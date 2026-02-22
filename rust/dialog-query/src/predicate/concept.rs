@@ -209,7 +209,7 @@ impl From<&Attributes> for Schema {
 /// as a URI in the format `concept:{hash}`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
-pub enum Concept {
+pub enum ConceptDescriptor {
     /// A concept constructed at runtime with owned data.
     Dynamic {
         /// Human-readable description of this concept.
@@ -227,7 +227,7 @@ pub enum Concept {
 }
 
 // Manual Deserialize implementation that only supports the Dynamic variant
-impl<'de> Deserialize<'de> for Concept {
+impl<'de> Deserialize<'de> for ConceptDescriptor {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -240,7 +240,7 @@ impl<'de> Deserialize<'de> for Concept {
         }
 
         let dynamic = DynamicConcept::deserialize(deserializer)?;
-        Ok(Concept::Dynamic {
+        Ok(ConceptDescriptor::Dynamic {
             description: dynamic.description,
             attributes: dynamic.attributes,
         })
@@ -312,10 +312,10 @@ impl Not for Conception {
     }
 }
 
-impl Concept {
+impl ConceptDescriptor {
     /// Creates a new dynamic concept with the given attributes.
     pub fn new(attributes: Attributes) -> Self {
-        Concept::Dynamic {
+        ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes,
         }
@@ -471,7 +471,7 @@ impl Concept {
 #[derive(Debug, Clone)]
 pub struct Builder<'a> {
     /// Reference to the concept schema this builder validates against
-    concept: &'a Concept,
+    concept: &'a ConceptDescriptor,
     /// The model being built with attribute values
     model: Model,
 }
@@ -484,7 +484,7 @@ impl<'a> Builder<'a> {
     /// # Returns
     /// * `Ok(Builder)` - A new builder with a fresh entity
     /// * `Err(DialogArtifactsError)` - If entity creation fails
-    pub fn new(concept: &'a Concept) -> Self {
+    pub fn new(concept: &'a ConceptDescriptor) -> Self {
         Self::edit(
             Entity::new().expect("should be able to generate new entity"),
             concept,
@@ -499,7 +499,7 @@ impl<'a> Builder<'a> {
     ///
     /// # Returns
     /// A new builder for the specified entity
-    pub fn edit(this: Entity, concept: &'a Concept) -> Self {
+    pub fn edit(this: Entity, concept: &'a ConceptDescriptor) -> Self {
         Builder {
             concept,
             model: Model {
@@ -558,7 +558,7 @@ mod tests {
             ),
         ]);
 
-        let concept = Concept::Dynamic {
+        let concept = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes,
         };
@@ -615,7 +615,7 @@ mod tests {
             }
         }"#;
 
-        let concept: Concept = serde_json::from_str(json).expect("Should deserialize");
+        let concept: ConceptDescriptor = serde_json::from_str(json).expect("Should deserialize");
 
         assert!(
             concept.operator().starts_with("concept:"),
@@ -648,7 +648,7 @@ mod tests {
 
     #[dialog_common::test]
     fn test_concept_round_trip_serialization() {
-        let original = Concept::Dynamic {
+        let original = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: [(
                 "score",
@@ -659,7 +659,8 @@ mod tests {
 
         // Serialize then deserialize
         let json = serde_json::to_string(&original).expect("Should serialize");
-        let deserialized: Concept = serde_json::from_str(&json).expect("Should deserialize");
+        let deserialized: ConceptDescriptor =
+            serde_json::from_str(&json).expect("Should deserialize");
 
         // Should be identical
         assert_eq!(original.operator(), deserialized.operator());
@@ -688,7 +689,7 @@ mod tests {
 
     #[dialog_common::test]
     fn test_expected_json_structure() {
-        let concept = Concept::Dynamic {
+        let concept = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: Attributes::from(vec![(
                 "id".to_string(),
@@ -724,7 +725,7 @@ mod tests {
     fn test_description_serialization_and_deserialization() {
         let original_description = "A comprehensive product catalog item";
 
-        let concept = Concept::Dynamic {
+        let concept = ConceptDescriptor::Dynamic {
             description: original_description.to_string(),
             attributes: Attributes::from(vec![(
                 "sku".to_string(),
@@ -745,10 +746,11 @@ mod tests {
             "Description field should be serialized correctly"
         );
 
-        let deserialized: Concept = serde_json::from_str(&json).expect("Should deserialize");
+        let deserialized: ConceptDescriptor =
+            serde_json::from_str(&json).expect("Should deserialize");
 
         match deserialized {
-            Concept::Dynamic { description, .. } => {
+            ConceptDescriptor::Dynamic { description, .. } => {
                 assert_eq!(
                     description, original_description,
                     "Description should be preserved through round-trip"
@@ -782,12 +784,12 @@ mod tests {
             ),
         ]);
 
-        let concept1 = Concept::Dynamic {
+        let concept1 = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: attributes1,
         };
 
-        let concept2 = Concept::Dynamic {
+        let concept2 = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: attributes2,
         };
@@ -812,12 +814,12 @@ mod tests {
             AttributeSchema::new("user", "name", "User's name", Type::String),
         )]);
 
-        let concept1 = Concept::Dynamic {
+        let concept1 = ConceptDescriptor::Dynamic {
             description: "A user in the system".to_string(),
             attributes: attributes.clone(),
         };
 
-        let concept2 = Concept::Dynamic {
+        let concept2 = ConceptDescriptor::Dynamic {
             description: "System user account".to_string(),
             attributes,
         };
@@ -859,12 +861,12 @@ mod tests {
             ),
         ]);
 
-        let concept1 = Concept::Dynamic {
+        let concept1 = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: attributes1,
         };
 
-        let concept2 = Concept::Dynamic {
+        let concept2 = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: attributes2,
         };
@@ -894,12 +896,12 @@ mod tests {
             AttributeSchema::new("person", "email", "Email", Type::String),
         )]);
 
-        let concept1 = Concept::Dynamic {
+        let concept1 = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: attributes1,
         };
 
-        let concept2 = Concept::Dynamic {
+        let concept2 = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: attributes2,
         };

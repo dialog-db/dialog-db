@@ -1,10 +1,10 @@
 //! Fact and Claim types for the dialog-query system
 
-pub use super::predicate::fact::Fact as PredicateFact;
+pub use super::predicate::fact::FactSelector;
 pub use crate::Term;
 pub use crate::application::FactApplication;
 pub use crate::artifact::{Artifact, Attribute, Cause, Entity, Instruction, Value};
-pub use crate::dsl::Quarriable;
+pub use crate::dsl::Predicate;
 pub use crate::error::SchemaError;
 pub use crate::query::Output;
 pub use crate::types::Scalar;
@@ -38,14 +38,14 @@ pub enum Fact<T: Scalar + ConditionalSend = Value> {
     },
 }
 
-impl Quarriable for Fact {
-    type Query = PredicateFact;
+impl Predicate for Fact {
+    type Application = FactSelector;
 }
 
 impl<T: Scalar + ConditionalSend> Fact<T> {
     /// Create a new fact query builder
-    pub fn select() -> PredicateFact {
-        PredicateFact::new()
+    pub fn select() -> FactSelector {
+        FactSelector::new()
     }
 
     /// Get the attribute of this fact

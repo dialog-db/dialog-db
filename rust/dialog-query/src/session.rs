@@ -132,7 +132,7 @@ impl<S: Store> Session<S> {
     /// ```
     pub fn install<M, W>(self, rule: impl Fn(M) -> W) -> Result<Self, crate::error::CompileError>
     where
-        M: crate::concept::Match,
+        M: crate::concept::ConceptQuery,
         W: crate::rule::When,
     {
         let query = M::default();
@@ -376,7 +376,7 @@ mod tests {
 
     use crate::{
         AttributeSchema, Parameters, Relation, Type,
-        predicate::{self, Fact, concept::Attributes},
+        predicate::{self, FactSelector, concept::Attributes},
     };
 
     use super::*;
@@ -424,7 +424,7 @@ mod tests {
             ])
             .await?;
 
-        let person = predicate::Concept::Dynamic {
+        let person = predicate::ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: [
                 (
@@ -495,7 +495,7 @@ mod tests {
             AttributeSchema::new("person", "age", "person age", Type::UnsignedInt),
         );
 
-        let person = predicate::Concept::Dynamic {
+        let person = predicate::ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: Attributes::from(attributes),
         };
@@ -520,7 +520,7 @@ mod tests {
         let store = Artifacts::anonymous(backend).await?;
         let mut session = Session::open(store);
 
-        let person = predicate::Concept::Dynamic {
+        let person = predicate::ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: [
                 (
@@ -762,7 +762,7 @@ mod tests {
                     name: employee.name.clone(),
                     role: employee.job,
                 },
-                Fact {
+                FactSelector {
                     the: "stuff/name"
                         .parse::<crate::artifact::Attribute>()
                         .unwrap()
@@ -865,7 +865,7 @@ mod tests {
         assert_eq!(session.resolve_rules("nonexistent"), Vec::new());
 
         // Test 2: Install a rule and verify it can be resolved
-        let adult_conclusion = predicate::Concept::Dynamic {
+        let adult_conclusion = predicate::ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: Attributes::from(vec![
                 (
@@ -916,7 +916,7 @@ mod tests {
 
         // Test with QuerySession
         let query_session: QuerySession<_> = artifacts.clone().into();
-        let concept = predicate::Concept::new(Attributes::new());
+        let concept = predicate::ConceptDescriptor::new(Attributes::new());
         let rule = DeductiveRule {
             conclusion: concept.clone(),
             premises: vec![],
@@ -960,12 +960,12 @@ mod tests {
         )]
         .into();
 
-        let concept1 = predicate::Concept::Dynamic {
+        let concept1 = predicate::ConceptDescriptor::Dynamic {
             description: "First rule".to_string(),
             attributes: attributes.clone(),
         };
 
-        let concept2 = predicate::Concept::Dynamic {
+        let concept2 = predicate::ConceptDescriptor::Dynamic {
             description: "Second rule".to_string(),
             attributes,
         };
@@ -1012,7 +1012,7 @@ mod tests {
         assert_eq!(query_session.rules().len(), 0);
 
         // Test 2: Conversion with rule installation
-        let adult_concept = predicate::Concept::Dynamic {
+        let adult_concept = predicate::ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: [(
                 "name".to_string(),

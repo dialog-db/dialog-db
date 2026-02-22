@@ -58,7 +58,7 @@ struct Selector {
 }
 
 /// Builder for constructing fact queries with fluent API
-pub struct Fact {
+pub struct FactSelector {
     /// Attribute constraint
     pub the: Term<Attribute>,
     /// Entity constraint
@@ -69,16 +69,16 @@ pub struct Fact {
     pub cause: Term<Cause>,
 }
 
-impl Default for Fact {
+impl Default for FactSelector {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Fact {
+impl FactSelector {
     /// Create a new empty Fact selector with all blank terms
     pub fn new() -> Self {
-        Fact {
+        FactSelector {
             the: Term::blank(),
             of: Term::blank(),
             is: Term::blank(),
@@ -259,14 +259,14 @@ impl Fact {
     }
 }
 
-impl From<Fact> for FactApplication {
-    fn from(fact: Fact) -> Self {
+impl From<FactSelector> for FactApplication {
+    fn from(fact: FactSelector) -> Self {
         FactApplication::new(fact.the, fact.of, fact.is, fact.cause, Cardinality::One)
     }
 }
 
-impl From<Fact> for crate::Premise {
-    fn from(fact: Fact) -> Self {
+impl From<FactSelector> for crate::Premise {
+    fn from(fact: FactSelector) -> Self {
         crate::Premise::Apply(crate::Application::Fact(fact.into()))
     }
 }

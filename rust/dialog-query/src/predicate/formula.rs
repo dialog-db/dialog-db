@@ -113,7 +113,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Schema;
 use crate::application::formula::FormulaApplication;
-pub use crate::dsl::{Input, Quarriable};
+pub use crate::dsl::{Input, Predicate};
 use crate::error::{FormulaEvaluationError, SchemaError, TypeError};
 use crate::selection::Answer;
 use crate::types::Scalar;
@@ -148,18 +148,18 @@ use bindings::Bindings;
 /// # Example
 ///
 /// See the module-level documentation for a complete example.
-pub trait Formula: Quarriable + Sized + Clone {
+pub trait Formula: Predicate + Sized + Clone {
     /// The input type for this formula
     ///
     /// This type must be constructible from a Bindings and should contain
     /// all the fields that the formula needs to read from the input.
     type Input: In;
 
-    /// Match type for future pattern matching support
+    /// Query type for formula application in queries
     ///
-    /// Currently unused. In future versions, this will be used by macros
-    /// to generate pattern matching code for formula applications in queries.
-    type Match: Match<Formula = Self>;
+    /// This type is used by the derive macro to generate query patterns
+    /// for formula applications.
+    type Query: FormulaQuery<Predicate = Self>;
 
     // fn dependencies() -> Dependencies;
 
@@ -248,20 +248,20 @@ pub trait Formula: Quarriable + Sized + Clone {
 pub trait In: for<'a> TryFrom<&'a mut Bindings, Error = FormulaEvaluationError> {}
 impl<T: for<'a> TryFrom<&'a mut Bindings, Error = FormulaEvaluationError>> In for T {}
 
-/// Trait for formula match patterns that can be converted into [`Parameters`].
-pub trait Match: Sized + Clone + Into<Parameters> {
-    /// The formula type this match pattern corresponds to.
-    type Formula: Formula<Match = Self>;
+/// Trait for formula query patterns that can be converted into [`Parameters`].
+pub trait FormulaQuery: Sized + Clone + Into<Parameters> {
+    /// The formula predicate type this query corresponds to.
+    type Predicate: Formula<Query = Self>;
 }
 
-impl<T: Match + Clone> From<T> for FormulaApplication {
+impl<T: FormulaQuery + Clone> From<T> for FormulaApplication {
     fn from(value: T) -> Self {
         FormulaApplication {
-            name: T::Formula::operator(),
-            cells: T::Formula::cells(),
-            cost: T::Formula::cost(),
+            name: T::Predicate::operator(),
+            cells: T::Predicate::cells(),
+            cost: T::Predicate::cost(),
             parameters: value.into(),
-            compute: |bindings| T::Formula::compute(bindings),
+            compute: |bindings| T::Predicate::compute(bindings),
         }
     }
 }

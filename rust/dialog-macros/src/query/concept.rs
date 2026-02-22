@@ -261,7 +261,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     dialog_query::term::Term::Constant(value) => dialog_query::term::Term::Constant(dialog_query::types::Scalar::as_value(value)),
                 };
 
-                dialog_query::predicate::fact::Fact::select()
+                dialog_query::predicate::fact::FactSelector::select()
                     .the(<#field_type as dialog_query::Attribute>::selector().to_string())
                     .of(terms.this.clone())
                     .is(value_term)
@@ -418,12 +418,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
         /// Const operator name for this concept
         pub const #operator_const_name: &str = #namespace_lit;
 
-        // Implement Match trait for the Match struct
-        impl dialog_query::concept::Match for #match_name {
-            type Concept = #struct_name;
-            type Instance = #struct_name;
+        // Implement ConceptQuery trait for the Match struct
+        impl dialog_query::concept::ConceptQuery for #match_name {
+            type Predicate = #struct_name;
+            type Proof = #struct_name;
 
-            fn realize(&self, source: dialog_query::selection::Answer) -> std::result::Result<Self::Instance, dialog_query::QueryError> {
+            fn realize(&self, source: dialog_query::selection::Answer) -> std::result::Result<Self::Proof, dialog_query::QueryError> {
                 Ok(#struct_name {
                     this: source.get(&self.this)?,
                     #(#field_names: #field_types(source.get(&self.#field_names)?)),*
@@ -443,7 +443,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 let cloned = self.clone();
                 application
                     .query(source)
-                    .map(move |input| dialog_query::concept::Match::realize(&cloned, input?))
+                    .map(move |input| dialog_query::concept::ConceptQuery::realize(&cloned, input?))
             }
         }
 
@@ -503,7 +503,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
 
         // Implement Instance trait for the concept struct
-        impl dialog_query::concept::Instance for #struct_name {
+        impl dialog_query::concept::ConceptProof for #struct_name {
             fn this(&self) -> &dialog_query::artifact::Entity {
                 &self.this
             }
@@ -511,12 +511,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         // Implement Concept trait
         impl dialog_query::concept::Concept for #struct_name {
-            type Instance = #struct_name;
-            type Match = #match_name;
+            type Proof = #struct_name;
+            type Query = #match_name;
             type Term = #terms_name;
 
-            const CONCEPT: dialog_query::predicate::concept::Concept =
-                dialog_query::predicate::concept::Concept::Static {
+            const CONCEPT: dialog_query::predicate::concept::ConceptDescriptor =
+                dialog_query::predicate::concept::ConceptDescriptor::Static {
                     description: #concept_description_lit,
                     attributes: &dialog_query::predicate::concept::Attributes::Static(#attributes_const_name),
                 };
@@ -558,8 +558,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         }
 
-        impl dialog_query::dsl::Quarriable for #struct_name {
-            type Query = #match_name;
+        impl dialog_query::dsl::Predicate for #struct_name {
+            type Application = #match_name;
         }
 
         // Implement Rule trait

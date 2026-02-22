@@ -402,19 +402,19 @@ where
 /// use dialog_query::{when, When, Term, predicate, artifact::Value};
 ///
 /// fn example() -> impl When {
-///     let selector1 = predicate::Fact::new()
+///     let selector1 = predicate::FactSelector::new()
 ///         .the("attr1".parse::<dialog_query::artifact::Attribute>().unwrap())
 ///         .of(Term::var("entity"))
 ///         .is(Term::from(Value::String("value1".to_string())))
 ///         .compile()
 ///         .unwrap();
-///     let selector2 = predicate::Fact::new()
+///     let selector2 = predicate::FactSelector::new()
 ///         .the("attr2".parse::<dialog_query::artifact::Attribute>().unwrap())
 ///         .of(Term::var("entity"))
 ///         .is(Term::var("value2"))
 ///         .compile()
 ///         .unwrap();
-///     let selector3 = predicate::Fact::new()
+///     let selector3 = predicate::FactSelector::new()
 ///         .the("attr3".parse::<dialog_query::artifact::Attribute>().unwrap())
 ///         .of(Term::var("entity"))
 ///         .is(Term::var("value3"))
@@ -562,15 +562,15 @@ mod tests {
     }
 
     impl crate::concept::Concept for Person {
-        type Instance = Person;
-        type Match = PersonMatch;
+        type Proof = Person;
+        type Query = PersonMatch;
         type Term = PersonTerms;
 
-        const CONCEPT: crate::predicate::concept::Concept = {
+        const CONCEPT: crate::predicate::concept::ConceptDescriptor = {
             const ATTRS: crate::predicate::concept::Attributes =
                 crate::predicate::concept::Attributes::Static(person::ATTRIBUTE_TUPLES);
 
-            crate::predicate::concept::Concept::Static {
+            crate::predicate::concept::ConceptDescriptor::Static {
                 description: "",
                 attributes: &ATTRS,
             }
@@ -646,8 +646,8 @@ mod tests {
         }
     }
 
-    impl crate::dsl::Quarriable for Person {
-        type Query = PersonMatch;
+    impl crate::dsl::Predicate for Person {
+        type Application = PersonMatch;
     }
 
     impl TryFrom<crate::selection::Answer> for Person {
@@ -674,15 +674,15 @@ mod tests {
         }
     }
 
-    impl crate::concept::Match for PersonMatch {
-        type Concept = Person;
-        type Instance = Person;
+    impl crate::concept::ConceptQuery for PersonMatch {
+        type Predicate = Person;
+        type Proof = Person;
 
         fn realize(
             &self,
             source: crate::selection::Answer,
-        ) -> Result<Self::Instance, crate::QueryError> {
-            Ok(Self::Instance {
+        ) -> Result<Self::Proof, crate::QueryError> {
+            Ok(Self::Proof {
                 this: source.get(&self.this)?,
                 name: source.get(&self.name)?,
                 age: source.get(&self.age)?,
@@ -711,7 +711,7 @@ mod tests {
         }
     }
 
-    impl crate::concept::Instance for Person {
+    impl crate::concept::ConceptProof for Person {
         fn this(&self) -> &crate::artifact::Entity {
             panic!("Instance trait implementation requires an entity field")
         }

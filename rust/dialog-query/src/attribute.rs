@@ -1,7 +1,7 @@
 use crate::application::FactApplication;
 pub use crate::artifact::{Attribute as ArtifactsAttribute, Cause, Entity, Value};
 use crate::error::{SchemaError, TypeError};
-pub use crate::predicate::Fact;
+pub use crate::predicate::FactSelector;
 pub use crate::schema::Cardinality;
 pub use crate::types::{IntoType, Scalar, Type};
 use crate::{Application, Parameters};
@@ -10,7 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use std::marker::PhantomData;
 
 /// A validated attribute–value pair with its cardinality, produced by
-/// [`AttributeSchema::resolve`]. Used inside [`Conception`](crate::predicate::concept::Conception)
+/// [`AttributeSchema::resolve`]. Used inside [`Conception`](crate::predicate::concept::ConceptDescriptorion)
 /// to represent the set of facts that make up a concept instance.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Attribution {
@@ -394,7 +394,7 @@ impl<T: Scalar> Match<T> {
 
     /// Constrains this match to a specific value, producing a [`FactApplication`].
     pub fn is<Is: Into<Term<T>>>(self, term: Is) -> FactApplication {
-        Fact::new()
+        FactSelector::new()
             .the(self.the())
             .of(self.of())
             .is(term.into().as_unknown())
@@ -430,7 +430,7 @@ pub trait Attribute: Sized {
     /// The full static schema for this attribute.
     const SCHEMA: AttributeSchema<Self::Type>;
     /// The concept definition that this attribute belongs to.
-    const CONCEPT: crate::predicate::concept::Concept;
+    const CONCEPT: crate::predicate::concept::ConceptDescriptor;
 
     /// Returns a reference to the inner value.
     fn value(&self) -> &Self::Type;
@@ -521,7 +521,7 @@ mod tests {
 
         pub struct Name(pub String);
 
-        const NAME_CONCEPT: crate::predicate::concept::Concept = {
+        const NAME_CONCEPT: crate::predicate::concept::ConceptDescriptor = {
             const ATTRS: crate::predicate::concept::Attributes =
                 crate::predicate::concept::Attributes::Static(&[(
                     "name",
@@ -534,7 +534,7 @@ mod tests {
                         marker: std::marker::PhantomData,
                     },
                 )]);
-            crate::predicate::concept::Concept::Static {
+            crate::predicate::concept::ConceptDescriptor::Static {
                 description: "",
                 attributes: &ATTRS,
             }
@@ -559,7 +559,7 @@ mod tests {
                     content_type: <String as crate::types::IntoType>::TYPE,
                     marker: std::marker::PhantomData,
                 };
-            const CONCEPT: crate::predicate::concept::Concept = NAME_CONCEPT;
+            const CONCEPT: crate::predicate::concept::ConceptDescriptor = NAME_CONCEPT;
 
             fn value(&self) -> &Self::Type {
                 &self.0
