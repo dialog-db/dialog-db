@@ -11,6 +11,7 @@ use crate::selection::{Answer, Answers, Evidence};
 use crate::{Entity, Field, Parameters, QueryError, Requirement, Schema, Term, Type, Value};
 use crate::{EvaluationContext, Source, try_stream};
 use dialog_artifacts::{Artifact, ArtifactStore, Cause};
+use futures_util::future::Either;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 
@@ -379,93 +380,79 @@ impl RelationApplication {
         source: S,
         answers: M,
     ) -> impl Answers {
+        if self.cardinality() == Cardinality::One {
+            Either::Left(self.evaluate_cardinality_one(source, answers))
+        } else {
+            Either::Right(self.evaluate_cardinality_many(source, answers))
+        }
+    }
+
+    /// Evaluate yielding all matching artifacts.
+    fn evaluate_cardinality_many<S: Source, M: Answers>(
+        &self,
+        source: S,
+        answers: M,
+    ) -> impl Answers {
         let selector = self.clone();
         try_stream! {
             for await each in answers {
                 let input = each?;
                 let selection = selector.resolve_from_answer(&input);
 
-                if selector.cardinality() != Cardinality::One {
-                    // Cardinality::Many — yield everything.
-                    for await artifact in source.select((&selection).try_into()?) {
+                for await artifact in source.select((&selection).try_into()?) {
+                    let artifact = artifact?;
+                    let fact = Fact::from(&artifact);
+
+                    let mut answer = input.clone();
+                    answer.merge(Evidence::Relation {
+                        application: &selector,
+                        fact: &fact,
+                    })?;
+                    yield answer;
+                }
+            }
+        }
+    }
+
+    /// Evaluate yielding only the winning artifact per `(attribute, entity)`.
+    ///
+    /// The strategy depends on which index the storage layer uses:
+    ///
+    /// - **EAV/AEV** (entity or attribute known): results are grouped by
+    ///   `(attribute, entity)`. A sliding window buffers the candidate and
+    ///   yields the winner when the group changes.
+    ///
+    /// - **VAE** (only value known): groups are scattered, so each match
+    ///   needs a secondary lookup to verify it is the winner.
+    fn evaluate_cardinality_one<S: Source, M: Answers>(
+        &self,
+        source: S,
+        answers: M,
+    ) -> impl Answers {
+        let selector = self.clone();
+        try_stream! {
+            for await each in answers {
+                let input = each?;
+                let selection = selector.resolve_from_answer(&input);
+
+                let require_validation =
+                    !matches!(&selection.of, Term::Constant(_))
+                    && !matches!(
+                        (&selection.namespace, &selection.name),
+                        (Term::Constant(_), Term::Constant(_))
+                    );
+
+                let artifacts = source.select((&selection).try_into()?);
+
+                if require_validation {
+                    // VAE scan: different values for the same (attribute,
+                    // entity) pair are scattered. Each match needs a
+                    // secondary lookup to verify it wins.
+                    for await artifact in artifacts {
                         let artifact = artifact?;
-                        let fact = Fact::from(&artifact);
 
-                        let mut answer = input.clone();
-                        answer.merge(Evidence::Relation {
-                            application: &selector,
-                            fact: &fact,
-                        })?;
-                        yield answer;
-                    }
-                } else {
-                    // Cardinality::One — determine strategy from which fields
-                    // are constants in the resolved selection (mirroring the
-                    // index priority in the storage layer).
-                    //
-                    // When entity or attribute is known the storage uses EAV or
-                    // AEV, both of which group results by (attribute, entity).
-                    // A sliding window suffices. When neither is known we fall
-                    // back to the VAE index where groups are scattered, so each
-                    // match needs a secondary lookup to validate.
-                    let require_validation =
-                        !matches!(&selection.of, Term::Constant(_))
-                        && !matches!(
-                            (&selection.namespace, &selection.name),
-                            (Term::Constant(_), Term::Constant(_))
-                        );
-
-                    let artifacts = source.select((&selection).try_into()?);
-
-                    if require_validation {
-                        // VAE scan: results are sorted by value, then
-                        // attribute, then entity — different values for the
-                        // same (attribute, entity) pair are scattered. Each
-                        // match needs a secondary lookup to verify it wins.
-                        for await artifact in artifacts {
-                            let artifact = artifact?;
-
-                            if is_cardinality_one_winner(&source, &artifact).await? {
-                                let fact = Fact::from(&artifact);
-                                let mut answer = input.clone();
-                                answer.merge(Evidence::Relation {
-                                    application: &selector,
-                                    fact: &fact,
-                                })?;
-                                yield answer;
-                            }
-                        }
-                    } else {
-                        // EAV or AEV scan: results are grouped by
-                        // (attribute, entity). Buffer the winning candidate
-                        // and yield when the group changes.
-                        let mut candidate: Option<Artifact> = None;
-
-                        for await artifact in artifacts {
-                            let artifact = artifact?;
-
-                            let same_group = candidate
-                                .as_ref()
-                                .is_some_and(|c| c.the == artifact.the && c.of == artifact.of);
-
-                            if same_group {
-                                candidate = Some(pick_winner(candidate.unwrap(), artifact));
-                            } else {
-                                if let Some(winner) = candidate.take() {
-                                    let fact = Fact::from(&winner);
-                                    let mut answer = input.clone();
-                                    answer.merge(Evidence::Relation {
-                                        application: &selector,
-                                        fact: &fact,
-                                    })?;
-                                    yield answer;
-                                }
-                                candidate = Some(artifact);
-                            }
-                        }
-
-                        if let Some(winner) = candidate.take() {
-                            let fact = Fact::from(&winner);
+                        if is_cardinality_one_winner(&source, &artifact).await? {
+                            let fact = Fact::from(&artifact);
                             let mut answer = input.clone();
                             answer.merge(Evidence::Relation {
                                 application: &selector,
@@ -473,6 +460,44 @@ impl RelationApplication {
                             })?;
                             yield answer;
                         }
+                    }
+                } else {
+                    // EAV or AEV scan: results are grouped by
+                    // (attribute, entity). Buffer the winning candidate
+                    // and yield when the group changes.
+                    let mut candidate: Option<Artifact> = None;
+
+                    for await artifact in artifacts {
+                        let artifact = artifact?;
+
+                        let same_group = candidate
+                            .as_ref()
+                            .is_some_and(|c| c.the == artifact.the && c.of == artifact.of);
+
+                        if same_group {
+                            candidate = Some(pick_winner(candidate.unwrap(), artifact));
+                        } else {
+                            if let Some(winner) = candidate.take() {
+                                let fact = Fact::from(&winner);
+                                let mut answer = input.clone();
+                                answer.merge(Evidence::Relation {
+                                    application: &selector,
+                                    fact: &fact,
+                                })?;
+                                yield answer;
+                            }
+                            candidate = Some(artifact);
+                        }
+                    }
+
+                    if let Some(winner) = candidate.take() {
+                        let fact = Fact::from(&winner);
+                        let mut answer = input.clone();
+                        answer.merge(Evidence::Relation {
+                            application: &selector,
+                            fact: &fact,
+                        })?;
+                        yield answer;
                     }
                 }
             }
