@@ -153,6 +153,24 @@ impl RelationApplication {
         self.relation.as_ref()
     }
 
+    /// Resolve an artifact into a `Relation` using this application's cardinality.
+    pub fn resolve(&self, artifact: &Artifact) -> Relation {
+        let attr_str = artifact.the.to_string();
+        let (namespace, name) = attr_str
+            .split_once('/')
+            .map(|(ns, n)| (ns.to_string(), n.to_string()))
+            .unwrap_or_else(|| (String::new(), attr_str));
+
+        Relation {
+            namespace,
+            name,
+            of: artifact.of.clone(),
+            is: artifact.is.clone(),
+            cause: artifact.cause.clone().unwrap_or(Cause([0; 32])),
+            cardinality: self.cardinality(),
+        }
+    }
+
     /// Get the cardinality, defaulting to `Cardinality::Many` if the relation
     /// descriptor is not set (unknown relations are assumed to have many values).
     pub fn cardinality(&self) -> Cardinality {
@@ -325,12 +343,12 @@ impl RelationApplication {
 
                 for await artifact in source.select((&selection).try_into()?) {
                     let artifact = artifact?;
-                    let fact = Relation::from(&artifact);
+                    let relation = selector.resolve(&artifact);
 
                     let mut answer = input.clone();
                     answer.merge(Evidence::Relation {
                         application: &selector,
-                        fact: &fact,
+                        fact: &relation,
                     })?;
                     yield answer;
                 }
@@ -393,7 +411,7 @@ impl RelationApplication {
                         candidate = Some(pick_winner(candidate.unwrap(), artifact));
                     } else {
                         if let Some(winner) = candidate.take() {
-                            let fact = Relation::from(&winner);
+                            let fact = selector.resolve(&winner);
                             let mut answer = input.clone();
                             answer.merge(Evidence::Relation {
                                 application: &selector,
@@ -406,7 +424,7 @@ impl RelationApplication {
                 }
 
                 if let Some(winner) = candidate.take() {
-                    let fact = Relation::from(&winner);
+                    let fact = selector.resolve(&winner);
                     let mut answer = input.clone();
                     answer.merge(Evidence::Relation {
                         application: &selector,

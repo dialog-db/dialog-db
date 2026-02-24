@@ -1,5 +1,5 @@
 use crate::DeductiveRule;
-use crate::attribute::AttributeSchema;
+use crate::attribute::AttributeDescriptor;
 use crate::context::new_context;
 use crate::planner::{Fork, Join};
 use crate::predicate::ConceptDescriptor;
@@ -129,15 +129,15 @@ impl ConceptApplication {
             Some(total)
         } else {
             // Entity is not bound - categorize attributes to find best execution strategy
-            let mut bound_one: Option<&AttributeSchema<Value>> = None;
-            let mut bound_many: Option<&AttributeSchema<Value>> = None;
-            let mut unbound_one: Option<&AttributeSchema<Value>> = None;
-            let mut unbound_many: Option<&AttributeSchema<Value>> = None;
+            let mut bound_one: Option<&AttributeDescriptor> = None;
+            let mut bound_many: Option<&AttributeDescriptor> = None;
+            let mut unbound_one: Option<&AttributeDescriptor> = None;
+            let mut unbound_many: Option<&AttributeDescriptor> = None;
 
             for (name, attribute) in self.concept.attributes().iter() {
                 if let Some(term) = self.terms.get(name) {
                     if env.contains(term) {
-                        match attribute.cardinality {
+                        match attribute.cardinality() {
                             crate::Cardinality::One => {
                                 bound_one = Some(attribute);
                                 break; // Best case found, stop searching
@@ -149,7 +149,7 @@ impl ConceptApplication {
                         }
                     } else {
                         // Term exists but not bound
-                        match attribute.cardinality {
+                        match attribute.cardinality() {
                             crate::Cardinality::One if unbound_one.is_none() => {
                                 unbound_one = Some(attribute);
                             }
@@ -161,7 +161,7 @@ impl ConceptApplication {
                     }
                 } else {
                     // No term at all
-                    match attribute.cardinality {
+                    match attribute.cardinality() {
                         crate::Cardinality::One if unbound_one.is_none() => {
                             unbound_one = Some(attribute);
                         }
@@ -288,7 +288,7 @@ impl Display for ConceptApplication {
 mod tests {
     use super::*;
     use crate::predicate::ConceptDescriptor;
-    use crate::{AttributeSchema, Parameters, Term, Type, Value};
+    use crate::{AttributeDescriptor, Parameters, Term, Type, Value};
 
     // Note: Async tests are commented out due to Rust recursion limit issues in test compilation
     // with deeply nested async streams. The functionality is tested indirectly through integration
@@ -339,11 +339,11 @@ mod tests {
             attributes: vec![
                 (
                     "name",
-                    AttributeSchema::new("person", "name", "", Type::String),
+                    AttributeDescriptor::new("person", "name", "", Type::String),
                 ),
                 (
                     "age",
-                    AttributeSchema::new("person", "age", "", Type::UnsignedInt),
+                    AttributeDescriptor::new("person", "age", "", Type::UnsignedInt),
                 ),
             ]
             .into(),
@@ -427,11 +427,11 @@ mod tests {
             attributes: vec![
                 (
                     "name",
-                    AttributeSchema::new("person", "name", "", Type::String),
+                    AttributeDescriptor::new("person", "name", "", Type::String),
                 ),
                 (
                     "age",
-                    AttributeSchema::new("person", "age", "", Type::UnsignedInt),
+                    AttributeDescriptor::new("person", "age", "", Type::UnsignedInt),
                 ),
             ]
             .into(),
@@ -473,11 +473,11 @@ mod tests {
             attributes: Attributes::from(vec![
                 (
                     "name",
-                    AttributeSchema::<Value>::new("person", "name", "Person name", Type::String),
+                    AttributeDescriptor::new("person", "name", "Person name", Type::String),
                 ),
                 (
                     "age",
-                    AttributeSchema::<Value>::new("person", "age", "Person age", Type::UnsignedInt),
+                    AttributeDescriptor::new("person", "age", "Person age", Type::UnsignedInt),
                 ),
             ]),
         };
@@ -498,7 +498,7 @@ mod tests {
             description: String::new(),
             attributes: Attributes::from(vec![(
                 "name".to_string(),
-                AttributeSchema::<Value>::new("person", "name", "Person name", Type::String),
+                AttributeDescriptor::new("person", "name", "Person name", Type::String),
             )]),
         };
 
@@ -520,11 +520,11 @@ mod tests {
             attributes: Attributes::from(vec![
                 (
                     "name".to_string(),
-                    AttributeSchema::<Value>::new("person", "name", "Person name", Type::String),
+                    AttributeDescriptor::new("person", "name", "Person name", Type::String),
                 ),
                 (
                     "age".to_string(),
-                    AttributeSchema::<Value>::new("person", "age", "Person age", Type::UnsignedInt),
+                    AttributeDescriptor::new("person", "age", "Person age", Type::UnsignedInt),
                 ),
             ]),
         };
@@ -556,11 +556,11 @@ mod tests {
                 attributes: [
                     (
                         "name".to_string(),
-                        AttributeSchema::new("person", "name", "Person name", Type::String),
+                        AttributeDescriptor::new("person", "name", "Person name", Type::String),
                     ),
                     (
                         "age".to_string(),
-                        AttributeSchema::new("person", "age", "Person age", Type::UnsignedInt),
+                        AttributeDescriptor::new("person", "age", "Person age", Type::UnsignedInt),
                     ),
                 ]
                 .into(),
@@ -742,7 +742,7 @@ mod tests {
             description: String::new(),
             attributes: vec![(
                 "name",
-                crate::attribute::AttributeSchema::new(
+                crate::attribute::AttributeDescriptor::new(
                     "person",
                     "name",
                     "Person name",
@@ -823,7 +823,7 @@ mod tests {
             attributes: vec![
                 (
                     "name",
-                    crate::attribute::AttributeSchema::new(
+                    crate::attribute::AttributeDescriptor::new(
                         "person",
                         "name",
                         "Person name",
@@ -832,7 +832,7 @@ mod tests {
                 ),
                 (
                     "age",
-                    crate::attribute::AttributeSchema::new(
+                    crate::attribute::AttributeDescriptor::new(
                         "person",
                         "age",
                         "Person age",
@@ -915,7 +915,7 @@ mod tests {
             attributes: vec![
                 (
                     "name",
-                    crate::attribute::AttributeSchema::new(
+                    crate::attribute::AttributeDescriptor::new(
                         "person",
                         "name",
                         "Person name",
@@ -924,7 +924,7 @@ mod tests {
                 ),
                 (
                     "age",
-                    crate::attribute::AttributeSchema::new(
+                    crate::attribute::AttributeDescriptor::new(
                         "person",
                         "age",
                         "Person age",

@@ -26,13 +26,12 @@
 //! // -- Concept constant --
 //! const FULLNAME_CONCEPT: Concept = Concept::Static {
 //!     description: "A person's full name",
-//!     attributes: &Attributes::Static(&[("has", AttributeSchema {
+//!     attributes: &Attributes::Static(&[("has", AttributeDescriptor::Static {
 //!         namespace: /* derived or explicit */,
 //!         name: "full-name",         // PascalCase → kebab-case
 //!         description: "A person's full name",
 //!         cardinality: Cardinality::One,
 //!         content_type: <String as IntoType>::TYPE,
-//!         ..
 //!     })]),
 //! };
 //!
@@ -46,7 +45,7 @@
 //!     const NAMESPACE: &'static str = /* "model" */;
 //!     const NAME: &'static str = "full-name";
 //!     const CARDINALITY: Cardinality = Cardinality::One;
-//!     const SCHEMA: AttributeSchema<String> = /* ... */;
+//!     const SCHEMA: AttributeDescriptor = /* ... */;
 //!     const CONCEPT: Concept = FULLNAME_CONCEPT;
 //!
 //!     fn value(&self) -> &String { &self.0 }
@@ -247,18 +246,17 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let expanded = quote! {
         #namespace_static_decl
 
-        // A Concept wraps the attribute schema so it can participate in queries
+        // A Concept wraps the attribute descriptor so it can participate in queries
         const #concept_const_name: dialog_query::predicate::concept::ConceptDescriptor = {
             const ATTRS: dialog_query::predicate::concept::Attributes =
                 dialog_query::predicate::concept::Attributes::Static(&[(
                     "has",
-                    dialog_query::attribute::AttributeSchema {
+                    dialog_query::attribute::AttributeDescriptor::Static {
                         namespace: #namespace_expr,
                         name: #attr_name_lit,
                         description: #description_lit,
                         cardinality: #cardinality,
                         content_type: <#wrapped_type as dialog_query::types::IntoType>::TYPE,
-                        marker: std::marker::PhantomData,
                     },
                 )]);
 
@@ -279,13 +277,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
             const NAME: &'static str = #attr_name_lit;
             const DESCRIPTION: &'static str = #description_lit;
             const CARDINALITY: dialog_query::attribute::Cardinality = #cardinality;
-            const SCHEMA: dialog_query::attribute::AttributeSchema<Self::Type> = dialog_query::attribute::AttributeSchema {
+            const SCHEMA: dialog_query::attribute::AttributeDescriptor = dialog_query::attribute::AttributeDescriptor::Static {
                 namespace: Self::NAMESPACE,
                 name: Self::NAME,
                 description: Self::DESCRIPTION,
                 cardinality: Self::CARDINALITY,
                 content_type: <#wrapped_type as dialog_query::types::IntoType>::TYPE,
-                marker: std::marker::PhantomData,
             };
             const CONCEPT: dialog_query::predicate::concept::ConceptDescriptor = #concept_const_name;
 

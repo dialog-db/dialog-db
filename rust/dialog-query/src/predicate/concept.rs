@@ -1,5 +1,5 @@
 use crate::application::ConceptApplication;
-use crate::attribute::{AttributeSchema, Attribution};
+use crate::attribute::{AttributeDescriptor, Attribution};
 use crate::claim::Revert;
 use crate::error::SchemaError;
 use crate::types::Scalar;
@@ -12,25 +12,25 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ops::Not;
 
-/// Collection of named attribute schemas, supporting both static and dynamic construction.
+/// Collection of named attribute descriptors, supporting both static and dynamic construction.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Attributes {
     /// Static attributes from compile-time generated code (const-compatible)
-    Static(&'static [(&'static str, AttributeSchema<Value>)]),
+    Static(&'static [(&'static str, AttributeDescriptor)]),
     /// Dynamic attributes from runtime construction
-    Dynamic(Vec<(String, AttributeSchema<Value>)>),
+    Dynamic(Vec<(String, AttributeDescriptor)>),
 }
 
 /// Iterator over attribute (name, value) pairs
 pub enum AttributesIter<'a> {
     /// Iterator over a static slice of attributes.
-    Static(std::slice::Iter<'a, (&'static str, AttributeSchema<Value>)>),
+    Static(std::slice::Iter<'a, (&'static str, AttributeDescriptor)>),
     /// Iterator over a dynamic vector of attributes.
-    Dynamic(std::slice::Iter<'a, (String, AttributeSchema<Value>)>),
+    Dynamic(std::slice::Iter<'a, (String, AttributeDescriptor)>),
 }
 
 impl<'a> Iterator for AttributesIter<'a> {
-    type Item = (&'a str, &'a AttributeSchema<Value>);
+    type Item = (&'a str, &'a AttributeDescriptor);
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
@@ -102,8 +102,8 @@ impl Attributes {
     }
 }
 
-impl<const N: usize> From<[(&str, AttributeSchema<Value>); N]> for Attributes {
-    fn from(arr: [(&str, AttributeSchema<Value>); N]) -> Self {
+impl<const N: usize> From<[(&str, AttributeDescriptor); N]> for Attributes {
+    fn from(arr: [(&str, AttributeDescriptor); N]) -> Self {
         Attributes::Dynamic(
             arr.into_iter()
                 .map(|(name, attr)| (name.to_string(), attr))
@@ -112,14 +112,14 @@ impl<const N: usize> From<[(&str, AttributeSchema<Value>); N]> for Attributes {
     }
 }
 
-impl<const N: usize> From<[(String, AttributeSchema<Value>); N]> for Attributes {
-    fn from(arr: [(String, AttributeSchema<Value>); N]) -> Self {
+impl<const N: usize> From<[(String, AttributeDescriptor); N]> for Attributes {
+    fn from(arr: [(String, AttributeDescriptor); N]) -> Self {
         Attributes::Dynamic(arr.into_iter().collect())
     }
 }
 
-impl From<Vec<(&str, AttributeSchema<Value>)>> for Attributes {
-    fn from(vec: Vec<(&str, AttributeSchema<Value>)>) -> Self {
+impl From<Vec<(&str, AttributeDescriptor)>> for Attributes {
+    fn from(vec: Vec<(&str, AttributeDescriptor)>) -> Self {
         Attributes::Dynamic(
             vec.into_iter()
                 .map(|(name, attr)| (name.to_string(), attr))
@@ -128,21 +128,21 @@ impl From<Vec<(&str, AttributeSchema<Value>)>> for Attributes {
     }
 }
 
-impl From<Vec<(String, AttributeSchema<Value>)>> for Attributes {
-    fn from(vec: Vec<(String, AttributeSchema<Value>)>) -> Self {
+impl From<Vec<(String, AttributeDescriptor)>> for Attributes {
+    fn from(vec: Vec<(String, AttributeDescriptor)>) -> Self {
         Attributes::Dynamic(vec)
     }
 }
 
-impl From<HashMap<String, AttributeSchema<Value>>> for Attributes {
-    fn from(map: HashMap<String, AttributeSchema<Value>>) -> Self {
+impl From<HashMap<String, AttributeDescriptor>> for Attributes {
+    fn from(map: HashMap<String, AttributeDescriptor>) -> Self {
         Attributes::Dynamic(map.into_iter().collect())
     }
 }
 
 // From static slice - creates const-compatible Static variant
-impl From<&'static [(&'static str, AttributeSchema<Value>)]> for Attributes {
-    fn from(slice: &'static [(&'static str, AttributeSchema<Value>)]) -> Self {
+impl From<&'static [(&'static str, AttributeDescriptor)]> for Attributes {
+    fn from(slice: &'static [(&'static str, AttributeDescriptor)]) -> Self {
         Attributes::Static(slice)
     }
 }
@@ -153,7 +153,7 @@ impl Serialize for Attributes {
     where
         S: serde::Serializer,
     {
-        let map: HashMap<&str, &AttributeSchema<Value>> = self.iter().collect();
+        let map: HashMap<&str, &AttributeDescriptor> = self.iter().collect();
         map.serialize(serializer)
     }
 }
@@ -164,7 +164,7 @@ impl<'de> Deserialize<'de> for Attributes {
     where
         D: serde::Deserializer<'de>,
     {
-        let map = HashMap::<String, AttributeSchema<Value>>::deserialize(deserializer)?;
+        let map = HashMap::<String, AttributeDescriptor>::deserialize(deserializer)?;
         Ok(Attributes::from(map))
     }
 }
@@ -176,10 +176,10 @@ impl From<&Attributes> for Schema {
             schema.insert(
                 name.into(),
                 Field {
-                    description: attribute.description.into(),
-                    content_type: attribute.content_type,
+                    description: attribute.description().into(),
+                    content_type: attribute.content_type(),
                     requirement: Requirement::Optional,
-                    cardinality: attribute.cardinality,
+                    cardinality: attribute.cardinality(),
                 },
             );
         }
@@ -550,11 +550,11 @@ mod tests {
         let attributes = <Attributes as From<_>>::from([
             (
                 "name",
-                AttributeSchema::<Value>::new("user", "name", "User's name", Type::String),
+                AttributeDescriptor::new("user", "name", "User's name", Type::String),
             ),
             (
                 "age",
-                AttributeSchema::<Value>::new("user", "age", "User's age", Type::UnsignedInt),
+                AttributeDescriptor::new("user", "age", "User's age", Type::UnsignedInt),
             ),
         ]);
 
@@ -629,10 +629,10 @@ mod tests {
             .find(|(k, _)| *k == "email")
             .map(|(_, v)| v)
             .expect("Should have email attribute");
-        assert_eq!(email_attr.namespace, "person");
-        assert_eq!(email_attr.name, "email");
-        assert_eq!(email_attr.description, "Person's email address");
-        assert_eq!(email_attr.content_type, Some(Type::String));
+        assert_eq!(email_attr.namespace(), "person");
+        assert_eq!(email_attr.name(), "email");
+        assert_eq!(email_attr.description(), "Person's email address");
+        assert_eq!(email_attr.content_type(), Some(Type::String));
 
         let active_attr = concept
             .attributes()
@@ -640,10 +640,10 @@ mod tests {
             .find(|(k, _)| *k == "active")
             .map(|(_, v)| v)
             .expect("Should have active attribute");
-        assert_eq!(active_attr.namespace, "person");
-        assert_eq!(active_attr.name, "active");
-        assert_eq!(active_attr.description, "Whether person is active");
-        assert_eq!(active_attr.content_type, Some(Type::Boolean));
+        assert_eq!(active_attr.namespace(), "person");
+        assert_eq!(active_attr.name(), "active");
+        assert_eq!(active_attr.description(), "Whether person is active");
+        assert_eq!(active_attr.content_type(), Some(Type::Boolean));
     }
 
     #[dialog_common::test]
@@ -652,7 +652,7 @@ mod tests {
             description: String::new(),
             attributes: [(
                 "score",
-                AttributeSchema::<Value>::new("game", "score", "Game score", Type::UnsignedInt),
+                AttributeDescriptor::new("game", "score", "Game score", Type::UnsignedInt),
             )]
             .into(),
         };
@@ -681,10 +681,10 @@ mod tests {
             .find(|(k, _)| *k == "score")
             .map(|(_, v)| v)
             .unwrap();
-        assert_eq!(orig_score.namespace, deser_score.namespace);
-        assert_eq!(orig_score.name, deser_score.name);
-        assert_eq!(orig_score.description, deser_score.description);
-        assert_eq!(orig_score.content_type, deser_score.content_type);
+        assert_eq!(orig_score.namespace(), deser_score.namespace());
+        assert_eq!(orig_score.name(), deser_score.name());
+        assert_eq!(orig_score.description(), deser_score.description());
+        assert_eq!(orig_score.content_type(), deser_score.content_type());
     }
 
     #[dialog_common::test]
@@ -693,7 +693,7 @@ mod tests {
             description: String::new(),
             attributes: Attributes::from(vec![(
                 "id".to_string(),
-                AttributeSchema::new("product", "id", "Product ID", Type::UnsignedInt),
+                AttributeDescriptor::new("product", "id", "Product ID", Type::UnsignedInt),
             )]),
         };
 
@@ -729,7 +729,7 @@ mod tests {
             description: original_description.to_string(),
             attributes: Attributes::from(vec![(
                 "sku".to_string(),
-                AttributeSchema::new("product", "sku", "Stock Keeping Unit", Type::String),
+                AttributeDescriptor::new("product", "sku", "Stock Keeping Unit", Type::String),
             )]),
         };
 
@@ -765,22 +765,22 @@ mod tests {
         let attributes1 = Attributes::from(vec![
             (
                 "field_a".to_string(),
-                AttributeSchema::new("person", "name", "Person's name", Type::String),
+                AttributeDescriptor::new("person", "name", "Person's name", Type::String),
             ),
             (
                 "field_b".to_string(),
-                AttributeSchema::new("person", "age", "Person's age", Type::UnsignedInt),
+                AttributeDescriptor::new("person", "age", "Person's age", Type::UnsignedInt),
             ),
         ]);
 
         let attributes2 = Attributes::from(vec![
             (
                 "different_field_1".to_string(),
-                AttributeSchema::new("person", "name", "Person's name", Type::String),
+                AttributeDescriptor::new("person", "name", "Person's name", Type::String),
             ),
             (
                 "different_field_2".to_string(),
-                AttributeSchema::new("person", "age", "Person's age", Type::UnsignedInt),
+                AttributeDescriptor::new("person", "age", "Person's age", Type::UnsignedInt),
             ),
         ]);
 
@@ -811,7 +811,7 @@ mod tests {
     fn test_concept_description_does_not_affect_hash() {
         let attributes = Attributes::from(vec![(
             "name".to_string(),
-            AttributeSchema::new("user", "name", "User's name", Type::String),
+            AttributeDescriptor::new("user", "name", "User's name", Type::String),
         )]);
 
         let concept1 = ConceptDescriptor::Dynamic {
@@ -842,22 +842,22 @@ mod tests {
         let attributes1 = Attributes::from(vec![
             (
                 "name".to_string(),
-                AttributeSchema::new("person", "name", "Name", Type::String),
+                AttributeDescriptor::new("person", "name", "Name", Type::String),
             ),
             (
                 "age".to_string(),
-                AttributeSchema::new("person", "age", "Age", Type::UnsignedInt),
+                AttributeDescriptor::new("person", "age", "Age", Type::UnsignedInt),
             ),
         ]);
 
         let attributes2 = Attributes::from(vec![
             (
                 "age".to_string(),
-                AttributeSchema::new("person", "age", "Age", Type::UnsignedInt),
+                AttributeDescriptor::new("person", "age", "Age", Type::UnsignedInt),
             ),
             (
                 "name".to_string(),
-                AttributeSchema::new("person", "name", "Name", Type::String),
+                AttributeDescriptor::new("person", "name", "Name", Type::String),
             ),
         ]);
 
@@ -888,12 +888,12 @@ mod tests {
     fn test_concept_different_attributes_different_hash() {
         let attributes1 = Attributes::from(vec![(
             "name".to_string(),
-            AttributeSchema::new("person", "name", "Name", Type::String),
+            AttributeDescriptor::new("person", "name", "Name", Type::String),
         )]);
 
         let attributes2 = Attributes::from(vec![(
             "email".to_string(),
-            AttributeSchema::new("person", "email", "Email", Type::String),
+            AttributeDescriptor::new("person", "email", "Email", Type::String),
         )]);
 
         let concept1 = ConceptDescriptor::Dynamic {
