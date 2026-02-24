@@ -39,23 +39,15 @@
 //!     pub fn age() -> Term<i64> { Term::var("age") }
 //! }
 //!
-//! // -- Attributes struct --
-//! // Match<T> wrappers bound to a specific entity term.
-//! pub struct PersonAttributes {
-//!     pub this: Term<Entity>,
-//!     pub name: Match<String>,
-//!     pub age: Match<i64>,
-//! }
-//!
-//! // -- Static attribute schemas --
-//! // LazyLock statics like PERSON_NAME, PERSON_AGE holding AttributeSchema<T>.
+//! // -- Static attribute descriptors --
+//! // LazyLock statics like PERSON_NAME, PERSON_AGE holding AttributeDescriptor.
 //!
 //! // -- Concept trait impl --
 //! impl Concept for Person {
-//!     type Instance = Person;
-//!     type Match = PersonMatch;
+//!     type Proof = Person;
+//!     type Query = PersonMatch;
 //!     type Term = PersonTerms;
-//!     const CONCEPT: predicate::concept::Concept = /* static descriptor */;
+//!     const CONCEPT: predicate::concept::ConceptDescriptor = /* static descriptor */;
 //! }
 //!
 //! // -- Match trait impl --
@@ -136,27 +128,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
     // Collect code fragments for each field. We iterate over fields once and build
     // up parallel vectors of token streams that get spliced into the final output.
-    // Each vector holds one fragment per non-`this` field:
-    //   match_fields         → Term<T> fields for the Match struct
-    //   attributes_fields    → Match<T> fields for the Attributes struct
-    //   rule_when_fields     → Fact selectors for the when() rule builder
-    //   attribute_init_fields→ field initializers for Attributes::new(entity)
-    //   typed_attributes     → LazyLock<AttributeSchema<T>> statics
-    //   value_attributes     → AttributeSchema<Value> for the attributes() vec
-    //   instance_relations   → Relation constructors for IntoIterator/Claim
-    //   terms_methods        → PersonTerms::name() convenience methods
-    //   attributes_tuples    → (name, schema) pairs for attribute lookup
-    //   match_term_conversions → (unused placeholder for future use)
     let mut match_fields = Vec::new();
-    let mut attributes_fields = Vec::new();
     let mut rule_when_fields = Vec::new();
-    let mut attribute_init_fields = Vec::new();
     let mut typed_attributes = Vec::new();
-    let mut value_attributes = Vec::new();
     let mut field_names = Vec::new();
     let mut field_name_lits = Vec::new();
     let mut field_types = Vec::new();
-    let mut match_term_conversions = Vec::new();
     let mut attributes_tuples = Vec::new();
     let mut terms_methods = Vec::new();
     let mut instance_relations = Vec::new();
@@ -205,13 +182,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         });
 
-        // Generate Attributes field (Match<T>) - T is the Attribute's inner type
-        attributes_fields.push(quote! {
-            #[doc = #doc_comment_lit]
-            pub #field_name: dialog_query::attribute::Match<#inner_type>
-        });
-
-        // Generate attribute initialization for Attributes
+        // Generate static attribute definition by extracting metadata from the Attribute trait
         let prefixed_field_name = syn::Ident::new(
             &format!(
                 "{}_{}",
@@ -220,34 +191,16 @@ pub fn derive(input: TokenStream) -> TokenStream {
             ),
             field_name.span(),
         );
-        attribute_init_fields.push(quote! {
-            #field_name: #prefixed_field_name.of(entity.clone())
-        });
-
-        // Generate static attribute definition by extracting metadata from the Attribute trait
         typed_attributes.push(quote! {
             /// Static attribute definition for #field_name - delegates to Attribute trait
-            pub static #prefixed_field_name: std::sync::LazyLock<dialog_query::attribute::AttributeSchema<#inner_type>> =
-                std::sync::LazyLock::new(|| dialog_query::attribute::AttributeSchema {
+            pub static #prefixed_field_name: std::sync::LazyLock<dialog_query::attribute::AttributeDescriptor> =
+                std::sync::LazyLock::new(|| dialog_query::attribute::AttributeDescriptor::Static {
                     namespace: <#field_type as dialog_query::Attribute>::NAMESPACE,
                     name: <#field_type as dialog_query::Attribute>::NAME,
                     description: <#field_type as dialog_query::Attribute>::DESCRIPTION,
                     cardinality: <#field_type as dialog_query::Attribute>::CARDINALITY,
                     content_type: <#inner_type as dialog_query::types::IntoType>::TYPE,
-                    marker: std::marker::PhantomData,
                 });
-        });
-
-        // Generate Attribute<Value> for the attributes() method
-        value_attributes.push(quote! {
-            dialog_query::attribute::AttributeSchema {
-                namespace: <#field_type as dialog_query::Attribute>::NAMESPACE,
-                name: <#field_type as dialog_query::Attribute>::NAME,
-                description: <#field_type as dialog_query::Attribute>::DESCRIPTION,
-                cardinality: <#field_type as dialog_query::Attribute>::CARDINALITY,
-                content_type: <#inner_type as dialog_query::types::IntoType>::TYPE,
-                marker: std::marker::PhantomData,
-            }
         });
 
         // Generate rule when field conversion
@@ -275,24 +228,16 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         });
 
-        // Generate term conversions for Match implementation
-        match_term_conversions.push(quote! {
-            #field_name_lit => {
-                None
-            }
-        });
-
         // Generate attribute tuples for Attributes implementation
         attributes_tuples.push(quote! {
             (
                 <#field_type as dialog_query::Attribute>::NAME,
-                dialog_query::attribute::AttributeSchema {
+                dialog_query::attribute::AttributeDescriptor::Static {
                     namespace: <#field_type as dialog_query::Attribute>::NAMESPACE,
                     name: <#field_type as dialog_query::Attribute>::NAME,
                     description: <#field_type as dialog_query::Attribute>::DESCRIPTION,
                     cardinality: <#field_type as dialog_query::Attribute>::CARDINALITY,
                     content_type: <#inner_type as dialog_query::types::IntoType>::TYPE,
-                    marker: std::marker::PhantomData,
                 }
             )
         });
@@ -309,24 +254,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
     // Generate type names based on struct name
     let match_name = syn::Ident::new(&format!("{}Match", struct_name), struct_name.span());
-    let attributes_name =
-        syn::Ident::new(&format!("{}Attributes", struct_name), struct_name.span());
 
     // Generate static array names
-    let attributes_array_name = syn::Ident::new(
-        &format!(
-            "{}_ATTRIBUTES_ARRAY",
-            struct_name.to_string().to_uppercase()
-        ),
-        struct_name.span(),
-    );
-    let attribute_tuples_name = syn::Ident::new(
-        &format!(
-            "{}_ATTRIBUTE_TUPLES",
-            struct_name.to_string().to_uppercase()
-        ),
-        struct_name.span(),
-    );
     let attributes_const_name = syn::Ident::new(
         &format!("{}_ATTRIBUTES", struct_name.to_string().to_uppercase()),
         struct_name.span(),
@@ -377,47 +306,18 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
         #(#terms_methods)*
 
-        /// Attributes pattern for #struct_name - enables fluent query building
-        #[derive(Debug, Clone, PartialEq)]
-        pub struct #attributes_name {
-            pub this: dialog_query::term::Term<dialog_query::artifact::Entity>,
-            #(#attributes_fields),*
-        }
-
         // Static attribute definitions
         #(#typed_attributes)*
 
-        /// All attributes as Attribute<Value> for the attributes() method
-        pub static #attributes_array_name: std::sync::LazyLock<Vec<dialog_query::attribute::AttributeSchema<dialog_query::artifact::Value>>> =
-            std::sync::LazyLock::new(|| vec![
-                #(#value_attributes),*
-            ]);
-
-        /// Attribute tuples for the Attributes trait implementation
-        pub static #attribute_tuples_name: std::sync::LazyLock<Vec<(String, dialog_query::attribute::AttributeSchema<dialog_query::artifact::Value>)>> =
-            std::sync::LazyLock::new(|| vec![
-                #(
-                    (#field_name_lits.to_string(), dialog_query::attribute::AttributeSchema {
-                        namespace: <#field_types as dialog_query::Attribute>::NAMESPACE,
-                        name: <#field_types as dialog_query::Attribute>::NAME,
-                        description: <#field_types as dialog_query::Attribute>::DESCRIPTION,
-                        cardinality: <#field_types as dialog_query::Attribute>::CARDINALITY,
-                        content_type: <<#field_types as dialog_query::Attribute>::Type as dialog_query::types::IntoType>::TYPE,
-                        marker: std::marker::PhantomData,
-                    })
-                ),*
-            ]);
-
         /// Static const array of attribute tuples for CONCEPT
-        static #attributes_const_name: &[(&str, dialog_query::attribute::AttributeSchema<dialog_query::artifact::Value>)] = &[
+        static #attributes_const_name: &[(&str, dialog_query::attribute::AttributeDescriptor)] = &[
             #(
-                (#field_name_lits, dialog_query::attribute::AttributeSchema {
+                (#field_name_lits, dialog_query::attribute::AttributeDescriptor::Static {
                     namespace: <#field_types as dialog_query::Attribute>::NAMESPACE,
                     name: <#field_types as dialog_query::Attribute>::NAME,
                     description: <#field_types as dialog_query::Attribute>::DESCRIPTION,
                     cardinality: <#field_types as dialog_query::Attribute>::CARDINALITY,
                     content_type: <<#field_types as dialog_query::Attribute>::Type as dialog_query::types::IntoType>::TYPE,
-                    marker: std::marker::PhantomData,
                 })
             ),*
         ];

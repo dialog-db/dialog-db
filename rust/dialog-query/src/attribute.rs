@@ -1,16 +1,15 @@
+use crate::Parameters;
 use crate::application::RelationApplication;
 pub use crate::artifact::{Attribute as ArtifactsAttribute, Cause, Entity, Value};
 use crate::error::{SchemaError, TypeError};
 pub use crate::predicate::RelationDescriptor;
 pub use crate::schema::Cardinality;
 pub use crate::types::{IntoType, Scalar, Type};
-use crate::{Application, Parameters};
 pub use crate::{Premise, Term};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-pub use std::marker::PhantomData;
 
 /// A validated attribute–value pair with its cardinality, produced by
-/// [`AttributeSchema::resolve`]. Used inside [`Conception`](crate::predicate::concept::ConceptDescriptorion)
+/// [`AttributeDescriptor::resolve`]. Used inside [`Conception`](crate::predicate::concept::ConceptDescriptorion)
 /// to represent the set of facts that make up a concept instance.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Attribution {
@@ -22,59 +21,97 @@ pub struct Attribution {
     pub cardinality: Cardinality,
 }
 
-/// Static schema describing an attribute's identity, type, and cardinality.
+/// Describes an attribute's identity, type, and cardinality.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AttributeSchema<T: Scalar> {
-    /// The domain namespace this attribute belongs to (e.g. `"person"`).
-    pub namespace: &'static str,
-    /// The attribute name within its namespace (e.g. `"name"`).
-    pub name: &'static str,
-    /// Human-readable description of the attribute.
-    pub description: &'static str,
-    /// Whether this attribute allows one or many values per entity.
-    pub cardinality: Cardinality,
-    /// The expected value type, or `None` if any type is accepted.
-    pub content_type: Option<Type>,
-    /// Phantom data to carry the Rust-level scalar type.
-    pub marker: PhantomData<T>,
+pub enum AttributeDescriptor {
+    /// A descriptor defined at compile time with static references.
+    Static {
+        /// The domain namespace this attribute belongs to (e.g. `"person"`).
+        namespace: &'static str,
+        /// The attribute name within its namespace (e.g. `"name"`).
+        name: &'static str,
+        /// Human-readable description of the attribute.
+        description: &'static str,
+        /// Whether this attribute allows one or many values per entity.
+        cardinality: Cardinality,
+        /// The expected value type, or `None` if any type is accepted.
+        content_type: Option<Type>,
+    },
+    /// A descriptor constructed at runtime with owned data.
+    Dynamic {
+        /// The domain namespace this attribute belongs to (e.g. `"person"`).
+        namespace: String,
+        /// The attribute name within its namespace (e.g. `"name"`).
+        name: String,
+        /// Human-readable description of the attribute.
+        description: String,
+        /// Whether this attribute allows one or many values per entity.
+        cardinality: Cardinality,
+        /// The expected value type, or `None` if any type is accepted.
+        content_type: Option<Type>,
+    },
 }
 
-impl<T: Scalar> AttributeSchema<T> {
-    /// Creates a new schema with [`Cardinality::One`] and the given content type.
+impl AttributeDescriptor {
+    /// Creates a new dynamic descriptor with [`Cardinality::One`] and the given content type.
     pub fn new(
         namespace: &'static str,
         name: &'static str,
         description: &'static str,
         content_type: Type,
     ) -> Self {
-        Self {
+        Self::Static {
             namespace,
             name,
             description,
             cardinality: Cardinality::One,
             content_type: Some(content_type),
-            marker: PhantomData,
+        }
+    }
+
+    /// Returns the domain namespace.
+    pub fn namespace(&self) -> &str {
+        match self {
+            Self::Static { namespace, .. } => namespace,
+            Self::Dynamic { namespace, .. } => namespace,
+        }
+    }
+
+    /// Returns the attribute name.
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Static { name, .. } => name,
+            Self::Dynamic { name, .. } => name,
+        }
+    }
+
+    /// Returns the human-readable description.
+    pub fn description(&self) -> &str {
+        match self {
+            Self::Static { description, .. } => description,
+            Self::Dynamic { description, .. } => description,
+        }
+    }
+
+    /// Returns the cardinality.
+    pub fn cardinality(&self) -> Cardinality {
+        match self {
+            Self::Static { cardinality, .. } => *cardinality,
+            Self::Dynamic { cardinality, .. } => *cardinality,
+        }
+    }
+
+    /// Returns the expected value type, or `None` if any type is accepted.
+    pub fn content_type(&self) -> Option<Type> {
+        match self {
+            Self::Static { content_type, .. } => *content_type,
+            Self::Dynamic { content_type, .. } => *content_type,
         }
     }
 
     /// Returns the fully-qualified attribute selector (`"namespace/name"`).
     pub fn the(&self) -> String {
-        format!("{}/{}", self.namespace, self.name)
-    }
-
-    /// Binds this attribute to an entity term, producing a [`Match`] that
-    /// can be used in queries.
-    pub fn of<Of: Into<Term<Entity>>>(&self, term: Of) -> Match<T> {
-        Match {
-            attribute: self.clone(),
-            of: term.into(),
-        }
-    }
-
-    /// Returns the expected value type for this attribute, or `None` if it
-    /// accepts any type.
-    pub fn content_type(&self) -> Option<Type> {
-        self.content_type
+        format!("{}/{}", self.namespace(), self.name())
     }
 
     /// Checks that the given term's type is compatible with this attribute's
@@ -109,7 +146,7 @@ impl<T: Scalar> AttributeSchema<T> {
     /// produces an [`Attribution`] — a validated (attribute, value, cardinality)
     /// triple ready for storage.
     pub fn resolve(&self, value: Value) -> Result<Attribution, TypeError> {
-        let type_matches = match self.content_type {
+        let type_matches = match self.content_type() {
             Some(expected) => value.data_type() == expected,
             None => true,
         };
@@ -126,11 +163,11 @@ impl<T: Scalar> AttributeSchema<T> {
             Ok(Attribution {
                 the,
                 is: value.clone(),
-                cardinality: self.cardinality,
+                cardinality: self.cardinality(),
             })
         } else {
             Err(TypeError::TypeMismatch {
-                expected: self.content_type.unwrap(), // Safe because we checked Some above
+                expected: self.content_type().unwrap(), // Safe because we checked Some above
                 actual: Term::Constant(value),
             })
         }
@@ -143,7 +180,7 @@ impl<T: Scalar> AttributeSchema<T> {
     /// - `of`: Is the entity known?
     /// - `is`: Is the value known?
     pub fn estimate(&self, of: bool, is: bool) -> usize {
-        self.cardinality
+        self.cardinality()
             .estimate(true, of, is)
             .expect("Should succeed if we know attribute")
     }
@@ -183,16 +220,19 @@ impl<T: Scalar> AttributeSchema<T> {
             .unwrap_or(Term::blank());
 
         Ok(RelationApplication::new(
-            Term::Constant(self.namespace.to_string()),
-            Term::Constant(self.name.to_string()),
+            Term::Constant(self.namespace().to_string()),
+            Term::Constant(self.name().to_string()),
             of,
             is,
             cause,
-            Some(RelationDescriptor::new(self.content_type, self.cardinality)),
+            Some(RelationDescriptor::new(
+                self.content_type(),
+                self.cardinality(),
+            )),
         ))
     }
 
-    /// Encode this attribute schema as CBOR for hashing
+    /// Encode this attribute descriptor as CBOR for hashing
     ///
     /// Creates a CBOR-encoded representation with fields:
     /// - domain: namespace
@@ -205,27 +245,27 @@ impl<T: Scalar> AttributeSchema<T> {
         use serde::Serialize;
 
         #[derive(Serialize)]
-        struct CborAttributeSchema<'a> {
+        struct CborAttributeDescriptor<'a> {
             domain: &'a str,
             name: &'a str,
-            cardinality: &'a Cardinality,
+            cardinality: Cardinality,
             #[serde(rename = "type")]
-            content_type: &'a Option<Type>,
+            content_type: Option<Type>,
         }
 
-        let schema = CborAttributeSchema {
-            domain: self.namespace,
-            name: self.name,
-            cardinality: &self.cardinality,
-            content_type: &self.content_type,
+        let schema = CborAttributeDescriptor {
+            domain: self.namespace(),
+            name: self.name(),
+            cardinality: self.cardinality(),
+            content_type: self.content_type(),
         };
 
         serde_ipld_dagcbor::to_vec(&schema).expect("CBOR encoding should not fail")
     }
 
-    /// Compute blake3 hash of this attribute schema
+    /// Compute blake3 hash of this attribute descriptor
     ///
-    /// Returns a 32-byte blake3 hash of the CBOR-encoded schema
+    /// Returns a 32-byte blake3 hash of the CBOR-encoded descriptor
     pub fn hash(&self) -> blake3::Hash {
         let cbor_bytes = self.to_cbor_bytes();
         blake3::hash(&cbor_bytes)
@@ -248,22 +288,22 @@ impl<T: Scalar> AttributeSchema<T> {
     }
 }
 
-impl<T: Scalar> Serialize for AttributeSchema<T> {
+impl Serialize for AttributeDescriptor {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         use serde::ser::SerializeStruct;
         let mut state = serializer.serialize_struct("Attribute", 4)?;
-        state.serialize_field("namespace", self.namespace)?;
-        state.serialize_field("name", self.name)?;
-        state.serialize_field("description", self.description)?;
-        state.serialize_field("type", &self.content_type)?;
+        state.serialize_field("namespace", self.namespace())?;
+        state.serialize_field("name", self.name())?;
+        state.serialize_field("description", self.description())?;
+        state.serialize_field("type", &self.content_type())?;
         state.end()
     }
 }
 
-impl<'de, T: Scalar> Deserialize<'de> for AttributeSchema<T> {
+impl<'de> Deserialize<'de> for AttributeDescriptor {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -281,16 +321,16 @@ impl<'de, T: Scalar> Deserialize<'de> for AttributeSchema<T> {
             DataType,
         }
 
-        struct AttributeVisitor<T>(PhantomData<T>);
+        struct AttributeVisitor;
 
-        impl<'de, T: Scalar> Visitor<'de> for AttributeVisitor<T> {
-            type Value = AttributeSchema<T>;
+        impl<'de> Visitor<'de> for AttributeVisitor {
+            type Value = AttributeDescriptor;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
                 formatter.write_str("struct Attribute")
             }
 
-            fn visit_map<V>(self, mut map: V) -> Result<AttributeSchema<T>, V::Error>
+            fn visit_map<V>(self, mut map: V) -> Result<AttributeDescriptor, V::Error>
             where
                 V: MapAccess<'de>,
             {
@@ -334,19 +374,12 @@ impl<'de, T: Scalar> Deserialize<'de> for AttributeSchema<T> {
                     description.ok_or_else(|| de::Error::missing_field("description"))?;
                 let data_type = data_type.ok_or_else(|| de::Error::missing_field("data_type"))?;
 
-                // Convert String to &'static str by leaking memory
-                // This is the trade-off for keeping &'static str fields
-                let namespace: &'static str = Box::leak(namespace.into_boxed_str());
-                let name: &'static str = Box::leak(name.into_boxed_str());
-                let description: &'static str = Box::leak(description.into_boxed_str());
-
-                Ok(AttributeSchema {
+                Ok(AttributeDescriptor::Dynamic {
                     namespace,
                     name,
                     description,
                     cardinality: Cardinality::One,
                     content_type: data_type,
-                    marker: PhantomData,
                 })
             }
         }
@@ -354,61 +387,8 @@ impl<'de, T: Scalar> Deserialize<'de> for AttributeSchema<T> {
         deserializer.deserialize_struct(
             "Attribute",
             &["namespace", "name", "description", "data_type"],
-            AttributeVisitor(PhantomData),
+            AttributeVisitor,
         )
-    }
-}
-
-/// A query pattern binding an [`AttributeSchema`] to an entity term.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Match<T: Scalar> {
-    /// The attribute schema this match targets.
-    pub attribute: AttributeSchema<T>,
-    /// The entity term to match against.
-    pub of: Term<Entity>,
-}
-
-impl<T: Scalar> Match<T> {
-    /// Creates a new match from raw attribute metadata and an entity term.
-    pub fn new(
-        namespace: &'static str,
-        name: &'static str,
-        description: &'static str,
-        content_type: Type,
-        of: Term<Entity>,
-    ) -> Self {
-        Self {
-            attribute: AttributeSchema::new(namespace, name, description, content_type),
-            of,
-        }
-    }
-
-    /// Returns a clone of the entity term.
-    pub fn of(&self) -> Term<Entity> {
-        self.of.clone()
-    }
-    /// Returns the fully-qualified attribute selector.
-    pub fn the(&self) -> String {
-        self.attribute.the()
-    }
-
-    /// Constrains this match to a specific value, producing a [`RelationApplication`].
-    pub fn is<Is: Into<Term<T>>>(self, term: Is) -> RelationApplication {
-        RelationApplication::new(
-            Term::Constant(self.attribute.namespace.to_string()),
-            Term::Constant(self.attribute.name.to_string()),
-            self.of(),
-            term.into().as_unknown(),
-            Term::blank(),
-            Some(RelationDescriptor::new(
-                self.attribute.content_type,
-                self.attribute.cardinality,
-            )),
-        )
-    }
-    /// Negates this match for a specific value, producing a [`Premise`].
-    pub fn not<Is: Into<Term<T>>>(self, term: Is) -> Premise {
-        Application::Relation(Box::new(self.is(term))).not()
     }
 }
 
@@ -433,8 +413,8 @@ pub trait Attribute: Sized {
     const DESCRIPTION: &'static str;
     /// Whether this attribute allows one or many values per entity.
     const CARDINALITY: Cardinality;
-    /// The full static schema for this attribute.
-    const SCHEMA: AttributeSchema<Self::Type>;
+    /// The full static descriptor for this attribute.
+    const SCHEMA: AttributeDescriptor;
     /// The concept definition that this attribute belongs to.
     const CONCEPT: crate::predicate::concept::ConceptDescriptor;
 
@@ -483,35 +463,9 @@ pub trait Attribute: Sized {
         Self::SCHEMA.to_uri()
     }
 
-    /// Create a query builder for a specific entity
-    fn of<E: Into<Term<Entity>>>(entity: E) -> AttributeQueryBuilder<Self::Type> {
-        AttributeQueryBuilder {
-            schema: &Self::SCHEMA,
-            entity: entity.into(),
-            content_type: PhantomData,
-        }
-    }
-
     /// Returns the expected value type, or `None` if any type is accepted.
     fn content_type() -> Option<Type> {
         <Self::Type as IntoType>::TYPE
-    }
-}
-
-/// Query builder for attribute queries, created via [`Attribute::of`].
-pub struct AttributeQueryBuilder<T: Scalar> {
-    schema: &'static AttributeSchema<T>,
-    entity: Term<Entity>,
-    content_type: PhantomData<T>,
-}
-
-impl<T: Scalar> AttributeQueryBuilder<T> {
-    /// Constrains the attribute to a value term, producing a [`Match`].
-    pub fn is<V: Into<Term<T>>>(self, _value: V) -> Match<T> {
-        Match {
-            attribute: self.schema.clone(),
-            of: self.entity,
-        }
     }
 }
 
@@ -531,13 +485,12 @@ mod tests {
             const ATTRS: crate::predicate::concept::Attributes =
                 crate::predicate::concept::Attributes::Static(&[(
                     "name",
-                    crate::attribute::AttributeSchema {
+                    crate::attribute::AttributeDescriptor::Static {
                         namespace: "person",
                         name: "name",
                         description: "The name of the person",
                         cardinality: Cardinality::One,
                         content_type: <String as crate::types::IntoType>::TYPE,
-                        marker: std::marker::PhantomData,
                     },
                 )]);
             crate::predicate::concept::ConceptDescriptor::Static {
@@ -556,14 +509,13 @@ mod tests {
             const NAME: &'static str = "name";
             const DESCRIPTION: &'static str = "The name of the person";
             const CARDINALITY: Cardinality = Cardinality::One;
-            const SCHEMA: crate::attribute::AttributeSchema<Self::Type> =
-                crate::attribute::AttributeSchema {
+            const SCHEMA: crate::attribute::AttributeDescriptor =
+                crate::attribute::AttributeDescriptor::Static {
                     namespace: Self::NAMESPACE,
                     name: Self::NAME,
                     description: Self::DESCRIPTION,
                     cardinality: Self::CARDINALITY,
                     content_type: <String as crate::types::IntoType>::TYPE,
-                    marker: std::marker::PhantomData,
                 };
             const CONCEPT: crate::predicate::concept::ConceptDescriptor = NAME_CONCEPT;
 
@@ -802,7 +754,7 @@ mod tests {
     #[dialog_common::test]
     fn test_attribute_uri_roundtrip() {
         let uri = employee_ident::Name::to_uri();
-        let parsed_hash = crate::attribute::AttributeSchema::<String>::parse_uri(&uri);
+        let parsed_hash = crate::attribute::AttributeDescriptor::parse_uri(&uri);
 
         assert!(parsed_hash.is_some(), "Should be able to parse valid URI");
         assert_eq!(
@@ -815,17 +767,17 @@ mod tests {
     #[dialog_common::test]
     fn test_attribute_uri_parse_invalid() {
         assert!(
-            crate::attribute::AttributeSchema::<String>::parse_uri("invalid").is_none(),
+            crate::attribute::AttributeDescriptor::parse_uri("invalid").is_none(),
             "Should fail to parse URI without 'the:' prefix"
         );
 
         assert!(
-            crate::attribute::AttributeSchema::<String>::parse_uri("the:invalid").is_none(),
+            crate::attribute::AttributeDescriptor::parse_uri("the:invalid").is_none(),
             "Should fail to parse URI with invalid hash"
         );
 
         assert!(
-            crate::attribute::AttributeSchema::<String>::parse_uri("concept:abcd").is_none(),
+            crate::attribute::AttributeDescriptor::parse_uri("concept:abcd").is_none(),
             "Should fail to parse URI with wrong prefix"
         );
     }
@@ -853,12 +805,12 @@ mod tests {
     #[dialog_common::test]
     fn test_attribute_description_does_not_affect_hash() {
         use crate::artifact::Type;
-        use crate::attribute::AttributeSchema;
+        use crate::attribute::AttributeDescriptor;
 
         let attr1 =
-            AttributeSchema::<String>::new("user", "email", "Primary email address", Type::String);
+            AttributeDescriptor::new("user", "email", "Primary email address", Type::String);
 
-        let attr2 = AttributeSchema::<String>::new(
+        let attr2 = AttributeDescriptor::new(
             "user",
             "email",
             "User's email for notifications",
@@ -1124,7 +1076,7 @@ mod tests {
         use crate::Cardinality;
 
         let schema = &test_pascal::UserName::SCHEMA;
-        assert_eq!(schema.name, "user-name");
-        assert_eq!(schema.cardinality, Cardinality::One);
+        assert_eq!(schema.name(), "user-name");
+        assert_eq!(schema.cardinality(), Cardinality::One);
     }
 }

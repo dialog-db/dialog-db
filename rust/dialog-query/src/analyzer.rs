@@ -958,7 +958,7 @@ mod cost_model_tests {
             description: String::new(),
             attributes: [(
                 "name",
-                crate::AttributeSchema::new("user", "name", "User name", crate::Type::String),
+                crate::AttributeDescriptor::new("user", "name", "User name", crate::Type::String),
             )]
             .into(),
         };
@@ -1014,7 +1014,7 @@ mod cost_model_tests {
             description: String::new(),
             attributes: [(
                 "name",
-                crate::AttributeSchema::new("user", "name", "User name", crate::Type::String),
+                crate::AttributeDescriptor::new("user", "name", "User name", crate::Type::String),
             )]
             .into(),
         };
@@ -1063,7 +1063,7 @@ mod cost_model_tests {
             description: String::new(),
             attributes: [(
                 "name",
-                crate::AttributeSchema::new("user", "name", "User name", crate::Type::String),
+                crate::AttributeDescriptor::new("user", "name", "User name", crate::Type::String),
             )]
             .into(),
         };
@@ -1108,9 +1108,13 @@ mod cost_model_tests {
         );
 
         // Create a ConceptApplication with single Cardinality::Many attribute
-        let mut concept_attr =
-            crate::AttributeSchema::new("user", "tags", "User tags", crate::Type::String);
-        concept_attr.cardinality = crate::Cardinality::Many;
+        let concept_attr = crate::AttributeDescriptor::Static {
+            namespace: "user",
+            name: "tags",
+            description: "User tags",
+            cardinality: crate::Cardinality::Many,
+            content_type: Some(crate::Type::String),
+        };
 
         let concept = ConceptDescriptor::Dynamic {
             description: String::new(),
@@ -1156,9 +1160,13 @@ mod cost_model_tests {
         );
 
         // Create a ConceptApplication with single Cardinality::Many attribute
-        let mut concept_attr =
-            crate::AttributeSchema::new("user", "tags", "User tags", crate::Type::String);
-        concept_attr.cardinality = crate::Cardinality::Many;
+        let concept_attr = crate::AttributeDescriptor::Static {
+            namespace: "user",
+            name: "tags",
+            description: "User tags",
+            cardinality: crate::Cardinality::Many,
+            content_type: Some(crate::Type::String),
+        };
 
         let concept = ConceptDescriptor::Dynamic {
             description: String::new(),

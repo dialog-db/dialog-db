@@ -98,7 +98,7 @@ impl Display for DeductiveRule {
         write!(f, "{} {{", self.operator())?;
         write!(f, "this: {},", Type::Entity)?;
         for (name, attribute) in self.conclusion.attributes().iter() {
-            match attribute.content_type {
+            match attribute.content_type() {
                 Some(ty) => write!(f, "{}: {},", name, ty)?,
                 None => write!(f, "{}: Any,", name)?,
             }
@@ -119,14 +119,14 @@ impl From<&ConceptDescriptor> for DeductiveRule {
         for (name, attribute) in concept.attributes().iter() {
             premises.push(
                 RelationApplication::new(
-                    Term::Constant(attribute.namespace.to_string()),
-                    Term::Constant(attribute.name.to_string()),
+                    Term::Constant(attribute.namespace().to_string()),
+                    Term::Constant(attribute.name().to_string()),
                     this.clone(),
                     Term::var(name),
                     Term::var("cause"),
                     Some(RelationDescriptor::new(
-                        attribute.content_type,
-                        attribute.cardinality,
+                        attribute.content_type(),
+                        attribute.cardinality(),
                     )),
                 )
                 .into(),
@@ -151,11 +151,16 @@ mod tests {
             attributes: vec![
                 (
                     "name",
-                    crate::attribute::AttributeSchema::new("person", "name", "", Type::String),
+                    crate::attribute::AttributeDescriptor::new("person", "name", "", Type::String),
                 ),
                 (
                     "age",
-                    crate::attribute::AttributeSchema::new("person", "age", "", Type::UnsignedInt),
+                    crate::attribute::AttributeDescriptor::new(
+                        "person",
+                        "age",
+                        "",
+                        Type::UnsignedInt,
+                    ),
                 ),
             ]
             .into(),
@@ -195,11 +200,11 @@ mod tests {
             attributes: vec![
                 (
                     "key",
-                    crate::attribute::AttributeSchema::new("person", "key", "", Type::String),
+                    crate::attribute::AttributeDescriptor::new("person", "key", "", Type::String),
                 ),
                 (
                     "value",
-                    crate::attribute::AttributeSchema::new("person", "value", "", Type::String),
+                    crate::attribute::AttributeDescriptor::new("person", "value", "", Type::String),
                 ),
             ]
             .into(),
@@ -228,11 +233,11 @@ mod tests {
             attributes: vec![
                 (
                     "key",
-                    crate::attribute::AttributeSchema::new("person", "key", "", Type::String),
+                    crate::attribute::AttributeDescriptor::new("person", "key", "", Type::String),
                 ),
                 (
                     "value",
-                    crate::attribute::AttributeSchema::new("person", "value", "", Type::String),
+                    crate::attribute::AttributeDescriptor::new("person", "value", "", Type::String),
                 ),
             ]
             .into(),
@@ -269,11 +274,16 @@ mod tests {
             attributes: vec![
                 (
                     "name",
-                    crate::attribute::AttributeSchema::new("person", "name", "", Type::String),
+                    crate::attribute::AttributeDescriptor::new("person", "name", "", Type::String),
                 ),
                 (
                     "age",
-                    crate::attribute::AttributeSchema::new("person", "age", "", Type::UnsignedInt),
+                    crate::attribute::AttributeDescriptor::new(
+                        "person",
+                        "age",
+                        "",
+                        Type::UnsignedInt,
+                    ),
                 ),
             ]
             .into(),
@@ -304,11 +314,16 @@ mod tests {
             attributes: vec![
                 (
                     "name",
-                    crate::attribute::AttributeSchema::new("person", "name", "", Type::String),
+                    crate::attribute::AttributeDescriptor::new("person", "name", "", Type::String),
                 ),
                 (
                     "age",
-                    crate::attribute::AttributeSchema::new("person", "age", "", Type::UnsignedInt),
+                    crate::attribute::AttributeDescriptor::new(
+                        "person",
+                        "age",
+                        "",
+                        Type::UnsignedInt,
+                    ),
                 ),
             ]
             .into(),
@@ -326,11 +341,11 @@ mod tests {
             attributes: vec![
                 (
                     "key",
-                    crate::attribute::AttributeSchema::new("result", "key", "", Type::String),
+                    crate::attribute::AttributeDescriptor::new("result", "key", "", Type::String),
                 ),
                 (
                     "value",
-                    crate::attribute::AttributeSchema::new("result", "value", "", Type::String),
+                    crate::attribute::AttributeDescriptor::new("result", "value", "", Type::String),
                 ),
             ]
             .into(),
@@ -372,7 +387,7 @@ mod tests {
             description: String::new(),
             attributes: vec![(
                 "key",
-                crate::attribute::AttributeSchema::new("result", "key", "", Type::String),
+                crate::attribute::AttributeDescriptor::new("result", "key", "", Type::String),
             )]
             .into(),
         };

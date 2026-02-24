@@ -486,75 +486,68 @@ mod tests {
 
     #[allow(dead_code)]
     mod person {
-        use crate::artifact::{Type, Value};
-        use crate::attribute::AttributeSchema;
+        use crate::artifact::Type;
+        use crate::attribute::AttributeDescriptor;
         use crate::attribute::Cardinality;
-        use std::marker::PhantomData;
 
         /// The namespace for Person attributes
         pub const NAMESPACE: &str = "person";
 
         /// Static attribute definitions
-        pub static NAME_ATTR: AttributeSchema<String> = AttributeSchema {
+        pub static NAME_ATTR: AttributeDescriptor = AttributeDescriptor::Static {
             namespace: NAMESPACE,
             name: "name",
             description: "Name of the person",
             cardinality: Cardinality::One,
             content_type: Some(Type::String),
-            marker: PhantomData,
         };
 
-        pub static AGE_ATTR: AttributeSchema<u32> = AttributeSchema {
+        pub static AGE_ATTR: AttributeDescriptor = AttributeDescriptor::Static {
             namespace: NAMESPACE,
             name: "age",
             description: "Age of the person",
             cardinality: Cardinality::One,
             content_type: Some(Type::UnsignedInt),
-            marker: PhantomData,
         };
 
-        /// All attributes as Attribute<Value> for the attributes() method
-        pub static ATTRIBUTES: &[AttributeSchema<Value>] = &[
-            AttributeSchema {
+        /// All attributes as AttributeDescriptor for the attributes() method
+        pub static ATTRIBUTES: &[AttributeDescriptor] = &[
+            AttributeDescriptor::Static {
                 namespace: NAMESPACE,
                 name: "name",
                 description: "Name of the person",
                 cardinality: Cardinality::One,
                 content_type: Some(Type::String),
-                marker: PhantomData,
             },
-            AttributeSchema {
+            AttributeDescriptor::Static {
                 namespace: NAMESPACE,
                 name: "age",
                 description: "Age of the person",
                 cardinality: Cardinality::One,
                 content_type: Some(Type::UnsignedInt),
-                marker: PhantomData,
             },
         ];
 
         /// Attribute tuples for the Attributes trait implementation
-        pub static ATTRIBUTE_TUPLES: &[(&str, AttributeSchema<Value>)] = &[
+        pub static ATTRIBUTE_TUPLES: &[(&str, AttributeDescriptor)] = &[
             (
                 "name",
-                AttributeSchema {
+                AttributeDescriptor::Static {
                     namespace: NAMESPACE,
                     name: "name",
                     description: "Name of the person",
                     cardinality: Cardinality::One,
                     content_type: Some(Type::String),
-                    marker: PhantomData,
                 },
             ),
             (
                 "age",
-                AttributeSchema {
+                AttributeDescriptor::Static {
                     namespace: NAMESPACE,
                     name: "age",
                     description: "Age of the person",
                     cardinality: Cardinality::One,
                     content_type: Some(Type::UnsignedInt),
-                    marker: PhantomData,
                 },
             ),
         ];
@@ -792,14 +785,14 @@ mod tests {
 
         assert_eq!(attrs.len(), 2);
         assert_eq!(attrs[0].0, "name");
-        assert_eq!(attrs[0].1.namespace, "macro-person");
-        assert_eq!(attrs[0].1.name, "name");
-        assert_eq!(attrs[0].1.description, "Name of the person");
+        assert_eq!(attrs[0].1.namespace(), "macro-person");
+        assert_eq!(attrs[0].1.name(), "name");
+        assert_eq!(attrs[0].1.description(), "Name of the person");
         assert_eq!(attrs[0].1.content_type(), Some(Type::String));
         assert_eq!(attrs[1].0, "birthday");
-        assert_eq!(attrs[1].1.namespace, "macro-person");
-        assert_eq!(attrs[1].1.name, "birthday");
-        assert_eq!(attrs[1].1.description, "Birthday of the person");
+        assert_eq!(attrs[1].1.namespace(), "macro-person");
+        assert_eq!(attrs[1].1.name(), "birthday");
+        assert_eq!(attrs[1].1.description(), "Birthday of the person");
         assert_eq!(attrs[1].1.content_type(), Some(Type::UnsignedInt));
 
         // Test that MacroPerson implements Rule
@@ -817,9 +810,9 @@ mod tests {
     fn test_static_attributes_generation() {
         // Test that static attributes are generated correctly with prefixed names
         // The prefixed attributes should exist and be accessible
-        assert_eq!(MACRO_PERSON_NAME.namespace, "macro-person");
-        assert_eq!(MACRO_PERSON_NAME.name, "name");
-        assert_eq!(MACRO_PERSON_BIRTHDAY.namespace, "macro-person");
-        assert_eq!(MACRO_PERSON_BIRTHDAY.name, "birthday");
+        assert_eq!(MACRO_PERSON_NAME.namespace(), "macro-person");
+        assert_eq!(MACRO_PERSON_NAME.name(), "name");
+        assert_eq!(MACRO_PERSON_BIRTHDAY.namespace(), "macro-person");
+        assert_eq!(MACRO_PERSON_BIRTHDAY.name(), "birthday");
     }
 }

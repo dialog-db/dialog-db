@@ -260,31 +260,28 @@ mod tests {
         type Term = PersonTerms;
 
         const CONCEPT: predicate::concept::ConceptDescriptor = {
-            use crate::artifact::{Type, Value};
-            use crate::attribute::{AttributeSchema, Cardinality};
-            use std::marker::PhantomData;
+            use crate::artifact::Type;
+            use crate::attribute::{AttributeDescriptor, Cardinality};
 
-            const ATTRIBUTE_TUPLES: &[(&str, AttributeSchema<Value>)] = &[
+            const ATTRIBUTE_TUPLES: &[(&str, AttributeDescriptor)] = &[
                 (
                     "name",
-                    AttributeSchema {
+                    AttributeDescriptor::Static {
                         namespace: "person",
                         name: "name",
                         description: "Name of the person",
                         cardinality: Cardinality::One,
                         content_type: Some(Type::String),
-                        marker: PhantomData,
                     },
                 ),
                 (
                     "age",
-                    AttributeSchema {
+                    AttributeDescriptor::Static {
                         namespace: "person",
                         name: "age",
                         description: "Age of the person",
                         cardinality: Cardinality::One,
                         content_type: Some(Type::UnsignedInt),
-                        marker: PhantomData,
                     },
                 ),
             ];

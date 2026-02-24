@@ -376,7 +376,7 @@ mod tests {
 
     use crate::application::relation::RelationApplication;
     use crate::{
-        Assertion, AttributeSchema, Parameters, Type,
+        Assertion, AttributeDescriptor, Parameters, Type,
         predicate::{self, concept::Attributes},
     };
 
@@ -430,11 +430,11 @@ mod tests {
             attributes: [
                 (
                     "name",
-                    AttributeSchema::<Value>::new("person", "name", "person name", Type::String),
+                    AttributeDescriptor::new("person", "name", "person name", Type::String),
                 ),
                 (
                     "age",
-                    AttributeSchema::<Value>::new("person", "age", "person age", Type::UnsignedInt),
+                    AttributeDescriptor::new("person", "age", "person age", Type::UnsignedInt),
                 ),
             ]
             .into(),
@@ -489,11 +489,11 @@ mod tests {
         let mut attributes = HashMap::new();
         attributes.insert(
             "name".into(),
-            AttributeSchema::new("person", "name", "person name", Type::String),
+            AttributeDescriptor::new("person", "name", "person name", Type::String),
         );
         attributes.insert(
             "age".into(),
-            AttributeSchema::new("person", "age", "person age", Type::UnsignedInt),
+            AttributeDescriptor::new("person", "age", "person age", Type::UnsignedInt),
         );
 
         let person = predicate::ConceptDescriptor::Dynamic {
@@ -526,11 +526,11 @@ mod tests {
             attributes: [
                 (
                     "name",
-                    AttributeSchema::new("person", "name", "person name", Type::String),
+                    AttributeDescriptor::new("person", "name", "person name", Type::String),
                 ),
                 (
                     "age",
-                    AttributeSchema::new("person", "age", "person age", Type::UnsignedInt),
+                    AttributeDescriptor::new("person", "age", "person age", Type::UnsignedInt),
                 ),
             ]
             .into(),
@@ -874,11 +874,11 @@ mod tests {
             attributes: Attributes::from(vec![
                 (
                     "name",
-                    AttributeSchema::new("adult", "name", "Adult name", Type::String),
+                    AttributeDescriptor::new("adult", "name", "Adult name", Type::String),
                 ),
                 (
                     "age",
-                    AttributeSchema::new("adult", "age", "Adult age", Type::UnsignedInt),
+                    AttributeDescriptor::new("adult", "age", "Adult age", Type::UnsignedInt),
                 ),
             ]),
         };
@@ -960,7 +960,7 @@ mod tests {
         // Create two different rules for the same concept (same attributes = same hash)
         let attributes: Attributes = [(
             "name".to_string(),
-            AttributeSchema::new("person", "name", "Person name", Type::String),
+            AttributeDescriptor::new("person", "name", "Person name", Type::String),
         )]
         .into();
 
@@ -1020,7 +1020,7 @@ mod tests {
             description: String::new(),
             attributes: [(
                 "name".to_string(),
-                AttributeSchema::new("person", "name", "Adult name", Type::String),
+                AttributeDescriptor::new("person", "name", "Adult name", Type::String),
             )]
             .into(),
         };
