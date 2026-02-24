@@ -42,7 +42,7 @@ pub use dialog_storage::{
     Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder, HashType,
     MemoryStorageBackend, Storage, StorageBackend,
 };
-use futures_util::{Stream, StreamExt};
+use futures_util::{Stream, StreamExt, future::Either};
 use std::{ops::Range, sync::Arc};
 use tokio::sync::RwLock;
 
@@ -316,6 +316,75 @@ where
 
         Ok(())
     }
+
+    /// Scan the entity-first (EAV) index.
+    fn scan_eav(
+        index: Arc<RwLock<Index<Key, Datum, Backend>>>,
+        selector: ArtifactSelector<Constrained>,
+    ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static + ConditionalSend
+    {
+        try_stream! {
+            let index = index.read().await.clone();
+            let start = <EntityKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
+            let end = <EntityKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
+            let stream = index.stream_range(Range { start, end });
+            tokio::pin!(stream);
+            for await item in stream {
+                let entry = item?;
+                if entry.matches_selector(&selector)
+                    && let Entry { value: State::Added(datum), .. } = entry
+                {
+                    yield Artifact::try_from(datum)?;
+                }
+            }
+        }
+    }
+
+    /// Scan the attribute-first (AEV) index.
+    fn scan_aev(
+        index: Arc<RwLock<Index<Key, Datum, Backend>>>,
+        selector: ArtifactSelector<Constrained>,
+    ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static + ConditionalSend
+    {
+        try_stream! {
+            let index = index.read().await.clone();
+            let start = <AttributeKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
+            let end = <AttributeKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
+            let stream = index.stream_range(Range { start, end });
+            tokio::pin!(stream);
+            for await item in stream {
+                let entry = item?;
+                if entry.matches_selector(&selector)
+                    && let Entry { value: State::Added(datum), .. } = entry
+                {
+                    yield Artifact::try_from(datum)?;
+                }
+            }
+        }
+    }
+
+    /// Scan the value-first (VAE) index.
+    fn scan_vae(
+        index: Arc<RwLock<Index<Key, Datum, Backend>>>,
+        selector: ArtifactSelector<Constrained>,
+    ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static + ConditionalSend
+    {
+        try_stream! {
+            let index = index.read().await.clone();
+            let start = <ValueKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
+            let end = <ValueKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
+            let stream = index.stream_range(Range { start, end });
+            tokio::pin!(stream);
+            for await item in stream {
+                let entry = item?;
+                if entry.matches_selector(&selector)
+                    && let Entry { value: State::Added(datum), .. } = entry
+                {
+                    yield Artifact::try_from(datum)?;
+                }
+            }
+        }
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -333,80 +402,12 @@ where
     {
         let index = self.index.clone();
 
-        try_stream! {
-            // We clone to "pin" the indexes at a version for the lifetime of the stream
-            let index = index.read().await.clone();
-
-            // Choose the index that best matches the selector constraints.
-            //
-            // Priority: Entity (EAV) > Attribute (AEV) > Value (VAE)
-            //
-            // Entity-first is ideal when the entity is known — results are
-            // sorted E, A, V so all attributes for an entity are contiguous.
-            //
-            // Attribute-first is preferred over value-first because the AEV
-            // sort order groups results by (attribute, entity), which is the
-            // natural grouping for cardinality-one enforcement: we need to
-            // see all values for a given (attribute, entity) pair together to
-            // pick the winner. The VAE index scatters different values for the
-            // same (attribute, entity) across the scan, making it impossible
-            // to enforce cardinality without secondary lookups.
-            //
-            // Value-first is the fallback when only the value is known.
-            if selector.entity().is_some() {
-                let start = <EntityKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
-                let end = <EntityKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
-
-                let stream = index.stream_range(Range { start, end });
-
-                tokio::pin!(stream);
-
-                for await item in stream {
-                    let entry = item?;
-
-                    if entry.matches_selector(&selector)
-                        && let Entry { value: State::Added(datum), .. } = entry
-                    {
-                        yield Artifact::try_from(datum)?;
-                    }
-                }
-            } else if selector.attribute().is_some() {
-                let start = <AttributeKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
-                let end = <AttributeKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
-
-                let stream = index.stream_range(Range { start, end });
-
-                tokio::pin!(stream);
-
-                for await item in stream {
-                    let entry = item?;
-
-                    if entry.matches_selector(&selector)
-                        && let Entry { value: State::Added(datum), .. } = entry
-                    {
-                        yield Artifact::try_from(datum)?;
-                    }
-                }
-            } else if selector.value().is_some() {
-                let start = <ValueKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
-                let end = <ValueKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
-
-                let stream = index.stream_range(Range { start, end });
-
-                tokio::pin!(stream);
-
-                for await item in stream {
-                    let entry = item?;
-
-                    if entry.matches_selector(&selector)
-                        && let Entry { value: State::Added(datum), .. } = entry
-                    {
-                        yield Artifact::try_from(datum)?;
-                    }
-                }
-            } else {
-                unreachable!("ArtifactSelector will always have at least one field specified")
-            };
+        if selector.entity().is_some() {
+            Either::Left(Either::Left(Self::scan_eav(index, selector)))
+        } else if selector.attribute().is_some() {
+            Either::Left(Either::Right(Self::scan_aev(index, selector)))
+        } else {
+            Either::Right(Self::scan_vae(index, selector))
         }
     }
 }

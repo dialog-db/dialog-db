@@ -7,10 +7,10 @@ pub use crate::context::new_context;
 pub use crate::error::{AnalyzerError, QueryResult};
 pub use crate::query::Output;
 use crate::query::Query;
-use crate::selection::{Answer, Answers, Evidence};
+use crate::selection::{Answer, Answers, AnswersFlatMapper, Evidence};
 use crate::{Entity, Field, Parameters, QueryError, Requirement, Schema, Term, Type, Value};
 use crate::{EvaluationContext, Source, try_stream};
-use dialog_artifacts::{Artifact, ArtifactStore, Cause};
+use dialog_artifacts::{Artifact, Cause};
 use futures_util::future::Either;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
@@ -43,40 +43,53 @@ fn pick_winner(current: Artifact, challenger: Artifact) -> Artifact {
     }
 }
 
-/// Check whether `candidate` is the cardinality-one winner for its
-/// `(attribute, entity)` pair by performing a secondary lookup.
+/// VAE winner verification via `AnswersFlatMapper`.
 ///
-/// Scans all values for the candidate's `(attribute, entity)` pair, finds the
-/// true winner by cause comparison (then fact hash tiebreaker), and returns
-/// `true` only if the candidate matches.
-///
-/// This is needed when the primary scan uses the VAE index (only value known),
-/// because different values for the same `(attribute, entity)` pair are
-/// scattered across the scan and the sliding-window approach cannot be used.
-async fn is_cardinality_one_winner<S: ArtifactStore>(
-    source: &S,
-    candidate: &Artifact,
-) -> Result<bool, QueryError> {
-    use futures_util::StreamExt;
+/// When the primary scan uses the VAE index (only value known), different
+/// values for the same `(attribute, entity)` pair are scattered. Each
+/// candidate answer from `evaluate_cardinality_many` is verified by doing a
+/// secondary `(attribute, entity)` range scan to find the true winner.
+/// Yields the answer if the candidate is the winner, nothing otherwise.
+struct WinnerVerifier<S> {
+    source: S,
+    selector: RelationApplication,
+}
 
-    let verification_selector = ArtifactSelector::new()
-        .the(candidate.the.clone())
-        .of(candidate.of.clone());
+impl<S: Source> AnswersFlatMapper for WinnerVerifier<S> {
+    fn map(&self, input: Answer) -> impl Answers {
+        let source = self.source.clone();
+        let selector = self.selector.clone();
+        try_stream! {
+            // Resolve the combined attribute and entity from the answer bindings.
+            // These were bound by evaluate_cardinality_many via Evidence::Relation.
+            let attribute_term = selector.attribute();
+            let attribute: Attribute = input.get(&attribute_term)?;
+            let entity: Entity = input.get(selector.of())?;
+            let candidate_value: Value = input.get(selector.is())?;
+            let candidate_cause: Cause = input.get(selector.cause())?;
 
-    let mut winner: Option<Artifact> = None;
-    let mut stream = std::pin::pin!(source.select(verification_selector));
+            // Secondary range scan on (attribute, entity) to find the winner
+            let verification_selector = ArtifactSelector::new()
+                .the(attribute)
+                .of(entity);
 
-    while let Some(result) = stream.next().await {
-        let artifact = result.map_err(|e| QueryError::FactStore(e.to_string()))?;
-        winner = Some(match winner {
-            None => artifact,
-            Some(current) => pick_winner(current, artifact),
-        });
-    }
+            let mut winner: Option<Artifact> = None;
+            for await result in source.select(verification_selector) {
+                let artifact = result?;
+                winner = Some(match winner {
+                    None => artifact,
+                    Some(current) => pick_winner(current, artifact),
+                });
+            }
 
-    match winner {
-        Some(w) => Ok(w.is == candidate.is && w.cause == candidate.cause),
-        None => Ok(false),
+            // Yield the answer only if the candidate matches the winner
+            if let Some(w) = winner {
+                let winner_cause = w.cause.unwrap_or(Cause([0; 32]));
+                if w.is == candidate_value && winner_cause == candidate_cause {
+                    yield input;
+                }
+            }
+        }
     }
 }
 
@@ -357,24 +370,8 @@ impl RelationApplication {
     /// For `Cardinality::Many`, all matching artifacts are yielded.
     ///
     /// For `Cardinality::One`, only the winning artifact per `(attribute, entity)`
-    /// pair is yielded. The winner is chosen by comparing causes (higher wins);
-    /// when causes are equal, the fact hash (`Cause::from(&artifact)`) breaks the
-    /// tie.
-    ///
-    /// The strategy depends on which index the storage layer uses:
-    ///
-    /// - **EAV** (entity known): results are sorted by entity, then attribute,
-    ///   then value. We buffer a candidate per `(attribute, entity)` group and
-    ///   yield the winner when the group changes.
-    ///
-    /// - **AEV** (attribute known, entity unknown): results are sorted by
-    ///   attribute, then entity, then value. Same sliding-window approach —
-    ///   yield when entity changes.
-    ///
-    /// - **VAE** (only value known): results are sorted by value, then attribute,
-    ///   then entity. Different values for the same `(attribute, entity)` pair
-    ///   are scattered across the scan, so each match requires a secondary
-    ///   lookup on `(attribute, entity)` to confirm it is the winner.
+    /// pair is yielded. The strategy depends on which index the storage layer
+    /// uses — see [`Self::evaluate_cardinality_one`].
     pub fn evaluate_with_provenance<S: Source, M: Answers>(
         &self,
         source: S,
@@ -416,43 +413,58 @@ impl RelationApplication {
 
     /// Evaluate yielding only the winning artifact per `(attribute, entity)`.
     ///
-    /// The strategy depends on which index the storage layer uses:
-    ///
     /// - **EAV/AEV** (entity or attribute known): results are grouped by
     ///   `(attribute, entity)`. A sliding window buffers the candidate and
     ///   yields the winner when the group changes.
     ///
-    /// - **VAE** (only value known): groups are scattered, so each match
-    ///   needs a secondary lookup to verify it is the winner.
+    /// - **VAE** (only value known): groups are scattered. Uses
+    ///   `evaluate_cardinality_many` to produce candidates, then flat-maps
+    ///   each through a winner verification that does a secondary
+    ///   `(attribute, entity)` range scan.
     fn evaluate_cardinality_one<S: Source, M: Answers>(
         &self,
         source: S,
         answers: M,
     ) -> impl Answers {
+        let entity_known = matches!(&self.of, Term::Constant(_));
+        let attribute_known = matches!(
+            (&self.namespace, &self.name),
+            (Term::Constant(_), Term::Constant(_))
+        );
+
+        if entity_known || attribute_known {
+            Either::Left(self.select_winners(source, answers))
+        } else {
+            let candidates = self.evaluate_cardinality_many(source.clone(), answers);
+            Either::Right(candidates.flat_map(WinnerVerifier {
+                source,
+                selector: self.clone(),
+            }))
+        }
+    }
+
+    /// EAV/AEV scan: results are grouped by `(attribute, entity)`.
+    /// Buffer the winning candidate and yield when the group changes.
+    fn select_winners<S: Source, M: Answers>(&self, source: S, answers: M) -> impl Answers {
         let selector = self.clone();
         try_stream! {
             for await each in answers {
                 let input = each?;
                 let selection = selector.resolve_from_answer(&input);
+                let mut candidate: Option<Artifact> = None;
 
-                let require_validation =
-                    !matches!(&selection.of, Term::Constant(_))
-                    && !matches!(
-                        (&selection.namespace, &selection.name),
-                        (Term::Constant(_), Term::Constant(_))
-                    );
+                for await artifact in source.select((&selection).try_into()?) {
+                    let artifact = artifact?;
 
-                let artifacts = source.select((&selection).try_into()?);
+                    let same_group = candidate
+                        .as_ref()
+                        .is_some_and(|c| c.the == artifact.the && c.of == artifact.of);
 
-                if require_validation {
-                    // VAE scan: different values for the same (attribute,
-                    // entity) pair are scattered. Each match needs a
-                    // secondary lookup to verify it wins.
-                    for await artifact in artifacts {
-                        let artifact = artifact?;
-
-                        if is_cardinality_one_winner(&source, &artifact).await? {
-                            let fact = Fact::from(&artifact);
+                    if same_group {
+                        candidate = Some(pick_winner(candidate.unwrap(), artifact));
+                    } else {
+                        if let Some(winner) = candidate.take() {
+                            let fact = Fact::from(&winner);
                             let mut answer = input.clone();
                             answer.merge(Evidence::Relation {
                                 application: &selector,
@@ -460,45 +472,18 @@ impl RelationApplication {
                             })?;
                             yield answer;
                         }
+                        candidate = Some(artifact);
                     }
-                } else {
-                    // EAV or AEV scan: results are grouped by
-                    // (attribute, entity). Buffer the winning candidate
-                    // and yield when the group changes.
-                    let mut candidate: Option<Artifact> = None;
+                }
 
-                    for await artifact in artifacts {
-                        let artifact = artifact?;
-
-                        let same_group = candidate
-                            .as_ref()
-                            .is_some_and(|c| c.the == artifact.the && c.of == artifact.of);
-
-                        if same_group {
-                            candidate = Some(pick_winner(candidate.unwrap(), artifact));
-                        } else {
-                            if let Some(winner) = candidate.take() {
-                                let fact = Fact::from(&winner);
-                                let mut answer = input.clone();
-                                answer.merge(Evidence::Relation {
-                                    application: &selector,
-                                    fact: &fact,
-                                })?;
-                                yield answer;
-                            }
-                            candidate = Some(artifact);
-                        }
-                    }
-
-                    if let Some(winner) = candidate.take() {
-                        let fact = Fact::from(&winner);
-                        let mut answer = input.clone();
-                        answer.merge(Evidence::Relation {
-                            application: &selector,
-                            fact: &fact,
-                        })?;
-                        yield answer;
-                    }
+                if let Some(winner) = candidate.take() {
+                    let fact = Fact::from(&winner);
+                    let mut answer = input.clone();
+                    answer.merge(Evidence::Relation {
+                        application: &selector,
+                        fact: &fact,
+                    })?;
+                    yield answer;
                 }
             }
         }
