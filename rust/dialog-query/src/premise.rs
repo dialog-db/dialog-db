@@ -7,13 +7,13 @@
 
 pub use super::application::Application;
 use super::application::{FactApplication, FormulaApplication};
-use futures_util::future::Either;
 pub use super::constraint::Constraint;
 pub use super::context::new_context;
 pub use super::negation::Negation;
 pub use crate::environment::Environment;
 pub use crate::error::{AnalyzerError, PlanError, QueryResult};
 pub use crate::{EvaluationContext, Source, selection::Answers};
+use futures_util::future::Either;
 use std::fmt::Display;
 
 /// Represents a premise in a rule - a condition that must be satisfied.

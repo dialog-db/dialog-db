@@ -7,7 +7,7 @@ pub use crate::context::new_context;
 pub use crate::error::{AnalyzerError, QueryResult};
 pub use crate::query::Output;
 use crate::query::Query;
-use crate::selection::{Answer, Answers, AnswersFlatMapper, Evidence};
+use crate::selection::{Answer, Answers, Evidence};
 use crate::{Entity, Field, Parameters, QueryError, Requirement, Schema, Term, Type, Value};
 use crate::{EvaluationContext, Source, try_stream};
 use dialog_artifacts::{Artifact, Cause};
@@ -43,51 +43,41 @@ fn pick_winner(current: Artifact, challenger: Artifact) -> Artifact {
     }
 }
 
-/// VAE winner verification via `AnswersFlatMapper`.
+/// VAE winner verification.
 ///
-/// When the primary scan uses the VAE index (only value known), different
-/// values for the same `(attribute, entity)` pair are scattered. Each
-/// candidate answer from `evaluate_cardinality_many` is verified by doing a
-/// secondary `(attribute, entity)` range scan to find the true winner.
-/// Yields the answer if the candidate is the winner, nothing otherwise.
-struct WinnerVerifier<S> {
+/// When only the value is known (VAE scan), groups aren't contiguous, so each
+/// candidate from `evaluate_cardinality_many` is verified by a secondary
+/// `(attribute, entity)` range scan to find the true winner. Yields the
+/// answer only if the candidate matches the winner.
+fn verify_winner<S: Source>(
     source: S,
     selector: RelationApplication,
-}
+    input: Answer,
+) -> impl Answers {
+    try_stream! {
+        let attribute_term = selector.attribute();
+        let attribute: Attribute = input.get(&attribute_term)?;
+        let entity: Entity = input.get(selector.of())?;
+        let candidate_value: Value = input.get(selector.is())?;
+        let candidate_cause: Cause = input.get(selector.cause())?;
 
-impl<S: Source> AnswersFlatMapper for WinnerVerifier<S> {
-    fn map(&self, input: Answer) -> impl Answers {
-        let source = self.source.clone();
-        let selector = self.selector.clone();
-        try_stream! {
-            // Resolve the combined attribute and entity from the answer bindings.
-            // These were bound by evaluate_cardinality_many via Evidence::Relation.
-            let attribute_term = selector.attribute();
-            let attribute: Attribute = input.get(&attribute_term)?;
-            let entity: Entity = input.get(selector.of())?;
-            let candidate_value: Value = input.get(selector.is())?;
-            let candidate_cause: Cause = input.get(selector.cause())?;
+        let verification_selector = ArtifactSelector::new()
+            .the(attribute)
+            .of(entity);
 
-            // Secondary range scan on (attribute, entity) to find the winner
-            let verification_selector = ArtifactSelector::new()
-                .the(attribute)
-                .of(entity);
+        let mut winner: Option<Artifact> = None;
+        for await result in source.select(verification_selector) {
+            let artifact = result?;
+            winner = Some(match winner {
+                None => artifact,
+                Some(current) => pick_winner(current, artifact),
+            });
+        }
 
-            let mut winner: Option<Artifact> = None;
-            for await result in source.select(verification_selector) {
-                let artifact = result?;
-                winner = Some(match winner {
-                    None => artifact,
-                    Some(current) => pick_winner(current, artifact),
-                });
-            }
-
-            // Yield the answer only if the candidate matches the winner
-            if let Some(w) = winner {
-                let winner_cause = w.cause.unwrap_or(Cause([0; 32]));
-                if w.is == candidate_value && winner_cause == candidate_cause {
-                    yield input;
-                }
+        if let Some(w) = winner {
+            let winner_cause = w.cause.unwrap_or(Cause([0; 32]));
+            if w.is == candidate_value && winner_cause == candidate_cause {
+                yield input;
             }
         }
     }
@@ -436,10 +426,12 @@ impl RelationApplication {
             Either::Left(self.select_winners(source, answers))
         } else {
             let candidates = self.evaluate_cardinality_many(source.clone(), answers);
-            Either::Right(candidates.flat_map(WinnerVerifier {
-                source,
-                selector: self.clone(),
-            }))
+            let selector = self.clone();
+            Either::Right(
+                candidates.try_flat_map(move |input| {
+                    verify_winner(source.clone(), selector.clone(), input)
+                }),
+            )
         }
     }
 
