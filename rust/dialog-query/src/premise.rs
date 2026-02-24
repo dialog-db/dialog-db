@@ -6,7 +6,7 @@
 //! Note: Premises are only used in rule conditions (the "when" part), not in conclusions.
 
 pub use super::application::Application;
-use super::application::{FactApplication, FormulaApplication};
+use super::application::FormulaApplication;
 pub use super::constraint::Constraint;
 pub use super::context::new_context;
 pub use super::negation::Negation;
@@ -117,17 +117,5 @@ impl From<Constraint> for Premise {
 impl From<FormulaApplication> for Premise {
     fn from(application: FormulaApplication) -> Self {
         Premise::Apply(Application::Formula(application))
-    }
-}
-
-impl From<FactApplication> for Premise {
-    fn from(selector: FactApplication) -> Self {
-        Premise::Apply(Application::Fact(selector))
-    }
-}
-
-impl From<&FactApplication> for Premise {
-    fn from(selector: &FactApplication) -> Self {
-        Premise::Apply(Application::Fact(selector.clone()))
     }
 }

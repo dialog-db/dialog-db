@@ -1,7 +1,7 @@
 use crate::application::ConceptApplication;
 use crate::attribute::Attribute;
 use crate::claim::Claim;
-use crate::{Application, Entity, Parameters, Premise, Relation, Transaction};
+use crate::{Application, Assertion, Entity, Parameters, Premise, Transaction};
 use std::marker::PhantomData;
 
 /// Represents an entity with a single attribute.
@@ -108,17 +108,17 @@ where
 {
     fn assert(self, transaction: &mut Transaction) {
         use crate::types::Scalar;
-        let relation = Relation::new(A::selector(), self.this, self.has.value().as_value());
+        let assertion = Assertion::new(A::selector(), self.this, self.has.value().as_value());
         if A::CARDINALITY == crate::Cardinality::One {
-            transaction.associate_unique(relation);
+            transaction.associate_unique(assertion);
         } else {
-            transaction.associate(relation);
+            transaction.associate(assertion);
         }
     }
 
     fn retract(self, transaction: &mut Transaction) {
         use crate::types::Scalar;
-        Relation::new(A::selector(), self.this, self.has.value().as_value()).retract(transaction);
+        Assertion::new(A::selector(), self.this, self.has.value().as_value()).retract(transaction);
     }
 }
 
@@ -137,12 +137,12 @@ impl<A: Attribute> IntoIterator for With<A>
 where
     A: Clone,
 {
-    type Item = Relation;
-    type IntoIter = std::iter::Once<Relation>;
+    type Item = Assertion;
+    type IntoIter = std::iter::Once<Assertion>;
 
     fn into_iter(self) -> Self::IntoIter {
         use crate::types::Scalar;
-        std::iter::once(Relation::new(
+        std::iter::once(Assertion::new(
             A::selector(),
             self.this,
             self.has.value().as_value(),
@@ -292,9 +292,10 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_single_attribute_assert_and_retract() -> anyhow::Result<()> {
+        use crate::application::relation::RelationApplication;
         use crate::artifact::{Artifacts, Value};
         use crate::concept::With;
-        use crate::{Entity, Fact, Session};
+        use crate::{Entity, Session, Term};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
 
@@ -312,10 +313,14 @@ mod tests {
             }])
             .await?;
 
-        let query = Fact::<Value>::select()
-            .the("employee-txn/name")
-            .of(alice.clone())
-            .compile()?;
+        let query = RelationApplication::new(
+            Term::Constant("employee-txn".into()),
+            Term::Constant("name".into()),
+            alice.clone().into(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
         let facts: Vec<_> = query
             .query(&Session::open(store.clone()))
@@ -323,12 +328,7 @@ mod tests {
             .await?;
 
         assert_eq!(facts.len(), 1);
-        match &facts[0] {
-            Fact::Assertion { is, .. } => {
-                assert_eq!(*is, Value::String("Alice".to_string()));
-            }
-            _ => panic!("Expected Assertion"),
-        }
+        assert_eq!(facts[0].is, Value::String("Alice".to_string()));
 
         let mut session = Session::open(store.clone());
         session
@@ -338,10 +338,14 @@ mod tests {
             }])
             .await?;
 
-        let query = Fact::<Value>::select()
-            .the("employee-txn/name")
-            .of(alice)
-            .compile()?;
+        let query = RelationApplication::new(
+            Term::Constant("employee-txn".into()),
+            Term::Constant("name".into()),
+            alice.into(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
         let facts: Vec<_> = query.query(&Session::open(store)).try_collect().await?;
 
@@ -352,9 +356,10 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_multiple_attributes_assert() -> anyhow::Result<()> {
+        use crate::application::relation::RelationApplication;
         use crate::artifact::{Artifacts, Value};
         use crate::concept::With;
-        use crate::{Entity, Fact, Session};
+        use crate::{Entity, Session, Term};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
 
@@ -379,15 +384,23 @@ mod tests {
             }])
             .await?;
 
-        let name_query = Fact::<Value>::select()
-            .the("employee-txn/name")
-            .of(bob.clone())
-            .compile()?;
+        let name_query = RelationApplication::new(
+            Term::Constant("employee-txn".into()),
+            Term::Constant("name".into()),
+            bob.clone().into(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
-        let job_query = Fact::<Value>::select()
-            .the("employee-txn/job")
-            .of(bob.clone())
-            .compile()?;
+        let job_query = RelationApplication::new(
+            Term::Constant("employee-txn".into()),
+            Term::Constant("job".into()),
+            bob.clone().into(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
         let name_facts: Vec<_> = name_query
             .query(&Session::open(store.clone()))
@@ -397,29 +410,20 @@ mod tests {
         let job_facts: Vec<_> = job_query.query(&Session::open(store)).try_collect().await?;
 
         assert_eq!(name_facts.len(), 1);
-        match &name_facts[0] {
-            Fact::Assertion { is, .. } => {
-                assert_eq!(*is, Value::String("Bob".to_string()));
-            }
-            _ => panic!("Expected Assertion"),
-        }
+        assert_eq!(name_facts[0].is, Value::String("Bob".to_string()));
 
         assert_eq!(job_facts.len(), 1);
-        match &job_facts[0] {
-            Fact::Assertion { is, .. } => {
-                assert_eq!(*is, Value::String("Engineer".to_string()));
-            }
-            _ => panic!("Expected Assertion"),
-        }
+        assert_eq!(job_facts[0].is, Value::String("Engineer".to_string()));
 
         Ok(())
     }
 
     #[dialog_common::test]
     async fn test_three_attributes_assert() -> anyhow::Result<()> {
+        use crate::application::relation::RelationApplication;
         use crate::artifact::{Artifacts, Value};
         use crate::concept::With;
-        use crate::{Entity, Fact, Session};
+        use crate::{Entity, Session, Term};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
 
@@ -451,20 +455,32 @@ mod tests {
             }])
             .await?;
 
-        let name_query = Fact::<Value>::select()
-            .the("employee-txn/name")
-            .of(charlie.clone())
-            .compile()?;
+        let name_query = RelationApplication::new(
+            Term::Constant("employee-txn".into()),
+            Term::Constant("name".into()),
+            charlie.clone().into(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
-        let job_query = Fact::<Value>::select()
-            .the("employee-txn/job")
-            .of(charlie.clone())
-            .compile()?;
+        let job_query = RelationApplication::new(
+            Term::Constant("employee-txn".into()),
+            Term::Constant("job".into()),
+            charlie.clone().into(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
-        let salary_query = Fact::<Value>::select()
-            .the("employee-txn/salary")
-            .of(charlie.clone())
-            .compile()?;
+        let salary_query = RelationApplication::new(
+            Term::Constant("employee-txn".into()),
+            Term::Constant("salary".into()),
+            charlie.clone().into(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
         let name_facts: Vec<_> = name_query
             .query(&Session::open(store.clone()))
@@ -482,37 +498,23 @@ mod tests {
             .await?;
 
         assert_eq!(name_facts.len(), 1);
-        match &name_facts[0] {
-            Fact::Assertion { is, .. } => {
-                assert_eq!(*is, Value::String("Charlie".to_string()));
-            }
-            _ => panic!("Expected Assertion"),
-        }
+        assert_eq!(name_facts[0].is, Value::String("Charlie".to_string()));
 
         assert_eq!(job_facts.len(), 1);
-        match &job_facts[0] {
-            Fact::Assertion { is, .. } => {
-                assert_eq!(*is, Value::String("Manager".to_string()));
-            }
-            _ => panic!("Expected Assertion"),
-        }
+        assert_eq!(job_facts[0].is, Value::String("Manager".to_string()));
 
         assert_eq!(salary_facts.len(), 1);
-        match &salary_facts[0] {
-            Fact::Assertion { is, .. } => {
-                assert_eq!(*is, Value::UnsignedInt(120000));
-            }
-            _ => panic!("Expected Assertion"),
-        }
+        assert_eq!(salary_facts[0].is, Value::UnsignedInt(120000));
 
         Ok(())
     }
 
     #[dialog_common::test]
     async fn test_multiple_attributes_retract() -> anyhow::Result<()> {
-        use crate::artifact::{Artifacts, Value};
+        use crate::application::relation::RelationApplication;
+        use crate::artifact::Artifacts;
         use crate::concept::With;
-        use crate::{Entity, Fact, Session};
+        use crate::{Entity, Session, Term};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
 
@@ -551,15 +553,23 @@ mod tests {
             }])
             .await?;
 
-        let name_query = Fact::<Value>::select()
-            .the("employee-txn/name")
-            .of(dave.clone())
-            .compile()?;
+        let name_query = RelationApplication::new(
+            Term::Constant("employee-txn".into()),
+            Term::Constant("name".into()),
+            dave.clone().into(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
-        let job_query = Fact::<Value>::select()
-            .the("employee-txn/job")
-            .of(dave.clone())
-            .compile()?;
+        let job_query = RelationApplication::new(
+            Term::Constant("employee-txn".into()),
+            Term::Constant("job".into()),
+            dave.clone().into(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
         let name_facts: Vec<_> = name_query
             .query(&Session::open(store.clone()))
@@ -576,9 +586,10 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_update_attribute() -> anyhow::Result<()> {
+        use crate::application::relation::RelationApplication;
         use crate::artifact::{Artifacts, Value};
         use crate::concept::With;
-        use crate::{Entity, Fact, Session};
+        use crate::{Entity, Session, Term};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
 
@@ -613,29 +624,32 @@ mod tests {
             }])
             .await?;
 
-        let query = Fact::<Value>::select()
-            .the("employee-txn/job")
-            .of(eve)
-            .compile()?;
+        let query = RelationApplication::new(
+            Term::Constant("employee-txn".into()),
+            Term::Constant("job".into()),
+            eve.into(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
         let job_facts: Vec<_> = query.query(&Session::open(store)).try_collect().await?;
 
         assert_eq!(job_facts.len(), 1);
-        match &job_facts[0] {
-            Fact::Assertion { is, .. } => {
-                assert_eq!(*is, Value::String("Senior Developer".to_string()));
-            }
-            _ => panic!("Expected Assertion"),
-        }
+        assert_eq!(
+            job_facts[0].is,
+            Value::String("Senior Developer".to_string())
+        );
 
         Ok(())
     }
 
     #[dialog_common::test]
     async fn test_entity_reference_attribute() -> anyhow::Result<()> {
+        use crate::application::relation::RelationApplication;
         use crate::artifact::{Artifacts, Value};
         use crate::concept::With;
-        use crate::{Entity, Fact, Session};
+        use crate::{Entity, Session, Term};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
 
@@ -671,20 +685,19 @@ mod tests {
             }])
             .await?;
 
-        let query = Fact::<Value>::select()
-            .the("employee-txn/manager")
-            .of(employee_entity)
-            .compile()?;
+        let query = RelationApplication::new(
+            Term::Constant("employee-txn".into()),
+            Term::Constant("manager".into()),
+            employee_entity.into(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
         let manager_facts: Vec<_> = query.query(&Session::open(store)).try_collect().await?;
 
         assert_eq!(manager_facts.len(), 1);
-        match &manager_facts[0] {
-            Fact::Assertion { is, .. } => {
-                assert_eq!(*is, Value::Entity(manager));
-            }
-            _ => panic!("Expected Assertion"),
-        }
+        assert_eq!(manager_facts[0].is, Value::Entity(manager));
 
         Ok(())
     }
@@ -829,7 +842,7 @@ mod tests {
     async fn test_adhoc_concept_query() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
         use crate::concept::With;
-        use crate::{Entity, Match, Relation, Session, Term, Value};
+        use crate::{Assertion, Entity, Match, Session, Term, Value};
         use dialog_artifacts::Attribute as ArtifactAttribute;
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
@@ -844,17 +857,17 @@ mod tests {
 
         session
             .transact(vec![
-                Relation {
+                Assertion {
                     the: "note-rule/title".parse::<ArtifactAttribute>()?,
                     of: note1.clone(),
                     is: Value::String("First Note".to_string()),
                 },
-                Relation {
+                Assertion {
                     the: "note-rule/title".parse::<ArtifactAttribute>()?,
                     of: note2.clone(),
                     is: Value::String("Second Note".to_string()),
                 },
-                Relation {
+                Assertion {
                     the: "note-rule/title".parse::<ArtifactAttribute>()?,
                     of: note3.clone(),
                     is: Value::String("Third Note".to_string()),
@@ -899,7 +912,7 @@ mod tests {
     async fn test_adhoc_concept_query_with_filter() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
         use crate::concept::With;
-        use crate::{Entity, Match, Relation, Session, Term, Value};
+        use crate::{Assertion, Entity, Match, Session, Term, Value};
         use dialog_artifacts::Attribute as ArtifactAttribute;
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
@@ -914,17 +927,17 @@ mod tests {
 
         session
             .transact(vec![
-                Relation {
+                Assertion {
                     the: "note-rule/title".parse::<ArtifactAttribute>()?,
                     of: note1.clone(),
                     is: Value::String("Target Note".to_string()),
                 },
-                Relation {
+                Assertion {
                     the: "note-rule/title".parse::<ArtifactAttribute>()?,
                     of: note2.clone(),
                     is: Value::String("Other Note".to_string()),
                 },
-                Relation {
+                Assertion {
                     the: "note-rule/title".parse::<ArtifactAttribute>()?,
                     of: note3.clone(),
                     is: Value::String("Another Note".to_string()),

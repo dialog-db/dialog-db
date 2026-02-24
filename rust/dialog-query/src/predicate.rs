@@ -8,12 +8,12 @@
 pub mod concept;
 /// Deductive rules that derive new facts from existing ones.
 pub mod deductive_rule;
-/// Fact predicates for querying the knowledge base.
-pub mod fact;
 /// Formula predicates for computed values.
 pub mod formula;
+/// Relation predicates for querying the knowledge base.
+pub mod relation;
 
 pub use concept::ConceptDescriptor;
 pub use deductive_rule::DeductiveRule;
-pub use fact::{FactSelector, RelationDescriptor};
 pub use formula::Formula;
+pub use relation::RelationDescriptor;

@@ -26,6 +26,8 @@ pub mod artifact;
 /// Attribute definitions and schema metadata.
 pub mod attribute;
 
+/// Entity-attribute-value assertion triples for writes.
+pub mod assertion;
 /// Claim trait for asserting and retracting facts.
 pub mod claim;
 /// Concept definitions for entity-centric pattern matching.
@@ -56,7 +58,7 @@ pub mod predicate;
 pub mod premise;
 /// Query trait and store abstractions for polymorphic querying.
 pub mod query;
-/// Entity-attribute-value relation triples.
+/// Read-side relation type for query results.
 pub mod relation;
 /// Rule-based deduction system for deriving facts.
 pub mod rule;
@@ -75,6 +77,7 @@ pub mod types;
 
 pub use application::Application;
 pub use artifact::{Attribute as ArtifactAttribute, Entity, Type, Value};
+pub use assertion::Assertion;
 pub use attribute::{Attribute, AttributeSchema, Cardinality};
 pub use claim::Claim;
 pub use concept::{Concept, With, WithMatch, WithTerms};
@@ -82,7 +85,6 @@ pub use context::EvaluationContext;
 pub use dialog_macros::{Attribute, Concept, Formula};
 pub use dsl::{Input, Match, Predicate, Query};
 pub use error::{InconsistencyError, QueryError};
-pub use fact::Fact;
 pub use negation::Negation;
 pub use parameters::Parameters;
 pub use predicate::{DeductiveRule, Formula};

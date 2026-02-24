@@ -374,9 +374,10 @@ mod tests {
 
     use std::collections::HashMap;
 
+    use crate::application::relation::RelationApplication;
     use crate::{
-        AttributeSchema, Parameters, Relation, Type,
-        predicate::{self, FactSelector, concept::Attributes},
+        Assertion, AttributeSchema, Parameters, Type,
+        predicate::{self, concept::Attributes},
     };
 
     use super::*;
@@ -396,27 +397,27 @@ mod tests {
 
         session
             .transact(vec![
-                Relation {
+                Assertion {
                     the: "person/name".parse::<ArtifactAttribute>()?,
                     of: alice.clone(),
                     is: Value::String("Alice".to_string()),
                 },
-                Relation {
+                Assertion {
                     the: "person/age".parse::<ArtifactAttribute>()?,
                     of: alice.clone(),
                     is: Value::UnsignedInt(25),
                 },
-                Relation {
+                Assertion {
                     the: "person/name".parse::<ArtifactAttribute>()?,
                     of: bob.clone(),
                     is: Value::String("Bob".to_string()),
                 },
-                Relation {
+                Assertion {
                     the: "person/age".parse::<ArtifactAttribute>()?,
                     of: bob.clone(),
                     is: Value::UnsignedInt(30),
                 },
-                Relation {
+                Assertion {
                     the: "person/name".parse::<ArtifactAttribute>()?,
                     of: mallory.clone(),
                     is: Value::String("Mallory".to_string()),
@@ -594,7 +595,7 @@ mod tests {
         use crate::artifact::{Artifacts, Entity};
         use crate::query::Output;
         use crate::rule::Match;
-        use crate::{Concept, Fact, Term};
+        use crate::{Concept, Term};
         use dialog_storage::MemoryStorageBackend;
 
         mod employee {
@@ -640,18 +641,24 @@ mod tests {
         let employee_from_stuff = DeductiveRule::new(
             <Employee as Concept>::CONCEPT,
             vec![
-                Fact::<String>::select()
-                    .the("stuff/name")
-                    .of(Term::var("this"))
-                    .is(Term::var("name"))
-                    .compile()?
-                    .into(),
-                Fact::<String>::select()
-                    .the("stuff/role")
-                    .of(Term::var("this"))
-                    .is(Term::var("job"))
-                    .compile()?
-                    .into(),
+                RelationApplication::new(
+                    Term::Constant("stuff".into()),
+                    Term::Constant("name".into()),
+                    Term::var("this"),
+                    Term::var("name"),
+                    Term::blank(),
+                    None,
+                )
+                .into(),
+                RelationApplication::new(
+                    Term::Constant("stuff".into()),
+                    Term::Constant("role".into()),
+                    Term::var("this"),
+                    Term::var("job"),
+                    Term::blank(),
+                    None,
+                )
+                .into(),
             ],
         )?;
 
@@ -762,17 +769,14 @@ mod tests {
                     name: employee.name.clone(),
                     role: employee.job,
                 },
-                FactSelector {
-                    the: "stuff/name"
-                        .parse::<crate::artifact::Attribute>()
-                        .unwrap()
-                        .into(),
-                    of: employee.this,
-                    is: employee.name.as_unknown(),
-                    cause: Term::blank(),
-                }
-                .compile()
-                .unwrap(),
+                RelationApplication::new(
+                    Term::Constant("stuff".to_string()),
+                    Term::Constant("name".to_string()),
+                    employee.this,
+                    employee.name.as_unknown(),
+                    Term::blank(),
+                    None,
+                ),
             )
         }
 
@@ -1230,7 +1234,7 @@ mod tests {
         use crate::artifact::{Artifacts, Entity};
         use crate::query::Output;
         use crate::rule::When;
-        use crate::{Attribute as _, Concept, Fact, Match, Term};
+        use crate::{Attribute as _, Concept, Match, Term};
         use dialog_storage::MemoryStorageBackend;
         use implicit_attr_test::{Name, Role};
 
@@ -1259,19 +1263,23 @@ mod tests {
             (
                 employee.role.is(Role("employee".into())),
                 // employee has a name
-                Fact::<String>::select()
-                    .the("implicit-attr-test/name")
-                    .of(employee.this.clone())
-                    .is(employee.name.clone().as_unknown())
-                    .compile()
-                    .unwrap(),
+                RelationApplication::new(
+                    Term::Constant("implicit-attr-test".into()),
+                    Term::Constant("name".into()),
+                    employee.this.clone(),
+                    employee.name.clone().as_unknown(),
+                    Term::blank(),
+                    None,
+                ),
                 // but does not have role (using ! operator)
-                !Fact::<String>::select()
-                    .the("implicit-attr-test/role")
-                    .of(employee.this.clone())
-                    .is(Term::blank())
-                    .compile()
-                    .unwrap(),
+                !RelationApplication::new(
+                    Term::Constant("implicit-attr-test".into()),
+                    Term::Constant("role".into()),
+                    employee.this.clone(),
+                    Term::blank(),
+                    Term::blank(),
+                    None,
+                ),
             )
         }
 

@@ -1,7 +1,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use crate::{
-    application::{FactApplication, RelationApplication},
+    application::RelationApplication,
     artifact::{Type, Value},
 };
 use async_stream::try_stream;
@@ -11,7 +11,7 @@ use std::collections::HashMap;
 /// Re-exported stream traits for working with answer streams.
 pub use futures_util::stream::{Stream, TryStream};
 
-use crate::{Fact, InconsistencyError, QueryError, Term, types::Scalar};
+use crate::{InconsistencyError, QueryError, Relation, Term, types::Scalar};
 
 /// Trait for streams of Answers (with fact provenance)
 pub trait Answers: Stream<Item = Result<Answer, QueryError>> + 'static + ConditionalSend {
@@ -122,10 +122,10 @@ pub enum Factor {
     Selected {
         /// Which fact component this value came from.
         selector: Selector,
-        /// The fact application that matched this fact.
-        application: Arc<crate::application::FactApplication>,
+        /// The relation application that matched this fact.
+        application: Arc<RelationApplication>,
         /// The matched fact itself.
-        fact: Arc<Fact>,
+        fact: Arc<Relation>,
     },
     /// Derived from a formula computation - tracks the input facts and formula used.
     Derived {
@@ -144,8 +144,8 @@ pub enum Factor {
 }
 
 impl Factor {
-    /// Get the underlying fact if this factor is directly from a fact (not derived)
-    pub fn fact(&self) -> Option<&Fact> {
+    /// Get the underlying relation if this factor is directly from a relation (not derived)
+    pub fn fact(&self) -> Option<&Relation> {
         match self {
             Factor::Selected { fact, .. } => Some(fact.as_ref()),
             Factor::Derived { .. } => None,
@@ -156,7 +156,7 @@ impl Factor {
     fn content(&self) -> Value {
         match self {
             Factor::Selected { selector, fact, .. } => match selector {
-                Selector::The => Value::Symbol(fact.the().clone()),
+                Selector::The => Value::Symbol(fact.the()),
                 Selector::Of => Value::Entity(fact.of().clone()),
                 Selector::Is => fact.is().clone(),
                 Selector::Cause => Value::Bytes(fact.cause().clone().0.into()),
@@ -307,57 +307,50 @@ impl From<&Factors> for Value {
     }
 }
 
-impl From<&Factors> for Fact {
-    /// Extract the fact from factors.
-    /// Uses the first factor's source fact (primary or first alternate).
+impl From<&Factors> for Relation {
+    /// Extract the relation from factors.
+    /// Uses the first factor's source relation (primary or first alternate).
     fn from(factors: &Factors) -> Self {
         if let Some(factor) = factors.evidence().next() {
-            if let Some(fact) = factor.fact() {
-                Fact::Assertion {
-                    the: fact.the().clone(),
-                    of: fact.of().clone(),
-                    is: fact.is().clone(),
-                    cause: fact.cause().clone(),
+            if let Some(relation) = factor.fact() {
+                Relation {
+                    namespace: relation.namespace.clone(),
+                    name: relation.name.clone(),
+                    of: relation.of.clone(),
+                    is: relation.is.clone(),
+                    cause: relation.cause.clone(),
+                    cardinality: relation.cardinality,
                 }
             } else {
-                // Derived factor - shouldn't happen for FactApplication
-                // but provide a fallback
-                panic!("Cannot convert Derived factor to Fact")
+                panic!("Cannot convert Derived factor to Relation")
             }
         } else {
-            panic!("Cannot convert empty Factors to Fact")
+            panic!("Cannot convert empty Factors to Relation")
         }
     }
 }
 
 /// Describes answer to the query. It captures facts from which answer was
-/// concluded and tracks which FactApplication produced which facts.
+/// concluded and tracks which RelationApplication produced which facts.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Answer {
     /// Conclusions: named variable bindings where we've concluded values from facts.
     /// Maps variable names to their values with provenance (which facts support this binding).
     conclusions: HashMap<String, Factors>,
-    /// Applications: maps FactApplication to the fact it matched.
+    /// Applications: maps RelationApplication to the fact it matched.
     /// This allows us to realize facts even when the application had only constants/blanks.
     /// The facts stored here represent all facts that contributed to this answer.
-    facts: HashMap<FactApplication, Arc<Fact>>,
+    facts: HashMap<RelationApplication, Arc<Relation>>,
 }
 
 /// Evidence describing how a value was obtained, used when merging into an answer.
 pub enum Evidence<'a> {
-    /// Selected using fact selector.
-    Selected {
-        /// The fact application that produced this match.
-        application: &'a FactApplication,
-        /// The matched fact.
-        fact: &'a Fact,
-    },
-    /// Selected using relation application (namespace + name).
+    /// Selected from a relation query.
     Relation {
         /// The relation application that produced this match.
         application: &'a RelationApplication,
-        /// The matched fact.
-        fact: &'a Fact,
+        /// The matched relation.
+        fact: &'a Relation,
     },
     /// Derived using formula application.
     Derived {
@@ -385,8 +378,8 @@ impl Answer {
         Self::default()
     }
 
-    /// Get all tracked facts from the applications.
-    pub fn facts(&self) -> impl Iterator<Item = &Arc<Fact>> {
+    /// Get all tracked relations from the applications.
+    pub fn facts(&self) -> impl Iterator<Item = &Arc<Relation>> {
         self.facts.values()
     }
 
@@ -395,13 +388,13 @@ impl Answer {
         self.conclusions.iter()
     }
 
-    /// Record that a FactApplication matched a specific fact.
+    /// Record that a RelationApplication matched a specific fact.
     /// Returns an error if the same application already mapped to a different fact,
     /// which would indicate an inconsistency (shouldn't happen in practice, but we check).
     pub fn record(
         &mut self,
-        application: &crate::application::fact::FactApplication,
-        fact: Arc<Fact>,
+        application: &RelationApplication,
+        fact: Arc<Relation>,
     ) -> Result<(), crate::error::InconsistencyError> {
         use crate::error::InconsistencyError;
 
@@ -409,7 +402,7 @@ impl Answer {
         if let Some(existing_fact) = self.facts.get(application) {
             if !Arc::ptr_eq(existing_fact, &fact) {
                 return Err(InconsistencyError::AssignmentError(format!(
-                    "FactApplication {:?} already mapped to a different fact",
+                    "RelationApplication {:?} already mapped to a different fact",
                     application
                 )));
             }
@@ -421,164 +414,54 @@ impl Answer {
         Ok(())
     }
 
-    /// Realize a fact from a FactApplication.
+    /// Realize a relation from a RelationApplication.
     /// First tries to extract from named variable conclusions.
     /// Falls back to looking up the application in the recorded applications.
     pub fn realize(
         &self,
-        application: &crate::application::fact::FactApplication,
-    ) -> Result<Fact, crate::error::QueryError> {
-        use crate::error::QueryError;
-        use crate::term::Term;
-
-        // Try to extract from a named variable conclusion first
-        // This gives us the full fact with all its components
-
-        // Try 'the' first
-        if let Term::Variable { name: Some(_), .. } = application.the()
-            && let Some(factors) = self.resolve_factors(&application.the().as_unknown())
-        {
-            return Ok(Fact::from(factors));
-        }
-
-        // Try 'of' next
-        if let Term::Variable { name: Some(_), .. } = application.of()
-            && let Some(factors) = self.resolve_factors(&application.of().as_unknown())
-        {
-            return Ok(Fact::from(factors));
-        }
-
-        // Try 'is' last
-        if let Term::Variable { name: Some(_), .. } = application.is()
-            && let Some(factors) = self.resolve_factors(&application.is().as_unknown())
-        {
-            return Ok(Fact::from(factors));
-        }
-
-        // No named variables - look up by application
-        if let Some(fact) = self.facts.get(application) {
-            return Ok(Fact::Assertion {
-                the: fact.the().clone(),
-                of: fact.of().clone(),
-                is: fact.is().clone(),
-                cause: fact.cause().clone(),
-            });
-        }
-
-        Err(QueryError::FactStore(
-            "Could not realize fact from answer - application not found".to_string(),
-        ))
-    }
-
-    /// Realize a fact from a RelationApplication.
-    /// Similar to `realize()` but works with relation applications that have
-    /// separate namespace and name terms.
-    pub fn realize_relation(
-        &self,
         application: &RelationApplication,
-    ) -> Result<Fact, crate::error::QueryError> {
+    ) -> Result<Relation, crate::error::QueryError> {
         use crate::error::QueryError;
 
         // Try to extract from a named variable conclusion first
+        // This gives us the full relation with all its components
         if let crate::Term::Variable { name: Some(_), .. } = application.of()
             && let Some(factors) = self.resolve_factors(&application.of().as_unknown())
         {
-            return Ok(Fact::from(factors));
+            return Ok(Relation::from(factors));
         }
 
         if let crate::Term::Variable { name: Some(_), .. } = application.is()
             && let Some(factors) = self.resolve_factors(&application.is().as_unknown())
         {
-            return Ok(Fact::from(factors));
+            return Ok(Relation::from(factors));
         }
 
-        // Build the FactApplication equivalent for lookup
-        let fact_app = FactApplication::new(
-            application.attribute(),
-            application.of().clone(),
-            application.is().clone(),
-            application.cause().clone(),
-            application.cardinality(),
-        );
-
-        if let Some(fact) = self.facts.get(&fact_app) {
-            return Ok(Fact::Assertion {
-                the: fact.the().clone(),
-                of: fact.of().clone(),
-                is: fact.is().clone(),
-                cause: fact.cause().clone(),
-            });
+        // No named variables - look up by application
+        if let Some(relation) = self.facts.get(application) {
+            return Ok(relation.as_ref().clone());
         }
 
         Err(QueryError::FactStore(
-            "Could not realize fact from answer - relation application not found".to_string(),
+            "Could not realize relation from answer - application not found".to_string(),
         ))
     }
 
     /// Merge evidence into this answer, recording facts and binding variables.
     pub fn merge(&mut self, evidence: Evidence<'_>) -> Result<(), InconsistencyError> {
         match evidence {
-            Evidence::Selected { application, fact } => {
+            Evidence::Relation { application, fact } => {
                 let fact = Arc::new(fact.to_owned());
                 self.record(application, fact.clone())?;
 
                 let application = Arc::new(application.to_owned());
-                self.assign(
-                    &application.the().as_unknown(),
-                    &Factor::Selected {
-                        selector: Selector::The,
-                        application: application.clone(),
-                        fact: fact.clone(),
-                    },
-                )?;
-                self.assign(
-                    &application.of().as_unknown(),
-                    &Factor::Selected {
-                        selector: Selector::Of,
-                        application: application.clone(),
-                        fact: fact.clone(),
-                    },
-                )?;
-                self.assign(
-                    &application.is().as_unknown(),
-                    &Factor::Selected {
-                        selector: Selector::Is,
-                        application: application.clone(),
-                        fact: fact.clone(),
-                    },
-                )?;
-                self.assign(
-                    &application.cause().as_unknown(),
-                    &Factor::Selected {
-                        selector: Selector::Cause,
-                        application: application.clone(),
-                        fact,
-                    },
-                )?;
-
-                Ok(())
-            }
-            Evidence::Relation { application, fact } => {
-                let fact = Arc::new(fact.to_owned());
-
-                // Build a FactApplication from the relation for provenance recording
-                let fact_app = crate::application::FactApplication::new(
-                    application.attribute(),
-                    application.of().clone(),
-                    application.is().clone(),
-                    application.cause().clone(),
-                    application.cardinality(),
-                );
-                self.record(&fact_app, fact.clone())?;
-
-                let fact_app = Arc::new(fact_app);
 
                 // Bind namespace and name as string variables
                 self.assign(
                     &application.namespace().as_unknown(),
                     &Factor::Selected {
                         selector: Selector::The,
-                        application: fact_app.clone(),
+                        application: application.clone(),
                         fact: fact.clone(),
                     },
                 )?;
@@ -586,7 +469,7 @@ impl Answer {
                     &application.name().as_unknown(),
                     &Factor::Selected {
                         selector: Selector::The,
-                        application: fact_app.clone(),
+                        application: application.clone(),
                         fact: fact.clone(),
                     },
                 )?;
@@ -595,7 +478,7 @@ impl Answer {
                     &application.attribute().as_unknown(),
                     &Factor::Selected {
                         selector: Selector::The,
-                        application: fact_app.clone(),
+                        application: application.clone(),
                         fact: fact.clone(),
                     },
                 )?;
@@ -603,7 +486,7 @@ impl Answer {
                     &application.of().as_unknown(),
                     &Factor::Selected {
                         selector: Selector::Of,
-                        application: fact_app.clone(),
+                        application: application.clone(),
                         fact: fact.clone(),
                     },
                 )?;
@@ -611,7 +494,7 @@ impl Answer {
                     &application.is().as_unknown(),
                     &Factor::Selected {
                         selector: Selector::Is,
-                        application: fact_app.clone(),
+                        application: application.clone(),
                         fact: fact.clone(),
                     },
                 )?;
@@ -619,7 +502,7 @@ impl Answer {
                     &application.cause().as_unknown(),
                     &Factor::Selected {
                         selector: Selector::Cause,
-                        application: fact_app,
+                        application,
                         fact,
                     },
                 )?;
@@ -708,7 +591,7 @@ impl Answer {
                             application, fact, ..
                         } = factor
                         {
-                            self.record(application, fact.clone())?;
+                            self.record(application.as_ref(), fact.clone())?;
                         }
 
                         Ok(())
@@ -843,33 +726,39 @@ mod tests {
     use crate::artifact::{Attribute, Entity};
     use std::str::FromStr;
 
-    // Helper function to create a test fact for Answer tests
-    // Since Fact requires a Cause (Blake3Hash), we create a simple helper
-    fn create_test_fact(entity: Entity, attr: Attribute, value: Value) -> Fact {
+    // Helper function to create a test relation for Answer tests
+    fn create_test_relation(entity: Entity, attr: Attribute, value: Value) -> Relation {
         use crate::artifact::Cause;
+        use crate::attribute::Cardinality;
 
-        // Create a dummy cause for testing - Cause is a newtype around a 32-byte hash
-        let cause = Cause([0u8; 32]);
+        let attr_str = attr.to_string();
+        let (namespace, name) = attr_str
+            .split_once('/')
+            .map(|(ns, n)| (ns.to_string(), n.to_string()))
+            .unwrap_or_else(|| (String::new(), attr_str));
 
-        Fact::Assertion {
-            the: attr,
+        Relation {
+            namespace,
+            name,
             of: entity,
             is: value,
-            cause,
+            cause: Cause([0u8; 32]),
+            cardinality: Cardinality::Many,
         }
     }
 
     // Helper to create a Factor::Selected for testing
-    fn create_test_factor(selector: Selector, fact: Arc<Fact>) -> Factor {
-        use crate::application::FactApplication;
+    fn create_test_factor(selector: Selector, fact: Arc<Relation>) -> Factor {
+        use crate::application::RelationApplication;
 
-        // Create a minimal FactApplication for testing
-        let application = Arc::new(FactApplication::new(
-            Term::var("the"),
+        // Create a minimal RelationApplication for testing
+        let application = Arc::new(RelationApplication::new(
+            Term::var("the_ns"),
+            Term::var("the_name"),
             Term::var("of"),
             Term::var("is"),
             Term::var("cause"),
-            crate::Cardinality::One,
+            None,
         ));
 
         Factor::Selected {
@@ -884,7 +773,7 @@ mod tests {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/name").unwrap();
         let value = Value::String("Alice".to_string());
-        let fact = Arc::new(create_test_fact(
+        let fact = Arc::new(create_test_relation(
             entity.clone(),
             attr.clone(),
             value.clone(),
@@ -934,7 +823,7 @@ mod tests {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/name").unwrap();
         let value = Value::String("Alice".to_string());
-        let fact = Arc::new(create_test_fact(
+        let fact = Arc::new(create_test_relation(
             entity.clone(),
             attr.clone(),
             value.clone(),
@@ -961,7 +850,7 @@ mod tests {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/age").unwrap();
         let value = Value::UnsignedInt(25);
-        let fact = Arc::new(create_test_fact(
+        let fact = Arc::new(create_test_relation(
             entity.clone(),
             attr.clone(),
             value.clone(),
@@ -988,7 +877,7 @@ mod tests {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/score").unwrap();
         let value = Value::SignedInt(-10);
-        let fact = Arc::new(create_test_fact(
+        let fact = Arc::new(create_test_relation(
             entity.clone(),
             attr.clone(),
             value.clone(),
@@ -1015,7 +904,7 @@ mod tests {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/active").unwrap();
         let value = Value::Boolean(true);
-        let fact = Arc::new(create_test_fact(
+        let fact = Arc::new(create_test_relation(
             entity.clone(),
             attr.clone(),
             value.clone(),
@@ -1043,7 +932,7 @@ mod tests {
         let attr = Attribute::from_str("user/id").unwrap();
         let entity_value = Entity::new().unwrap();
         let value = Value::Entity(entity_value.clone());
-        let fact = Arc::new(create_test_fact(
+        let fact = Arc::new(create_test_relation(
             entity.clone(),
             attr.clone(),
             value.clone(),
@@ -1117,7 +1006,7 @@ mod tests {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/name").unwrap();
         let value = Value::String("Alice".to_string());
-        let fact = Arc::new(create_test_fact(
+        let fact = Arc::new(create_test_relation(
             entity.clone(),
             attr.clone(),
             value.clone(),
@@ -1150,12 +1039,12 @@ mod tests {
         let value = Value::String("Alice".to_string());
 
         // Create two different facts with the same value but different entities
-        let fact1 = Arc::new(create_test_fact(
+        let fact1 = Arc::new(create_test_relation(
             entity1.clone(),
             attr.clone(),
             value.clone(),
         ));
-        let fact2 = Arc::new(create_test_fact(
+        let fact2 = Arc::new(create_test_relation(
             entity2.clone(),
             attr.clone(),
             value.clone(),
@@ -1198,7 +1087,7 @@ mod tests {
         // Create multiple facts
         let name_attr = Attribute::from_str("user/name").unwrap();
         let name_value = Value::String("Bob".to_string());
-        let name_fact = Arc::new(create_test_fact(
+        let name_fact = Arc::new(create_test_relation(
             entity.clone(),
             name_attr.clone(),
             name_value.clone(),
@@ -1207,7 +1096,7 @@ mod tests {
 
         let age_attr = Attribute::from_str("user/age").unwrap();
         let age_value = Value::UnsignedInt(30);
-        let age_fact = Arc::new(create_test_fact(
+        let age_fact = Arc::new(create_test_relation(
             entity.clone(),
             age_attr.clone(),
             age_value.clone(),
@@ -1216,7 +1105,7 @@ mod tests {
 
         let active_attr = Attribute::from_str("user/active").unwrap();
         let active_value = Value::Boolean(true);
-        let active_fact = Arc::new(create_test_fact(
+        let active_fact = Arc::new(create_test_relation(
             entity.clone(),
             active_attr.clone(),
             active_value.clone(),
@@ -1255,7 +1144,7 @@ mod tests {
         // Create multiple facts
         let name_attr = Attribute::from_str("user/name").unwrap();
         let name_value = Value::String("Charlie".to_string());
-        let name_fact = Arc::new(create_test_fact(
+        let name_fact = Arc::new(create_test_relation(
             entity.clone(),
             name_attr.clone(),
             name_value.clone(),
@@ -1264,7 +1153,7 @@ mod tests {
 
         let age_attr = Attribute::from_str("user/age").unwrap();
         let age_value = Value::UnsignedInt(35);
-        let age_fact = Arc::new(create_test_fact(
+        let age_fact = Arc::new(create_test_relation(
             entity.clone(),
             age_attr.clone(),
             age_value.clone(),

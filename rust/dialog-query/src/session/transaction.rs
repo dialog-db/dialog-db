@@ -5,7 +5,7 @@
 
 use crate::Claim;
 use crate::artifact::{Artifact, Attribute, DialogArtifactsError, Entity, Instruction, Value};
-use crate::relation::Relation;
+use crate::assertion::Assertion;
 use futures_util::Stream;
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -72,20 +72,20 @@ impl Transaction {
 
     /// Assert a relation (entity-attribute-value triple).
     /// Multiple assertions for the same `(entity, attribute)` accumulate.
-    pub fn associate(&mut self, relation: Relation) -> &mut Self {
-        self.insert(relation.the, relation.of, Change::Assert(relation.is))
+    pub fn associate(&mut self, assertion: Assertion) -> &mut Self {
+        self.insert(assertion.the, assertion.of, Change::Assert(assertion.is))
     }
 
-    /// Retract a relation (entity-attribute-value triple).
-    pub fn dissociate(&mut self, relation: Relation) -> &mut Self {
-        self.insert(relation.the, relation.of, Change::Retract(relation.is))
+    /// Retract an assertion (entity-attribute-value triple).
+    pub fn dissociate(&mut self, assertion: Assertion) -> &mut Self {
+        self.insert(assertion.the, assertion.of, Change::Retract(assertion.is))
     }
 
-    /// Assert a relation with `Cardinality::One` semantics: if the same
+    /// Assert with `Cardinality::One` semantics: if the same
     /// `(entity, attribute)` pair was already asserted in this transaction,
     /// the previous value is replaced.
-    pub fn associate_unique(&mut self, relation: Relation) -> &mut Self {
-        self.replace(relation.the, relation.of, Change::Assert(relation.is))
+    pub fn associate_unique(&mut self, assertion: Assertion) -> &mut Self {
+        self.replace(assertion.the, assertion.of, Change::Assert(assertion.is))
     }
 
     /// Add a change operation for an entity-attribute pair, accumulating with
@@ -240,7 +240,7 @@ pub trait Edit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Relation;
+    use crate::Assertion;
     use crate::artifact::{Attribute, Entity, Value};
 
     #[dialog_common::test]
@@ -250,7 +250,7 @@ mod tests {
 
         // Test basic assert
         let name_attr: Attribute = "user/name".parse()?;
-        transaction.associate(Relation {
+        transaction.associate(Assertion {
             the: name_attr.clone(),
             of: alice.clone(),
             is: Value::String("Alice".to_string()),
@@ -274,13 +274,13 @@ mod tests {
         let first_value = Value::String("Alice".to_string());
         let second_value = Value::String("Alice Smith".to_string());
 
-        transaction.associate(Relation {
+        transaction.associate(Assertion {
             the: name_attr.clone(),
             of: alice.clone(),
             is: first_value.clone(),
         });
 
-        transaction.associate(Relation {
+        transaction.associate(Assertion {
             the: name_attr.clone(),
             of: alice.clone(),
             is: second_value.clone(),
@@ -312,13 +312,13 @@ mod tests {
         let first_value = Value::String("Alice".to_string());
         let second_value = Value::String("Alice Smith".to_string());
 
-        transaction.associate_unique(Relation {
+        transaction.associate_unique(Assertion {
             the: name_attr.clone(),
             of: alice.clone(),
             is: first_value.clone(),
         });
 
-        transaction.associate_unique(Relation {
+        transaction.associate_unique(Assertion {
             the: name_attr.clone(),
             of: alice.clone(),
             is: second_value.clone(),
@@ -348,13 +348,13 @@ mod tests {
         let name_attr: Attribute = "user/name".parse()?;
         let age_attr: Attribute = "user/age".parse()?;
 
-        transaction.associate_unique(Relation {
+        transaction.associate_unique(Assertion {
             the: name_attr.clone(),
             of: alice.clone(),
             is: Value::String("Alice".to_string()),
         });
 
-        transaction.associate_unique(Relation {
+        transaction.associate_unique(Assertion {
             the: age_attr.clone(),
             of: alice.clone(),
             is: Value::SignedInt(30),
@@ -374,13 +374,13 @@ mod tests {
         let bob = Entity::new()?;
 
         let name_attr: Attribute = "user/name".parse()?;
-        transaction.associate(Relation {
+        transaction.associate(Assertion {
             the: name_attr.clone(),
             of: alice,
             is: Value::String("Alice".to_string()),
         });
 
-        transaction.associate(Relation {
+        transaction.associate(Assertion {
             the: name_attr,
             of: bob,
             is: Value::String("Bob".to_string()),
@@ -402,13 +402,13 @@ mod tests {
         let bob = Entity::new()?;
 
         let name_attr: Attribute = "user/name".parse()?;
-        transaction.associate(Relation {
+        transaction.associate(Assertion {
             the: name_attr.clone(),
             of: alice,
             is: Value::String("Alice".to_string()),
         });
 
-        transaction.associate(Relation {
+        transaction.associate(Assertion {
             the: name_attr,
             of: bob,
             is: Value::String("Bob".to_string()),

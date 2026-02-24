@@ -6,7 +6,7 @@ pub use dialog_common::{ConditionalSend, ConditionalSync};
 use crate::artifact::{ArtifactStore, ArtifactStoreMut};
 pub use crate::context::new_context;
 pub use crate::error::{QueryError, QueryResult};
-pub use crate::fact::Fact;
+pub use crate::relation::Relation;
 use crate::{EvaluationContext, selection};
 pub use futures_util::stream::{Stream, StreamExt, TryStream};
 
@@ -96,8 +96,9 @@ impl<T> Store for T where T: ArtifactStoreMut + Clone + ConditionalSend {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::relation::RelationApplication;
     use crate::artifact::{Artifacts, Attribute, Entity, Value};
-    use crate::{Relation, Session, Term};
+    use crate::{Assertion, Session, Term};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
@@ -112,17 +113,17 @@ mod tests {
         let bob = Entity::new()?;
 
         let claims = vec![
-            Relation {
+            Assertion {
                 the: "user/name".parse::<Attribute>()?,
                 of: alice.clone(),
                 is: Value::String("Alice".to_string()),
             },
-            Relation {
+            Assertion {
                 the: "user/email".parse::<Attribute>()?,
                 of: alice.clone(),
                 is: Value::String("alice@example.com".to_string()),
             },
-            Relation {
+            Assertion {
                 the: "user/name".parse::<Attribute>()?,
                 of: bob.clone(),
                 is: Value::String("Bob".to_string()),
@@ -132,14 +133,15 @@ mod tests {
         let mut session = Session::open(artifacts.clone());
         session.transact(claims).await?;
 
-        // Step 2: Test Query trait on FactSelector with constants
-
         // Query 1: Find Alice by name using Query trait
-        let alice_query = Fact::<Value>::select()
-            .the("user/name")
-            .of(alice.clone())
-            .is(Value::String("Alice".to_string()))
-            .compile()?;
+        let alice_query = RelationApplication::new(
+            Term::from("user"),
+            Term::from("name"),
+            alice.clone().into(),
+            Term::from(Value::String("Alice".to_string())),
+            Term::blank(),
+            None,
+        );
 
         // Use the Query trait method - should succeed since all fields are constants
         let session = Session::open(artifacts.clone());
@@ -147,17 +149,28 @@ mod tests {
         assert!(result.is_ok()); // Should succeed with constants, returns empty stream
 
         // Query 2: Find all user/name facts using Query trait
-        let all_names_query = Fact::<Value>::select().the("user/name").compile()?;
+        let all_names_query = RelationApplication::new(
+            Term::from("user"),
+            Term::from("name"),
+            Term::blank(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
         let session = Session::open(artifacts.clone());
         let result = all_names_query.query(&session).try_vec().await;
         assert!(result.is_ok()); // Should succeed with constants
 
         // Query 3: Find Alice's email using Query trait
-        let email_query = Fact::<Value>::select()
-            .the("user/email")
-            .of(alice.clone())
-            .compile()?;
+        let email_query = RelationApplication::new(
+            Term::from("user"),
+            Term::from("email"),
+            alice.clone().into(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
         let session = Session::open(artifacts);
         let result = email_query.query(&session).try_vec().await;
@@ -173,11 +186,14 @@ mod tests {
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         // Create a query with variables - variables are skipped, constants used
-        let variable_query = Fact::<Value>::select()
-            .the("user/name") // Constant - used
-            .of(Term::<Entity>::var("user")) // Variable - skipped
-            .is(Term::<Value>::var("name")) // Variable - skippeda
-            .compile()?;
+        let variable_query = RelationApplication::new(
+            Term::from("user"),
+            Term::from("name"),
+            Term::<Entity>::var("user"),
+            Term::<Value>::var("name"),
+            Term::blank(),
+            None,
+        );
 
         // Should succeed since planning validation only rejects all-unbound queries, and this has a constant
         let session = Session::open(artifacts);
@@ -196,7 +212,7 @@ mod tests {
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         let alice = Entity::new()?;
-        let claims = vec![Relation {
+        let claims = vec![Assertion {
             the: "user/name".parse::<Attribute>()?,
             of: alice.clone(),
             is: Value::String("Alice".to_string()),
@@ -205,18 +221,18 @@ mod tests {
         let mut session = Session::open(artifacts.clone());
         session.transact(claims).await?;
 
-        // Test with FactSelector
-        let fact_selector = Fact::<Value>::select()
-            .the("user/name")
-            .of(alice.clone())
-            .compile()?;
+        let fact_selector = RelationApplication::new(
+            Term::from("user"),
+            Term::from("name"),
+            alice.clone().into(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
         let session = Session::open(artifacts);
         let results = fact_selector.query(&session).try_vec().await?;
         assert_eq!(results.len(), 1); // Should find the Alice fact
-
-        // Could also test with FactSelectorPlan if we had a way to create one easily
-        // This demonstrates the polymorphic nature of the Query trait
 
         Ok(())
     }
@@ -233,22 +249,22 @@ mod tests {
         let bob = Entity::new()?;
 
         let claims = vec![
-            Relation {
+            Assertion {
                 the: "user/name".parse::<Attribute>()?,
                 of: alice.clone(),
                 is: Value::String("Alice".to_string()),
             },
-            Relation {
+            Assertion {
                 the: "user/role".parse::<Attribute>()?,
                 of: alice.clone(),
                 is: Value::String("admin".to_string()),
             },
-            Relation {
+            Assertion {
                 the: "user/name".parse::<Attribute>()?,
                 of: bob.clone(),
                 is: Value::String("Bob".to_string()),
             },
-            Relation {
+            Assertion {
                 the: "user/role".parse::<Attribute>()?,
                 of: bob.clone(),
                 is: Value::String("user".to_string()),
@@ -258,25 +274,34 @@ mod tests {
         let mut session = Session::open(artifacts.clone());
         session.transact(claims).await?;
 
-        // Test fluent query building - should succeed with constants
+        // Test query building - should succeed with constants
         let session = Session::open(artifacts.clone());
-        let admin_result = Fact::<Value>::select()
-            .the("user/role")
-            .is(Value::String("admin".to_string()))
-            .compile()?
-            .query(&session)
-            .try_vec()
-            .await;
+        let admin_result = RelationApplication::new(
+            Term::from("user"),
+            Term::from("role"),
+            Term::blank(),
+            Term::from(Value::String("admin".to_string())),
+            Term::blank(),
+            None,
+        )
+        .query(&session)
+        .try_vec()
+        .await;
         assert!(admin_result.is_ok());
 
-        // Test another fluent query - should also succeed
+        // Test another query - should also succeed
         let session = Session::open(artifacts);
-        let names_result = Fact::<Value>::select()
-            .the("user/name")
-            .compile()?
-            .query(&session)
-            .try_vec()
-            .await;
+        let names_result = RelationApplication::new(
+            Term::from("user"),
+            Term::from("name"),
+            Term::blank(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        )
+        .query(&session)
+        .try_vec()
+        .await;
         assert!(names_result.is_ok());
 
         Ok(())

@@ -1,7 +1,7 @@
 use crate::application::RelationApplication;
 pub use crate::artifact::{Attribute as ArtifactsAttribute, Cause, Entity, Value};
 use crate::error::{SchemaError, TypeError};
-pub use crate::predicate::{FactSelector, RelationDescriptor};
+pub use crate::predicate::RelationDescriptor;
 pub use crate::schema::Cardinality;
 pub use crate::types::{IntoType, Scalar, Type};
 use crate::{Application, Parameters};
@@ -408,7 +408,7 @@ impl<T: Scalar> Match<T> {
     }
     /// Negates this match for a specific value, producing a [`Premise`].
     pub fn not<Is: Into<Term<T>>>(self, term: Is) -> Premise {
-        Application::Relation(self.is(term)).not()
+        Application::Relation(Box::new(self.is(term))).not()
     }
 }
 

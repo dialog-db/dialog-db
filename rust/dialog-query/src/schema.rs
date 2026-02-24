@@ -63,6 +63,27 @@ impl Default for Schema {
     }
 }
 
+/// Cost of a segment read for Cardinality::One with 3/3 or 2/3 constraints.
+/// This is a direct lookup that reads from a single segment.
+pub const SEGMENT_READ_COST: usize = 100;
+
+/// Cost of a range read for Cardinality::Many with 3/3 constraints.
+/// This read could potentially span multiple segments but is bounded.
+pub const RANGE_READ_COST: usize = 200;
+
+/// Cost of a range scan for Cardinality::Many with 2/3 constraints,
+/// or Cardinality::One with 1/3 constraints.
+/// This scan is likely to span multiple segments.
+pub const RANGE_SCAN_COST: usize = 1_000;
+
+/// Cost of an index scan for Cardinality::Many with 1/3 constraints.
+/// This is the most expensive query pattern - scanning with minimal constraints.
+pub const INDEX_SCAN: usize = 5_000;
+
+/// Overhead cost for concept queries due to potential rule evaluation.
+/// Concepts may have associated deductive rules that need to be checked and evaluated.
+pub const CONCEPT_OVERHEAD: usize = 1_000;
+
 /// Cardinality indicates whether an attribute can have one or many values
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Cardinality {
@@ -87,8 +108,6 @@ impl Cardinality {
     /// - 1 known (scan): Table/index scan
     /// - 0 known: Unbound (should be rejected)
     pub fn estimate(&self, the: bool, of: bool, is: bool) -> Option<usize> {
-        use crate::application::fact::*;
-
         let count = (the as usize) + (of as usize) + (is as usize);
 
         match (count, self) {

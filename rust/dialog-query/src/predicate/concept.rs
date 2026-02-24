@@ -4,7 +4,7 @@ use crate::claim::Revert;
 use crate::error::SchemaError;
 use crate::types::Scalar;
 use crate::{
-    Application, Cardinality, Claim, Entity, Field, Parameters, Relation, Requirement, Schema,
+    Application, Assertion, Cardinality, Claim, Entity, Field, Parameters, Requirement, Schema,
     Type, Value,
 };
 
@@ -286,7 +286,7 @@ impl Conception {
 impl Claim for Conception {
     fn assert(self, transaction: &mut crate::Transaction) {
         for attribution in self.with {
-            transaction.associate(Relation::new(
+            transaction.associate(Assertion::new(
                 attribution.the,
                 self.this.clone(),
                 attribution.is,
@@ -295,7 +295,7 @@ impl Claim for Conception {
     }
     fn retract(self, transaction: &mut crate::Transaction) {
         for attribution in self.with {
-            transaction.dissociate(Relation::new(
+            transaction.dissociate(Assertion::new(
                 attribution.the,
                 self.this.clone(),
                 attribution.is,
