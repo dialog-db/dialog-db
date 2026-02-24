@@ -1,10 +1,7 @@
 //! Fact and Claim types for the dialog-query system
 
-pub use super::predicate::fact::FactSelector;
 pub use crate::Term;
-pub use crate::application::FactApplication;
 pub use crate::artifact::{Artifact, Attribute, Cause, Entity, Instruction, Value};
-pub use crate::dsl::Predicate;
 pub use crate::error::SchemaError;
 pub use crate::query::Output;
 pub use crate::types::Scalar;
@@ -38,10 +35,6 @@ pub enum Fact<T: Scalar + ConditionalSend = Value> {
     },
 }
 
-impl Predicate for Fact {
-    type Application = FactSelector;
-}
-
 impl From<&Artifact> for Fact {
     fn from(artifact: &Artifact) -> Self {
         Fact::Assertion {
@@ -54,11 +47,6 @@ impl From<&Artifact> for Fact {
 }
 
 impl<T: Scalar + ConditionalSend> Fact<T> {
-    /// Create a new fact query builder
-    pub fn select() -> FactSelector {
-        FactSelector::new()
-    }
-
     /// Get the attribute of this fact
     pub fn the(&self) -> &Attribute {
         match self {
@@ -92,11 +80,12 @@ impl<T: Scalar + ConditionalSend> Fact<T> {
 #[cfg(test)]
 mod integration_tests {
     //! Integration tests for the complete Fact workflow:
-    //! Fact::assert/retract → commit → Fact::select → query
+    //! assert/retract → commit → RelationApplication → query
 
     use super::*;
+    use crate::application::relation::RelationApplication;
     use crate::artifact::{Artifacts, Attribute, Entity, Value};
-    use crate::{Relation, Session};
+    use crate::{Assertion, Session};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
@@ -111,19 +100,19 @@ mod integration_tests {
         let bob = Entity::new()?;
 
         // Step 2: Create facts using our Fact DSL
-        let alice_name = Relation {
+        let alice_name = Assertion {
             the: "user/name".parse::<Attribute>()?,
             of: alice.clone(),
             is: Value::String("Alice".to_string()),
         };
 
-        let alice_email = Relation {
+        let alice_email = Assertion {
             the: "user/email".parse::<Attribute>()?,
             of: alice.clone(),
             is: Value::String("alice@example.com".to_string()),
         };
 
-        let bob_name = Relation {
+        let bob_name = Assertion {
             the: "user/name".parse::<Attribute>()?,
             of: bob.clone(),
             is: Value::String("Bob".to_string()),
@@ -135,7 +124,14 @@ mod integration_tests {
         session.transact(claims).await?;
 
         // Step 4: Test 1 - Query for user names
-        let query_names = Fact::<Value>::select().the("user/name").compile()?;
+        let query_names = RelationApplication::new(
+            Term::Constant("user".into()),
+            Term::Constant("name".into()),
+            Term::blank(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
         let facts = query_names
             .query(&Session::open(artifacts.clone()))
@@ -145,28 +141,31 @@ mod integration_tests {
         assert_eq!(facts.len(), 2, "Should find both Alice and Bob");
 
         // Check that we got the right facts
-        let has_alice = facts.iter().any(|f| match f {
-            Fact::Assertion { the, of, is, .. } => {
-                the.to_string() == "user/name"
-                    && *of == alice
-                    && *is == Value::String("Alice".to_string())
-            }
-            _ => false,
+        let has_alice = facts.iter().any(|f| {
+            f.namespace == "user"
+                && f.name == "name"
+                && f.of == alice
+                && f.is == Value::String("Alice".to_string())
         });
         assert!(has_alice, "Should find Alice's name fact");
 
-        let has_bob = facts.iter().any(|f| match f {
-            Fact::Assertion { the, of, is, .. } => {
-                the.to_string() == "user/name"
-                    && *of == bob
-                    && *is == Value::String("Bob".to_string())
-            }
-            _ => false,
+        let has_bob = facts.iter().any(|f| {
+            f.namespace == "user"
+                && f.name == "name"
+                && f.of == bob
+                && f.is == Value::String("Bob".to_string())
         });
         assert!(has_bob, "Should find Bob's name fact");
 
         // Step 5: Test 2 - Query for email
-        let query_email = Fact::<Value>::select().the("user/email").compile()?;
+        let query_email = RelationApplication::new(
+            Term::Constant("user".into()),
+            Term::Constant("email".into()),
+            Term::blank(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
         let email_facts = query_email
             .query(&Session::open(artifacts.clone()))
@@ -175,21 +174,23 @@ mod integration_tests {
 
         assert_eq!(email_facts.len(), 1, "Should find Alice's email");
 
-        let has_email = email_facts.iter().any(|f| match f {
-            Fact::Assertion { the, of, is, .. } => {
-                the.to_string() == "user/email"
-                    && *of == alice
-                    && *is == Value::String("alice@example.com".to_string())
-            }
-            _ => false,
+        let has_email = email_facts.iter().any(|f| {
+            f.namespace == "user"
+                && f.name == "email"
+                && f.of == alice
+                && f.is == Value::String("alice@example.com".to_string())
         });
         assert!(has_email, "Should find Alice's email fact");
 
         // Step 6: Test 3 - Query for specific user
-        let query_alice = Fact::<Value>::select()
-            .the("user/name")
-            .of(alice.clone())
-            .compile()?;
+        let query_alice = RelationApplication::new(
+            Term::Constant("user".into()),
+            Term::Constant("name".into()),
+            alice.clone().into(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
         let alice_facts = query_alice
             .query(&Session::open(artifacts.clone()))
@@ -210,7 +211,7 @@ mod integration_tests {
         let alice = Entity::new()?;
 
         // Step 1: Assert a fact
-        let alice_name = Relation {
+        let alice_name = Assertion {
             the: "user/name".parse::<Attribute>()?,
             of: alice.clone(),
             is: Value::String("Alice".to_string()),
@@ -220,10 +221,14 @@ mod integration_tests {
         session.transact(vec![alice_name.clone()]).await?;
 
         // Step 2: Verify fact exists
-        let query_constant = Fact::<Value>::select()
-            .the("user/name")
-            .of(alice.clone())
-            .compile()?;
+        let query_constant = RelationApplication::new(
+            Term::Constant("user".into()),
+            Term::Constant("name".into()),
+            alice.clone().into(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
         let results = query_constant
             .query(&Session::open(artifacts.clone()))
@@ -233,13 +238,11 @@ mod integration_tests {
         assert_eq!(results.len(), 1);
 
         // Verify the fact content
-        let has_alice = results.iter().any(|f| match f {
-            Fact::Assertion { the, of, is, .. } => {
-                the.to_string() == "user/name"
-                    && *of == alice
-                    && *is == Value::String("Alice".to_string())
-            }
-            _ => false,
+        let has_alice = results.iter().any(|f| {
+            f.namespace == "user"
+                && f.name == "name"
+                && f.of == alice
+                && f.is == Value::String("Alice".to_string())
         });
         assert!(has_alice, "Should find Alice's name fact");
 
@@ -247,10 +250,14 @@ mod integration_tests {
         session.transact([!alice_name]).await?;
 
         // Step 4: Verify fact is gone
-        let query2 = Fact::<Value>::select()
-            .the("user/name")
-            .of(alice.clone())
-            .compile()?;
+        let query2 = RelationApplication::new(
+            Term::Constant("user".into()),
+            Term::Constant("name".into()),
+            alice.clone().into(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
         let results2 = query2
             .query(&Session::open(artifacts.clone()))
@@ -273,17 +280,17 @@ mod integration_tests {
 
         // Create facts
         let claims = vec![
-            Relation {
+            Assertion {
                 the: "user/name".parse::<Attribute>()?,
                 of: alice.clone(),
                 is: Value::String("Alice".to_string()),
             },
-            Relation {
+            Assertion {
                 the: "user/name".parse::<Attribute>()?,
                 of: bob.clone(),
                 is: Value::String("Bob".to_string()),
             },
-            Relation {
+            Assertion {
                 the: "user/age".parse::<Attribute>()?,
                 of: alice.clone(),
                 is: Value::UnsignedInt(30),
@@ -294,11 +301,14 @@ mod integration_tests {
         session.transact(claims).await?;
 
         // Test 1: All constants
-        let all_constants_query = Fact::<Value>::select()
-            .the("user/name")
-            .of(alice.clone())
-            .is(Value::String("Alice".to_string()))
-            .compile()?;
+        let all_constants_query = RelationApplication::new(
+            Term::Constant("user".into()),
+            Term::Constant("name".into()),
+            alice.clone().into(),
+            Term::Constant(Value::String("Alice".to_string())),
+            Term::blank(),
+            None,
+        );
 
         let constant_results = all_constants_query
             .query(&Session::open(artifacts.clone()))
@@ -308,10 +318,14 @@ mod integration_tests {
         assert_eq!(constant_results.len(), 1, "Should find Alice's name fact");
 
         // Test 2: Find Alice specifically
-        let mixed_query = Fact::<Value>::select()
-            .the("user/name")
-            .is(Value::String("Alice".to_string()))
-            .compile()?;
+        let mixed_query = RelationApplication::new(
+            Term::Constant("user".into()),
+            Term::Constant("name".into()),
+            Term::blank(),
+            Term::Constant(Value::String("Alice".to_string())),
+            Term::blank(),
+            None,
+        );
 
         let mixed_results = mixed_query
             .query(&Session::open(artifacts.clone()))
@@ -321,7 +335,14 @@ mod integration_tests {
         assert_eq!(mixed_results.len(), 1, "Should find Alice specifically");
 
         // Test 3: Find all names
-        let find_all_names = Fact::<Value>::select().the("user/name").compile()?;
+        let find_all_names = RelationApplication::new(
+            Term::Constant("user".into()),
+            Term::Constant("name".into()),
+            Term::blank(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
         let all_name_results = find_all_names
             .query(&Session::open(artifacts.clone()))
@@ -331,16 +352,12 @@ mod integration_tests {
         assert_eq!(all_name_results.len(), 2, "Should find both Alice and Bob");
 
         // Verify we have both users' facts
-        let has_alice = all_name_results.iter().any(|f| match f {
-            Fact::Assertion { of, is, .. } => {
-                *of == alice && *is == Value::String("Alice".to_string())
-            }
-            _ => false,
-        });
-        let has_bob = all_name_results.iter().any(|f| match f {
-            Fact::Assertion { of, is, .. } => *of == bob && *is == Value::String("Bob".to_string()),
-            _ => false,
-        });
+        let has_alice = all_name_results
+            .iter()
+            .any(|f| f.of == alice && f.is == Value::String("Alice".to_string()));
+        let has_bob = all_name_results
+            .iter()
+            .any(|f| f.of == bob && f.is == Value::String("Bob".to_string()));
         assert!(
             has_alice && has_bob,
             "Should find both Alice and Bob's facts"
@@ -362,32 +379,32 @@ mod integration_tests {
 
         let claims = vec![
             // Users and roles
-            Relation {
+            Assertion {
                 the: "user/name".parse::<Attribute>()?,
                 of: alice.clone(),
                 is: Value::String("Alice".to_string()),
             },
-            Relation {
+            Assertion {
                 the: "user/role".parse::<Attribute>()?,
                 of: alice.clone(),
                 is: Value::String("admin".to_string()),
             },
-            Relation {
+            Assertion {
                 the: "user/name".parse::<Attribute>()?,
                 of: bob.clone(),
                 is: Value::String("Bob".to_string()),
             },
-            Relation {
+            Assertion {
                 the: "user/role".parse::<Attribute>()?,
                 of: bob.clone(),
                 is: Value::String("user".to_string()),
             },
-            Relation {
+            Assertion {
                 the: "user/name".parse::<Attribute>()?,
                 of: charlie.clone(),
                 is: Value::String("Charlie".to_string()),
             },
-            Relation {
+            Assertion {
                 the: "user/role".parse::<Attribute>()?,
                 of: charlie.clone(),
                 is: Value::String("admin".to_string()),
@@ -398,10 +415,14 @@ mod integration_tests {
         session.transact(claims).await?;
 
         // Query 1: Find all admins by role
-        let admin_query = Fact::<Value>::select()
-            .the("user/role")
-            .is(Value::String("admin".to_string()))
-            .compile()?;
+        let admin_query = RelationApplication::new(
+            Term::Constant("user".into()),
+            Term::Constant("role".into()),
+            Term::blank(),
+            Term::Constant(Value::String("admin".to_string())),
+            Term::blank(),
+            None,
+        );
 
         let admin_results = admin_query
             .query(&Session::open(artifacts.clone()))
@@ -415,22 +436,23 @@ mod integration_tests {
         );
 
         // Verify we have admin facts for alice and charlie
-        let has_alice_admin = admin_results.iter().any(|f| match f {
-            Fact::Assertion { of, is, .. } => {
-                *of == alice && *is == Value::String("admin".to_string())
-            }
-            _ => false,
-        });
-        let has_charlie_admin = admin_results.iter().any(|f| match f {
-            Fact::Assertion { of, is, .. } => {
-                *of == charlie && *is == Value::String("admin".to_string())
-            }
-            _ => false,
-        });
+        let has_alice_admin = admin_results
+            .iter()
+            .any(|f| f.of == alice && f.is == Value::String("admin".to_string()));
+        let has_charlie_admin = admin_results
+            .iter()
+            .any(|f| f.of == charlie && f.is == Value::String("admin".to_string()));
         assert!(has_alice_admin && has_charlie_admin);
 
         // Query 2: Find all user roles
-        let role_query = Fact::<Value>::select().the("user/role").compile()?;
+        let role_query = RelationApplication::new(
+            Term::Constant("user".into()),
+            Term::Constant("role".into()),
+            Term::blank(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
         let role_results = role_query
             .query(&Session::open(artifacts.clone()))
@@ -440,11 +462,14 @@ mod integration_tests {
         assert_eq!(role_results.len(), 3, "Should find all 3 role assignments");
 
         // Query 3: Find Bob specifically using all constants
-        let bob_query = Fact::<Value>::select()
-            .the("user/name")
-            .of(bob.clone())
-            .is(Value::String("Bob".to_string()))
-            .compile()?;
+        let bob_query = RelationApplication::new(
+            Term::Constant("user".into()),
+            Term::Constant("name".into()),
+            bob.clone().into(),
+            Term::Constant(Value::String("Bob".to_string())),
+            Term::blank(),
+            None,
+        );
 
         let bob_results = bob_query
             .query(&Session::open(artifacts.clone()))
@@ -466,12 +491,12 @@ mod integration_tests {
         let bob = Entity::new()?;
 
         let claims = vec![
-            Relation {
+            Assertion {
                 the: "user/name".parse::<Attribute>()?,
                 of: alice.clone(),
                 is: Value::String("Alice".to_string()),
             },
-            Relation {
+            Assertion {
                 the: "user/name".parse::<Attribute>()?,
                 of: bob.clone(),
                 is: Value::String("Bob".to_string()),
@@ -481,7 +506,14 @@ mod integration_tests {
         let mut session = Session::open(artifacts.clone());
         session.transact(claims).await?;
 
-        let query_with_variables = Fact::<Value>::select().the("user/name").compile()?;
+        let query_with_variables = RelationApplication::new(
+            Term::Constant("user".into()),
+            Term::Constant("name".into()),
+            Term::blank(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
         let results = query_with_variables
             .query(&Session::open(artifacts.clone()))
@@ -491,16 +523,12 @@ mod integration_tests {
         assert_eq!(results.len(), 2, "Should find both Alice and Bob");
 
         // Verify we have both facts
-        let has_alice = results.iter().any(|f| match f {
-            Fact::Assertion { of, is, .. } => {
-                *of == alice && *is == Value::String("Alice".to_string())
-            }
-            _ => false,
-        });
-        let has_bob = results.iter().any(|f| match f {
-            Fact::Assertion { of, is, .. } => *of == bob && *is == Value::String("Bob".to_string()),
-            _ => false,
-        });
+        let has_alice = results
+            .iter()
+            .any(|f| f.of == alice && f.is == Value::String("Alice".to_string()));
+        let has_bob = results
+            .iter()
+            .any(|f| f.of == bob && f.is == Value::String("Bob".to_string()));
         assert!(has_alice && has_bob);
 
         Ok(())
@@ -516,12 +544,12 @@ mod integration_tests {
         let bob = Entity::new()?;
 
         let claims = vec![
-            Relation {
+            Assertion {
                 the: "user/name".parse::<Attribute>()?,
                 of: alice.clone(),
                 is: Value::String("Alice".to_string()),
             },
-            Relation {
+            Assertion {
                 the: "user/friend".parse::<Attribute>()?,
                 of: alice.clone(),
                 is: Value::Entity(bob.clone()),
@@ -532,7 +560,14 @@ mod integration_tests {
         session.transact(claims).await?;
 
         // Pattern 1: Query for user names
-        let value_selector = Fact::<Value>::select().the("user/name").compile()?;
+        let value_selector = RelationApplication::new(
+            Term::Constant("user".into()),
+            Term::Constant("name".into()),
+            Term::blank(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
         let value_results = value_selector
             .query(&Session::open(artifacts.clone()))
@@ -540,19 +575,20 @@ mod integration_tests {
             .await?;
         assert_eq!(value_results.len(), 1);
 
-        let has_alice = value_results.iter().any(|f| match f {
-            Fact::Assertion { of, is, .. } => {
-                *of == alice && *is == Value::String("Alice".to_string())
-            }
-            _ => false,
-        });
+        let has_alice = value_results
+            .iter()
+            .any(|f| f.of == alice && f.is == Value::String("Alice".to_string()));
         assert!(has_alice);
 
         // Pattern 2: Query for entity values (friends)
-        let entity_selector = Fact::<Value>::select()
-            .the("user/friend")
-            .of(alice.clone())
-            .compile()?;
+        let entity_selector = RelationApplication::new(
+            Term::Constant("user".into()),
+            Term::Constant("friend".into()),
+            alice.clone().into(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
         let entity_results = entity_selector
             .query(&Session::open(artifacts.clone()))
@@ -560,18 +596,20 @@ mod integration_tests {
             .await?;
         assert_eq!(entity_results.len(), 1);
 
-        let has_bob = entity_results.iter().any(|f| match f {
-            Fact::Assertion { is, .. } => *is == Value::Entity(bob.clone()),
-            _ => false,
-        });
+        let has_bob = entity_results
+            .iter()
+            .any(|f| f.is == Value::Entity(bob.clone()));
         assert!(has_bob);
 
         // Pattern 3: Test with all constants
-        let constant_selector = Fact::<Value>::select()
-            .the("user/name")
-            .of(alice.clone())
-            .is(Value::String("Alice".to_string()))
-            .compile()?;
+        let constant_selector = RelationApplication::new(
+            Term::Constant("user".into()),
+            Term::Constant("name".into()),
+            alice.clone().into(),
+            Term::Constant(Value::String("Alice".to_string())),
+            Term::blank(),
+            None,
+        );
 
         let constant_results = constant_selector
             .query(&Session::open(artifacts.clone()))
@@ -592,17 +630,17 @@ mod integration_tests {
         let bob = Entity::new()?;
 
         let claims = vec![
-            Relation {
+            Assertion {
                 the: "user/name".parse::<Attribute>()?,
                 of: alice.clone(),
                 is: Value::String("Alice".to_string()),
             },
-            Relation {
+            Assertion {
                 the: "user/name".parse::<Attribute>()?,
                 of: bob.clone(),
                 is: Value::String("Bob".to_string()),
             },
-            Relation {
+            Assertion {
                 the: "user/role".parse::<Attribute>()?,
                 of: alice.clone(),
                 is: Value::String("admin".to_string()),
@@ -613,10 +651,14 @@ mod integration_tests {
         session.transact(claims).await?;
 
         // Pattern 1: Find Bob by name using string constant
-        let bob_query = Fact::<Value>::select()
-            .the("user/name")
-            .is(Value::String("Bob".to_string()))
-            .compile()?;
+        let bob_query = RelationApplication::new(
+            Term::Constant("user".into()),
+            Term::Constant("name".into()),
+            Term::blank(),
+            Term::Constant(Value::String("Bob".to_string())),
+            Term::blank(),
+            None,
+        );
 
         let bob_results = bob_query
             .query(&Session::open(artifacts.clone()))
@@ -624,17 +666,18 @@ mod integration_tests {
             .await?;
         assert_eq!(bob_results.len(), 1);
 
-        let has_bob = bob_results.iter().any(|f| match f {
-            Fact::Assertion { of, .. } => *of == bob,
-            _ => false,
-        });
+        let has_bob = bob_results.iter().any(|f| f.of == bob);
         assert!(has_bob);
 
         // Pattern 2: Find admin using string constant
-        let admin_query = Fact::<Value>::select()
-            .the("user/role")
-            .is(Value::String("admin".to_string()))
-            .compile()?;
+        let admin_query = RelationApplication::new(
+            Term::Constant("user".into()),
+            Term::Constant("role".into()),
+            Term::blank(),
+            Term::Constant(Value::String("admin".to_string())),
+            Term::blank(),
+            None,
+        );
 
         let admin_results = admin_query
             .query(&Session::open(artifacts.clone()))
@@ -642,14 +685,18 @@ mod integration_tests {
             .await?;
         assert_eq!(admin_results.len(), 1);
 
-        let has_alice = admin_results.iter().any(|f| match f {
-            Fact::Assertion { of, .. } => *of == alice,
-            _ => false,
-        });
+        let has_alice = admin_results.iter().any(|f| f.of == alice);
         assert!(has_alice);
 
         // Pattern 3: Find all names
-        let names_query = Fact::<Value>::select().the("user/name").compile()?;
+        let names_query = RelationApplication::new(
+            Term::Constant("user".into()),
+            Term::Constant("name".into()),
+            Term::blank(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
         let name_results = names_query
             .query(&Session::open(artifacts.clone()))
@@ -657,14 +704,12 @@ mod integration_tests {
             .await?;
         assert_eq!(name_results.len(), 2);
 
-        let has_alice_name = name_results.iter().any(|f| match f {
-            Fact::Assertion { is, .. } => *is == Value::String("Alice".to_string()),
-            _ => false,
-        });
-        let has_bob_name = name_results.iter().any(|f| match f {
-            Fact::Assertion { is, .. } => *is == Value::String("Bob".to_string()),
-            _ => false,
-        });
+        let has_alice_name = name_results
+            .iter()
+            .any(|f| f.is == Value::String("Alice".to_string()));
+        let has_bob_name = name_results
+            .iter()
+            .any(|f| f.is == Value::String("Bob".to_string()));
         assert!(has_alice_name && has_bob_name);
 
         Ok(())
@@ -678,7 +723,7 @@ mod integration_tests {
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
-        let claims = vec![Relation {
+        let claims = vec![Assertion {
             the: "user/name".parse::<Attribute>()?,
             of: alice.clone(),
             is: Value::String("Alice".to_string()),
@@ -687,10 +732,14 @@ mod integration_tests {
         let mut session = Session::open(artifacts.clone());
         session.transact(claims).await?;
 
-        let mixed_query = Fact::<Value>::select()
-            .the("user/name")
-            .of(alice.clone())
-            .compile()?;
+        let mixed_query = RelationApplication::new(
+            Term::Constant("user".into()),
+            Term::Constant("name".into()),
+            alice.clone().into(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
         let results = mixed_query
             .query(&Session::open(artifacts.clone()))
@@ -700,41 +749,13 @@ mod integration_tests {
         assert_eq!(results.len(), 1, "Should find Alice's name fact");
 
         // Verify we got the right fact
-        let has_alice = results.iter().any(|f| match f {
-            Fact::Assertion { the, of, is, .. } => {
-                the.to_string() == "user/name"
-                    && *of == alice
-                    && *is == Value::String("Alice".to_string())
-            }
-            _ => false,
+        let has_alice = results.iter().any(|f| {
+            f.namespace == "user"
+                && f.name == "name"
+                && f.of == alice
+                && f.is == Value::String("Alice".to_string())
         });
         assert!(has_alice);
-
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    async fn test_only_variables_query_fails() -> Result<()> {
-        // Test that queries with ONLY variables and NO constants fail during building
-        // This test verifies error handling for completely unconstrained queries
-
-        // Try to build a query with no constants - this should fail at build time
-        // since the ArtifactSelector conversion requires at least one constrained field
-        let result = Fact::<Value>::select().compile();
-
-        // Should fail because there are no constraints at all
-        assert!(result.is_err(), "Query with no constraints should fail");
-
-        if let Err(error) = result {
-            // The error should mention that at least one field must be constrained
-            let error_msg = error.to_string();
-            assert!(
-                error_msg.contains("At least one field must be constrained")
-                    || error_msg.contains("Unconstrained"),
-                "Error should mention constraint requirements: {}",
-                error_msg
-            );
-        }
 
         Ok(())
     }
@@ -749,22 +770,22 @@ mod integration_tests {
         let bob = Entity::new()?;
 
         let claims = vec![
-            Relation {
+            Assertion {
                 the: "user/name".parse::<Attribute>()?,
                 of: alice.clone(),
                 is: Value::String("Alice".to_string()),
             },
-            Relation {
+            Assertion {
                 the: "user/role".parse::<Attribute>()?,
                 of: alice.clone(),
                 is: Value::String("admin".to_string()),
             },
-            Relation {
+            Assertion {
                 the: "user/name".parse::<Attribute>()?,
                 of: bob.clone(),
                 is: Value::String("Bob".to_string()),
             },
-            Relation {
+            Assertion {
                 the: "user/role".parse::<Attribute>()?,
                 of: bob.clone(),
                 is: Value::String("user".to_string()),
@@ -774,11 +795,15 @@ mod integration_tests {
         let mut session = Session::open(artifacts.clone());
         session.transact(claims).await?;
 
-        // Test 1: Find admin users using fluent query building
-        let admin_search = Fact::<Value>::select()
-            .the("user/role")
-            .is(Value::String("admin".to_string()))
-            .compile()?;
+        // Test 1: Find admin users
+        let admin_search = RelationApplication::new(
+            Term::Constant("user".into()),
+            Term::Constant("role".into()),
+            Term::blank(),
+            Term::Constant(Value::String("admin".to_string())),
+            Term::blank(),
+            None,
+        );
 
         let admin_results = admin_search
             .query(&Session::open(artifacts.clone()))
@@ -787,14 +812,18 @@ mod integration_tests {
 
         assert_eq!(admin_results.len(), 1, "Should find one admin (Alice)");
 
-        let has_alice_admin = admin_results.iter().any(|f| match f {
-            Fact::Assertion { of, .. } => *of == alice,
-            _ => false,
-        });
+        let has_alice_admin = admin_results.iter().any(|f| f.of == alice);
         assert!(has_alice_admin);
 
         // Test 2: Find all user names
-        let name_search = Fact::<Value>::select().the("user/name").compile()?;
+        let name_search = RelationApplication::new(
+            Term::Constant("user".into()),
+            Term::Constant("name".into()),
+            Term::blank(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
         let name_results = name_search
             .query(&Session::open(artifacts.clone()))
@@ -804,25 +833,17 @@ mod integration_tests {
         assert_eq!(name_results.len(), 2, "Should find both Alice and Bob");
 
         // Verify we have both names
-        let has_alice_name = name_results.iter().any(|f| match f {
-            Fact::Assertion { is, .. } => *is == Value::String("Alice".to_string()),
-            _ => false,
-        });
-        let has_bob_name = name_results.iter().any(|f| match f {
-            Fact::Assertion { is, .. } => *is == Value::String("Bob".to_string()),
-            _ => false,
-        });
+        let has_alice_name = name_results
+            .iter()
+            .any(|f| f.is == Value::String("Alice".to_string()));
+        let has_bob_name = name_results
+            .iter()
+            .any(|f| f.is == Value::String("Bob".to_string()));
         assert!(has_alice_name && has_bob_name);
 
         // Verify we have both users
-        let has_alice_entity = name_results.iter().any(|f| match f {
-            Fact::Assertion { of, .. } => *of == alice,
-            _ => false,
-        });
-        let has_bob_entity = name_results.iter().any(|f| match f {
-            Fact::Assertion { of, .. } => *of == bob,
-            _ => false,
-        });
+        let has_alice_entity = name_results.iter().any(|f| f.of == alice);
+        let has_bob_entity = name_results.iter().any(|f| f.of == bob);
         assert!(has_alice_entity && has_bob_entity);
 
         Ok(())
@@ -830,7 +851,6 @@ mod integration_tests {
 
     #[dialog_common::test]
     async fn match_fact() -> Result<()> {
-        use dialog_query::Match;
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
@@ -838,12 +858,12 @@ mod integration_tests {
         let bob = Entity::new()?;
 
         let claims = vec![
-            Relation {
+            Assertion {
                 the: "user/name".parse::<Attribute>()?,
                 of: alice.clone(),
                 is: Value::String("Alice".to_string()),
             },
-            Relation {
+            Assertion {
                 the: "user/friend".parse::<Attribute>()?,
                 of: alice.clone(),
                 is: Value::Entity(bob.clone()),
@@ -854,51 +874,50 @@ mod integration_tests {
         session.transact(claims).await?;
 
         // Pattern 1: Query for user names
-        let value_selector = Match::<Fact> {
-            the: "user/name".try_into()?,
-            of: Term::blank(),
-            is: Term::blank(),
-            cause: Term::blank(),
-        }
-        .compile()?;
+        let value_selector = RelationApplication::new(
+            Term::Constant("user".to_string()),
+            Term::Constant("name".to_string()),
+            Term::blank(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
         let value_results = value_selector.query(&session).try_vec().await?;
         assert_eq!(value_results.len(), 1);
 
-        let has_alice = value_results.iter().any(|f| match f {
-            Fact::Assertion { of, is, .. } => {
-                *of == alice && *is == Value::String("Alice".to_string())
-            }
-            _ => false,
-        });
+        let has_alice = value_results
+            .iter()
+            .any(|f| f.of == alice && f.is == Value::String("Alice".to_string()));
         assert!(has_alice);
 
         // Pattern 2: Query for entity values (friends)
-        let entity_selector = Match::<Fact> {
-            the: "user/friend".try_into()?,
-            of: alice.clone().into(),
-            is: Term::blank(),
-            cause: Term::blank(),
-        }
-        .compile()?;
+        let entity_selector = RelationApplication::new(
+            Term::Constant("user".to_string()),
+            Term::Constant("friend".to_string()),
+            alice.clone().into(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
         let entity_results = entity_selector.query(&session).try_vec().await?;
         assert_eq!(entity_results.len(), 1);
 
-        let has_bob = entity_results.iter().any(|f| match f {
-            Fact::Assertion { is, .. } => *is == Value::Entity(bob.clone()),
-            _ => false,
-        });
+        let has_bob = entity_results
+            .iter()
+            .any(|f| f.is == Value::Entity(bob.clone()));
         assert!(has_bob);
 
         // Pattern 3: Test with all constants
-        let constant_selector = Match::<Fact> {
-            the: "user/name".try_into()?,
-            of: alice.clone().into(),
-            is: "Alice".into(),
-            cause: Term::blank(),
-        }
-        .compile()?;
+        let constant_selector = RelationApplication::new(
+            Term::Constant("user".to_string()),
+            Term::Constant("name".to_string()),
+            alice.clone().into(),
+            "Alice".into(),
+            Term::blank(),
+            None,
+        );
 
         let constant_results = constant_selector
             .query(&Session::open(artifacts.clone()))

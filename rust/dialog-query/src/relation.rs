@@ -1,49 +1,68 @@
-pub use crate::artifact::{Artifact, Attribute, Instruction};
-pub use crate::claim::Claim;
-use crate::claim::Revert;
-pub use crate::session::transaction::{Edit, Transaction};
-pub use crate::{Entity, Value};
-use serde::{Deserialize, Serialize};
-use std::ops::Not;
+//! Read-side relation type representing a query result with full metadata.
 
-/// A relation represents an entity-attribute-value triple
+pub use crate::artifact::{Artifact, Attribute, Cause, Entity, Value};
+pub use crate::attribute::Cardinality;
+use serde::{Deserialize, Serialize};
+
+/// A relation represents a read-side query result with full metadata.
 ///
-/// This is the fundamental unit of data in the dialog-query system.
-/// Relations follow the EAV pattern:
-/// - `the` - attribute (predicate/property)
-/// - `of` - entity (subject)
-/// - `is` - value (object)
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// This is the result type for relation queries. It carries the attribute
+/// metadata (namespace, name, cardinality) alongside the entity-value data.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Relation {
-    /// The attribute (predicate) - what property is being asserted
-    pub the: Attribute,
-    /// The entity (subject) - what entity the property applies to
+    /// The namespace of the attribute (e.g., "user")
+    pub namespace: String,
+    /// The name of the attribute within the namespace (e.g., "name")
+    pub name: String,
+    /// The entity (subject)
     pub of: Entity,
-    /// The value (object) - what value the property has
+    /// The value (object)
     pub is: Value,
+    /// The cause (provenance hash) of this relation
+    pub cause: Cause,
+    /// The cardinality of this attribute
+    pub cardinality: Cardinality,
 }
 
 impl Relation {
-    /// Create a new relation from its components
-    pub fn new(the: Attribute, of: Entity, is: Value) -> Self {
-        Self { the, of, is }
+    /// Get the combined attribute string (e.g., "user/name")
+    pub fn the(&self) -> Attribute {
+        format!("{}/{}", self.namespace, self.name)
+            .parse()
+            .expect("Failed to parse combined attribute")
+    }
+
+    /// Get the entity of this relation
+    pub fn of(&self) -> &Entity {
+        &self.of
+    }
+
+    /// Get the value of this relation
+    pub fn is(&self) -> &Value {
+        &self.is
+    }
+
+    /// Get the cause (provenance hash) of this relation
+    pub fn cause(&self) -> &Cause {
+        &self.cause
     }
 }
 
-impl Claim for Relation {
-    fn assert(self, transaction: &mut Transaction) {
-        transaction.associate(self);
-    }
+impl From<&Artifact> for Relation {
+    fn from(artifact: &Artifact) -> Self {
+        let attr_str = artifact.the.to_string();
+        let (namespace, name) = attr_str
+            .split_once('/')
+            .map(|(ns, n)| (ns.to_string(), n.to_string()))
+            .unwrap_or_else(|| (String::new(), attr_str));
 
-    fn retract(self, transaction: &mut Transaction) {
-        transaction.dissociate(self);
-    }
-}
-
-impl Not for Relation {
-    type Output = Revert<Relation>;
-
-    fn not(self) -> Self::Output {
-        self.revert()
+        Relation {
+            namespace,
+            name,
+            of: artifact.of.clone(),
+            is: artifact.is.clone(),
+            cause: artifact.cause.clone().unwrap_or(Cause([0; 32])),
+            cardinality: Cardinality::Many,
+        }
     }
 }

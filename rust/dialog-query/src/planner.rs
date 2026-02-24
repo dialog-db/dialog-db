@@ -448,31 +448,36 @@ mod tests {
 
     #[dialog_common::test]
     fn test_join_plan_with_two_fact_applications() {
-        use crate::application::FactApplication;
-        use crate::{Cardinality, Term, Value};
-        use dialog_artifacts::Attribute;
+        use crate::application::RelationApplication;
+        use crate::predicate::RelationDescriptor;
+        use crate::{Application, Cardinality, Term, Value};
 
         // Create two fact applications that will be joined
         // First: (person/name, of: ?person, is: ?name) - find person's name
-        let fact1 = FactApplication::new(
-            Term::Constant(Attribute::try_from("person/name".to_string()).unwrap()),
+        let fact1 = RelationApplication::new(
+            Term::Constant("person".to_string()),
+            Term::Constant("name".to_string()),
             Term::var("person"),
             Term::var("name"),
             Term::var("cause"),
-            Cardinality::One,
+            Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
         // Second: (person/age, of: ?person, is: ?age) - find person's age
-        let fact2 = FactApplication::new(
-            Term::Constant(Attribute::try_from("person/age".to_string()).unwrap()),
+        let fact2 = RelationApplication::new(
+            Term::Constant("person".to_string()),
+            Term::Constant("age".to_string()),
             Term::var("person"),
             Term::var("age"),
             Term::var("cause"),
-            Cardinality::One,
+            Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
         // Create premises from the applications
-        let premises = vec![Premise::from(fact1), Premise::from(fact2)];
+        let premises = vec![
+            Premise::Apply(Application::Relation(Box::new(fact1))),
+            Premise::Apply(Application::Relation(Box::new(fact2))),
+        ];
 
         // Create a join planner and plan with empty scope
         let plan = Join::try_from(premises).expect("Planning should succeed");
@@ -496,31 +501,37 @@ mod tests {
 
     #[dialog_common::test]
     fn test_join_plan_execution_order() {
-        use crate::application::FactApplication;
-        use crate::{Cardinality, Term};
-        use dialog_artifacts::{Attribute, Entity};
+        use crate::application::RelationApplication;
+        use crate::predicate::RelationDescriptor;
+        use crate::{Application, Cardinality, Term};
+        use dialog_artifacts::Entity;
 
         // Create two fact applications where one depends on the other
         // First: (person/name, of: urn:alice, is: ?name) - alice's name is bound
-        let fact1 = FactApplication::new(
-            Term::Constant(Attribute::try_from("person/name".to_string()).unwrap()),
+        let fact1 = RelationApplication::new(
+            Term::Constant("person".to_string()),
+            Term::Constant("name".to_string()),
             Term::Constant(Entity::try_from("urn:alice".to_string()).unwrap()),
             Term::var("name"),
             Term::var("cause"),
-            Cardinality::One,
+            Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
         // Second: (greeting/text, of: ?name, is: ?greeting) - uses ?name from first
         // Note: ?name here refers to the Entity value, not Attribute
-        let fact2 = FactApplication::new(
-            Term::Constant(Attribute::try_from("greeting/text".to_string()).unwrap()),
+        let fact2 = RelationApplication::new(
+            Term::Constant("greeting".to_string()),
+            Term::Constant("text".to_string()),
             Term::var("name"),
             Term::var("greeting"),
             Term::var("cause"),
-            Cardinality::One,
+            Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
-        let premises = vec![Premise::from(fact1), Premise::from(fact2)];
+        let premises = vec![
+            Premise::Apply(Application::Relation(Box::new(fact1))),
+            Premise::Apply(Application::Relation(Box::new(fact2))),
+        ];
 
         let plan = Join::try_from(premises).expect("Planning should succeed");
 
@@ -534,9 +545,10 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_join_plan_query_execution() -> anyhow::Result<()> {
-        use crate::application::FactApplication;
+        use crate::application::RelationApplication;
+        use crate::predicate::RelationDescriptor;
         use crate::session::Session;
-        use crate::{Cardinality, Relation, Term, Value};
+        use crate::{Application, Assertion, Cardinality, Term, Value};
         use dialog_artifacts::{Artifacts, Attribute, Entity};
         use dialog_storage::MemoryStorageBackend;
 
@@ -550,22 +562,22 @@ mod tests {
 
         session
             .transact(vec![
-                Relation {
+                Assertion {
                     the: "person/name".parse::<Attribute>()?,
                     of: alice.clone(),
                     is: Value::String("Alice".to_string()),
                 },
-                Relation {
+                Assertion {
                     the: "person/age".parse::<Attribute>()?,
                     of: alice.clone(),
                     is: Value::UnsignedInt(25),
                 },
-                Relation {
+                Assertion {
                     the: "person/name".parse::<Attribute>()?,
                     of: bob.clone(),
                     is: Value::String("Bob".to_string()),
                 },
-                Relation {
+                Assertion {
                     the: "person/age".parse::<Attribute>()?,
                     of: bob.clone(),
                     is: Value::UnsignedInt(30),
@@ -574,23 +586,28 @@ mod tests {
             .await?;
 
         // Create a join query: find person's name and age
-        let fact1 = FactApplication::new(
-            Term::Constant(Attribute::try_from("person/name".to_string()).unwrap()),
+        let fact1 = RelationApplication::new(
+            Term::Constant("person".to_string()),
+            Term::Constant("name".to_string()),
             Term::var("person"),
             Term::var("name"),
             Term::var("cause"),
-            Cardinality::One,
+            Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
-        let fact2 = FactApplication::new(
-            Term::Constant(Attribute::try_from("person/age".to_string()).unwrap()),
+        let fact2 = RelationApplication::new(
+            Term::Constant("person".to_string()),
+            Term::Constant("age".to_string()),
             Term::var("person"),
             Term::var("age"),
             Term::var("cause"),
-            Cardinality::One,
+            Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
-        let premises = vec![Premise::from(fact1), Premise::from(fact2)];
+        let premises = vec![
+            Premise::Apply(Application::Relation(Box::new(fact1))),
+            Premise::Apply(Application::Relation(Box::new(fact2))),
+        ];
         let plan = Join::try_from(premises)?;
 
         // Execute the query

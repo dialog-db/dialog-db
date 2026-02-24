@@ -1,4 +1,4 @@
-pub use super::relation::Relation;
+pub use super::assertion::Assertion;
 pub use crate::artifact::{Artifact, Attribute, Instruction};
 pub use crate::session::transaction::{Edit, Transaction, TransactionError};
 use std::ops::Not;

@@ -1,9 +1,9 @@
-use super::fact::CONCEPT_OVERHEAD;
 use crate::DeductiveRule;
 use crate::attribute::AttributeSchema;
 use crate::context::new_context;
 use crate::planner::{Fork, Join};
 use crate::predicate::ConceptDescriptor;
+use crate::schema::CONCEPT_OVERHEAD;
 use crate::selection::{Answer, Evidence};
 use crate::{Environment, EvaluationContext, Parameters, Schema, Source, Term, Value, try_stream};
 use std::fmt::Display;
@@ -296,7 +296,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_concept_application_query_execution() -> anyhow::Result<()> {
-        use crate::{Relation, Session};
+        use crate::{Assertion, Session};
         use dialog_artifacts::{Artifacts, Attribute as ArtifactAttribute, Entity};
         use dialog_storage::MemoryStorageBackend;
 
@@ -310,22 +310,22 @@ mod tests {
 
         session
             .transact(vec![
-                Relation {
+                Assertion {
                     the: "person/name".parse::<ArtifactAttribute>()?,
                     of: alice.clone(),
                     is: Value::String("Alice".to_string()),
                 },
-                Relation {
+                Assertion {
                     the: "person/age".parse::<ArtifactAttribute>()?,
                     of: alice.clone(),
                     is: Value::UnsignedInt(25),
                 },
-                Relation {
+                Assertion {
                     the: "person/name".parse::<ArtifactAttribute>()?,
                     of: bob.clone(),
                     is: Value::String("Bob".to_string()),
                 },
-                Relation {
+                Assertion {
                     the: "person/age".parse::<ArtifactAttribute>()?,
                     of: bob.clone(),
                     is: Value::UnsignedInt(30),
@@ -395,7 +395,7 @@ mod tests {
     #[dialog_common::test]
     async fn test_concept_application_with_bound_entity_query() -> anyhow::Result<()> {
         use crate::context::new_context;
-        use crate::{Relation, Session};
+        use crate::{Assertion, Session};
         use dialog_artifacts::{Artifacts, Attribute as ArtifactAttribute, Entity};
         use dialog_storage::MemoryStorageBackend;
 
@@ -408,12 +408,12 @@ mod tests {
 
         session
             .transact(vec![
-                Relation {
+                Assertion {
                     the: "person/name".parse::<ArtifactAttribute>()?,
                     of: alice.clone(),
                     is: Value::String("Alice".to_string()),
                 },
-                Relation {
+                Assertion {
                     the: "person/age".parse::<ArtifactAttribute>()?,
                     of: alice.clone(),
                     is: Value::UnsignedInt(25),
@@ -577,19 +577,23 @@ mod tests {
 
     #[dialog_common::test]
     fn test_premise_construction() {
-        use crate::predicate::fact::FactSelector;
+        use crate::application::relation::RelationApplication;
         use crate::{Application, Premise};
 
-        let fact = FactSelector::select()
-            .the("person/name")
-            .of(Term::var("person"))
-            .is(Value::String("Alice".to_string()));
+        let relation = RelationApplication::new(
+            Term::Constant("person".into()),
+            Term::Constant("name".into()),
+            Term::var("person"),
+            Term::Constant(Value::String("Alice".to_string())),
+            Term::blank(),
+            None,
+        );
 
-        let premise = Premise::from(fact);
+        let premise = Premise::from(relation);
 
         match premise {
             Premise::Apply(Application::Relation(_)) => {
-                // Expected case - FactSelector now produces RelationApplication
+                // Expected case - RelationApplication produces Relation premise
             }
             _ => panic!("Expected Relation application"),
         }
@@ -641,13 +645,19 @@ mod tests {
     #[dialog_common::test]
     fn test_application_variants() {
         use crate::Application;
+        use crate::application::relation::RelationApplication;
         use crate::predicate::concept::Attributes;
-        use crate::predicate::fact::FactSelector;
 
-        // Test Relation application (FactSelector now produces RelationApplication)
-        let fact = FactSelector::select().the("test/attr");
-        let relation: crate::application::RelationApplication = fact.into();
-        let app = Application::Relation(relation);
+        // Test Relation application
+        let relation = RelationApplication::new(
+            Term::Constant("test".into()),
+            Term::Constant("attr".into()),
+            Term::blank(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
+        let app = Application::Relation(Box::new(relation));
 
         match app {
             Application::Relation(_) => {
@@ -675,12 +685,18 @@ mod tests {
 
     #[dialog_common::test]
     fn test_negation_construction() {
-        use crate::predicate::fact::FactSelector;
+        use crate::application::relation::RelationApplication;
         use crate::{Application, Negation};
 
-        let fact = FactSelector::select().the("test/attr");
-        let relation: crate::application::RelationApplication = fact.into();
-        let app = Application::Relation(relation);
+        let relation = RelationApplication::new(
+            Term::Constant("test".into()),
+            Term::Constant("attr".into()),
+            Term::blank(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
+        let app = Application::Relation(Box::new(relation));
         let negation = Negation(app);
 
         // Test that negation wraps the application
@@ -696,7 +712,7 @@ mod tests {
     async fn test_concept_application_respects_constant_entity_parameter() -> anyhow::Result<()> {
         use crate::application::concept::ConceptApplication;
         use crate::predicate::concept::ConceptDescriptor;
-        use crate::{Relation, Session, Term, Value};
+        use crate::{Assertion, Session, Term, Value};
         use dialog_artifacts::{Artifacts, Attribute, Entity};
         use dialog_storage::MemoryStorageBackend;
 
@@ -709,12 +725,12 @@ mod tests {
 
         session
             .transact(vec![
-                Relation {
+                Assertion {
                     the: "person/name".parse::<Attribute>()?,
                     of: alice.clone(),
                     is: Value::String("Alice".to_string()),
                 },
-                Relation {
+                Assertion {
                     the: "person/name".parse::<Attribute>()?,
                     of: bob.clone(),
                     is: Value::String("Bob".to_string()),
@@ -766,7 +782,7 @@ mod tests {
     {
         use crate::application::concept::ConceptApplication;
         use crate::predicate::concept::ConceptDescriptor;
-        use crate::{Relation, Session, Term, Value};
+        use crate::{Assertion, Session, Term, Value};
         use dialog_artifacts::{Artifacts, Attribute, Entity};
         use dialog_storage::MemoryStorageBackend;
 
@@ -779,22 +795,22 @@ mod tests {
 
         session
             .transact(vec![
-                Relation {
+                Assertion {
                     the: "person/name".parse::<Attribute>()?,
                     of: alice.clone(),
                     is: Value::String("Alice".to_string()),
                 },
-                Relation {
+                Assertion {
                     the: "person/age".parse::<Attribute>()?,
                     of: alice.clone(),
                     is: Value::UnsignedInt(25),
                 },
-                Relation {
+                Assertion {
                     the: "person/name".parse::<Attribute>()?,
                     of: bob.clone(),
                     is: Value::String("Bob".to_string()),
                 },
-                Relation {
+                Assertion {
                     the: "person/age".parse::<Attribute>()?,
                     of: bob.clone(),
                     is: Value::UnsignedInt(30),
@@ -858,7 +874,7 @@ mod tests {
     {
         use crate::application::concept::ConceptApplication;
         use crate::predicate::concept::ConceptDescriptor;
-        use crate::{Relation, Session, Term, Value};
+        use crate::{Assertion, Session, Term, Value};
         use dialog_artifacts::{Artifacts, Attribute, Entity};
         use dialog_storage::MemoryStorageBackend;
 
@@ -871,22 +887,22 @@ mod tests {
 
         session
             .transact(vec![
-                Relation {
+                Assertion {
                     the: "person/name".parse::<Attribute>()?,
                     of: alice.clone(),
                     is: Value::String("Alice".to_string()),
                 },
-                Relation {
+                Assertion {
                     the: "person/age".parse::<Attribute>()?,
                     of: alice.clone(),
                     is: Value::UnsignedInt(25),
                 },
-                Relation {
+                Assertion {
                     the: "person/name".parse::<Attribute>()?,
                     of: bob.clone(),
                     is: Value::String("Bob".to_string()),
                 },
-                Relation {
+                Assertion {
                     the: "person/age".parse::<Attribute>()?,
                     of: bob.clone(),
                     is: Value::UnsignedInt(30),

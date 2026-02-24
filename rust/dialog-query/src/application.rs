@@ -1,7 +1,5 @@
 /// Concept application for querying entities that match a concept pattern
 pub mod concept;
-/// Fact application for direct fact selection from the knowledge base
-pub mod fact;
 /// Formula application for computed values
 pub mod formula;
 /// Relation application for queries with separate namespace and name
@@ -13,7 +11,6 @@ pub use crate::error::{PlanError, QueryResult};
 pub use crate::premise::{Negation, Premise};
 pub use crate::{Environment, EvaluationContext, Source};
 pub use concept::ConceptApplication;
-pub use fact::FactApplication;
 pub use formula::FormulaApplication;
 use futures_util::future::Either;
 pub use relation::RelationApplication;
@@ -22,16 +19,11 @@ pub use std::fmt::Display;
 /// Different types of applications that can query the knowledge base.
 /// Constraints are separate `Premise` variants since they express relationships
 /// between variables rather than querying the knowledge base.
-///
-/// TODO: Large enum variant - FactApplication (448 bytes) is much larger than other variants.
-/// Consider boxing to reduce memory footprint.
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Application {
-    /// Direct fact selection from the knowledge base
-    Fact(FactApplication),
-    /// Relation query with separate namespace and name
-    Relation(RelationApplication),
+    /// Relation query with separate namespace and name.
+    /// Boxed to reduce enum size (RelationApplication is ~432 bytes vs ~96 for other variants).
+    Relation(Box<RelationApplication>),
     /// Concept realization - matching entities against concept patterns
     Concept(ConceptApplication),
     /// Application of a formula for computation
@@ -44,7 +36,6 @@ impl Application {
     /// Returns None if the application cannot be executed without more constraints.
     pub fn estimate(&self, env: &crate::Environment) -> Option<usize> {
         match self {
-            Application::Fact(application) => application.estimate(env),
             Application::Relation(application) => application.estimate(env),
             Application::Concept(application) => application.estimate(env),
             Application::Formula(application) => application.estimate(env),
@@ -57,25 +48,19 @@ impl Application {
         context: EvaluationContext<S, M>,
     ) -> impl crate::selection::Answers {
         match self {
-            Application::Fact(application) => Either::Left(Either::Left(
-                application.evaluate_with_provenance(context.source, context.selection),
-            )),
-            Application::Relation(application) => Either::Left(Either::Right(
+            Application::Relation(application) => Either::Left(Either::Left(
                 application.evaluate_with_provenance(context.source, context.selection),
             )),
             Application::Concept(application) => {
-                Either::Right(Either::Left(application.clone().evaluate(context)))
+                Either::Left(Either::Right(application.clone().evaluate(context)))
             }
-            Application::Formula(application) => {
-                Either::Right(Either::Right(application.evaluate(context)))
-            }
+            Application::Formula(application) => Either::Right(application.evaluate(context)),
         }
     }
 
     /// Returns the parameter bindings for this application
     pub fn parameters(&self) -> crate::Parameters {
         match self {
-            Application::Fact(application) => application.parameters(),
             Application::Relation(application) => application.parameters(),
             Application::Concept(application) => application.parameters(),
             Application::Formula(application) => application.parameters(),
@@ -85,7 +70,6 @@ impl Application {
     /// Returns the schema describing this application's parameters
     pub fn schema(&self) -> crate::Schema {
         match self {
-            Application::Fact(application) => application.schema(),
             Application::Relation(application) => application.schema(),
             Application::Concept(application) => application.schema(),
             Application::Formula(application) => application.schema(),
@@ -105,12 +89,6 @@ impl Application {
     }
 }
 
-impl From<FactApplication> for Application {
-    fn from(selector: FactApplication) -> Self {
-        Application::Fact(selector)
-    }
-}
-
 impl From<ConceptApplication> for Application {
     fn from(selector: ConceptApplication) -> Self {
         Application::Concept(selector)
@@ -126,7 +104,6 @@ impl From<FormulaApplication> for Application {
 impl Display for Application {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Application::Fact(application) => Display::fmt(application, f),
             Application::Relation(application) => Display::fmt(application, f),
             Application::Concept(application) => Display::fmt(application, f),
             Application::Formula(application) => Display::fmt(application, f),

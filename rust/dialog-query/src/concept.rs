@@ -5,7 +5,7 @@ pub use with::{With, WithMatch, WithTerms};
 use crate::application::ConceptApplication;
 
 #[cfg(test)]
-use crate::Relation;
+use crate::Assertion;
 pub use crate::dsl::Predicate;
 pub use crate::predicate::concept::Attributes;
 use crate::query::{Output, Query, Source};
@@ -201,11 +201,12 @@ pub trait ConceptProof: ConditionalSend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Answer;
+    use crate::application::relation::RelationApplication;
     use crate::artifact::Value;
     use crate::artifact::{Artifacts, Attribute as ArtifactAttribute};
     use crate::attribute::Attribute as _;
     use crate::term::Term;
-    use crate::{Answer, Fact};
     use crate::{Claim, Concept, Session, Transaction};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
@@ -299,19 +300,19 @@ mod tests {
     }
 
     impl IntoIterator for Person {
-        type Item = Relation;
-        type IntoIter = std::vec::IntoIter<Relation>;
+        type Item = Assertion;
+        type IntoIter = std::vec::IntoIter<Assertion>;
 
         fn into_iter(self) -> Self::IntoIter {
             use crate::types::Scalar;
 
             vec![
-                Relation::new(
+                Assertion::new(
                     "person/name".parse().expect("Failed to parse attribute"),
                     self.this.clone(),
                     self.name.as_value(),
                 ),
-                Relation::new(
+                Assertion::new(
                     "person/age".parse().expect("Failed to parse attribute"),
                     self.this.clone(),
                     self.age.as_value(),
@@ -324,13 +325,13 @@ mod tests {
     impl Claim for Person {
         fn assert(self, transaction: &mut Transaction) {
             use crate::types::Scalar;
-            transaction.associate(Relation {
+            transaction.associate(Assertion {
                 the: "person/name".parse().expect("Failed to parse attribute"),
                 of: self.this.clone(),
                 is: self.name.as_value(),
             });
 
-            transaction.associate(Relation {
+            transaction.associate(Assertion {
                 the: "person/age".parse().expect("Failed to parse attribute"),
                 of: self.this.clone(),
                 is: self.age.as_value(),
@@ -339,13 +340,13 @@ mod tests {
 
         fn retract(self, transaction: &mut Transaction) {
             use crate::types::Scalar;
-            transaction.dissociate(Relation {
+            transaction.dissociate(Assertion {
                 the: "person/name".parse().expect("Failed to parse attribute"),
                 of: self.this.clone(),
                 is: self.name.as_value(),
             });
 
-            transaction.dissociate(Relation {
+            transaction.dissociate(Assertion {
                 the: "person/age".parse().expect("Failed to parse attribute"),
                 of: self.this.clone(),
                 is: self.age.as_value(),
@@ -667,7 +668,7 @@ mod tests {
         let alice = Entity::new()?;
 
         // Create minimal test data
-        let claims = vec![Relation {
+        let claims = vec![Assertion {
             the: "person/name".parse::<ArtifactAttribute>()?,
             of: alice.clone(),
             is: Value::String("Alice".to_string()),
@@ -677,11 +678,14 @@ mod tests {
         session.transact(claims).await?;
 
         // Test: Search for non-existent person using individual fact selector
-        let missing_query = Fact::<Value>::select()
-            .the("person/name")
-            .of(Term::var("person"))
-            .is(Value::String("NonExistent".to_string()))
-            .compile()?;
+        let missing_query = RelationApplication::new(
+            Term::Constant("person".into()),
+            Term::Constant("name".into()),
+            Term::var("person"),
+            Term::Constant(Value::String("NonExistent".to_string())),
+            Term::blank(),
+            None,
+        );
 
         let session = Session::open(artifacts);
         let no_results = missing_query.query(&session).try_vec().await?;
@@ -734,12 +738,12 @@ mod tests {
                 name: employee::Name("Bob".to_string()),
                 role: employee::Role("janitor".to_string()),
             })
-            .assert(Relation {
+            .assert(Assertion {
                 the: "employee/name".parse::<ArtifactAttribute>()?,
                 of: mallory.clone(),
                 is: Value::String("Mallory".to_string()),
             })
-            .assert(Relation {
+            .assert(Assertion {
                 the: "employee/role".parse::<ArtifactAttribute>()?,
                 of: mallory.clone(),
                 is: Value::String("Hacker".to_string()),
@@ -901,7 +905,7 @@ mod tests {
 
         // Assert a relation
         let mut session = Session::open(artifacts.clone());
-        let name_relation = Relation {
+        let name_relation = Assertion {
             the: name_attr.clone(),
             of: alice.clone(),
             is: Value::String("Alice".to_string()),
@@ -993,15 +997,23 @@ mod tests {
         let mut session = Session::open(store.clone());
         session.transact(vec![alice.clone()]).await?;
 
-        let name_query = Fact::<Value>::select()
-            .the("person-attr-concept/name")
-            .of(alice_id.clone())
-            .compile()?;
+        let name_query = RelationApplication::new(
+            Term::Constant("person-attr-concept".into()),
+            Term::Constant("name".into()),
+            Term::Constant(alice_id.clone()),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
-        let birthday_query = Fact::<Value>::select()
-            .the("person-attr-concept/birthday")
-            .of(alice_id.clone())
-            .compile()?;
+        let birthday_query = RelationApplication::new(
+            Term::Constant("person-attr-concept".into()),
+            Term::Constant("birthday".into()),
+            Term::Constant(alice_id.clone()),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
         let name_facts: Vec<_> = name_query
             .query(&Session::open(store.clone()))
@@ -1016,19 +1028,8 @@ mod tests {
         assert_eq!(name_facts.len(), 1);
         assert_eq!(birthday_facts.len(), 1);
 
-        match &name_facts[0] {
-            Fact::Assertion { is, .. } => {
-                assert_eq!(*is, Value::String("Alice".to_string()));
-            }
-            _ => panic!("Expected Assertion"),
-        }
-
-        match &birthday_facts[0] {
-            Fact::Assertion { is, .. } => {
-                assert_eq!(*is, Value::UnsignedInt(19830703));
-            }
-            _ => panic!("Expected Assertion"),
-        }
+        assert_eq!(name_facts[0].is, Value::String("Alice".to_string()));
+        assert_eq!(birthday_facts[0].is, Value::UnsignedInt(19830703));
 
         Ok(())
     }
@@ -1147,20 +1148,32 @@ mod tests {
         let mut session = Session::open(store.clone());
         session.transact(vec![alice_with_birthday]).await?;
 
-        let name_query = Fact::<Value>::select()
-            .the("person-attr-concept/name")
-            .of(alice_id.clone())
-            .compile()?;
+        let name_query = RelationApplication::new(
+            Term::Constant("person-attr-concept".into()),
+            Term::Constant("name".into()),
+            Term::Constant(alice_id.clone()),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
-        let email_query = Fact::<Value>::select()
-            .the("person-attr-concept/email")
-            .of(alice_id.clone())
-            .compile()?;
+        let email_query = RelationApplication::new(
+            Term::Constant("person-attr-concept".into()),
+            Term::Constant("email".into()),
+            Term::Constant(alice_id.clone()),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
-        let birthday_query = Fact::<Value>::select()
-            .the("person-attr-concept/birthday")
-            .of(alice_id.clone())
-            .compile()?;
+        let birthday_query = RelationApplication::new(
+            Term::Constant("person-attr-concept".into()),
+            Term::Constant("birthday".into()),
+            Term::Constant(alice_id.clone()),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
         let name_facts: Vec<_> = name_query
             .query(&Session::open(store.clone()))
@@ -1205,15 +1218,23 @@ mod tests {
         let mut session = Session::open(store.clone());
         session.transact(vec![!alice]).await?;
 
-        let name_query = Fact::<Value>::select()
-            .the("person-attr-concept/name")
-            .of(alice_id.clone())
-            .compile()?;
+        let name_query = RelationApplication::new(
+            Term::Constant("person-attr-concept".into()),
+            Term::Constant("name".into()),
+            Term::Constant(alice_id.clone()),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
-        let birthday_query = Fact::<Value>::select()
-            .the("person-attr-concept/birthday")
-            .of(alice_id)
-            .compile()?;
+        let birthday_query = RelationApplication::new(
+            Term::Constant("person-attr-concept".into()),
+            Term::Constant("birthday".into()),
+            Term::Constant(alice_id),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
 
         let name_facts: Vec<_> = name_query
             .query(&Session::open(store.clone()))

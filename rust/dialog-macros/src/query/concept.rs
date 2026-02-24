@@ -297,9 +297,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
             )
         });
 
-        // Generate Relation for IntoIterator implementation
+        // Generate Assertion for IntoIterator implementation
         instance_relations.push(quote! {
-            dialog_query::Relation::new(
+            dialog_query::Assertion::new(
                 <#field_type as dialog_query::Attribute>::selector(),
                 self.this.clone(),
                 dialog_query::types::Scalar::as_value(<#field_type as dialog_query::Attribute>::value(&self.#field_name)),
@@ -531,8 +531,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         // Implement IntoIterator to convert concept into relations
         impl IntoIterator for #struct_name {
-            type Item = dialog_query::Relation;
-            type IntoIter = std::vec::IntoIter<dialog_query::Relation>;
+            type Item = dialog_query::Assertion;
+            type IntoIter = std::vec::IntoIter<dialog_query::Assertion>;
 
             fn into_iter(self) -> Self::IntoIter {
                 vec![

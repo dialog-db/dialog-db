@@ -399,29 +399,28 @@ where
 /// This macro provides the most concise way to create rule conditions:
 ///
 /// ```rust
-/// use dialog_query::{when, When, Term, predicate, artifact::Value};
+/// use dialog_query::{when, When, Term, artifact::Value};
+/// use dialog_query::application::relation::RelationApplication;
 ///
 /// fn example() -> impl When {
-///     let selector1 = predicate::FactSelector::new()
-///         .the("attr1".parse::<dialog_query::artifact::Attribute>().unwrap())
-///         .of(Term::var("entity"))
-///         .is(Term::from(Value::String("value1".to_string())))
-///         .compile()
-///         .unwrap();
-///     let selector2 = predicate::FactSelector::new()
-///         .the("attr2".parse::<dialog_query::artifact::Attribute>().unwrap())
-///         .of(Term::var("entity"))
-///         .is(Term::var("value2"))
-///         .compile()
-///         .unwrap();
-///     let selector3 = predicate::FactSelector::new()
-///         .the("attr3".parse::<dialog_query::artifact::Attribute>().unwrap())
-///         .of(Term::var("entity"))
-///         .is(Term::var("value3"))
-///         .compile()
-///         .unwrap();
+///     let r1 = RelationApplication::new(
+///         Term::Constant("ns".into()),
+///         Term::Constant("attr1".into()),
+///         Term::var("entity"),
+///         Term::from(Value::String("value1".to_string())),
+///         Term::blank(),
+///         None,
+///     );
+///     let r2 = RelationApplication::new(
+///         Term::Constant("ns".into()),
+///         Term::Constant("attr2".into()),
+///         Term::var("entity"),
+///         Term::var("value2"),
+///         Term::blank(),
+///         None,
+///     );
 ///
-///     when![selector1, selector2, selector3]
+///     when![r1, r2]
 /// }
 /// ```
 #[macro_export]
@@ -578,21 +577,21 @@ mod tests {
     }
 
     impl IntoIterator for Person {
-        type Item = crate::Relation;
-        type IntoIter = std::vec::IntoIter<crate::Relation>;
+        type Item = crate::Assertion;
+        type IntoIter = std::vec::IntoIter<crate::Assertion>;
 
         fn into_iter(self) -> Self::IntoIter {
             use crate::types::Scalar;
 
             vec![
-                crate::Relation::new(
+                crate::Assertion::new(
                     "person/name"
                         .parse()
                         .expect("Failed to parse person/name attribute"),
                     self.this.clone(),
                     self.name.as_value(),
                 ),
-                crate::Relation::new(
+                crate::Assertion::new(
                     "person/age"
                         .parse()
                         .expect("Failed to parse person/age attribute"),
@@ -607,7 +606,7 @@ mod tests {
     impl crate::claim::Claim for Person {
         fn assert(self, transaction: &mut crate::Transaction) {
             use crate::types::Scalar;
-            crate::Relation::new(
+            crate::Assertion::new(
                 "person/name"
                     .parse()
                     .expect("Failed to parse person/name attribute"),
@@ -615,7 +614,7 @@ mod tests {
                 self.name.as_value(),
             )
             .assert(transaction);
-            crate::Relation::new(
+            crate::Assertion::new(
                 "person/age"
                     .parse()
                     .expect("Failed to parse person/age attribute"),
@@ -627,7 +626,7 @@ mod tests {
 
         fn retract(self, transaction: &mut crate::Transaction) {
             use crate::types::Scalar;
-            crate::Relation::new(
+            crate::Assertion::new(
                 "person/name"
                     .parse()
                     .expect("Failed to parse person/name attribute"),
@@ -635,7 +634,7 @@ mod tests {
                 self.name.as_value(),
             )
             .retract(transaction);
-            crate::Relation::new(
+            crate::Assertion::new(
                 "person/age"
                     .parse()
                     .expect("Failed to parse person/age attribute"),
