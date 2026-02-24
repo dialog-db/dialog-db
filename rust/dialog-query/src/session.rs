@@ -136,7 +136,7 @@ impl<S: Store> Session<S> {
         W: crate::rule::When,
     {
         let query = M::default();
-        let concept = query.to_concept();
+        let concept = query.to_predicate();
         let when = rule(query).into_premises();
         let premises = when.into_vec();
         let rule = crate::predicate::DeductiveRule::new(concept, premises)?;
@@ -375,17 +375,19 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::application::relation::RelationApplication;
+    use crate::artifact::{Artifacts, Entity, Value};
+    use crate::query::{Output, Source};
+    use crate::the;
     use crate::{
-        Assertion, AttributeDescriptor, Parameters, Type,
-        predicate::{self, concept::Attributes},
+        Assertion, AttributeDescriptor, Cardinality, Concept, Match, Parameters, Term, Type,
+        predicate::concept::ConceptPredicate,
     };
 
     use super::*;
 
     #[dialog_common::test]
     async fn test_session() -> anyhow::Result<()> {
-        use crate::Term;
-        use crate::artifact::{Artifacts, Attribute as ArtifactAttribute, Entity, Value};
+        use crate::artifact::Attribute as ArtifactAttribute;
         use dialog_storage::MemoryStorageBackend;
 
         let backend = MemoryStorageBackend::default();
@@ -425,20 +427,26 @@ mod tests {
             ])
             .await?;
 
-        let person = predicate::ConceptDescriptor::Dynamic {
-            description: String::new(),
-            attributes: [
-                (
-                    "name",
-                    AttributeDescriptor::new("person", "name", "person name", Type::String),
+        let person = ConceptPredicate::from([
+            (
+                "name",
+                AttributeDescriptor::new(
+                    the!("person/name"),
+                    "person name",
+                    Cardinality::One,
+                    Some(Type::String),
                 ),
-                (
-                    "age",
-                    AttributeDescriptor::new("person", "age", "person age", Type::UnsignedInt),
+            ),
+            (
+                "age",
+                AttributeDescriptor::new(
+                    the!("person/age"),
+                    "person age",
+                    Cardinality::One,
+                    Some(Type::UnsignedInt),
                 ),
-            ]
-            .into(),
-        };
+            ),
+        ]);
 
         let name = Term::var("name");
         let age = Term::var("age");
@@ -482,24 +490,28 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_concept_planning_mixed_parameters() -> anyhow::Result<()> {
-        use crate::Term;
-        use crate::artifact::Type;
-
         // Set up concept with attributes
         let mut attributes = HashMap::new();
         attributes.insert(
             "name".into(),
-            AttributeDescriptor::new("person", "name", "person name", Type::String),
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "person name",
+                Cardinality::One,
+                Some(Type::String),
+            ),
         );
         attributes.insert(
             "age".into(),
-            AttributeDescriptor::new("person", "age", "person age", Type::UnsignedInt),
+            AttributeDescriptor::new(
+                the!("person/age"),
+                "person age",
+                Cardinality::One,
+                Some(Type::UnsignedInt),
+            ),
         );
 
-        let person = predicate::ConceptDescriptor::Dynamic {
-            description: String::new(),
-            attributes: Attributes::from(attributes),
-        };
+        let person = ConceptPredicate::from(attributes);
 
         // Mixed case - valid parameters with some matching attributes (should succeed)
         let mut mixed_params = Parameters::new();
@@ -513,28 +525,32 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_assert_concept() -> anyhow::Result<()> {
-        use crate::Term;
-        use crate::artifact::{Artifacts, Value};
         use dialog_storage::MemoryStorageBackend;
 
         let backend = MemoryStorageBackend::default();
         let store = Artifacts::anonymous(backend).await?;
         let mut session = Session::open(store);
 
-        let person = predicate::ConceptDescriptor::Dynamic {
-            description: String::new(),
-            attributes: [
-                (
-                    "name",
-                    AttributeDescriptor::new("person", "name", "person name", Type::String),
+        let person = ConceptPredicate::from([
+            (
+                "name",
+                AttributeDescriptor::new(
+                    the!("person/name"),
+                    "person name",
+                    Cardinality::One,
+                    Some(Type::String),
                 ),
-                (
-                    "age",
-                    AttributeDescriptor::new("person", "age", "person age", Type::UnsignedInt),
+            ),
+            (
+                "age",
+                AttributeDescriptor::new(
+                    the!("person/age"),
+                    "person age",
+                    Cardinality::One,
+                    Some(Type::UnsignedInt),
                 ),
-            ]
-            .into(),
-        };
+            ),
+        ]);
 
         let alice = person
             .create()
@@ -592,10 +608,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_rule() -> anyhow::Result<()> {
-        use crate::artifact::{Artifacts, Entity};
-        use crate::query::Output;
-        use crate::rule::Match;
-        use crate::{Concept, Term};
         use dialog_storage::MemoryStorageBackend;
 
         mod employee {
@@ -639,7 +651,7 @@ mod tests {
 
         // employee can be derived from the stuff concept
         let employee_from_stuff = DeductiveRule::new(
-            <Employee as Concept>::CONCEPT,
+            <Employee as Concept>::predicate(),
             vec![
                 RelationApplication::new(
                     Term::Constant("stuff".into()),
@@ -666,13 +678,13 @@ mod tests {
         let store = Artifacts::anonymous(backend).await?;
         let mut session = Session::open(store).register(employee_from_stuff);
 
-        let alice = Stuff::CONCEPT
+        let alice = Stuff::predicate()
             .create()
             .with("name", "Alice".to_string())
             .with("role", "manager".to_string())
             .build()?;
 
-        let bob = Stuff::CONCEPT
+        let bob = Stuff::predicate()
             .create()
             .with("name", "Bob".to_string())
             .with("role", "developer".to_string())
@@ -714,10 +726,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_install_rule_api() -> anyhow::Result<()> {
-        use crate::artifact::{Artifacts, Entity};
-        use crate::query::Output;
         use crate::rule::When;
-        use crate::{Concept, Match, Term};
         use dialog_storage::MemoryStorageBackend;
 
         mod employee {
@@ -788,13 +797,13 @@ mod tests {
         let mut session = Session::open(store).install(employee_from_stuff)?;
 
         // Create test data as Stuff
-        let alice = Stuff::CONCEPT
+        let alice = Stuff::predicate()
             .create()
             .with("name", "Alice".to_string())
             .with("role", "manager".to_string())
             .build()?;
 
-        let bob = Stuff::CONCEPT
+        let bob = Stuff::predicate()
             .create()
             .with("name", "Bob".to_string())
             .with("role", "developer".to_string())
@@ -855,9 +864,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_session_source_rule_resolution() -> anyhow::Result<()> {
-        use crate::artifact::Artifacts;
-        use crate::predicate::concept::Attributes;
-        use crate::query::Source;
         use dialog_storage::MemoryStorageBackend;
 
         // Setup: Create a Session with a rule-aware store
@@ -869,19 +875,26 @@ mod tests {
         assert_eq!(session.resolve_rules("nonexistent"), Vec::new());
 
         // Test 2: Install a rule and verify it can be resolved
-        let adult_conclusion = predicate::ConceptDescriptor::Dynamic {
-            description: String::new(),
-            attributes: Attributes::from(vec![
-                (
-                    "name",
-                    AttributeDescriptor::new("adult", "name", "Adult name", Type::String),
+        let adult_conclusion = ConceptPredicate::from(vec![
+            (
+                "name",
+                AttributeDescriptor::new(
+                    the!("adult/name"),
+                    "Adult name",
+                    Cardinality::One,
+                    Some(Type::String),
                 ),
-                (
-                    "age",
-                    AttributeDescriptor::new("adult", "age", "Adult age", Type::UnsignedInt),
+            ),
+            (
+                "age",
+                AttributeDescriptor::new(
+                    the!("adult/age"),
+                    "Adult age",
+                    Cardinality::One,
+                    Some(Type::UnsignedInt),
                 ),
-            ]),
-        };
+            ),
+        ]);
 
         // Create a simple rule: adult(X, Age) :- person(X, Age), Age >= 18
         let rule = DeductiveRule {
@@ -905,9 +918,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_source_trait_compatibility() -> anyhow::Result<()> {
-        use crate::artifact::Artifacts;
-        use crate::predicate::concept::Attributes;
-        use crate::query::Source;
         use dialog_storage::MemoryStorageBackend;
 
         // Test that both QuerySession and Session can be used polymorphically as a Source
@@ -920,7 +930,7 @@ mod tests {
 
         // Test with QuerySession
         let query_session: QuerySession<_> = artifacts.clone().into();
-        let concept = predicate::ConceptDescriptor::new(Attributes::new());
+        let concept = ConceptPredicate::new();
         let rule = DeductiveRule {
             conclusion: concept.clone(),
             premises: vec![],
@@ -945,9 +955,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_multiple_rules_same_operator() -> anyhow::Result<()> {
-        use crate::artifact::Artifacts;
-        use crate::predicate::concept::Attributes;
-        use crate::query::Source;
         use dialog_storage::MemoryStorageBackend;
 
         // Test that multiple rules for the same operator are stored and resolved correctly
@@ -957,40 +964,33 @@ mod tests {
         // Test with QuerySession
         let query_session: QuerySession<_> = artifacts.into();
 
-        // Create two different rules for the same concept (same attributes = same hash)
-        let attributes: Attributes = [(
+        // Create two different rules for the same concept (same predicate)
+        let predicate = ConceptPredicate::from([(
             "name".to_string(),
-            AttributeDescriptor::new("person", "name", "Person name", Type::String),
-        )]
-        .into();
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "Person name",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
 
-        let concept1 = predicate::ConceptDescriptor::Dynamic {
-            description: "First rule".to_string(),
-            attributes: attributes.clone(),
-        };
-
-        let concept2 = predicate::ConceptDescriptor::Dynamic {
-            description: "Second rule".to_string(),
-            attributes,
-        };
-
+        // Both rules have the same conclusion but different premises
         let rule1 = DeductiveRule {
-            conclusion: concept1.clone(),
+            conclusion: predicate.clone(),
             premises: vec![],
         };
 
-        let rule2 = DeductiveRule {
-            conclusion: concept2.clone(),
-            premises: vec![],
-        };
+        // rule2 is identical to rule1, so the registry should deduplicate
+        let rule2 = rule1.clone();
 
         // Install both rules
         let query_session = query_session.install(rule1).install(rule2);
 
-        // Should resolve both rules for the same concept operator (hash)
-        let operator = concept1.operator();
+        // Identical rules should be deduplicated
+        let operator = predicate.operator();
         let rules = query_session.resolve_rules(&operator);
-        assert_eq!(rules.len(), 2, "Should have 2 rules for the same concept");
+        assert_eq!(rules.len(), 1, "Identical rules should be deduplicated");
 
         // Both rules should have the same operator (hash)
         for rule in &rules {
@@ -1002,8 +1002,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_explicit_conversion_pattern() -> anyhow::Result<()> {
-        use crate::artifact::Artifacts;
-        use crate::query::Source;
         use dialog_storage::MemoryStorageBackend;
 
         // Test the explicit conversion pattern: artifacts.into() for QuerySession
@@ -1016,14 +1014,15 @@ mod tests {
         assert_eq!(query_session.rules().len(), 0);
 
         // Test 2: Conversion with rule installation
-        let adult_concept = predicate::ConceptDescriptor::Dynamic {
-            description: String::new(),
-            attributes: [(
-                "name".to_string(),
-                AttributeDescriptor::new("person", "name", "Adult name", Type::String),
-            )]
-            .into(),
-        };
+        let adult_concept = ConceptPredicate::from([(
+            "name".to_string(),
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "Adult name",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
 
         let adult_rule = DeductiveRule {
             conclusion: adult_concept.clone(),
@@ -1056,11 +1055,9 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_like_formula_in_rule() -> anyhow::Result<()> {
-        use crate::artifact::{Artifacts, Entity};
+        use crate::Attribute;
         use crate::formula::Like;
-        use crate::query::Output;
         use crate::rule::When;
-        use crate::{Attribute, Concept, Match, Term};
         use dialog_storage::MemoryStorageBackend;
 
         mod note_like_test {
@@ -1139,11 +1136,9 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_like_negation_in_rule() -> anyhow::Result<()> {
-        use crate::artifact::{Artifacts, Entity};
+        use crate::Attribute;
         use crate::formula::Like;
-        use crate::query::Output;
         use crate::rule::When;
-        use crate::{Attribute, Concept, Match, Term};
         use dialog_storage::MemoryStorageBackend;
 
         mod note_not_like_test {
@@ -1231,10 +1226,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_implicit_attribute() -> anyhow::Result<()> {
-        use crate::artifact::{Artifacts, Entity};
-        use crate::query::Output;
+        use crate::Attribute as _;
         use crate::rule::When;
-        use crate::{Attribute as _, Concept, Match, Term};
         use dialog_storage::MemoryStorageBackend;
         use implicit_attr_test::{Name, Role};
 

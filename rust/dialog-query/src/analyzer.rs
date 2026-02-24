@@ -611,11 +611,19 @@ mod tests {
 #[cfg(test)]
 mod cost_model_tests {
     use crate::analyzer::Analysis;
+    use crate::application::concept::ConceptApplication;
     use crate::application::{Application, RelationApplication};
     use crate::artifact::Entity;
+    use crate::attribute::Cardinality;
+    use crate::formula::string::Length;
     use crate::predicate::RelationDescriptor;
-    use crate::schema::SEGMENT_READ_COST;
-    use crate::{Environment, Premise, Term, Value};
+    use crate::predicate::concept::ConceptPredicate;
+    use crate::predicate::formula::Formula;
+    use crate::schema::{
+        CONCEPT_OVERHEAD, INDEX_SCAN, RANGE_READ_COST, RANGE_SCAN_COST, SEGMENT_READ_COST,
+    };
+    use crate::the;
+    use crate::{AttributeDescriptor, Environment, Parameters, Premise, Term, Type, Value};
 
     // Test 1: Constants don't add to cost
     #[dialog_common::test]
@@ -629,10 +637,7 @@ mod cost_model_tests {
             Term::Constant(entity_val),
             Term::Constant(Value::String("test".to_string())),
             Term::var("cause"),
-            Some(RelationDescriptor::new(
-                None,
-                crate::attribute::Cardinality::One,
-            )),
+            Some(RelationDescriptor::new(None, Cardinality::One)),
         );
         let premise = Premise::Apply(Application::Relation(Box::new(app)));
         let analysis = Analysis::from(premise);
@@ -648,8 +653,6 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn test_one_constant_two_variables() {
-        use crate::schema::RANGE_SCAN_COST;
-
         // Constant "the" satisfies group, "of" and "is" are derived
         let app = RelationApplication::new(
             Term::Constant("user".to_string()),
@@ -657,10 +660,7 @@ mod cost_model_tests {
             Term::<Entity>::var("entity"),
             Term::<Value>::var("value"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(
-                None,
-                crate::attribute::Cardinality::One,
-            )),
+            Some(RelationDescriptor::new(None, Cardinality::One)),
         );
         let premise = Premise::Apply(Application::Relation(Box::new(app)));
         let analysis = Analysis::from(premise);
@@ -679,18 +679,13 @@ mod cost_model_tests {
     // Test 2: Parameters in env are removed from costs
     #[dialog_common::test]
     fn test_env_variables_reduce_cost() {
-        use crate::schema::{RANGE_SCAN_COST, SEGMENT_READ_COST};
-
         let app = RelationApplication::new(
             Term::Constant("user".to_string()),
             Term::Constant("name".to_string()),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("value"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(
-                None,
-                crate::attribute::Cardinality::One,
-            )),
+            Some(RelationDescriptor::new(None, Cardinality::One)),
         );
         let premise = Premise::Apply(Application::Relation(Box::new(app)));
 
@@ -730,18 +725,13 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn test_variables_already_in_initial_env_dont_add_cost() {
-        use crate::schema::SEGMENT_READ_COST;
-
         let app = RelationApplication::new(
             Term::Constant("user".to_string()),
             Term::Constant("name".to_string()),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("value"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(
-                None,
-                crate::attribute::Cardinality::One,
-            )),
+            Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
         // Create analysis with entity already in environment
@@ -763,18 +753,13 @@ mod cost_model_tests {
     // Test 3: Cardinality affects cost
     #[dialog_common::test]
     fn test_cardinality_many_costs_more_than_one() {
-        use crate::schema::{INDEX_SCAN, RANGE_SCAN_COST};
-
         let one_app = RelationApplication::new(
             Term::Constant("user".to_string()),
             Term::Constant("tags".to_string()),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("tag"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(
-                None,
-                crate::attribute::Cardinality::One,
-            )),
+            Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
         let many_app = RelationApplication::new(
@@ -783,10 +768,7 @@ mod cost_model_tests {
             Term::<Entity>::var("entity"),
             Term::<Value>::var("tag"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(
-                None,
-                crate::attribute::Cardinality::Many,
-            )),
+            Some(RelationDescriptor::new(None, Cardinality::Many)),
         );
 
         let one_analysis = Analysis::from(Premise::Apply(Application::Relation(Box::new(one_app))));
@@ -818,8 +800,6 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn test_fully_bound_cardinality_should_not_differ() {
-        use crate::schema::{RANGE_READ_COST, SEGMENT_READ_COST};
-
         // When all parameters are known (constants or bound), cardinality shouldn't matter much
         // because we're doing a precise lookup, not a scan
         let entity_val: Entity = Entity::new().unwrap();
@@ -831,10 +811,7 @@ mod cost_model_tests {
             Term::Constant(entity_val.clone()),
             Term::Constant(value_val.clone()),
             Term::var("cause"),
-            Some(RelationDescriptor::new(
-                None,
-                crate::attribute::Cardinality::One,
-            )),
+            Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
         let many_app = RelationApplication::new(
@@ -843,10 +820,7 @@ mod cost_model_tests {
             Term::Constant(entity_val),
             Term::Constant(value_val),
             Term::var("cause"),
-            Some(RelationDescriptor::new(
-                None,
-                crate::attribute::Cardinality::Many,
-            )),
+            Some(RelationDescriptor::new(None, Cardinality::Many)),
         );
 
         let one_analysis = Analysis::from(Premise::Apply(Application::Relation(Box::new(one_app))));
@@ -870,10 +844,6 @@ mod cost_model_tests {
     // Test 4: Formula vs Fact costs
     #[dialog_common::test]
     fn test_formula_cheaper_than_fact_no_io() {
-        use crate::Parameters;
-        use crate::formula::string::Length;
-        use crate::predicate::formula::Formula;
-
         // Formula with constant input (no IO needed)
         let mut formula_params = Parameters::new();
         formula_params.insert(
@@ -892,10 +862,7 @@ mod cost_model_tests {
             Term::<Entity>::var("entity"),
             Term::<Value>::var("value"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(
-                None,
-                crate::attribute::Cardinality::One,
-            )),
+            Some(RelationDescriptor::new(None, Cardinality::One)),
         );
         let fact_analysis =
             Analysis::from(Premise::Apply(Application::Relation(Box::new(fact_app))));
@@ -910,10 +877,6 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn test_formula_requiring_fact_costs_more() {
-        use crate::Parameters;
-        use crate::formula::string::Length;
-        use crate::predicate::formula::Formula;
-
         // Formula that needs variable bound by fact (requires IO transitively)
         let mut formula_params = Parameters::new();
         formula_params.insert("of".to_string(), Term::<Value>::var("text")); // Needs to be bound first
@@ -936,10 +899,6 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn test_concept_equals_fact_cost_nothing_bound() {
-        use crate::application::concept::ConceptApplication;
-        use crate::predicate::concept::ConceptDescriptor;
-        use crate::schema::{CONCEPT_OVERHEAD, RANGE_SCAN_COST};
-
         // Create a RelationApplication with constant attribute name
         let fact_app = RelationApplication::new(
             Term::Constant("user".to_string()),
@@ -947,27 +906,28 @@ mod cost_model_tests {
             Term::<Entity>::var("entity"),
             Term::<Value>::var("value"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(
-                None,
-                crate::attribute::Cardinality::One,
-            )),
+            Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
         // Create a ConceptApplication with single attribute
-        let concept = ConceptDescriptor::Dynamic {
-            description: String::new(),
-            attributes: [(
-                "name",
-                crate::AttributeDescriptor::new("user", "name", "User name", crate::Type::String),
-            )]
-            .into(),
-        };
+        let concept = ConceptPredicate::from([(
+            "name",
+            AttributeDescriptor::new(
+                the!("user/name"),
+                "User name",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
 
-        let mut terms = crate::Parameters::new();
+        let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Value>::var("entity"));
         terms.insert("name".to_string(), Term::<Value>::var("value"));
 
-        let concept_app = ConceptApplication { terms, concept };
+        let concept_app = ConceptApplication {
+            terms,
+            predicate: concept,
+        };
 
         // Both should have same cost when nothing is bound
         let env = Environment::new();
@@ -992,10 +952,6 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn test_concept_equals_fact_cost_value_bound() {
-        use crate::application::concept::ConceptApplication;
-        use crate::predicate::concept::ConceptDescriptor;
-        use crate::schema::{CONCEPT_OVERHEAD, SEGMENT_READ_COST};
-
         // Create a RelationApplication with constant attribute name
         let fact_app = RelationApplication::new(
             Term::Constant("user".to_string()),
@@ -1003,27 +959,28 @@ mod cost_model_tests {
             Term::<Entity>::var("entity"),
             Term::<Value>::var("value"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(
-                None,
-                crate::attribute::Cardinality::One,
-            )),
+            Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
         // Create a ConceptApplication with single attribute
-        let concept = ConceptDescriptor::Dynamic {
-            description: String::new(),
-            attributes: [(
-                "name",
-                crate::AttributeDescriptor::new("user", "name", "User name", crate::Type::String),
-            )]
-            .into(),
-        };
+        let concept = ConceptPredicate::from([(
+            "name",
+            AttributeDescriptor::new(
+                the!("user/name"),
+                "User name",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
 
-        let mut terms = crate::Parameters::new();
+        let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Value>::var("entity"));
         terms.insert("name".to_string(), Term::<Value>::var("value"));
 
-        let concept_app = ConceptApplication { terms, concept };
+        let concept_app = ConceptApplication {
+            terms,
+            predicate: concept,
+        };
 
         // Bind the value
         let mut env = Environment::new();
@@ -1041,10 +998,6 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn test_concept_equals_fact_cost_entity_bound() {
-        use crate::application::concept::ConceptApplication;
-        use crate::predicate::concept::ConceptDescriptor;
-        use crate::schema::{CONCEPT_OVERHEAD, SEGMENT_READ_COST};
-
         // Create a RelationApplication with constant attribute name
         let fact_app = RelationApplication::new(
             Term::Constant("user".to_string()),
@@ -1052,27 +1005,28 @@ mod cost_model_tests {
             Term::<Entity>::var("entity"),
             Term::<Value>::var("value"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(
-                None,
-                crate::attribute::Cardinality::One,
-            )),
+            Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
         // Create a ConceptApplication with single attribute
-        let concept = ConceptDescriptor::Dynamic {
-            description: String::new(),
-            attributes: [(
-                "name",
-                crate::AttributeDescriptor::new("user", "name", "User name", crate::Type::String),
-            )]
-            .into(),
-        };
+        let concept = ConceptPredicate::from([(
+            "name",
+            AttributeDescriptor::new(
+                the!("user/name"),
+                "User name",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
 
-        let mut terms = crate::Parameters::new();
+        let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Value>::var("entity"));
         terms.insert("name".to_string(), Term::<Value>::var("value"));
 
-        let concept_app = ConceptApplication { terms, concept };
+        let concept_app = ConceptApplication {
+            terms,
+            predicate: concept,
+        };
 
         // Bind the entity
         let mut env = Environment::new();
@@ -1090,10 +1044,6 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn test_concept_equals_fact_cost_cardinality_many_nothing_bound() {
-        use crate::application::concept::ConceptApplication;
-        use crate::predicate::concept::ConceptDescriptor;
-        use crate::schema::{CONCEPT_OVERHEAD, INDEX_SCAN};
-
         // Create a RelationApplication with Cardinality::Many
         let fact_app = RelationApplication::new(
             Term::Constant("user".to_string()),
@@ -1101,31 +1051,27 @@ mod cost_model_tests {
             Term::<Entity>::var("entity"),
             Term::<Value>::var("tag"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(
-                None,
-                crate::attribute::Cardinality::Many,
-            )),
+            Some(RelationDescriptor::new(None, Cardinality::Many)),
         );
 
         // Create a ConceptApplication with single Cardinality::Many attribute
-        let concept_attr = crate::AttributeDescriptor::Static {
-            namespace: "user",
-            name: "tags",
-            description: "User tags",
-            cardinality: crate::Cardinality::Many,
-            content_type: Some(crate::Type::String),
-        };
+        let tag = AttributeDescriptor::new(
+            the!("user/tags"),
+            "User tags",
+            Cardinality::Many,
+            Some(Type::String),
+        );
 
-        let concept = ConceptDescriptor::Dynamic {
-            description: String::new(),
-            attributes: [("tags", concept_attr)].into(),
-        };
+        let concept = ConceptPredicate::from([("tags", tag)]);
 
-        let mut terms = crate::Parameters::new();
+        let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Value>::var("entity"));
         terms.insert("tags".to_string(), Term::<Value>::var("tag"));
 
-        let concept_app = ConceptApplication { terms, concept };
+        let concept_app = ConceptApplication {
+            terms,
+            predicate: concept,
+        };
 
         // Nothing bound
         let env = Environment::new();
@@ -1142,10 +1088,6 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn test_concept_equals_fact_cost_cardinality_many_value_bound() {
-        use crate::application::concept::ConceptApplication;
-        use crate::predicate::concept::ConceptDescriptor;
-        use crate::schema::{CONCEPT_OVERHEAD, RANGE_SCAN_COST};
-
         // Create a RelationApplication with Cardinality::Many
         let fact_app = RelationApplication::new(
             Term::Constant("user".to_string()),
@@ -1153,31 +1095,27 @@ mod cost_model_tests {
             Term::<Entity>::var("entity"),
             Term::<Value>::var("tag"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(
-                None,
-                crate::attribute::Cardinality::Many,
-            )),
+            Some(RelationDescriptor::new(None, Cardinality::Many)),
         );
 
         // Create a ConceptApplication with single Cardinality::Many attribute
-        let concept_attr = crate::AttributeDescriptor::Static {
-            namespace: "user",
-            name: "tags",
-            description: "User tags",
-            cardinality: crate::Cardinality::Many,
-            content_type: Some(crate::Type::String),
-        };
+        let tag = AttributeDescriptor::new(
+            the!("user/tags"),
+            "User tags",
+            Cardinality::Many,
+            Some(Type::String),
+        );
 
-        let concept = ConceptDescriptor::Dynamic {
-            description: String::new(),
-            attributes: [("tags", concept_attr)].into(),
-        };
+        let concept = ConceptPredicate::from([("tags", tag)]);
 
-        let mut terms = crate::Parameters::new();
+        let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Value>::var("entity"));
         terms.insert("tags".to_string(), Term::<Value>::var("tag"));
 
-        let concept_app = ConceptApplication { terms, concept };
+        let concept_app = ConceptApplication {
+            terms,
+            predicate: concept,
+        };
 
         // Bind the value
         let mut env = Environment::new();
@@ -1195,8 +1133,6 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn test_cost_accumulation_through_planning() {
-        use crate::schema::{RANGE_SCAN_COST, SEGMENT_READ_COST};
-
         // Test that costs accumulate correctly when planning multiple premises
 
         // First premise: binds "entity" and "name"
@@ -1206,10 +1142,7 @@ mod cost_model_tests {
             Term::<Entity>::var("entity"),
             Term::<Value>::var("name"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(
-                None,
-                crate::attribute::Cardinality::One,
-            )),
+            Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
         // Second premise: uses bound "entity", binds "age"
@@ -1219,10 +1152,7 @@ mod cost_model_tests {
             Term::<Entity>::var("entity"), // Already bound by p1
             Term::<Value>::var("age"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(
-                None,
-                crate::attribute::Cardinality::One,
-            )),
+            Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
         let a1 = Analysis::from(Premise::Apply(Application::Relation(Box::new(p1))));
@@ -1259,20 +1189,13 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn debug_update_cost() {
-        use crate::analyzer::Analysis;
-        use crate::artifact::Entity;
-        use crate::{Environment, Premise, Term, Value};
-
         let app = RelationApplication::new(
             Term::Constant("user".to_string()),
             Term::Constant("name".to_string()),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("value"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(
-                None,
-                crate::attribute::Cardinality::One,
-            )),
+            Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
         let schema = app.schema();

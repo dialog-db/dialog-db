@@ -2,7 +2,7 @@ use crate::DeductiveRule;
 use crate::attribute::AttributeDescriptor;
 use crate::context::new_context;
 use crate::planner::{Fork, Join};
-use crate::predicate::ConceptDescriptor;
+use crate::predicate::ConceptPredicate;
 use crate::schema::CONCEPT_OVERHEAD;
 use crate::selection::{Answer, Evidence};
 use crate::{Environment, EvaluationContext, Parameters, Schema, Source, Term, Value, try_stream};
@@ -84,8 +84,8 @@ fn merge_parameters(
 pub struct ConceptApplication {
     /// The term bindings for this concept application.
     pub terms: Parameters,
-    /// The concept being applied.
-    pub concept: ConceptDescriptor,
+    /// The concept predicate being applied.
+    pub predicate: ConceptPredicate,
 }
 
 impl ConceptApplication {
@@ -115,7 +115,7 @@ impl ConceptApplication {
         if this_bound {
             // Entity is known - each attribute is a lookup (the + of known)
             let mut total = CONCEPT_OVERHEAD; // Add overhead for potential rule evaluation
-            for (name, attribute) in self.concept.attributes().iter() {
+            for (name, attribute) in self.predicate.iter() {
                 // Check if this attribute's value is also bound
                 total += attribute.estimate(
                     true,
@@ -134,7 +134,7 @@ impl ConceptApplication {
             let mut unbound_one: Option<&AttributeDescriptor> = None;
             let mut unbound_many: Option<&AttributeDescriptor> = None;
 
-            for (name, attribute) in self.concept.attributes().iter() {
+            for (name, attribute) in self.predicate.iter() {
                 if let Some(term) = self.terms.get(name) {
                     if env.contains(term) {
                         match attribute.cardinality() {
@@ -195,7 +195,7 @@ impl ConceptApplication {
             // of=false (finding entity), is=bound
             let mut total = CONCEPT_OVERHEAD + lead.estimate(false, bound);
 
-            for (name, attribute) in self.concept.attributes().iter() {
+            for (name, attribute) in self.predicate.iter() {
                 if lead != attribute {
                     total += attribute.estimate(
                         true,
@@ -219,7 +219,7 @@ impl ConceptApplication {
 
     /// Returns the schema describing this concept's attributes and their types.
     pub fn schema(&self) -> Schema {
-        self.concept.schema()
+        self.predicate.schema()
     }
 
     /// Evaluates this concept application within the given context, producing a stream of answers.
@@ -228,10 +228,10 @@ impl ConceptApplication {
         context: EvaluationContext<S, M>,
     ) -> impl crate::selection::Answers {
         let app = self;
-        let concept = app.concept.clone();
+        let predicate = app.predicate.clone();
 
-        let mut rules = vec![DeductiveRule::from(&concept)];
-        rules.extend(context.source.resolve_rules(&concept.operator()));
+        let mut rules = vec![DeductiveRule::from(&predicate)];
+        rules.extend(context.source.resolve_rules(&predicate.operator()));
         let plan = rules
             .iter()
             .map(|rule| Join::from(&rule.premises))
@@ -275,7 +275,7 @@ impl ConceptApplication {
 
 impl Display for ConceptApplication {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} {{", self.concept.operator())?;
+        write!(f, "{} {{", self.predicate.operator())?;
         for (name, term) in self.terms.iter() {
             write!(f, "{}: {},", name, term)?;
         }
@@ -287,8 +287,13 @@ impl Display for ConceptApplication {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::predicate::ConceptDescriptor;
-    use crate::{AttributeDescriptor, Parameters, Term, Type, Value};
+    use crate::application::relation::RelationApplication;
+    use crate::predicate::ConceptPredicate;
+    use crate::the;
+    use crate::{
+        Application, Assertion, AttributeDescriptor, Cardinality, Negation, Parameters, Premise,
+        Session, Term, Type, Value,
+    };
 
     // Note: Async tests are commented out due to Rust recursion limit issues in test compilation
     // with deeply nested async streams. The functionality is tested indirectly through integration
@@ -296,7 +301,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_concept_application_query_execution() -> anyhow::Result<()> {
-        use crate::{Assertion, Session};
         use dialog_artifacts::{Artifacts, Attribute as ArtifactAttribute, Entity};
         use dialog_storage::MemoryStorageBackend;
 
@@ -334,27 +338,36 @@ mod tests {
             .await?;
 
         // Create a person concept
-        let concept = ConceptDescriptor::Dynamic {
-            description: String::new(),
-            attributes: vec![
-                (
-                    "name",
-                    AttributeDescriptor::new("person", "name", "", Type::String),
+        let concept = ConceptPredicate::from(vec![
+            (
+                "name",
+                AttributeDescriptor::new(
+                    the!("person/name"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
                 ),
-                (
-                    "age",
-                    AttributeDescriptor::new("person", "age", "", Type::UnsignedInt),
+            ),
+            (
+                "age",
+                AttributeDescriptor::new(
+                    the!("person/age"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::UnsignedInt),
                 ),
-            ]
-            .into(),
-        };
+            ),
+        ]);
 
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::var("person"));
         terms.insert("name".to_string(), Term::var("name"));
         terms.insert("age".to_string(), Term::var("age"));
 
-        let application = ConceptApplication { terms, concept };
+        let application = ConceptApplication {
+            terms,
+            predicate: concept,
+        };
 
         // Execute the query
         let selection =
@@ -395,7 +408,6 @@ mod tests {
     #[dialog_common::test]
     async fn test_concept_application_with_bound_entity_query() -> anyhow::Result<()> {
         use crate::context::new_context;
-        use crate::{Assertion, Session};
         use dialog_artifacts::{Artifacts, Attribute as ArtifactAttribute, Entity};
         use dialog_storage::MemoryStorageBackend;
 
@@ -422,27 +434,36 @@ mod tests {
             .await?;
 
         // Create a person concept
-        let concept = ConceptDescriptor::Dynamic {
-            description: String::new(),
-            attributes: vec![
-                (
-                    "name",
-                    AttributeDescriptor::new("person", "name", "", Type::String),
+        let concept = ConceptPredicate::from(vec![
+            (
+                "name",
+                AttributeDescriptor::new(
+                    the!("person/name"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
                 ),
-                (
-                    "age",
-                    AttributeDescriptor::new("person", "age", "", Type::UnsignedInt),
+            ),
+            (
+                "age",
+                AttributeDescriptor::new(
+                    the!("person/age"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::UnsignedInt),
                 ),
-            ]
-            .into(),
-        };
+            ),
+        ]);
 
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::var("person"));
         terms.insert("name".to_string(), Term::var("name"));
         terms.insert("age".to_string(), Term::var("age"));
 
-        let application = ConceptApplication { terms, concept };
+        let application = ConceptApplication {
+            terms,
+            predicate: concept,
+        };
 
         // Create a scope with the entity already bound
         let mut scope = Environment::new();
@@ -466,24 +487,29 @@ mod tests {
 
     #[dialog_common::test]
     fn test_concept_as_conclusion_operations() {
-        use crate::predicate::concept::Attributes;
-
-        let concept = ConceptDescriptor::Dynamic {
-            description: String::new(),
-            attributes: Attributes::from(vec![
-                (
-                    "name",
-                    AttributeDescriptor::new("person", "name", "Person name", Type::String),
+        let concept = ConceptPredicate::from(vec![
+            (
+                "name",
+                AttributeDescriptor::new(
+                    the!("person/name"),
+                    "Person name",
+                    Cardinality::One,
+                    Some(Type::String),
                 ),
-                (
-                    "age",
-                    AttributeDescriptor::new("person", "age", "Person age", Type::UnsignedInt),
+            ),
+            (
+                "age",
+                AttributeDescriptor::new(
+                    the!("person/age"),
+                    "Person age",
+                    Cardinality::One,
+                    Some(Type::UnsignedInt),
                 ),
-            ]),
-        };
+            ),
+        ]);
 
         // Test that attributes are present
-        let param_names: Vec<&str> = concept.attributes().keys().collect();
+        let param_names: Vec<&str> = concept.keys().collect();
         assert!(param_names.contains(&"name"));
         assert!(param_names.contains(&"age"));
         assert!(!param_names.contains(&"height"));
@@ -492,48 +518,56 @@ mod tests {
 
     #[dialog_common::test]
     fn test_concept_creation() {
-        use crate::predicate::concept::Attributes;
-
-        let concept = ConceptDescriptor::Dynamic {
-            description: String::new(),
-            attributes: Attributes::from(vec![(
-                "name".to_string(),
-                AttributeDescriptor::new("person", "name", "Person name", Type::String),
-            )]),
-        };
+        let concept = ConceptPredicate::from(vec![(
+            "name".to_string(),
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "Person name",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
 
         // Operator is now a computed URI
         assert!(
             concept.operator().starts_with("concept:"),
             "Operator should be a concept URI"
         );
-        assert_eq!(concept.attributes().count(), 1);
-        assert!(concept.attributes().keys().any(|k| k == "name"));
+        assert_eq!(concept.len(), 1);
+        assert!(concept.keys().any(|k| k == "name"));
     }
 
     #[dialog_common::test]
     fn test_concept_application_analysis() {
-        use crate::predicate::concept::Attributes;
-
-        let concept = ConceptDescriptor::Dynamic {
-            description: String::new(),
-            attributes: Attributes::from(vec![
-                (
-                    "name".to_string(),
-                    AttributeDescriptor::new("person", "name", "Person name", Type::String),
+        let concept = ConceptPredicate::from(vec![
+            (
+                "name".to_string(),
+                AttributeDescriptor::new(
+                    the!("person/name"),
+                    "Person name",
+                    Cardinality::One,
+                    Some(Type::String),
                 ),
-                (
-                    "age".to_string(),
-                    AttributeDescriptor::new("person", "age", "Person age", Type::UnsignedInt),
+            ),
+            (
+                "age".to_string(),
+                AttributeDescriptor::new(
+                    the!("person/age"),
+                    "Person age",
+                    Cardinality::One,
+                    Some(Type::UnsignedInt),
                 ),
-            ]),
-        };
+            ),
+        ]);
 
         let mut terms = Parameters::new();
         terms.insert("name".to_string(), Term::var("person_name"));
         terms.insert("age".to_string(), Term::var("person_age"));
 
-        let concept_app = ConceptApplication { terms, concept };
+        let concept_app = ConceptApplication {
+            terms,
+            predicate: concept,
+        };
 
         let cost = concept_app.estimate(&Environment::new());
         assert_eq!(cost, Some(2100));
@@ -551,20 +585,26 @@ mod tests {
         use std::collections::HashSet;
 
         let rule = DeductiveRule {
-            conclusion: ConceptDescriptor::Dynamic {
-                description: String::new(),
-                attributes: [
-                    (
-                        "name".to_string(),
-                        AttributeDescriptor::new("person", "name", "Person name", Type::String),
+            conclusion: ConceptPredicate::from([
+                (
+                    "name".to_string(),
+                    AttributeDescriptor::new(
+                        the!("person/name"),
+                        "Person name",
+                        Cardinality::One,
+                        Some(Type::String),
                     ),
-                    (
-                        "age".to_string(),
-                        AttributeDescriptor::new("person", "age", "Person age", Type::UnsignedInt),
+                ),
+                (
+                    "age".to_string(),
+                    AttributeDescriptor::new(
+                        the!("person/age"),
+                        "Person age",
+                        Cardinality::One,
+                        Some(Type::UnsignedInt),
                     ),
-                ]
-                .into(),
-            },
+                ),
+            ]),
             premises: vec![],
         };
 
@@ -577,9 +617,6 @@ mod tests {
 
     #[dialog_common::test]
     fn test_premise_construction() {
-        use crate::application::relation::RelationApplication;
-        use crate::{Application, Premise};
-
         let relation = RelationApplication::new(
             Term::Constant("person".into()),
             Term::Constant("name".into()),
@@ -601,15 +638,12 @@ mod tests {
 
     #[dialog_common::test]
     fn test_error_types() {
-        use crate::error::{AnalyzerError, PlanError, QueryError};
-        use crate::predicate::concept::Attributes;
+        use crate::QueryError;
+        use crate::error::{AnalyzerError, PlanError};
 
         // Test AnalyzerError creation
         let rule = DeductiveRule {
-            conclusion: ConceptDescriptor::Dynamic {
-                description: String::new(),
-                attributes: Attributes::new(),
-            },
+            conclusion: ConceptPredicate::new(),
             premises: vec![],
         };
 
@@ -644,10 +678,6 @@ mod tests {
 
     #[dialog_common::test]
     fn test_application_variants() {
-        use crate::Application;
-        use crate::application::relation::RelationApplication;
-        use crate::predicate::concept::Attributes;
-
         // Test Relation application
         let relation = RelationApplication::new(
             Term::Constant("test".into()),
@@ -669,11 +699,10 @@ mod tests {
         // Test other variants exist
         let mut terms = Parameters::new();
         terms.insert("test".to_string(), Term::var("test_var"));
-        let concept = ConceptDescriptor::Dynamic {
-            description: String::new(),
-            attributes: Attributes::new(),
-        };
-        let concept_app = Application::Concept(ConceptApplication { terms, concept });
+        let concept_app = Application::Concept(ConceptApplication {
+            terms,
+            predicate: ConceptPredicate::new(),
+        });
 
         match concept_app {
             Application::Concept(_) => {
@@ -685,9 +714,6 @@ mod tests {
 
     #[dialog_common::test]
     fn test_negation_construction() {
-        use crate::application::relation::RelationApplication;
-        use crate::{Application, Negation};
-
         let relation = RelationApplication::new(
             Term::Constant("test".into()),
             Term::Constant("attr".into()),
@@ -710,9 +736,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_concept_application_respects_constant_entity_parameter() -> anyhow::Result<()> {
-        use crate::application::concept::ConceptApplication;
-        use crate::predicate::concept::ConceptDescriptor;
-        use crate::{Assertion, Session, Term, Value};
         use dialog_artifacts::{Artifacts, Attribute, Entity};
         use dialog_storage::MemoryStorageBackend;
 
@@ -738,19 +761,15 @@ mod tests {
             ])
             .await?;
 
-        let concept = ConceptDescriptor::Dynamic {
-            description: String::new(),
-            attributes: vec![(
-                "name",
-                crate::attribute::AttributeDescriptor::new(
-                    "person",
-                    "name",
-                    "Person name",
-                    crate::Type::String,
-                ),
-            )]
-            .into(),
-        };
+        let concept = ConceptPredicate::from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "Person name",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
 
         // Query with constant entity - should only return Alice
         let mut terms = Parameters::new();
@@ -760,7 +779,10 @@ mod tests {
         );
         terms.insert("name".to_string(), Term::var("name"));
 
-        let app = ConceptApplication { terms, concept };
+        let app = ConceptApplication {
+            terms,
+            predicate: concept,
+        };
         let selection =
             futures_util::TryStreamExt::try_collect::<Vec<_>>(app.query(session)).await?;
 
@@ -780,9 +802,6 @@ mod tests {
     #[dialog_common::test]
     async fn test_concept_application_respects_constant_attribute_parameter() -> anyhow::Result<()>
     {
-        use crate::application::concept::ConceptApplication;
-        use crate::predicate::concept::ConceptDescriptor;
-        use crate::{Assertion, Session, Term, Value};
         use dialog_artifacts::{Artifacts, Attribute, Entity};
         use dialog_storage::MemoryStorageBackend;
 
@@ -818,30 +837,26 @@ mod tests {
             ])
             .await?;
 
-        let concept = ConceptDescriptor::Dynamic {
-            description: String::new(),
-            attributes: vec![
-                (
-                    "name",
-                    crate::attribute::AttributeDescriptor::new(
-                        "person",
-                        "name",
-                        "Person name",
-                        crate::Type::String,
-                    ),
+        let concept = ConceptPredicate::from(vec![
+            (
+                "name",
+                AttributeDescriptor::new(
+                    the!("person/name"),
+                    "Person name",
+                    Cardinality::One,
+                    Some(Type::String),
                 ),
-                (
-                    "age",
-                    crate::attribute::AttributeDescriptor::new(
-                        "person",
-                        "age",
-                        "Person age",
-                        crate::Type::UnsignedInt,
-                    ),
+            ),
+            (
+                "age",
+                AttributeDescriptor::new(
+                    the!("person/age"),
+                    "Person age",
+                    Cardinality::One,
+                    Some(Type::UnsignedInt),
                 ),
-            ]
-            .into(),
-        };
+            ),
+        ]);
 
         // Query with constant name value - should only return Bob
         let mut terms = Parameters::new();
@@ -852,7 +867,10 @@ mod tests {
         );
         terms.insert("age".to_string(), Term::var("age"));
 
-        let app = ConceptApplication { terms, concept };
+        let app = ConceptApplication {
+            terms,
+            predicate: concept,
+        };
         let selection =
             futures_util::TryStreamExt::try_collect::<Vec<_>>(app.query(session)).await?;
 
@@ -872,9 +890,6 @@ mod tests {
     #[dialog_common::test]
     async fn test_concept_application_respects_multiple_constant_parameters() -> anyhow::Result<()>
     {
-        use crate::application::concept::ConceptApplication;
-        use crate::predicate::concept::ConceptDescriptor;
-        use crate::{Assertion, Session, Term, Value};
         use dialog_artifacts::{Artifacts, Attribute, Entity};
         use dialog_storage::MemoryStorageBackend;
 
@@ -910,30 +925,26 @@ mod tests {
             ])
             .await?;
 
-        let concept = ConceptDescriptor::Dynamic {
-            description: String::new(),
-            attributes: vec![
-                (
-                    "name",
-                    crate::attribute::AttributeDescriptor::new(
-                        "person",
-                        "name",
-                        "Person name",
-                        crate::Type::String,
-                    ),
+        let concept = ConceptPredicate::from(vec![
+            (
+                "name",
+                AttributeDescriptor::new(
+                    the!("person/name"),
+                    "Person name",
+                    Cardinality::One,
+                    Some(Type::String),
                 ),
-                (
-                    "age",
-                    crate::attribute::AttributeDescriptor::new(
-                        "person",
-                        "age",
-                        "Person age",
-                        crate::Type::UnsignedInt,
-                    ),
+            ),
+            (
+                "age",
+                AttributeDescriptor::new(
+                    the!("person/age"),
+                    "Person age",
+                    Cardinality::One,
+                    Some(Type::UnsignedInt),
                 ),
-            ]
-            .into(),
-        };
+            ),
+        ]);
 
         // Query with both name and age constants - should only match Alice
         let mut terms = Parameters::new();
@@ -944,7 +955,10 @@ mod tests {
         );
         terms.insert("age".to_string(), Term::Constant(Value::UnsignedInt(25)));
 
-        let app = ConceptApplication { terms, concept };
+        let app = ConceptApplication {
+            terms,
+            predicate: concept,
+        };
         let selection =
             futures_util::TryStreamExt::try_collect::<Vec<_>>(app.query(session)).await?;
 

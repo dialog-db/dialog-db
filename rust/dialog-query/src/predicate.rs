@@ -13,7 +13,7 @@ pub mod formula;
 /// Relation predicates for querying the knowledge base.
 pub mod relation;
 
-pub use concept::ConceptDescriptor;
+pub use concept::ConceptPredicate;
 pub use deductive_rule::DeductiveRule;
 pub use formula::Formula;
 pub use relation::RelationDescriptor;

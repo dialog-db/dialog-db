@@ -1,7 +1,7 @@
 pub use crate::analyzer::Plan;
 use crate::error::{CompileError, SchemaError};
 pub use crate::planner::Join;
-pub use crate::predicate::ConceptDescriptor;
+pub use crate::predicate::ConceptPredicate;
 pub use crate::premise::Premise;
 pub use crate::{Application, Attribute, Cardinality, Parameters, Requirement, Value};
 use crate::{Term, Type};
@@ -12,7 +12,7 @@ use std::fmt::Display;
 pub struct DeductiveRule {
     /// Conclusion that this rule reaches if all premises hold. This is
     /// typically what datalog calls rule head.
-    pub conclusion: ConceptDescriptor,
+    pub conclusion: ConceptPredicate,
     /// Premises that must hold for rule to reach it's conclusion. Typically
     /// datalog calls these rule body. These are guaranteed to be viable plans
     /// after compilation.
@@ -20,10 +20,7 @@ pub struct DeductiveRule {
 }
 impl DeductiveRule {
     /// Create a new uncompiled rule from a conclusion and premises
-    pub fn new(
-        conclusion: ConceptDescriptor,
-        premises: Vec<Premise>,
-    ) -> Result<Self, CompileError> {
+    pub fn new(conclusion: ConceptPredicate, premises: Vec<Premise>) -> Result<Self, CompileError> {
         // Convert premises to an intermediate form, then compile
         let uncompiled = UncompiledDeductiveRule {
             conclusion,
@@ -55,7 +52,7 @@ impl DeductiveRule {
 
 /// Internal helper for rules before compilation
 pub struct UncompiledDeductiveRule {
-    conclusion: ConceptDescriptor,
+    conclusion: ConceptPredicate,
     premises: Vec<Premise>,
 }
 
@@ -97,7 +94,7 @@ impl Display for DeductiveRule {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} {{", self.operator())?;
         write!(f, "this: {},", Type::Entity)?;
-        for (name, attribute) in self.conclusion.attributes().iter() {
+        for (name, attribute) in self.conclusion.iter() {
             match attribute.content_type() {
                 Some(ty) => write!(f, "{}: {},", name, ty)?,
                 None => write!(f, "{}: Any,", name)?,
@@ -107,8 +104,8 @@ impl Display for DeductiveRule {
     }
 }
 
-impl From<&ConceptDescriptor> for DeductiveRule {
-    fn from(concept: &ConceptDescriptor) -> Self {
+impl From<&ConceptPredicate> for DeductiveRule {
+    fn from(concept: &ConceptPredicate) -> Self {
         use crate::application::RelationApplication;
         use crate::artifact::Entity;
         use crate::predicate::RelationDescriptor;
@@ -116,7 +113,7 @@ impl From<&ConceptDescriptor> for DeductiveRule {
         let mut premises = Vec::new();
 
         let this = Term::<Entity>::var("this");
-        for (name, attribute) in concept.attributes().iter() {
+        for (name, attribute) in concept.iter() {
             premises.push(
                 RelationApplication::new(
                     Term::Constant(attribute.namespace().to_string()),
@@ -140,31 +137,34 @@ impl From<&ConceptDescriptor> for DeductiveRule {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::RelationApplication;
+    use crate::artifact::{Entity, Type};
+    use crate::attribute::AttributeDescriptor;
+    use crate::predicate::RelationDescriptor;
+    use crate::the;
 
     #[dialog_common::test]
     fn test_rule_compiles_with_valid_premises() {
-        use crate::application::RelationApplication;
-        use crate::artifact::{Entity, Type};
-        use crate::predicate::RelationDescriptor;
-        let conclusion = ConceptDescriptor::Dynamic {
-            description: String::new(),
-            attributes: vec![
-                (
-                    "name",
-                    crate::attribute::AttributeDescriptor::new("person", "name", "", Type::String),
+        let conclusion = ConceptPredicate::from(vec![
+            (
+                "name",
+                AttributeDescriptor::new(
+                    the!("person/name"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
                 ),
-                (
-                    "age",
-                    crate::attribute::AttributeDescriptor::new(
-                        "person",
-                        "age",
-                        "",
-                        Type::UnsignedInt,
-                    ),
+            ),
+            (
+                "age",
+                AttributeDescriptor::new(
+                    the!("person/age"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::UnsignedInt),
                 ),
-            ]
-            .into(),
-        };
+            ),
+        ]);
         let this = Term::<Entity>::var("this");
         let premises = vec![
             RelationApplication::new(
@@ -172,7 +172,7 @@ mod tests {
                 Term::Constant("name".to_string()),
                 this.clone(),
                 Term::var("name"),
-                crate::attribute::Term::var("cause"),
+                Term::var("cause"),
                 Some(RelationDescriptor::new(None, Cardinality::One)),
             )
             .into(),
@@ -181,7 +181,7 @@ mod tests {
                 Term::Constant("age".to_string()),
                 this,
                 Term::var("age"),
-                crate::attribute::Term::var("cause"),
+                Term::var("cause"),
                 Some(RelationDescriptor::new(None, Cardinality::One)),
             )
             .into(),
@@ -192,30 +192,33 @@ mod tests {
 
     #[dialog_common::test]
     fn test_rule_fails_with_unconstrained_fact() {
-        use crate::application::RelationApplication;
-        use crate::artifact::{Entity, Type};
-        use crate::predicate::RelationDescriptor;
-        let conclusion = ConceptDescriptor::Dynamic {
-            description: String::new(),
-            attributes: vec![
-                (
-                    "key",
-                    crate::attribute::AttributeDescriptor::new("person", "key", "", Type::String),
+        let conclusion = ConceptPredicate::from(vec![
+            (
+                "key",
+                AttributeDescriptor::new(
+                    the!("person/key"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
                 ),
-                (
-                    "value",
-                    crate::attribute::AttributeDescriptor::new("person", "value", "", Type::String),
+            ),
+            (
+                "value",
+                AttributeDescriptor::new(
+                    the!("person/value"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
                 ),
-            ]
-            .into(),
-        };
+            ),
+        ]);
         let premises = vec![
             RelationApplication::new(
                 Term::var("key_ns"),
                 Term::var("key_name"),
                 Term::<Entity>::var("user"),
                 Term::var("value"),
-                crate::attribute::Term::var("cause"),
+                Term::var("cause"),
                 Some(RelationDescriptor::new(None, Cardinality::One)),
             )
             .into(),
@@ -225,23 +228,26 @@ mod tests {
 
     #[dialog_common::test]
     fn test_rule_fails_with_unconstrained_relation() {
-        use crate::application::RelationApplication;
-        use crate::artifact::{Entity, Type};
-
-        let conclusion = ConceptDescriptor::Dynamic {
-            description: String::new(),
-            attributes: vec![
-                (
-                    "key",
-                    crate::attribute::AttributeDescriptor::new("person", "key", "", Type::String),
+        let conclusion = ConceptPredicate::from(vec![
+            (
+                "key",
+                AttributeDescriptor::new(
+                    the!("person/key"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
                 ),
-                (
-                    "value",
-                    crate::attribute::AttributeDescriptor::new("person", "value", "", Type::String),
+            ),
+            (
+                "value",
+                AttributeDescriptor::new(
+                    the!("person/value"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
                 ),
-            ]
-            .into(),
-        };
+            ),
+        ]);
 
         // All terms are variables — no constants at all.
         // The planner should reject this at install time.
@@ -266,35 +272,33 @@ mod tests {
 
     #[dialog_common::test]
     fn test_rule_fails_with_unused_parameter() {
-        use crate::application::RelationApplication;
-        use crate::artifact::{Entity, Type};
-        use crate::predicate::RelationDescriptor;
-        let conclusion = ConceptDescriptor::Dynamic {
-            description: String::new(),
-            attributes: vec![
-                (
-                    "name",
-                    crate::attribute::AttributeDescriptor::new("person", "name", "", Type::String),
+        let conclusion = ConceptPredicate::from(vec![
+            (
+                "name",
+                AttributeDescriptor::new(
+                    the!("person/name"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
                 ),
-                (
-                    "age",
-                    crate::attribute::AttributeDescriptor::new(
-                        "person",
-                        "age",
-                        "",
-                        Type::UnsignedInt,
-                    ),
+            ),
+            (
+                "age",
+                AttributeDescriptor::new(
+                    the!("person/age"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::UnsignedInt),
                 ),
-            ]
-            .into(),
-        };
+            ),
+        ]);
         let premises = vec![
             RelationApplication::new(
                 Term::Constant("user".to_string()),
                 Term::Constant("name".to_string()),
                 Term::<Entity>::var("this"),
                 Term::var("name"),
-                crate::attribute::Term::var("cause"),
+                Term::var("cause"),
                 Some(RelationDescriptor::new(None, Cardinality::One)),
             )
             .into(),
@@ -308,48 +312,51 @@ mod tests {
 
     #[dialog_common::test]
     fn test_rule_fails_with_no_premises() {
-        use crate::artifact::Type;
-        let conclusion = ConceptDescriptor::Dynamic {
-            description: String::new(),
-            attributes: vec![
-                (
-                    "name",
-                    crate::attribute::AttributeDescriptor::new("person", "name", "", Type::String),
+        let conclusion = ConceptPredicate::from(vec![
+            (
+                "name",
+                AttributeDescriptor::new(
+                    the!("person/name"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
                 ),
-                (
-                    "age",
-                    crate::attribute::AttributeDescriptor::new(
-                        "person",
-                        "age",
-                        "",
-                        Type::UnsignedInt,
-                    ),
+            ),
+            (
+                "age",
+                AttributeDescriptor::new(
+                    the!("person/age"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::UnsignedInt),
                 ),
-            ]
-            .into(),
-        };
+            ),
+        ]);
         assert!(DeductiveRule::new(conclusion, vec![]).is_err());
     }
 
     #[dialog_common::test]
     fn test_rule_compiles_with_chained_dependencies() {
-        use crate::application::RelationApplication;
-        use crate::artifact::{Entity, Type};
-        use crate::predicate::RelationDescriptor;
-        let conclusion = ConceptDescriptor::Dynamic {
-            description: String::new(),
-            attributes: vec![
-                (
-                    "key",
-                    crate::attribute::AttributeDescriptor::new("result", "key", "", Type::String),
+        let conclusion = ConceptPredicate::from(vec![
+            (
+                "key",
+                AttributeDescriptor::new(
+                    the!("result/key"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
                 ),
-                (
-                    "value",
-                    crate::attribute::AttributeDescriptor::new("result", "value", "", Type::String),
+            ),
+            (
+                "value",
+                AttributeDescriptor::new(
+                    the!("result/value"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
                 ),
-            ]
-            .into(),
-        };
+            ),
+        ]);
         let this = Term::<Entity>::var("this");
         let premises = vec![
             RelationApplication::new(
@@ -357,7 +364,7 @@ mod tests {
                 Term::Constant("name".to_string()),
                 this.clone(),
                 Term::Constant(Value::String("jack".to_string())),
-                crate::attribute::Term::var("cause"),
+                Term::var("cause"),
                 Some(RelationDescriptor::new(None, Cardinality::One)),
             )
             .into(),
@@ -368,7 +375,7 @@ mod tests {
                 Term::blank(),
                 this,
                 Term::var("value"),
-                crate::attribute::Term::var("cause"),
+                Term::var("cause"),
                 Some(RelationDescriptor::new(None, Cardinality::One)),
             )
             .into(),
@@ -380,17 +387,10 @@ mod tests {
 
     #[dialog_common::test]
     fn test_rule_parameter_name_vs_variable_name() {
-        use crate::application::RelationApplication;
-        use crate::artifact::{Entity, Type};
-        use crate::predicate::RelationDescriptor;
-        let conclusion = ConceptDescriptor::Dynamic {
-            description: String::new(),
-            attributes: vec![(
-                "key",
-                crate::attribute::AttributeDescriptor::new("result", "key", "", Type::String),
-            )]
-            .into(),
-        };
+        let conclusion = ConceptPredicate::from(vec![(
+            "key",
+            AttributeDescriptor::new(the!("result/key"), "", Cardinality::One, Some(Type::String)),
+        )]);
 
         let premises = vec![
             RelationApplication::new(
@@ -398,7 +398,7 @@ mod tests {
                 Term::Constant("name".to_string()),
                 Term::<Entity>::var("this"),
                 Term::var("key_var"),
-                crate::attribute::Term::var("cause"),
+                Term::var("cause"),
                 Some(RelationDescriptor::new(None, Cardinality::One)),
             )
             .into(),
