@@ -12,10 +12,10 @@ pub use crate::context::new_context;
 pub use crate::error::{PlanError, QueryResult};
 pub use crate::premise::{Negation, Premise};
 pub use crate::{Environment, EvaluationContext, Source};
-use futures_util::future::Either;
 pub use concept::ConceptApplication;
 pub use fact::FactApplication;
 pub use formula::FormulaApplication;
+use futures_util::future::Either;
 pub use relation::RelationApplication;
 pub use std::fmt::Display;
 

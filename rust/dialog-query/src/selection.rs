@@ -26,18 +26,22 @@ pub trait Answers: Stream<Item = Result<Answer, QueryError>> + 'static + Conditi
         async move { futures_util::TryStreamExt::try_collect(self).await }
     }
 
-    /// Apply a flat-mapping operation over each answer, producing a new stream of answers.
-    fn flat_map<M: AnswersFlatMapper>(self, mapper: M) -> impl Answers
+    /// Flat-map each answer into a stream of answers, propagating errors.
+    ///
+    /// Like `StreamExt::flat_map` but for fallible streams: errors from
+    /// the outer stream are forwarded directly, `Ok` values are passed
+    /// to `f` which returns a new answer stream that gets flattened in.
+    fn try_flat_map<S, F>(self, mut f: F) -> impl Answers
     where
         Self: Sized,
+        S: Answers,
+        F: FnMut(Answer) -> S + ConditionalSend + 'static,
     {
-        try_stream! {
-            for await each in self {
-                for await mapped in mapper.map(each?) {
-                    yield mapped?;
-                }
-            }
-        }
+        use futures_util::future::Either;
+        futures_util::StreamExt::flat_map(self, move |result| match result {
+            Ok(answer) => Either::Left(f(answer)),
+            Err(e) => Either::Right(futures_util::stream::once(async move { Err(e) })),
+        })
     }
 
     /// Expand each answer into zero or more answers using an infallible expander.
@@ -71,12 +75,6 @@ pub trait Answers: Stream<Item = Result<Answer, QueryError>> + 'static + Conditi
 
 impl<S> Answers for S where S: Stream<Item = Result<Answer, QueryError>> + 'static + ConditionalSend {}
 
-/// Maps an answer into a stream of answers (flat-map operation).
-pub trait AnswersFlatMapper: ConditionalSend + 'static {
-    /// Produce a stream of answers from a single input answer.
-    fn map(&self, item: Answer) -> impl Answers;
-}
-
 /// Expands an answer into multiple answers, potentially returning an error.
 pub trait AnswersTryExpand: ConditionalSend + 'static {
     /// Attempt to expand a single answer into zero or more answers.
@@ -100,12 +98,6 @@ impl<F: Fn(Answer) -> Result<Vec<Answer>, QueryError> + ConditionalSend + 'stati
 impl<F: Fn(Answer) -> Vec<Answer> + ConditionalSend + 'static> AnswersExpand for F {
     fn expand(&self, answer: Answer) -> Vec<Answer> {
         self(answer)
-    }
-}
-
-impl<S: Answers, F: (Fn(Answer) -> S) + ConditionalSend + 'static> AnswersFlatMapper for F {
-    fn map(&self, input: Answer) -> impl Answers {
-        self(input)
     }
 }
 
