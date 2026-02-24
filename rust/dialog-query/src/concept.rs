@@ -1,13 +1,13 @@
 /// Single-attribute concept wrapper ([`With<A>`]) and its query types.
 pub mod with;
-pub use with::{With, WithMatch, WithTerms};
+pub use with::{With, WithQuery, WithTerms};
 
 use crate::application::ConceptApplication;
 
 #[cfg(test)]
 use crate::Assertion;
 pub use crate::dsl::Predicate;
-pub use crate::predicate::concept::Attributes;
+pub use crate::predicate::concept::ConceptPredicate;
 use crate::query::{Output, Query, Source};
 use crate::selection::Answer;
 use crate::{Entity, EvaluationContext, Parameters, QueryError, predicate, selection};
@@ -39,9 +39,13 @@ pub trait Concept: Predicate + Clone + Debug {
     /// Typed term accessors for building queries (e.g. `PersonTerms::name()`).
     type Term;
 
-    /// The static concept definition for this type.
-    /// This is typically defined by the macro as a Concept::Static variant.
-    const CONCEPT: predicate::concept::ConceptDescriptor;
+    /// Returns a description of this concept.
+    fn description() -> &'static str {
+        ""
+    }
+
+    /// Returns the concept predicate.
+    fn predicate() -> predicate::concept::ConceptPredicate;
 
     /// Convenience method to query for all instances of this concept.
     ///
@@ -75,14 +79,14 @@ pub trait Concept: Predicate + Clone + Debug {
     /// ensuring that concepts with the same attributes (regardless of field names)
     /// produce the same identifier.
     fn hash() -> blake3::Hash {
-        Self::CONCEPT.hash()
+        Self::predicate().hash()
     }
 
     /// Format this concept's identifier as a URI.
     ///
     /// Returns a URI in the format `concept:{blake3_hash_hex}`.
     fn to_uri() -> String {
-        Self::CONCEPT.to_uri()
+        Self::predicate().to_uri()
     }
 
     /// Parse a concept URI and extract its hash.
@@ -90,7 +94,7 @@ pub trait Concept: Predicate + Clone + Debug {
     /// Returns `Some(hash)` if the URI has the format `concept:{valid_hex}`,
     /// or `None` if the URI is invalid.
     fn parse_uri(uri: &str) -> Option<blake3::Hash> {
-        predicate::concept::ConceptDescriptor::parse_uri(uri)
+        predicate::concept::ConceptPredicate::parse_uri(uri)
     }
 }
 
@@ -106,9 +110,9 @@ pub trait ConceptQuery: Sized + Clone + ConditionalSend + Default + 'static {
     /// Reconstructs a concept instance from a query [`Answer`].
     fn realize(&self, source: Answer) -> Result<Self::Proof, QueryError>;
 
-    /// Returns the static concept descriptor for this query.
-    fn to_concept(&self) -> predicate::ConceptDescriptor {
-        Self::Predicate::CONCEPT
+    /// Returns the concept predicate for this query.
+    fn to_predicate(&self) -> predicate::ConceptPredicate {
+        Self::Predicate::predicate()
     }
 }
 
@@ -201,13 +205,17 @@ pub trait ConceptProof: ConditionalSend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Answer;
     use crate::application::relation::RelationApplication;
-    use crate::artifact::Value;
-    use crate::artifact::{Artifacts, Attribute as ArtifactAttribute};
-    use crate::attribute::Attribute as _;
+    use crate::artifact::{
+        ArtifactSelector, ArtifactStore, Artifacts, Attribute as ArtifactAttribute, Type, Value,
+    };
+    use crate::attribute::{Attribute as _, AttributeDescriptor};
+    use crate::concept::With;
+    use crate::rule::Match;
     use crate::term::Term;
-    use crate::{Claim, Concept, Session, Transaction};
+    use crate::the;
+    use crate::types::Scalar;
+    use crate::{Answer, Cardinality, Claim, Concept, Session, Transaction};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
@@ -259,41 +267,28 @@ mod tests {
         type Query = PersonMatch;
         type Term = PersonTerms;
 
-        const CONCEPT: predicate::concept::ConceptDescriptor = {
-            use crate::artifact::Type;
-            use crate::attribute::{AttributeDescriptor, Cardinality};
-
-            const ATTRIBUTE_TUPLES: &[(&str, AttributeDescriptor)] = &[
+        fn predicate() -> predicate::concept::ConceptPredicate {
+            predicate::concept::ConceptPredicate::from(vec![
                 (
                     "name",
-                    AttributeDescriptor::Static {
-                        namespace: "person",
-                        name: "name",
-                        description: "Name of the person",
-                        cardinality: Cardinality::One,
-                        content_type: Some(Type::String),
-                    },
+                    AttributeDescriptor::new(
+                        the!("person/name"),
+                        "Name of the person",
+                        Cardinality::One,
+                        Some(Type::String),
+                    ),
                 ),
                 (
                     "age",
-                    AttributeDescriptor::Static {
-                        namespace: "person",
-                        name: "age",
-                        description: "Age of the person",
-                        cardinality: Cardinality::One,
-                        content_type: Some(Type::UnsignedInt),
-                    },
+                    AttributeDescriptor::new(
+                        the!("person/age"),
+                        "Age of the person",
+                        Cardinality::One,
+                        Some(Type::UnsignedInt),
+                    ),
                 ),
-            ];
-
-            const ATTRS: predicate::concept::Attributes =
-                predicate::concept::Attributes::Static(ATTRIBUTE_TUPLES);
-
-            predicate::concept::ConceptDescriptor::Static {
-                description: "",
-                attributes: &ATTRS,
-            }
-        };
+            ])
+        }
     }
 
     impl IntoIterator for Person {
@@ -301,8 +296,6 @@ mod tests {
         type IntoIter = std::vec::IntoIter<Assertion>;
 
         fn into_iter(self) -> Self::IntoIter {
-            use crate::types::Scalar;
-
             vec![
                 Assertion::new(
                     "person/name".parse().expect("Failed to parse attribute"),
@@ -321,7 +314,6 @@ mod tests {
 
     impl Claim for Person {
         fn assert(self, transaction: &mut Transaction) {
-            use crate::types::Scalar;
             transaction.associate(Assertion {
                 the: "person/name".parse().expect("Failed to parse attribute"),
                 of: self.this.clone(),
@@ -336,7 +328,6 @@ mod tests {
         }
 
         fn retract(self, transaction: &mut Transaction) {
-            use crate::types::Scalar;
             transaction.dissociate(Assertion {
                 the: "person/name".parse().expect("Failed to parse attribute"),
                 of: self.this.clone(),
@@ -380,7 +371,6 @@ mod tests {
     // This mirrors what the macro generates
     impl From<PersonMatch> for Parameters {
         fn from(source: PersonMatch) -> Self {
-            use crate::types::Scalar;
             let mut terms = Self::new();
 
             // Convert this field: Term<Entity> -> Term<Value>
@@ -421,7 +411,7 @@ mod tests {
         fn from(source: PersonMatch) -> Self {
             ConceptApplication {
                 terms: source.into(),
-                concept: Person::CONCEPT,
+                predicate: Person::predicate(),
             }
         }
     }
@@ -443,7 +433,7 @@ mod tests {
     #[dialog_common::test]
     fn test_person_concept_creation() {
         // Test that the Person concept has the expected properties
-        let concept = Person::CONCEPT;
+        let concept = Person::predicate();
         // Operator is now a URI based on the hash of the concept's attributes
         assert!(
             concept.operator().starts_with("concept:"),
@@ -451,11 +441,10 @@ mod tests {
         );
 
         // Test Person has 2 attributes (name and age)
-        let attributes = concept.attributes();
-        assert_eq!(attributes.count(), 2);
+        assert_eq!(concept.len(), 2);
 
         // Verify attribute names
-        let attr_names: Vec<&str> = attributes.iter().map(|(name, _)| name).collect();
+        let attr_names: Vec<&str> = concept.iter().map(|(name, _)| name).collect();
         assert!(attr_names.contains(&"name"));
         assert!(attr_names.contains(&"age"));
     }
@@ -537,7 +526,7 @@ mod tests {
     #[dialog_common::test]
     fn test_concept_name_consistency() {
         // Test that concept identifier is consistent across different access patterns
-        let concept = Person::CONCEPT;
+        let concept = Person::predicate();
         // Operator is now a URI based on the hash of the concept's attributes
         assert!(
             concept.operator().starts_with("concept:"),
@@ -644,12 +633,11 @@ mod tests {
         assert!(params.get("age").is_some());
 
         // Test 2: Verify concept attributes are accessible
-        let concept = Person::CONCEPT;
-        let attrs = concept.attributes();
-        assert_eq!(attrs.count(), 2); // name and age
+        let concept = Person::predicate();
+        assert_eq!(concept.len(), 2); // name and age
 
         // Verify we can find specific attributes
-        let name_attr = attrs.iter().find(|(name, _)| *name == "name");
+        let name_attr = concept.iter().find(|(name, _)| *name == "name");
         assert!(name_attr.is_some());
 
         Ok(())
@@ -781,10 +769,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_concept_negation_with_not_operator() -> Result<()> {
-        use crate::artifact::Artifacts;
-        use crate::artifact::Attribute as ArtifactAttribute;
-        use dialog_storage::MemoryStorageBackend;
-
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
@@ -818,7 +802,6 @@ mod tests {
         session.transact(vec![alice_person.clone()]).await?;
 
         // Verify Alice exists
-        use crate::artifact::{ArtifactSelector, ArtifactStore};
         use futures_util::TryStreamExt;
 
         let session = Session::open(artifacts.clone());
@@ -890,10 +873,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_relation_negation_with_not_operator() -> Result<()> {
-        use crate::artifact::Artifacts;
-        use crate::artifact::Attribute as ArtifactAttribute;
-        use dialog_storage::MemoryStorageBackend;
-
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
@@ -911,7 +890,6 @@ mod tests {
         session.transact(vec![name_relation.clone()]).await?;
 
         // Verify relation exists
-        use crate::artifact::{ArtifactSelector, ArtifactStore};
         use futures_util::TryStreamExt;
 
         let session = Session::open(artifacts.clone());
@@ -1056,7 +1034,7 @@ mod tests {
         let mut session = Session::open(store.clone());
         session.transact(vec![alice, bob]).await?;
 
-        let query = crate::rule::Match::<DerivedPerson> {
+        let query = Match::<DerivedPerson> {
             this: Term::var("person"),
             name: Term::var("name"),
             birthday: Term::var("birthday"),
@@ -1103,7 +1081,7 @@ mod tests {
         let mut session = Session::open(store.clone());
         session.transact(vec![alice, bob]).await?;
 
-        let query = crate::rule::Match::<DerivedPerson> {
+        let query = Match::<DerivedPerson> {
             this: Term::var("person"),
             name: Term::from("Alice"),
             birthday: Term::var("birthday"),
@@ -1295,11 +1273,10 @@ mod tests {
             .try_collect()
             .await?;
 
-        let employees_explicit: Vec<ShortcutEmployee> =
-            crate::rule::Match::<ShortcutEmployee>::default()
-                .query(session.clone())
-                .try_collect()
-                .await?;
+        let employees_explicit: Vec<ShortcutEmployee> = Match::<ShortcutEmployee>::default()
+            .query(session.clone())
+            .try_collect()
+            .await?;
 
         assert_eq!(employees_shortcut.len(), 2);
         assert_eq!(employees_explicit.len(), 2);
@@ -1345,7 +1322,7 @@ mod tests {
             .try_collect()
             .await?;
 
-        let result2: Vec<ShortcutEmployee> = crate::rule::Match::<ShortcutEmployee> {
+        let result2: Vec<ShortcutEmployee> = Match::<ShortcutEmployee> {
             this: Term::var("this"),
             name: Term::var("name"),
             job: Term::var("job"),
@@ -1354,7 +1331,7 @@ mod tests {
         .try_collect()
         .await?;
 
-        let result3: Vec<ShortcutEmployee> = crate::rule::Match::<ShortcutEmployee>::default()
+        let result3: Vec<ShortcutEmployee> = Match::<ShortcutEmployee>::default()
             .query(session.clone())
             .try_collect()
             .await?;
@@ -1410,17 +1387,17 @@ mod tests {
 
         let mut session = Session::open(artifacts.clone());
         let mut transaction = session.edit();
-        transaction.assert(crate::concept::With {
+        transaction.assert(With {
             this: alice,
             has: helper_person::Name("Alice".into()),
         });
-        transaction.assert(crate::concept::With {
+        transaction.assert(With {
             this: bob,
             has: helper_person::Name("Bob".into()),
         });
         session.commit(transaction).await?;
 
-        let alice_query = crate::rule::Match::<HelperPerson> {
+        let alice_query = Match::<HelperPerson> {
             this: Term::var("person"),
             name: Term::from("Alice".to_string()),
         };
@@ -1430,7 +1407,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name.value(), "Alice");
 
-        let all_people_query = crate::rule::Match::<HelperPerson> {
+        let all_people_query = Match::<HelperPerson> {
             this: Term::var("person"),
             name: Term::var("name"),
         };
@@ -1452,25 +1429,25 @@ mod tests {
 
         let mut session = Session::open(artifacts.clone());
         let mut transaction = session.edit();
-        transaction.assert(crate::concept::With {
+        transaction.assert(With {
             this: alice.clone(),
             has: helper_employee::Name("Alice".into()),
         });
-        transaction.assert(crate::concept::With {
+        transaction.assert(With {
             this: alice.clone(),
             has: helper_employee::Department("Engineering".into()),
         });
-        transaction.assert(crate::concept::With {
+        transaction.assert(With {
             this: bob.clone(),
             has: helper_employee::Name("Bob".into()),
         });
-        transaction.assert(crate::concept::With {
+        transaction.assert(With {
             this: bob,
             has: helper_employee::Department("Sales".into()),
         });
         session.commit(transaction).await?;
 
-        let alice_engineering_query = crate::rule::Match::<HelperEmployee> {
+        let alice_engineering_query = Match::<HelperEmployee> {
             this: Term::var("employee"),
             name: Term::from("Alice".to_string()),
             department: Term::from("Engineering".to_string()),
@@ -1497,25 +1474,25 @@ mod tests {
 
         let mut session = Session::open(artifacts.clone());
         let mut transaction = session.edit();
-        transaction.assert(crate::concept::With {
+        transaction.assert(With {
             this: alice.clone(),
             has: helper_employee::Name("Alice".into()),
         });
-        transaction.assert(crate::concept::With {
+        transaction.assert(With {
             this: alice.clone(),
             has: helper_employee::Department("Engineering".into()),
         });
-        transaction.assert(crate::concept::With {
+        transaction.assert(With {
             this: bob.clone(),
             has: helper_employee::Name("Bob".into()),
         });
-        transaction.assert(crate::concept::With {
+        transaction.assert(With {
             this: bob.clone(),
             has: helper_employee::Department("Sales".into()),
         });
         session.commit(transaction).await?;
 
-        let engineering_query = crate::rule::Match::<HelperEmployee> {
+        let engineering_query = Match::<HelperEmployee> {
             this: Term::var("employee"),
             name: Term::var("name"),
             department: Term::from("Engineering".to_string()),

@@ -435,13 +435,25 @@ mod tests {
     extern crate self as dialog_query;
 
     use super::*;
-    use crate::concept::Concept as _;
+    use crate::application::ConceptApplication;
+    use crate::artifact::{Artifacts, Entity, Type};
+    use crate::attribute::{AttributeDescriptor, Cardinality};
+    use crate::claim::Claim;
+    use crate::concept::{Concept, ConceptProof, ConceptQuery};
+    use crate::dsl::Predicate;
+    use crate::error::InconsistencyError;
+    use crate::predicate::concept::ConceptPredicate;
+    use crate::selection::Answer;
+    use crate::term::Term;
+    use crate::the;
+    use crate::types::Scalar;
+    use crate::{Application, Assertion, Parameters, Premise, QueryError, Session, Transaction};
 
     // Manual implementation of Person struct with Concept and Rule traits
     // This serves as a template for what the derive macro should generate
     #[derive(Debug, Clone)]
     pub struct Person {
-        pub this: crate::artifact::Entity,
+        pub this: Entity,
         /// Name of the person
         pub name: String,
         /// Age of the person
@@ -452,19 +464,19 @@ mod tests {
     #[derive(Debug, Clone)]
     pub struct PersonMatch {
         /// The entity being matched
-        pub this: crate::Term<crate::artifact::Entity>,
+        pub this: Term<Entity>,
         /// Name term - can be a variable or concrete value
-        pub name: crate::Term<String>,
+        pub name: Term<String>,
         /// Age term - can be a variable or concrete value
-        pub age: crate::Term<u32>,
+        pub age: Term<u32>,
     }
 
     impl Default for PersonMatch {
         fn default() -> Self {
             Self {
-                this: crate::Term::var("this"),
-                name: crate::Term::var("name"),
-                age: crate::Term::var("age"),
+                this: Term::var("this"),
+                name: Term::var("name"),
+                age: Term::var("age"),
             }
         }
     }
@@ -473,118 +485,60 @@ mod tests {
     #[derive(Debug, Clone)]
     pub struct PersonTerms;
     impl PersonTerms {
-        pub fn this() -> crate::Term<crate::artifact::Entity> {
-            crate::Term::var("this")
+        pub fn this() -> Term<Entity> {
+            Term::var("this")
         }
-        pub fn name() -> crate::Term<String> {
-            crate::Term::var("name")
+        pub fn name() -> Term<String> {
+            Term::var("name")
         }
-        pub fn age() -> crate::Term<u32> {
-            crate::Term::var("age")
+        pub fn age() -> Term<u32> {
+            Term::var("age")
         }
     }
 
-    #[allow(dead_code)]
-    mod person {
-        use crate::artifact::Type;
-        use crate::attribute::AttributeDescriptor;
-        use crate::attribute::Cardinality;
-
-        /// The namespace for Person attributes
-        pub const NAMESPACE: &str = "person";
-
-        /// Static attribute definitions
-        pub static NAME_ATTR: AttributeDescriptor = AttributeDescriptor::Static {
-            namespace: NAMESPACE,
-            name: "name",
-            description: "Name of the person",
-            cardinality: Cardinality::One,
-            content_type: Some(Type::String),
-        };
-
-        pub static AGE_ATTR: AttributeDescriptor = AttributeDescriptor::Static {
-            namespace: NAMESPACE,
-            name: "age",
-            description: "Age of the person",
-            cardinality: Cardinality::One,
-            content_type: Some(Type::UnsignedInt),
-        };
-
-        /// All attributes as AttributeDescriptor for the attributes() method
-        pub static ATTRIBUTES: &[AttributeDescriptor] = &[
-            AttributeDescriptor::Static {
-                namespace: NAMESPACE,
-                name: "name",
-                description: "Name of the person",
-                cardinality: Cardinality::One,
-                content_type: Some(Type::String),
-            },
-            AttributeDescriptor::Static {
-                namespace: NAMESPACE,
-                name: "age",
-                description: "Age of the person",
-                cardinality: Cardinality::One,
-                content_type: Some(Type::UnsignedInt),
-            },
-        ];
-
-        /// Attribute tuples for the Attributes trait implementation
-        pub static ATTRIBUTE_TUPLES: &[(&str, AttributeDescriptor)] = &[
-            (
-                "name",
-                AttributeDescriptor::Static {
-                    namespace: NAMESPACE,
-                    name: "name",
-                    description: "Name of the person",
-                    cardinality: Cardinality::One,
-                    content_type: Some(Type::String),
-                },
-            ),
-            (
-                "age",
-                AttributeDescriptor::Static {
-                    namespace: NAMESPACE,
-                    name: "age",
-                    description: "Age of the person",
-                    cardinality: Cardinality::One,
-                    content_type: Some(Type::UnsignedInt),
-                },
-            ),
-        ];
-    }
-
-    impl crate::concept::Concept for Person {
+    impl Concept for Person {
         type Proof = Person;
         type Query = PersonMatch;
         type Term = PersonTerms;
 
-        const CONCEPT: crate::predicate::concept::ConceptDescriptor = {
-            const ATTRS: crate::predicate::concept::Attributes =
-                crate::predicate::concept::Attributes::Static(person::ATTRIBUTE_TUPLES);
-
-            crate::predicate::concept::ConceptDescriptor::Static {
-                description: "",
-                attributes: &ATTRS,
-            }
-        };
+        fn predicate() -> ConceptPredicate {
+            ConceptPredicate::from(vec![
+                (
+                    "name",
+                    AttributeDescriptor::new(
+                        the!("person/name"),
+                        "Name of the person",
+                        Cardinality::One,
+                        Some(Type::String),
+                    ),
+                ),
+                (
+                    "age",
+                    AttributeDescriptor::new(
+                        the!("person/age"),
+                        "Age of the person",
+                        Cardinality::One,
+                        Some(Type::UnsignedInt),
+                    ),
+                ),
+            ])
+        }
     }
 
     impl IntoIterator for Person {
-        type Item = crate::Assertion;
-        type IntoIter = std::vec::IntoIter<crate::Assertion>;
+        type Item = Assertion;
+        type IntoIter = std::vec::IntoIter<Assertion>;
 
         fn into_iter(self) -> Self::IntoIter {
-            use crate::types::Scalar;
-
             vec![
-                crate::Assertion::new(
+                Assertion::new(
                     "person/name"
                         .parse()
                         .expect("Failed to parse person/name attribute"),
                     self.this.clone(),
                     self.name.as_value(),
                 ),
-                crate::Assertion::new(
+                Assertion::new(
                     "person/age"
                         .parse()
                         .expect("Failed to parse person/age attribute"),
@@ -596,10 +550,9 @@ mod tests {
         }
     }
 
-    impl crate::claim::Claim for Person {
-        fn assert(self, transaction: &mut crate::Transaction) {
-            use crate::types::Scalar;
-            crate::Assertion::new(
+    impl Claim for Person {
+        fn assert(self, transaction: &mut Transaction) {
+            Assertion::new(
                 "person/name"
                     .parse()
                     .expect("Failed to parse person/name attribute"),
@@ -607,7 +560,7 @@ mod tests {
                 self.name.as_value(),
             )
             .assert(transaction);
-            crate::Assertion::new(
+            Assertion::new(
                 "person/age"
                     .parse()
                     .expect("Failed to parse person/age attribute"),
@@ -617,9 +570,8 @@ mod tests {
             .assert(transaction);
         }
 
-        fn retract(self, transaction: &mut crate::Transaction) {
-            use crate::types::Scalar;
-            crate::Assertion::new(
+        fn retract(self, transaction: &mut Transaction) {
+            Assertion::new(
                 "person/name"
                     .parse()
                     .expect("Failed to parse person/name attribute"),
@@ -627,7 +579,7 @@ mod tests {
                 self.name.as_value(),
             )
             .retract(transaction);
-            crate::Assertion::new(
+            Assertion::new(
                 "person/age"
                     .parse()
                     .expect("Failed to parse person/age attribute"),
@@ -638,14 +590,14 @@ mod tests {
         }
     }
 
-    impl crate::dsl::Predicate for Person {
+    impl Predicate for Person {
         type Application = PersonMatch;
     }
 
-    impl TryFrom<crate::selection::Answer> for Person {
-        type Error = crate::error::InconsistencyError;
+    impl TryFrom<Answer> for Person {
+        type Error = InconsistencyError;
 
-        fn try_from(source: crate::selection::Answer) -> Result<Self, Self::Error> {
+        fn try_from(source: Answer) -> Result<Self, Self::Error> {
             Ok(Person {
                 this: source.get(&PersonTerms::this())?,
                 name: source.get(&PersonTerms::name())?,
@@ -654,7 +606,7 @@ mod tests {
         }
     }
 
-    impl From<PersonMatch> for crate::Parameters {
+    impl From<PersonMatch> for Parameters {
         fn from(source: PersonMatch) -> Self {
             let mut terms = Self::new();
 
@@ -666,14 +618,11 @@ mod tests {
         }
     }
 
-    impl crate::concept::ConceptQuery for PersonMatch {
+    impl ConceptQuery for PersonMatch {
         type Predicate = Person;
         type Proof = Person;
 
-        fn realize(
-            &self,
-            source: crate::selection::Answer,
-        ) -> Result<Self::Proof, crate::QueryError> {
+        fn realize(&self, source: Answer) -> Result<Self::Proof, QueryError> {
             Ok(Self::Proof {
                 this: source.get(&self.this)?,
                 name: source.get(&self.name)?,
@@ -682,36 +631,35 @@ mod tests {
         }
     }
 
-    impl From<PersonMatch> for crate::application::ConceptApplication {
+    impl From<PersonMatch> for ConceptApplication {
         fn from(source: PersonMatch) -> Self {
-            crate::application::ConceptApplication {
+            ConceptApplication {
                 terms: source.into(),
-                concept: <Person as crate::concept::Concept>::CONCEPT,
+                predicate: <Person as Concept>::predicate(),
             }
         }
     }
 
-    impl From<PersonMatch> for crate::Application {
+    impl From<PersonMatch> for Application {
         fn from(source: PersonMatch) -> Self {
-            crate::Application::Concept(source.into())
+            Application::Concept(source.into())
         }
     }
 
-    impl From<PersonMatch> for crate::Premise {
+    impl From<PersonMatch> for Premise {
         fn from(source: PersonMatch) -> Self {
-            crate::Premise::Apply(source.into())
+            Premise::Apply(source.into())
         }
     }
 
-    impl crate::concept::ConceptProof for Person {
-        fn this(&self) -> &crate::artifact::Entity {
+    impl ConceptProof for Person {
+        fn this(&self) -> &Entity {
             panic!("Instance trait implementation requires an entity field")
         }
     }
 
     #[dialog_common::test]
     async fn test_install_rule_api() {
-        use crate::{Session, When};
         use dialog_storage::MemoryStorageBackend;
 
         // Define a rule function using the clean API
@@ -725,9 +673,7 @@ mod tests {
 
         // Create a session
         let storage = MemoryStorageBackend::default();
-        let artifacts = crate::artifact::Artifacts::anonymous(storage)
-            .await
-            .unwrap();
+        let artifacts = Artifacts::anonymous(storage).await.unwrap();
 
         let result = Session::open(artifacts).install(person_rule);
         assert!(result.is_ok(), "install should work");
@@ -748,7 +694,7 @@ mod tests {
     #[derive(crate::Concept, Debug, Clone)]
     pub struct MacroPerson {
         /// Person entity
-        pub this: crate::artifact::Entity,
+        pub this: Entity,
 
         /// Name of the person
         pub name: macro_person::Name,
@@ -759,9 +705,6 @@ mod tests {
 
     #[dialog_common::test]
     fn test_derive_rule_generates_types() {
-        use crate::artifact::Type;
-        use crate::term::Term;
-
         // Test that the generated module and types exist
         let entity = Term::var("person_entity");
 
@@ -773,7 +716,7 @@ mod tests {
         };
 
         // Test that MacroPerson implements Concept
-        let concept = <MacroPerson as crate::concept::Concept>::CONCEPT;
+        let concept = <MacroPerson as Concept>::predicate();
         // Operator is now a computed URI
         assert!(
             concept.operator().starts_with("concept:"),
@@ -781,7 +724,7 @@ mod tests {
         );
 
         // Test the attributes() method
-        let attrs = concept.attributes().iter().collect::<Vec<_>>();
+        let attrs = concept.iter().collect::<Vec<_>>();
 
         assert_eq!(attrs.len(), 2);
         assert_eq!(attrs[0].0, "name");
@@ -807,12 +750,14 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_static_attributes_generation() {
-        // Test that static attributes are generated correctly with prefixed names
-        // The prefixed attributes should exist and be accessible
-        assert_eq!(MACRO_PERSON_NAME.namespace(), "macro-person");
-        assert_eq!(MACRO_PERSON_NAME.name(), "name");
-        assert_eq!(MACRO_PERSON_BIRTHDAY.namespace(), "macro-person");
-        assert_eq!(MACRO_PERSON_BIRTHDAY.name(), "birthday");
+    fn test_attribute_descriptors() {
+        use crate::attribute::Attribute;
+        // Test that attribute descriptors are accessible via the Attribute trait
+        let name_desc = macro_person::Name::descriptor();
+        let birthday_desc = macro_person::Birthday::descriptor();
+        assert_eq!(name_desc.namespace(), "macro-person");
+        assert_eq!(name_desc.name(), "name");
+        assert_eq!(birthday_desc.namespace(), "macro-person");
+        assert_eq!(birthday_desc.name(), "birthday");
     }
 }

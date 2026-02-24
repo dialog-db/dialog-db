@@ -38,14 +38,11 @@
 //! // -- Attribute trait impl --
 //! impl Attribute for FullName {
 //!     type Type = String;
-//!     type Match = WithMatch<Self>;
-//!     type Instance = With<Self>;
+//!     type Query = MatchQuery<Self>;
+//!     type Proof = With<Self>;
 //!     type Term = WithTerms<Self>;
 //!
-//!     const NAMESPACE: &'static str = /* "model" */;
-//!     const NAME: &'static str = "full-name";
-//!     const CARDINALITY: Cardinality = Cardinality::One;
-//!     const SCHEMA: AttributeDescriptor = /* ... */;
+//!     const DESCRIPTOR: AttributeDescriptor = /* ... */;
 //!     const CONCEPT: Concept = FULLNAME_CONCEPT;
 //!
 //!     fn value(&self) -> &String { &self.0 }
@@ -235,56 +232,29 @@ pub fn derive(input: TokenStream) -> TokenStream {
         )
     };
 
-    // Generate concept const name
-    let concept_const_name = syn::Ident::new(
-        &format!("{}_CONCEPT", struct_name.to_string().to_uppercase()),
-        struct_name.span(),
-    );
-
-    // Assemble the final generated code: namespace consts, Concept, Attribute impl,
+    // Assemble the final generated code: namespace consts, Attribute impl,
     // and the Debug/Display/From trait impls.
     let expanded = quote! {
         #namespace_static_decl
 
-        // A Concept wraps the attribute descriptor so it can participate in queries
-        const #concept_const_name: dialog_query::predicate::concept::ConceptDescriptor = {
-            const ATTRS: dialog_query::predicate::concept::Attributes =
-                dialog_query::predicate::concept::Attributes::Static(&[(
-                    "has",
-                    dialog_query::attribute::AttributeDescriptor::Static {
-                        namespace: #namespace_expr,
-                        name: #attr_name_lit,
-                        description: #description_lit,
-                        cardinality: #cardinality,
-                        content_type: <#wrapped_type as dialog_query::types::IntoType>::TYPE,
-                    },
-                )]);
-
-            dialog_query::predicate::concept::ConceptDescriptor::Static {
-                description: #description_lit,
-                attributes: &ATTRS,
-            }
-        };
-
         impl dialog_query::attribute::Attribute for #struct_name {
             type Type = #wrapped_type;
 
-            type Match = dialog_query::concept::WithMatch<Self>;
-            type Instance = dialog_query::concept::With<Self>;
+            type Query = dialog_query::concept::WithQuery<Self>;
+            type Proof = dialog_query::concept::With<Self>;
             type Term = dialog_query::concept::WithTerms<Self>;
 
-            const NAMESPACE: &'static str = #namespace_expr;
-            const NAME: &'static str = #attr_name_lit;
-            const DESCRIPTION: &'static str = #description_lit;
-            const CARDINALITY: dialog_query::attribute::Cardinality = #cardinality;
-            const SCHEMA: dialog_query::attribute::AttributeDescriptor = dialog_query::attribute::AttributeDescriptor::Static {
-                namespace: Self::NAMESPACE,
-                name: Self::NAME,
-                description: Self::DESCRIPTION,
-                cardinality: Self::CARDINALITY,
-                content_type: <#wrapped_type as dialog_query::types::IntoType>::TYPE,
-            };
-            const CONCEPT: dialog_query::predicate::concept::ConceptDescriptor = #concept_const_name;
+            fn descriptor() -> dialog_query::attribute::AttributeDescriptor {
+                let the = format!("{}/{}", #namespace_expr, #attr_name_lit)
+                    .parse::<dialog_query::attribute::The>()
+                    .expect("attribute selector must be valid");
+                dialog_query::attribute::AttributeDescriptor::new(
+                    the,
+                    #description_lit,
+                    #cardinality,
+                    <#wrapped_type as dialog_query::types::IntoType>::TYPE,
+                )
+            }
 
             fn value(&self) -> &Self::Type {
                 &self.0
@@ -299,8 +269,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl std::fmt::Debug for #struct_name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.debug_struct(stringify!(#struct_name))
-                    .field("namespace", &<Self as dialog_query::attribute::Attribute>::NAMESPACE)
-                    .field("name", &<Self as dialog_query::attribute::Attribute>::NAME)
+                    .field("namespace", &<Self as dialog_query::attribute::Attribute>::descriptor().namespace())
+                    .field("name", &<Self as dialog_query::attribute::Attribute>::descriptor().name())
                     .field("value", &self.0)
                     .finish()
             }
@@ -310,8 +280,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl std::fmt::Display for #struct_name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 write!(f, "{}/{}: {:?}",
-                    <Self as dialog_query::attribute::Attribute>::NAMESPACE,
-                    <Self as dialog_query::attribute::Attribute>::NAME,
+                    <Self as dialog_query::attribute::Attribute>::descriptor().namespace(),
+                    <Self as dialog_query::attribute::Attribute>::descriptor().name(),
                     self.0
                 )
             }

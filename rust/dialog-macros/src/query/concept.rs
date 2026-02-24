@@ -39,15 +39,12 @@
 //!     pub fn age() -> Term<i64> { Term::var("age") }
 //! }
 //!
-//! // -- Static attribute descriptors --
-//! // LazyLock statics like PERSON_NAME, PERSON_AGE holding AttributeDescriptor.
-//!
 //! // -- Concept trait impl --
 //! impl Concept for Person {
 //!     type Proof = Person;
 //!     type Query = PersonMatch;
 //!     type Term = PersonTerms;
-//!     const CONCEPT: predicate::concept::ConceptDescriptor = /* static descriptor */;
+//!     fn predicate() -> predicate::concept::ConceptPredicate { /* construct predicate */ }
 //! }
 //!
 //! // -- Match trait impl --
@@ -130,11 +127,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
     // up parallel vectors of token streams that get spliced into the final output.
     let mut match_fields = Vec::new();
     let mut rule_when_fields = Vec::new();
-    let mut typed_attributes = Vec::new();
     let mut field_names = Vec::new();
     let mut field_name_lits = Vec::new();
     let mut field_types = Vec::new();
-    let mut attributes_tuples = Vec::new();
     let mut terms_methods = Vec::new();
     let mut instance_relations = Vec::new();
 
@@ -182,27 +177,6 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         });
 
-        // Generate static attribute definition by extracting metadata from the Attribute trait
-        let prefixed_field_name = syn::Ident::new(
-            &format!(
-                "{}_{}",
-                namespace.replace(".", "_").to_uppercase(),
-                field_name_str.to_uppercase()
-            ),
-            field_name.span(),
-        );
-        typed_attributes.push(quote! {
-            /// Static attribute definition for #field_name - delegates to Attribute trait
-            pub static #prefixed_field_name: std::sync::LazyLock<dialog_query::attribute::AttributeDescriptor> =
-                std::sync::LazyLock::new(|| dialog_query::attribute::AttributeDescriptor::Static {
-                    namespace: <#field_type as dialog_query::Attribute>::NAMESPACE,
-                    name: <#field_type as dialog_query::Attribute>::NAME,
-                    description: <#field_type as dialog_query::Attribute>::DESCRIPTION,
-                    cardinality: <#field_type as dialog_query::Attribute>::CARDINALITY,
-                    content_type: <#inner_type as dialog_query::types::IntoType>::TYPE,
-                });
-        });
-
         // Generate rule when field conversion
         rule_when_fields.push(quote! {
             {
@@ -215,31 +189,17 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 };
 
                 dialog_query::application::relation::RelationApplication::new(
-                    dialog_query::term::Term::Constant(<#field_type as dialog_query::Attribute>::NAMESPACE.to_string()),
-                    dialog_query::term::Term::Constant(<#field_type as dialog_query::Attribute>::NAME.to_string()),
+                    dialog_query::term::Term::Constant(<#field_type as dialog_query::Attribute>::descriptor().namespace().to_string()),
+                    dialog_query::term::Term::Constant(<#field_type as dialog_query::Attribute>::descriptor().name().to_string()),
                     terms.this.clone(),
                     value_term,
                     dialog_query::term::Term::blank(),
                     Some(dialog_query::predicate::RelationDescriptor::new(
                         <<#field_type as dialog_query::Attribute>::Type as dialog_query::types::IntoType>::TYPE,
-                        <#field_type as dialog_query::Attribute>::CARDINALITY,
+                        <#field_type as dialog_query::Attribute>::descriptor().cardinality(),
                     )),
                 )
             }
-        });
-
-        // Generate attribute tuples for Attributes implementation
-        attributes_tuples.push(quote! {
-            (
-                <#field_type as dialog_query::Attribute>::NAME,
-                dialog_query::attribute::AttributeDescriptor::Static {
-                    namespace: <#field_type as dialog_query::Attribute>::NAMESPACE,
-                    name: <#field_type as dialog_query::Attribute>::NAME,
-                    description: <#field_type as dialog_query::Attribute>::DESCRIPTION,
-                    cardinality: <#field_type as dialog_query::Attribute>::CARDINALITY,
-                    content_type: <#inner_type as dialog_query::types::IntoType>::TYPE,
-                }
-            )
         });
 
         // Generate Assertion for IntoIterator implementation
@@ -255,11 +215,6 @@ pub fn derive(input: TokenStream) -> TokenStream {
     // Generate type names based on struct name
     let match_name = syn::Ident::new(&format!("{}Match", struct_name), struct_name.span());
 
-    // Generate static array names
-    let attributes_const_name = syn::Ident::new(
-        &format!("{}_ATTRIBUTES", struct_name.to_string().to_uppercase()),
-        struct_name.span(),
-    );
     let operator_const_name = syn::Ident::new(
         &format!("{}_OPERATOR", struct_name.to_string().to_uppercase()),
         struct_name.span(),
@@ -305,22 +260,6 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         }
         #(#terms_methods)*
-
-        // Static attribute definitions
-        #(#typed_attributes)*
-
-        /// Static const array of attribute tuples for CONCEPT
-        static #attributes_const_name: &[(&str, dialog_query::attribute::AttributeDescriptor)] = &[
-            #(
-                (#field_name_lits, dialog_query::attribute::AttributeDescriptor::Static {
-                    namespace: <#field_types as dialog_query::Attribute>::NAMESPACE,
-                    name: <#field_types as dialog_query::Attribute>::NAME,
-                    description: <#field_types as dialog_query::Attribute>::DESCRIPTION,
-                    cardinality: <#field_types as dialog_query::Attribute>::CARDINALITY,
-                    content_type: <<#field_types as dialog_query::Attribute>::Type as dialog_query::types::IntoType>::TYPE,
-                })
-            ),*
-        ];
 
         /// Const operator name for this concept
         pub const #operator_const_name: &str = #namespace_lit;
@@ -372,7 +311,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             fn from(source: #match_name) -> Self {
                 let app = dialog_query::application::concept::ConceptApplication {
                     terms: source.into(),
-                    concept: #struct_name::CONCEPT,
+                    predicate: #struct_name::predicate(),
                 };
                 dialog_query::Premise::Apply(dialog_query::Application::Concept(app))
             }
@@ -383,7 +322,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             fn from(source: #match_name) -> Self {
                 let app = dialog_query::application::concept::ConceptApplication {
                     terms: source.into(),
-                    concept: #struct_name::CONCEPT,
+                    predicate: #struct_name::predicate(),
                 };
                 dialog_query::Application::Concept(app)
             }
@@ -394,7 +333,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             fn from(source: #match_name) -> Self {
                 dialog_query::application::concept::ConceptApplication {
                     terms: source.into(),
-                    concept: #struct_name::CONCEPT,
+                    predicate: #struct_name::predicate(),
                 }
             }
         }
@@ -404,7 +343,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             fn from(source: &#match_name) -> Self {
                 dialog_query::application::concept::ConceptApplication {
                     terms: source.into(),
-                    concept: #struct_name::CONCEPT,
+                    predicate: #struct_name::predicate(),
                 }
             }
         }
@@ -422,11 +361,17 @@ pub fn derive(input: TokenStream) -> TokenStream {
             type Query = #match_name;
             type Term = #terms_name;
 
-            const CONCEPT: dialog_query::predicate::concept::ConceptDescriptor =
-                dialog_query::predicate::concept::ConceptDescriptor::Static {
-                    description: #concept_description_lit,
-                    attributes: &dialog_query::predicate::concept::Attributes::Static(#attributes_const_name),
-                };
+            fn description() -> &'static str {
+                #concept_description_lit
+            }
+
+            fn predicate() -> dialog_query::predicate::concept::ConceptPredicate {
+                dialog_query::predicate::concept::ConceptPredicate::from(vec![
+                    #(
+                        (#field_name_lits, <#field_types as dialog_query::Attribute>::descriptor())
+                    ),*
+                ])
+            }
         }
 
         // Implement IntoIterator to convert concept into relations

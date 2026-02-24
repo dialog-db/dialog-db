@@ -41,14 +41,14 @@ pub struct With<A: Attribute> {
 ///
 /// Use with the `Match` type alias to query for entities that have an attribute.
 #[derive(Clone, Debug, PartialEq)]
-pub struct WithMatch<A: Attribute> {
+pub struct WithQuery<A: Attribute> {
     /// Term matching the entity. Defaults to a variable named `"this"`.
     pub this: crate::Term<Entity>,
     /// Term matching the attribute value. Defaults to a variable named `"has"`.
     pub has: crate::Term<A::Type>,
 }
 
-impl<A: Attribute> Default for WithMatch<A> {
+impl<A: Attribute> Default for WithQuery<A> {
     fn default() -> Self {
         Self {
             this: crate::Term::var("this"),
@@ -80,17 +80,24 @@ where
     A: Clone + std::fmt::Debug + Send + 'static,
 {
     type Proof = With<A>;
-    type Query = WithMatch<A>;
+    type Query = WithQuery<A>;
     type Term = WithTerms<A>;
 
-    const CONCEPT: crate::predicate::concept::ConceptDescriptor = A::CONCEPT;
+    fn description() -> &'static str {
+        ""
+    }
+
+    fn predicate() -> crate::predicate::concept::ConceptPredicate {
+        let attr_descriptor = A::descriptor();
+        crate::predicate::concept::ConceptPredicate::from(vec![("has", attr_descriptor)])
+    }
 }
 
 impl<A: Attribute> crate::dsl::Predicate for With<A>
 where
     A: Clone + std::fmt::Debug + Send + 'static,
 {
-    type Application = WithMatch<A>;
+    type Application = WithQuery<A>;
 }
 
 impl<A: Attribute> crate::concept::ConceptProof for With<A>
@@ -109,7 +116,7 @@ where
     fn assert(self, transaction: &mut Transaction) {
         use crate::types::Scalar;
         let assertion = Assertion::new(A::selector(), self.this, self.has.value().as_value());
-        if A::CARDINALITY == crate::Cardinality::One {
+        if A::descriptor().cardinality() == crate::Cardinality::One {
             transaction.associate_unique(assertion);
         } else {
             transaction.associate(assertion);
@@ -150,7 +157,7 @@ where
     }
 }
 
-impl<A: Attribute> crate::concept::ConceptQuery for WithMatch<A>
+impl<A: Attribute> crate::concept::ConceptQuery for WithQuery<A>
 where
     A: Clone + std::fmt::Debug + Send + 'static,
 {
@@ -165,7 +172,7 @@ where
     }
 }
 
-impl<A: Attribute> std::ops::Not for WithMatch<A>
+impl<A: Attribute> std::ops::Not for WithQuery<A>
 where
     A: Clone + std::fmt::Debug + Send + 'static,
 {
@@ -177,11 +184,11 @@ where
     }
 }
 
-impl<A: Attribute> From<WithMatch<A>> for Parameters
+impl<A: Attribute> From<WithQuery<A>> for Parameters
 where
     A: Clone,
 {
-    fn from(source: WithMatch<A>) -> Self {
+    fn from(source: WithQuery<A>) -> Self {
         let mut params = Self::new();
         params.insert("this".to_string(), source.this.as_unknown());
         params.insert("has".to_string(), source.has.as_unknown());
@@ -189,32 +196,32 @@ where
     }
 }
 
-impl<A: Attribute> From<WithMatch<A>> for ConceptApplication
+impl<A: Attribute> From<WithQuery<A>> for ConceptApplication
 where
-    A: Clone,
+    A: Clone + std::fmt::Debug + Send + 'static,
 {
-    fn from(source: WithMatch<A>) -> Self {
+    fn from(source: WithQuery<A>) -> Self {
         ConceptApplication {
             terms: source.into(),
-            concept: A::CONCEPT,
+            predicate: <With<A> as crate::concept::Concept>::predicate(),
         }
     }
 }
 
-impl<A: Attribute> From<WithMatch<A>> for Application
+impl<A: Attribute> From<WithQuery<A>> for Application
 where
-    A: Clone,
+    A: Clone + std::fmt::Debug + Send + 'static,
 {
-    fn from(source: WithMatch<A>) -> Self {
+    fn from(source: WithQuery<A>) -> Self {
         Application::Concept(source.into())
     }
 }
 
-impl<A: Attribute> From<WithMatch<A>> for Premise
+impl<A: Attribute> From<WithQuery<A>> for Premise
 where
-    A: Clone,
+    A: Clone + std::fmt::Debug + Send + 'static,
 {
-    fn from(source: WithMatch<A>) -> Self {
+    fn from(source: WithQuery<A>) -> Self {
         Premise::Apply(source.into())
     }
 }

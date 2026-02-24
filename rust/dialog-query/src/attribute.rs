@@ -1,6 +1,8 @@
 use crate::Parameters;
 use crate::application::RelationApplication;
-pub use crate::artifact::{Attribute as ArtifactsAttribute, Cause, Entity, Value};
+pub use crate::artifact::{
+    Attribute as ArtifactsAttribute, Cause, DialogArtifactsError, Entity, Value,
+};
 use crate::error::{SchemaError, TypeError};
 pub use crate::predicate::RelationDescriptor;
 pub use crate::schema::Cardinality;
@@ -8,8 +10,110 @@ pub use crate::types::{IntoType, Scalar, Type};
 pub use crate::{Premise, Term};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+/// Maximum length in bytes for an attribute selector (`"namespace/name"`).
+pub const MAX_SELECTOR_LENGTH: usize = 64;
+
+/// A validated attribute selector (`"namespace/name"`).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct The {
+    /// The domain namespace.
+    pub namespace: String,
+    /// The attribute name.
+    pub name: String,
+}
+
+impl std::fmt::Display for The {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.namespace, self.name)
+    }
+}
+
+impl std::str::FromStr for The {
+    type Err = DialogArtifactsError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (namespace, name) = s.split_once('/').ok_or_else(|| {
+            DialogArtifactsError::InvalidAttribute(format!(
+                "Attribute format is \"namespace/predicate\", but got \"{s}\""
+            ))
+        })?;
+        // Validate via ArtifactsAttribute to enforce length limit
+        let _: ArtifactsAttribute = s.parse()?;
+        Ok(Self {
+            namespace: namespace.to_owned(),
+            name: name.to_owned(),
+        })
+    }
+}
+
+impl From<The> for ArtifactsAttribute {
+    fn from(the: The) -> Self {
+        the.to_string()
+            .parse()
+            .expect("The is always a valid ArtifactsAttribute")
+    }
+}
+
+impl From<&The> for ArtifactsAttribute {
+    fn from(the: &The) -> Self {
+        the.to_string()
+            .parse()
+            .expect("The is always a valid ArtifactsAttribute")
+    }
+}
+
+impl From<ArtifactsAttribute> for The {
+    fn from(attr: ArtifactsAttribute) -> Self {
+        let s = attr.to_string();
+        let (namespace, name) = s
+            .split_once('/')
+            .expect("ArtifactsAttribute always contains '/'");
+        Self {
+            namespace: namespace.to_owned(),
+            name: name.to_owned(),
+        }
+    }
+}
+
+/// Compile-time validated attribute selector.
+///
+/// Verifies at compile time that the literal:
+/// - does not exceed [`MAX_SELECTOR_LENGTH`] bytes
+/// - contains a `'/'` separator
+///
+/// # Examples
+///
+/// ```
+/// use dialog_query::the;
+/// let selector = the!("person/name");
+/// assert_eq!(selector.to_string(), "person/name");
+/// ```
+#[macro_export]
+macro_rules! the {
+    ($selector:literal) => {{
+        const _: () = {
+            assert!(
+                $selector.len() <= $crate::attribute::MAX_SELECTOR_LENGTH,
+                "attribute selector exceeds maximum length of 64 bytes"
+            );
+            let bytes = $selector.as_bytes();
+            let mut found = false;
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i] == b'/' {
+                    found = true;
+                    break;
+                }
+                i += 1;
+            }
+            assert!(found, "attribute selector must contain '/' separator");
+        };
+        // SAFETY: compile-time checks above guarantee the literal is valid.
+        <$crate::attribute::The as ::std::str::FromStr>::from_str($selector).unwrap()
+    }};
+}
+
 /// A validated attribute–value pair with its cardinality, produced by
-/// [`AttributeDescriptor::resolve`]. Used inside [`Conception`](crate::predicate::concept::ConceptDescriptorion)
+/// [`AttributeDescriptor::resolve`]. Used inside [`Conception`](crate::predicate::concept::Conception)
 /// to represent the set of facts that make up a concept instance.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Attribution {
@@ -23,95 +127,57 @@ pub struct Attribution {
 
 /// Describes an attribute's identity, type, and cardinality.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AttributeDescriptor {
-    /// A descriptor defined at compile time with static references.
-    Static {
-        /// The domain namespace this attribute belongs to (e.g. `"person"`).
-        namespace: &'static str,
-        /// The attribute name within its namespace (e.g. `"name"`).
-        name: &'static str,
-        /// Human-readable description of the attribute.
-        description: &'static str,
-        /// Whether this attribute allows one or many values per entity.
-        cardinality: Cardinality,
-        /// The expected value type, or `None` if any type is accepted.
-        content_type: Option<Type>,
-    },
-    /// A descriptor constructed at runtime with owned data.
-    Dynamic {
-        /// The domain namespace this attribute belongs to (e.g. `"person"`).
-        namespace: String,
-        /// The attribute name within its namespace (e.g. `"name"`).
-        name: String,
-        /// Human-readable description of the attribute.
-        description: String,
-        /// Whether this attribute allows one or many values per entity.
-        cardinality: Cardinality,
-        /// The expected value type, or `None` if any type is accepted.
-        content_type: Option<Type>,
-    },
+pub struct AttributeDescriptor {
+    the: The,
+    description: String,
+    cardinality: Cardinality,
+    content_type: Option<Type>,
 }
 
 impl AttributeDescriptor {
-    /// Creates a new dynamic descriptor with [`Cardinality::One`] and the given content type.
+    /// Creates a new descriptor from a validated [`The`] selector.
     pub fn new(
-        namespace: &'static str,
-        name: &'static str,
-        description: &'static str,
-        content_type: Type,
+        the: The,
+        description: impl Into<String>,
+        cardinality: Cardinality,
+        content_type: Option<Type>,
     ) -> Self {
-        Self::Static {
-            namespace,
-            name,
-            description,
-            cardinality: Cardinality::One,
-            content_type: Some(content_type),
+        Self {
+            the,
+            description: description.into(),
+            cardinality,
+            content_type,
         }
+    }
+
+    /// Returns a reference to the validated selector.
+    pub fn the(&self) -> &The {
+        &self.the
     }
 
     /// Returns the domain namespace.
     pub fn namespace(&self) -> &str {
-        match self {
-            Self::Static { namespace, .. } => namespace,
-            Self::Dynamic { namespace, .. } => namespace,
-        }
+        &self.the.namespace
     }
 
     /// Returns the attribute name.
     pub fn name(&self) -> &str {
-        match self {
-            Self::Static { name, .. } => name,
-            Self::Dynamic { name, .. } => name,
-        }
+        &self.the.name
     }
 
     /// Returns the human-readable description.
     pub fn description(&self) -> &str {
-        match self {
-            Self::Static { description, .. } => description,
-            Self::Dynamic { description, .. } => description,
-        }
+        &self.description
     }
 
     /// Returns the cardinality.
     pub fn cardinality(&self) -> Cardinality {
-        match self {
-            Self::Static { cardinality, .. } => *cardinality,
-            Self::Dynamic { cardinality, .. } => *cardinality,
-        }
+        self.cardinality
     }
 
     /// Returns the expected value type, or `None` if any type is accepted.
     pub fn content_type(&self) -> Option<Type> {
-        match self {
-            Self::Static { content_type, .. } => *content_type,
-            Self::Dynamic { content_type, .. } => *content_type,
-        }
-    }
-
-    /// Returns the fully-qualified attribute selector (`"namespace/name"`).
-    pub fn the(&self) -> String {
-        format!("{}/{}", self.namespace(), self.name())
+        self.content_type
     }
 
     /// Checks that the given term's type is compatible with this attribute's
@@ -152,16 +218,8 @@ impl AttributeDescriptor {
         };
 
         if type_matches {
-            let the =
-                self.the()
-                    .parse::<ArtifactsAttribute>()
-                    .map_err(|_| TypeError::TypeMismatch {
-                        expected: Type::Symbol,
-                        actual: Term::Constant(Value::String(self.the().clone())),
-                    })?;
-
             Ok(Attribution {
-                the,
+                the: ArtifactsAttribute::from(&self.the),
                 is: value.clone(),
                 cardinality: self.cardinality(),
             })
@@ -288,6 +346,18 @@ impl AttributeDescriptor {
     }
 }
 
+impl From<&AttributeDescriptor> for ArtifactsAttribute {
+    fn from(descriptor: &AttributeDescriptor) -> Self {
+        ArtifactsAttribute::from(&descriptor.the)
+    }
+}
+
+impl From<AttributeDescriptor> for ArtifactsAttribute {
+    fn from(descriptor: AttributeDescriptor) -> Self {
+        ArtifactsAttribute::from(descriptor.the)
+    }
+}
+
 impl Serialize for AttributeDescriptor {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -374,13 +444,15 @@ impl<'de> Deserialize<'de> for AttributeDescriptor {
                     description.ok_or_else(|| de::Error::missing_field("description"))?;
                 let data_type = data_type.ok_or_else(|| de::Error::missing_field("data_type"))?;
 
-                Ok(AttributeDescriptor::Dynamic {
-                    namespace,
-                    name,
+                let the = format!("{namespace}/{name}")
+                    .parse::<The>()
+                    .map_err(de::Error::custom)?;
+                Ok(AttributeDescriptor::new(
+                    the,
                     description,
-                    cardinality: Cardinality::One,
-                    content_type: data_type,
-                })
+                    Cardinality::One,
+                    data_type,
+                ))
             }
         }
 
@@ -398,25 +470,12 @@ pub trait Attribute: Sized {
     /// The Rust scalar type of this attribute's values.
     type Type: Scalar;
 
-    /// The match pattern type used when querying this attribute in a concept.
-    type Match;
-    /// The concrete instance type when this attribute is part of a concept result.
-    type Instance;
+    /// The query pattern type used when querying this attribute in a concept.
+    type Query;
+    /// The concrete proof type when this attribute is part of a concept result.
+    type Proof;
     /// The term type used when building query patterns for this attribute.
     type Term;
-
-    /// The domain namespace (e.g. `"person"`).
-    const NAMESPACE: &'static str;
-    /// The attribute name within its namespace (e.g. `"name"`).
-    const NAME: &'static str;
-    /// Human-readable description of this attribute.
-    const DESCRIPTION: &'static str;
-    /// Whether this attribute allows one or many values per entity.
-    const CARDINALITY: Cardinality;
-    /// The full static descriptor for this attribute.
-    const SCHEMA: AttributeDescriptor;
-    /// The concept definition that this attribute belongs to.
-    const CONCEPT: crate::predicate::concept::ConceptDescriptor;
 
     /// Returns a reference to the inner value.
     fn value(&self) -> &Self::Type;
@@ -424,27 +483,28 @@ pub trait Attribute: Sized {
     /// Construct an attribute from its inner value
     fn new(value: Self::Type) -> Self;
 
+    /// Returns the attribute descriptor.
+    fn descriptor() -> AttributeDescriptor;
+
     /// Returns the namespace as an owned `String`.
     fn namespace() -> String {
-        Self::NAMESPACE.into()
+        Self::descriptor().namespace().into()
     }
     /// Returns the attribute name as an owned `String`.
     fn name() -> String {
-        Self::NAME.into()
+        Self::descriptor().name().into()
     }
     /// Returns the description as an owned `String`.
     fn description() -> String {
-        Self::DESCRIPTION.into()
+        Self::descriptor().description().into()
     }
     /// Returns the cardinality of this attribute.
     fn cardinality() -> Cardinality {
-        Self::CARDINALITY
+        Self::descriptor().cardinality()
     }
     /// Returns the parsed attribute selector (`"namespace/name"`).
     fn selector() -> crate::artifact::Attribute {
-        format!("{}/{}", Self::NAMESPACE, Self::NAME)
-            .parse()
-            .expect("Failed to parse attribute")
+        ArtifactsAttribute::from(Self::descriptor())
     }
 
     /// Compute blake3 hash of this attribute's schema
@@ -452,15 +512,14 @@ pub trait Attribute: Sized {
     /// Returns a 32-byte blake3 hash of the CBOR-encoded attribute schema
     /// (namespace, name, cardinality, content_type - excluding description)
     fn hash() -> blake3::Hash {
-        let cbor_bytes = Self::SCHEMA.to_cbor_bytes();
-        blake3::hash(&cbor_bytes)
+        Self::descriptor().hash()
     }
 
     /// Format this attribute's hash as a URI
     ///
     /// Returns a string in the format: `the:{blake3_hash_hex}`
     fn to_uri() -> String {
-        Self::SCHEMA.to_uri()
+        Self::descriptor().to_uri()
     }
 
     /// Returns the expected value type, or `None` if any type is accepted.
@@ -469,55 +528,35 @@ pub trait Attribute: Sized {
     }
 }
 
-pub use crate::concept::with::{With, WithMatch, WithTerms};
+pub use crate::concept::with::{With, WithQuery, WithTerms};
 
 #[cfg(test)]
 mod tests {
-    use crate::attribute::Attribute;
+    use crate::artifact::Type;
+    use crate::attribute::{Attribute, AttributeDescriptor, Cardinality};
+    use crate::term::Term;
 
     mod person {
         use crate::Cardinality;
-        use crate::attribute::Attribute;
+        use crate::attribute::{Attribute, AttributeDescriptor, With, WithQuery, WithTerms};
+        use crate::types::IntoType;
 
         pub struct Name(pub String);
 
-        const NAME_CONCEPT: crate::predicate::concept::ConceptDescriptor = {
-            const ATTRS: crate::predicate::concept::Attributes =
-                crate::predicate::concept::Attributes::Static(&[(
-                    "name",
-                    crate::attribute::AttributeDescriptor::Static {
-                        namespace: "person",
-                        name: "name",
-                        description: "The name of the person",
-                        cardinality: Cardinality::One,
-                        content_type: <String as crate::types::IntoType>::TYPE,
-                    },
-                )]);
-            crate::predicate::concept::ConceptDescriptor::Static {
-                description: "",
-                attributes: &ATTRS,
-            }
-        };
-
         impl Attribute for Name {
             type Type = String;
-            type Match = crate::attribute::WithMatch<Self>;
-            type Instance = crate::attribute::With<Self>;
-            type Term = crate::attribute::WithTerms<Self>;
+            type Query = WithQuery<Self>;
+            type Proof = With<Self>;
+            type Term = WithTerms<Self>;
 
-            const NAMESPACE: &'static str = "person";
-            const NAME: &'static str = "name";
-            const DESCRIPTION: &'static str = "The name of the person";
-            const CARDINALITY: Cardinality = Cardinality::One;
-            const SCHEMA: crate::attribute::AttributeDescriptor =
-                crate::attribute::AttributeDescriptor::Static {
-                    namespace: Self::NAMESPACE,
-                    name: Self::NAME,
-                    description: Self::DESCRIPTION,
-                    cardinality: Self::CARDINALITY,
-                    content_type: <String as crate::types::IntoType>::TYPE,
-                };
-            const CONCEPT: crate::predicate::concept::ConceptDescriptor = NAME_CONCEPT;
+            fn descriptor() -> AttributeDescriptor {
+                AttributeDescriptor::new(
+                    the!("person/name"),
+                    "The name of the person",
+                    Cardinality::One,
+                    <String as IntoType>::TYPE,
+                )
+            }
 
             fn value(&self) -> &Self::Type {
                 &self.0
@@ -533,8 +572,8 @@ mod tests {
     fn test_person_name() {
         let _name = person::Name("hello".into());
         // Basic test that Attribute trait is implemented
-        assert_eq!(person::Name::NAMESPACE, "person");
-        assert_eq!(person::Name::NAME, "name");
+        assert_eq!(person::Name::descriptor().namespace(), "person");
+        assert_eq!(person::Name::descriptor().name(), "name");
     }
 
     // Tests from attribute_derive_test.rs
@@ -570,8 +609,6 @@ mod tests {
 
     #[dialog_common::test]
     fn test_employee_name_derives_attribute() {
-        use crate::Cardinality;
-
         let name = employee_derive::Name("Alice".to_string());
 
         assert_eq!(employee_derive::Name::namespace(), "employee-derive");
@@ -587,8 +624,6 @@ mod tests {
 
     #[dialog_common::test]
     fn test_employee_job_derives_attribute() {
-        use crate::Cardinality;
-
         let job = employee_derive::Job("Engineer".to_string());
 
         assert_eq!(employee_derive::Job::namespace(), "employee-derive");
@@ -607,8 +642,6 @@ mod tests {
 
     #[dialog_common::test]
     fn test_employee_salary_derives_attribute() {
-        use crate::Cardinality;
-
         let salary = employee_derive::Salary(100000);
 
         assert_eq!(employee_derive::Salary::namespace(), "employee-derive");
@@ -640,8 +673,6 @@ mod tests {
 
     #[dialog_common::test]
     fn test_cardinality_many() {
-        use crate::Cardinality;
-
         assert_eq!(person_derive::Manages::cardinality(), Cardinality::Many);
         assert_eq!(
             person_derive::Manages::description(),
@@ -754,7 +785,7 @@ mod tests {
     #[dialog_common::test]
     fn test_attribute_uri_roundtrip() {
         let uri = employee_ident::Name::to_uri();
-        let parsed_hash = crate::attribute::AttributeDescriptor::parse_uri(&uri);
+        let parsed_hash = AttributeDescriptor::parse_uri(&uri);
 
         assert!(parsed_hash.is_some(), "Should be able to parse valid URI");
         assert_eq!(
@@ -767,24 +798,24 @@ mod tests {
     #[dialog_common::test]
     fn test_attribute_uri_parse_invalid() {
         assert!(
-            crate::attribute::AttributeDescriptor::parse_uri("invalid").is_none(),
+            AttributeDescriptor::parse_uri("invalid").is_none(),
             "Should fail to parse URI without 'the:' prefix"
         );
 
         assert!(
-            crate::attribute::AttributeDescriptor::parse_uri("the:invalid").is_none(),
+            AttributeDescriptor::parse_uri("the:invalid").is_none(),
             "Should fail to parse URI with invalid hash"
         );
 
         assert!(
-            crate::attribute::AttributeDescriptor::parse_uri("concept:abcd").is_none(),
+            AttributeDescriptor::parse_uri("concept:abcd").is_none(),
             "Should fail to parse URI with wrong prefix"
         );
     }
 
     #[dialog_common::test]
     fn test_attribute_schema_hash_stability() {
-        let schema_hash = employee_ident::Name::SCHEMA.hash();
+        let schema_hash = employee_ident::Name::descriptor().hash();
         let trait_hash = employee_ident::Name::hash();
 
         assert_eq!(
@@ -795,8 +826,8 @@ mod tests {
 
     #[dialog_common::test]
     fn test_attribute_cbor_encoding() {
-        let cbor1 = employee_ident::Name::SCHEMA.to_cbor_bytes();
-        let cbor2 = employee_ident::Name::SCHEMA.to_cbor_bytes();
+        let cbor1 = employee_ident::Name::descriptor().to_cbor_bytes();
+        let cbor2 = employee_ident::Name::descriptor().to_cbor_bytes();
 
         assert_eq!(cbor1, cbor2, "CBOR encoding should be deterministic");
         assert!(!cbor1.is_empty(), "CBOR encoding should not be empty");
@@ -804,17 +835,18 @@ mod tests {
 
     #[dialog_common::test]
     fn test_attribute_description_does_not_affect_hash() {
-        use crate::artifact::Type;
-        use crate::attribute::AttributeDescriptor;
-
-        let attr1 =
-            AttributeDescriptor::new("user", "email", "Primary email address", Type::String);
+        let attr1 = AttributeDescriptor::new(
+            the!("user/email"),
+            "Primary email address",
+            Cardinality::One,
+            Some(Type::String),
+        );
 
         let attr2 = AttributeDescriptor::new(
-            "user",
-            "email",
+            the!("user/email"),
             "User's email for notifications",
-            Type::String,
+            Cardinality::One,
+            Some(Type::String),
         );
 
         assert_eq!(
@@ -847,8 +879,6 @@ mod tests {
 
     #[dialog_common::test]
     fn test_attribute_into_term() {
-        use crate::Term;
-
         let name = employee_term::Name("Alice".into());
         let name_term: Term<String> = name.into();
         assert!(name_term.is_constant());
@@ -864,8 +894,6 @@ mod tests {
 
     #[dialog_common::test]
     fn test_attribute_from_method() {
-        use crate::Term;
-
         let name = employee_term::Name::from("Alice");
         assert_eq!(name.value(), "Alice");
 
@@ -954,10 +982,8 @@ mod tests {
 
     #[dialog_common::test]
     fn test_underscore_to_hyphen_conversion() {
-        use crate::Attribute;
-
-        assert_eq!(account_name::Name::NAMESPACE, "account-name");
-        assert_eq!(account_name::Name::NAME, "name");
+        assert_eq!(account_name::Name::namespace(), "account-name");
+        assert_eq!(account_name::Name::name(), "name");
         assert_eq!(
             account_name::Name::selector().to_string(),
             "account-name/name"
@@ -966,19 +992,15 @@ mod tests {
 
     #[dialog_common::test]
     fn test_nested_module_namespace() {
-        use crate::Attribute;
-
-        assert_eq!(ns_my::config::Key::NAMESPACE, "config");
-        assert_eq!(ns_my::config::Key::NAME, "key");
+        assert_eq!(ns_my::config::Key::namespace(), "config");
+        assert_eq!(ns_my::config::Key::name(), "key");
         assert_eq!(ns_my::config::Key::selector().to_string(), "config/key");
     }
 
     #[dialog_common::test]
     fn test_explicit_namespace_override() {
-        use crate::Attribute;
-
-        assert_eq!(NsValue::NAMESPACE, "my.custom.namespace");
-        assert_eq!(NsValue::NAME, "ns-value");
+        assert_eq!(NsValue::namespace(), "my.custom.namespace");
+        assert_eq!(NsValue::name(), "ns-value");
         assert_eq!(
             NsValue::selector().to_string(),
             "my.custom.namespace/ns-value"
@@ -987,10 +1009,8 @@ mod tests {
 
     #[dialog_common::test]
     fn test_namespace_identifier_syntax() {
-        use crate::Attribute;
-
-        assert_eq!(NsCustomValue::NAMESPACE, "custom");
-        assert_eq!(NsCustomValue::NAME, "ns-custom-value");
+        assert_eq!(NsCustomValue::namespace(), "custom");
+        assert_eq!(NsCustomValue::name(), "ns-custom-value");
         assert_eq!(
             NsCustomValue::selector().to_string(),
             "custom/ns-custom-value"
@@ -999,10 +1019,8 @@ mod tests {
 
     #[dialog_common::test]
     fn test_namespace_string_literal_syntax() {
-        use crate::Attribute;
-
-        assert_eq!(NsDottedValue::NAMESPACE, "io.gozala");
-        assert_eq!(NsDottedValue::NAME, "ns-dotted-value");
+        assert_eq!(NsDottedValue::namespace(), "io.gozala");
+        assert_eq!(NsDottedValue::name(), "ns-dotted-value");
         assert_eq!(
             NsDottedValue::selector().to_string(),
             "io.gozala/ns-dotted-value"
@@ -1011,10 +1029,8 @@ mod tests {
 
     #[dialog_common::test]
     fn test_nested_underscore_conversion() {
-        use crate::Attribute;
-
-        assert_eq!(ns_my_app::user_profile::Email::NAMESPACE, "user-profile");
-        assert_eq!(ns_my_app::user_profile::Email::NAME, "email");
+        assert_eq!(ns_my_app::user_profile::Email::namespace(), "user-profile");
+        assert_eq!(ns_my_app::user_profile::Email::name(), "email");
         assert_eq!(
             ns_my_app::user_profile::Email::selector().to_string(),
             "user-profile/email"
@@ -1023,14 +1039,12 @@ mod tests {
 
     #[dialog_common::test]
     fn test_all_metadata_preserved() {
-        use crate::{Attribute, Cardinality};
-
         let name = account_name::Name("John Doe".to_string());
 
-        assert_eq!(account_name::Name::NAMESPACE, "account-name");
-        assert_eq!(account_name::Name::NAME, "name");
-        assert_eq!(account_name::Name::DESCRIPTION, "Account holder's name");
-        assert_eq!(account_name::Name::CARDINALITY, Cardinality::One);
+        assert_eq!(account_name::Name::namespace(), "account-name");
+        assert_eq!(account_name::Name::name(), "name");
+        assert_eq!(account_name::Name::description(), "Account holder's name");
+        assert_eq!(account_name::Name::cardinality(), Cardinality::One);
         assert_eq!(name.value(), "John Doe");
     }
 
@@ -1051,20 +1065,20 @@ mod tests {
 
     #[dialog_common::test]
     fn test_pascal_case_to_kebab_case() {
-        assert_eq!(test_pascal::UserName::NAME, "user-name");
+        assert_eq!(test_pascal::UserName::name(), "user-name");
     }
 
     #[dialog_common::test]
     fn test_consecutive_capitals() {
-        assert_eq!(test_pascal::HTTPRequest::NAME, "http-request");
-        assert_eq!(test_pascal::APIKey::NAME, "api-key");
+        assert_eq!(test_pascal::HTTPRequest::name(), "http-request");
+        assert_eq!(test_pascal::APIKey::name(), "api-key");
     }
 
     #[dialog_common::test]
     fn test_static_values() {
-        let ns = test_pascal::UserName::NAMESPACE;
-        let name = test_pascal::UserName::NAME;
-        let desc = test_pascal::UserName::DESCRIPTION;
+        let ns = test_pascal::UserName::namespace();
+        let name = test_pascal::UserName::name();
+        let desc = test_pascal::UserName::description();
 
         assert!(!ns.is_empty());
         assert_eq!(name, "user-name");
@@ -1073,9 +1087,7 @@ mod tests {
 
     #[dialog_common::test]
     fn test_schema_static() {
-        use crate::Cardinality;
-
-        let schema = &test_pascal::UserName::SCHEMA;
+        let schema = &test_pascal::UserName::descriptor();
         assert_eq!(schema.name(), "user-name");
         assert_eq!(schema.cardinality(), Cardinality::One);
     }
