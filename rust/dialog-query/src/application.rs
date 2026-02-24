@@ -11,9 +11,8 @@ pub use crate::analyzer::AnalyzerError;
 pub use crate::context::new_context;
 pub use crate::error::{PlanError, QueryResult};
 pub use crate::premise::{Negation, Premise};
-use crate::query::Query;
 pub use crate::{Environment, EvaluationContext, Source};
-use async_stream::try_stream;
+use futures_util::future::Either;
 pub use concept::ConceptApplication;
 pub use fact::FactApplication;
 pub use formula::FormulaApplication;
@@ -57,29 +56,18 @@ impl Application {
         &self,
         context: EvaluationContext<S, M>,
     ) -> impl crate::selection::Answers {
-        let source = self.clone();
-        try_stream! {
-            match source {
-                Application::Fact(application) => {
-                    for await item in application.evaluate(context) {
-                        yield item?;
-                    }
-                },
-                Application::Relation(application) => {
-                    for await item in application.evaluate(context) {
-                        yield item?;
-                    }
-                },
-                Application::Concept(application) => {
-                    for await item in application.evaluate(context) {
-                        yield item?;
-                    }
-                },
-                Application::Formula(application) => {
-                    for await item in application.evaluate(context) {
-                        yield item?;
-                    }
-                },
+        match self {
+            Application::Fact(application) => Either::Left(Either::Left(
+                application.evaluate_with_provenance(context.source, context.selection),
+            )),
+            Application::Relation(application) => Either::Left(Either::Right(
+                application.evaluate_with_provenance(context.source, context.selection),
+            )),
+            Application::Concept(application) => {
+                Either::Right(Either::Left(application.clone().evaluate(context)))
+            }
+            Application::Formula(application) => {
+                Either::Right(Either::Right(application.evaluate(context)))
             }
         }
     }

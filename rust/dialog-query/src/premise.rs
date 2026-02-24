@@ -5,10 +5,9 @@
 //!
 //! Note: Premises are only used in rule conditions (the "when" part), not in conclusions.
 
-use async_stream::try_stream;
-
 pub use super::application::Application;
 use super::application::{FactApplication, FormulaApplication};
+use futures_util::future::Either;
 pub use super::constraint::Constraint;
 pub use super::context::new_context;
 pub use super::negation::Negation;
@@ -79,25 +78,14 @@ impl Premise {
         &self,
         context: EvaluationContext<S, M>,
     ) -> impl Answers {
-        let source = self.clone();
-        try_stream! {
-            match source {
-                Premise::Apply(application) => {
-                    for await each in application.evaluate(context) {
-                        yield each?;
-                    }
-                },
-                Premise::Constrain(constraint) => {
-                    for await each in constraint.evaluate(context) {
-                        yield each?;
-                    }
-                },
-                Premise::Exclude(negation) => {
-                    for await each in negation.evaluate(context) {
-                        yield each?;
-                    }
-                },
+        match self {
+            Premise::Apply(application) => {
+                Either::Left(Either::Left(application.evaluate(context)))
             }
+            Premise::Constrain(constraint) => {
+                Either::Left(Either::Right(constraint.evaluate(context)))
+            }
+            Premise::Exclude(negation) => Either::Right(negation.evaluate(context)),
         }
     }
 
