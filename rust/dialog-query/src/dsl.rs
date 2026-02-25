@@ -1,5 +1,6 @@
 pub use crate::concept::Concept;
 pub use crate::predicate::formula::Formula;
+use dialog_common::ConditionalSend;
 
 /// Represents predicates that can be applied using an associated application
 /// type. This is used by predicate definitions like `Concept` and `Formula`
@@ -14,8 +15,12 @@ pub use crate::predicate::formula::Formula;
 /// }
 /// ```
 pub trait Predicate {
+    /// The materialized proof type produced by resolving a query.
+    type Proof: ConditionalSend + 'static;
     /// The application type associated with this predicate
-    type Application;
+    type Application: crate::query::Application<Proof = Self::Proof>;
+    /// The descriptor type that identifies this predicate. Must convert to Entity.
+    type Descriptor: Into<crate::Entity>;
 }
 
 /// Type alias to construct type-safe formula / concept applications.

@@ -262,11 +262,31 @@ pub fn derive(input: TokenStream) -> TokenStream {
         static #cells_name: ::std::sync::OnceLock<dialog_query::predicate::formula::Cells> = ::std::sync::OnceLock::new();
 
         impl dialog_query::dsl::Predicate for #struct_name {
+            type Proof = #struct_name;
             type Application = #match_name;
+            type Descriptor = dialog_query::Entity;
         }
 
         impl dialog_query::predicate::formula::FormulaQuery for #match_name {
             type Predicate = #struct_name;
+        }
+
+        impl dialog_query::query::Application for #match_name {
+            type Proof = #struct_name;
+
+            fn evaluate<S: dialog_query::query::Source, M: dialog_query::selection::Answers>(
+                self,
+                context: dialog_query::EvaluationContext<S, M>,
+            ) -> impl dialog_query::selection::Answers {
+                let application: dialog_query::proposition::FormulaApplication = self.into();
+                application.evaluate(context)
+            }
+
+            fn realize(&self, source: dialog_query::selection::Answer) -> std::result::Result<Self::Proof, dialog_query::QueryError> {
+                Ok(#struct_name {
+                    #(#all_field_names: source.get(&self.#all_field_names)?),*
+                })
+            }
         }
 
         impl ::std::convert::From<#match_name> for dialog_query::Parameters {
@@ -279,15 +299,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         impl From<#match_name> for dialog_query::Premise {
             fn from(source: #match_name) -> Self {
-                let app: dialog_query::application::FormulaApplication = source.into();
-                dialog_query::Premise::Apply(dialog_query::Application::Formula(app))
+                let app: dialog_query::proposition::FormulaApplication = source.into();
+                dialog_query::Premise::When(dialog_query::Proposition::Formula(app))
             }
         }
 
-        impl From<#match_name> for dialog_query::Application {
+        impl From<#match_name> for dialog_query::Proposition {
             fn from(source: #match_name) -> Self {
-                let app: dialog_query::application::FormulaApplication = source.into();
-                dialog_query::Application::Formula(app)
+                let app: dialog_query::proposition::FormulaApplication = source.into();
+                dialog_query::Proposition::Formula(app)
             }
         }
 
@@ -295,8 +315,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
             type Output = dialog_query::Premise;
 
             fn not(self) -> Self::Output {
-                let application: dialog_query::Application = self.into();
-                dialog_query::Premise::Exclude(dialog_query::Negation(application))
+                let application: dialog_query::Proposition = self.into();
+                dialog_query::Premise::Unless(dialog_query::Negation(application))
             }
         }
 

@@ -188,7 +188,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     dialog_query::term::Term::Constant(value) => dialog_query::term::Term::Constant(dialog_query::types::Scalar::as_value(value)),
                 };
 
-                dialog_query::application::relation::RelationApplication::new(
+                dialog_query::proposition::relation::RelationApplication::new(
                     dialog_query::term::Term::Constant(<#field_type as dialog_query::Attribute>::descriptor().namespace().to_string()),
                     dialog_query::term::Term::Constant(<#field_type as dialog_query::Attribute>::descriptor().name().to_string()),
                     terms.this.clone(),
@@ -264,10 +264,17 @@ pub fn derive(input: TokenStream) -> TokenStream {
         /// Const operator name for this concept
         pub const #operator_const_name: &str = #namespace_lit;
 
-        // Implement ConceptQuery trait for the Match struct
-        impl dialog_query::concept::ConceptQuery for #match_name {
-            type Predicate = #struct_name;
+        // Implement Queryable trait for the Match struct
+        impl dialog_query::query::Application for #match_name {
             type Proof = #struct_name;
+
+            fn evaluate<S: dialog_query::query::Source, M: dialog_query::selection::Answers>(
+                self,
+                context: dialog_query::EvaluationContext<S, M>,
+            ) -> impl dialog_query::selection::Answers {
+                let application: dialog_query::proposition::concept::ConceptApplication = self.into();
+                application.evaluate(context)
+            }
 
             fn realize(&self, source: dialog_query::selection::Answer) -> std::result::Result<Self::Proof, dialog_query::QueryError> {
                 Ok(#struct_name {
@@ -277,19 +284,14 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         }
 
-        // Add inherent query method so users don't need to import Query trait
+        // Add inherent perform method so users don't need to import Application trait
         impl #match_name {
-            /// Query for instances matching this pattern
-            pub fn query<S: dialog_query::query::Source>(
-                &self,
-                source: S,
+            /// Execute this query against the given source
+            pub fn perform<S: dialog_query::query::Source>(
+                self,
+                source: &S,
             ) -> impl dialog_query::query::Output<#struct_name> {
-                use futures_util::StreamExt;
-                let application: dialog_query::application::concept::ConceptApplication = self.clone().into();
-                let cloned = self.clone();
-                application
-                    .query(source)
-                    .map(move |input| dialog_query::concept::ConceptQuery::realize(&cloned, input?))
+                dialog_query::query::Application::perform(self, source)
             }
         }
 
@@ -332,31 +334,31 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl From<#match_name> for dialog_query::Premise {
             fn from(source: #match_name) -> Self {
                 let predicate: dialog_query::predicate::concept::ConceptPredicate = source.clone().into();
-                let app = dialog_query::application::concept::ConceptApplication {
+                let app = dialog_query::proposition::concept::ConceptApplication {
                     terms: source.into(),
                     predicate,
                 };
-                dialog_query::Premise::Apply(dialog_query::Application::Concept(app))
+                dialog_query::Premise::When(dialog_query::Proposition::Concept(app))
             }
         }
 
         // Implement From<Match> for Application
-        impl From<#match_name> for dialog_query::Application {
+        impl From<#match_name> for dialog_query::Proposition {
             fn from(source: #match_name) -> Self {
                 let predicate: dialog_query::predicate::concept::ConceptPredicate = source.clone().into();
-                let app = dialog_query::application::concept::ConceptApplication {
+                let app = dialog_query::proposition::concept::ConceptApplication {
                     terms: source.into(),
                     predicate,
                 };
-                dialog_query::Application::Concept(app)
+                dialog_query::Proposition::Concept(app)
             }
         }
 
         // Implement From<Match> for ConceptApplication
-        impl From<#match_name> for dialog_query::application::concept::ConceptApplication {
+        impl From<#match_name> for dialog_query::proposition::concept::ConceptApplication {
             fn from(source: #match_name) -> Self {
                 let predicate: dialog_query::predicate::concept::ConceptPredicate = source.clone().into();
-                dialog_query::application::concept::ConceptApplication {
+                dialog_query::proposition::concept::ConceptApplication {
                     terms: source.into(),
                     predicate,
                 }
@@ -364,10 +366,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
 
         // Implement From<&Match> for ConceptApplication
-        impl From<&#match_name> for dialog_query::application::concept::ConceptApplication {
+        impl From<&#match_name> for dialog_query::proposition::concept::ConceptApplication {
             fn from(source: &#match_name) -> Self {
                 let predicate: dialog_query::predicate::concept::ConceptPredicate = source.clone().into();
-                dialog_query::application::concept::ConceptApplication {
+                dialog_query::proposition::concept::ConceptApplication {
                     terms: source.into(),
                     predicate,
                 }
@@ -383,8 +385,6 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         // Implement Concept trait
         impl dialog_query::concept::Concept for #struct_name {
-            type Proof = #struct_name;
-            type Query = #match_name;
             type Term = #terms_name;
 
             fn description() -> &'static str {
@@ -434,7 +434,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
 
         impl dialog_query::dsl::Predicate for #struct_name {
+            type Proof = #struct_name;
             type Application = #match_name;
+            type Descriptor = dialog_query::predicate::concept::ConceptPredicate;
         }
 
         // Implement Rule trait

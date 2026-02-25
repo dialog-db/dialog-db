@@ -106,12 +106,9 @@ impl Equality {
     /// # Returns
     /// A stream of answers that satisfy the constraint, with any necessary
     /// variable bindings added through inference.
-    pub fn evaluate<S: Source, M: Answers>(
-        &self,
-        context: EvaluationContext<S, M>,
-    ) -> impl Answers {
-        let this = self.this.clone();
-        let is = self.is.clone();
+    pub fn evaluate<S: Source, M: Answers>(self, context: EvaluationContext<S, M>) -> impl Answers {
+        let this = self.this;
+        let is = self.is;
         try_stream! {
             for await each in context.selection {
                 let input = each?;

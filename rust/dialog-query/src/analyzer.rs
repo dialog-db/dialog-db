@@ -164,16 +164,15 @@ impl Plan {
     /// Evaluate this plan with the given context
     /// The premise will be evaluated with scope set to self.env
     pub fn evaluate<S: Source, M: crate::selection::Answers>(
-        &self,
+        self,
         context: EvaluationContext<S, M>,
     ) -> impl crate::selection::Answers {
         // Delegate to premise evaluation passing env inferred by an analyzer
         // as scope. Premise already returns boxed, so just pass through.
-        let scope = self.env.clone();
         self.premise.evaluate(EvaluationContext {
             source: context.source,
             selection: context.selection,
-            scope,
+            scope: self.env,
         })
     }
 }
@@ -225,7 +224,7 @@ impl Analysis {
         let env = Environment::new();
 
         // Negations never bind variables - they only filter
-        let is_negation = matches!(premise, Premise::Exclude(_));
+        let is_negation = matches!(premise, Premise::Unless(_));
 
         // Use the premise's estimate() method to calculate cost
         // If None, the premise is unbound and should use a high cost
@@ -611,14 +610,14 @@ mod tests {
 #[cfg(test)]
 mod cost_model_tests {
     use crate::analyzer::Analysis;
-    use crate::application::concept::ConceptApplication;
-    use crate::application::{Application, RelationApplication};
     use crate::artifact::Entity;
     use crate::attribute::Cardinality;
     use crate::formula::string::Length;
     use crate::predicate::RelationDescriptor;
     use crate::predicate::concept::ConceptPredicate;
     use crate::predicate::formula::Formula;
+    use crate::proposition::concept::ConceptApplication;
+    use crate::proposition::{Proposition, RelationApplication};
     use crate::schema::{
         CONCEPT_OVERHEAD, INDEX_SCAN, RANGE_READ_COST, RANGE_SCAN_COST, SEGMENT_READ_COST,
     };
@@ -639,7 +638,7 @@ mod cost_model_tests {
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
-        let premise = Premise::Apply(Application::Relation(Box::new(app)));
+        let premise = Premise::When(Proposition::Relation(Box::new(app)));
         let analysis = Analysis::from(premise);
 
         assert_eq!(
@@ -662,7 +661,7 @@ mod cost_model_tests {
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
-        let premise = Premise::Apply(Application::Relation(Box::new(app)));
+        let premise = Premise::When(Proposition::Relation(Box::new(app)));
         let analysis = Analysis::from(premise);
 
         // With new cost model: 1 constraint (only 'the' constant is bound)
@@ -687,7 +686,7 @@ mod cost_model_tests {
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
-        let premise = Premise::Apply(Application::Relation(Box::new(app)));
+        let premise = Premise::When(Proposition::Relation(Box::new(app)));
 
         let mut analysis = Analysis::from(premise);
         let initial_cost = analysis.cost();
@@ -771,9 +770,9 @@ mod cost_model_tests {
             Some(RelationDescriptor::new(None, Cardinality::Many)),
         );
 
-        let one_analysis = Analysis::from(Premise::Apply(Application::Relation(Box::new(one_app))));
+        let one_analysis = Analysis::from(Premise::When(Proposition::Relation(Box::new(one_app))));
         let many_analysis =
-            Analysis::from(Premise::Apply(Application::Relation(Box::new(many_app))));
+            Analysis::from(Premise::When(Proposition::Relation(Box::new(many_app))));
 
         assert!(
             many_analysis.cost() > one_analysis.cost(),
@@ -823,9 +822,9 @@ mod cost_model_tests {
             Some(RelationDescriptor::new(None, Cardinality::Many)),
         );
 
-        let one_analysis = Analysis::from(Premise::Apply(Application::Relation(Box::new(one_app))));
+        let one_analysis = Analysis::from(Premise::When(Proposition::Relation(Box::new(one_app))));
         let many_analysis =
-            Analysis::from(Premise::Apply(Application::Relation(Box::new(many_app))));
+            Analysis::from(Premise::When(Proposition::Relation(Box::new(many_app))));
 
         // With new cost model: 3 constraints (all constants)
         // Cardinality::One with 3 constraints = SEGMENT_READ_COST (100)
@@ -865,7 +864,7 @@ mod cost_model_tests {
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
         let fact_analysis =
-            Analysis::from(Premise::Apply(Application::Relation(Box::new(fact_app))));
+            Analysis::from(Premise::When(Proposition::Relation(Box::new(fact_app))));
 
         assert!(
             formula_analysis.cost() < fact_analysis.cost(),
@@ -1155,7 +1154,7 @@ mod cost_model_tests {
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
-        let a1 = Analysis::from(Premise::Apply(Application::Relation(Box::new(p1))));
+        let a1 = Analysis::from(Premise::When(Proposition::Relation(Box::new(p1))));
         let cost1 = a1.cost();
 
         // First premise: 1 constraint (just 'the' constant)
@@ -1163,7 +1162,7 @@ mod cost_model_tests {
         assert_eq!(cost1, RANGE_SCAN_COST);
 
         // Simulate p2 with entity already bound
-        let mut a2 = Analysis::from(Premise::Apply(Application::Relation(Box::new(p2.clone()))));
+        let mut a2 = Analysis::from(Premise::When(Proposition::Relation(Box::new(p2.clone()))));
         let mut env = Environment::new();
         env.add(&Term::<Value>::var("entity"));
         a2.update(&env);
@@ -1204,7 +1203,7 @@ mod cost_model_tests {
             eprintln!("  {}: {:?}", name, constraint.requirement);
         }
 
-        let premise = Premise::Apply(Application::Relation(Box::new(app)));
+        let premise = Premise::When(Proposition::Relation(Box::new(app)));
         let mut analysis = Analysis::from(premise);
 
         eprintln!("\nInitial state:");

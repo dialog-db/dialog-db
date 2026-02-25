@@ -1,4 +1,4 @@
-pub use super::Application;
+pub use super::Proposition;
 use crate::Cardinality;
 use crate::Relation;
 pub use crate::artifact::Attribute;
@@ -6,7 +6,6 @@ pub use crate::artifact::{ArtifactSelector, Constrained};
 pub use crate::context::new_context;
 pub use crate::error::{AnalyzerError, QueryResult};
 pub use crate::query::Output;
-use crate::query::Query;
 use crate::selection::{Answer, Answers, Evidence};
 use crate::{Entity, Field, Parameters, QueryError, Requirement, Schema, Term, Type, Value};
 use crate::{EvaluationContext, Source, try_stream};
@@ -318,7 +317,7 @@ impl RelationApplication {
     /// pair is yielded. The strategy depends on which index the storage layer
     /// uses — see [`Self::evaluate_cardinality_one`].
     pub fn evaluate_with_provenance<S: Source, M: Answers>(
-        &self,
+        self,
         source: S,
         answers: M,
     ) -> impl Answers {
@@ -331,11 +330,11 @@ impl RelationApplication {
 
     /// Evaluate yielding all matching artifacts.
     fn evaluate_cardinality_many<S: Source, M: Answers>(
-        &self,
+        self,
         source: S,
         answers: M,
     ) -> impl Answers {
-        let selector = self.clone();
+        let selector = self;
         try_stream! {
             for await each in answers {
                 let input = each?;
@@ -367,7 +366,7 @@ impl RelationApplication {
     ///   each through a winner verification that does a secondary
     ///   `(attribute, entity)` range scan.
     fn evaluate_cardinality_one<S: Source, M: Answers>(
-        &self,
+        self,
         source: S,
         answers: M,
     ) -> impl Answers {
@@ -380,8 +379,8 @@ impl RelationApplication {
         if entity_known || attribute_known {
             Either::Left(self.select_winners(source, answers))
         } else {
-            let candidates = self.evaluate_cardinality_many(source.clone(), answers);
             let selector = self.clone();
+            let candidates = self.evaluate_cardinality_many(source.clone(), answers);
             Either::Right(
                 candidates.try_flat_map(move |input| {
                     verify_winner(source.clone(), selector.clone(), input)
@@ -392,8 +391,8 @@ impl RelationApplication {
 
     /// EAV/AEV scan: results are grouped by `(attribute, entity)`.
     /// Buffer the winning candidate and yield when the group changes.
-    fn select_winners<S: Source, M: Answers>(&self, source: S, answers: M) -> impl Answers {
-        let selector = self.clone();
+    fn select_winners<S: Source, M: Answers>(self, source: S, answers: M) -> impl Answers {
+        let selector = self;
         try_stream! {
             for await each in answers {
                 let input = each?;
@@ -487,27 +486,19 @@ impl RelationApplication {
         })
     }
 
-    /// Execute this relation application as a query, returning a stream of relations.
-    pub fn query<S: Source>(&self, source: &S) -> impl Output<Relation>
+    /// Execute this relation application, returning a stream of relations.
+    pub fn perform<S: Source>(self, source: &S) -> impl Output<Relation>
     where
         Self: Sized,
     {
-        use futures_util::stream::once;
-
-        let initial_answer = once(async move { Ok(Answer::new()) });
-        let answers = self.evaluate_with_provenance(source.clone(), initial_answer);
-        let query = self.clone();
-
-        try_stream! {
-            for await answer in answers {
-                yield answer?.realize(&query)?;
-            }
-        }
+        crate::query::Application::perform(self, source)
     }
 }
 
-impl Query<Relation> for RelationApplication {
-    fn evaluate<S: Source, M: Answers>(&self, context: EvaluationContext<S, M>) -> impl Answers {
+impl crate::query::Application for RelationApplication {
+    type Proof = Relation;
+
+    fn evaluate<S: Source, M: Answers>(self, context: EvaluationContext<S, M>) -> impl Answers {
         self.evaluate_with_provenance(context.source, context.selection)
     }
 
@@ -577,25 +568,25 @@ impl std::ops::Not for RelationApplication {
     type Output = crate::Premise;
 
     fn not(self) -> Self::Output {
-        crate::Premise::Exclude(crate::Negation::not(Application::Relation(Box::new(self))))
+        crate::Premise::Unless(crate::Negation::not(Proposition::Relation(Box::new(self))))
     }
 }
 
-impl From<RelationApplication> for Application {
+impl From<RelationApplication> for Proposition {
     fn from(application: RelationApplication) -> Self {
-        Application::Relation(Box::new(application))
+        Proposition::Relation(Box::new(application))
     }
 }
 
 impl From<RelationApplication> for crate::Premise {
     fn from(application: RelationApplication) -> Self {
-        crate::Premise::Apply(Application::Relation(Box::new(application)))
+        crate::Premise::When(Proposition::Relation(Box::new(application)))
     }
 }
 
 impl From<&RelationApplication> for crate::Premise {
     fn from(application: &RelationApplication) -> Self {
-        crate::Premise::Apply(Application::Relation(Box::new(application.clone())))
+        crate::Premise::When(Proposition::Relation(Box::new(application.clone())))
     }
 }
 
@@ -705,7 +696,7 @@ mod tests {
         );
 
         let session = Session::open(artifacts.clone());
-        let results = rel_app.query(&session).try_vec().await?;
+        let results = rel_app.perform(&session).try_vec().await?;
 
         assert_eq!(
             results.len(),
@@ -728,7 +719,7 @@ mod tests {
         );
 
         let session = Session::open(artifacts);
-        let results_many = rel_app_many.query(&session).try_vec().await?;
+        let results_many = rel_app_many.perform(&session).try_vec().await?;
 
         assert_eq!(
             results_many.len(),
@@ -789,7 +780,7 @@ mod tests {
         );
 
         let session = Session::open(artifacts);
-        let results = rel_app.query(&session).try_vec().await?;
+        let results = rel_app.perform(&session).try_vec().await?;
 
         // Should get exactly 2 facts: one winner for person/name, one for person/age
         assert_eq!(
@@ -846,7 +837,7 @@ mod tests {
         );
 
         let session = Session::open(artifacts);
-        let results = rel_app.query(&session).try_vec().await?;
+        let results = rel_app.perform(&session).try_vec().await?;
 
         // Should get exactly 2 facts: one winner per entity
         assert_eq!(
@@ -902,7 +893,7 @@ mod tests {
         );
 
         let session = Session::open(artifacts.clone());
-        let aev_results = aev_app.query(&session).try_vec().await?;
+        let aev_results = aev_app.perform(&session).try_vec().await?;
         assert_eq!(aev_results.len(), 1);
         let expected_winner_value = aev_results[0].is().clone();
 
@@ -920,7 +911,7 @@ mod tests {
         );
 
         let session = Session::open(artifacts.clone());
-        let vae_results = vae_app.query(&session).try_vec().await?;
+        let vae_results = vae_app.perform(&session).try_vec().await?;
 
         // The winning value should appear (the secondary lookup confirms it wins)
         assert_eq!(
@@ -951,7 +942,7 @@ mod tests {
         );
 
         let session = Session::open(artifacts);
-        let vae_loser_results = vae_loser_app.query(&session).try_vec().await?;
+        let vae_loser_results = vae_loser_app.perform(&session).try_vec().await?;
 
         assert_eq!(
             vae_loser_results.len(),
@@ -989,7 +980,7 @@ mod tests {
         );
 
         let session = Session::open(artifacts.clone());
-        let eav_results = eav_app.query(&session).try_vec().await?;
+        let eav_results = eav_app.perform(&session).try_vec().await?;
         let eav_name_results: Vec<_> = eav_results
             .iter()
             .filter(|f| f.the() == name_attr)
@@ -1011,7 +1002,7 @@ mod tests {
         );
 
         let session = Session::open(artifacts.clone());
-        let aev_results = aev_app.query(&session).try_vec().await?;
+        let aev_results = aev_app.perform(&session).try_vec().await?;
         let aev_alice: Vec<_> = aev_results.iter().filter(|f| f.of() == &alice).collect();
         assert_eq!(aev_alice.len(), 1);
         let aev_winner = aev_alice[0].is().clone();
@@ -1057,7 +1048,7 @@ mod tests {
         assert_eq!(rel_app.name(), &Term::Constant("name".to_string()));
 
         let session = Session::open(artifacts);
-        let results = rel_app.query(&session).try_vec().await?;
+        let results = rel_app.perform(&session).try_vec().await?;
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].of(), &alice);
@@ -1098,7 +1089,7 @@ mod tests {
         );
 
         let session = Session::open(artifacts);
-        let results = rel_app.query(&session).try_vec().await?;
+        let results = rel_app.perform(&session).try_vec().await?;
 
         assert_eq!(results.len(), 1);
         let fact = &results[0];

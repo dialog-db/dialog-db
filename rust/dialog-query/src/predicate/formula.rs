@@ -112,9 +112,9 @@ use crate::{Term, Type};
 use serde::{Deserialize, Serialize};
 
 use crate::Schema;
-use crate::application::formula::FormulaApplication;
 pub use crate::dsl::{Input, Predicate};
 use crate::error::{FormulaEvaluationError, SchemaError, TypeError};
+use crate::proposition::formula::FormulaApplication;
 use crate::selection::Answer;
 use crate::types::Scalar;
 use crate::{Parameters, Requirement};

@@ -64,10 +64,7 @@ impl Constraint {
     /// # Returns
     /// A stream of answers that satisfy the constraint, with any necessary
     /// variable bindings added through inference.
-    pub fn evaluate<S: Source, M: Answers>(
-        &self,
-        context: EvaluationContext<S, M>,
-    ) -> impl Answers {
+    pub fn evaluate<S: Source, M: Answers>(self, context: EvaluationContext<S, M>) -> impl Answers {
         match self {
             Constraint::Equality(constraint) => constraint.evaluate(context),
         }

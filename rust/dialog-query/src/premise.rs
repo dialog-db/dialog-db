@@ -5,11 +5,11 @@
 //!
 //! Note: Premises are only used in rule conditions (the "when" part), not in conclusions.
 
-pub use super::application::Application;
-use super::application::FormulaApplication;
 pub use super::constraint::Constraint;
 pub use super::context::new_context;
 pub use super::negation::Negation;
+use super::proposition::FormulaApplication;
+pub use super::proposition::Proposition;
 pub use crate::environment::Environment;
 pub use crate::error::{AnalyzerError, PlanError, QueryResult};
 pub use crate::{EvaluationContext, Source, selection::Answers};
@@ -29,11 +29,11 @@ use std::fmt::Display;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Premise {
     /// A positive premise that queries the knowledge base.
-    Apply(Application),
+    When(Proposition),
     /// A constraint that relates variables (equality, comparison, etc.).
-    Constrain(Constraint),
+    Where(Constraint),
     /// A negated premise that excludes matches from the selection.
-    Exclude(Negation),
+    Unless(Negation),
 }
 
 impl Premise {
@@ -41,27 +41,27 @@ impl Premise {
     /// Returns None if the premise cannot be executed without more constraints.
     pub fn estimate(&self, env: &crate::Environment) -> Option<usize> {
         match self {
-            Premise::Apply(application) => application.estimate(env),
-            Premise::Constrain(constraint) => constraint.estimate(env),
-            Premise::Exclude(negation) => negation.estimate(env),
+            Premise::When(application) => application.estimate(env),
+            Premise::Where(constraint) => constraint.estimate(env),
+            Premise::Unless(negation) => negation.estimate(env),
         }
     }
 
     /// Returns the parameter bindings for this premise
     pub fn parameters(&self) -> crate::Parameters {
         match self {
-            Premise::Apply(application) => application.parameters(),
-            Premise::Constrain(constraint) => constraint.parameters(),
-            Premise::Exclude(negation) => negation.parameters(),
+            Premise::When(application) => application.parameters(),
+            Premise::Where(constraint) => constraint.parameters(),
+            Premise::Unless(negation) => negation.parameters(),
         }
     }
 
     /// Returns the schema describing this premise's parameters
     pub fn schema(&self) -> crate::Schema {
         match self {
-            Premise::Apply(application) => application.schema(),
-            Premise::Constrain(constraint) => constraint.schema(),
-            Premise::Exclude(negation) => negation.schema(),
+            Premise::When(application) => application.schema(),
+            Premise::Where(constraint) => constraint.schema(),
+            Premise::Unless(negation) => negation.schema(),
         }
     }
 
@@ -74,48 +74,39 @@ impl Premise {
     }
 
     /// Evaluate this premise with the given context
-    pub fn evaluate<S: Source, M: Answers>(
-        &self,
-        context: EvaluationContext<S, M>,
-    ) -> impl Answers {
+    pub fn evaluate<S: Source, M: Answers>(self, context: EvaluationContext<S, M>) -> impl Answers {
         match self {
-            Premise::Apply(application) => {
-                Either::Left(Either::Left(application.evaluate(context)))
-            }
-            Premise::Constrain(constraint) => {
-                Either::Left(Either::Right(constraint.evaluate(context)))
-            }
-            Premise::Exclude(negation) => Either::Right(negation.evaluate(context)),
+            Premise::When(application) => Either::Left(Either::Left(application.evaluate(context))),
+            Premise::Where(constraint) => Either::Left(Either::Right(constraint.evaluate(context))),
+            Premise::Unless(negation) => Either::Right(negation.evaluate(context)),
         }
     }
 
-    /// Execute this premise as a query against the given store
-    pub fn query<S: Source>(&self, store: &S) -> QueryResult<impl Answers> {
-        let store = store.clone();
-        let context = new_context(store);
-        let answers = self.evaluate(context);
-        Ok(answers)
+    /// Execute this premise against the given store
+    pub fn perform<S: Source>(self, store: &S) -> impl Answers {
+        let context = new_context(store.clone());
+        self.evaluate(context)
     }
 }
 
 impl Display for Premise {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Premise::Apply(application) => Display::fmt(&application, f),
-            Premise::Constrain(constraint) => Display::fmt(&constraint, f),
-            Premise::Exclude(negation) => Display::fmt(&negation, f),
+            Premise::When(application) => Display::fmt(&application, f),
+            Premise::Where(constraint) => Display::fmt(&constraint, f),
+            Premise::Unless(negation) => Display::fmt(&negation, f),
         }
     }
 }
 
 impl From<Constraint> for Premise {
     fn from(constraint: Constraint) -> Self {
-        Premise::Constrain(constraint)
+        Premise::Where(constraint)
     }
 }
 
 impl From<FormulaApplication> for Premise {
     fn from(application: FormulaApplication) -> Self {
-        Premise::Apply(Application::Formula(application))
+        Premise::When(Proposition::Formula(application))
     }
 }

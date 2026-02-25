@@ -133,7 +133,7 @@ impl<S: Store> Session<S> {
     /// ```
     pub fn install<M, W>(self, rule: impl Fn(M) -> W) -> Result<Self, crate::error::CompileError>
     where
-        M: crate::concept::ConceptQuery + Default,
+        M: crate::query::Application + Default + Into<crate::predicate::concept::ConceptPredicate>,
         W: crate::rule::When,
     {
         let query = M::default();
@@ -375,9 +375,9 @@ mod tests {
 
     use std::collections::HashMap;
 
-    use crate::application::relation::RelationApplication;
     use crate::artifact::{Artifacts, Entity, Value};
-    use crate::query::{Output, Source};
+    use crate::proposition::relation::RelationApplication;
+    use crate::query::{Output, Source, new_context};
     use crate::the;
     use crate::{
         Assertion, AttributeDescriptor, Cardinality, Concept, Match, Parameters, Term, Type,
@@ -458,8 +458,10 @@ mod tests {
         // Use new query API directly on application
         let application = person.apply(params)?;
 
-        let selection =
-            futures_util::TryStreamExt::try_collect::<Vec<_>>(application.query(&session)).await?;
+        let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
+            application.evaluate(new_context(session.clone())),
+        )
+        .await?;
         assert_eq!(selection.len(), 2); // Should find just Alice and Bob
 
         // Check that we have both Alice and Bob (order may vary)
@@ -576,8 +578,10 @@ mod tests {
         // Let's test with empty parameters first to see the exact error
         let application = person.apply(params)?;
 
-        let selection =
-            futures_util::TryStreamExt::try_collect::<Vec<_>>(application.query(&session)).await?;
+        let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
+            application.evaluate(new_context(session.clone())),
+        )
+        .await?;
         assert_eq!(selection.len(), 2); // Should find just Alice and Bob
 
         // Check that we have both Alice and Bob (order may vary)
@@ -709,7 +713,7 @@ mod tests {
             role: Term::var("job"),
         };
 
-        let stuff = query_stuff.query(session.clone()).try_vec().await?;
+        let stuff = query_stuff.perform(&session).try_vec().await?;
 
         assert_eq!(stuff.len(), 2);
 
@@ -721,7 +725,7 @@ mod tests {
             job: Term::var("job"),
         };
 
-        let employees = Output::try_vec(query_employee.query(session)).await?;
+        let employees = Output::try_vec(query_employee.perform(&session)).await?;
 
         assert_eq!(employees.len(), 2);
         println!("{:?}", employees);
@@ -825,7 +829,7 @@ mod tests {
             role: Term::var("job"),
         };
 
-        let stuff = query_stuff.query(session.clone()).try_vec().await?;
+        let stuff = query_stuff.perform(&session).try_vec().await?;
         assert_eq!(stuff.len(), 2, "Should have 2 Stuff records");
 
         // Query for Employees - the rule should derive them from Stuff
@@ -835,7 +839,7 @@ mod tests {
             job: Term::var("job"),
         };
 
-        let employees = Output::try_vec(query_employee.query(session)).await?;
+        let employees = Output::try_vec(query_employee.perform(&session)).await?;
 
         // The rule should have derived 2 Employee instances from the 2 Stuff instances
         assert_eq!(
@@ -1131,7 +1135,7 @@ mod tests {
             this: Term::var("note"),
             title: Term::var("title"),
         }
-        .query(session)
+        .perform(&session)
         .try_vec()
         .await?;
 
@@ -1221,7 +1225,7 @@ mod tests {
             this: Term::var("note"),
             title: Term::var("title"),
         }
-        .query(session)
+        .perform(&session)
         .try_vec()
         .await?;
 
@@ -1314,7 +1318,7 @@ mod tests {
             role: Term::var("title"),
         };
 
-        let result = employees.query(session.clone()).try_vec().await?;
+        let result = employees.perform(&session).try_vec().await?;
         assert_eq!(result.len(), 2, "Should have 2 Stuff records");
 
         // Verify the derived data is correct

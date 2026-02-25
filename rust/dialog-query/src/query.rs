@@ -53,23 +53,31 @@ pub trait Source: ArtifactStore + Clone + ConditionalSend + ConditionalSync + 's
     fn resolve_rules(&self, entity: &crate::Entity) -> Vec<DeductiveRule>;
 }
 
-/// A typed query that can be evaluated against a source to produce concrete results.
-pub trait Query<T: ConditionalSend + 'static>: Clone + ConditionalSend + 'static {
-    /// Evaluate this query, producing a stream of answers
+/// A query type that can be evaluated against a source to produce concrete results.
+///
+/// This is the unified query trait that all query types implement. It replaces
+/// the previous `Query<T>` and `ConceptQuery` traits with a single interface.
+pub trait Application: Clone + ConditionalSend + 'static {
+    /// The concrete result type produced by this query.
+    type Proof: ConditionalSend + 'static;
+
+    /// Evaluate this query, producing a stream of answers.
     fn evaluate<S: Source, M: selection::Answers>(
-        &self,
+        self,
         context: EvaluationContext<S, M>,
     ) -> impl selection::Answers;
-    /// Convert an answer into a concrete result value
-    fn realize(&self, input: selection::Answer) -> Result<T, QueryError>;
-    /// Execute this query against a source, returning a stream of typed results
-    fn execute<S: Source>(&self, source: &S) -> impl Output<T>
+
+    /// Convert an answer into a concrete result value.
+    fn realize(&self, input: selection::Answer) -> Result<Self::Proof, QueryError>;
+
+    /// Execute this query against a source, returning a stream of typed results.
+    fn perform<S: Source>(self, source: &S) -> impl Output<Self::Proof>
     where
         Self: Sized,
     {
         let context = new_context(source.clone());
-        let answers = self.evaluate(context);
         let query = self.clone();
+        let answers = self.evaluate(context);
         try_stream! {
             for await each in answers {
                 yield query.realize(each?)?;
@@ -86,7 +94,7 @@ pub trait Query<T: ConditionalSend + 'static>: Clone + ConditionalSend + 'static
 // For basic artifact stores, use Session::open() to enable rule-aware querying:
 //
 //   let session = Session::open(artifacts);
-//   let results = concept.query(&session)?;
+//   let results = concept.perform(&session)?;
 
 /// A mutable store that can be used for writes
 pub trait Store: ArtifactStoreMut + Clone + ConditionalSend {}
@@ -96,8 +104,8 @@ impl<T> Store for T where T: ArtifactStoreMut + Clone + ConditionalSend {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::relation::RelationApplication;
     use crate::artifact::{Artifacts, Attribute, Entity, Value};
+    use crate::proposition::relation::RelationApplication;
     use crate::{Assertion, Session, Term};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
@@ -145,7 +153,7 @@ mod tests {
 
         // Use the Query trait method - should succeed since all fields are constants
         let session = Session::open(artifacts.clone());
-        let result = alice_query.query(&session).try_vec().await;
+        let result = alice_query.perform(&session).try_vec().await;
         assert!(result.is_ok()); // Should succeed with constants, returns empty stream
 
         // Query 2: Find all user/name facts using Query trait
@@ -159,7 +167,7 @@ mod tests {
         );
 
         let session = Session::open(artifacts.clone());
-        let result = all_names_query.query(&session).try_vec().await;
+        let result = all_names_query.perform(&session).try_vec().await;
         assert!(result.is_ok()); // Should succeed with constants
 
         // Query 3: Find Alice's email using Query trait
@@ -173,7 +181,7 @@ mod tests {
         );
 
         let session = Session::open(artifacts);
-        let result = email_query.query(&session).try_vec().await;
+        let result = email_query.perform(&session).try_vec().await;
         assert!(result.is_ok()); // Should succeed with constants
 
         Ok(())
@@ -197,7 +205,7 @@ mod tests {
 
         // Should succeed since planning validation only rejects all-unbound queries, and this has a constant
         let session = Session::open(artifacts);
-        let result = variable_query.query(&session).try_vec().await;
+        let result = variable_query.perform(&session).try_vec().await;
         assert!(result.is_ok());
 
         Ok(())
@@ -231,7 +239,7 @@ mod tests {
         );
 
         let session = Session::open(artifacts);
-        let results = fact_selector.query(&session).try_vec().await?;
+        let results = fact_selector.perform(&session).try_vec().await?;
         assert_eq!(results.len(), 1); // Should find the Alice fact
 
         Ok(())
@@ -284,7 +292,7 @@ mod tests {
             Term::blank(),
             None,
         )
-        .query(&session)
+        .perform(&session)
         .try_vec()
         .await;
         assert!(admin_result.is_ok());
@@ -299,7 +307,7 @@ mod tests {
             Term::blank(),
             None,
         )
-        .query(&session)
+        .perform(&session)
         .try_vec()
         .await;
         assert!(names_result.is_ok());

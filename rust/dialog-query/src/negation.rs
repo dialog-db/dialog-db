@@ -1,5 +1,5 @@
 use super::Environment;
-use super::application::Application;
+use super::proposition::Proposition;
 use crate::{EvaluationContext, Parameters, Schema, Source, try_stream};
 pub use futures_util::{TryStreamExt, stream};
 use std::fmt::Display;
@@ -10,11 +10,11 @@ pub const NEGATION_OVERHEAD: usize = 100;
 /// Represents a negated application that excludes matching results.
 /// Used in rules to specify conditions that must NOT hold.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Negation(pub Application);
+pub struct Negation(pub Proposition);
 
 impl Negation {
     /// Create a negation wrapping the given application
-    pub fn not(application: Application) -> Self {
+    pub fn not(application: Proposition) -> Self {
         Negation(application)
     }
 
@@ -60,15 +60,15 @@ impl Negation {
 
     /// Evaluate this negation, yielding answers that do NOT match the inner application
     pub fn evaluate<S: Source, M: crate::selection::Answers>(
-        &self,
+        self,
         context: EvaluationContext<S, M>,
     ) -> impl crate::selection::Answers {
-        let application = self.0.clone();
+        let application = self.0;
         try_stream! {
             for await each in context.selection {
                 let answer = each?;
                 let not = answer.clone();
-                let output = application.evaluate(EvaluationContext {
+                let output = application.clone().evaluate(EvaluationContext {
                     selection: stream::once(async move { Ok(not)}),
                     source: context.source.clone(),
                     scope: context.scope.clone(),

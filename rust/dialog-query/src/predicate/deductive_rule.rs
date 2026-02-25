@@ -3,7 +3,7 @@ use crate::error::{CompileError, SchemaError};
 pub use crate::planner::Join;
 pub use crate::predicate::ConceptPredicate;
 pub use crate::premise::Premise;
-pub use crate::{Application, Attribute, Cardinality, Parameters, Requirement, Value};
+pub use crate::{Attribute, Cardinality, Parameters, Proposition, Requirement, Value};
 use crate::{Term, Type};
 use std::fmt::Display;
 
@@ -41,7 +41,7 @@ impl DeductiveRule {
     /// Creates a rule application by binding the provided terms to this rule's parameters.
     /// Validates that all required parameters are provided and returns an error if the
     /// application would be invalid.
-    pub fn apply(&self, parameters: Parameters) -> Result<Application, SchemaError> {
+    pub fn apply(&self, parameters: Parameters) -> Result<Proposition, SchemaError> {
         self.conclusion.apply(parameters)
     }
 }
@@ -102,9 +102,9 @@ impl Display for DeductiveRule {
 
 impl From<&ConceptPredicate> for DeductiveRule {
     fn from(concept: &ConceptPredicate) -> Self {
-        use crate::application::RelationApplication;
         use crate::artifact::Entity;
         use crate::predicate::RelationDescriptor;
+        use crate::proposition::RelationApplication;
 
         let mut premises = Vec::new();
 
@@ -133,10 +133,10 @@ impl From<&ConceptPredicate> for DeductiveRule {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::RelationApplication;
     use crate::artifact::{Entity, Type};
     use crate::attribute::AttributeDescriptor;
     use crate::predicate::RelationDescriptor;
+    use crate::proposition::RelationApplication;
     use crate::the;
 
     #[dialog_common::test]

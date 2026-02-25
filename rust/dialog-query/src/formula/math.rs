@@ -653,6 +653,263 @@ mod tests {
     }
 
     #[dialog_common::test]
+    async fn test_formula_application_perform_all_variables() -> anyhow::Result<()> {
+        use crate::query::Application;
+        use crate::{Session, artifact::Artifacts};
+        use dialog_storage::MemoryStorageBackend;
+
+        // Create a SumMatch with all variables
+        let query = crate::Match::<Sum> {
+            of: Term::var("x"),
+            with: Term::var("y"),
+            is: Term::var("result"),
+        };
+
+        // Create a minimal session (formulas don't need stored data)
+        let storage = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage).await?;
+        let session = Session::open(artifacts);
+
+        // perform = evaluate(new_context) → realize for each answer
+        // But first we need to seed the context with input values.
+        // Since perform starts from an empty Answer, the formula will fail
+        // because input variables x and y are unbound.
+        // So we use evaluate with a pre-seeded context instead.
+        let input = Answer::new()
+            .set(Term::var("x"), 5u32)?
+            .set(Term::var("y"), 3u32)?;
+
+        let context = crate::EvaluationContext {
+            source: session,
+            selection: futures_util::stream::once(async { Ok(input) }),
+            scope: crate::Environment::new(),
+        };
+
+        let query_copy = query.clone();
+        let answers: Vec<Answer> = {
+            use futures_util::TryStreamExt;
+            query.evaluate(context).try_collect().await?
+        };
+
+        assert_eq!(answers.len(), 1);
+        let answer = &answers[0];
+
+        // Now test realize — should reconstruct the Sum proof struct
+        let proof = query_copy.realize(answer.clone())?;
+        assert_eq!(proof.of, 5);
+        assert_eq!(proof.with, 3);
+        assert_eq!(proof.is, 8);
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn test_formula_application_perform_constant_inputs() -> anyhow::Result<()> {
+        use crate::query::Application;
+        use crate::{Session, artifact::Artifacts};
+        use dialog_storage::MemoryStorageBackend;
+
+        // Input fields are constants, derived field is a variable
+        let query = crate::Match::<Sum> {
+            of: Term::from(5u32),
+            with: Term::from(3u32),
+            is: Term::var("result"),
+        };
+
+        let storage = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage).await?;
+        let session = Session::open(artifacts);
+
+        // Constants are already bound — empty starting Answer should work
+        let input = Answer::new();
+        let context = crate::EvaluationContext {
+            source: session,
+            selection: futures_util::stream::once(async { Ok(input) }),
+            scope: crate::Environment::new(),
+        };
+
+        let query_copy = query.clone();
+        let answers: Vec<Answer> = {
+            use futures_util::TryStreamExt;
+            query.evaluate(context).try_collect().await?
+        };
+
+        assert_eq!(answers.len(), 1);
+        let proof = query_copy.realize(answers[0].clone())?;
+        assert_eq!(proof.of, 5);
+        assert_eq!(proof.with, 3);
+        assert_eq!(proof.is, 8);
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn test_formula_application_perform_constant_derived() -> anyhow::Result<()> {
+        use crate::query::Application;
+        use crate::{Session, artifact::Artifacts};
+        use dialog_storage::MemoryStorageBackend;
+
+        // Derived field is a constant matching the expected result
+        let query = crate::Match::<Sum> {
+            of: Term::var("x"),
+            with: Term::var("y"),
+            is: Term::from(8u32),
+        };
+
+        let storage = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage).await?;
+        let session = Session::open(artifacts);
+
+        let input = Answer::new()
+            .set(Term::var("x"), 5u32)?
+            .set(Term::var("y"), 3u32)?;
+
+        let context = crate::EvaluationContext {
+            source: session,
+            selection: futures_util::stream::once(async { Ok(input) }),
+            scope: crate::Environment::new(),
+        };
+
+        let query_copy = query.clone();
+        let answers: Vec<Answer> = {
+            use futures_util::TryStreamExt;
+            query.evaluate(context).try_collect().await?
+        };
+
+        // Should succeed — the formula computes 8, and the constant 8 is consistent
+        assert_eq!(answers.len(), 1);
+        let proof = query_copy.realize(answers[0].clone())?;
+        assert_eq!(proof.of, 5);
+        assert_eq!(proof.with, 3);
+        assert_eq!(proof.is, 8);
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn test_formula_application_perform_inconsistent_constant() -> anyhow::Result<()> {
+        use crate::query::Application;
+        use crate::{Session, artifact::Artifacts};
+        use dialog_storage::MemoryStorageBackend;
+
+        // Derived field is a constant that does NOT match (5 + 3 ≠ 99)
+        let query = crate::Match::<Sum> {
+            of: Term::var("x"),
+            with: Term::var("y"),
+            is: Term::from(99u32),
+        };
+
+        let storage = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage).await?;
+        let session = Session::open(artifacts);
+
+        let input = Answer::new()
+            .set(Term::var("x"), 5u32)?
+            .set(Term::var("y"), 3u32)?;
+
+        let context = crate::EvaluationContext {
+            source: session,
+            selection: futures_util::stream::once(async { Ok(input) }),
+            scope: crate::Environment::new(),
+        };
+
+        let answers: Vec<Answer> = {
+            use futures_util::TryStreamExt;
+            query.evaluate(context).try_collect().await?
+        };
+
+        // The formula computes 8 but "is" is constant 99 — inconsistency
+        // should filter this out (0 results)
+        assert_eq!(
+            answers.len(),
+            0,
+            "Inconsistent constant should produce no results"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn test_formula_application_perform_mixed_terms() -> anyhow::Result<()> {
+        use crate::query::Application;
+        use crate::{Session, artifact::Artifacts};
+        use dialog_storage::MemoryStorageBackend;
+
+        // Mix: one input is constant, one is variable, derived is variable
+        let query = crate::Match::<Sum> {
+            of: Term::from(10u32),
+            with: Term::var("y"),
+            is: Term::var("result"),
+        };
+
+        let storage = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage).await?;
+        let session = Session::open(artifacts);
+
+        let input = Answer::new().set(Term::var("y"), 7u32)?;
+
+        let context = crate::EvaluationContext {
+            source: session,
+            selection: futures_util::stream::once(async { Ok(input) }),
+            scope: crate::Environment::new(),
+        };
+
+        let query_copy = query.clone();
+        let answers: Vec<Answer> = {
+            use futures_util::TryStreamExt;
+            query.evaluate(context).try_collect().await?
+        };
+
+        assert_eq!(answers.len(), 1);
+        let proof = query_copy.realize(answers[0].clone())?;
+        assert_eq!(proof.of, 10);
+        assert_eq!(proof.with, 7);
+        assert_eq!(proof.is, 17);
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn test_formula_application_perform_shared_variable() -> anyhow::Result<()> {
+        use crate::query::Application;
+        use crate::{Session, artifact::Artifacts};
+        use dialog_storage::MemoryStorageBackend;
+
+        // Both inputs use the same variable (x + x)
+        let query = crate::Match::<Sum> {
+            of: Term::var("x"),
+            with: Term::var("x"),
+            is: Term::var("result"),
+        };
+
+        let storage = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage).await?;
+        let session = Session::open(artifacts);
+
+        let input = Answer::new().set(Term::var("x"), 4u32)?;
+
+        let context = crate::EvaluationContext {
+            source: session,
+            selection: futures_util::stream::once(async { Ok(input) }),
+            scope: crate::Environment::new(),
+        };
+
+        let query_copy = query.clone();
+        let answers: Vec<Answer> = {
+            use futures_util::TryStreamExt;
+            query.evaluate(context).try_collect().await?
+        };
+
+        assert_eq!(answers.len(), 1);
+        let proof = query_copy.realize(answers[0].clone())?;
+        assert_eq!(proof.of, 4);
+        assert_eq!(proof.with, 4);
+        assert_eq!(proof.is, 8);
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
     fn test_error_handling() -> anyhow::Result<()> {
         // Test division by zero in Quotient formula
         let mut quotient_terms = Parameters::new();

@@ -1,4 +1,4 @@
-pub use super::Application;
+pub use super::Proposition;
 pub use crate::error::{AnalyzerError, FormulaEvaluationError, PlanError, QueryError};
 use crate::predicate::formula::Cells;
 pub use crate::predicate::formula::bindings::Bindings;
@@ -97,11 +97,11 @@ impl FormulaApplication {
 
     /// Evaluate this formula against the context, expanding each input answer
     pub fn evaluate<S: Source, M: crate::selection::Answers>(
-        &self,
+        self,
         context: EvaluationContext<S, M>,
     ) -> impl Answers {
         // Formulas now work natively with Answer and track provenance via Factor::Derived
-        let formula = self.clone();
+        let formula = self;
         try_stream! {
             for await each in context.selection {
 
