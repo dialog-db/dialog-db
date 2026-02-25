@@ -400,7 +400,7 @@ where
 ///
 /// ```rust
 /// use dialog_query::{when, When, Term, artifact::Value};
-/// use dialog_query::application::relation::RelationApplication;
+/// use dialog_query::proposition::relation::RelationApplication;
 ///
 /// fn example() -> impl When {
 ///     let r1 = RelationApplication::new(
@@ -435,19 +435,19 @@ mod tests {
     extern crate self as dialog_query;
 
     use super::*;
-    use crate::application::ConceptApplication;
     use crate::artifact::{Artifacts, Entity, Type};
     use crate::attribute::{AttributeDescriptor, Cardinality};
     use crate::claim::Claim;
-    use crate::concept::{Concept, ConceptProof, ConceptQuery};
+    use crate::concept::{Concept, ConceptProof};
     use crate::dsl::Predicate;
     use crate::error::InconsistencyError;
     use crate::predicate::concept::ConceptPredicate;
+    use crate::proposition::ConceptApplication;
     use crate::selection::Answer;
     use crate::term::Term;
     use crate::the;
     use crate::types::Scalar;
-    use crate::{Application, Assertion, Parameters, Premise, QueryError, Session, Transaction};
+    use crate::{Assertion, Parameters, Premise, Proposition, QueryError, Session, Transaction};
 
     // Manual implementation of Person struct with Concept and Rule traits
     // This serves as a template for what the derive macro should generate
@@ -532,8 +532,6 @@ mod tests {
     }
 
     impl Concept for Person {
-        type Proof = Person;
-        type Query = PersonMatch;
         type Term = PersonTerms;
 
         fn this(&self) -> Entity {
@@ -608,7 +606,9 @@ mod tests {
     }
 
     impl Predicate for Person {
+        type Proof = Person;
         type Application = PersonMatch;
+        type Descriptor = ConceptPredicate;
     }
 
     impl TryFrom<Answer> for Person {
@@ -635,12 +635,19 @@ mod tests {
         }
     }
 
-    impl ConceptQuery for PersonMatch {
-        type Predicate = Person;
+    impl crate::query::Application for PersonMatch {
         type Proof = Person;
 
+        fn evaluate<S: crate::query::Source, M: crate::selection::Answers>(
+            self,
+            context: crate::EvaluationContext<S, M>,
+        ) -> impl crate::selection::Answers {
+            let application: ConceptApplication = self.into();
+            application.evaluate(context)
+        }
+
         fn realize(&self, source: Answer) -> Result<Self::Proof, QueryError> {
-            Ok(Self::Proof {
+            Ok(Person {
                 this: source.get(&self.this)?,
                 name: source.get(&self.name)?,
                 age: source.get(&self.age)?,
@@ -658,15 +665,15 @@ mod tests {
         }
     }
 
-    impl From<PersonMatch> for Application {
+    impl From<PersonMatch> for Proposition {
         fn from(source: PersonMatch) -> Self {
-            Application::Concept(source.into())
+            Proposition::Concept(source.into())
         }
     }
 
     impl From<PersonMatch> for Premise {
         fn from(source: PersonMatch) -> Self {
-            Premise::Apply(source.into())
+            Premise::When(source.into())
         }
     }
 

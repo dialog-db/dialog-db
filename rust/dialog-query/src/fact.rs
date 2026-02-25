@@ -83,8 +83,8 @@ mod integration_tests {
     //! assert/retract → commit → RelationApplication → query
 
     use super::*;
-    use crate::application::relation::RelationApplication;
     use crate::artifact::{Artifacts, Attribute, Entity, Value};
+    use crate::proposition::relation::RelationApplication;
     use crate::{Assertion, Session};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
@@ -134,7 +134,7 @@ mod integration_tests {
         );
 
         let facts = query_names
-            .query(&Session::open(artifacts.clone()))
+            .perform(&Session::open(artifacts.clone()))
             .try_vec()
             .await?;
 
@@ -168,7 +168,7 @@ mod integration_tests {
         );
 
         let email_facts = query_email
-            .query(&Session::open(artifacts.clone()))
+            .perform(&Session::open(artifacts.clone()))
             .try_vec()
             .await?;
 
@@ -193,7 +193,7 @@ mod integration_tests {
         );
 
         let alice_facts = query_alice
-            .query(&Session::open(artifacts.clone()))
+            .perform(&Session::open(artifacts.clone()))
             .try_vec()
             .await?;
 
@@ -231,7 +231,7 @@ mod integration_tests {
         );
 
         let results = query_constant
-            .query(&Session::open(artifacts.clone()))
+            .perform(&Session::open(artifacts.clone()))
             .try_vec()
             .await?;
 
@@ -260,7 +260,7 @@ mod integration_tests {
         );
 
         let results2 = query2
-            .query(&Session::open(artifacts.clone()))
+            .perform(&Session::open(artifacts.clone()))
             .try_vec()
             .await?;
 
@@ -311,7 +311,7 @@ mod integration_tests {
         );
 
         let constant_results = all_constants_query
-            .query(&Session::open(artifacts.clone()))
+            .perform(&Session::open(artifacts.clone()))
             .try_vec()
             .await?;
 
@@ -328,7 +328,7 @@ mod integration_tests {
         );
 
         let mixed_results = mixed_query
-            .query(&Session::open(artifacts.clone()))
+            .perform(&Session::open(artifacts.clone()))
             .try_vec()
             .await?;
 
@@ -345,7 +345,7 @@ mod integration_tests {
         );
 
         let all_name_results = find_all_names
-            .query(&Session::open(artifacts.clone()))
+            .perform(&Session::open(artifacts.clone()))
             .try_vec()
             .await?;
 
@@ -425,7 +425,7 @@ mod integration_tests {
         );
 
         let admin_results = admin_query
-            .query(&Session::open(artifacts.clone()))
+            .perform(&Session::open(artifacts.clone()))
             .try_vec()
             .await?;
 
@@ -455,7 +455,7 @@ mod integration_tests {
         );
 
         let role_results = role_query
-            .query(&Session::open(artifacts.clone()))
+            .perform(&Session::open(artifacts.clone()))
             .try_vec()
             .await?;
 
@@ -472,7 +472,7 @@ mod integration_tests {
         );
 
         let bob_results = bob_query
-            .query(&Session::open(artifacts.clone()))
+            .perform(&Session::open(artifacts.clone()))
             .try_vec()
             .await?;
 
@@ -516,7 +516,7 @@ mod integration_tests {
         );
 
         let results = query_with_variables
-            .query(&Session::open(artifacts.clone()))
+            .perform(&Session::open(artifacts.clone()))
             .try_vec()
             .await?;
 
@@ -570,7 +570,7 @@ mod integration_tests {
         );
 
         let value_results = value_selector
-            .query(&Session::open(artifacts.clone()))
+            .perform(&Session::open(artifacts.clone()))
             .try_vec()
             .await?;
         assert_eq!(value_results.len(), 1);
@@ -591,7 +591,7 @@ mod integration_tests {
         );
 
         let entity_results = entity_selector
-            .query(&Session::open(artifacts.clone()))
+            .perform(&Session::open(artifacts.clone()))
             .try_vec()
             .await?;
         assert_eq!(entity_results.len(), 1);
@@ -612,7 +612,7 @@ mod integration_tests {
         );
 
         let constant_results = constant_selector
-            .query(&Session::open(artifacts.clone()))
+            .perform(&Session::open(artifacts.clone()))
             .try_vec()
             .await?;
         assert_eq!(constant_results.len(), 1);
@@ -661,7 +661,7 @@ mod integration_tests {
         );
 
         let bob_results = bob_query
-            .query(&Session::open(artifacts.clone()))
+            .perform(&Session::open(artifacts.clone()))
             .try_vec()
             .await?;
         assert_eq!(bob_results.len(), 1);
@@ -680,7 +680,7 @@ mod integration_tests {
         );
 
         let admin_results = admin_query
-            .query(&Session::open(artifacts.clone()))
+            .perform(&Session::open(artifacts.clone()))
             .try_vec()
             .await?;
         assert_eq!(admin_results.len(), 1);
@@ -699,7 +699,7 @@ mod integration_tests {
         );
 
         let name_results = names_query
-            .query(&Session::open(artifacts.clone()))
+            .perform(&Session::open(artifacts.clone()))
             .try_vec()
             .await?;
         assert_eq!(name_results.len(), 2);
@@ -742,7 +742,7 @@ mod integration_tests {
         );
 
         let results = mixed_query
-            .query(&Session::open(artifacts.clone()))
+            .perform(&Session::open(artifacts.clone()))
             .try_vec()
             .await?;
 
@@ -806,7 +806,7 @@ mod integration_tests {
         );
 
         let admin_results = admin_search
-            .query(&Session::open(artifacts.clone()))
+            .perform(&Session::open(artifacts.clone()))
             .try_vec()
             .await?;
 
@@ -826,7 +826,7 @@ mod integration_tests {
         );
 
         let name_results = name_search
-            .query(&Session::open(artifacts.clone()))
+            .perform(&Session::open(artifacts.clone()))
             .try_vec()
             .await?;
 
@@ -883,7 +883,7 @@ mod integration_tests {
             None,
         );
 
-        let value_results = value_selector.query(&session).try_vec().await?;
+        let value_results = value_selector.perform(&session).try_vec().await?;
         assert_eq!(value_results.len(), 1);
 
         let has_alice = value_results
@@ -901,7 +901,7 @@ mod integration_tests {
             None,
         );
 
-        let entity_results = entity_selector.query(&session).try_vec().await?;
+        let entity_results = entity_selector.perform(&session).try_vec().await?;
         assert_eq!(entity_results.len(), 1);
 
         let has_bob = entity_results
@@ -920,7 +920,7 @@ mod integration_tests {
         );
 
         let constant_results = constant_selector
-            .query(&Session::open(artifacts.clone()))
+            .perform(&Session::open(artifacts.clone()))
             .try_vec()
             .await?;
         assert_eq!(constant_results.len(), 1);

@@ -1,13 +1,14 @@
 use crate::Parameters;
-use crate::application::RelationApplication;
 pub use crate::artifact::{
     Attribute as ArtifactsAttribute, Cause, DialogArtifactsError, Entity, Value,
 };
 use crate::error::{SchemaError, TypeError};
 pub use crate::predicate::RelationDescriptor;
+use crate::proposition::RelationApplication;
 pub use crate::schema::Cardinality;
 pub use crate::types::{IntoType, Scalar, Type};
 pub use crate::{Premise, Term};
+use base58::ToBase58;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Maximum length in bytes for an attribute selector (`"namespace/name"`).
@@ -331,18 +332,31 @@ impl AttributeDescriptor {
 
     /// Format this attribute's hash as a URI
     ///
-    /// Returns a string in the format: `the:{blake3_hash_hex}`
+    /// Returns a string in the format: `the:{base58(blake3)}`
     pub fn to_uri(&self) -> String {
-        format!("the:{}", self.hash().to_hex())
+        let encoded = self.hash().as_bytes().as_ref().to_base58();
+        format!("the:{encoded}")
     }
 
     /// Parse an attribute URI and extract the hash
     ///
-    /// Expects format: `the:{blake3_hash_hex}`
+    /// Expects format: `the:{base58(blake3)}`
     /// Returns None if the format is invalid
     pub fn parse_uri(uri: &str) -> Option<blake3::Hash> {
-        let uri = uri.strip_prefix("the:")?;
-        blake3::Hash::from_hex(uri).ok()
+        let encoded = uri.strip_prefix("the:")?;
+        let bytes = base58::FromBase58::from_base58(encoded).ok()?;
+        if bytes.len() != 32 {
+            return None;
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Some(blake3::Hash::from(arr))
+    }
+}
+
+impl From<AttributeDescriptor> for Entity {
+    fn from(descriptor: AttributeDescriptor) -> Self {
+        descriptor.to_uri().parse().expect("valid entity URI")
     }
 }
 
@@ -775,11 +789,8 @@ mod tests {
             uri.starts_with("the:"),
             "URI should start with 'the:' prefix"
         );
-        assert_eq!(
-            uri.len(),
-            4 + 64,
-            "URI should be 'the:' + 64 hex chars (32 bytes)"
-        );
+        // base58 encoding of 32 bytes is typically 43-44 characters
+        assert!(uri.len() > 4, "URI should have content after 'the:' prefix");
     }
 
     #[dialog_common::test]

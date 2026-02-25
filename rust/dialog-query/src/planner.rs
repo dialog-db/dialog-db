@@ -1,9 +1,8 @@
 use crate::EvaluationContext;
 use crate::analyzer::{Analysis, Plan};
 use crate::artifact::Value;
-use crate::context::new_context;
+use crate::error::CompileError;
 pub use crate::error::{AnalyzerError, PlanError};
-use crate::error::{CompileError, QueryResult};
 pub use crate::premise::Premise;
 use crate::stream::{fork_stream, stream_select};
 pub use crate::term::Term;
@@ -284,19 +283,11 @@ impl Join {
     /// Evaluate this join plan by executing all steps in order.
     /// Each step flows results to the next, building up bindings.
     pub fn evaluate<S: Source, M: crate::selection::Answers>(
-        &self,
+        self,
         context: EvaluationContext<S, M>,
     ) -> impl crate::selection::Answers {
-        let chain = Chain::from(self.steps.clone());
+        let chain = Chain::from(self.steps);
         chain.evaluate(context)
-    }
-
-    /// Execute this join plan as a query against the given store
-    pub fn query<S: Source>(&self, store: &S) -> QueryResult<impl crate::selection::Answers> {
-        let store = store.clone();
-        let context = new_context(store);
-        let answers = self.evaluate(context);
-        Ok(answers)
     }
 }
 
@@ -445,12 +436,13 @@ impl Fork {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::new_context;
 
     #[dialog_common::test]
     fn test_join_plan_with_two_fact_applications() {
-        use crate::application::RelationApplication;
         use crate::predicate::RelationDescriptor;
-        use crate::{Application, Cardinality, Term, Value};
+        use crate::proposition::RelationApplication;
+        use crate::{Cardinality, Proposition, Term, Value};
 
         // Create two fact applications that will be joined
         // First: (person/name, of: ?person, is: ?name) - find person's name
@@ -475,8 +467,8 @@ mod tests {
 
         // Create premises from the applications
         let premises = vec![
-            Premise::Apply(Application::Relation(Box::new(fact1))),
-            Premise::Apply(Application::Relation(Box::new(fact2))),
+            Premise::When(Proposition::Relation(Box::new(fact1))),
+            Premise::When(Proposition::Relation(Box::new(fact2))),
         ];
 
         // Create a join planner and plan with empty scope
@@ -501,9 +493,9 @@ mod tests {
 
     #[dialog_common::test]
     fn test_join_plan_execution_order() {
-        use crate::application::RelationApplication;
         use crate::predicate::RelationDescriptor;
-        use crate::{Application, Cardinality, Term};
+        use crate::proposition::RelationApplication;
+        use crate::{Cardinality, Proposition, Term};
         use dialog_artifacts::Entity;
 
         // Create two fact applications where one depends on the other
@@ -529,8 +521,8 @@ mod tests {
         );
 
         let premises = vec![
-            Premise::Apply(Application::Relation(Box::new(fact1))),
-            Premise::Apply(Application::Relation(Box::new(fact2))),
+            Premise::When(Proposition::Relation(Box::new(fact1))),
+            Premise::When(Proposition::Relation(Box::new(fact2))),
         ];
 
         let plan = Join::try_from(premises).expect("Planning should succeed");
@@ -545,10 +537,10 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_join_plan_query_execution() -> anyhow::Result<()> {
-        use crate::application::RelationApplication;
         use crate::predicate::RelationDescriptor;
+        use crate::proposition::RelationApplication;
         use crate::session::Session;
-        use crate::{Application, Assertion, Cardinality, Term, Value};
+        use crate::{Assertion, Cardinality, Proposition, Term, Value};
         use dialog_artifacts::{Artifacts, Attribute, Entity};
         use dialog_storage::MemoryStorageBackend;
 
@@ -605,14 +597,16 @@ mod tests {
         );
 
         let premises = vec![
-            Premise::Apply(Application::Relation(Box::new(fact1))),
-            Premise::Apply(Application::Relation(Box::new(fact2))),
+            Premise::When(Proposition::Relation(Box::new(fact1))),
+            Premise::When(Proposition::Relation(Box::new(fact2))),
         ];
         let plan = Join::try_from(premises)?;
 
         // Execute the query
-        let selection =
-            futures_util::TryStreamExt::try_collect::<Vec<_>>(plan.query(&session)?).await?;
+        let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
+            plan.evaluate(new_context(session.clone())),
+        )
+        .await?;
 
         // Should find both Alice and Bob with their name and age
         assert_eq!(selection.len(), 2, "Should find 2 people");

@@ -2,17 +2,15 @@
 pub mod with;
 pub use with::{With, WithQuery, WithTerms};
 
-use crate::application::ConceptApplication;
-
 #[cfg(test)]
 use crate::Assertion;
 pub use crate::dsl::Predicate;
 pub use crate::predicate::concept::ConceptPredicate;
 #[cfg(test)]
+use crate::proposition::ConceptApplication;
+#[cfg(test)]
 use crate::query::Output;
-use crate::query::{Query, Source};
-use crate::selection::Answer;
-use crate::{Entity, EvaluationContext, Parameters, QueryError, selection};
+use crate::{Entity, Parameters};
 use dialog_common::ConditionalSend;
 use std::fmt::Debug;
 
@@ -29,14 +27,10 @@ use std::fmt::Debug;
 /// Note: IntoIterator is not a bound on this trait to allow attributes to
 /// implement Concept by delegating to their instance types (e.g., Title
 /// delegates to WithTitle). Instance types still implement IntoIterator.
-pub trait Concept: Predicate + Clone + Debug {
-    /// The materialized form of this concept, produced by resolving a query.
-    type Proof: ConceptProof;
-    /// Type representing a query of this concept. It is a set of terms
-    /// corresponding to the set of attributes defined by this concept.
-    /// It is used as premise of the rule.
-    type Query: ConceptQuery<Predicate = Self, Proof = Self::Proof>;
-
+pub trait Concept: Predicate + Clone + Debug
+where
+    Self::Proof: ConceptProof,
+{
     /// Typed term accessors for building queries (e.g. `PersonTerms::name()`).
     type Term;
 
@@ -49,47 +43,10 @@ pub trait Concept: Predicate + Clone + Debug {
     fn this(&self) -> Entity;
 }
 
-/// Concepts can be matched and this trait describes an abstract match for the
-/// concept. Each match should be translatable into a set of statements making
-/// it possible to spread it into a query.
-pub trait ConceptQuery: Sized + Clone + ConditionalSend + Into<ConceptPredicate> + 'static {
-    /// The concept type this query corresponds to.
-    type Predicate: Concept;
-    /// Proof of the concept that this query can produce.
-    type Proof: ConceptProof + ConditionalSend + Clone;
-
-    /// Reconstructs a concept instance from a query [`Answer`].
-    fn realize(&self, source: Answer) -> Result<Self::Proof, QueryError>;
-}
-
-/// Blanket implementation of [`Query`] for all concept query types.
-///
-/// Any type implementing [`ConceptQuery`] that can be converted into a [`ConceptApplication`]
-/// automatically gets query execution capabilities through the [`Query`] trait.
-/// This unifies the concept query path with the general query infrastructure.
-impl<M> Query<M::Proof> for M
-where
-    M: ConceptQuery,
-    M::Proof: ConditionalSend + 'static,
-    ConceptApplication: From<M>,
-{
-    fn evaluate<S: Source, A: selection::Answers>(
-        &self,
-        context: EvaluationContext<S, A>,
-    ) -> impl selection::Answers {
-        let application: ConceptApplication = ConceptApplication::from(self.clone());
-        application.evaluate(context)
-    }
-
-    fn realize(&self, input: selection::Answer) -> Result<M::Proof, QueryError> {
-        ConceptQuery::realize(self, input)
-    }
-}
-
 // Blanket impl for &T -> Parameters that uses the generated From<T> impl
 impl<T> From<&T> for Parameters
 where
-    T: ConceptQuery + Clone + Into<Parameters>,
+    T: Clone + Into<Parameters>,
 {
     fn from(source: &T) -> Self {
         source.clone().into()
@@ -151,17 +108,17 @@ pub trait ConceptProof: ConditionalSend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::relation::RelationApplication;
     use crate::artifact::{
         ArtifactSelector, ArtifactStore, Artifacts, Attribute as ArtifactAttribute, Type, Value,
     };
     use crate::attribute::{Attribute as _, AttributeDescriptor};
     use crate::concept::With;
+    use crate::proposition::relation::RelationApplication;
     use crate::rule::Match;
     use crate::term::Term;
     use crate::the;
     use crate::types::Scalar;
-    use crate::{Answer, Cardinality, Claim, Concept, Session, Transaction};
+    use crate::{Answer, Cardinality, Claim, Concept, QueryError, Session, Transaction};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
@@ -244,8 +201,6 @@ mod tests {
 
     // Implement Concept for Person
     impl Concept for Person {
-        type Proof = Person;
-        type Query = PersonMatch;
         type Term = PersonTerms;
 
         fn this(&self) -> Entity {
@@ -306,7 +261,9 @@ mod tests {
     }
 
     impl Predicate for Person {
+        type Proof = Person;
         type Application = PersonMatch;
+        type Descriptor = ConceptPredicate;
     }
 
     // Implement TryFrom<selection::Answer> for Person
@@ -380,13 +337,20 @@ mod tests {
         }
     }
 
-    // Implement Match for PersonMatch
-    impl ConceptQuery for PersonMatch {
-        type Predicate = Person;
+    // Implement Queryable for PersonMatch
+    impl crate::query::Application for PersonMatch {
         type Proof = Person;
 
+        fn evaluate<S: crate::query::Source, M: crate::selection::Answers>(
+            self,
+            context: crate::EvaluationContext<S, M>,
+        ) -> impl crate::selection::Answers {
+            let application: ConceptApplication = self.into();
+            application.evaluate(context)
+        }
+
         fn realize(&self, source: Answer) -> std::result::Result<Self::Proof, QueryError> {
-            Ok(Self::Proof {
+            Ok(Person {
                 this: source.get(&self.this)?,
                 name: source.get(&self.name)?,
                 age: source.get(&self.age)?,
@@ -637,7 +601,7 @@ mod tests {
         );
 
         let session = Session::open(artifacts);
-        let no_results = missing_query.query(&session).try_vec().await?;
+        let no_results = missing_query.perform(&session).try_vec().await?;
         assert_eq!(no_results.len(), 0, "Should find no non-existent people");
 
         Ok(())
@@ -706,7 +670,7 @@ mod tests {
             role: Term::var("role"),
         };
 
-        let mut employees = employee.query(session).try_vec().await?;
+        let mut employees = employee.perform(&session).try_vec().await?;
         employees.sort();
         let mut expected = vec![
             Employee {
@@ -955,12 +919,12 @@ mod tests {
         );
 
         let name_facts: Vec<_> = name_query
-            .query(&Session::open(store.clone()))
+            .perform(&Session::open(store.clone()))
             .try_collect()
             .await?;
 
         let birthday_facts: Vec<_> = birthday_query
-            .query(&Session::open(store))
+            .perform(&Session::open(store))
             .try_collect()
             .await?;
 
@@ -1004,7 +968,8 @@ mod tests {
             birthday: Term::var("birthday"),
         };
 
-        let results: Vec<DerivedPerson> = query.query(Session::open(store)).try_collect().await?;
+        let session = Session::open(store);
+        let results: Vec<DerivedPerson> = query.perform(&session).try_collect().await?;
 
         assert_eq!(results.len(), 2);
 
@@ -1051,7 +1016,8 @@ mod tests {
             birthday: Term::var("birthday"),
         };
 
-        let results: Vec<DerivedPerson> = query.query(Session::open(store)).try_collect().await?;
+        let session = Session::open(store);
+        let results: Vec<DerivedPerson> = query.perform(&session).try_collect().await?;
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name.value(), "Alice");
@@ -1115,17 +1081,17 @@ mod tests {
         );
 
         let name_facts: Vec<_> = name_query
-            .query(&Session::open(store.clone()))
+            .perform(&Session::open(store.clone()))
             .try_collect()
             .await?;
 
         let email_facts: Vec<_> = email_query
-            .query(&Session::open(store.clone()))
+            .perform(&Session::open(store.clone()))
             .try_collect()
             .await?;
 
         let birthday_facts: Vec<_> = birthday_query
-            .query(&Session::open(store))
+            .perform(&Session::open(store))
             .try_collect()
             .await?;
 
@@ -1176,12 +1142,12 @@ mod tests {
         );
 
         let name_facts: Vec<_> = name_query
-            .query(&Session::open(store.clone()))
+            .perform(&Session::open(store.clone()))
             .try_collect()
             .await?;
 
         let birthday_facts: Vec<_> = birthday_query
-            .query(&Session::open(store))
+            .perform(&Session::open(store))
             .try_collect()
             .await?;
 
@@ -1234,12 +1200,12 @@ mod tests {
         session.commit(edit).await?;
 
         let employees_shortcut: Vec<ShortcutEmployee> = Match::<ShortcutEmployee>::default()
-            .query(session.clone())
+            .perform(&session)
             .try_collect()
             .await?;
 
         let employees_explicit: Vec<ShortcutEmployee> = Match::<ShortcutEmployee>::default()
-            .query(session.clone())
+            .perform(&session)
             .try_collect()
             .await?;
 
@@ -1284,7 +1250,7 @@ mod tests {
         session.commit(edit).await?;
 
         let result1: Vec<ShortcutEmployee> = Match::<ShortcutEmployee>::default()
-            .query(session.clone())
+            .perform(&session)
             .try_collect()
             .await?;
 
@@ -1293,12 +1259,12 @@ mod tests {
             name: Term::var("name"),
             job: Term::var("job"),
         }
-        .query(session.clone())
+        .perform(&session)
         .try_collect()
         .await?;
 
         let result3: Vec<ShortcutEmployee> = Match::<ShortcutEmployee>::default()
-            .query(session.clone())
+            .perform(&session)
             .try_collect()
             .await?;
 
@@ -1369,7 +1335,7 @@ mod tests {
         };
 
         let session = Session::open(artifacts.clone());
-        let results = alice_query.query(session).try_vec().await?;
+        let results = alice_query.perform(&session).try_vec().await?;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name.value(), "Alice");
 
@@ -1379,7 +1345,7 @@ mod tests {
         };
 
         let session = Session::open(artifacts);
-        let all_results = all_people_query.query(session).try_vec().await?;
+        let all_results = all_people_query.perform(&session).try_vec().await?;
         assert_eq!(all_results.len(), 2);
 
         Ok(())
@@ -1421,7 +1387,7 @@ mod tests {
 
         let session = Session::open(artifacts);
 
-        let results = alice_engineering_query.query(session).try_vec().await?;
+        let results = alice_engineering_query.perform(&session).try_vec().await?;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name.value(), "Alice");
         assert_eq!(results[0].department.value(), "Engineering");
@@ -1465,7 +1431,7 @@ mod tests {
         };
 
         let session = Session::open(artifacts);
-        let results = engineering_query.query(session).try_vec().await?;
+        let results = engineering_query.perform(&session).try_vec().await?;
         assert_eq!(
             results,
             vec![HelperEmployee {

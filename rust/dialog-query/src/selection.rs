@@ -1,8 +1,8 @@
 use std::{collections::HashSet, sync::Arc};
 
 use crate::{
-    application::RelationApplication,
     artifact::{Type, Value},
+    proposition::RelationApplication,
 };
 use async_stream::try_stream;
 use dialog_common::ConditionalSend;
@@ -134,7 +134,7 @@ pub enum Factor {
         /// The facts that were read to produce this derived value, keyed by parameter name.
         from: HashMap<String, Factors>,
         /// The formula application that produced this value.
-        formula: Arc<crate::application::formula::FormulaApplication>,
+        formula: Arc<crate::proposition::formula::FormulaApplication>,
     },
     /// A value provided externally as a query parameter.
     Parameter {
@@ -361,7 +361,7 @@ pub enum Evidence<'a> {
         /// The facts that were read to produce this derived value, keyed by parameter name.
         from: HashMap<String, Factors>,
         /// The formula application that produced this value.
-        formula: &'a crate::application::formula::FormulaApplication,
+        formula: &'a crate::proposition::formula::FormulaApplication,
     },
     /// Applied parameter.
     Parameter {
@@ -749,7 +749,7 @@ mod tests {
 
     // Helper to create a Factor::Selected for testing
     fn create_test_factor(selector: Selector, fact: Arc<Relation>) -> Factor {
-        use crate::application::RelationApplication;
+        use crate::proposition::RelationApplication;
 
         // Create a minimal RelationApplication for testing
         let application = Arc::new(RelationApplication::new(

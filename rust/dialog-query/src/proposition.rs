@@ -6,7 +6,6 @@ pub mod formula;
 pub mod relation;
 
 pub use crate::analyzer::AnalyzerError;
-pub use crate::context::new_context;
 pub use crate::error::{PlanError, QueryResult};
 pub use crate::premise::{Negation, Premise};
 pub use crate::{Environment, EvaluationContext, Source};
@@ -20,7 +19,7 @@ pub use std::fmt::Display;
 /// Constraints are separate `Premise` variants since they express relationships
 /// between variables rather than querying the knowledge base.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Application {
+pub enum Proposition {
     /// Relation query with separate namespace and name.
     /// Boxed to reduce enum size (RelationApplication is ~432 bytes vs ~96 for other variants).
     Relation(Box<RelationApplication>),
@@ -30,83 +29,76 @@ pub enum Application {
     Formula(FormulaApplication),
 }
 
-impl Application {
+impl Proposition {
     /// Estimate the cost of this application given the current environment.
     /// Each application type knows how to calculate its cost based on what's bound.
     /// Returns None if the application cannot be executed without more constraints.
     pub fn estimate(&self, env: &crate::Environment) -> Option<usize> {
         match self {
-            Application::Relation(application) => application.estimate(env),
-            Application::Concept(application) => application.estimate(env),
-            Application::Formula(application) => application.estimate(env),
+            Proposition::Relation(application) => application.estimate(env),
+            Proposition::Concept(application) => application.estimate(env),
+            Proposition::Formula(application) => application.estimate(env),
         }
     }
 
     /// Evaluate this application against the given context, producing answers
     pub fn evaluate<S: Source, M: crate::selection::Answers>(
-        &self,
+        self,
         context: EvaluationContext<S, M>,
     ) -> impl crate::selection::Answers {
         match self {
-            Application::Relation(application) => Either::Left(Either::Left(
+            Proposition::Relation(application) => Either::Left(Either::Left(
                 application.evaluate_with_provenance(context.source, context.selection),
             )),
-            Application::Concept(application) => {
-                Either::Left(Either::Right(application.clone().evaluate(context)))
+            Proposition::Concept(application) => {
+                Either::Left(Either::Right(application.evaluate(context)))
             }
-            Application::Formula(application) => Either::Right(application.evaluate(context)),
+            Proposition::Formula(application) => Either::Right(application.evaluate(context)),
         }
     }
 
     /// Returns the parameter bindings for this application
     pub fn parameters(&self) -> crate::Parameters {
         match self {
-            Application::Relation(application) => application.parameters(),
-            Application::Concept(application) => application.parameters(),
-            Application::Formula(application) => application.parameters(),
+            Proposition::Relation(application) => application.parameters(),
+            Proposition::Concept(application) => application.parameters(),
+            Proposition::Formula(application) => application.parameters(),
         }
     }
 
     /// Returns the schema describing this application's parameters
     pub fn schema(&self) -> crate::Schema {
         match self {
-            Application::Relation(application) => application.schema(),
-            Application::Concept(application) => application.schema(),
-            Application::Formula(application) => application.schema(),
+            Proposition::Relation(application) => application.schema(),
+            Proposition::Concept(application) => application.schema(),
+            Proposition::Formula(application) => application.schema(),
         }
     }
 
     /// Creates a negated premise from this application.
     pub fn not(&self) -> Premise {
-        Premise::Exclude(Negation::not(self.clone()))
-    }
-
-    /// Execute this application as a query against the given store
-    pub fn query<S: Source>(&self, store: &S) -> impl crate::selection::Answers {
-        let store = store.clone();
-        let context = new_context(store);
-        self.evaluate(context)
+        Premise::Unless(Negation::not(self.clone()))
     }
 }
 
-impl From<ConceptApplication> for Application {
+impl From<ConceptApplication> for Proposition {
     fn from(selector: ConceptApplication) -> Self {
-        Application::Concept(selector)
+        Proposition::Concept(selector)
     }
 }
 
-impl From<FormulaApplication> for Application {
+impl From<FormulaApplication> for Proposition {
     fn from(application: FormulaApplication) -> Self {
-        Application::Formula(application)
+        Proposition::Formula(application)
     }
 }
 
-impl Display for Application {
+impl Display for Proposition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Application::Relation(application) => Display::fmt(application, f),
-            Application::Concept(application) => Display::fmt(application, f),
-            Application::Formula(application) => Display::fmt(application, f),
+            Proposition::Relation(application) => Display::fmt(application, f),
+            Proposition::Concept(application) => Display::fmt(application, f),
+            Proposition::Formula(application) => Display::fmt(application, f),
         }
     }
 }

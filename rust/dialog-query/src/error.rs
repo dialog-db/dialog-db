@@ -2,9 +2,9 @@
 
 pub use crate::analyzer::AnalyzerError;
 pub use crate::analyzer::Required;
-pub use crate::application::Application;
 use crate::artifact::{DialogArtifactsError, Type, Value};
 pub use crate::predicate::DeductiveRule;
+pub use crate::proposition::Proposition;
 use crate::term::Term;
 pub use thiserror::Error;
 
@@ -446,7 +446,7 @@ pub enum PlanError {
     )]
     UnboundParameter {
         /// The premise application containing the error
-        application: Box<Application>,
+        application: Box<Proposition>,
         /// The required parameter name
         parameter: String,
         /// The unbound term that was passed

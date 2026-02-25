@@ -1,14 +1,14 @@
-use crate::application::ConceptApplication;
 use crate::attribute::{AttributeDescriptor, Attribution};
 use crate::claim::Revert;
-use crate::concept::{Concept, ConceptProof, ConceptQuery};
+use crate::concept::{Concept, ConceptProof};
 use crate::dsl::Predicate;
 use crate::error::SchemaError;
+use crate::proposition::ConceptApplication;
 use crate::selection::Answer;
 use crate::term::Term;
 use crate::types::Scalar;
 use crate::{
-    Application, Assertion, Cardinality, Claim, Entity, Field, Parameters, QueryError, Requirement,
+    Assertion, Cardinality, Claim, Entity, Field, Parameters, Proposition, QueryError, Requirement,
     Schema, Type, Value,
 };
 
@@ -121,8 +121,8 @@ impl ConceptPredicate {
     }
 
     /// Creates an application for this concept predicate.
-    pub fn apply(&self, parameters: Parameters) -> Result<Application, SchemaError> {
-        Ok(Application::Concept(ConceptApplication {
+    pub fn apply(&self, parameters: Parameters) -> Result<Proposition, SchemaError> {
+        Ok(Proposition::Concept(ConceptApplication {
             terms: self.conform(parameters)?,
             predicate: self.clone(),
         }))
@@ -407,15 +407,27 @@ impl ConceptProof for DynamicProof {
     }
 }
 
+impl From<ConceptPredicate> for Entity {
+    fn from(predicate: ConceptPredicate) -> Self {
+        predicate.this()
+    }
+}
+
 impl From<ConceptApplication> for ConceptPredicate {
     fn from(app: ConceptApplication) -> Self {
         app.predicate
     }
 }
 
-impl ConceptQuery for ConceptApplication {
-    type Predicate = ConceptPredicate;
+impl crate::query::Application for ConceptApplication {
     type Proof = DynamicProof;
+
+    fn evaluate<S: crate::query::Source, M: crate::selection::Answers>(
+        self,
+        context: crate::EvaluationContext<S, M>,
+    ) -> impl crate::selection::Answers {
+        ConceptApplication::evaluate(self, context)
+    }
 
     fn realize(&self, source: Answer) -> Result<Self::Proof, QueryError> {
         let this_term = self
@@ -424,7 +436,6 @@ impl ConceptQuery for ConceptApplication {
             .ok_or_else(|| QueryError::UnboundVariable {
                 variable_name: "this".to_string(),
             })?;
-        // Extract entity from the answer using the variable name
         let entity: Entity = match this_term {
             Term::Variable { name, .. } => {
                 let var_name = name.as_ref().ok_or_else(|| QueryError::UnboundVariable {
@@ -451,12 +462,12 @@ impl ConceptQuery for ConceptApplication {
 }
 
 impl Predicate for ConceptPredicate {
+    type Proof = DynamicProof;
     type Application = ConceptApplication;
+    type Descriptor = ConceptPredicate;
 }
 
 impl Concept for ConceptPredicate {
-    type Proof = DynamicProof;
-    type Query = ConceptApplication;
     type Term = ();
 
     fn this(&self) -> Entity {

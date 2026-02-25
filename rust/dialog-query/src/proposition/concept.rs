@@ -1,6 +1,5 @@
 use crate::DeductiveRule;
 use crate::attribute::AttributeDescriptor;
-use crate::context::new_context;
 use crate::planner::{Fork, Join};
 use crate::predicate::ConceptPredicate;
 use crate::schema::CONCEPT_OVERHEAD;
@@ -264,13 +263,6 @@ impl ConceptApplication {
             }
         }
     }
-
-    /// Queries a source for entities matching this concept application.
-    pub fn query<S: Source>(self, source: S) -> impl crate::selection::Answers {
-        let store = source.clone();
-        let context = new_context(store);
-        self.evaluate(context)
-    }
 }
 
 impl Display for ConceptApplication {
@@ -287,11 +279,12 @@ impl Display for ConceptApplication {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::relation::RelationApplication;
+    use crate::context::new_context;
     use crate::predicate::ConceptPredicate;
+    use crate::proposition::relation::RelationApplication;
     use crate::the;
     use crate::{
-        Application, Assertion, AttributeDescriptor, Cardinality, Negation, Parameters, Premise,
+        Assertion, AttributeDescriptor, Cardinality, Negation, Parameters, Premise, Proposition,
         Session, Term, Type, Value,
     };
 
@@ -370,8 +363,10 @@ mod tests {
         };
 
         // Execute the query
-        let selection =
-            futures_util::TryStreamExt::try_collect::<Vec<_>>(application.query(session)).await?;
+        let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
+            application.evaluate(new_context(session.clone())),
+        )
+        .await?;
 
         // Should find both Alice and Bob with their name and age
         assert_eq!(selection.len(), 2, "Should find 2 people");
@@ -629,7 +624,7 @@ mod tests {
         let premise = Premise::from(relation);
 
         match premise {
-            Premise::Apply(Application::Relation(_)) => {
+            Premise::When(Proposition::Relation(_)) => {
                 // Expected case - RelationApplication produces Relation premise
             }
             _ => panic!("Expected Relation application"),
@@ -687,10 +682,10 @@ mod tests {
             Term::blank(),
             None,
         );
-        let app = Application::Relation(Box::new(relation));
+        let app = Proposition::Relation(Box::new(relation));
 
         match app {
-            Application::Relation(_) => {
+            Proposition::Relation(_) => {
                 // Expected
             }
             _ => panic!("Expected Relation variant"),
@@ -699,13 +694,13 @@ mod tests {
         // Test other variants exist
         let mut terms = Parameters::new();
         terms.insert("test".to_string(), Term::var("test_var"));
-        let concept_app = Application::Concept(ConceptApplication {
+        let concept_app = Proposition::Concept(ConceptApplication {
             terms,
             predicate: ConceptPredicate::new(),
         });
 
         match concept_app {
-            Application::Concept(_) => {
+            Proposition::Concept(_) => {
                 // Expected
             }
             _ => panic!("Expected Realize variant"),
@@ -722,12 +717,12 @@ mod tests {
             Term::blank(),
             None,
         );
-        let app = Application::Relation(Box::new(relation));
+        let app = Proposition::Relation(Box::new(relation));
         let negation = Negation(app);
 
         // Test that negation wraps the application
         match negation {
-            Negation(Application::Relation(_)) => {
+            Negation(Proposition::Relation(_)) => {
                 // Expected
             }
             _ => panic!("Expected wrapped Relation application"),
@@ -783,8 +778,10 @@ mod tests {
             terms,
             predicate: concept,
         };
-        let selection =
-            futures_util::TryStreamExt::try_collect::<Vec<_>>(app.query(session)).await?;
+        let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
+            app.evaluate(new_context(session.clone())),
+        )
+        .await?;
 
         assert_eq!(
             selection.len(),
@@ -871,8 +868,10 @@ mod tests {
             terms,
             predicate: concept,
         };
-        let selection =
-            futures_util::TryStreamExt::try_collect::<Vec<_>>(app.query(session)).await?;
+        let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
+            app.evaluate(new_context(session.clone())),
+        )
+        .await?;
 
         assert_eq!(selection.len(), 1, "Should find only Bob");
         assert_eq!(
@@ -959,8 +958,10 @@ mod tests {
             terms,
             predicate: concept,
         };
-        let selection =
-            futures_util::TryStreamExt::try_collect::<Vec<_>>(app.query(session)).await?;
+        let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
+            app.evaluate(new_context(session.clone())),
+        )
+        .await?;
 
         assert_eq!(
             selection.len(),

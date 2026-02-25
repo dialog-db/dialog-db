@@ -1,7 +1,7 @@
-use crate::application::ConceptApplication;
 use crate::attribute::Attribute;
 use crate::claim::Claim;
-use crate::{Application, Assertion, Entity, Parameters, Premise, Transaction};
+use crate::proposition::ConceptApplication;
+use crate::{Assertion, Entity, Parameters, Premise, Proposition, Transaction};
 use std::marker::PhantomData;
 
 /// Represents an entity with a single attribute.
@@ -62,13 +62,11 @@ where
     A: Clone + std::fmt::Debug + Send + 'static,
 {
     /// Query for instances matching this pattern
-    pub fn query<S: crate::query::Source>(&self, source: S) -> impl crate::query::Output<With<A>> {
-        use futures_util::StreamExt;
-        let application: ConceptApplication = self.clone().into();
-        let cloned = self.clone();
-        application
-            .query(source)
-            .map(move |input| crate::concept::ConceptQuery::realize(&cloned, input?))
+    pub fn perform<S: crate::query::Source>(
+        self,
+        source: &S,
+    ) -> impl crate::query::Output<With<A>> {
+        crate::query::Application::perform(self, source)
     }
 }
 
@@ -112,8 +110,6 @@ impl<A: Attribute> crate::concept::Concept for With<A>
 where
     A: Clone + std::fmt::Debug + Send + 'static,
 {
-    type Proof = With<A>;
-    type Query = WithQuery<A>;
     type Term = WithTerms<A>;
 
     fn description() -> &'static str {
@@ -130,7 +126,9 @@ impl<A: Attribute> crate::dsl::Predicate for With<A>
 where
     A: Clone + std::fmt::Debug + Send + 'static,
 {
+    type Proof = With<A>;
     type Application = WithQuery<A>;
+    type Descriptor = crate::attribute::AttributeDescriptor;
 }
 
 impl<A: Attribute> crate::concept::ConceptProof for With<A>
@@ -190,12 +188,19 @@ where
     }
 }
 
-impl<A: Attribute> crate::concept::ConceptQuery for WithQuery<A>
+impl<A: Attribute> crate::query::Application for WithQuery<A>
 where
     A: Clone + std::fmt::Debug + Send + 'static,
 {
-    type Predicate = With<A>;
     type Proof = With<A>;
+
+    fn evaluate<S: crate::query::Source, M: crate::selection::Answers>(
+        self,
+        context: crate::EvaluationContext<S, M>,
+    ) -> impl crate::selection::Answers {
+        let application: ConceptApplication = self.into();
+        application.evaluate(context)
+    }
 
     fn realize(&self, source: crate::selection::Answer) -> Result<Self::Proof, crate::QueryError> {
         Ok(With {
@@ -212,8 +217,8 @@ where
     type Output = Premise;
 
     fn not(self) -> Self::Output {
-        let application: Application = self.into();
-        Premise::Exclude(crate::negation::Negation::not(application))
+        let application: Proposition = self.into();
+        Premise::Unless(crate::negation::Negation::not(application))
     }
 }
 
@@ -242,12 +247,12 @@ where
     }
 }
 
-impl<A: Attribute> From<WithQuery<A>> for Application
+impl<A: Attribute> From<WithQuery<A>> for Proposition
 where
     A: Clone + std::fmt::Debug + Send + 'static,
 {
     fn from(source: WithQuery<A>) -> Self {
-        Application::Concept(source.into())
+        Proposition::Concept(source.into())
     }
 }
 
@@ -256,13 +261,14 @@ where
     A: Clone + std::fmt::Debug + Send + 'static,
 {
     fn from(source: WithQuery<A>) -> Self {
-        Premise::Apply(source.into())
+        Premise::When(source.into())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::attribute::Attribute;
+    use crate::context::new_context;
 
     mod test_pascal {
         use crate::Attribute;
@@ -333,9 +339,9 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_single_attribute_assert_and_retract() -> anyhow::Result<()> {
-        use crate::application::relation::RelationApplication;
         use crate::artifact::{Artifacts, Value};
         use crate::concept::With;
+        use crate::proposition::relation::RelationApplication;
         use crate::{Entity, Session, Term};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
@@ -364,7 +370,7 @@ mod tests {
         );
 
         let facts: Vec<_> = query
-            .query(&Session::open(store.clone()))
+            .perform(&Session::open(store.clone()))
             .try_collect()
             .await?;
 
@@ -388,7 +394,7 @@ mod tests {
             None,
         );
 
-        let facts: Vec<_> = query.query(&Session::open(store)).try_collect().await?;
+        let facts: Vec<_> = query.perform(&Session::open(store)).try_collect().await?;
 
         assert_eq!(facts.len(), 0);
 
@@ -397,9 +403,9 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_multiple_attributes_assert() -> anyhow::Result<()> {
-        use crate::application::relation::RelationApplication;
         use crate::artifact::{Artifacts, Value};
         use crate::concept::With;
+        use crate::proposition::relation::RelationApplication;
         use crate::{Entity, Session, Term};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
@@ -444,11 +450,14 @@ mod tests {
         );
 
         let name_facts: Vec<_> = name_query
-            .query(&Session::open(store.clone()))
+            .perform(&Session::open(store.clone()))
             .try_collect()
             .await?;
 
-        let job_facts: Vec<_> = job_query.query(&Session::open(store)).try_collect().await?;
+        let job_facts: Vec<_> = job_query
+            .perform(&Session::open(store))
+            .try_collect()
+            .await?;
 
         assert_eq!(name_facts.len(), 1);
         assert_eq!(name_facts[0].is, Value::String("Bob".to_string()));
@@ -461,9 +470,9 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_three_attributes_assert() -> anyhow::Result<()> {
-        use crate::application::relation::RelationApplication;
         use crate::artifact::{Artifacts, Value};
         use crate::concept::With;
+        use crate::proposition::relation::RelationApplication;
         use crate::{Entity, Session, Term};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
@@ -524,17 +533,17 @@ mod tests {
         );
 
         let name_facts: Vec<_> = name_query
-            .query(&Session::open(store.clone()))
+            .perform(&Session::open(store.clone()))
             .try_collect()
             .await?;
 
         let job_facts: Vec<_> = job_query
-            .query(&Session::open(store.clone()))
+            .perform(&Session::open(store.clone()))
             .try_collect()
             .await?;
 
         let salary_facts: Vec<_> = salary_query
-            .query(&Session::open(store))
+            .perform(&Session::open(store))
             .try_collect()
             .await?;
 
@@ -552,9 +561,9 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_multiple_attributes_retract() -> anyhow::Result<()> {
-        use crate::application::relation::RelationApplication;
         use crate::artifact::Artifacts;
         use crate::concept::With;
+        use crate::proposition::relation::RelationApplication;
         use crate::{Entity, Session, Term};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
@@ -613,11 +622,14 @@ mod tests {
         );
 
         let name_facts: Vec<_> = name_query
-            .query(&Session::open(store.clone()))
+            .perform(&Session::open(store.clone()))
             .try_collect()
             .await?;
 
-        let job_facts: Vec<_> = job_query.query(&Session::open(store)).try_collect().await?;
+        let job_facts: Vec<_> = job_query
+            .perform(&Session::open(store))
+            .try_collect()
+            .await?;
 
         assert_eq!(name_facts.len(), 0);
         assert_eq!(job_facts.len(), 0);
@@ -627,9 +639,9 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_update_attribute() -> anyhow::Result<()> {
-        use crate::application::relation::RelationApplication;
         use crate::artifact::{Artifacts, Value};
         use crate::concept::With;
+        use crate::proposition::relation::RelationApplication;
         use crate::{Entity, Session, Term};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
@@ -674,7 +686,7 @@ mod tests {
             None,
         );
 
-        let job_facts: Vec<_> = query.query(&Session::open(store)).try_collect().await?;
+        let job_facts: Vec<_> = query.perform(&Session::open(store)).try_collect().await?;
 
         assert_eq!(job_facts.len(), 1);
         assert_eq!(
@@ -687,9 +699,9 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_entity_reference_attribute() -> anyhow::Result<()> {
-        use crate::application::relation::RelationApplication;
         use crate::artifact::{Artifacts, Value};
         use crate::concept::With;
+        use crate::proposition::relation::RelationApplication;
         use crate::{Entity, Session, Term};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
@@ -735,7 +747,7 @@ mod tests {
             None,
         );
 
-        let manager_facts: Vec<_> = query.query(&Session::open(store)).try_collect().await?;
+        let manager_facts: Vec<_> = query.perform(&Session::open(store)).try_collect().await?;
 
         assert_eq!(manager_facts.len(), 1);
         assert_eq!(manager_facts[0].is, Value::Entity(manager));
@@ -789,7 +801,7 @@ mod tests {
 
         let names: Vec<With<employee_shortcut::Name>> =
             Match::<With<employee_shortcut::Name>>::default()
-                .query(session.clone())
+                .perform(&session)
                 .try_collect()
                 .await?;
 
@@ -811,7 +823,7 @@ mod tests {
 
         let jobs: Vec<With<employee_shortcut::Job>> =
             Match::<With<employee_shortcut::Job>>::default()
-                .query(session.clone())
+                .perform(&session)
                 .try_collect()
                 .await?;
 
@@ -863,11 +875,14 @@ mod tests {
 
         let premise: crate::Premise = query.into();
         let application = match premise {
-            crate::Premise::Apply(app) => app,
+            crate::Premise::When(app) => app,
             _ => panic!("Expected Apply premise"),
         };
 
-        let results = application.query(&session).try_collect::<Vec<_>>().await?;
+        let results = application
+            .evaluate(new_context(session.clone()))
+            .try_collect::<Vec<_>>()
+            .await?;
 
         assert_eq!(results.len(), 1);
 
@@ -926,11 +941,14 @@ mod tests {
         let premise: crate::Premise = query.into();
 
         let application = match premise {
-            crate::Premise::Apply(app) => app,
+            crate::Premise::When(app) => app,
             _ => panic!("Expected Apply premise"),
         };
 
-        let results = application.query(&session).try_collect::<Vec<_>>().await?;
+        let results = application
+            .evaluate(new_context(session.clone()))
+            .try_collect::<Vec<_>>()
+            .await?;
 
         assert_eq!(results.len(), 3, "Should find 3 notes with titles");
 
@@ -996,11 +1014,14 @@ mod tests {
         let premise: crate::Premise = query.into();
 
         let application = match premise {
-            crate::Premise::Apply(app) => app,
+            crate::Premise::When(app) => app,
             _ => panic!("Expected Apply premise"),
         };
 
-        let results = application.query(&session).try_collect::<Vec<_>>().await?;
+        let results = application
+            .evaluate(new_context(session.clone()))
+            .try_collect::<Vec<_>>()
+            .await?;
 
         assert_eq!(
             results.len(),

@@ -752,7 +752,7 @@ mod tests {
 
         // Verify it creates a Constraint Premise
         match premise {
-            Premise::Constrain(Constraint::Equality(constraint)) => {
+            Premise::Where(Constraint::Equality(constraint)) => {
                 // Verify the constraint has the right structure
                 assert_eq!(constraint.this.name(), Some("x"));
                 assert_eq!(constraint.is.name(), Some("y"));
@@ -774,7 +774,7 @@ mod tests {
 
         // Verify it creates a Constraint Premise
         match premise {
-            Premise::Constrain(Constraint::Equality(constraint)) => {
+            Premise::Where(Constraint::Equality(constraint)) => {
                 assert_eq!(constraint.this.name(), Some("x"));
                 assert!(constraint.is.is_constant());
             }

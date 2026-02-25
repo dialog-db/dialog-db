@@ -60,7 +60,7 @@ pub struct Bindings {
     /// The formula application these bindings belong to
     /// Used to create Factor::Derived with proper provenance
     /// Stored as Arc to avoid cloning the entire FormulaApplication
-    formula: Arc<crate::application::formula::FormulaApplication>,
+    formula: Arc<crate::proposition::formula::FormulaApplication>,
 }
 
 impl Bindings {
@@ -71,7 +71,7 @@ impl Bindings {
     /// * `source` - The answer containing current variable bindings and provenance
     /// * `terms` - Mapping from formula parameter names to query terms
     pub fn new(
-        formula: Arc<crate::application::formula::FormulaApplication>,
+        formula: Arc<crate::proposition::formula::FormulaApplication>,
         source: impl Into<Answer>,
         terms: Parameters,
     ) -> Self {
@@ -190,6 +190,20 @@ impl Bindings {
                     parameter: key.into(),
                 })?;
 
+        // For constant terms, verify the computed value matches the constant.
+        // Answer::assign treats constants as no-ops, so we must check here.
+        if let crate::Term::Constant(expected) = term {
+            if expected != value {
+                return Err(FormulaEvaluationError::VariableInconsistency {
+                    parameter: key.into(),
+                    actual: crate::Term::Constant(value.clone()),
+                    expected: term.clone(),
+                });
+            }
+            // Constant matches — nothing to write to the answer
+            return Ok(());
+        }
+
         // Create a Derived factor with proper provenance
         let factor = Factor::Derived {
             value: value.clone(),
@@ -224,12 +238,12 @@ mod tests {
     use crate::Term;
 
     // Helper to create a test formula for bindings tests
-    fn test_formula() -> crate::application::formula::FormulaApplication {
+    fn test_formula() -> crate::proposition::formula::FormulaApplication {
         use std::sync::OnceLock;
         static EMPTY_CELLS: OnceLock<crate::predicate::formula::Cells> = OnceLock::new();
         let cells = EMPTY_CELLS.get_or_init(crate::predicate::formula::Cells::new);
 
-        crate::application::formula::FormulaApplication {
+        crate::proposition::formula::FormulaApplication {
             name: "test",
             compute: |_| Ok(vec![]),
             cost: 0,
@@ -349,7 +363,7 @@ mod tests {
         let conflicting_factor = Factor::Derived {
             value: Value::UnsignedInt(100),
             from: HashMap::new(),
-            formula: Arc::new(crate::application::formula::FormulaApplication {
+            formula: Arc::new(crate::proposition::formula::FormulaApplication {
                 name: "test",
                 compute: |_| Ok(vec![]),
                 cost: 0,
@@ -405,6 +419,51 @@ mod tests {
         assert_eq!(
             unchanged_value, 42,
             "Original value should remain unchanged after failed write"
+        );
+    }
+
+    #[dialog_common::test]
+    fn test_bindings_write_constant_matching_value() {
+        use crate::selection::Answer;
+
+        // Term is a constant 42 — writing 42 should succeed (consistent)
+        let mut terms = Parameters::new();
+        terms.insert("value".to_string(), Term::from(42u32).as_unknown());
+
+        let source = Answer::new();
+        let formula = test_formula();
+        let mut bindings = Bindings::new(Arc::new(formula), source, terms);
+
+        let result = bindings.write("value", &Value::UnsignedInt(42));
+        assert!(
+            result.is_ok(),
+            "Writing a value that matches the constant should succeed"
+        );
+    }
+
+    #[dialog_common::test]
+    fn test_bindings_write_constant_mismatched_value() {
+        use crate::selection::Answer;
+
+        // Term is a constant 99 — writing 8 should fail (inconsistent)
+        let mut terms = Parameters::new();
+        terms.insert("value".to_string(), Term::from(99u32).as_unknown());
+
+        let source = Answer::new();
+        let formula = test_formula();
+        let mut bindings = Bindings::new(Arc::new(formula), source, terms);
+
+        let result = bindings.write("value", &Value::UnsignedInt(8));
+        assert!(
+            result.is_err(),
+            "Writing a value that conflicts with the constant should fail"
+        );
+        assert!(
+            matches!(
+                result.unwrap_err(),
+                FormulaEvaluationError::VariableInconsistency { .. }
+            ),
+            "Should be a VariableInconsistency error"
         );
     }
 

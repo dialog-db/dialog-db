@@ -19,12 +19,12 @@ extern crate self as dialog_query;
 
 /// Static analysis of rules and formulas for query planning.
 pub mod analyzer;
-/// Application of predicates within query evaluation.
-pub mod application;
 /// Re-exports from the dialog-artifacts crate.
 pub mod artifact;
 /// Attribute definitions and schema metadata.
 pub mod attribute;
+/// Proposition types for querying the knowledge base.
+pub mod proposition;
 
 /// Entity-attribute-value assertion triples for writes.
 pub mod assertion;
@@ -75,7 +75,6 @@ pub mod term;
 /// Type system utilities bridging Rust types to dialog-artifacts types.
 pub mod types;
 
-pub use application::Application;
 pub use artifact::{Attribute as ArtifactAttribute, Entity, Type, Value};
 pub use assertion::Assertion;
 pub use attribute::{Attribute, AttributeDescriptor, Cardinality, The};
@@ -90,7 +89,8 @@ pub use parameters::Parameters;
 pub use predicate::concept::DynamicProof;
 pub use predicate::{DeductiveRule, Formula};
 pub use premise::Premise;
-pub use query::{Source, Store};
+pub use proposition::Proposition;
+pub use query::{Application, Source, Store};
 pub use relation::Relation;
 pub use rule::{Premises, When};
 pub use schema::{Field, Requirement, Schema};
