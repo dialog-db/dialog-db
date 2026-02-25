@@ -8,11 +8,12 @@ use crate::application::ConceptApplication;
 use crate::Assertion;
 pub use crate::dsl::Predicate;
 pub use crate::predicate::concept::ConceptPredicate;
-use crate::query::{Output, Query, Source};
+#[cfg(test)]
+use crate::query::Output;
+use crate::query::{Query, Source};
 use crate::selection::Answer;
-use crate::{Entity, EvaluationContext, Parameters, QueryError, predicate, selection};
+use crate::{Entity, EvaluationContext, Parameters, QueryError, selection};
 use dialog_common::ConditionalSend;
-use futures_util::StreamExt;
 use std::fmt::Debug;
 
 /// Concept is a set of attributes associated with entity representing an
@@ -44,64 +45,14 @@ pub trait Concept: Predicate + Clone + Debug {
         ""
     }
 
-    /// Returns the concept predicate.
-    fn predicate() -> predicate::concept::ConceptPredicate;
-
-    /// Convenience method to query for all instances of this concept.
-    ///
-    /// This creates a default Match pattern (all fields as variables) and executes it.
-    /// It's equivalent to calling `Query::execute(&Match::<Self>::default(), &source)`.
-    ///
-    /// # Example
-    ///
-    /// ```rs
-    /// // These are equivalent:
-    /// let employees = Employee::query(session).try_collect::<Vec<_>>().await?;
-    ///
-    /// let employees = Match::<Employee>::default()
-    ///     .execute(&session)
-    ///     .try_collect::<Vec<_>>().await?;
-    /// ```
-    fn query<S: Source>(source: S) -> impl Output<Self::Proof>
-    where
-        ConceptApplication: From<Self::Query>,
-    {
-        let pattern = Self::Query::default();
-        let application: ConceptApplication = pattern.clone().into();
-        application
-            .query(source)
-            .map(move |input| ConceptQuery::realize(&pattern, input?))
-    }
-
-    /// Compute the blake3 hash of this concept's CBOR-encoded representation.
-    ///
-    /// The hash is computed from the CBOR encoding of the concept's attribute set,
-    /// ensuring that concepts with the same attributes (regardless of field names)
-    /// produce the same identifier.
-    fn hash() -> blake3::Hash {
-        Self::predicate().hash()
-    }
-
-    /// Format this concept's identifier as a URI.
-    ///
-    /// Returns a URI in the format `concept:{blake3_hash_hex}`.
-    fn to_uri() -> String {
-        Self::predicate().to_uri()
-    }
-
-    /// Parse a concept URI and extract its hash.
-    ///
-    /// Returns `Some(hash)` if the URI has the format `concept:{valid_hex}`,
-    /// or `None` if the URI is invalid.
-    fn parse_uri(uri: &str) -> Option<blake3::Hash> {
-        predicate::concept::ConceptPredicate::parse_uri(uri)
-    }
+    /// Content-addressed identity for this concept.
+    fn this(&self) -> Entity;
 }
 
 /// Concepts can be matched and this trait describes an abstract match for the
 /// concept. Each match should be translatable into a set of statements making
 /// it possible to spread it into a query.
-pub trait ConceptQuery: Sized + Clone + ConditionalSend + Default + 'static {
+pub trait ConceptQuery: Sized + Clone + ConditionalSend + Into<ConceptPredicate> + 'static {
     /// The concept type this query corresponds to.
     type Predicate: Concept;
     /// Proof of the concept that this query can produce.
@@ -109,11 +60,6 @@ pub trait ConceptQuery: Sized + Clone + ConditionalSend + Default + 'static {
 
     /// Reconstructs a concept instance from a query [`Answer`].
     fn realize(&self, source: Answer) -> Result<Self::Proof, QueryError>;
-
-    /// Returns the concept predicate for this query.
-    fn to_predicate(&self) -> predicate::ConceptPredicate {
-        Self::Predicate::predicate()
-    }
 }
 
 /// Blanket implementation of [`Query`] for all concept query types.
@@ -131,7 +77,7 @@ where
         &self,
         context: EvaluationContext<S, A>,
     ) -> impl selection::Answers {
-        let application: ConceptApplication = self.clone().into();
+        let application: ConceptApplication = ConceptApplication::from(self.clone());
         application.evaluate(context)
     }
 
@@ -261,33 +207,50 @@ mod tests {
         }
     }
 
+    fn person_predicate() -> ConceptPredicate {
+        ConceptPredicate::from(vec![
+            (
+                "name",
+                AttributeDescriptor::new(
+                    the!("person/name"),
+                    "Name of the person",
+                    Cardinality::One,
+                    Some(Type::String),
+                ),
+            ),
+            (
+                "age",
+                AttributeDescriptor::new(
+                    the!("person/age"),
+                    "Age of the person",
+                    Cardinality::One,
+                    Some(Type::UnsignedInt),
+                ),
+            ),
+        ])
+    }
+
+    impl From<Person> for ConceptPredicate {
+        fn from(_: Person) -> Self {
+            person_predicate()
+        }
+    }
+
+    impl From<PersonMatch> for ConceptPredicate {
+        fn from(_: PersonMatch) -> Self {
+            person_predicate()
+        }
+    }
+
     // Implement Concept for Person
     impl Concept for Person {
         type Proof = Person;
         type Query = PersonMatch;
         type Term = PersonTerms;
 
-        fn predicate() -> predicate::concept::ConceptPredicate {
-            predicate::concept::ConceptPredicate::from(vec![
-                (
-                    "name",
-                    AttributeDescriptor::new(
-                        the!("person/name"),
-                        "Name of the person",
-                        Cardinality::One,
-                        Some(Type::String),
-                    ),
-                ),
-                (
-                    "age",
-                    AttributeDescriptor::new(
-                        the!("person/age"),
-                        "Age of the person",
-                        Cardinality::One,
-                        Some(Type::UnsignedInt),
-                    ),
-                ),
-            ])
+        fn this(&self) -> Entity {
+            let predicate: ConceptPredicate = self.clone().into();
+            predicate.this()
         }
     }
 
@@ -409,9 +372,10 @@ mod tests {
     // Implement From<PersonMatch> for ConceptApplication
     impl From<PersonMatch> for ConceptApplication {
         fn from(source: PersonMatch) -> Self {
+            let predicate: ConceptPredicate = source.clone().into();
             ConceptApplication {
                 terms: source.into(),
-                predicate: Person::predicate(),
+                predicate,
             }
         }
     }
@@ -433,10 +397,10 @@ mod tests {
     #[dialog_common::test]
     fn test_person_concept_creation() {
         // Test that the Person concept has the expected properties
-        let concept = Person::predicate();
+        let concept = person_predicate();
         // Operator is now a URI based on the hash of the concept's attributes
         assert!(
-            concept.operator().starts_with("concept:"),
+            concept.this().to_string().starts_with("concept:"),
             "Operator should be a concept URI"
         );
 
@@ -520,16 +484,16 @@ mod tests {
         };
 
         // Test Instance trait - should return the same entity
-        assert_eq!(person.this(), &entity);
+        assert_eq!(ConceptProof::this(&person), &entity);
     }
 
     #[dialog_common::test]
     fn test_concept_name_consistency() {
         // Test that concept identifier is consistent across different access patterns
-        let concept = Person::predicate();
+        let concept = person_predicate();
         // Operator is now a URI based on the hash of the concept's attributes
         assert!(
-            concept.operator().starts_with("concept:"),
+            concept.this().to_string().starts_with("concept:"),
             "Operator should be a concept URI"
         );
 
@@ -544,7 +508,7 @@ mod tests {
         // (though our current Instance impl doesn't store concept info)
         // Verify the identifier is still consistent
         assert!(
-            concept.operator().starts_with("concept:"),
+            concept.this().to_string().starts_with("concept:"),
             "Operator should be a concept URI"
         );
     }
@@ -633,7 +597,7 @@ mod tests {
         assert!(params.get("age").is_some());
 
         // Test 2: Verify concept attributes are accessible
-        let concept = Person::predicate();
+        let concept = person_predicate();
         assert_eq!(concept.len(), 2); // name and age
 
         // Verify we can find specific attributes
@@ -1269,7 +1233,8 @@ mod tests {
         });
         session.commit(edit).await?;
 
-        let employees_shortcut: Vec<ShortcutEmployee> = ShortcutEmployee::query(session.clone())
+        let employees_shortcut: Vec<ShortcutEmployee> = Match::<ShortcutEmployee>::default()
+            .query(session.clone())
             .try_collect()
             .await?;
 
@@ -1318,7 +1283,8 @@ mod tests {
         });
         session.commit(edit).await?;
 
-        let result1: Vec<ShortcutEmployee> = ShortcutEmployee::query(session.clone())
+        let result1: Vec<ShortcutEmployee> = Match::<ShortcutEmployee>::default()
+            .query(session.clone())
             .try_collect()
             .await?;
 

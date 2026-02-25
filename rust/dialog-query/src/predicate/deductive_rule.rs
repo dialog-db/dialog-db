@@ -29,10 +29,6 @@ impl DeductiveRule {
         uncompiled.compile()
     }
 
-    /// Returns the operator name identifying this rule's conclusion concept.
-    pub fn operator(&self) -> String {
-        self.conclusion.operator()
-    }
     /// Returns an iterator over the operand names of this rule's conclusion.
     pub fn operands(&self) -> impl Iterator<Item = &str> {
         self.conclusion.operands()
@@ -92,7 +88,7 @@ impl UncompiledDeductiveRule {
 
 impl Display for DeductiveRule {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} {{", self.operator())?;
+        write!(f, "{} {{", self.conclusion.this())?;
         write!(f, "this: {},", Type::Entity)?;
         for (name, attribute) in self.conclusion.iter() {
             match attribute.content_type() {

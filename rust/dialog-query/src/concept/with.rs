@@ -57,6 +57,21 @@ impl<A: Attribute> Default for WithQuery<A> {
     }
 }
 
+impl<A: Attribute> WithQuery<A>
+where
+    A: Clone + std::fmt::Debug + Send + 'static,
+{
+    /// Query for instances matching this pattern
+    pub fn query<S: crate::query::Source>(&self, source: S) -> impl crate::query::Output<With<A>> {
+        use futures_util::StreamExt;
+        let application: ConceptApplication = self.clone().into();
+        let cloned = self.clone();
+        application
+            .query(source)
+            .map(move |input| crate::concept::ConceptQuery::realize(&cloned, input?))
+    }
+}
+
 /// Helper methods for constructing term variables in queries.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WithTerms<A: Attribute> {
@@ -75,6 +90,24 @@ impl<A: Attribute> WithTerms<A> {
     }
 }
 
+impl<A: Attribute> From<With<A>> for crate::predicate::concept::ConceptPredicate
+where
+    A: Clone + std::fmt::Debug + Send + 'static,
+{
+    fn from(_: With<A>) -> Self {
+        crate::predicate::concept::ConceptPredicate::from(vec![("has", A::descriptor())])
+    }
+}
+
+impl<A: Attribute> From<WithQuery<A>> for crate::predicate::concept::ConceptPredicate
+where
+    A: Clone + std::fmt::Debug + Send + 'static,
+{
+    fn from(_: WithQuery<A>) -> Self {
+        crate::predicate::concept::ConceptPredicate::from(vec![("has", A::descriptor())])
+    }
+}
+
 impl<A: Attribute> crate::concept::Concept for With<A>
 where
     A: Clone + std::fmt::Debug + Send + 'static,
@@ -87,9 +120,9 @@ where
         ""
     }
 
-    fn predicate() -> crate::predicate::concept::ConceptPredicate {
-        let attr_descriptor = A::descriptor();
-        crate::predicate::concept::ConceptPredicate::from(vec![("has", attr_descriptor)])
+    fn this(&self) -> Entity {
+        let predicate: crate::predicate::concept::ConceptPredicate = self.clone().into();
+        predicate.this()
     }
 }
 
@@ -201,9 +234,10 @@ where
     A: Clone + std::fmt::Debug + Send + 'static,
 {
     fn from(source: WithQuery<A>) -> Self {
+        let predicate: crate::predicate::concept::ConceptPredicate = source.clone().into();
         ConceptApplication {
             terms: source.into(),
-            predicate: <With<A> as crate::concept::Concept>::predicate(),
+            predicate,
         }
     }
 }
@@ -723,7 +757,7 @@ mod tests {
     async fn test_with_query_shortcut() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
         use crate::concept::With;
-        use crate::{Concept, Entity, Session};
+        use crate::{Entity, Match, Session};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
 
@@ -754,7 +788,8 @@ mod tests {
         session.commit(edit).await?;
 
         let names: Vec<With<employee_shortcut::Name>> =
-            With::<employee_shortcut::Name>::query(session.clone())
+            Match::<With<employee_shortcut::Name>>::default()
+                .query(session.clone())
                 .try_collect()
                 .await?;
 
@@ -775,7 +810,8 @@ mod tests {
         assert!(found_bob, "Should find Bob");
 
         let jobs: Vec<With<employee_shortcut::Job>> =
-            With::<employee_shortcut::Job>::query(session.clone())
+            Match::<With<employee_shortcut::Job>>::default()
+                .query(session.clone())
                 .try_collect()
                 .await?;
 
