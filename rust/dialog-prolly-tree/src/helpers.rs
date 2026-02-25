@@ -573,18 +573,18 @@ impl TreeDescriptor {
         }
 
         // Only recurse if we have more levels to go and height won't underflow
-        if height > 0 {
-            if let Ok(children) = node.load_children(storage).await {
-                for child in children {
-                    Box::pin(Self::build_spec_from_node(
-                        spec,
-                        &child,
-                        storage,
-                        height - 1,
-                        expected_ops,
-                    ))
-                    .await;
-                }
+        if height > 0
+            && let Ok(children) = node.load_children(storage).await
+        {
+            for child in children {
+                Box::pin(Self::build_spec_from_node(
+                    spec,
+                    &child,
+                    storage,
+                    height - 1,
+                    expected_ops,
+                ))
+                .await;
             }
         }
     }
@@ -919,41 +919,40 @@ impl TreeSpec {
             writeln!(f, "{}{}{} [{}]@{}", prefix, branch, key_str, rank, hash_str)?;
         }
 
-        if node.is_branch() {
-            if let Ok(refs) = node.references() {
-                let new_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
-                let ref_count = refs.len();
-                for (i, reference) in refs.iter().enumerate() {
-                    let is_last_child = i == ref_count - 1;
-                    let child_branch = if is_last_child {
-                        "└── "
-                    } else {
-                        "├── "
-                    };
+        if node.is_branch()
+            && let Ok(refs) = node.references()
+        {
+            let new_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
+            let ref_count = refs.len();
+            for (i, reference) in refs.iter().enumerate() {
+                let is_last_child = i == ref_count - 1;
+                let child_branch = if is_last_child {
+                    "└── "
+                } else {
+                    "├── "
+                };
 
-                    let ref_boundary = reference.upper_bound();
-                    let ref_key_str = String::from_utf8_lossy(ref_boundary).to_string();
+                let ref_boundary = reference.upper_bound();
+                let ref_key_str = String::from_utf8_lossy(ref_boundary).to_string();
 
-                    let ref_rank = if ref_boundary.len() >= 2
-                        && ref_boundary[ref_boundary.len() - 2] == 0x00
-                    {
+                let ref_rank =
+                    if ref_boundary.len() >= 2 && ref_boundary[ref_boundary.len() - 2] == 0x00 {
                         ref_boundary[ref_boundary.len() - 1]
                     } else {
                         1
                     };
 
-                    let ref_hash = reference.hash();
-                    let ref_hash_str = format!(
-                        "{:02x}{:02x}{:02x}{:02x}",
-                        ref_hash[0], ref_hash[1], ref_hash[2], ref_hash[3]
-                    );
+                let ref_hash = reference.hash();
+                let ref_hash_str = format!(
+                    "{:02x}{:02x}{:02x}{:02x}",
+                    ref_hash[0], ref_hash[1], ref_hash[2], ref_hash[3]
+                );
 
-                    writeln!(
-                        f,
-                        "{}{}{} [{}]@{} (ref)",
-                        new_prefix, child_branch, ref_key_str, ref_rank, ref_hash_str
-                    )?;
-                }
+                writeln!(
+                    f,
+                    "{}{}{} [{}]@{} (ref)",
+                    new_prefix, child_branch, ref_key_str, ref_rank, ref_hash_str
+                )?;
             }
         }
 

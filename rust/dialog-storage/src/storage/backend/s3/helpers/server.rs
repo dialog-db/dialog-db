@@ -161,19 +161,19 @@ impl S3 for InMemoryS3 {
         let key = &req.input.key;
 
         let buckets = self.buckets.read().await;
-        if let Some(bucket_contents) = buckets.get(bucket) {
-            if let Some(obj) = bucket_contents.get(key) {
-                let body = s3s::Body::from(Bytes::from(obj.data.clone()));
-                let output = GetObjectOutput {
-                    body: Some(StreamingBlob::from(body)),
-                    content_length: Some(obj.data.len() as i64),
-                    content_type: obj.content_type.clone(),
-                    e_tag: Some(ETag::Strong(obj.e_tag.clone())),
-                    last_modified: Some(obj.last_modified.clone()),
-                    ..Default::default()
-                };
-                return Ok(S3Response::new(output));
-            }
+        if let Some(bucket_contents) = buckets.get(bucket)
+            && let Some(obj) = bucket_contents.get(key)
+        {
+            let body = s3s::Body::from(Bytes::from(obj.data.clone()));
+            let output = GetObjectOutput {
+                body: Some(StreamingBlob::from(body)),
+                content_length: Some(obj.data.len() as i64),
+                content_type: obj.content_type.clone(),
+                e_tag: Some(ETag::Strong(obj.e_tag.clone())),
+                last_modified: Some(obj.last_modified.clone()),
+                ..Default::default()
+            };
+            return Ok(S3Response::new(output));
         }
         Err(s3_error!(NoSuchKey))
     }
@@ -278,17 +278,17 @@ impl S3 for InMemoryS3 {
         let key = &req.input.key;
 
         let buckets = self.buckets.read().await;
-        if let Some(bucket_contents) = buckets.get(bucket) {
-            if let Some(obj) = bucket_contents.get(key) {
-                let output = HeadObjectOutput {
-                    content_length: Some(obj.data.len() as i64),
-                    content_type: obj.content_type.clone(),
-                    e_tag: Some(ETag::Strong(obj.e_tag.clone())),
-                    last_modified: Some(obj.last_modified.clone()),
-                    ..Default::default()
-                };
-                return Ok(S3Response::new(output));
-            }
+        if let Some(bucket_contents) = buckets.get(bucket)
+            && let Some(obj) = bucket_contents.get(key)
+        {
+            let output = HeadObjectOutput {
+                content_length: Some(obj.data.len() as i64),
+                content_type: obj.content_type.clone(),
+                e_tag: Some(ETag::Strong(obj.e_tag.clone())),
+                last_modified: Some(obj.last_modified.clone()),
+                ..Default::default()
+            };
+            return Ok(S3Response::new(output));
         }
         Err(s3_error!(NoSuchKey))
     }

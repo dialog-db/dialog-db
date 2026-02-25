@@ -184,6 +184,8 @@ mod tests {
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     use wasm_bindgen_test::wasm_bindgen_test;
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_service_worker);
 
     /// Minimal test codec that just uses serde_bytes-style identity encoding.
     /// Encodes `String` as raw UTF-8 bytes.

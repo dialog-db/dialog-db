@@ -793,6 +793,8 @@ mod tests {
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     use wasm_bindgen_test::wasm_bindgen_test;
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_service_worker);
 
     /// Create a deterministic test signer from a seed.
     async fn test_signer(seed: u8) -> Ed25519Signer {
@@ -1050,14 +1052,16 @@ mod tests {
         Ok(())
     }
 
+    type DelegationStore = Rc<RefCell<HashMap<Cid, Rc<Delegation<Ed25519Signature>>>>>;
+
     /// Helper to create an `Rc<RefCell<HashMap>>` delegation store.
-    fn new_store() -> Rc<RefCell<HashMap<ipld_core::cid::Cid, Rc<Delegation<Ed25519Signature>>>>> {
+    fn new_store() -> DelegationStore {
         Rc::new(RefCell::new(HashMap::new()))
     }
 
     /// Helper to insert a delegation into the store and return its CID.
     async fn store_delegation(
-        store: &Rc<RefCell<HashMap<ipld_core::cid::Cid, Rc<Delegation<Ed25519Signature>>>>>,
+        store: &DelegationStore,
         delegation: Delegation<Ed25519Signature>,
     ) -> ipld_core::cid::Cid {
         store::insert(store, Rc::new(delegation)).await.unwrap()

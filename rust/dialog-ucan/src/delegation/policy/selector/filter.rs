@@ -679,17 +679,15 @@ mod tests {
                     let deserialized = serialized.parse(); //
                     let expected = {
                         let mut work = filter;
-                        loop {
-                            if let Filter::Try(inner) = work.clone() {
-                                if let Filter::Try(nested) = *inner {
-                                    work = Filter::Try(nested);
-                                } else {
-                                    break;
-                                }
+
+                        while let Filter::Try(inner) = work.clone() {
+                            if let Filter::Try(nested) = *inner {
+                                work = Filter::Try(nested);
                             } else {
                                 break;
                             }
                         }
+
                         work
                     };
 

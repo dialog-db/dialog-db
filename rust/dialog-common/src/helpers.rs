@@ -156,12 +156,14 @@ mod tests {
     // Simple test resource (no real provider)
 
     /// Minimal test address for macro testing
+    #[allow(unused)]
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct TestAddress {
         pub value: String,
     }
 
     /// Minimal provider for macro testing
+    #[allow(unused)]
     pub struct TestServer;
 
     impl Provider for TestServer {}
@@ -181,6 +183,7 @@ mod tests {
 
     /// Address that uses configurable settings
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[allow(unused)]
     pub struct ConfiguredAddress {
         pub endpoint: String,
         pub bucket: String,
@@ -225,6 +228,7 @@ mod tests {
 
     /// Address that represents a running TCP server
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[allow(unused)]
     pub struct ServerAddress {
         pub port: u16,
     }
@@ -257,7 +261,8 @@ mod tests {
     /// Tests a simple (non-provisioned) test with default attributes.
     #[dialog_common::test]
     async fn it_runs_simple_test() {
-        assert_eq!(2 + 2, 4);
+        const SUM: i32 = 4;
+        assert_eq!(2 + 2, SUM);
     }
 
     /// Tests provisioned test with default settings

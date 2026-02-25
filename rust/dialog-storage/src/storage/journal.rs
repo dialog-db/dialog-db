@@ -475,16 +475,16 @@ mod tests {
 
         // Check per-key counts
         let read_counts = storage.get_read_counts();
-        assert_eq!(read_counts.get(&"key1".to_string()), Some(&2));
-        assert_eq!(read_counts.get(&"key2".to_string()), Some(&1));
+        assert_eq!(read_counts.get("key1"), Some(&2));
+        assert_eq!(read_counts.get("key2"), Some(&1));
 
         let write_counts = storage.get_write_counts();
-        assert_eq!(write_counts.get(&"key1".to_string()), Some(&1));
-        assert_eq!(write_counts.get(&"key2".to_string()), Some(&1));
+        assert_eq!(write_counts.get("key1"), Some(&1));
+        assert_eq!(write_counts.get("key2"), Some(&1));
 
         let op_counts = storage.get_operation_counts();
-        assert_eq!(op_counts.get(&"key1".to_string()), Some(&3)); // 1 write + 2 reads
-        assert_eq!(op_counts.get(&"key2".to_string()), Some(&2)); // 1 write + 1 read
+        assert_eq!(op_counts.get("key1"), Some(&3)); // 1 write + 2 reads
+        assert_eq!(op_counts.get("key2"), Some(&2)); // 1 write + 1 read
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]

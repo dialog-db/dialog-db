@@ -11,6 +11,9 @@ use dialog_ucan::delegation::builder::DelegationBuilder;
 use dialog_ucan::invocation::builder::InvocationBuilder;
 use dialog_ucan::subject::Subject;
 
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_service_worker);
+
 async fn test_signer(seed: u8) -> Ed25519Signer {
     Ed25519Signer::import(&[seed; 32]).await.unwrap()
 }

@@ -477,6 +477,8 @@ mod tests {
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     use wasm_bindgen_test::wasm_bindgen_test;
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_service_worker);
 
     /// Create a deterministic test signer from a seed.
     async fn test_signer(seed: u8) -> Ed25519Signer {
