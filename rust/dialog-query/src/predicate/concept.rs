@@ -424,9 +424,10 @@ impl crate::query::Application for ConceptApplication {
 
     fn evaluate<S: crate::query::Source, M: crate::selection::Answers>(
         self,
-        context: crate::EvaluationContext<S, M>,
+        answers: M,
+        source: &S,
     ) -> impl crate::selection::Answers {
-        ConceptApplication::evaluate(self, context)
+        ConceptApplication::evaluate(self, answers, source)
     }
 
     fn realize(&self, source: Answer) -> Result<Self::Proof, QueryError> {

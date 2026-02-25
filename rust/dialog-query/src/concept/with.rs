@@ -196,10 +196,11 @@ where
 
     fn evaluate<S: crate::query::Source, M: crate::selection::Answers>(
         self,
-        context: crate::EvaluationContext<S, M>,
+        answers: M,
+        source: &S,
     ) -> impl crate::selection::Answers {
         let application: ConceptApplication = self.into();
-        application.evaluate(context)
+        application.evaluate(answers, source)
     }
 
     fn realize(&self, source: crate::selection::Answer) -> Result<Self::Proof, crate::QueryError> {
@@ -268,7 +269,7 @@ where
 #[cfg(test)]
 mod tests {
     use crate::attribute::Attribute;
-    use crate::context::new_context;
+    use crate::selection::Answer;
 
     mod test_pascal {
         use crate::Attribute;
@@ -880,7 +881,7 @@ mod tests {
         };
 
         let results = application
-            .evaluate(new_context(session.clone()))
+            .evaluate(Answer::new().seed(), &session)
             .try_collect::<Vec<_>>()
             .await?;
 
@@ -946,7 +947,7 @@ mod tests {
         };
 
         let results = application
-            .evaluate(new_context(session.clone()))
+            .evaluate(Answer::new().seed(), &session)
             .try_collect::<Vec<_>>()
             .await?;
 
@@ -1019,7 +1020,7 @@ mod tests {
         };
 
         let results = application
-            .evaluate(new_context(session.clone()))
+            .evaluate(Answer::new().seed(), &session)
             .try_collect::<Vec<_>>()
             .await?;
 

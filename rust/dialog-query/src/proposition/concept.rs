@@ -10,7 +10,7 @@ use crate::planner::Fork;
 use crate::predicate::ConceptPredicate;
 use crate::schema::CONCEPT_OVERHEAD;
 use crate::selection::{Answer, Evidence};
-use crate::{Environment, EvaluationContext, Parameters, Schema, Source, Term, Value, try_stream};
+use crate::{Environment, Parameters, Schema, Source, Term, Value, try_stream};
 use std::fmt::Display;
 
 /// Extract an Answer with parameter names from an Answer with user variable names
@@ -238,21 +238,23 @@ impl ConceptApplication {
     /// than carried globally through every evaluation step.
     pub fn evaluate<S: Source, M: crate::selection::Answers>(
         self,
-        context: EvaluationContext<S, M>,
+        answers: M,
+        source: &S,
     ) -> impl crate::selection::Answers {
         let app = self;
+        let source = source.clone();
 
         try_stream! {
             let mut plan = None;
 
-            for await each in context.selection {
+            for await each in answers {
                 let input = each?;
 
                 // Derive the binding pattern from the first answer and cache the
                 // plan. All answers in the selection share the same binding pattern
                 // (same variables bound), only the values differ.
                 if plan.is_none() {
-                    let rules = context.source.acquire(&app.predicate)?;
+                    let rules = source.acquire(&app.predicate)?;
                     plan = Some(rules.plan(&app.terms, &input));
                 }
                 let plan = plan.as_ref().unwrap();
@@ -261,15 +263,11 @@ impl ConceptApplication {
                 // Maps user variable names → internal parameter names
                 let initial_answer = extract_parameters(&input, &app.terms)
                     .map_err(|e| crate::QueryError::FactStore(e.to_string()))?;
-                let single_answers = futures_util::stream::once(async move { Ok(initial_answer) });
-                let eval_context = EvaluationContext {
-                    selection: single_answers,
-                    source: context.source.clone(),
-                };
+                let single_answers = initial_answer.seed();
 
                 // Merge results back, mapping parameter names → user variable names
                 // All factors are copied with their original provenance
-                for await result in Fork::clone(plan).evaluate(eval_context) {
+                for await result in Fork::clone(plan).evaluate(single_answers, &source) {
                     let result_answer = result?;
                     let merged = merge_parameters(&input, &result_answer, &app.terms)
                         .map_err(|e| crate::QueryError::FactStore(e.to_string()))?;
@@ -294,9 +292,9 @@ impl Display for ConceptApplication {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::new_context;
     use crate::predicate::ConceptPredicate;
     use crate::proposition::relation::RelationApplication;
+    use crate::selection::Answer;
     use crate::the;
     use crate::{
         Assertion, AttributeDescriptor, Cardinality, DeductiveRule, Negation, Parameters, Premise,
@@ -379,7 +377,7 @@ mod tests {
 
         // Execute the query
         let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            application.evaluate(new_context(session.clone())),
+            application.evaluate(Answer::new().seed(), &session),
         )
         .await?;
 
@@ -481,13 +479,11 @@ mod tests {
             value: &Value::from(alice),
         })?;
 
-        let context = EvaluationContext {
-            source: session,
-            selection: futures_util::stream::once(async { Ok(answer) }),
-        };
+        let answers = answer.seed();
 
         // Execute with bound entity via answer
-        futures_util::TryStreamExt::try_collect::<Vec<_>>(application.evaluate(context)).await?;
+        futures_util::TryStreamExt::try_collect::<Vec<_>>(application.evaluate(answers, &session))
+            .await?;
 
         Ok(())
     }
@@ -791,7 +787,7 @@ mod tests {
             predicate: concept,
         };
         let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            app.evaluate(new_context(session.clone())),
+            app.evaluate(Answer::new().seed(), &session),
         )
         .await?;
 
@@ -881,7 +877,7 @@ mod tests {
             predicate: concept,
         };
         let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            app.evaluate(new_context(session.clone())),
+            app.evaluate(Answer::new().seed(), &session),
         )
         .await?;
 
@@ -971,7 +967,7 @@ mod tests {
             predicate: concept,
         };
         let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            app.evaluate(new_context(session.clone())),
+            app.evaluate(Answer::new().seed(), &session),
         )
         .await?;
 

@@ -378,6 +378,11 @@ impl Answer {
         Self::default()
     }
 
+    /// Wrap this answer into a single-element `Answers` stream.
+    pub fn seed(self) -> impl Answers {
+        futures_util::stream::once(async { Ok(self) })
+    }
+
     /// Get all tracked relations from the applications.
     pub fn facts(&self) -> impl Iterator<Item = &Arc<Relation>> {
         self.facts.values()
@@ -724,6 +729,13 @@ mod tests {
     use super::*;
     use crate::Term;
     use crate::artifact::{Attribute, Entity};
+
+    #[dialog_common::test]
+    async fn test_answer_seed_produces_one_empty_answer() {
+        use futures_util::TryStreamExt;
+        let results: Vec<Answer> = Answer::new().seed().try_collect().await.unwrap();
+        assert_eq!(results.len(), 1);
+    }
     use std::str::FromStr;
 
     // Helper function to create a test relation for Answer tests

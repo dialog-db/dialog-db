@@ -8,7 +8,7 @@ pub mod relation;
 pub use crate::analyzer::AnalyzerError;
 pub use crate::error::{PlanError, QueryResult};
 pub use crate::premise::{Negation, Premise};
-pub use crate::{Environment, EvaluationContext, Source};
+pub use crate::{Environment, Source};
 pub use concept::ConceptApplication;
 pub use formula::FormulaApplication;
 use futures_util::future::Either;
@@ -44,16 +44,17 @@ impl Proposition {
     /// Evaluate this application against the given context, producing answers
     pub fn evaluate<S: Source, M: crate::selection::Answers>(
         self,
-        context: EvaluationContext<S, M>,
+        answers: M,
+        source: &S,
     ) -> impl crate::selection::Answers {
         match self {
             Proposition::Relation(application) => Either::Left(Either::Left(
-                application.evaluate_with_provenance(context.source, context.selection),
+                application.evaluate_with_provenance(source.clone(), answers),
             )),
             Proposition::Concept(application) => {
-                Either::Left(Either::Right(application.evaluate(context)))
+                Either::Left(Either::Right(application.evaluate(answers, source)))
             }
-            Proposition::Formula(application) => Either::Right(application.evaluate(context)),
+            Proposition::Formula(application) => Either::Right(application.evaluate(answers)),
         }
     }
 

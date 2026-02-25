@@ -1,7 +1,5 @@
 use crate::error::CompileError;
-use crate::{
-    Environment, EvaluationContext, Parameters, Premise, Requirement, Schema, Source, Term,
-};
+use crate::{Environment, Parameters, Premise, Requirement, Schema, Source, Term};
 use crate::{fact::Scalar, predicate::DeductiveRule};
 use std::collections::HashSet;
 use std::fmt::Display;
@@ -161,12 +159,13 @@ impl Plan {
         &self.env
     }
 
-    /// Evaluate this plan with the given context
+    /// Evaluate this plan with the given answers and source
     pub fn evaluate<S: Source, M: crate::selection::Answers>(
         self,
-        context: EvaluationContext<S, M>,
+        answers: M,
+        source: &S,
     ) -> impl crate::selection::Answers {
-        self.premise.evaluate(context)
+        self.premise.evaluate(answers, source)
     }
 }
 

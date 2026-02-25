@@ -6,13 +6,12 @@
 //! Note: Premises are only used in rule conditions (the "when" part), not in conclusions.
 
 pub use super::constraint::Constraint;
-pub use super::context::new_context;
 pub use super::negation::Negation;
 use super::proposition::FormulaApplication;
 pub use super::proposition::Proposition;
 pub use crate::environment::Environment;
 pub use crate::error::{AnalyzerError, PlanError, QueryResult};
-pub use crate::{EvaluationContext, Source, selection::Answers};
+pub use crate::{Source, selection::Answer, selection::Answers};
 use futures_util::future::Either;
 use std::fmt::Display;
 
@@ -73,19 +72,20 @@ impl Premise {
         analysis
     }
 
-    /// Evaluate this premise with the given context
-    pub fn evaluate<S: Source, M: Answers>(self, context: EvaluationContext<S, M>) -> impl Answers {
+    /// Evaluate this premise with the given answers and source
+    pub fn evaluate<S: Source, M: Answers>(self, answers: M, source: &S) -> impl Answers {
         match self {
-            Premise::When(application) => Either::Left(Either::Left(application.evaluate(context))),
-            Premise::Where(constraint) => Either::Left(Either::Right(constraint.evaluate(context))),
-            Premise::Unless(negation) => Either::Right(negation.evaluate(context)),
+            Premise::When(application) => {
+                Either::Left(Either::Left(application.evaluate(answers, source)))
+            }
+            Premise::Where(constraint) => Either::Left(Either::Right(constraint.evaluate(answers))),
+            Premise::Unless(negation) => Either::Right(negation.evaluate(answers, source)),
         }
     }
 
     /// Execute this premise against the given store
     pub fn perform<S: Source>(self, store: &S) -> impl Answers {
-        let context = new_context(store.clone());
-        self.evaluate(context)
+        self.evaluate(Answer::new().seed(), store)
     }
 }
 
