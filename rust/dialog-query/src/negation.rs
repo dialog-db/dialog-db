@@ -1,6 +1,5 @@
-use super::Environment;
 use super::proposition::Proposition;
-use crate::{EvaluationContext, Parameters, Schema, Source, try_stream};
+use crate::{Environment, EvaluationContext, Parameters, Schema, Source, try_stream};
 pub use futures_util::{TryStreamExt, stream};
 use std::fmt::Display;
 
@@ -71,7 +70,6 @@ impl Negation {
                 let output = application.clone().evaluate(EvaluationContext {
                     selection: stream::once(async move { Ok(not)}),
                     source: context.source.clone(),
-                    scope: context.scope.clone(),
                 });
 
                 tokio::pin!(output);

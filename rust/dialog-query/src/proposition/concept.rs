@@ -1,6 +1,12 @@
-use crate::DeductiveRule;
+/// Adornment types for parameter binding pattern caching.
+pub mod adornment;
+/// Per-concept rule management with adornment-keyed plan caching.
+pub mod rules;
+
+pub use rules::ConceptRules;
+
 use crate::attribute::AttributeDescriptor;
-use crate::planner::{Fork, Join};
+use crate::planner::Fork;
 use crate::predicate::ConceptPredicate;
 use crate::schema::CONCEPT_OVERHEAD;
 use crate::selection::{Answer, Evidence};
@@ -221,25 +227,35 @@ impl ConceptApplication {
         self.predicate.schema()
     }
 
-    /// Evaluates this concept application within the given context, producing a stream of answers.
+    /// Evaluates this concept application within the given context, producing
+    /// a stream of answers.
+    ///
+    /// Rather than threading a scope through the entire evaluation pipeline,
+    /// we derive the binding pattern (adornment) from the first answer and
+    /// use it to obtain a specialized, cached execution plan. This is the
+    /// key insight from magic set optimization applied locally: the adornment
+    /// is computed at the point of use from what's actually bound, rather
+    /// than carried globally through every evaluation step.
     pub fn evaluate<S: Source, M: crate::selection::Answers>(
         self,
         context: EvaluationContext<S, M>,
     ) -> impl crate::selection::Answers {
         let app = self;
-        let predicate = app.predicate.clone();
-
-        let mut rules = vec![DeductiveRule::from(&predicate)];
-        rules.extend(context.source.resolve_rules(&predicate.this()));
-        let plan = rules
-            .iter()
-            .map(|rule| Join::from(&rule.premises))
-            .map(|join| join.plan(&context.scope).unwrap_or(join))
-            .fold(Fork::new(), |fork, join| fork.or(join));
 
         try_stream! {
+            let mut plan = None;
+
             for await each in context.selection {
                 let input = each?;
+
+                // Derive the binding pattern from the first answer and cache the
+                // plan. All answers in the selection share the same binding pattern
+                // (same variables bound), only the values differ.
+                if plan.is_none() {
+                    let rules = context.source.acquire(&app.predicate)?;
+                    plan = Some(rules.plan(&app.terms, &input));
+                }
+                let plan = plan.as_ref().unwrap();
 
                 // Extract answer with parameter names for scoped evaluation
                 // Maps user variable names → internal parameter names
@@ -249,12 +265,11 @@ impl ConceptApplication {
                 let eval_context = EvaluationContext {
                     selection: single_answers,
                     source: context.source.clone(),
-                    scope: context.scope.clone(),
                 };
 
                 // Merge results back, mapping parameter names → user variable names
                 // All factors are copied with their original provenance
-                for await result in plan.clone().evaluate(eval_context) {
+                for await result in Fork::clone(plan).evaluate(eval_context) {
                     let result_answer = result?;
                     let merged = merge_parameters(&input, &result_answer, &app.terms)
                         .map_err(|e| crate::QueryError::FactStore(e.to_string()))?;
@@ -284,8 +299,8 @@ mod tests {
     use crate::proposition::relation::RelationApplication;
     use crate::the;
     use crate::{
-        Assertion, AttributeDescriptor, Cardinality, Negation, Parameters, Premise, Proposition,
-        Session, Term, Type, Value,
+        Assertion, AttributeDescriptor, Cardinality, DeductiveRule, Negation, Parameters, Premise,
+        Proposition, Session, Term, Type, Value,
     };
 
     // Note: Async tests are commented out due to Rust recursion limit issues in test compilation
@@ -402,7 +417,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_concept_application_with_bound_entity_query() -> anyhow::Result<()> {
-        use crate::context::new_context;
         use dialog_artifacts::{Artifacts, Attribute as ArtifactAttribute, Entity};
         use dialog_storage::MemoryStorageBackend;
 
@@ -460,22 +474,20 @@ mod tests {
             predicate: concept,
         };
 
-        // Create a scope with the entity already bound
-        let mut scope = Environment::new();
-        let person_var: Term<Value> = Term::var("person");
-        scope.add(&person_var);
+        // Create evaluation context with bound entity in the answer
+        let mut answer = Answer::new();
+        answer.merge(Evidence::Parameter {
+            term: &Term::var("person"),
+            value: &Value::from(alice),
+        })?;
 
-        // Create evaluation context with bound entity
-        let context = new_context(session);
-        let context_with_scope = EvaluationContext {
-            source: context.source,
-            selection: context.selection,
-            scope,
+        let context = EvaluationContext {
+            source: session,
+            selection: futures_util::stream::once(async { Ok(answer) }),
         };
 
-        // Execute with bound entity scope
-        futures_util::TryStreamExt::try_collect::<Vec<_>>(application.evaluate(context_with_scope))
-            .await?;
+        // Execute with bound entity via answer
+        futures_util::TryStreamExt::try_collect::<Vec<_>>(application.evaluate(context)).await?;
 
         Ok(())
     }

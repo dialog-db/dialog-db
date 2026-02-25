@@ -162,18 +162,11 @@ impl Plan {
     }
 
     /// Evaluate this plan with the given context
-    /// The premise will be evaluated with scope set to self.env
     pub fn evaluate<S: Source, M: crate::selection::Answers>(
         self,
         context: EvaluationContext<S, M>,
     ) -> impl crate::selection::Answers {
-        // Delegate to premise evaluation passing env inferred by an analyzer
-        // as scope. Premise already returns boxed, so just pass through.
-        self.premise.evaluate(EvaluationContext {
-            source: context.source,
-            selection: context.selection,
-            scope: self.env,
-        })
+        self.premise.evaluate(context)
     }
 }
 

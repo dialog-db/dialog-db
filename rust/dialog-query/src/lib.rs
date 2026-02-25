@@ -90,6 +90,7 @@ pub use predicate::concept::DynamicProof;
 pub use predicate::{DeductiveRule, Formula};
 pub use premise::Premise;
 pub use proposition::Proposition;
+pub use proposition::concept::ConceptRules;
 pub use query::{Application, Source, Store};
 pub use relation::Relation;
 pub use rule::{Premises, When};

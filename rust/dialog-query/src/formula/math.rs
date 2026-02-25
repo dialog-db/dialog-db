@@ -682,7 +682,6 @@ mod tests {
         let context = crate::EvaluationContext {
             source: session,
             selection: futures_util::stream::once(async { Ok(input) }),
-            scope: crate::Environment::new(),
         };
 
         let query_copy = query.clone();
@@ -725,7 +724,6 @@ mod tests {
         let context = crate::EvaluationContext {
             source: session,
             selection: futures_util::stream::once(async { Ok(input) }),
-            scope: crate::Environment::new(),
         };
 
         let query_copy = query.clone();
@@ -767,7 +765,6 @@ mod tests {
         let context = crate::EvaluationContext {
             source: session,
             selection: futures_util::stream::once(async { Ok(input) }),
-            scope: crate::Environment::new(),
         };
 
         let query_copy = query.clone();
@@ -810,7 +807,6 @@ mod tests {
         let context = crate::EvaluationContext {
             source: session,
             selection: futures_util::stream::once(async { Ok(input) }),
-            scope: crate::Environment::new(),
         };
 
         let answers: Vec<Answer> = {
@@ -851,7 +847,6 @@ mod tests {
         let context = crate::EvaluationContext {
             source: session,
             selection: futures_util::stream::once(async { Ok(input) }),
-            scope: crate::Environment::new(),
         };
 
         let query_copy = query.clone();
@@ -891,7 +886,6 @@ mod tests {
         let context = crate::EvaluationContext {
             source: session,
             selection: futures_util::stream::once(async { Ok(input) }),
-            scope: crate::Environment::new(),
         };
 
         let query_copy = query.clone();

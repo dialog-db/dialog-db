@@ -192,7 +192,6 @@ mod tests {
         let context = EvaluationContext {
             selection: futures_util::stream::iter(vec![Ok(answer.clone())]),
             source: session,
-            scope: Environment::new(),
         };
 
         let results: Vec<Answer> = constraint.evaluate(context).try_collect().await?;
@@ -228,7 +227,6 @@ mod tests {
         let context = EvaluationContext {
             selection: futures_util::stream::iter(vec![Ok(answer.clone())]),
             source: session,
-            scope: Environment::new(),
         };
 
         let results: Vec<Answer> = constraint.evaluate(context).try_collect().await?;
@@ -259,7 +257,6 @@ mod tests {
         let context = EvaluationContext {
             selection: futures_util::stream::iter(vec![Ok(answer.clone())]),
             source: session,
-            scope: Environment::new(),
         };
 
         let results: Vec<Answer> = constraint.evaluate(context).try_collect().await?;

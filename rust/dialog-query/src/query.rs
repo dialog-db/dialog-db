@@ -10,8 +10,6 @@ pub use crate::relation::Relation;
 use crate::{EvaluationContext, selection};
 pub use futures_util::stream::{Stream, StreamExt, TryStream};
 
-use crate::predicate::DeductiveRule;
-
 /// A stream of query results that can be collected or iterated
 pub trait Output<T: ConditionalSend>:
     Stream<Item = Result<T, QueryError>> + 'static + ConditionalSend
@@ -39,18 +37,16 @@ impl<S, T: ConditionalSend> Output<T> for S where
 /// query evaluation to access both stored facts and registered deductive rules.
 /// This enables rule-based inference during query execution.
 pub trait Source: ArtifactStore + Clone + ConditionalSend + ConditionalSync + 'static {
-    /// Resolve rules for the given concept entity
+    /// Acquire rules for the given concept predicate.
     ///
-    /// Returns all deductive rules that have conclusions matching the given concept.
-    /// This enables concept evaluation to discover and apply relevant rules when
-    /// facts are not directly available in the store.
-    ///
-    /// # Arguments
-    /// * `entity` - The concept entity to find rules for
-    ///
-    /// # Returns
-    /// A vector of DeductiveRule instances whose conclusions match the concept
-    fn resolve_rules(&self, entity: &crate::Entity) -> Vec<DeductiveRule>;
+    /// Returns a `ConceptRules` that owns the default rule, any installed rules,
+    /// and a per-adornment plan cache. Always returns a value. If no rules were
+    /// explicitly registered, an implicit rule (derived from the predicate's
+    /// attributes) is used.
+    fn acquire(
+        &self,
+        predicate: &crate::predicate::ConceptPredicate,
+    ) -> Result<crate::proposition::concept::ConceptRules, QueryError>;
 }
 
 /// A query type that can be evaluated against a source to produce concrete results.
