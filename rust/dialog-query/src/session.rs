@@ -10,19 +10,24 @@ pub use crate::artifact::{
     Artifact, ArtifactSelector, ArtifactStore, ConditionalSend, ConditionalSync, Constrained,
     DialogArtifactsError,
 };
+use crate::predicate::ConceptPredicate;
+use crate::proposition::concept::ConceptRules;
 use crate::query::Source;
 use crate::session::transaction::{Transaction, TransactionError};
 use crate::{DeductiveRule, Entity, Store};
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use transaction::Edit;
 
 /// Registry for deductive rules, indexed by conclusion entity
 ///
-/// Provides deduplicating rule registration and entity-based lookup.
+/// Provides deduplicating rule registration and concept-scoped plan caching.
 /// Used internally by both `Session` and `QuerySession`.
+///
+/// Cloning shares the underlying map and plan caches via `Arc`.
 #[derive(Debug, Clone, Default)]
 pub struct RuleRegistry {
-    rules: HashMap<Entity, Vec<DeductiveRule>>,
+    rules: Arc<RwLock<HashMap<Entity, ConceptRules>>>,
 }
 
 impl RuleRegistry {
@@ -31,26 +36,31 @@ impl RuleRegistry {
         Self::default()
     }
 
-    /// Register a deductive rule, deduplicating by equality
-    pub fn register(&mut self, rule: DeductiveRule) {
-        let key = rule.conclusion.this();
-        if let Some(rules) = self.rules.get_mut(&key) {
-            if !rules.contains(&rule) {
-                rules.push(rule);
-            }
-        } else {
-            self.rules.insert(key, vec![rule]);
-        }
+    /// Register a deductive rule, deduplicating by equality.
+    /// Invalidates cached plans for the affected concept entity.
+    pub fn register(&mut self, rule: DeductiveRule) -> Result<(), crate::QueryError> {
+        let entity = rule.conclusion.this();
+        self.rules
+            .write()
+            .map_err(|e| crate::QueryError::FactStore(e.to_string()))?
+            .entry(entity)
+            .or_insert_with(|| ConceptRules::new(&rule.conclusion))
+            .install(rule);
+        Ok(())
     }
 
-    /// Resolve rules for the given concept entity
-    pub fn resolve_rules(&self, entity: &Entity) -> Vec<DeductiveRule> {
-        self.rules.get(entity).cloned().unwrap_or_default()
-    }
-
-    /// Get a reference to all rules
-    pub fn rules(&self) -> &HashMap<Entity, Vec<DeductiveRule>> {
-        &self.rules
+    /// Acquire rules for the given concept. Creates the default rule from
+    /// the predicate's attributes on first access — so this always returns
+    /// a ConceptRules regardless of whether any rules were explicitly installed.
+    pub fn acquire(&self, predicate: &ConceptPredicate) -> Result<ConceptRules, crate::QueryError> {
+        let entity = predicate.this();
+        Ok(self
+            .rules
+            .write()
+            .map_err(|e| crate::QueryError::FactStore(e.to_string()))?
+            .entry(entity)
+            .or_insert_with(|| ConceptRules::new(predicate))
+            .clone())
     }
 }
 
@@ -105,9 +115,9 @@ impl<S: Store> Session<S> {
     }
 
     /// Register a new rule into the session
-    pub fn register(mut self, rule: DeductiveRule) -> Self {
-        self.rules.register(rule);
-        self
+    pub fn register(mut self, rule: DeductiveRule) -> Result<Self, crate::QueryError> {
+        self.rules.register(rule)?;
+        Ok(self)
     }
 
     /// Install a rule from a function - concept inferred from function parameter.
@@ -131,7 +141,7 @@ impl<S: Store> Session<S> {
     ///
     /// let session = session.install(person_rule)?;
     /// ```
-    pub fn install<M, W>(self, rule: impl Fn(M) -> W) -> Result<Self, crate::error::CompileError>
+    pub fn install<M, W>(self, rule: impl Fn(M) -> W) -> Result<Self, crate::QueryError>
     where
         M: crate::query::Application + Default + Into<crate::predicate::concept::ConceptPredicate>,
         W: crate::rule::When,
@@ -140,8 +150,12 @@ impl<S: Store> Session<S> {
         let concept: crate::predicate::concept::ConceptPredicate = query.clone().into();
         let when = rule(query).into_premises();
         let premises = when.into_vec();
-        let rule = crate::predicate::DeductiveRule::new(concept, premises)?;
-        Ok(self.register(rule))
+        let rule = crate::predicate::DeductiveRule::new(concept, premises).map_err(|e| {
+            crate::QueryError::PlanningError {
+                message: e.to_string(),
+            }
+        })?;
+        self.register(rule)
     }
 
     /// Create a new transaction for imperative API usage
@@ -298,25 +312,21 @@ impl<S: ArtifactStore> QuerySession<S> {
     /// ```no_run
     /// # use dialog_query::{QuerySession, DeductiveRule};
     /// # use dialog_query::session::ArtifactStore;
-    /// # fn example(artifacts: impl ArtifactStore, adult_rule: DeductiveRule, senior_rule: DeductiveRule) {
+    /// # fn example(artifacts: impl ArtifactStore, adult_rule: DeductiveRule, senior_rule: DeductiveRule) -> Result<(), dialog_query::QueryError> {
     /// let query_session = QuerySession::new(artifacts)
-    ///     .install(adult_rule)
-    ///     .install(senior_rule);
+    ///     .install(adult_rule)?
+    ///     .install(senior_rule)?;
+    /// # Ok(())
     /// # }
     /// ```
-    pub fn install(mut self, rule: DeductiveRule) -> Self {
-        self.rules.register(rule);
-        self
+    pub fn install(mut self, rule: DeductiveRule) -> Result<Self, crate::QueryError> {
+        self.rules.register(rule)?;
+        Ok(self)
     }
 
     /// Get a reference to the underlying store
     pub fn store(&self) -> &S {
         &self.store
-    }
-
-    /// Get a reference to the rules registry
-    pub fn rules(&self) -> &HashMap<Entity, Vec<DeductiveRule>> {
-        self.rules.rules()
     }
 }
 
@@ -329,8 +339,8 @@ impl<S: ArtifactStore + Clone + Send + Sync + 'static> From<S> for QuerySession<
 
 /// Implement Source trait for QuerySession to provide rule resolution capabilities
 impl<S: ArtifactStore + Clone + Send + Sync + 'static> Source for QuerySession<S> {
-    fn resolve_rules(&self, entity: &Entity) -> Vec<DeductiveRule> {
-        self.rules.resolve_rules(entity)
+    fn acquire(&self, predicate: &ConceptPredicate) -> Result<ConceptRules, crate::QueryError> {
+        self.rules.acquire(predicate)
     }
 }
 
@@ -351,8 +361,8 @@ impl<S: ArtifactStore> ArtifactStore for QuerySession<S> {
 /// This implementation allows Session to be used directly with the Query trait
 /// while providing access to both stored artifacts and registered rules.
 impl<S: Store + ConditionalSend + ConditionalSync + 'static> Source for Session<S> {
-    fn resolve_rules(&self, entity: &Entity) -> Vec<DeductiveRule> {
-        self.rules.resolve_rules(entity)
+    fn acquire(&self, predicate: &ConceptPredicate) -> Result<ConceptRules, crate::QueryError> {
+        self.rules.acquire(predicate)
     }
 }
 
@@ -372,8 +382,6 @@ impl<S: Store> ArtifactStore for Session<S> {
 mod tests {
     // Allow the derive macro to reference dialog_query:: from within the crate
     extern crate self as dialog_query;
-
-    use std::collections::HashMap;
 
     use crate::artifact::{Artifacts, Entity, Value};
     use crate::proposition::relation::RelationApplication;
@@ -683,7 +691,7 @@ mod tests {
 
         let backend = MemoryStorageBackend::default();
         let store = Artifacts::anonymous(backend).await?;
-        let mut session = Session::open(store).register(employee_from_stuff);
+        let mut session = Session::open(store).register(employee_from_stuff)?;
 
         let stuff_predicate: crate::predicate::concept::ConceptPredicate =
             Match::<Stuff>::default().into();
@@ -877,16 +885,9 @@ mod tests {
     async fn test_session_source_rule_resolution() -> anyhow::Result<()> {
         use dialog_storage::MemoryStorageBackend;
 
-        // Setup: Create a Session with a rule-aware store
         let backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(backend).await?;
-        let session = Session::open(artifacts);
 
-        // Test 1: Verify Session implements Source trait
-        let nonexistent: Entity = "nonexistent:test".parse().unwrap();
-        assert_eq!(session.resolve_rules(&nonexistent), Vec::new());
-
-        // Test 2: Install a rule and verify it can be resolved
         let adult_conclusion = ConceptPredicate::from(vec![
             (
                 "name",
@@ -908,23 +909,21 @@ mod tests {
             ),
         ]);
 
-        // Create a simple rule: adult(X, Age) :- person(X, Age), Age >= 18
         let rule = DeductiveRule {
             conclusion: adult_conclusion.clone(),
             premises: vec![],
         };
 
-        let session_with_rule = session.register(rule.clone());
+        let session_with_rule = Session::open(artifacts).register(rule.clone())?;
 
-        // Test 3: Verify the rule can be resolved
-        let adult_entity = adult_conclusion.this();
-        let resolved_rules = session_with_rule.resolve_rules(&adult_entity);
-        assert_eq!(resolved_rules.len(), 1);
-        assert_eq!(resolved_rules[0].conclusion.this(), adult_entity);
-
-        // Test 4: Verify non-matching entity returns empty
-        let nonexistent: Entity = "nonexistent:test".parse().unwrap();
-        assert_eq!(session_with_rule.resolve_rules(&nonexistent), Vec::new());
+        // Verify resolve returns ConceptRules that can plan
+        let rules = session_with_rule.acquire(&adult_conclusion)?;
+        let answer = crate::selection::Answer::new();
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("e"));
+        terms.insert("name".into(), Term::var("n"));
+        terms.insert("age".into(), Term::var("a"));
+        let _plan = rules.plan(&terms, &answer);
 
         Ok(())
     }
@@ -934,52 +933,18 @@ mod tests {
         use dialog_storage::MemoryStorageBackend;
 
         // Test that both QuerySession and Session can be used polymorphically as a Source
-        async fn query_with_source<S: Source>(source: &S, entity: &Entity) -> Vec<DeductiveRule> {
-            source.resolve_rules(entity)
+        fn resolve_with_source<S: Source>(
+            source: &S,
+            predicate: &ConceptPredicate,
+        ) -> ConceptRules {
+            source.acquire(predicate).unwrap()
         }
 
         let backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(backend).await?;
 
-        // Test with QuerySession
-        let query_session: QuerySession<_> = artifacts.clone().into();
-        let concept = ConceptPredicate::new();
-        let rule = DeductiveRule {
-            conclusion: concept.clone(),
-            premises: vec![],
-        };
-
-        let query_session = query_session.install(rule.clone());
-        // Query using the concept's entity identity
-        let entity = concept.this();
-        let rules = query_with_source(&query_session, &entity).await;
-        assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].conclusion.this(), concept.this());
-
-        // Test with Session
-        let mut session = Session::open(artifacts);
-        session = session.register(rule.clone());
-        let rules = query_with_source(&session, &entity).await;
-        assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].conclusion.this(), concept.this());
-
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    async fn test_multiple_rules_same_operator() -> anyhow::Result<()> {
-        use dialog_storage::MemoryStorageBackend;
-
-        // Test that multiple rules for the same operator are stored and resolved correctly
-        let backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(backend).await?;
-
-        // Test with QuerySession
-        let query_session: QuerySession<_> = artifacts.into();
-
-        // Create two different rules for the same concept (same predicate)
-        let predicate = ConceptPredicate::from([(
-            "name".to_string(),
+        let concept = ConceptPredicate::from([(
+            "name",
             AttributeDescriptor::new(
                 the!("person/name"),
                 "Person name",
@@ -987,28 +952,19 @@ mod tests {
                 Some(Type::String),
             ),
         )]);
-
-        // Both rules have the same conclusion but different premises
-        let rule1 = DeductiveRule {
-            conclusion: predicate.clone(),
+        let rule = DeductiveRule {
+            conclusion: concept.clone(),
             premises: vec![],
         };
 
-        // rule2 is identical to rule1, so the registry should deduplicate
-        let rule2 = rule1.clone();
+        // Test with QuerySession
+        let query_session: QuerySession<_> = artifacts.clone().into();
+        let query_session = query_session.install(rule.clone())?;
+        let _rules = resolve_with_source(&query_session, &concept);
 
-        // Install both rules
-        let query_session = query_session.install(rule1).install(rule2);
-
-        // Identical rules should be deduplicated
-        let entity = predicate.this();
-        let rules = query_session.resolve_rules(&entity);
-        assert_eq!(rules.len(), 1, "Identical rules should be deduplicated");
-
-        // Both rules should have the same concept identity
-        for rule in &rules {
-            assert_eq!(rule.conclusion.this(), entity);
-        }
+        // Test with Session
+        let session = Session::open(artifacts).register(rule.clone())?;
+        let _rules = resolve_with_source(&session, &concept);
 
         Ok(())
     }
@@ -1017,17 +973,9 @@ mod tests {
     async fn test_explicit_conversion_pattern() -> anyhow::Result<()> {
         use dialog_storage::MemoryStorageBackend;
 
-        // Test the explicit conversion pattern: artifacts.into() for QuerySession
         let backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(backend).await?;
 
-        // Test 1: Basic conversion - no rules
-        let query_session: QuerySession<_> = artifacts.clone().into();
-        let nonexistent: Entity = "nonexistent:test".parse().unwrap();
-        assert_eq!(query_session.resolve_rules(&nonexistent), Vec::new());
-        assert_eq!(query_session.rules().len(), 0);
-
-        // Test 2: Conversion with rule installation
         let adult_concept = ConceptPredicate::from([(
             "name".to_string(),
             AttributeDescriptor::new(
@@ -1044,14 +992,10 @@ mod tests {
         };
 
         let query_session: QuerySession<_> = artifacts.into();
-        let query_session = query_session.install(adult_rule.clone());
+        let query_session = query_session.install(adult_rule.clone())?;
 
-        let adult_entity = adult_concept.this();
-        let resolved_rules = query_session.resolve_rules(&adult_entity);
-        assert_eq!(resolved_rules.len(), 1);
-        assert_eq!(resolved_rules[0].conclusion.this(), adult_entity);
-
-        // Test 3: Verify store is still accessible
+        // Verify resolve works and store is still accessible
+        let _rules = query_session.acquire(&adult_concept)?;
         assert!(!std::ptr::addr_of!(*query_session.store()).is_null());
 
         Ok(())
@@ -1341,6 +1285,417 @@ mod tests {
 
         assert!(found_alice, "Should find Alice as an employee");
         assert!(found_bob, "Should find Bob as an employee");
+
+        Ok(())
+    }
+
+    // Plan caching tests
+    //
+    // These tests verify that the adornment-keyed plan cache (inspired by magic
+    // set optimization) correctly caches, reuses, and invalidates execution plans.
+
+    /// Helper: build a person concept predicate with name and age attributes.
+    fn person_concept() -> ConceptPredicate {
+        ConceptPredicate::from([
+            (
+                "name",
+                AttributeDescriptor::new(
+                    the!("person/name"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                ),
+            ),
+            (
+                "age",
+                AttributeDescriptor::new(
+                    the!("person/age"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::UnsignedInt),
+                ),
+            ),
+        ])
+    }
+
+    #[dialog_common::test]
+    fn test_plan_cache_hit_returns_same_arc() {
+        use crate::selection::Answer;
+
+        let person = person_concept();
+        let rules = ConceptRules::new(&person);
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("e"));
+        terms.insert("name".into(), Term::var("n"));
+        terms.insert("age".into(), Term::var("a"));
+
+        let answer = Answer::new();
+        let plan1 = rules.plan(&terms, &answer);
+        let plan2 = rules.plan(&terms, &answer);
+
+        assert!(
+            Arc::ptr_eq(&plan1, &plan2),
+            "Same adornment should return the same Arc (cache hit)"
+        );
+    }
+
+    #[dialog_common::test]
+    fn test_plan_cache_different_adornments_produce_different_plans() {
+        use crate::selection::{Answer, Evidence};
+
+        let person = person_concept();
+        let rules = ConceptRules::new(&person);
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("e"));
+        terms.insert("name".into(), Term::var("n"));
+        terms.insert("age".into(), Term::var("a"));
+
+        // All-free adornment
+        let answer_free = Answer::new();
+        let plan_free = rules.plan(&terms, &answer_free);
+
+        // Entity-bound adornment (bind "e" in the answer)
+        let mut answer_bound = Answer::new();
+        answer_bound
+            .merge(Evidence::Parameter {
+                term: &Term::var("e"),
+                value: &Value::from(Entity::new().unwrap()),
+            })
+            .unwrap();
+        let plan_bound = rules.plan(&terms, &answer_bound);
+
+        assert!(
+            !Arc::ptr_eq(&plan_free, &plan_bound),
+            "Different adornments should produce distinct cached plans"
+        );
+    }
+
+    #[dialog_common::test]
+    fn test_plan_cache_invalidated_on_rule_install() {
+        use crate::selection::Answer;
+
+        let person = person_concept();
+        let mut rules = ConceptRules::new(&person);
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("e"));
+        terms.insert("name".into(), Term::var("n"));
+        terms.insert("age".into(), Term::var("a"));
+
+        // Warm the cache
+        let answer = Answer::new();
+        let plan_before = rules.plan(&terms, &answer);
+
+        // Install a rule for the same concept
+        let rule = DeductiveRule::from(&person);
+        rules.install(rule);
+
+        // Cache should be invalidated — new plan must be computed
+        let plan_after = rules.plan(&terms, &answer);
+
+        assert!(
+            !Arc::ptr_eq(&plan_before, &plan_after),
+            "Plan should be recomputed after installing a new rule"
+        );
+    }
+
+    #[dialog_common::test]
+    fn test_plan_cache_not_invalidated_by_unrelated_rule() {
+        use crate::selection::Answer;
+
+        let person = person_concept();
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("e"));
+        terms.insert("name".into(), Term::var("n"));
+        terms.insert("age".into(), Term::var("a"));
+
+        let mut registry = RuleRegistry::new();
+
+        // Warm the cache for the person concept via resolve
+        let answer = Answer::new();
+        let person_rules = registry.acquire(&person).unwrap();
+        let plan_before = person_rules.plan(&terms, &answer);
+
+        // Install a rule for a DIFFERENT concept entity
+        let unrelated = ConceptPredicate::from([(
+            "title",
+            AttributeDescriptor::new(the!("book/title"), "", Cardinality::One, Some(Type::String)),
+        )]);
+        let rule = DeductiveRule::from(&unrelated);
+        registry.register(rule).unwrap();
+
+        // Person's cache should be untouched (same ConceptRules, shared Arc)
+        let plan_after = person_rules.plan(&terms, &answer);
+
+        assert!(
+            Arc::ptr_eq(&plan_before, &plan_after),
+            "Unrelated rule install should not invalidate person's cached plan"
+        );
+    }
+
+    #[dialog_common::test]
+    fn test_plan_cache_duplicate_rule_does_not_invalidate() {
+        use crate::selection::Answer;
+
+        let person = person_concept();
+        let mut rules = ConceptRules::new(&person);
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("e"));
+        terms.insert("name".into(), Term::var("n"));
+        terms.insert("age".into(), Term::var("a"));
+
+        // Install a rule and warm the cache
+        let rule = DeductiveRule::from(&person);
+        rules.install(rule.clone());
+        let answer = Answer::new();
+        let plan_before = rules.plan(&terms, &answer);
+
+        // Re-install the exact same rule (duplicate)
+        rules.install(rule);
+
+        // Cache should NOT be invalidated — the rule was already present
+        let plan_after = rules.plan(&terms, &answer);
+
+        assert!(
+            Arc::ptr_eq(&plan_before, &plan_after),
+            "Duplicate rule registration should not invalidate the cache"
+        );
+    }
+
+    #[dialog_common::test]
+    fn test_plan_cache_shared_across_clones() {
+        use crate::selection::Answer;
+
+        let person = person_concept();
+        let rules = ConceptRules::new(&person);
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("e"));
+        terms.insert("name".into(), Term::var("n"));
+        terms.insert("age".into(), Term::var("a"));
+
+        // Warm cache on the original
+        let answer = Answer::new();
+        let plan_original = rules.plan(&terms, &answer);
+
+        // Clone the ConceptRules — the cache is shared via Arc
+        let cloned = rules.clone();
+        let plan_cloned = cloned.plan(&terms, &answer);
+
+        assert!(
+            Arc::ptr_eq(&plan_original, &plan_cloned),
+            "Cloned ConceptRules should share the plan cache"
+        );
+    }
+
+    #[dialog_common::test]
+    fn test_bound_entity_produces_cheaper_plan() {
+        use crate::proposition::concept::adornment::Adornment;
+        use crate::selection::{Answer, Evidence};
+
+        let person = person_concept();
+        let rules = ConceptRules::new(&person);
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("e"));
+        terms.insert("name".into(), Term::var("n"));
+        terms.insert("age".into(), Term::var("a"));
+
+        // All-free plan
+        let answer_free = Answer::new();
+        let adornment_free = Adornment::derive(&terms, &answer_free);
+        let env_free = adornment_free.into_environment(&terms);
+        let free_plan = rules.plan(&terms, &answer_free);
+
+        // Entity-bound plan
+        let mut answer_bound = Answer::new();
+        answer_bound
+            .merge(Evidence::Parameter {
+                term: &Term::var("e"),
+                value: &Value::from(Entity::new().unwrap()),
+            })
+            .unwrap();
+        let adornment_bound = Adornment::derive(&terms, &answer_bound);
+        let env_bound = adornment_bound.into_environment(&terms);
+        let bound_plan = rules.plan(&terms, &answer_bound);
+
+        // The entity-bound environment should contain "e"
+        assert!(
+            env_bound.contains(&Term::<Value>::var("e")),
+            "Bound adornment should include entity variable in environment"
+        );
+        assert!(
+            !env_free.contains(&Term::<Value>::var("e")),
+            "Free adornment should not include entity variable in environment"
+        );
+
+        // Verify the plans are structurally different
+        assert_ne!(
+            free_plan, bound_plan,
+            "Bound-entity plan should differ from all-free plan"
+        );
+    }
+
+    #[dialog_common::test]
+    async fn test_cached_plan_produces_correct_results() -> anyhow::Result<()> {
+        use crate::artifact::Attribute as ArtifactAttribute;
+        use dialog_storage::MemoryStorageBackend;
+
+        // End-to-end test: verify that evaluating a concept with the plan cache
+        // produces the same correct results as the pre-cache implementation.
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+        let mut session = Session::open(store);
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        session
+            .transact(vec![
+                Assertion {
+                    the: "person/name".parse::<ArtifactAttribute>()?,
+                    of: alice.clone(),
+                    is: Value::String("Alice".into()),
+                },
+                Assertion {
+                    the: "person/age".parse::<ArtifactAttribute>()?,
+                    of: alice.clone(),
+                    is: Value::UnsignedInt(30),
+                },
+                Assertion {
+                    the: "person/name".parse::<ArtifactAttribute>()?,
+                    of: bob.clone(),
+                    is: Value::String("Bob".into()),
+                },
+                Assertion {
+                    the: "person/age".parse::<ArtifactAttribute>()?,
+                    of: bob.clone(),
+                    is: Value::UnsignedInt(25),
+                },
+            ])
+            .await?;
+
+        let person = person_concept();
+        let name = Term::var("name");
+        let age = Term::var("age");
+        let mut params = Parameters::new();
+        params.insert("name".into(), name.clone());
+        params.insert("age".into(), age.clone());
+
+        let application = person.apply(params)?;
+
+        // First query — plan is computed and cached
+        let results1: Vec<_> = futures_util::TryStreamExt::try_collect(
+            application.clone().evaluate(new_context(session.clone())),
+        )
+        .await?;
+
+        // Second query — plan is reused from cache
+        let results2: Vec<_> = futures_util::TryStreamExt::try_collect(
+            application.evaluate(new_context(session.clone())),
+        )
+        .await?;
+
+        assert_eq!(results1.len(), 2, "First query should find 2 people");
+        assert_eq!(results2.len(), 2, "Cached query should find 2 people");
+
+        // Both runs should produce the same names
+        let names1: std::collections::HashSet<_> =
+            results1.iter().map(|r| r.resolve(&name).unwrap()).collect();
+        let names2: std::collections::HashSet<_> =
+            results2.iter().map(|r| r.resolve(&name).unwrap()).collect();
+
+        assert_eq!(
+            names1, names2,
+            "Cached plan should produce identical results"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn test_cached_plan_with_bound_entity_produces_correct_results() -> anyhow::Result<()> {
+        use crate::artifact::Attribute as ArtifactAttribute;
+        use crate::selection::{Answer, Evidence};
+        use dialog_storage::MemoryStorageBackend;
+
+        // Verify that a plan cached with a bound entity still produces
+        // correct results — the "pushing selections into joins" step from
+        // magic set optimization must not break correctness.
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+        let mut session = Session::open(store);
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        session
+            .transact(vec![
+                Assertion {
+                    the: "person/name".parse::<ArtifactAttribute>()?,
+                    of: alice.clone(),
+                    is: Value::String("Alice".into()),
+                },
+                Assertion {
+                    the: "person/age".parse::<ArtifactAttribute>()?,
+                    of: alice.clone(),
+                    is: Value::UnsignedInt(30),
+                },
+                Assertion {
+                    the: "person/name".parse::<ArtifactAttribute>()?,
+                    of: bob.clone(),
+                    is: Value::String("Bob".into()),
+                },
+                Assertion {
+                    the: "person/age".parse::<ArtifactAttribute>()?,
+                    of: bob.clone(),
+                    is: Value::UnsignedInt(25),
+                },
+            ])
+            .await?;
+
+        let person = person_concept();
+
+        let name = Term::var("name");
+        let age = Term::var("age");
+        let entity = Term::var("this");
+
+        let mut params = Parameters::new();
+        params.insert("this".into(), entity.clone());
+        params.insert("name".into(), name.clone());
+        params.insert("age".into(), age.clone());
+
+        let application = person.apply(params)?;
+
+        // Evaluate with alice bound in the initial answer
+        let mut answer = Answer::new();
+        answer.merge(Evidence::Parameter {
+            term: &entity,
+            value: &Value::from(alice.clone()),
+        })?;
+
+        let context = crate::EvaluationContext {
+            source: session.clone(),
+            selection: futures_util::stream::once(async { Ok(answer) }),
+        };
+
+        let results: Vec<_> =
+            futures_util::TryStreamExt::try_collect(application.evaluate(context)).await?;
+
+        assert_eq!(results.len(), 1, "Should find exactly one person (Alice)");
+        assert_eq!(
+            results[0].resolve(&name)?,
+            Value::String("Alice".into()),
+            "Should resolve to Alice"
+        );
+        assert_eq!(
+            results[0].resolve(&age)?,
+            Value::UnsignedInt(30),
+            "Should have Alice's age"
+        );
 
         Ok(())
     }

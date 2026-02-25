@@ -336,7 +336,6 @@ impl Chain {
             Chain::Empty => Box::pin(context.selection),
             Chain::Join(left, right) => {
                 let source = context.source.clone();
-                let scope = context.scope.clone();
                 let answers = left.evaluate(context);
                 // Box the premise evaluation to move it to the heap.
                 // Without this, each chain step would inline the full
@@ -345,7 +344,6 @@ impl Chain {
                 Box::pin(right.evaluate(EvaluationContext {
                     selection: answers,
                     source,
-                    scope,
                 }))
             }
         }
@@ -410,17 +408,14 @@ impl Fork {
         Box::pin(try_stream! {
             let (left_input, right_input) = fork_stream(context.selection);
 
-            let scope = context.scope.clone();
             let source = context.source.clone();
             let left_output = left.evaluate(EvaluationContext {
                 selection: left_input,
                 source,
-                scope,
             });
             let right_output = right.evaluate(EvaluationContext {
                 selection: right_input,
                 source: context.source,
-                scope: context.scope,
             });
 
             tokio::pin!(left_output);

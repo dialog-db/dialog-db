@@ -30,6 +30,11 @@ impl Parameters {
     pub fn iter(&self) -> impl Iterator<Item = (&String, &Term<Value>)> {
         self.0.iter()
     }
+
+    /// Returns an iterator over the parameter names in this binding set.
+    pub fn keys(&self) -> impl Iterator<Item = &String> {
+        self.0.keys()
+    }
 }
 
 #[cfg(test)]
