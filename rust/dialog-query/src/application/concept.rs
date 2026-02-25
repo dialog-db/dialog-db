@@ -231,7 +231,7 @@ impl ConceptApplication {
         let predicate = app.predicate.clone();
 
         let mut rules = vec![DeductiveRule::from(&predicate)];
-        rules.extend(context.source.resolve_rules(&predicate.operator()));
+        rules.extend(context.source.resolve_rules(&predicate.this()));
         let plan = rules
             .iter()
             .map(|rule| Join::from(&rule.premises))
@@ -275,7 +275,7 @@ impl ConceptApplication {
 
 impl Display for ConceptApplication {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} {{", self.predicate.operator())?;
+        write!(f, "{} {{", self.predicate.this())?;
         for (name, term) in self.terms.iter() {
             write!(f, "{}: {},", name, term)?;
         }
@@ -530,7 +530,7 @@ mod tests {
 
         // Operator is now a computed URI
         assert!(
-            concept.operator().starts_with("concept:"),
+            concept.this().to_string().starts_with("concept:"),
             "Operator should be a concept URI"
         );
         assert_eq!(concept.len(), 1);
@@ -658,7 +658,7 @@ mod tests {
             PlanError::UnusedParameter { rule: r, parameter } => {
                 // Operator is now a computed URI
                 assert!(
-                    r.conclusion.operator().starts_with("concept:"),
+                    r.conclusion.this().to_string().starts_with("concept:"),
                     "Operator should be a concept URI"
                 );
                 assert_eq!(parameter, "test_param");

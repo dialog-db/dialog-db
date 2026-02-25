@@ -39,18 +39,18 @@ impl<S, T: ConditionalSend> Output<T> for S where
 /// query evaluation to access both stored facts and registered deductive rules.
 /// This enables rule-based inference during query execution.
 pub trait Source: ArtifactStore + Clone + ConditionalSend + ConditionalSync + 'static {
-    /// Resolve rules for the given operator
+    /// Resolve rules for the given concept entity
     ///
-    /// Returns all deductive rules that have conclusions matching the given operator.
+    /// Returns all deductive rules that have conclusions matching the given concept.
     /// This enables concept evaluation to discover and apply relevant rules when
     /// facts are not directly available in the store.
     ///
     /// # Arguments
-    /// * `operator` - The concept operator to find rules for
+    /// * `entity` - The concept entity to find rules for
     ///
     /// # Returns
-    /// A vector of DeductiveRule instances whose conclusions match the operator
-    fn resolve_rules(&self, operator: &str) -> Vec<DeductiveRule>;
+    /// A vector of DeductiveRule instances whose conclusions match the concept
+    fn resolve_rules(&self, entity: &crate::Entity) -> Vec<DeductiveRule>;
 }
 
 /// A typed query that can be evaluated against a source to produce concrete results.

@@ -87,6 +87,7 @@ pub use dsl::{Input, Match, Predicate, Query};
 pub use error::{InconsistencyError, QueryError};
 pub use negation::Negation;
 pub use parameters::Parameters;
+pub use predicate::concept::DynamicProof;
 pub use predicate::{DeductiveRule, Formula};
 pub use premise::Premise;
 pub use query::{Source, Store};

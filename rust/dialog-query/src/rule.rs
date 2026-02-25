@@ -496,32 +496,49 @@ mod tests {
         }
     }
 
+    fn person_predicate() -> ConceptPredicate {
+        ConceptPredicate::from(vec![
+            (
+                "name",
+                AttributeDescriptor::new(
+                    the!("person/name"),
+                    "Name of the person",
+                    Cardinality::One,
+                    Some(Type::String),
+                ),
+            ),
+            (
+                "age",
+                AttributeDescriptor::new(
+                    the!("person/age"),
+                    "Age of the person",
+                    Cardinality::One,
+                    Some(Type::UnsignedInt),
+                ),
+            ),
+        ])
+    }
+
+    impl From<Person> for ConceptPredicate {
+        fn from(_: Person) -> Self {
+            person_predicate()
+        }
+    }
+
+    impl From<PersonMatch> for ConceptPredicate {
+        fn from(_: PersonMatch) -> Self {
+            person_predicate()
+        }
+    }
+
     impl Concept for Person {
         type Proof = Person;
         type Query = PersonMatch;
         type Term = PersonTerms;
 
-        fn predicate() -> ConceptPredicate {
-            ConceptPredicate::from(vec![
-                (
-                    "name",
-                    AttributeDescriptor::new(
-                        the!("person/name"),
-                        "Name of the person",
-                        Cardinality::One,
-                        Some(Type::String),
-                    ),
-                ),
-                (
-                    "age",
-                    AttributeDescriptor::new(
-                        the!("person/age"),
-                        "Age of the person",
-                        Cardinality::One,
-                        Some(Type::UnsignedInt),
-                    ),
-                ),
-            ])
+        fn this(&self) -> Entity {
+            let predicate: ConceptPredicate = self.clone().into();
+            predicate.this()
         }
     }
 
@@ -633,9 +650,10 @@ mod tests {
 
     impl From<PersonMatch> for ConceptApplication {
         fn from(source: PersonMatch) -> Self {
+            let predicate: ConceptPredicate = source.clone().into();
             ConceptApplication {
                 terms: source.into(),
-                predicate: <Person as Concept>::predicate(),
+                predicate,
             }
         }
     }
@@ -716,10 +734,10 @@ mod tests {
         };
 
         // Test that MacroPerson implements Concept
-        let concept = <MacroPerson as Concept>::predicate();
+        let concept: ConceptPredicate = Match::<MacroPerson>::default().into();
         // Operator is now a computed URI
         assert!(
-            concept.operator().starts_with("concept:"),
+            concept.this().to_string().starts_with("concept:"),
             "Operator should be a concept URI"
         );
 

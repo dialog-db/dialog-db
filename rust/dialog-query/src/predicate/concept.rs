@@ -1,13 +1,18 @@
 use crate::application::ConceptApplication;
 use crate::attribute::{AttributeDescriptor, Attribution};
 use crate::claim::Revert;
+use crate::concept::{Concept, ConceptProof, ConceptQuery};
+use crate::dsl::Predicate;
 use crate::error::SchemaError;
+use crate::selection::Answer;
+use crate::term::Term;
 use crate::types::Scalar;
 use crate::{
-    Application, Assertion, Cardinality, Claim, Entity, Field, Parameters, Requirement, Schema,
-    Type, Value,
+    Application, Assertion, Cardinality, Claim, Entity, Field, Parameters, QueryError, Requirement,
+    Schema, Type, Value,
 };
 
+use base58::ToBase58;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ops::Not;
@@ -66,14 +71,6 @@ impl ConceptPredicate {
         Ok(parameters)
     }
 
-    /// Returns the concept identifier as a URI.
-    ///
-    /// This is a computed value based on the blake3 hash of the concept's
-    /// attribute set, in the format `concept:{hash}`.
-    pub fn operator(&self) -> String {
-        self.to_uri()
-    }
-
     /// Returns an iterator over operand names, starting with "this" followed by attribute keys.
     pub fn operands(&self) -> impl Iterator<Item = &str> {
         std::iter::once("this").chain(self.keys())
@@ -114,20 +111,13 @@ impl ConceptPredicate {
         blake3::hash(&cbor_bytes)
     }
 
-    /// Format this concept's hash as a URI.
-    ///
-    /// Returns a string in the format: `concept:{blake3_hash_hex}`
-    pub fn to_uri(&self) -> String {
-        format!("concept:{}", self.hash().to_hex())
-    }
-
-    /// Parse a concept URI and extract the hash.
-    ///
-    /// Expects format: `concept:{blake3_hash_hex}`
-    /// Returns None if the format is invalid.
-    pub fn parse_uri(uri: &str) -> Option<blake3::Hash> {
-        let uri = uri.strip_prefix("concept:")?;
-        blake3::Hash::from_hex(uri).ok()
+    /// Identityfier for this concept (as in type identifier and not instance
+    /// identifier)
+    pub fn this(&self) -> Entity {
+        let encoded = self.hash().as_bytes().as_ref().to_base58();
+        format!("concept:{encoded}")
+            .parse()
+            .expect("valid entity URI")
     }
 
     /// Creates an application for this concept predicate.
@@ -359,6 +349,124 @@ impl<'a> Builder<'a> {
     }
 }
 
+/// A dynamic proof — an entity with its resolved field values.
+///
+/// Field values are accessed by the term bindings from the query.
+/// The `terms` map provides the mapping from field names to variable terms
+/// used in the answer.
+#[derive(Debug, Clone)]
+pub struct DynamicProof {
+    this: Entity,
+    terms: Parameters,
+    answer: Answer,
+}
+
+impl DynamicProof {
+    /// Returns the entity this proof describes.
+    pub fn entity(&self) -> &Entity {
+        &self.this
+    }
+
+    /// Look up a field value by its concept field name (e.g. "name", "age").
+    pub fn get<T>(&self, field: &str) -> Result<T, QueryError>
+    where
+        T: Scalar + std::convert::TryFrom<Value>,
+    {
+        let term = self
+            .terms
+            .get(field)
+            .ok_or_else(|| QueryError::UnboundVariable {
+                variable_name: field.to_string(),
+            })?;
+        // Extract the variable name from the Term<Value> and create a typed Term<T>
+        let typed_term: Term<T> = match term {
+            Term::Variable { name, .. } => {
+                let var_name = name.as_ref().ok_or_else(|| QueryError::UnboundVariable {
+                    variable_name: field.to_string(),
+                })?;
+                Term::var(var_name.clone())
+            }
+            Term::Constant(value) => {
+                return T::try_from(value.clone()).map_err(|_| QueryError::UnboundVariable {
+                    variable_name: field.to_string(),
+                });
+            }
+        };
+        self.answer.get(&typed_term).map_err(QueryError::from)
+    }
+
+    /// Returns a reference to the raw answer.
+    pub fn answer(&self) -> &Answer {
+        &self.answer
+    }
+}
+
+impl ConceptProof for DynamicProof {
+    fn this(&self) -> &Entity {
+        &self.this
+    }
+}
+
+impl From<ConceptApplication> for ConceptPredicate {
+    fn from(app: ConceptApplication) -> Self {
+        app.predicate
+    }
+}
+
+impl ConceptQuery for ConceptApplication {
+    type Predicate = ConceptPredicate;
+    type Proof = DynamicProof;
+
+    fn realize(&self, source: Answer) -> Result<Self::Proof, QueryError> {
+        let this_term = self
+            .terms
+            .get("this")
+            .ok_or_else(|| QueryError::UnboundVariable {
+                variable_name: "this".to_string(),
+            })?;
+        // Extract entity from the answer using the variable name
+        let entity: Entity = match this_term {
+            Term::Variable { name, .. } => {
+                let var_name = name.as_ref().ok_or_else(|| QueryError::UnboundVariable {
+                    variable_name: "this".to_string(),
+                })?;
+                let typed_term: Term<Entity> = Term::var(var_name.clone());
+                source.get(&typed_term)?
+            }
+            Term::Constant(value) => match value {
+                Value::Entity(e) => e.clone(),
+                _ => {
+                    return Err(QueryError::UnboundVariable {
+                        variable_name: "this".to_string(),
+                    });
+                }
+            },
+        };
+        Ok(DynamicProof {
+            this: entity,
+            terms: self.terms.clone(),
+            answer: source,
+        })
+    }
+}
+
+impl Predicate for ConceptPredicate {
+    type Application = ConceptApplication;
+}
+
+impl Concept for ConceptPredicate {
+    type Proof = DynamicProof;
+    type Query = ConceptApplication;
+    type Term = ();
+
+    fn this(&self) -> Entity {
+        let encoded = self.hash().as_bytes().as_ref().to_base58();
+        format!("concept:{encoded}")
+            .parse()
+            .expect("valid entity URI")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,7 +536,7 @@ mod tests {
         let predicate: ConceptPredicate = serde_json::from_str(json).expect("Should deserialize");
 
         assert!(
-            predicate.operator().starts_with("concept:"),
+            predicate.this().to_string().starts_with("concept:"),
             "Operator should be a concept URI"
         );
         assert_eq!(predicate.len(), 2);
@@ -470,7 +578,7 @@ mod tests {
         let deserialized: ConceptPredicate =
             serde_json::from_str(&json).expect("Should deserialize");
 
-        assert_eq!(original.operator(), deserialized.operator());
+        assert_eq!(original.this(), deserialized.this());
         assert_eq!(original.len(), deserialized.len());
 
         let orig_score = original
@@ -573,8 +681,8 @@ mod tests {
         );
 
         assert_eq!(
-            pred1.to_uri(),
-            pred2.to_uri(),
+            pred1.this().to_string(),
+            pred2.this().to_string(),
             "Concepts with same attributes but different field names should have same URI"
         );
     }
@@ -630,8 +738,8 @@ mod tests {
         );
 
         assert_eq!(
-            pred1.to_uri(),
-            pred2.to_uri(),
+            pred1.this().to_string(),
+            pred2.this().to_string(),
             "Concepts with same attributes in different order should have same URI"
         );
     }
@@ -665,8 +773,8 @@ mod tests {
         );
 
         assert_ne!(
-            pred1.to_uri(),
-            pred2.to_uri(),
+            pred1.this().to_string(),
+            pred2.this().to_string(),
             "Concepts with different attributes should have different URIs"
         );
     }

@@ -12,17 +12,17 @@ pub use crate::artifact::{
 };
 use crate::query::Source;
 use crate::session::transaction::{Transaction, TransactionError};
-use crate::{DeductiveRule, Store};
+use crate::{DeductiveRule, Entity, Store};
 use std::collections::HashMap;
 use transaction::Edit;
 
-/// Registry for deductive rules, indexed by conclusion operator
+/// Registry for deductive rules, indexed by conclusion entity
 ///
-/// Provides deduplicating rule registration and operator-based lookup.
+/// Provides deduplicating rule registration and entity-based lookup.
 /// Used internally by both `Session` and `QuerySession`.
 #[derive(Debug, Clone, Default)]
 pub struct RuleRegistry {
-    rules: HashMap<String, Vec<DeductiveRule>>,
+    rules: HashMap<Entity, Vec<DeductiveRule>>,
 }
 
 impl RuleRegistry {
@@ -33,22 +33,23 @@ impl RuleRegistry {
 
     /// Register a deductive rule, deduplicating by equality
     pub fn register(&mut self, rule: DeductiveRule) {
-        if let Some(rules) = self.rules.get_mut(&rule.conclusion.operator()) {
+        let key = rule.conclusion.this();
+        if let Some(rules) = self.rules.get_mut(&key) {
             if !rules.contains(&rule) {
                 rules.push(rule);
             }
         } else {
-            self.rules.insert(rule.conclusion.operator(), vec![rule]);
+            self.rules.insert(key, vec![rule]);
         }
     }
 
-    /// Resolve rules for the given operator
-    pub fn resolve_rules(&self, operator: &str) -> Vec<DeductiveRule> {
-        self.rules.get(operator).cloned().unwrap_or_default()
+    /// Resolve rules for the given concept entity
+    pub fn resolve_rules(&self, entity: &Entity) -> Vec<DeductiveRule> {
+        self.rules.get(entity).cloned().unwrap_or_default()
     }
 
     /// Get a reference to all rules
-    pub fn rules(&self) -> &HashMap<String, Vec<DeductiveRule>> {
+    pub fn rules(&self) -> &HashMap<Entity, Vec<DeductiveRule>> {
         &self.rules
     }
 }
@@ -132,11 +133,11 @@ impl<S: Store> Session<S> {
     /// ```
     pub fn install<M, W>(self, rule: impl Fn(M) -> W) -> Result<Self, crate::error::CompileError>
     where
-        M: crate::concept::ConceptQuery,
+        M: crate::concept::ConceptQuery + Default,
         W: crate::rule::When,
     {
         let query = M::default();
-        let concept = query.to_predicate();
+        let concept: crate::predicate::concept::ConceptPredicate = query.clone().into();
         let when = rule(query).into_premises();
         let premises = when.into_vec();
         let rule = crate::predicate::DeductiveRule::new(concept, premises)?;
@@ -314,7 +315,7 @@ impl<S: ArtifactStore> QuerySession<S> {
     }
 
     /// Get a reference to the rules registry
-    pub fn rules(&self) -> &HashMap<String, Vec<DeductiveRule>> {
+    pub fn rules(&self) -> &HashMap<Entity, Vec<DeductiveRule>> {
         self.rules.rules()
     }
 }
@@ -328,8 +329,8 @@ impl<S: ArtifactStore + Clone + Send + Sync + 'static> From<S> for QuerySession<
 
 /// Implement Source trait for QuerySession to provide rule resolution capabilities
 impl<S: ArtifactStore + Clone + Send + Sync + 'static> Source for QuerySession<S> {
-    fn resolve_rules(&self, operator: &str) -> Vec<DeductiveRule> {
-        self.rules.resolve_rules(operator)
+    fn resolve_rules(&self, entity: &Entity) -> Vec<DeductiveRule> {
+        self.rules.resolve_rules(entity)
     }
 }
 
@@ -350,8 +351,8 @@ impl<S: ArtifactStore> ArtifactStore for QuerySession<S> {
 /// This implementation allows Session to be used directly with the Query trait
 /// while providing access to both stored artifacts and registered rules.
 impl<S: Store + ConditionalSend + ConditionalSync + 'static> Source for Session<S> {
-    fn resolve_rules(&self, operator: &str) -> Vec<DeductiveRule> {
-        self.rules.resolve_rules(operator)
+    fn resolve_rules(&self, entity: &Entity) -> Vec<DeductiveRule> {
+        self.rules.resolve_rules(entity)
     }
 }
 
@@ -650,8 +651,10 @@ mod tests {
         }
 
         // employee can be derived from the stuff concept
+        let employee_predicate: crate::predicate::concept::ConceptPredicate =
+            Match::<Employee>::default().into();
         let employee_from_stuff = DeductiveRule::new(
-            <Employee as Concept>::predicate(),
+            employee_predicate,
             vec![
                 RelationApplication::new(
                     Term::Constant("stuff".into()),
@@ -678,13 +681,15 @@ mod tests {
         let store = Artifacts::anonymous(backend).await?;
         let mut session = Session::open(store).register(employee_from_stuff);
 
-        let alice = Stuff::predicate()
+        let stuff_predicate: crate::predicate::concept::ConceptPredicate =
+            Match::<Stuff>::default().into();
+        let alice = stuff_predicate
             .create()
             .with("name", "Alice".to_string())
             .with("role", "manager".to_string())
             .build()?;
 
-        let bob = Stuff::predicate()
+        let bob = stuff_predicate
             .create()
             .with("name", "Bob".to_string())
             .with("role", "developer".to_string())
@@ -797,13 +802,15 @@ mod tests {
         let mut session = Session::open(store).install(employee_from_stuff)?;
 
         // Create test data as Stuff
-        let alice = Stuff::predicate()
+        let stuff_predicate: crate::predicate::concept::ConceptPredicate =
+            Match::<Stuff>::default().into();
+        let alice = stuff_predicate
             .create()
             .with("name", "Alice".to_string())
             .with("role", "manager".to_string())
             .build()?;
 
-        let bob = Stuff::predicate()
+        let bob = stuff_predicate
             .create()
             .with("name", "Bob".to_string())
             .with("role", "developer".to_string())
@@ -872,7 +879,8 @@ mod tests {
         let session = Session::open(artifacts);
 
         // Test 1: Verify Session implements Source trait
-        assert_eq!(session.resolve_rules("nonexistent"), Vec::new());
+        let nonexistent: Entity = "nonexistent:test".parse().unwrap();
+        assert_eq!(session.resolve_rules(&nonexistent), Vec::new());
 
         // Test 2: Install a rule and verify it can be resolved
         let adult_conclusion = ConceptPredicate::from(vec![
@@ -905,13 +913,14 @@ mod tests {
         let session_with_rule = session.register(rule.clone());
 
         // Test 3: Verify the rule can be resolved
-        let adult_operator = adult_conclusion.operator();
-        let resolved_rules = session_with_rule.resolve_rules(&adult_operator);
+        let adult_entity = adult_conclusion.this();
+        let resolved_rules = session_with_rule.resolve_rules(&adult_entity);
         assert_eq!(resolved_rules.len(), 1);
-        assert_eq!(resolved_rules[0].conclusion.operator(), adult_operator);
+        assert_eq!(resolved_rules[0].conclusion.this(), adult_entity);
 
-        // Test 4: Verify non-matching operator returns empty
-        assert_eq!(session_with_rule.resolve_rules("nonexistent"), Vec::new());
+        // Test 4: Verify non-matching entity returns empty
+        let nonexistent: Entity = "nonexistent:test".parse().unwrap();
+        assert_eq!(session_with_rule.resolve_rules(&nonexistent), Vec::new());
 
         Ok(())
     }
@@ -921,8 +930,8 @@ mod tests {
         use dialog_storage::MemoryStorageBackend;
 
         // Test that both QuerySession and Session can be used polymorphically as a Source
-        async fn query_with_source<S: Source>(source: &S, operator: &str) -> Vec<DeductiveRule> {
-            source.resolve_rules(operator)
+        async fn query_with_source<S: Source>(source: &S, entity: &Entity) -> Vec<DeductiveRule> {
+            source.resolve_rules(entity)
         }
 
         let backend = MemoryStorageBackend::default();
@@ -937,18 +946,18 @@ mod tests {
         };
 
         let query_session = query_session.install(rule.clone());
-        // Query using the concept's actual operator (hash URI)
-        let operator = concept.operator();
-        let rules = query_with_source(&query_session, &operator).await;
+        // Query using the concept's entity identity
+        let entity = concept.this();
+        let rules = query_with_source(&query_session, &entity).await;
         assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].conclusion.operator(), concept.operator());
+        assert_eq!(rules[0].conclusion.this(), concept.this());
 
         // Test with Session
         let mut session = Session::open(artifacts);
         session = session.register(rule.clone());
-        let rules = query_with_source(&session, &operator).await;
+        let rules = query_with_source(&session, &entity).await;
         assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].conclusion.operator(), concept.operator());
+        assert_eq!(rules[0].conclusion.this(), concept.this());
 
         Ok(())
     }
@@ -988,13 +997,13 @@ mod tests {
         let query_session = query_session.install(rule1).install(rule2);
 
         // Identical rules should be deduplicated
-        let operator = predicate.operator();
-        let rules = query_session.resolve_rules(&operator);
+        let entity = predicate.this();
+        let rules = query_session.resolve_rules(&entity);
         assert_eq!(rules.len(), 1, "Identical rules should be deduplicated");
 
-        // Both rules should have the same operator (hash)
+        // Both rules should have the same concept identity
         for rule in &rules {
-            assert_eq!(rule.conclusion.operator(), operator);
+            assert_eq!(rule.conclusion.this(), entity);
         }
 
         Ok(())
@@ -1010,7 +1019,8 @@ mod tests {
 
         // Test 1: Basic conversion - no rules
         let query_session: QuerySession<_> = artifacts.clone().into();
-        assert_eq!(query_session.resolve_rules("nonexistent"), Vec::new());
+        let nonexistent: Entity = "nonexistent:test".parse().unwrap();
+        assert_eq!(query_session.resolve_rules(&nonexistent), Vec::new());
         assert_eq!(query_session.rules().len(), 0);
 
         // Test 2: Conversion with rule installation
@@ -1032,10 +1042,10 @@ mod tests {
         let query_session: QuerySession<_> = artifacts.into();
         let query_session = query_session.install(adult_rule.clone());
 
-        let adult_operator = adult_concept.operator();
-        let resolved_rules = query_session.resolve_rules(&adult_operator);
+        let adult_entity = adult_concept.this();
+        let resolved_rules = query_session.resolve_rules(&adult_entity);
         assert_eq!(resolved_rules.len(), 1);
-        assert_eq!(resolved_rules[0].conclusion.operator(), adult_operator);
+        assert_eq!(resolved_rules[0].conclusion.this(), adult_entity);
 
         // Test 3: Verify store is still accessible
         assert!(!std::ptr::addr_of!(*query_session.store()).is_null());

@@ -306,12 +306,35 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         }
 
+        // Implement From<StructName> for ConceptPredicate
+        impl From<#struct_name> for dialog_query::predicate::concept::ConceptPredicate {
+            fn from(_: #struct_name) -> Self {
+                dialog_query::predicate::concept::ConceptPredicate::from(vec![
+                    #(
+                        (#field_name_lits, <#field_types as dialog_query::Attribute>::descriptor())
+                    ),*
+                ])
+            }
+        }
+
+        // Implement From<MatchName> for ConceptPredicate
+        impl From<#match_name> for dialog_query::predicate::concept::ConceptPredicate {
+            fn from(_: #match_name) -> Self {
+                dialog_query::predicate::concept::ConceptPredicate::from(vec![
+                    #(
+                        (#field_name_lits, <#field_types as dialog_query::Attribute>::descriptor())
+                    ),*
+                ])
+            }
+        }
+
         // Implement From<Match> for Premise
         impl From<#match_name> for dialog_query::Premise {
             fn from(source: #match_name) -> Self {
+                let predicate: dialog_query::predicate::concept::ConceptPredicate = source.clone().into();
                 let app = dialog_query::application::concept::ConceptApplication {
                     terms: source.into(),
-                    predicate: #struct_name::predicate(),
+                    predicate,
                 };
                 dialog_query::Premise::Apply(dialog_query::Application::Concept(app))
             }
@@ -320,9 +343,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
         // Implement From<Match> for Application
         impl From<#match_name> for dialog_query::Application {
             fn from(source: #match_name) -> Self {
+                let predicate: dialog_query::predicate::concept::ConceptPredicate = source.clone().into();
                 let app = dialog_query::application::concept::ConceptApplication {
                     terms: source.into(),
-                    predicate: #struct_name::predicate(),
+                    predicate,
                 };
                 dialog_query::Application::Concept(app)
             }
@@ -331,9 +355,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
         // Implement From<Match> for ConceptApplication
         impl From<#match_name> for dialog_query::application::concept::ConceptApplication {
             fn from(source: #match_name) -> Self {
+                let predicate: dialog_query::predicate::concept::ConceptPredicate = source.clone().into();
                 dialog_query::application::concept::ConceptApplication {
                     terms: source.into(),
-                    predicate: #struct_name::predicate(),
+                    predicate,
                 }
             }
         }
@@ -341,9 +366,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
         // Implement From<&Match> for ConceptApplication
         impl From<&#match_name> for dialog_query::application::concept::ConceptApplication {
             fn from(source: &#match_name) -> Self {
+                let predicate: dialog_query::predicate::concept::ConceptPredicate = source.clone().into();
                 dialog_query::application::concept::ConceptApplication {
                     terms: source.into(),
-                    predicate: #struct_name::predicate(),
+                    predicate,
                 }
             }
         }
@@ -365,12 +391,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 #concept_description_lit
             }
 
-            fn predicate() -> dialog_query::predicate::concept::ConceptPredicate {
-                dialog_query::predicate::concept::ConceptPredicate::from(vec![
-                    #(
-                        (#field_name_lits, <#field_types as dialog_query::Attribute>::descriptor())
-                    ),*
-                ])
+            fn this(&self) -> dialog_artifacts::Entity {
+                let predicate: dialog_query::predicate::concept::ConceptPredicate = self.clone().into();
+                predicate.this()
             }
         }
 

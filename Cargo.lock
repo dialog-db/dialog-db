@@ -927,6 +927,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-stream",
+ "base58",
  "blake3",
  "dialog-artifacts",
  "dialog-common",
