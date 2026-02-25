@@ -4,10 +4,10 @@ use async_stream::try_stream;
 pub use dialog_common::{ConditionalSend, ConditionalSync};
 
 use crate::artifact::{ArtifactStore, ArtifactStoreMut};
-pub use crate::context::new_context;
 pub use crate::error::{QueryError, QueryResult};
 pub use crate::relation::Relation;
-use crate::{EvaluationContext, selection};
+use crate::selection;
+use crate::selection::Answer;
 pub use futures_util::stream::{Stream, StreamExt, TryStream};
 
 /// A stream of query results that can be collected or iterated
@@ -60,7 +60,8 @@ pub trait Application: Clone + ConditionalSend + 'static {
     /// Evaluate this query, producing a stream of answers.
     fn evaluate<S: Source, M: selection::Answers>(
         self,
-        context: EvaluationContext<S, M>,
+        answers: M,
+        source: &S,
     ) -> impl selection::Answers;
 
     /// Convert an answer into a concrete result value.
@@ -71,11 +72,10 @@ pub trait Application: Clone + ConditionalSend + 'static {
     where
         Self: Sized,
     {
-        let context = new_context(source.clone());
         let query = self.clone();
-        let answers = self.evaluate(context);
+        let results = self.evaluate(Answer::new().seed(), source);
         try_stream! {
-            for await each in answers {
+            for await each in results {
                 yield query.realize(each?)?;
             }
         }

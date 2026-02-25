@@ -385,7 +385,8 @@ mod tests {
 
     use crate::artifact::{Artifacts, Entity, Value};
     use crate::proposition::relation::RelationApplication;
-    use crate::query::{Output, Source, new_context};
+    use crate::query::{Output, Source};
+    use crate::selection::Answer;
     use crate::the;
     use crate::{
         Assertion, AttributeDescriptor, Cardinality, Concept, Match, Parameters, Term, Type,
@@ -467,7 +468,7 @@ mod tests {
         let application = person.apply(params)?;
 
         let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            application.evaluate(new_context(session.clone())),
+            application.evaluate(Answer::new().seed(), &session),
         )
         .await?;
         assert_eq!(selection.len(), 2); // Should find just Alice and Bob
@@ -587,7 +588,7 @@ mod tests {
         let application = person.apply(params)?;
 
         let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            application.evaluate(new_context(session.clone())),
+            application.evaluate(Answer::new().seed(), &session),
         )
         .await?;
         assert_eq!(selection.len(), 2); // Should find just Alice and Bob
@@ -1589,13 +1590,13 @@ mod tests {
 
         // First query — plan is computed and cached
         let results1: Vec<_> = futures_util::TryStreamExt::try_collect(
-            application.clone().evaluate(new_context(session.clone())),
+            application.clone().evaluate(Answer::new().seed(), &session),
         )
         .await?;
 
         // Second query — plan is reused from cache
         let results2: Vec<_> = futures_util::TryStreamExt::try_collect(
-            application.evaluate(new_context(session.clone())),
+            application.evaluate(Answer::new().seed(), &session),
         )
         .await?;
 
@@ -1677,13 +1678,11 @@ mod tests {
             value: &Value::from(alice.clone()),
         })?;
 
-        let context = crate::EvaluationContext {
-            source: session.clone(),
-            selection: futures_util::stream::once(async { Ok(answer) }),
-        };
+        let answers = answer.seed();
 
         let results: Vec<_> =
-            futures_util::TryStreamExt::try_collect(application.evaluate(context)).await?;
+            futures_util::TryStreamExt::try_collect(application.evaluate(answers, &session))
+                .await?;
 
         assert_eq!(results.len(), 1, "Should find exactly one person (Alice)");
         assert_eq!(

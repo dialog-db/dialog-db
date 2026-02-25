@@ -276,10 +276,11 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
             fn evaluate<S: dialog_query::query::Source, M: dialog_query::selection::Answers>(
                 self,
-                context: dialog_query::EvaluationContext<S, M>,
+                answers: M,
+                _source: &S,
             ) -> impl dialog_query::selection::Answers {
                 let application: dialog_query::proposition::FormulaApplication = self.into();
-                application.evaluate(context)
+                application.evaluate(answers)
             }
 
             fn realize(&self, source: dialog_query::selection::Answer) -> std::result::Result<Self::Proof, dialog_query::QueryError> {

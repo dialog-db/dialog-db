@@ -1,4 +1,3 @@
-use crate::EvaluationContext;
 use crate::analyzer::{Analysis, Plan};
 use crate::artifact::Value;
 use crate::error::CompileError;
@@ -284,10 +283,11 @@ impl Join {
     /// Each step flows results to the next, building up bindings.
     pub fn evaluate<S: Source, M: crate::selection::Answers>(
         self,
-        context: EvaluationContext<S, M>,
+        answers: M,
+        source: &S,
     ) -> impl crate::selection::Answers {
         let chain = Chain::from(self.steps);
-        chain.evaluate(context)
+        chain.evaluate(answers, source)
     }
 }
 
@@ -330,21 +330,18 @@ impl Chain {
     /// as the chain grows.
     fn evaluate<S: Source, M: crate::selection::Answers>(
         self,
-        context: EvaluationContext<S, M>,
+        answers: M,
+        source: &S,
     ) -> Pin<Box<dyn crate::selection::Answers>> {
         match self {
-            Chain::Empty => Box::pin(context.selection),
+            Chain::Empty => Box::pin(answers),
             Chain::Join(left, right) => {
-                let source = context.source.clone();
-                let answers = left.evaluate(context);
+                let left_answers = left.evaluate(answers, source);
                 // Box the premise evaluation to move it to the heap.
                 // Without this, each chain step would inline the full
                 // premise stream (~35KB) on the stack, compounding with
                 // every additional premise in the join.
-                Box::pin(right.evaluate(EvaluationContext {
-                    selection: answers,
-                    source,
-                }))
+                Box::pin(right.evaluate(left_answers, source))
             }
         }
     }
@@ -386,13 +383,14 @@ impl Fork {
     /// keeps each alternative at pointer size on the stack.
     pub fn evaluate<S: Source, M: crate::selection::Answers>(
         self,
-        context: EvaluationContext<S, M>,
+        answers: M,
+        source: &S,
     ) -> Pin<Box<dyn crate::selection::Answers>> {
         match self {
             Self::Empty => Box::pin(futures_util::stream::empty()),
-            Self::Solo(join) => Box::pin(join.evaluate(context)),
-            Self::Duet(left, right) => Self::merge(Self::Solo(left), right, context),
-            Self::Or(left, right) => Self::merge(*left, right, context),
+            Self::Solo(join) => Box::pin(join.evaluate(answers, source)),
+            Self::Duet(left, right) => Self::merge(Self::Solo(left), right, answers, source),
+            Self::Or(left, right) => Self::merge(*left, right, answers, source),
         }
     }
 
@@ -400,23 +398,18 @@ impl Fork {
     fn merge<S: Source, M: crate::selection::Answers>(
         left: Fork,
         right: Join,
-        context: EvaluationContext<S, M>,
+        answers: M,
+        source: &S,
     ) -> Pin<Box<dyn crate::selection::Answers>> {
+        let source = source.clone();
         // Box the merged stream to move it to the heap. The try_stream!
         // here captures two boxed (8-byte) stream pointers from
         // left.evaluate and right.evaluate, keeping the state machine small.
         Box::pin(try_stream! {
-            let (left_input, right_input) = fork_stream(context.selection);
+            let (left_input, right_input) = fork_stream(answers);
 
-            let source = context.source.clone();
-            let left_output = left.evaluate(EvaluationContext {
-                selection: left_input,
-                source,
-            });
-            let right_output = right.evaluate(EvaluationContext {
-                selection: right_input,
-                source: context.source,
-            });
+            let left_output = left.evaluate(left_input, &source);
+            let right_output = right.evaluate(right_input, &source);
 
             tokio::pin!(left_output);
             tokio::pin!(right_output);
@@ -431,7 +424,7 @@ impl Fork {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::new_context;
+    use crate::selection::Answer;
 
     #[dialog_common::test]
     fn test_join_plan_with_two_fact_applications() {
@@ -599,7 +592,7 @@ mod tests {
 
         // Execute the query
         let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            plan.evaluate(new_context(session.clone())),
+            plan.evaluate(Answer::new().seed(), &session),
         )
         .await?;
 

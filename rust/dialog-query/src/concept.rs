@@ -343,10 +343,11 @@ mod tests {
 
         fn evaluate<S: crate::query::Source, M: crate::selection::Answers>(
             self,
-            context: crate::EvaluationContext<S, M>,
+            answers: M,
+            source: &S,
         ) -> impl crate::selection::Answers {
             let application: ConceptApplication = self.into();
-            application.evaluate(context)
+            application.evaluate(answers, source)
         }
 
         fn realize(&self, source: Answer) -> std::result::Result<Self::Proof, QueryError> {

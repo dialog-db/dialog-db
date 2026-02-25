@@ -2,7 +2,7 @@ pub use super::Proposition;
 pub use crate::error::{AnalyzerError, FormulaEvaluationError, PlanError, QueryError};
 use crate::predicate::formula::Cells;
 pub use crate::predicate::formula::bindings::Bindings;
-pub use crate::{Answer, Answers, EvaluationContext, Source, try_stream};
+pub use crate::{Answer, Answers, try_stream};
 
 pub use crate::{Environment, Parameters, Requirement};
 use std::fmt::Display;
@@ -95,15 +95,12 @@ impl FormulaApplication {
         }
     }
 
-    /// Evaluate this formula against the context, expanding each input answer
-    pub fn evaluate<S: Source, M: crate::selection::Answers>(
-        self,
-        context: EvaluationContext<S, M>,
-    ) -> impl Answers {
+    /// Evaluate this formula against the given answers stream, expanding each input answer
+    pub fn evaluate<M: crate::selection::Answers>(self, answers: M) -> impl Answers {
         // Formulas now work natively with Answer and track provenance via Factor::Derived
         let formula = self;
         try_stream! {
-            for await each in context.selection {
+            for await each in answers {
 
                 // Expand directly with Answer - no conversions needed
                 for answer in formula.expand(each?)? {

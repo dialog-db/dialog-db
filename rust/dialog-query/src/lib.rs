@@ -34,8 +34,6 @@ pub mod claim;
 pub mod concept;
 /// Constraint system for filtering and validating variable bindings.
 pub mod constraint;
-/// Query execution context for evaluation.
-pub mod context;
 /// DSL types for constructing type-safe queries.
 pub mod dsl;
 /// Variable binding environment used during query planning.
@@ -80,7 +78,6 @@ pub use assertion::Assertion;
 pub use attribute::{Attribute, AttributeDescriptor, Cardinality, The};
 pub use claim::Claim;
 pub use concept::{Concept, With, WithQuery, WithTerms};
-pub use context::EvaluationContext;
 pub use dialog_macros::{Attribute, Concept, Formula};
 pub use dsl::{Input, Match, Predicate, Query};
 pub use error::{InconsistencyError, QueryError};

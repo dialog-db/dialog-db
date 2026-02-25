@@ -679,15 +679,15 @@ mod tests {
             .set(Term::var("x"), 5u32)?
             .set(Term::var("y"), 3u32)?;
 
-        let context = crate::EvaluationContext {
-            source: session,
-            selection: futures_util::stream::once(async { Ok(input) }),
-        };
+        let input_answers = input.seed();
 
         let query_copy = query.clone();
         let answers: Vec<Answer> = {
             use futures_util::TryStreamExt;
-            query.evaluate(context).try_collect().await?
+            query
+                .evaluate(input_answers, &session)
+                .try_collect()
+                .await?
         };
 
         assert_eq!(answers.len(), 1);
@@ -721,15 +721,15 @@ mod tests {
 
         // Constants are already bound — empty starting Answer should work
         let input = Answer::new();
-        let context = crate::EvaluationContext {
-            source: session,
-            selection: futures_util::stream::once(async { Ok(input) }),
-        };
+        let input_answers = input.seed();
 
         let query_copy = query.clone();
         let answers: Vec<Answer> = {
             use futures_util::TryStreamExt;
-            query.evaluate(context).try_collect().await?
+            query
+                .evaluate(input_answers, &session)
+                .try_collect()
+                .await?
         };
 
         assert_eq!(answers.len(), 1);
@@ -762,15 +762,15 @@ mod tests {
             .set(Term::var("x"), 5u32)?
             .set(Term::var("y"), 3u32)?;
 
-        let context = crate::EvaluationContext {
-            source: session,
-            selection: futures_util::stream::once(async { Ok(input) }),
-        };
+        let input_answers = input.seed();
 
         let query_copy = query.clone();
         let answers: Vec<Answer> = {
             use futures_util::TryStreamExt;
-            query.evaluate(context).try_collect().await?
+            query
+                .evaluate(input_answers, &session)
+                .try_collect()
+                .await?
         };
 
         // Should succeed — the formula computes 8, and the constant 8 is consistent
@@ -804,14 +804,14 @@ mod tests {
             .set(Term::var("x"), 5u32)?
             .set(Term::var("y"), 3u32)?;
 
-        let context = crate::EvaluationContext {
-            source: session,
-            selection: futures_util::stream::once(async { Ok(input) }),
-        };
+        let input_answers = input.seed();
 
         let answers: Vec<Answer> = {
             use futures_util::TryStreamExt;
-            query.evaluate(context).try_collect().await?
+            query
+                .evaluate(input_answers, &session)
+                .try_collect()
+                .await?
         };
 
         // The formula computes 8 but "is" is constant 99 — inconsistency
@@ -844,15 +844,15 @@ mod tests {
 
         let input = Answer::new().set(Term::var("y"), 7u32)?;
 
-        let context = crate::EvaluationContext {
-            source: session,
-            selection: futures_util::stream::once(async { Ok(input) }),
-        };
+        let input_answers = input.seed();
 
         let query_copy = query.clone();
         let answers: Vec<Answer> = {
             use futures_util::TryStreamExt;
-            query.evaluate(context).try_collect().await?
+            query
+                .evaluate(input_answers, &session)
+                .try_collect()
+                .await?
         };
 
         assert_eq!(answers.len(), 1);
@@ -883,15 +883,15 @@ mod tests {
 
         let input = Answer::new().set(Term::var("x"), 4u32)?;
 
-        let context = crate::EvaluationContext {
-            source: session,
-            selection: futures_util::stream::once(async { Ok(input) }),
-        };
+        let input_answers = input.seed();
 
         let query_copy = query.clone();
         let answers: Vec<Answer> = {
             use futures_util::TryStreamExt;
-            query.evaluate(context).try_collect().await?
+            query
+                .evaluate(input_answers, &session)
+                .try_collect()
+                .await?
         };
 
         assert_eq!(answers.len(), 1);

@@ -1,5 +1,5 @@
 use super::proposition::Proposition;
-use crate::{Environment, EvaluationContext, Parameters, Schema, Source, try_stream};
+use crate::{Environment, Parameters, Schema, Source, try_stream};
 pub use futures_util::{TryStreamExt, stream};
 use std::fmt::Display;
 
@@ -60,17 +60,16 @@ impl Negation {
     /// Evaluate this negation, yielding answers that do NOT match the inner application
     pub fn evaluate<S: Source, M: crate::selection::Answers>(
         self,
-        context: EvaluationContext<S, M>,
+        answers: M,
+        source: &S,
     ) -> impl crate::selection::Answers {
         let application = self.0;
+        let source = source.clone();
         try_stream! {
-            for await each in context.selection {
+            for await each in answers {
                 let answer = each?;
                 let not = answer.clone();
-                let output = application.clone().evaluate(EvaluationContext {
-                    selection: stream::once(async move { Ok(not)}),
-                    source: context.source.clone(),
-                });
+                let output = application.clone().evaluate(not.seed(), &source);
 
                 tokio::pin!(output);
 

@@ -9,7 +9,7 @@ pub mod equality;
 pub use equality::Equality;
 
 use crate::selection::Answers;
-use crate::{Environment, EvaluationContext, Parameters, Schema, Source};
+use crate::{Environment, Parameters, Schema};
 use std::fmt::Display;
 
 /// Constraint enum representing different types of constraints between terms.
@@ -64,9 +64,9 @@ impl Constraint {
     /// # Returns
     /// A stream of answers that satisfy the constraint, with any necessary
     /// variable bindings added through inference.
-    pub fn evaluate<S: Source, M: Answers>(self, context: EvaluationContext<S, M>) -> impl Answers {
+    pub fn evaluate<M: Answers>(self, answers: M) -> impl Answers {
         match self {
-            Constraint::Equality(constraint) => constraint.evaluate(context),
+            Constraint::Equality(constraint) => constraint.evaluate(answers),
         }
     }
 }

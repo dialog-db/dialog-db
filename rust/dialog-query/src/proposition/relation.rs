@@ -3,12 +3,11 @@ use crate::Cardinality;
 use crate::Relation;
 pub use crate::artifact::Attribute;
 pub use crate::artifact::{ArtifactSelector, Constrained};
-pub use crate::context::new_context;
 pub use crate::error::{AnalyzerError, QueryResult};
 pub use crate::query::Output;
 use crate::selection::{Answer, Answers, Evidence};
 use crate::{Entity, Field, Parameters, QueryError, Requirement, Schema, Term, Type, Value};
-use crate::{EvaluationContext, Source, try_stream};
+use crate::{Source, try_stream};
 use dialog_artifacts::{Artifact, Cause};
 use futures_util::future::Either;
 use serde::{Deserialize, Serialize};
@@ -498,8 +497,8 @@ impl RelationApplication {
 impl crate::query::Application for RelationApplication {
     type Proof = Relation;
 
-    fn evaluate<S: Source, M: Answers>(self, context: EvaluationContext<S, M>) -> impl Answers {
-        self.evaluate_with_provenance(context.source, context.selection)
+    fn evaluate<S: Source, M: Answers>(self, answers: M, source: &S) -> impl Answers {
+        self.evaluate_with_provenance(source.clone(), answers)
     }
 
     fn realize(&self, input: Answer) -> Result<Relation, QueryError> {

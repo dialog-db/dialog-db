@@ -6,8 +6,8 @@
 
 pub use crate::selection::Evidence;
 pub use crate::{
-    Answers, Environment, EvaluationContext, Field, Parameters, QueryError, Requirement, Schema,
-    Source, Term, Value, try_stream,
+    Answers, Environment, Field, Parameters, QueryError, Requirement, Schema, Term, Value,
+    try_stream,
 };
 use std::fmt::Display;
 
@@ -106,11 +106,11 @@ impl Equality {
     /// # Returns
     /// A stream of answers that satisfy the constraint, with any necessary
     /// variable bindings added through inference.
-    pub fn evaluate<S: Source, M: Answers>(self, context: EvaluationContext<S, M>) -> impl Answers {
+    pub fn evaluate<M: Answers>(self, answers: M) -> impl Answers {
         let this = self.this;
         let is = self.is;
         try_stream! {
-            for await each in context.selection {
+            for await each in answers {
                 let input = each?;
 
                 match (input.resolve(&this), input.resolve(&is)) {
@@ -167,8 +167,6 @@ impl Display for Equality {
 mod tests {
     use super::*;
     use crate::selection::Answer;
-    use crate::{Session, artifact::Artifacts};
-    use dialog_storage::MemoryStorageBackend;
     use futures_util::TryStreamExt;
 
     #[dialog_common::test]
@@ -185,16 +183,8 @@ mod tests {
             value: &Value::from(42),
         })?;
 
-        let storage = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage).await.unwrap();
-        let session = Session::open(artifacts);
-
-        let context = EvaluationContext {
-            selection: futures_util::stream::iter(vec![Ok(answer.clone())]),
-            source: session,
-        };
-
-        let results: Vec<Answer> = constraint.evaluate(context).try_collect().await?;
+        let answers = futures_util::stream::iter(vec![Ok(answer.clone())]);
+        let results: Vec<Answer> = constraint.evaluate(answers).try_collect().await?;
 
         assert_eq!(results.len(), 1, "Should have one result");
         assert_eq!(
@@ -220,16 +210,8 @@ mod tests {
             value: &Value::from(99),
         })?;
 
-        let storage = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage).await.unwrap();
-        let session = Session::open(artifacts);
-
-        let context = EvaluationContext {
-            selection: futures_util::stream::iter(vec![Ok(answer.clone())]),
-            source: session,
-        };
-
-        let results: Vec<Answer> = constraint.evaluate(context).try_collect().await?;
+        let answers = futures_util::stream::iter(vec![Ok(answer.clone())]);
+        let results: Vec<Answer> = constraint.evaluate(answers).try_collect().await?;
 
         assert_eq!(
             results.len(),
@@ -250,16 +232,8 @@ mod tests {
             value: &Value::from(42),
         })?;
 
-        let storage = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage).await.unwrap();
-        let session = Session::open(artifacts);
-
-        let context = EvaluationContext {
-            selection: futures_util::stream::iter(vec![Ok(answer.clone())]),
-            source: session,
-        };
-
-        let results: Vec<Answer> = constraint.evaluate(context).try_collect().await?;
+        let answers = futures_util::stream::iter(vec![Ok(answer.clone())]);
+        let results: Vec<Answer> = constraint.evaluate(answers).try_collect().await?;
 
         assert_eq!(results.len(), 1, "Should have one result");
         assert_eq!(
