@@ -259,15 +259,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
 
         /// Static storage for formula cells
-        static #cells_name: ::std::sync::OnceLock<dialog_query::predicate::formula::Cells> = ::std::sync::OnceLock::new();
+        static #cells_name: ::std::sync::OnceLock<dialog_query::formula::cell::Cells> = ::std::sync::OnceLock::new();
 
-        impl dialog_query::dsl::Predicate for #struct_name {
+        impl dialog_query::Predicate for #struct_name {
             type Proof = #struct_name;
             type Application = #match_name;
             type Descriptor = dialog_query::Entity;
         }
 
-        impl dialog_query::predicate::formula::FormulaQuery for #match_name {
+        impl dialog_query::formula::FormulaQuery for #match_name {
             type Predicate = #struct_name;
         }
 
@@ -279,7 +279,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 answers: M,
                 _source: &S,
             ) -> impl dialog_query::selection::Answers {
-                let application: dialog_query::proposition::FormulaApplication = self.into();
+                let application: dialog_query::formula::application::FormulaApplication = self.into();
                 application.evaluate(answers)
             }
 
@@ -300,14 +300,14 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         impl From<#match_name> for dialog_query::Premise {
             fn from(source: #match_name) -> Self {
-                let app: dialog_query::proposition::FormulaApplication = source.into();
+                let app: dialog_query::formula::application::FormulaApplication = source.into();
                 dialog_query::Premise::When(dialog_query::Proposition::Formula(app))
             }
         }
 
         impl From<#match_name> for dialog_query::Proposition {
             fn from(source: #match_name) -> Self {
-                let app: dialog_query::proposition::FormulaApplication = source.into();
+                let app: dialog_query::formula::application::FormulaApplication = source.into();
                 dialog_query::Proposition::Formula(app)
             }
         }
@@ -321,17 +321,17 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         }
 
-        impl ::std::convert::TryFrom<&mut dialog_query::predicate::formula::bindings::Bindings> for #input_name {
+        impl ::std::convert::TryFrom<&mut dialog_query::formula::bindings::Bindings> for #input_name {
             type Error = dialog_query::error::FormulaEvaluationError;
 
-            fn try_from(bindings: &mut dialog_query::predicate::formula::bindings::Bindings) -> ::std::result::Result<Self, Self::Error> {
+            fn try_from(bindings: &mut dialog_query::formula::bindings::Bindings) -> ::std::result::Result<Self, Self::Error> {
                 Ok(#input_name {
                     #(#input_field_names: bindings.resolve(#input_field_name_lits)?.try_into()?),*
                 })
             }
         }
 
-        impl dialog_query::predicate::formula::Formula for #struct_name {
+        impl dialog_query::formula::Formula for #struct_name {
             type Input = #input_name;
             type Query = #match_name;
 
@@ -339,9 +339,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 #operator_lit
             }
 
-            fn cells() -> &'static dialog_query::predicate::formula::Cells {
+            fn cells() -> &'static dialog_query::formula::cell::Cells {
                 #cells_name.get_or_init(|| {
-                    dialog_query::predicate::formula::Cells::define(|builder| {
+                    dialog_query::formula::cell::Cells::define(|builder| {
                         #(#cell_definitions)*
                     })
                 })
@@ -355,7 +355,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 #struct_name::derive(input)
             }
 
-            fn write(&self, bindings: &mut dialog_query::predicate::formula::bindings::Bindings) -> ::std::result::Result<(), dialog_query::error::FormulaEvaluationError> {
+            fn write(&self, bindings: &mut dialog_query::formula::bindings::Bindings) -> ::std::result::Result<(), dialog_query::error::FormulaEvaluationError> {
                 #(#write_statements)*
                 ::std::result::Result::Ok(())
             }

@@ -5,7 +5,17 @@ use crate::term::Term;
 use crate::types::Scalar;
 use std::collections::HashSet;
 
-/// Tracks variable bindings during query planning
+/// The set of variable names that have been bound so far during query planning.
+///
+/// As the planner selects premises for execution, each premise declares which
+/// variables it will bind (via its [`Candidate`](crate::planner::Candidate)).
+/// Those names are added to the `Environment`, and subsequent premises are
+/// re-evaluated against it — a premise that was `Blocked` may become `Viable`
+/// once the variables it needs appear here.
+///
+/// At execution time, `Environment` is also stored inside each [`Plan`](crate::planner::Plan)
+/// to record which variables were already bound when the plan was created and
+/// which the plan itself will bind.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Environment {
     /// Set of variables that have already been bound.
@@ -113,27 +123,27 @@ impl Environment {
 }
 
 impl IntoIterator for Environment {
-    type Item = Term<crate::artifact::Value>;
-    type IntoIter = std::vec::IntoIter<Term<crate::artifact::Value>>;
+    type Item = Term<Value>;
+    type IntoIter = std::vec::IntoIter<Term<Value>>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.variables
             .into_iter()
-            .map(|var| Term::<crate::artifact::Value>::var(&var))
+            .map(|var| Term::<Value>::var(&var))
             .collect::<Vec<_>>()
             .into_iter()
     }
 }
 
 impl IntoIterator for &Environment {
-    type Item = Term<crate::artifact::Value>;
-    type IntoIter = std::vec::IntoIter<Term<crate::artifact::Value>>;
+    type Item = Term<Value>;
+    type IntoIter = std::vec::IntoIter<Term<Value>>;
 
     fn into_iter(self) -> Self::IntoIter {
         let vars = &self.variables;
 
         vars.iter()
-            .map(Term::<crate::artifact::Value>::var)
+            .map(Term::<Value>::var)
             .collect::<Vec<_>>()
             .into_iter()
     }

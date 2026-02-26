@@ -1,13 +1,22 @@
 use super::proposition::Proposition;
-use crate::{Environment, Parameters, Schema, Source, try_stream};
+use crate::selection::Answers;
+use crate::{Environment, Parameters, Requirement, Schema, Source, try_stream};
 pub use futures_util::{TryStreamExt, stream};
 use std::fmt::Display;
 
 /// Cost overhead added for negation operations (checking non-existence)
 pub const NEGATION_OVERHEAD: usize = 100;
 
-/// Represents a negated application that excludes matching results.
-/// Used in rules to specify conditions that must NOT hold.
+/// A negated proposition used inside [`Premise::Unless`](crate::Premise::Unless).
+///
+/// During query evaluation a `Negation` acts as a filter: for each incoming
+/// [`Answer`](crate::selection::Answer), the wrapped [`Proposition`] is
+/// evaluated. If it produces *any* results the answer is discarded; if it
+/// produces *no* results the answer passes through unchanged.
+///
+/// Negations never bind new variables — they only constrain existing ones.
+/// The planner accounts for this by never adding a negation's parameters to
+/// the `binds` set of an [`Candidate`](crate::planner::Candidate).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Negation(pub Proposition);
 
@@ -46,10 +55,10 @@ impl Negation {
             if let Some(term) = params.get(name) {
                 constraint.requirement = if term.is_blank() {
                     // Blank terms are wildcards - mark as optional so they don't block planning
-                    crate::Requirement::Optional
+                    Requirement::Optional
                 } else {
                     // Non-blank terms must be bound before negation can run
-                    crate::Requirement::Required(None)
+                    Requirement::Required(None)
                 };
             }
         }
@@ -58,11 +67,7 @@ impl Negation {
     }
 
     /// Evaluate this negation, yielding answers that do NOT match the inner application
-    pub fn evaluate<S: Source, M: crate::selection::Answers>(
-        self,
-        answers: M,
-        source: &S,
-    ) -> impl crate::selection::Answers {
+    pub fn evaluate<S: Source, M: Answers>(self, answers: M, source: &S) -> impl Answers {
         let application = self.0;
         let source = source.clone();
         try_stream! {

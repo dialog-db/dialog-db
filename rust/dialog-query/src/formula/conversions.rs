@@ -3,7 +3,7 @@
 //! This module provides formulas for converting between different types,
 //! including string conversion and number parsing operations.
 
-use crate::{Formula, Value, dsl::Input};
+use crate::{Formula, Value, formula::Input};
 
 /// ToString formula that converts any supported type to string
 #[derive(Debug, Clone, Formula)]

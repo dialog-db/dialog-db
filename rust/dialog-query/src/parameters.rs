@@ -1,8 +1,17 @@
 use crate::{Term, Value};
 use std::collections::HashMap;
 
-/// Represents set of bindings used in the rule or formula applications. It is
-/// effectively a map of terms (constant or variable) keyed by parameter names.
+/// A name-to-term mapping that describes how a premise is applied.
+///
+/// Every premise type (relation, concept, formula, constraint) exposes its
+/// inputs and outputs as named parameters. A `Parameters` instance binds
+/// each parameter name to a [`Term<Value>`] — either a concrete constant
+/// or a named variable that will be resolved during query evaluation.
+///
+/// During planning, the [`Schema`](crate::Schema) is consulted to determine
+/// which parameters are required vs optional, and the planner uses this
+/// information together with the current [`Environment`](crate::Environment)
+/// to decide whether the premise is viable.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Parameters(HashMap<String, Term<Value>>);
 impl Parameters {

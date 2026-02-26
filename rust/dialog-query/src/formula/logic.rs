@@ -4,7 +4,7 @@
 //! AND, OR, and NOT operations.
 
 use crate::Formula;
-use crate::dsl::Input;
+use crate::formula::Input;
 
 /// And formula that performs logical AND on two boolean values
 #[derive(Debug, Clone, Formula)]

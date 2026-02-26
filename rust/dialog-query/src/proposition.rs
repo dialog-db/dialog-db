@@ -1,23 +1,26 @@
-/// Concept application for querying entities that match a concept pattern
-pub mod concept;
-/// Formula application for computed values
-pub mod formula;
-/// Relation application for queries with separate namespace and name
-pub mod relation;
-
-pub use crate::analyzer::AnalyzerError;
+pub use crate::concept::application::ConceptApplication;
+pub use crate::error::AnalyzerError;
 pub use crate::error::{PlanError, QueryResult};
+pub use crate::formula::application::FormulaApplication;
 pub use crate::premise::{Negation, Premise};
-pub use crate::{Environment, Source};
-pub use concept::ConceptApplication;
-pub use formula::FormulaApplication;
+pub use crate::relation::application::RelationApplication;
+use crate::selection::Answers;
+pub use crate::{Environment, Parameters, Schema, Source};
 use futures_util::future::Either;
-pub use relation::RelationApplication;
 pub use std::fmt::Display;
 
-/// Different types of applications that can query the knowledge base.
-/// Constraints are separate `Premise` variants since they express relationships
-/// between variables rather than querying the knowledge base.
+/// A knowledge-base query embedded inside a [`Premise::When`](crate::Premise::When).
+///
+/// Each variant binds a different kind of application:
+/// - `Relation` — low-level EAV triple lookup against the fact store.
+/// - `Concept` — entity-level query using a concept predicate and its
+///   associated deductive rules.
+/// - `Formula` — pure computation that derives new bindings from existing
+///   ones without touching the fact store.
+///
+/// Constraints (equality, comparison) are *not* propositions — they live in
+/// [`Premise::Where`](crate::Premise::Where) because they relate variables
+/// rather than querying stored data.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Proposition {
     /// Relation query with separate namespace and name.
@@ -33,7 +36,7 @@ impl Proposition {
     /// Estimate the cost of this application given the current environment.
     /// Each application type knows how to calculate its cost based on what's bound.
     /// Returns None if the application cannot be executed without more constraints.
-    pub fn estimate(&self, env: &crate::Environment) -> Option<usize> {
+    pub fn estimate(&self, env: &Environment) -> Option<usize> {
         match self {
             Proposition::Relation(application) => application.estimate(env),
             Proposition::Concept(application) => application.estimate(env),
@@ -42,11 +45,7 @@ impl Proposition {
     }
 
     /// Evaluate this application against the given context, producing answers
-    pub fn evaluate<S: Source, M: crate::selection::Answers>(
-        self,
-        answers: M,
-        source: &S,
-    ) -> impl crate::selection::Answers {
+    pub fn evaluate<S: Source, M: Answers>(self, answers: M, source: &S) -> impl Answers {
         match self {
             Proposition::Relation(application) => Either::Left(Either::Left(
                 application.evaluate_with_provenance(source.clone(), answers),
@@ -59,7 +58,7 @@ impl Proposition {
     }
 
     /// Returns the parameter bindings for this application
-    pub fn parameters(&self) -> crate::Parameters {
+    pub fn parameters(&self) -> Parameters {
         match self {
             Proposition::Relation(application) => application.parameters(),
             Proposition::Concept(application) => application.parameters(),
@@ -68,7 +67,7 @@ impl Proposition {
     }
 
     /// Returns the schema describing this application's parameters
-    pub fn schema(&self) -> crate::Schema {
+    pub fn schema(&self) -> Schema {
         match self {
             Proposition::Relation(application) => application.schema(),
             Proposition::Concept(application) => application.schema(),

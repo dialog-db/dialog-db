@@ -1,5 +1,12 @@
 //! Read-side relation type representing a query result with full metadata.
 
+/// Relation application for queries.
+pub mod application;
+/// Relation descriptor for parameter signatures.
+pub mod descriptor;
+pub use application::RelationApplication;
+pub use descriptor::RelationDescriptor;
+
 pub use crate::artifact::{Artifact, Attribute, Cause, Entity, Value};
 pub use crate::attribute::Cardinality;
 use serde::{Deserialize, Serialize};

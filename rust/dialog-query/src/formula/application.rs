@@ -1,23 +1,30 @@
-pub use super::Proposition;
-pub use crate::error::{AnalyzerError, FormulaEvaluationError, PlanError, QueryError};
-use crate::predicate::formula::Cells;
-pub use crate::predicate::formula::bindings::Bindings;
-pub use crate::{Answer, Answers, try_stream};
-
-pub use crate::{Environment, Parameters, Requirement};
+use crate::error::{FormulaEvaluationError, QueryError};
+use crate::formula::bindings::Bindings;
+use crate::formula::cell::Cells;
+use crate::selection::{Answer, Answers};
+use crate::{Environment, Parameters, Schema, try_stream};
 use std::fmt::Display;
 use std::sync::Arc;
 
 /// Cost per parameter for formula evaluation
 pub const PARAM_COST: usize = 10;
 
-/// A formula bound to specific term mappings, usable as a premise in the
-/// deductive rule system alongside fact and concept applications.
+/// A formula premise bound to specific term arguments.
+///
+/// Unlike a [`RelationApplication`](crate::relation::application::RelationApplication)
+/// which reads from the fact store, a `FormulaApplication` performs pure
+/// computation: it reads already-bound variables via [`Bindings`], runs a
+/// user-defined `compute` function, and writes the results back as new
+/// variable bindings.
+///
+/// The `cells` field provides the formula's [`Cells`] schema (parameter
+/// names, types, and requirement levels) so the planner can determine
+/// prerequisites and estimate cost without invoking the formula.
 #[derive(Debug, Clone)]
 pub struct FormulaApplication {
     /// Formula identifier being applied
     pub name: &'static str,
-    /// Farmula cells for planning and analysis
+    /// Formula cells for planning and analysis
     pub cells: &'static Cells,
 
     /// Parameter of the application keyed by names
@@ -58,7 +65,7 @@ impl FormulaApplication {
     }
 
     /// Returns the schema for this formula
-    pub fn schema(&self) -> crate::Schema {
+    pub fn schema(&self) -> Schema {
         self.cells.into()
     }
 
@@ -96,7 +103,7 @@ impl FormulaApplication {
     }
 
     /// Evaluate this formula against the given answers stream, expanding each input answer
-    pub fn evaluate<M: crate::selection::Answers>(self, answers: M) -> impl Answers {
+    pub fn evaluate<M: Answers>(self, answers: M) -> impl Answers {
         // Formulas now work natively with Answer and track provenance via Factor::Derived
         let formula = self;
         try_stream! {

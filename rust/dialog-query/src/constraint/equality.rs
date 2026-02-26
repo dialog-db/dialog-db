@@ -6,8 +6,8 @@
 
 pub use crate::selection::Evidence;
 pub use crate::{
-    Answers, Environment, Field, Parameters, QueryError, Requirement, Schema, Term, Value,
-    try_stream,
+    Answers, Cardinality, Environment, Field, Parameters, QueryError, Requirement, Schema, Term,
+    Value, try_stream,
 };
 use std::fmt::Display;
 
@@ -61,7 +61,7 @@ impl Equality {
                 description: "Term that must be equal to the \"is\" term.".into(),
                 content_type: self.this.content_type(),
                 requirement: requirement.required(),
-                cardinality: crate::Cardinality::One,
+                cardinality: Cardinality::One,
             },
         );
         schema.insert(
@@ -70,7 +70,7 @@ impl Equality {
                 description: "Term that must be equal to the \"this\" term.".into(),
                 content_type: self.is.content_type(),
                 requirement: requirement.required(),
-                cardinality: crate::Cardinality::One,
+                cardinality: Cardinality::One,
             },
         );
         schema

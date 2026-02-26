@@ -237,7 +237,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let expanded = quote! {
         #namespace_static_decl
 
-        impl dialog_query::dsl::Predicate for #struct_name {
+        impl dialog_query::Predicate for #struct_name {
             type Proof = dialog_query::concept::With<Self>;
             type Application = dialog_query::concept::WithQuery<Self>;
             type Descriptor = dialog_query::attribute::AttributeDescriptor;

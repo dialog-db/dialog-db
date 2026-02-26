@@ -12,7 +12,7 @@
 use std::fmt;
 use std::marker::PhantomData;
 
-use crate::artifact::{Attribute as ArtifactAttribute, Entity, Type, Value};
+use crate::artifact::{Attribute as ArtifactAttribute, Cause, Entity, Type, TypeError, Value};
 use crate::constraint::{Constraint, Equality};
 use crate::error::SyntaxError;
 use crate::types::{IntoType, Scalar};
@@ -20,15 +20,24 @@ use crate::{Attribute, Premise};
 use serde::{Deserialize, Serialize};
 use std::hash::Hash;
 
-/// Term represents either a constant value or variable constraint of the
-/// predicate.
+/// Either a concrete value or a named variable placeholder.
 ///
-/// This is the main API type used throughout the dialog-query system.
-/// Generic over T to represent typed terms (e.g., Term<String>, Term<Value>).
+/// `Term<T>` is the fundamental building block of query patterns. When
+/// constructing a premise you fill its parameters with terms:
+/// - `Term::Constant(v)` — matches only the exact value `v`.
+/// - `Term::Variable { name, .. }` — matches any value and, if named,
+///   acts as an implicit join across premises that share the same name.
+///   Anonymous (blank) variables (`name: None`) match anything but do not
+///   participate in joins.
+///
+/// The type parameter `T` carries a compile-time type constraint. A
+/// `Term<String>` can only hold string values; `Term<Value>` is
+/// dynamically typed and accepts any scalar. During planning, the planner
+/// inspects terms to classify parameters as constants (already bound),
+/// variables (may need binding), or blanks (wildcards).
 ///
 /// # JSON Serialization
-/// Terms serialize to different JSON formats:
-/// - Named typed variable: `Term<String>`: `{ "?": { "name": "var_name", "type": "String" } }`
+/// - Named typed variable `Term<String>`: `{ "?": { "name": "var_name", "type": "String" } }`
 /// - Named untyped variable `Term<Value>`: `{ "?": { "name": "var_name" } }`
 /// - Anonymous typed variable `Term<String>`: `{ "?": { "type": "String" } }`
 /// - Anonymous untyped variable `Term<Value>`: `{ "?": {} }`
@@ -301,7 +310,7 @@ impl From<ArtifactAttribute> for Term<Value> {
 }
 
 impl From<Entity> for Term<Value> {
-    fn from(entity: crate::artifact::Entity) -> Self {
+    fn from(entity: Entity) -> Self {
         Term::Constant(Value::Entity(entity))
     }
 }
@@ -485,7 +494,7 @@ impl<T: Scalar> From<&Option<Term<T>>> for Term<T> {
 
 /// Convert Term<Value> to Term<Entity>
 impl TryFrom<Term<Value>> for Term<Entity> {
-    type Error = crate::artifact::TypeError;
+    type Error = TypeError;
 
     fn try_from(term: Term<Value>) -> Result<Self, Self::Error> {
         match term {
@@ -494,17 +503,14 @@ impl TryFrom<Term<Value>> for Term<Entity> {
                 content_type: Default::default(),
             }),
             Term::Constant(Value::Entity(e)) => Ok(Term::Constant(e)),
-            Term::Constant(other) => Err(crate::artifact::TypeError::TypeMismatch(
-                Type::Entity,
-                other.data_type(),
-            )),
+            Term::Constant(other) => Err(TypeError::TypeMismatch(Type::Entity, other.data_type())),
         }
     }
 }
 
 /// Convert Term<Value> to Term<Attribute>
-impl TryFrom<Term<Value>> for Term<crate::artifact::Attribute> {
-    type Error = crate::artifact::TypeError;
+impl TryFrom<Term<Value>> for Term<ArtifactAttribute> {
+    type Error = TypeError;
 
     fn try_from(term: Term<Value>) -> Result<Self, Self::Error> {
         match term {
@@ -513,21 +519,16 @@ impl TryFrom<Term<Value>> for Term<crate::artifact::Attribute> {
                 content_type: Default::default(),
             }),
             Term::Constant(Value::Symbol(attr)) => Ok(Term::Constant(attr)),
-            Term::Constant(other) => Err(crate::artifact::TypeError::TypeMismatch(
-                Type::Symbol,
-                other.data_type(),
-            )),
+            Term::Constant(other) => Err(TypeError::TypeMismatch(Type::Symbol, other.data_type())),
         }
     }
 }
 
 /// Convert Term<Value> to Term<Cause>
-impl TryFrom<Term<Value>> for Term<crate::artifact::Cause> {
-    type Error = crate::artifact::TypeError;
+impl TryFrom<Term<Value>> for Term<Cause> {
+    type Error = TypeError;
 
     fn try_from(term: Term<Value>) -> Result<Self, Self::Error> {
-        use crate::artifact::Cause;
-
         match term {
             Term::Variable { name, .. } => Ok(Term::Variable {
                 name,
@@ -535,15 +536,11 @@ impl TryFrom<Term<Value>> for Term<crate::artifact::Cause> {
             }),
             Term::Constant(Value::Bytes(b)) => {
                 // Use TryFrom<Vec<u8>> for Cause (from reference_type! macro)
-                let cause = Cause::try_from(b).map_err(|_| {
-                    crate::artifact::TypeError::TypeMismatch(Type::Bytes, Type::Bytes)
-                })?;
+                let cause = Cause::try_from(b)
+                    .map_err(|_| TypeError::TypeMismatch(Type::Bytes, Type::Bytes))?;
                 Ok(Term::Constant(cause))
             }
-            Term::Constant(other) => Err(crate::artifact::TypeError::TypeMismatch(
-                Type::Bytes,
-                other.data_type(),
-            )),
+            Term::Constant(other) => Err(TypeError::TypeMismatch(Type::Bytes, other.data_type())),
         }
     }
 }

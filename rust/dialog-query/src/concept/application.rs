@@ -6,21 +6,22 @@ pub mod rules;
 pub use rules::ConceptRules;
 
 use crate::attribute::AttributeDescriptor;
-use crate::planner::Fork;
-use crate::predicate::ConceptPredicate;
+use crate::concept::predicate::ConceptPredicate;
+use crate::error::InconsistencyError;
+use crate::planner::Disjunction;
 use crate::schema::CONCEPT_OVERHEAD;
+use crate::selection::Answers;
 use crate::selection::{Answer, Evidence};
-use crate::{Environment, Parameters, Schema, Source, Term, Value, try_stream};
+use crate::{
+    Cardinality, Environment, Parameters, QueryError, Schema, Source, Term, Value, try_stream,
+};
 use std::fmt::Display;
 
 /// Extract an Answer with parameter names from an Answer with user variable names
 ///
 /// This maps values from user-specified variable names to internal parameter names
 /// for scoped evaluation. All factors are copied with their original provenance.
-fn extract_parameters(
-    source: &Answer,
-    terms: &Parameters,
-) -> Result<Answer, crate::InconsistencyError> {
+fn extract_parameters(source: &Answer, terms: &Parameters) -> Result<Answer, InconsistencyError> {
     let mut answer = Answer::new();
 
     for (param_name, user_term) in terms.iter() {
@@ -58,7 +59,7 @@ fn merge_parameters(
     base: &Answer,
     result: &Answer,
     terms: &Parameters,
-) -> Result<Answer, crate::InconsistencyError> {
+) -> Result<Answer, InconsistencyError> {
     let mut merged = base.clone();
 
     // Map through parameters: for each parameter, if it exists in result,
@@ -143,11 +144,11 @@ impl ConceptApplication {
                 if let Some(term) = self.terms.get(name) {
                     if env.contains(term) {
                         match attribute.cardinality() {
-                            crate::Cardinality::One => {
+                            Cardinality::One => {
                                 bound_one = Some(attribute);
                                 break; // Best case found, stop searching
                             }
-                            crate::Cardinality::Many if bound_many.is_none() => {
+                            Cardinality::Many if bound_many.is_none() => {
                                 bound_many = Some(attribute);
                             }
                             _ => {}
@@ -155,10 +156,10 @@ impl ConceptApplication {
                     } else {
                         // Term exists but not bound
                         match attribute.cardinality() {
-                            crate::Cardinality::One if unbound_one.is_none() => {
+                            Cardinality::One if unbound_one.is_none() => {
                                 unbound_one = Some(attribute);
                             }
-                            crate::Cardinality::Many if unbound_many.is_none() => {
+                            Cardinality::Many if unbound_many.is_none() => {
                                 unbound_many = Some(attribute);
                             }
                             _ => {}
@@ -167,10 +168,10 @@ impl ConceptApplication {
                 } else {
                     // No term at all
                     match attribute.cardinality() {
-                        crate::Cardinality::One if unbound_one.is_none() => {
+                        Cardinality::One if unbound_one.is_none() => {
                             unbound_one = Some(attribute);
                         }
-                        crate::Cardinality::Many if unbound_many.is_none() => {
+                        Cardinality::Many if unbound_many.is_none() => {
                             unbound_many = Some(attribute);
                         }
                         _ => {}
@@ -236,11 +237,7 @@ impl ConceptApplication {
     /// key insight from magic set optimization applied locally: the adornment
     /// is computed at the point of use from what's actually bound, rather
     /// than carried globally through every evaluation step.
-    pub fn evaluate<S: Source, M: crate::selection::Answers>(
-        self,
-        answers: M,
-        source: &S,
-    ) -> impl crate::selection::Answers {
+    pub fn evaluate<S: Source, M: Answers>(self, answers: M, source: &S) -> impl Answers {
         let app = self;
         let source = source.clone();
 
@@ -262,15 +259,15 @@ impl ConceptApplication {
                 // Extract answer with parameter names for scoped evaluation
                 // Maps user variable names → internal parameter names
                 let initial_answer = extract_parameters(&input, &app.terms)
-                    .map_err(|e| crate::QueryError::FactStore(e.to_string()))?;
+                    .map_err(|e| QueryError::FactStore(e.to_string()))?;
                 let single_answers = initial_answer.seed();
 
                 // Merge results back, mapping parameter names → user variable names
                 // All factors are copied with their original provenance
-                for await result in Fork::clone(plan).evaluate(single_answers, &source) {
+                for await result in Disjunction::clone(plan).evaluate(single_answers, &source) {
                     let result_answer = result?;
                     let merged = merge_parameters(&input, &result_answer, &app.terms)
-                        .map_err(|e| crate::QueryError::FactStore(e.to_string()))?;
+                        .map_err(|e| QueryError::FactStore(e.to_string()))?;
                     yield merged;
                 }
             }
@@ -292,8 +289,8 @@ impl Display for ConceptApplication {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::predicate::ConceptPredicate;
-    use crate::proposition::relation::RelationApplication;
+    use crate::concept::predicate::ConceptPredicate;
+    use crate::relation::application::RelationApplication;
     use crate::selection::Answer;
     use crate::the;
     use crate::{
@@ -587,29 +584,27 @@ mod tests {
     fn test_deductive_rule_parameters() {
         use std::collections::HashSet;
 
-        let rule = DeductiveRule {
-            conclusion: ConceptPredicate::from([
-                (
-                    "name".to_string(),
-                    AttributeDescriptor::new(
-                        the!("person/name"),
-                        "Person name",
-                        Cardinality::One,
-                        Some(Type::String),
-                    ),
+        let predicate = ConceptPredicate::from([
+            (
+                "name".to_string(),
+                AttributeDescriptor::new(
+                    the!("person/name"),
+                    "Person name",
+                    Cardinality::One,
+                    Some(Type::String),
                 ),
-                (
-                    "age".to_string(),
-                    AttributeDescriptor::new(
-                        the!("person/age"),
-                        "Person age",
-                        Cardinality::One,
-                        Some(Type::UnsignedInt),
-                    ),
+            ),
+            (
+                "age".to_string(),
+                AttributeDescriptor::new(
+                    the!("person/age"),
+                    "Person age",
+                    Cardinality::One,
+                    Some(Type::UnsignedInt),
                 ),
-            ]),
-            premises: vec![],
-        };
+            ),
+        ]);
+        let rule = DeductiveRule::from(&predicate);
 
         let params: HashSet<&str> = rule.parameters().collect();
         assert!(params.contains("this"));
@@ -645,10 +640,11 @@ mod tests {
         use crate::error::{AnalyzerError, PlanError};
 
         // Test AnalyzerError creation
-        let rule = DeductiveRule {
-            conclusion: ConceptPredicate::new(),
-            premises: vec![],
-        };
+        let predicate = ConceptPredicate::from(vec![(
+            "name",
+            AttributeDescriptor::new(the!("test/name"), "", Cardinality::One, Some(Type::String)),
+        )]);
+        let rule = DeductiveRule::from(&predicate);
 
         let analyzer_error = AnalyzerError::UnusedParameter {
             rule: rule.clone(),
@@ -661,7 +657,7 @@ mod tests {
             PlanError::UnusedParameter { rule: r, parameter } => {
                 // Operator is now a computed URI
                 assert!(
-                    r.conclusion.this().to_string().starts_with("concept:"),
+                    r.conclusion().this().to_string().starts_with("concept:"),
                     "Operator should be a concept URI"
                 );
                 assert_eq!(parameter, "test_param");

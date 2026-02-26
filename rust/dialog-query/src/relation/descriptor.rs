@@ -1,6 +1,6 @@
 pub use crate::artifact::{Attribute, Cause};
 pub use crate::error::SchemaError;
-pub use crate::proposition::relation::RelationApplication;
+pub use crate::relation::application::RelationApplication;
 use crate::{Cardinality, Type};
 pub use crate::{Parameters, Term};
 
