@@ -7,7 +7,7 @@ use std::ops::Not;
 /// A domain-level write operation that can be asserted or retracted.
 ///
 /// `Claim` is the high-level write API. Types like [`Assertion`],
-/// [`With<A>`](crate::attribute::With), and user-defined concept structs
+/// [`With<A>`](crate:::With), and user-defined concept structs
 /// implement this trait. Asserting a claim adds facts to the knowledge
 /// base; retracting it removes them. The [`Revert`] wrapper inverts the
 /// direction — asserting a `Revert<C>` retracts the inner claim.
