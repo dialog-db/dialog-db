@@ -4,11 +4,11 @@
 //! execution plans keyed by adornment (binding pattern). This is the per-concept
 //! counterpart to the registry-level indexing in `RuleRegistry`.
 
+use super::adornment::Adornment;
 use crate::DeductiveRule;
+use crate::concept::predicate::ConceptPredicate;
 use crate::parameters::Parameters;
-use crate::planner::{Fork, Join};
-use crate::predicate::ConceptPredicate;
-use crate::proposition::concept::adornment::Adornment;
+use crate::planner::Disjunction;
 use crate::selection::Answer;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -22,7 +22,7 @@ use std::sync::{Arc, RwLock};
 pub struct ConceptRules {
     implicit: DeductiveRule,
     installed: Vec<DeductiveRule>,
-    plans: Arc<RwLock<HashMap<Adornment, Arc<Fork>>>>,
+    plans: Arc<RwLock<HashMap<Adornment, Arc<Disjunction>>>>,
 }
 
 impl ConceptRules {
@@ -46,7 +46,7 @@ impl ConceptRules {
     }
 
     /// Get or compute a cached plan for the given binding pattern.
-    pub fn plan(&self, terms: &Parameters, answer: &Answer) -> Arc<Fork> {
+    pub fn plan(&self, terms: &Parameters, answer: &Answer) -> Arc<Disjunction> {
         let adornment = Adornment::derive(terms, answer);
 
         // Fast path: read lock
@@ -57,12 +57,9 @@ impl ConceptRules {
         // Slow path: replan all rules with inferred scope
         let scope = adornment.into_environment(terms);
         let all_rules = std::iter::once(&self.implicit).chain(&self.installed);
-        let fork = all_rules
-            .map(|rule| Join::from(&rule.premises))
-            .map(|join| join.plan(&scope).unwrap_or(join))
-            .fold(Fork::new(), |fork, join| fork.or(join));
+        let plan: Disjunction = all_rules.map(|rule| rule.plan(&scope)).collect();
 
-        let fork = Arc::new(fork);
+        let fork = Arc::new(plan);
         self.plans.write().unwrap().insert(adornment, fork.clone());
         fork
     }

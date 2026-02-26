@@ -17,8 +17,6 @@
 // Allow macro-generated code to reference this crate as `dialog_query::`
 extern crate self as dialog_query;
 
-/// Static analysis of rules and formulas for query planning.
-pub mod analyzer;
 /// Re-exports from the dialog-artifacts crate.
 pub mod artifact;
 /// Attribute definitions and schema metadata.
@@ -34,8 +32,6 @@ pub mod claim;
 pub mod concept;
 /// Constraint system for filtering and validating variable bindings.
 pub mod constraint;
-/// DSL types for constructing type-safe queries.
-pub mod dsl;
 /// Variable binding environment used during query planning.
 pub mod environment;
 /// Error types for the query engine.
@@ -50,7 +46,7 @@ pub mod negation;
 pub mod parameters;
 /// Query planner that compiles premises into execution plans.
 pub mod planner;
-/// Predicate definitions including concepts, facts, and formulas.
+/// Predicate trait and type aliases for type-safe queries.
 pub mod predicate;
 /// Premise trait for rule conditions and pattern matching.
 pub mod premise;
@@ -76,40 +72,29 @@ pub mod types;
 pub use artifact::{Attribute as ArtifactAttribute, Entity, Type, Value};
 pub use assertion::Assertion;
 pub use attribute::{Attribute, AttributeDescriptor, Cardinality, The};
-pub use claim::Claim;
+pub use claim::*;
+pub use concept::application::ConceptRules;
+pub use concept::predicate::DynamicProof;
 pub use concept::{Concept, With, WithQuery, WithTerms};
-pub use dialog_macros::{Attribute, Concept, Formula};
-pub use dsl::{Input, Match, Predicate, Query};
-pub use error::{InconsistencyError, QueryError};
-pub use negation::Negation;
-pub use parameters::Parameters;
-pub use predicate::concept::DynamicProof;
-pub use predicate::{DeductiveRule, Formula};
-pub use premise::Premise;
+pub use environment::*;
+pub use error::*;
+pub use formula::*;
+pub use negation::*;
+pub use parameters::*;
+pub use planner::*;
+pub use predicate::*;
+pub use premise::*;
 pub use proposition::Proposition;
-pub use proposition::concept::ConceptRules;
-pub use query::{Application, Source, Store};
+pub use query::{Application, Output, Source, Store};
 pub use relation::Relation;
-pub use rule::{Premises, When};
-pub use schema::{Field, Requirement, Schema};
-pub use session::transaction::{Edit, Transaction, TransactionError};
+pub use rule::*;
+pub use schema::*;
+pub use selection::*;
+pub use session::transaction::{Edit, Transaction};
 pub use session::{QuerySession, Session};
-
-pub use async_stream::try_stream;
-pub use environment::Environment;
-pub use selection::{Answer, Answers};
 pub use stream::*;
 pub use term::*;
 pub use types::IntoType;
 
-/// Re-export commonly used types.
-pub mod prelude {
-    pub use crate::artifact::{Type, Value};
-    pub use crate::environment::Environment;
-    pub use crate::error::QueryError;
-    pub use crate::premise::Premise;
-    pub use crate::rule::Premises;
-    pub use crate::term::Term;
-    pub use crate::types::IntoType;
-    // Macros are automatically available due to #[macro_export]
-}
+pub use async_stream::try_stream;
+pub use dialog_macros::{Attribute, Concept, Formula};

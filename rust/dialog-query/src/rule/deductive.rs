@@ -1,10 +1,10 @@
-pub use crate::analyzer::Plan;
+pub use crate::concept::predicate::ConceptPredicate;
 use crate::error::{CompileError, SchemaError};
-pub use crate::planner::Join;
-pub use crate::predicate::ConceptPredicate;
+pub use crate::planner::Plan;
+pub use crate::planner::{Conjunction, Planner};
 pub use crate::premise::Premise;
 pub use crate::{Attribute, Cardinality, Parameters, Proposition, Requirement, Value};
-use crate::{Term, Type};
+use crate::{Environment, Term, Type};
 use std::fmt::Display;
 
 /// Represents a deductive rule that can be applied creating a premise.
@@ -12,11 +12,10 @@ use std::fmt::Display;
 pub struct DeductiveRule {
     /// Conclusion that this rule reaches if all premises hold. This is
     /// typically what datalog calls rule head.
-    pub conclusion: ConceptPredicate,
-    /// Premises that must hold for rule to reach it's conclusion. Typically
-    /// datalog calls these rule body. These are guaranteed to be viable plans
-    /// after compilation.
-    pub premises: Vec<Plan>,
+    conclusion: ConceptPredicate,
+    /// Execution plan for the rule's premises, ordered for optimal
+    /// evaluation. Produced by [`Planner::plan`] during compilation.
+    join: Conjunction,
 }
 impl DeductiveRule {
     /// Create a new uncompiled rule from a conclusion and premises
@@ -27,6 +26,19 @@ impl DeductiveRule {
             premises,
         };
         uncompiled.compile()
+    }
+
+    /// Returns the conclusion predicate for this rule.
+    pub fn conclusion(&self) -> &ConceptPredicate {
+        &self.conclusion
+    }
+
+    /// Re-plan this rule's premises against a new scope.
+    ///
+    /// If replanning with the new bindings fails, falls back to the
+    /// original compiled join plan.
+    pub fn plan(&self, scope: &Environment) -> Conjunction {
+        self.join.plan(scope).unwrap_or_else(|_| self.join.clone())
     }
 
     /// Returns an iterator over the operand names of this rule's conclusion.
@@ -60,17 +72,17 @@ impl UncompiledDeductiveRule {
         // order in such scenario or to discover that some premise in the rule
         // is not satisfiable e.g. if formula uses rule parameter in the required
         // cell which is not derived from any other premise.
-        let plan = Join::try_from(self.premises)?;
+        let join = Planner::from(self.premises).plan(&Environment::new())?;
 
         // We also verify that every rule parameter was derived by one of the
         // rule premises, otherwise we produce an error since rule evaluation
         // would not be able to bind such parameter.
         for name in self.conclusion.operands() {
-            if !plan.binds.contains(&Term::<Value>::var(name)) {
+            if !join.binds.contains(&Term::<Value>::var(name)) {
                 // Create a temporary rule for the error message
                 let temp_rule = DeductiveRule {
                     conclusion: self.conclusion.clone(),
-                    premises: plan.steps.clone(),
+                    join: join.clone(),
                 };
                 Err(CompileError::UnboundVariable {
                     rule: temp_rule,
@@ -81,7 +93,7 @@ impl UncompiledDeductiveRule {
 
         Ok(DeductiveRule {
             conclusion: self.conclusion,
-            premises: plan.steps,
+            join,
         })
     }
 }
@@ -103,8 +115,8 @@ impl Display for DeductiveRule {
 impl From<&ConceptPredicate> for DeductiveRule {
     fn from(concept: &ConceptPredicate) -> Self {
         use crate::artifact::Entity;
-        use crate::predicate::RelationDescriptor;
-        use crate::proposition::RelationApplication;
+        use crate::relation::application::RelationApplication;
+        use crate::relation::descriptor::RelationDescriptor;
 
         let mut premises = Vec::new();
 
@@ -135,8 +147,8 @@ mod tests {
     use super::*;
     use crate::artifact::{Entity, Type};
     use crate::attribute::AttributeDescriptor;
-    use crate::predicate::RelationDescriptor;
-    use crate::proposition::RelationApplication;
+    use crate::relation::application::RelationApplication;
+    use crate::relation::descriptor::RelationDescriptor;
     use crate::the;
 
     #[dialog_common::test]
@@ -378,7 +390,7 @@ mod tests {
         ];
         let result = DeductiveRule::new(conclusion, premises);
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result.err());
-        assert_eq!(result.unwrap().premises.len(), 2);
+        assert_eq!(result.unwrap().join.steps.len(), 2);
     }
 
     #[dialog_common::test]

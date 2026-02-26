@@ -1,10 +1,9 @@
 //! Error types for the query engine
 
-pub use crate::analyzer::AnalyzerError;
-pub use crate::analyzer::Required;
-use crate::artifact::{DialogArtifactsError, Type, Value};
-pub use crate::predicate::DeductiveRule;
+use crate::artifact::{DialogArtifactsError, Type, TypeError as ArtifactTypeError, Value};
+pub use crate::planner::Prerequisites;
 pub use crate::proposition::Proposition;
+pub use crate::rule::deductive::DeductiveRule;
 use crate::term::Term;
 pub use thiserror::Error;
 
@@ -210,7 +209,7 @@ pub enum InconsistencyError {
 
     /// A type conversion between value types failed
     #[error("Type conversion error: {0}")]
-    TypeConversion(#[from] crate::artifact::TypeError),
+    TypeConversion(#[from] ArtifactTypeError),
 }
 
 /// Errors that can occur during formula evaluation
@@ -329,33 +328,33 @@ impl From<InconsistencyError> for FormulaEvaluationError {
             InconsistencyError::UnboundVariableError(var) => {
                 FormulaEvaluationError::UnboundVariable {
                     parameter: var.clone(),
-                    term: crate::Term::var(&var),
+                    term: Term::var(&var),
                 }
             }
             InconsistencyError::AssignmentError(msg) => {
                 FormulaEvaluationError::VariableInconsistency {
                     parameter: msg,
-                    actual: crate::Term::var("_"),
-                    expected: crate::Term::var("_"),
+                    actual: Term::var("_"),
+                    expected: Term::var("_"),
                 }
             }
             InconsistencyError::UnexpectedType { expected, actual } => {
                 FormulaEvaluationError::TypeMismatch { expected, actual }
             }
             InconsistencyError::TypeConversion(type_error) => {
-                let crate::artifact::TypeError::TypeMismatch(expected, actual) = type_error;
+                let ArtifactTypeError::TypeMismatch(expected, actual) = type_error;
                 FormulaEvaluationError::TypeMismatch { expected, actual }
             }
             InconsistencyError::TypeError(msg) => FormulaEvaluationError::VariableInconsistency {
                 parameter: msg,
-                actual: crate::Term::var("_"),
-                expected: crate::Term::var("_"),
+                actual: Term::var("_"),
+                expected: Term::var("_"),
             },
             InconsistencyError::TypeMismatch { expected, actual } => {
                 FormulaEvaluationError::VariableInconsistency {
                     parameter: "value".to_string(),
-                    actual: crate::Term::Constant(actual),
-                    expected: crate::Term::Constant(expected),
+                    actual: Term::Constant(actual),
+                    expected: Term::Constant(expected),
                 }
             }
             InconsistencyError::UnconstrainedSelector => {
@@ -603,7 +602,7 @@ pub enum CompileError {
     #[error("Required bindings {required} are not bound in the rule environment")]
     RequiredBindings {
         /// The set of required but unbound bindings
-        required: Required,
+        required: Prerequisites,
     },
     /// A variable referenced in the rule is not bound
     #[error("Rule {rule} does not bind a variable \"{variable}\"")]
@@ -624,4 +623,88 @@ pub enum SyntaxError {
         /// The invalid attribute string
         actual: String,
     },
+}
+
+/// Errors that can occur during rule or formula analysis.
+/// These errors indicate structural problems with rules that would prevent execution.
+#[derive(Error, Debug, Clone, PartialEq)]
+pub enum AnalyzerError {
+    /// A rule parameter is defined in the conclusion but never used by any premise.
+    /// This indicates a likely error in the rule definition.
+    #[error("Rule {rule} does not makes use of the \"{parameter}\" parameter")]
+    UnusedParameter {
+        /// The rule with the unused parameter.
+        rule: DeductiveRule,
+        /// The name of the unused parameter.
+        parameter: String,
+    },
+    /// A rule application is missing a required parameter that the rule needs.
+    #[error("Rule {rule} application omits required parameter \"{parameter}\"")]
+    RequiredParameter {
+        /// The rule missing the parameter.
+        rule: DeductiveRule,
+        /// The name of the missing required parameter.
+        parameter: String,
+    },
+    /// A formula application is missing a required cell value.
+    #[error("Formula {formula} application omits required cell \"{cell}\"")]
+    OmitsRequiredCell {
+        /// The formula missing the cell.
+        formula: &'static str,
+        /// The name of the missing required cell.
+        cell: String,
+    },
+    /// A rule uses a local variable that cannot be satisfied by any premise.
+    /// This makes the rule impossible to execute.
+    #[error("Rule {rule} makes use of local {variable} that no premise can provide")]
+    RequiredLocalVariable {
+        /// The rule with the unsatisfiable local variable.
+        rule: DeductiveRule,
+        /// The name of the local variable no premise can provide.
+        variable: String,
+    },
+
+    /// A rule references a variable that is never bound by any premise or parameter.
+    #[error("Rule {rule} does not bind a variable \"{variable}\"")]
+    UnboundVariable {
+        /// The rule containing the unbound variable.
+        rule: DeductiveRule,
+        /// The name of the variable that is never bound.
+        variable: String,
+    },
+}
+
+/// Errors that can occur when estimating the cost of a premise.
+#[derive(Error, Debug, Clone, PartialEq)]
+pub enum EstimateError<'a> {
+    /// One or more required parameters are not yet bound in the environment.
+    #[error("Required parameters {required} are not bound in the environment ")]
+    RequiredParameters {
+        /// The set of required bindings that are missing.
+        required: &'a Prerequisites,
+    },
+}
+
+impl<'a> From<EstimateError<'a>> for CompileError {
+    fn from(error: EstimateError<'a>) -> Self {
+        match error {
+            EstimateError::RequiredParameters { required } => CompileError::RequiredBindings {
+                required: required.clone(),
+            },
+        }
+    }
+}
+
+/// Error types that can occur during transaction operations
+#[derive(Debug, Error)]
+pub enum TransactionError {
+    /// The requested operation is not valid
+    #[error("Invalid operation: {reason}")]
+    InvalidOperation {
+        /// Reason why the operation is invalid
+        reason: String,
+    },
+    /// An error from the underlying storage layer
+    #[error("Storage error: {0}")]
+    Storage(#[from] DialogArtifactsError),
 }

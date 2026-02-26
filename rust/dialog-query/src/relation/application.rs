@@ -1,25 +1,30 @@
-pub use super::Proposition;
 use crate::Cardinality;
 use crate::Relation;
 pub use crate::artifact::Attribute;
 pub use crate::artifact::{ArtifactSelector, Constrained};
+use crate::environment::Environment;
 pub use crate::error::{AnalyzerError, QueryResult};
+use crate::negation::Negation;
+pub use crate::proposition::Proposition;
+use crate::query::Application;
 pub use crate::query::Output;
+use crate::relation::descriptor::RelationDescriptor;
+use crate::schema::SEGMENT_READ_COST;
 use crate::selection::{Answer, Answers, Evidence};
-use crate::{Entity, Field, Parameters, QueryError, Requirement, Schema, Term, Type, Value};
-use crate::{Source, try_stream};
+use crate::{
+    Entity, Field, Parameters, Premise, QueryError, Requirement, Schema, Source, Term, Type, Value,
+    try_stream,
+};
 use dialog_artifacts::{Artifact, Cause};
 use futures_util::future::Either;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 
-use crate::predicate::RelationDescriptor;
-
 /// Per-match cost of the secondary lookup required when scanning the value
 /// index (VAE) with `Cardinality::One`. Each match from the primary scan
 /// needs a secondary `(attribute, entity)` lookup to verify it is the
 /// winning value — the one with the highest cause.
-const SECONDARY_LOOKUP_COST: usize = crate::schema::SEGMENT_READ_COST;
+const SECONDARY_LOOKUP_COST: usize = SEGMENT_READ_COST;
 
 /// Given two artifacts for the same `(attribute, entity)` pair, return the
 /// winner. The winner is the artifact with the higher cause; when causes are
@@ -81,9 +86,17 @@ fn verify_winner<S: Source>(
     }
 }
 
-/// Compiled relation query with separate namespace and name terms.
-/// At the storage boundary, namespace + name constants are combined into a
-/// `dialog_artifacts::Attribute` via `"namespace/name".parse()`.
+/// A relation premise bound to specific term arguments.
+///
+/// Represents a query against the fact store in the form
+/// `(namespace, name, entity, value, cause)` where each position is a
+/// [`Term`] — either a constant that constrains the lookup or a variable
+/// that will be bound by the results.
+///
+/// At the storage boundary the `namespace` and `name` constants are
+/// combined into a `dialog_artifacts::Attribute` via `"namespace/name".parse()`.
+/// The optional [`RelationDescriptor`] provides type and cardinality
+/// metadata used by the cost estimator during planning.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RelationApplication {
     /// Namespace of the attribute (e.g., "person")
@@ -258,7 +271,7 @@ impl RelationApplication {
     /// attribute), each match from the VAE scan requires a secondary lookup on
     /// the `(attribute, entity)` pair to verify that the matched value is the
     /// winner. This adds `SECONDARY_LOOKUP_COST` per match to the estimate.
-    pub fn estimate(&self, env: &crate::Environment) -> Option<usize> {
+    pub fn estimate(&self, env: &Environment) -> Option<usize> {
         // The attribute is "known" if both namespace and name are bound
         let the = env.contains(&self.namespace) && env.contains(&self.name);
         let of = env.contains(&self.of);
@@ -490,11 +503,11 @@ impl RelationApplication {
     where
         Self: Sized,
     {
-        crate::query::Application::perform(self, source)
+        Application::perform(self, source)
     }
 }
 
-impl crate::query::Application for RelationApplication {
+impl Application for RelationApplication {
     type Proof = Relation;
 
     fn evaluate<S: Source, M: Answers>(self, answers: M, source: &S) -> impl Answers {
@@ -564,10 +577,10 @@ impl Display for RelationApplication {
 }
 
 impl std::ops::Not for RelationApplication {
-    type Output = crate::Premise;
+    type Output = Premise;
 
     fn not(self) -> Self::Output {
-        crate::Premise::Unless(crate::Negation::not(Proposition::Relation(Box::new(self))))
+        Premise::Unless(Negation::not(Proposition::Relation(Box::new(self))))
     }
 }
 
@@ -577,15 +590,15 @@ impl From<RelationApplication> for Proposition {
     }
 }
 
-impl From<RelationApplication> for crate::Premise {
+impl From<RelationApplication> for Premise {
     fn from(application: RelationApplication) -> Self {
-        crate::Premise::When(Proposition::Relation(Box::new(application)))
+        Premise::When(Proposition::Relation(Box::new(application)))
     }
 }
 
-impl From<&RelationApplication> for crate::Premise {
+impl From<&RelationApplication> for Premise {
     fn from(application: &RelationApplication) -> Self {
-        crate::Premise::When(Proposition::Relation(Box::new(application.clone())))
+        Premise::When(Proposition::Relation(Box::new(application.clone())))
     }
 }
 

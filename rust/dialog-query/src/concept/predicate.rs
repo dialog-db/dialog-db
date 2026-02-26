@@ -1,15 +1,16 @@
+use crate::Predicate;
 use crate::attribute::{AttributeDescriptor, Attribution};
 use crate::claim::Revert;
+use crate::concept::application::ConceptApplication;
 use crate::concept::{Concept, ConceptProof};
-use crate::dsl::Predicate;
 use crate::error::SchemaError;
-use crate::proposition::ConceptApplication;
-use crate::selection::Answer;
+use crate::query::{Application, Source};
+use crate::selection::{Answer, Answers};
 use crate::term::Term;
 use crate::types::Scalar;
 use crate::{
     Assertion, Cardinality, Claim, Entity, Field, Parameters, Proposition, QueryError, Requirement,
-    Schema, Type, Value,
+    Schema, Transaction, Type, Value,
 };
 
 use base58::ToBase58;
@@ -283,7 +284,7 @@ impl Conception {
 }
 
 impl Claim for Conception {
-    fn assert(self, transaction: &mut crate::Transaction) {
+    fn assert(self, transaction: &mut Transaction) {
         for attribution in self.with {
             transaction.associate(Assertion::new(
                 attribution.the,
@@ -292,7 +293,7 @@ impl Claim for Conception {
             ));
         }
     }
-    fn retract(self, transaction: &mut crate::Transaction) {
+    fn retract(self, transaction: &mut Transaction) {
         for attribution in self.with {
             transaction.dissociate(Assertion::new(
                 attribution.the,
@@ -419,14 +420,10 @@ impl From<ConceptApplication> for ConceptPredicate {
     }
 }
 
-impl crate::query::Application for ConceptApplication {
+impl Application for ConceptApplication {
     type Proof = DynamicProof;
 
-    fn evaluate<S: crate::query::Source, M: crate::selection::Answers>(
-        self,
-        answers: M,
-        source: &S,
-    ) -> impl crate::selection::Answers {
+    fn evaluate<S: Source, M: Answers>(self, answers: M, source: &S) -> impl Answers {
         ConceptApplication::evaluate(self, answers, source)
     }
 

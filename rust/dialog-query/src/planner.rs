@@ -1,16 +1,34 @@
-use crate::analyzer::{Analysis, Plan};
+mod candidate;
+mod conjunction;
+mod disjunction;
+mod plan;
+mod prerequisites;
+
+pub use candidate::*;
+pub use conjunction::*;
+pub use disjunction::*;
+pub use plan::*;
+pub use prerequisites::*;
+
 use crate::artifact::Value;
 use crate::error::CompileError;
-pub use crate::error::{AnalyzerError, PlanError};
-pub use crate::premise::Premise;
-use crate::stream::{fork_stream, stream_select};
-pub use crate::term::Term;
-pub use crate::{Environment, Source, try_stream};
-use core::pin::Pin;
+use crate::term::Term;
+use crate::{Environment, Premise};
 
-/// Query planner that optimizes the order of premise execution based on cost
-/// and dependency analysis. Uses a state machine approach to iteratively
-/// select the best premise to execute next.
+/// State machine that greedily selects the cheapest viable premise at each
+/// step, building an ordered execution plan.
+///
+/// The planner starts in `Idle` with raw premises. On the first call to
+/// [`top`](Planner::top) it analyzes every premise against the current
+/// [`Environment`](crate::Environment), picks the viable one with the
+/// lowest cost, and transitions to `Active` with the remaining candidates
+/// cached as [`Candidate`] values. Subsequent calls incrementally update
+/// these candidates as new bindings arrive, potentially unblocking premises
+/// that were previously missing prerequisites.
+///
+/// The planner is consumed by [`Conjunction::try_from`](super::Conjunction) and
+/// [`Conjunction::plan`](super::Conjunction) which repeatedly call `top` until all
+/// premises have been planned or an error is raised.
 pub enum Planner {
     /// Initial state with unprocessed premises.
     Idle {
@@ -19,25 +37,57 @@ pub enum Planner {
     },
     /// Processing state with cached candidates and current scope.
     Active {
-        /// Analyzed candidates being evaluated for selection
-        candidates: Vec<Analysis>,
+        /// Candidates being evaluated for selection
+        candidates: Vec<Candidate>,
     },
 }
 
 impl Planner {
+    /// Produce an ordered execution plan ([`Conjunction`]) for the given scope.
+    ///
+    /// Repeatedly selects the cheapest viable candidate until all premises
+    /// have been planned. Returns an error if any premise has unsatisfiable
+    /// prerequisites.
+    pub fn plan(mut self, scope: &Environment) -> Result<Conjunction, CompileError> {
+        let env = scope.clone();
+        let mut bound = scope.clone();
+        let mut steps = vec![];
+        let mut cost = 0;
+
+        while !self.done() {
+            let plan = self.top(&bound)?;
+            cost += plan.cost();
+            bound.extend(plan.binds());
+            steps.push(plan);
+        }
+
+        let mut binds = Environment::new();
+        for var_name in &bound.variables {
+            let var: Term<Value> = Term::var(var_name);
+            if !env.contains(&var) {
+                binds.add(&var);
+            }
+        }
+
+        Ok(Conjunction {
+            steps,
+            cost,
+            binds,
+            env,
+        })
+    }
+
     /// Helper to create a planning error from failed candidates.
-    fn fail(analyses: &[Analysis]) -> Result<Plan, CompileError> {
-        // If there are no candidates at all, return empty Required
-        if analyses.is_empty() {
+    fn fail(candidates: &[Candidate]) -> Result<Plan, CompileError> {
+        if candidates.is_empty() {
             return Err(CompileError::RequiredBindings {
-                required: crate::analyzer::Required::new(),
+                required: Prerequisites::new(),
             });
         }
 
-        // Return the first required bindings error we find
-        for analysis in analyses {
-            if let Analysis::Blocked { requires, .. } = analysis
-                && requires.count() > 0
+        for candidate in candidates {
+            if let Candidate::Blocked { requires, .. } = candidate
+                && !requires.is_empty()
             {
                 return Err(CompileError::RequiredBindings {
                     required: requires.clone(),
@@ -62,15 +112,14 @@ impl Planner {
         match self {
             Planner::Idle { premises } => {
                 let mut candidates = vec![];
-                let mut best: Option<(usize, usize)> = None; // (cost, index)
+                let mut best: Option<(usize, usize)> = None;
 
-                // Analyze each premise to create initial candidates
                 for (index, premise) in premises.iter().enumerate() {
-                    let analysis = premise.analyze(env);
+                    let mut candidate = Candidate::from(premise.clone());
+                    candidate.update(env);
 
-                    // Check if this analysis is viable
-                    if analysis.is_viable() {
-                        let cost = analysis.cost();
+                    if candidate.is_viable() {
+                        let cost = candidate.cost();
 
                         if let Some((best_cost, _)) = &best {
                             if cost < *best_cost {
@@ -81,28 +130,25 @@ impl Planner {
                         }
                     }
 
-                    candidates.push(analysis);
+                    candidates.push(candidate);
                 }
 
                 if let Some((_, best_index)) = best {
-                    let analysis = candidates.remove(best_index);
+                    let candidate = candidates.remove(best_index);
                     *self = Planner::Active { candidates };
-                    Plan::try_from(analysis)
+                    Plan::try_from(candidate)
                 } else {
                     Self::fail(&candidates)
                 }
             }
             Planner::Active { candidates } => {
-                let mut best: Option<(usize, usize)> = None; // (cost, index)
+                let mut best: Option<(usize, usize)> = None;
 
-                // Update all candidates with new bindings
-                for (index, analysis) in candidates.iter_mut().enumerate() {
-                    // Update this analysis with the current environment
-                    analysis.update(env);
+                for (index, candidate) in candidates.iter_mut().enumerate() {
+                    candidate.update(env);
 
-                    // Check if this analysis is now viable
-                    if analysis.is_viable() {
-                        let cost = analysis.cost();
+                    if candidate.is_viable() {
+                        let cost = candidate.cost();
 
                         if let Some((best_cost, _)) = &best {
                             if cost < *best_cost {
@@ -115,13 +161,19 @@ impl Planner {
                 }
 
                 if let Some((_, best_index)) = best {
-                    let analysis = candidates.remove(best_index);
-                    Plan::try_from(analysis)
+                    let candidate = candidates.remove(best_index);
+                    Plan::try_from(candidate)
                 } else {
                     Self::fail(candidates)
                 }
             }
         }
+    }
+}
+
+impl From<Vec<Premise>> for Planner {
+    fn from(premises: Vec<Premise>) -> Self {
+        Self::Idle { premises }
     }
 }
 
@@ -133,294 +185,6 @@ impl From<&Vec<Plan>> for Planner {
     }
 }
 
-/// Represents a join plan - the result of planning multiple premises together.
-/// Contains the ordered sequence of steps, total cost, and variable scopes.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Join {
-    /// The ordered steps to execute
-    pub steps: Vec<Plan>,
-    /// Total execution cost
-    pub cost: usize,
-    /// Variables provided/bound by this join
-    pub binds: Environment,
-    /// Variables required in the environment to execute this join
-    pub env: Environment,
-}
-
-impl Join {
-    /// Replan this join with a different scope by converting existing steps to candidates
-    pub fn plan(&self, scope: &Environment) -> Result<Self, CompileError> {
-        let env = scope.clone();
-        let mut bound = scope.clone();
-        let mut steps = vec![];
-        let mut cost = 0;
-
-        // Convert existing plans back to analyses for replanning
-        // let candidates: Vec<Analysis> = self.steps.iter().map(|plan| plan.into()).collect();
-
-        // Re-analyze all premises with the new scope instead of converting Plans to Analyses
-        // This ensures proper Blocked/Viable status based on the new environment
-        let candidates: Vec<Analysis> = self
-            .steps
-            .iter()
-            .map(|plan| {
-                let mut analysis = Analysis::from(plan.premise.clone());
-                analysis.update(scope);
-                analysis
-            })
-            .collect();
-
-        let mut planner = Planner::Active { candidates };
-
-        while !planner.done() {
-            let plan = planner.top(&bound)?;
-
-            cost += plan.cost();
-            // Extend the scope with what this premise binds
-            bound.extend(plan.binds());
-
-            steps.push(plan);
-        }
-
-        // binds is the difference between final scope and initial env
-        let mut binds = Environment::new();
-        for var_name in &bound.variables {
-            let var: Term<Value> = Term::var(var_name);
-            if !env.contains(&var) {
-                binds.add(&var);
-            }
-        }
-
-        Ok(Join {
-            steps,
-            cost,
-            binds,
-            env,
-        })
-    }
-}
-
-impl TryFrom<Vec<Premise>> for Join {
-    type Error = CompileError;
-
-    fn try_from(premises: Vec<Premise>) -> Result<Self, Self::Error> {
-        let env = Environment::new();
-        let mut bound = Environment::new();
-        let mut steps = vec![];
-        let mut cost = 0;
-
-        let mut planner = Planner::Idle { premises };
-
-        while !planner.done() {
-            let plan = planner.top(&bound)?;
-
-            cost += plan.cost();
-            // Extend the scope with what this premise binds
-            bound.extend(plan.binds());
-
-            steps.push(plan);
-        }
-
-        // binds is the difference between final scope and initial env
-        let mut binds = Environment::new();
-        for var_name in &bound.variables {
-            let var: Term<Value> = Term::var(var_name);
-            if !env.contains(&var) {
-                binds.add(&var);
-            }
-        }
-
-        Ok(Self {
-            steps,
-            cost,
-            binds,
-            env,
-        })
-    }
-}
-
-impl From<&Vec<Plan>> for Join {
-    fn from(plans: &Vec<Plan>) -> Self {
-        let env = Environment::new();
-        let mut bound = Environment::new();
-        let mut steps = vec![];
-        let mut cost = 0;
-
-        let mut planner: Planner = plans.into();
-
-        while !planner.done() {
-            let plan = planner
-                .top(&bound)
-                .expect("Plan from empty scope can be planned in non-empty scope");
-
-            cost += plan.cost();
-            // Extend the scope with what this premise binds
-            bound.extend(plan.binds());
-
-            steps.push(plan);
-        }
-
-        // binds is the difference between final scope and initial env
-        let mut binds = Environment::new();
-        for var_name in &bound.variables {
-            let var: Term<Value> = Term::var(var_name);
-            if !env.contains(&var) {
-                binds.add(&var);
-            }
-        }
-
-        Self {
-            steps,
-            cost,
-            binds,
-            env,
-        }
-    }
-}
-
-impl Join {
-    /// Evaluate this join plan by executing all steps in order.
-    /// Each step flows results to the next, building up bindings.
-    pub fn evaluate<S: Source, M: crate::selection::Answers>(
-        self,
-        answers: M,
-        source: &S,
-    ) -> impl crate::selection::Answers {
-        let chain = Chain::from(self.steps);
-        chain.evaluate(answers, source)
-    }
-}
-
-/// Recursive chain structure for joining 2+ plan steps.
-/// This explicit recursion at the value level avoids type-level recursion
-/// that would cause compiler stack overflow.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub enum Chain {
-    /// Base case - passes through the selection unchanged.
-    #[default]
-    Empty,
-    /// Recursive case - joins a plan with the rest of the join chain.
-    Join(Box<Chain>, Box<Plan>),
-}
-
-impl Chain {
-    /// Creates a new empty join (identity).
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Adds a plan to this join chain.
-    pub fn and(self, plan: Plan) -> Self {
-        Chain::Join(Box::new(self), Box::new(plan))
-    }
-
-    /// Creates a join from a vector of plans by chaining them together.
-    pub fn from(plans: Vec<Plan>) -> Self {
-        plans
-            .into_iter()
-            .fold(Self::Empty, |join, plan| join.and(plan))
-    }
-
-    /// Evaluate this chain by executing plans in sequence.
-    /// Each step feeds its output as input to the next.
-    ///
-    /// Returns `Pin<Box<...>>` because Chain is recursive — left.evaluate
-    /// calls back into this method. Boxing caps each step to a pointer so
-    /// premise futures (~35KB in release builds) don't compound on the stack
-    /// as the chain grows.
-    fn evaluate<S: Source, M: crate::selection::Answers>(
-        self,
-        answers: M,
-        source: &S,
-    ) -> Pin<Box<dyn crate::selection::Answers>> {
-        match self {
-            Chain::Empty => Box::pin(answers),
-            Chain::Join(left, right) => {
-                let left_answers = left.evaluate(answers, source);
-                // Box the premise evaluation to move it to the heap.
-                // Without this, each chain step would inline the full
-                // premise stream (~35KB) on the stack, compounding with
-                // every additional premise in the join.
-                Box::pin(right.evaluate(left_answers, source))
-            }
-        }
-    }
-}
-
-/// Union of alternative join plans whose results are merged
-#[derive(Debug, Clone, PartialEq, Default)]
-pub enum Fork {
-    /// No alternatives - produces no results
-    #[default]
-    Empty,
-    /// Single alternative join
-    Solo(Join),
-    /// Two alternative joins
-    Duet(Join, Join),
-    /// Three or more alternative joins (recursive)
-    Or(Box<Fork>, Join),
-}
-
-impl Fork {
-    /// Creates a new empty join (identity).
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Creates a new join of two plans.
-    pub fn or(self, right: Join) -> Self {
-        match self {
-            Self::Empty => Self::Solo(right),
-            Self::Solo(left) => Self::Duet(left, right),
-            _ => Self::Or(Box::new(self), right),
-        }
-    }
-
-    /// Evaluate all alternatives, merging their result streams.
-    ///
-    /// Returns `Pin<Box<...>>` because Fork is recursive — Or holds a
-    /// `Box<Fork>` whose evaluate calls back into this method. Boxing
-    /// keeps each alternative at pointer size on the stack.
-    pub fn evaluate<S: Source, M: crate::selection::Answers>(
-        self,
-        answers: M,
-        source: &S,
-    ) -> Pin<Box<dyn crate::selection::Answers>> {
-        match self {
-            Self::Empty => Box::pin(futures_util::stream::empty()),
-            Self::Solo(join) => Box::pin(join.evaluate(answers, source)),
-            Self::Duet(left, right) => Self::merge(Self::Solo(left), right, answers, source),
-            Self::Or(left, right) => Self::merge(*left, right, answers, source),
-        }
-    }
-
-    /// Fork the input stream and merge two alternative evaluations.
-    fn merge<S: Source, M: crate::selection::Answers>(
-        left: Fork,
-        right: Join,
-        answers: M,
-        source: &S,
-    ) -> Pin<Box<dyn crate::selection::Answers>> {
-        let source = source.clone();
-        // Box the merged stream to move it to the heap. The try_stream!
-        // here captures two boxed (8-byte) stream pointers from
-        // left.evaluate and right.evaluate, keeping the state machine small.
-        Box::pin(try_stream! {
-            let (left_input, right_input) = fork_stream(answers);
-
-            let left_output = left.evaluate(left_input, &source);
-            let right_output = right.evaluate(right_input, &source);
-
-            tokio::pin!(left_output);
-            tokio::pin!(right_output);
-
-            for await each in stream_select!(left_output, right_output) {
-                yield each?;
-            }
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,12 +192,10 @@ mod tests {
 
     #[dialog_common::test]
     fn test_join_plan_with_two_fact_applications() {
-        use crate::predicate::RelationDescriptor;
-        use crate::proposition::RelationApplication;
+        use crate::relation::application::RelationApplication;
+        use crate::relation::descriptor::RelationDescriptor;
         use crate::{Cardinality, Proposition, Term, Value};
 
-        // Create two fact applications that will be joined
-        // First: (person/name, of: ?person, is: ?name) - find person's name
         let fact1 = RelationApplication::new(
             Term::Constant("person".to_string()),
             Term::Constant("name".to_string()),
@@ -443,7 +205,6 @@ mod tests {
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
-        // Second: (person/age, of: ?person, is: ?age) - find person's age
         let fact2 = RelationApplication::new(
             Term::Constant("person".to_string()),
             Term::Constant("age".to_string()),
@@ -453,20 +214,18 @@ mod tests {
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
-        // Create premises from the applications
         let premises = vec![
-            Premise::When(Proposition::Relation(Box::new(fact1))),
-            Premise::When(Proposition::Relation(Box::new(fact2))),
+            crate::Premise::When(Proposition::Relation(Box::new(fact1))),
+            crate::Premise::When(Proposition::Relation(Box::new(fact2))),
         ];
 
-        // Create a join planner and plan with empty scope
-        let plan = Join::try_from(premises).expect("Planning should succeed");
+        let plan = Planner::from(premises)
+            .plan(&Environment::new())
+            .expect("Planning should succeed");
 
-        // Verify the plan was created
         assert_eq!(plan.steps.len(), 2, "Should have two steps");
         assert!(plan.cost > 0, "Should have non-zero cost");
 
-        // Verify that the plan binds the expected variables
         let person_var: Term<Value> = Term::var("person");
         let name_var: Term<Value> = Term::var("name");
         let age_var: Term<Value> = Term::var("age");
@@ -481,13 +240,11 @@ mod tests {
 
     #[dialog_common::test]
     fn test_join_plan_execution_order() {
-        use crate::predicate::RelationDescriptor;
-        use crate::proposition::RelationApplication;
+        use crate::relation::application::RelationApplication;
+        use crate::relation::descriptor::RelationDescriptor;
         use crate::{Cardinality, Proposition, Term};
         use dialog_artifacts::Entity;
 
-        // Create two fact applications where one depends on the other
-        // First: (person/name, of: urn:alice, is: ?name) - alice's name is bound
         let fact1 = RelationApplication::new(
             Term::Constant("person".to_string()),
             Term::Constant("name".to_string()),
@@ -497,8 +254,6 @@ mod tests {
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
-        // Second: (greeting/text, of: ?name, is: ?greeting) - uses ?name from first
-        // Note: ?name here refers to the Entity value, not Attribute
         let fact2 = RelationApplication::new(
             Term::Constant("greeting".to_string()),
             Term::Constant("text".to_string()),
@@ -509,30 +264,27 @@ mod tests {
         );
 
         let premises = vec![
-            Premise::When(Proposition::Relation(Box::new(fact1))),
-            Premise::When(Proposition::Relation(Box::new(fact2))),
+            crate::Premise::When(Proposition::Relation(Box::new(fact1))),
+            crate::Premise::When(Proposition::Relation(Box::new(fact2))),
         ];
 
-        let plan = Join::try_from(premises).expect("Planning should succeed");
+        let plan = Planner::from(premises)
+            .plan(&Environment::new())
+            .expect("Planning should succeed");
 
-        // The planner should execute fact1 first (lower cost - entity is bound)
-        // Then fact2 (which now has ?name bound from fact1)
         assert_eq!(plan.steps.len(), 2);
-
-        // After both steps, 2 variables should be bound (name and greeting)
         assert_eq!(plan.binds.variables.len(), 2, "Should bind 2 variables");
     }
 
     #[dialog_common::test]
     async fn test_join_plan_query_execution() -> anyhow::Result<()> {
-        use crate::predicate::RelationDescriptor;
-        use crate::proposition::RelationApplication;
+        use crate::relation::application::RelationApplication;
+        use crate::relation::descriptor::RelationDescriptor;
         use crate::session::Session;
         use crate::{Assertion, Cardinality, Proposition, Term, Value};
         use dialog_artifacts::{Artifacts, Attribute, Entity};
         use dialog_storage::MemoryStorageBackend;
 
-        // Create a store and session
         let backend = MemoryStorageBackend::default();
         let store = Artifacts::anonymous(backend).await?;
         let mut session = Session::open(store);
@@ -565,7 +317,6 @@ mod tests {
             ])
             .await?;
 
-        // Create a join query: find person's name and age
         let fact1 = RelationApplication::new(
             Term::Constant("person".to_string()),
             Term::Constant("name".to_string()),
@@ -585,18 +336,16 @@ mod tests {
         );
 
         let premises = vec![
-            Premise::When(Proposition::Relation(Box::new(fact1))),
-            Premise::When(Proposition::Relation(Box::new(fact2))),
+            crate::Premise::When(Proposition::Relation(Box::new(fact1))),
+            crate::Premise::When(Proposition::Relation(Box::new(fact2))),
         ];
-        let plan = Join::try_from(premises)?;
+        let plan = Planner::from(premises).plan(&Environment::new())?;
 
-        // Execute the query
         let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
             plan.evaluate(Answer::new().seed(), &session),
         )
         .await?;
 
-        // Should find both Alice and Bob with their name and age
         assert_eq!(selection.len(), 2, "Should find 2 people");
 
         let name_var: Term<Value> = Term::var("name");

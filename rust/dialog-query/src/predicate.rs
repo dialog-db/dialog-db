@@ -1,19 +1,51 @@
-//! Premise trait for rule conditions
-//!
-//! This module defines the premise system used in rule conditions. Premises represent
-//! patterns that can be matched against facts in the knowledge base during rule evaluation.
-//!
-//! Note: Premises are only used in rule conditions (the "when" part), not in conclusions.
-/// Concept predicates for entity-centric queries.
-pub mod concept;
-/// Deductive rules that derive new facts from existing ones.
-pub mod deductive_rule;
-/// Formula predicates for computed values.
-pub mod formula;
-/// Relation predicates for querying the knowledge base.
-pub mod relation;
+use crate::Entity;
+use crate::query::Application;
+use dialog_common::ConditionalSend;
 
-pub use concept::ConceptPredicate;
-pub use deductive_rule::DeductiveRule;
-pub use formula::Formula;
-pub use relation::RelationDescriptor;
+/// Associates a domain type with its query, proof, and descriptor types.
+///
+/// Implemented by `#[derive(Concept)]` and `#[derive(Formula)]` structs,
+/// `Predicate` is the trait-level glue that connects:
+/// - `Application` — the query pattern struct (fields as [`Term`](crate::Term)s)
+///   used to build premises.
+/// - `Proof` — the concrete result struct whose fields are resolved values.
+/// - `Descriptor` — an entity-like identifier for the predicate itself.
+///
+/// Use the [`Query`] type alias for ergonomic construction:
+///
+/// ```rs
+/// let q = Query::<Person> {
+///     this: Term::var("entity"),
+///     name: Term::var("name"),
+/// };
+/// ```
+pub trait Predicate {
+    /// The materialized proof type produced by resolving a query.
+    type Proof: ConditionalSend + 'static;
+    /// The application type associated with this predicate
+    type Application: Application<Proof = Self::Proof>;
+    /// The descriptor type that identifies this predicate. Must convert to Entity.
+    type Descriptor: Into<Entity>;
+}
+
+/// Type alias to construct type-safe formula / concept applications.
+///
+/// ```rs
+/// #[derive(Debug, Clone, Concept)]
+/// pub struct Person {
+///     this: Entity,
+///     name: String,
+///     address: Term,
+/// }
+///
+/// let query = Query::<Person> {
+///     name: "John".to_string(),
+///     address: Term::var("address"),
+/// }
+/// ```
+#[allow(type_alias_bounds)]
+pub type Query<T: Predicate> = T::Application;
+
+/// Convenience alias kept for backward compatibility during migration.
+#[allow(type_alias_bounds)]
+pub type Match<T: Predicate> = T::Application;

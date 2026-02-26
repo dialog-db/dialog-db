@@ -1,7 +1,16 @@
-use crate::attribute::Attribute;
-use crate::claim::Claim;
-use crate::proposition::ConceptApplication;
-use crate::{Assertion, Entity, Parameters, Premise, Proposition, Transaction};
+use crate::Predicate;
+use crate::attribute::{Attribute, AttributeDescriptor};
+use crate::claim::{Claim, Revert};
+use crate::concept::application::ConceptApplication;
+use crate::concept::predicate::ConceptPredicate;
+use crate::concept::{Concept, ConceptProof};
+use crate::negation::Negation;
+use crate::query::{Application, Output, Source};
+use crate::selection::{Answer, Answers};
+use crate::types::Scalar;
+use crate::{
+    Assertion, Cardinality, Entity, Parameters, Premise, Proposition, QueryError, Term, Transaction,
+};
 use std::marker::PhantomData;
 
 /// Represents an entity with a single attribute.
@@ -43,16 +52,16 @@ pub struct With<A: Attribute> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct WithQuery<A: Attribute> {
     /// Term matching the entity. Defaults to a variable named `"this"`.
-    pub this: crate::Term<Entity>,
+    pub this: Term<Entity>,
     /// Term matching the attribute value. Defaults to a variable named `"has"`.
-    pub has: crate::Term<A::Type>,
+    pub has: Term<A::Type>,
 }
 
 impl<A: Attribute> Default for WithQuery<A> {
     fn default() -> Self {
         Self {
-            this: crate::Term::var("this"),
-            has: crate::Term::var("has"),
+            this: Term::var("this"),
+            has: Term::var("has"),
         }
     }
 }
@@ -62,11 +71,8 @@ where
     A: Clone + std::fmt::Debug + Send + 'static,
 {
     /// Query for instances matching this pattern
-    pub fn perform<S: crate::query::Source>(
-        self,
-        source: &S,
-    ) -> impl crate::query::Output<With<A>> {
-        crate::query::Application::perform(self, source)
+    pub fn perform<S: Source>(self, source: &S) -> impl Output<With<A>> {
+        Application::perform(self, source)
     }
 }
 
@@ -78,35 +84,35 @@ pub struct WithTerms<A: Attribute> {
 
 impl<A: Attribute> WithTerms<A> {
     /// Returns a term variable for the entity, named `"this"`.
-    pub fn this() -> crate::Term<Entity> {
-        crate::Term::var("this")
+    pub fn this() -> Term<Entity> {
+        Term::var("this")
     }
 
     /// Returns a term variable for the attribute value, named `"has"`.
-    pub fn has() -> crate::Term<A::Type> {
-        crate::Term::var("has")
+    pub fn has() -> Term<A::Type> {
+        Term::var("has")
     }
 }
 
-impl<A: Attribute> From<With<A>> for crate::predicate::concept::ConceptPredicate
+impl<A: Attribute> From<With<A>> for ConceptPredicate
 where
     A: Clone + std::fmt::Debug + Send + 'static,
 {
     fn from(_: With<A>) -> Self {
-        crate::predicate::concept::ConceptPredicate::from(vec![("has", A::descriptor())])
+        ConceptPredicate::from(vec![("has", A::descriptor())])
     }
 }
 
-impl<A: Attribute> From<WithQuery<A>> for crate::predicate::concept::ConceptPredicate
+impl<A: Attribute> From<WithQuery<A>> for ConceptPredicate
 where
     A: Clone + std::fmt::Debug + Send + 'static,
 {
     fn from(_: WithQuery<A>) -> Self {
-        crate::predicate::concept::ConceptPredicate::from(vec![("has", A::descriptor())])
+        ConceptPredicate::from(vec![("has", A::descriptor())])
     }
 }
 
-impl<A: Attribute> crate::concept::Concept for With<A>
+impl<A: Attribute> Concept for With<A>
 where
     A: Clone + std::fmt::Debug + Send + 'static,
 {
@@ -117,21 +123,21 @@ where
     }
 
     fn this(&self) -> Entity {
-        let predicate: crate::predicate::concept::ConceptPredicate = self.clone().into();
+        let predicate: ConceptPredicate = self.clone().into();
         predicate.this()
     }
 }
 
-impl<A: Attribute> crate::dsl::Predicate for With<A>
+impl<A: Attribute> Predicate for With<A>
 where
     A: Clone + std::fmt::Debug + Send + 'static,
 {
     type Proof = With<A>;
     type Application = WithQuery<A>;
-    type Descriptor = crate::attribute::AttributeDescriptor;
+    type Descriptor = AttributeDescriptor;
 }
 
-impl<A: Attribute> crate::concept::ConceptProof for With<A>
+impl<A: Attribute> ConceptProof for With<A>
 where
     A: Clone + Send,
 {
@@ -145,9 +151,8 @@ where
     A: Clone,
 {
     fn assert(self, transaction: &mut Transaction) {
-        use crate::types::Scalar;
         let assertion = Assertion::new(A::selector(), self.this, self.has.value().as_value());
-        if A::descriptor().cardinality() == crate::Cardinality::One {
+        if A::descriptor().cardinality() == Cardinality::One {
             transaction.associate_unique(assertion);
         } else {
             transaction.associate(assertion);
@@ -155,7 +160,6 @@ where
     }
 
     fn retract(self, transaction: &mut Transaction) {
-        use crate::types::Scalar;
         Assertion::new(A::selector(), self.this, self.has.value().as_value()).retract(transaction);
     }
 }
@@ -164,7 +168,7 @@ impl<A: Attribute> std::ops::Not for With<A>
 where
     A: Clone,
 {
-    type Output = crate::claim::Revert<With<A>>;
+    type Output = Revert<With<A>>;
 
     fn not(self) -> Self::Output {
         self.revert()
@@ -179,7 +183,6 @@ where
     type IntoIter = std::iter::Once<Assertion>;
 
     fn into_iter(self) -> Self::IntoIter {
-        use crate::types::Scalar;
         std::iter::once(Assertion::new(
             A::selector(),
             self.this,
@@ -188,22 +191,18 @@ where
     }
 }
 
-impl<A: Attribute> crate::query::Application for WithQuery<A>
+impl<A: Attribute> Application for WithQuery<A>
 where
     A: Clone + std::fmt::Debug + Send + 'static,
 {
     type Proof = With<A>;
 
-    fn evaluate<S: crate::query::Source, M: crate::selection::Answers>(
-        self,
-        answers: M,
-        source: &S,
-    ) -> impl crate::selection::Answers {
+    fn evaluate<S: Source, M: Answers>(self, answers: M, source: &S) -> impl Answers {
         let application: ConceptApplication = self.into();
         application.evaluate(answers, source)
     }
 
-    fn realize(&self, source: crate::selection::Answer) -> Result<Self::Proof, crate::QueryError> {
+    fn realize(&self, source: Answer) -> Result<Self::Proof, QueryError> {
         Ok(With {
             this: source.get(&self.this)?,
             has: A::new(source.get(&self.has)?),
@@ -219,7 +218,7 @@ where
 
     fn not(self) -> Self::Output {
         let application: Proposition = self.into();
-        Premise::Unless(crate::negation::Negation::not(application))
+        Premise::Unless(Negation::not(application))
     }
 }
 
@@ -240,7 +239,7 @@ where
     A: Clone + std::fmt::Debug + Send + 'static,
 {
     fn from(source: WithQuery<A>) -> Self {
-        let predicate: crate::predicate::concept::ConceptPredicate = source.clone().into();
+        let predicate: ConceptPredicate = source.clone().into();
         ConceptApplication {
             terms: source.into(),
             predicate,
@@ -342,7 +341,7 @@ mod tests {
     async fn test_single_attribute_assert_and_retract() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Value};
         use crate::concept::With;
-        use crate::proposition::relation::RelationApplication;
+        use crate::relation::application::RelationApplication;
         use crate::{Entity, Session, Term};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
@@ -406,7 +405,7 @@ mod tests {
     async fn test_multiple_attributes_assert() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Value};
         use crate::concept::With;
-        use crate::proposition::relation::RelationApplication;
+        use crate::relation::application::RelationApplication;
         use crate::{Entity, Session, Term};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
@@ -473,7 +472,7 @@ mod tests {
     async fn test_three_attributes_assert() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Value};
         use crate::concept::With;
-        use crate::proposition::relation::RelationApplication;
+        use crate::relation::application::RelationApplication;
         use crate::{Entity, Session, Term};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
@@ -564,7 +563,7 @@ mod tests {
     async fn test_multiple_attributes_retract() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
         use crate::concept::With;
-        use crate::proposition::relation::RelationApplication;
+        use crate::relation::application::RelationApplication;
         use crate::{Entity, Session, Term};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
@@ -642,7 +641,7 @@ mod tests {
     async fn test_update_attribute() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Value};
         use crate::concept::With;
-        use crate::proposition::relation::RelationApplication;
+        use crate::relation::application::RelationApplication;
         use crate::{Entity, Session, Term};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
@@ -702,7 +701,7 @@ mod tests {
     async fn test_entity_reference_attribute() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Value};
         use crate::concept::With;
-        use crate::proposition::relation::RelationApplication;
+        use crate::relation::application::RelationApplication;
         use crate::{Entity, Session, Term};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;

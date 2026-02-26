@@ -1,0 +1,381 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use crate::artifact::{Type, TypeError, Value};
+use crate::error::{InconsistencyError, QueryError};
+use crate::relation::application::RelationApplication;
+use crate::{Relation, Term, types::Scalar};
+
+use super::{Answers, Evidence, Factor, Factors, Selector};
+
+/// A single result row produced during query evaluation.
+///
+/// An `Answer` accumulates variable bindings as premises are evaluated in
+/// sequence. Each binding is backed by one or more [`Factors`] that record
+/// *how* the value was obtained — whether it was selected from a stored
+/// fact, derived by a formula, or provided as a query parameter.
+///
+/// In addition to named bindings (`conclusions`), an `Answer` tracks the
+/// raw [`Relation`] facts matched by each [`RelationApplication`]. This
+/// allows downstream code to reconstruct the full provenance chain for any
+/// value in the result.
+///
+/// Answers flow through the evaluation pipeline as a stream
+/// ([`Answers`](super::Answers)): each premise receives the stream,
+/// potentially expands each answer into zero or more new answers, and
+/// passes them to the next premise.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct Answer {
+    /// Conclusions: named variable bindings where we've concluded values from facts.
+    /// Maps variable names to their values with provenance (which facts support this binding).
+    conclusions: HashMap<String, Factors>,
+    /// Applications: maps RelationApplication to the fact it matched.
+    /// This allows us to realize facts even when the application had only constants/blanks.
+    /// The facts stored here represent all facts that contributed to this answer.
+    facts: HashMap<RelationApplication, Arc<Relation>>,
+}
+
+impl Answer {
+    /// Create new empty answer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Wrap this answer into a single-element `Answers` stream.
+    pub fn seed(self) -> impl Answers {
+        futures_util::stream::once(async { Ok(self) })
+    }
+
+    /// Get all tracked relations from the applications.
+    pub fn facts(&self) -> impl Iterator<Item = &Arc<Relation>> {
+        self.facts.values()
+    }
+
+    /// Get all conclusions (named variable bindings).
+    pub fn conclusions(&self) -> impl Iterator<Item = (&String, &Factors)> {
+        self.conclusions.iter()
+    }
+
+    /// Record that a RelationApplication matched a specific fact.
+    /// Returns an error if the same application already mapped to a different fact,
+    /// which would indicate an inconsistency (shouldn't happen in practice, but we check).
+    pub fn record(
+        &mut self,
+        application: &RelationApplication,
+        fact: Arc<Relation>,
+    ) -> Result<(), InconsistencyError> {
+        // Check if this application already has a different fact
+        if let Some(existing_fact) = self.facts.get(application) {
+            if !Arc::ptr_eq(existing_fact, &fact) {
+                return Err(InconsistencyError::AssignmentError(format!(
+                    "RelationApplication {:?} already mapped to a different fact",
+                    application
+                )));
+            }
+            // Same fact - this is fine (idempotent)
+        } else {
+            // New mapping
+            self.facts.insert(application.clone(), fact);
+        }
+        Ok(())
+    }
+
+    /// Realize a relation from a RelationApplication.
+    /// First tries to extract from named variable conclusions.
+    /// Falls back to looking up the application in the recorded applications.
+    pub fn realize(&self, application: &RelationApplication) -> Result<Relation, QueryError> {
+        // Try to extract from a named variable conclusion first
+        // This gives us the full relation with all its components
+        if let Term::Variable { name: Some(_), .. } = application.of()
+            && let Some(factors) = self.resolve_factors(&application.of().as_unknown())
+        {
+            return Ok(Relation::from(factors));
+        }
+
+        if let Term::Variable { name: Some(_), .. } = application.is()
+            && let Some(factors) = self.resolve_factors(&application.is().as_unknown())
+        {
+            return Ok(Relation::from(factors));
+        }
+
+        // No named variables - look up by application
+        if let Some(relation) = self.facts.get(application) {
+            return Ok(relation.as_ref().clone());
+        }
+
+        Err(QueryError::FactStore(
+            "Could not realize relation from answer - application not found".to_string(),
+        ))
+    }
+
+    /// Merge evidence into this answer, recording facts and binding variables.
+    pub fn merge(&mut self, evidence: Evidence<'_>) -> Result<(), InconsistencyError> {
+        match evidence {
+            Evidence::Relation { application, fact } => {
+                let fact = Arc::new(fact.to_owned());
+                self.record(application, fact.clone())?;
+
+                let application = Arc::new(application.to_owned());
+
+                // Bind namespace and name as string variables
+                self.assign(
+                    &application.namespace().as_unknown(),
+                    &Factor::Selected {
+                        selector: Selector::The,
+                        application: application.clone(),
+                        fact: fact.clone(),
+                    },
+                )?;
+                self.assign(
+                    &application.name().as_unknown(),
+                    &Factor::Selected {
+                        selector: Selector::The,
+                        application: application.clone(),
+                        fact: fact.clone(),
+                    },
+                )?;
+                // Also bind the combined attribute term
+                self.assign(
+                    &application.attribute().as_unknown(),
+                    &Factor::Selected {
+                        selector: Selector::The,
+                        application: application.clone(),
+                        fact: fact.clone(),
+                    },
+                )?;
+                self.assign(
+                    &application.of().as_unknown(),
+                    &Factor::Selected {
+                        selector: Selector::Of,
+                        application: application.clone(),
+                        fact: fact.clone(),
+                    },
+                )?;
+                self.assign(
+                    &application.is().as_unknown(),
+                    &Factor::Selected {
+                        selector: Selector::Is,
+                        application: application.clone(),
+                        fact: fact.clone(),
+                    },
+                )?;
+                self.assign(
+                    &application.cause().as_unknown(),
+                    &Factor::Selected {
+                        selector: Selector::Cause,
+                        application,
+                        fact,
+                    },
+                )?;
+
+                Ok(())
+            }
+            Evidence::Parameter { term, value } => self.assign(
+                term,
+                &Factor::Parameter {
+                    value: value.clone(),
+                },
+            ),
+            Evidence::Derived {
+                term,
+                from,
+                value,
+                formula,
+            } => self.assign(
+                term,
+                &Factor::Derived {
+                    value: *value,
+                    from,
+                    formula: Arc::new(formula.to_owned()),
+                },
+            ),
+        }
+    }
+
+    /// Look up the factors bound to a named variable term.
+    pub fn lookup(&self, term: &Term<Value>) -> Option<&Factors> {
+        match term {
+            Term::Variable {
+                name: Some(key), ..
+            } => self.conclusions.get(key),
+            Term::Variable { name: None, .. } => None,
+            Term::Constant(_) => None,
+        }
+    }
+
+    /// Assign a term to a factor - just calls conclude() which handles all cases.
+    /// This is provided for backward compatibility.
+    pub fn assign(
+        &mut self,
+        term: &Term<Value>,
+        factor: &Factor,
+    ) -> Result<(), InconsistencyError> {
+        self.conclude(term, factor)
+    }
+
+    /// Extends this answer by assigning multiple term-factor pairs.
+    pub fn extend<I>(&mut self, assignments: I) -> Result<(), InconsistencyError>
+    where
+        I: IntoIterator<Item = (Term<Value>, Factor)>,
+    {
+        for (term, factor) in assignments {
+            self.assign(&term, &factor)?;
+        }
+        Ok(())
+    }
+
+    /// Conclude a value for a named variable from a factor.
+    /// This binds the variable to the value with provenance tracking.
+    /// Ignores blank variables and constants (no-op for those).
+    pub fn conclude(
+        &mut self,
+        term: &Term<Value>,
+        factor: &Factor,
+    ) -> Result<(), InconsistencyError> {
+        match term {
+            Term::Variable {
+                name: Some(name), ..
+            } => {
+                if let Some(factors) = self.conclusions.get_mut(name) {
+                    // Check if the new factor's content matches existing content
+                    if factors.content() != factor.content() {
+                        Err(InconsistencyError::AssignmentError(format!(
+                            "Can not set {:?} to {:?} because it is already set to {:?}.",
+                            name,
+                            factor.content(),
+                            factors.content()
+                        )))
+                    } else {
+                        // Add the factor (idempotent if already present)
+                        factors.add(factor.clone());
+                        if let Factor::Selected {
+                            application, fact, ..
+                        } = factor
+                        {
+                            self.record(application.as_ref(), fact.clone())?;
+                        }
+
+                        Ok(())
+                    }
+                } else {
+                    self.conclusions
+                        .insert(name.into(), Factors::new(factor.clone()));
+                    Ok(())
+                }
+            }
+            Term::Variable { name: None, .. } | Term::Constant(_) => {
+                // Blank variables and constants are ignored - no-op
+                Ok(())
+            }
+        }
+    }
+
+    /// Returns true if term can be read from this answer.
+    pub fn contains<T: Scalar>(&self, term: &Term<T>) -> bool {
+        match term {
+            Term::Variable { name, .. } => {
+                if let Some(key) = name {
+                    self.conclusions.contains_key(key)
+                } else {
+                    // We don't capture values for Any
+                    false
+                }
+            }
+            Term::Constant(_) => true, // Constants are always "bound"
+        }
+    }
+
+    /// Resolves factors that were assigned to the given term.
+    pub fn resolve_factors<T: Scalar>(&self, term: &Term<T>) -> Option<&Factors> {
+        match term {
+            Term::Variable {
+                name: Some(name), ..
+            } => self.conclusions.get(name),
+            Term::Variable { name: None, .. } => None,
+            Term::Constant(_) => None,
+        }
+    }
+
+    /// Resolve a term to its Value without type conversion.
+    ///
+    /// For variables, looks up the binding and returns the raw Value.
+    /// For constants, converts the constant to a Value.
+    ///
+    /// Returns an error if the variable is not bound.
+    pub fn resolve<T>(&self, term: &Term<T>) -> Result<Value, InconsistencyError>
+    where
+        T: Scalar,
+    {
+        match term {
+            Term::Variable { name, .. } => {
+                if let Some(key) = name {
+                    if let Some(factors) = self.conclusions.get(key) {
+                        Ok(factors.content().clone())
+                    } else {
+                        Err(InconsistencyError::UnboundVariableError(key.clone()))
+                    }
+                } else {
+                    Err(InconsistencyError::UnboundVariableError("_".into()))
+                }
+            }
+            Term::Constant(value) => Ok(value.as_value()),
+        }
+    }
+
+    /// Resolves a term to its typed value.
+    /// Resolve a variable term into a constant term if this answer has a
+    /// binding for it. Otherwise, return the original term.
+    /// This is similar to Match::resolve but works with Answer bindings.
+    pub fn resolve_term<T: Scalar>(&self, term: &Term<T>) -> Term<T> {
+        match term {
+            Term::Variable { name, .. } => {
+                if let Some(key) = name {
+                    if let Some(factors) = self.conclusions.get(key) {
+                        let value = factors.content();
+                        if let Ok(converted) = T::try_from(value) {
+                            Term::Constant(converted)
+                        } else {
+                            // Conversion failed - return original term
+                            term.clone()
+                        }
+                    } else {
+                        term.clone()
+                    }
+                } else {
+                    term.clone()
+                }
+            }
+            Term::Constant(_) => term.clone(),
+        }
+    }
+
+    /// Convenience method to set a variable to a value without provenance tracking.
+    /// This creates a Parameter factor for the value.
+    /// Useful for testing and simple cases where provenance isn't needed.
+    pub fn set<T: Scalar>(mut self, term: Term<T>, value: T) -> Result<Self, InconsistencyError>
+    where
+        Value: From<T>,
+    {
+        let factor = Factor::Parameter {
+            value: value.into(),
+        };
+        self.assign(&term.as_unknown(), &factor)?;
+        Ok(self)
+    }
+
+    /// Convenience method to get a value for a variable.
+    /// Similar to Match::get but works with Answer.
+    pub fn get<T>(&self, term: &Term<T>) -> Result<T, InconsistencyError>
+    where
+        T: Scalar + std::convert::TryFrom<Value>,
+    {
+        let value = self.resolve(term)?;
+        let value_type = value.data_type();
+        T::try_from(value).map_err(|_| {
+            InconsistencyError::TypeConversion(TypeError::TypeMismatch(
+                T::TYPE.unwrap_or(Type::Bytes),
+                value_type,
+            ))
+        })
+    }
+}

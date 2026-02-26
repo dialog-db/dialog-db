@@ -1,4 +1,4 @@
-use crate::{Formula, dsl::Input};
+use crate::{Formula, formula::Input};
 
 /// Sum formula that adds two numbers
 #[derive(Debug, Clone, Formula)]
@@ -625,7 +625,7 @@ mod tests {
     }
 
     impl TestSum {
-        pub fn derive(input: crate::dsl::Input<Self>) -> Vec<Self> {
+        pub fn derive(input: crate::formula::Input<Self>) -> Vec<Self> {
             vec![TestSum {
                 of: input.of,
                 with: input.with,
@@ -636,7 +636,7 @@ mod tests {
 
     #[dialog_common::test]
     fn test_input_struct_generated() {
-        let input = crate::dsl::Input::<TestSum> { of: 5, with: 3 };
+        let input = crate::formula::Input::<TestSum> { of: 5, with: 3 };
         assert_eq!(input.of, 5);
         assert_eq!(input.with, 3);
     }

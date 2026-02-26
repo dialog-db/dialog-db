@@ -7,7 +7,14 @@ use crate::Type;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Schema defines set of named fields
+/// Describes the parameter signature of a premise.
+///
+/// Every premise type (relation, concept, formula) advertises a `Schema`
+/// that lists its named fields together with their types, cardinalities, and
+/// requirement levels. The query planner inspects the schema to determine
+/// which variables must already be bound (required fields) and which will
+/// be produced (optional fields), and to estimate the cost of executing the
+/// premise under a given [`Environment`](crate::Environment).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Schema {
     fields: HashMap<String, Field>,
@@ -84,7 +91,13 @@ pub const INDEX_SCAN: usize = 5_000;
 /// Concepts may have associated deductive rules that need to be checked and evaluated.
 pub const CONCEPT_OVERHEAD: usize = 1_000;
 
-/// Cardinality indicates whether an attribute can have one or many values
+/// Whether an attribute holds a single value or multiple values per entity.
+///
+/// Cardinality directly affects query cost estimation: a `Many` attribute
+/// may return multiple rows for the same `(attribute, entity)` pair, so
+/// scans over it are more expensive. The cost model in
+/// [`Cardinality::estimate`] uses this to assign costs that the planner
+/// uses when ordering premises.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Cardinality {
     /// The attribute holds a single value per entity.
@@ -129,7 +142,12 @@ impl Cardinality {
     }
 }
 
-/// Field descriptor describes a type cardinality and fields requirement type.
+/// Metadata for a single named parameter in a [`Schema`].
+///
+/// Captures the parameter's expected value type, whether it accepts one or
+/// many values ([`Cardinality`]), and whether it must be bound before the
+/// premise can execute ([`Requirement`]). The planner reads these fields
+/// to classify each parameter as a prerequisite or a produced binding.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Field {
     /// Human-readable description of the field.
@@ -175,7 +193,13 @@ impl Field {
     }
 }
 
-/// Represents the requirement level for a dependency in a rule or formula.
+/// Whether a parameter must be externally bound before a premise can execute.
+///
+/// The planner uses this to partition a premise's parameters into
+/// [`Prerequisites`](crate::planner::Prerequisites) (must be bound) and
+/// bindings the premise will produce. Parameters in the same [`Group`] form
+/// a *choice group* — if any member of the group is bound, the entire group
+/// is satisfied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Requirement {
     /// Dependency that must be provided externally or via choice group.
@@ -216,7 +240,13 @@ impl Requirement {
     }
 }
 
-/// Identifier for a choice group
+/// Identifier for a choice group within a [`Requirement`].
+///
+/// A choice group ties together parameters that are interchangeable inputs.
+/// When *any* parameter in the group is bound, the entire group is considered
+/// satisfied, and the remaining unbound members become optional bindings
+/// rather than prerequisites. Each `Group` carries a globally unique id
+/// assigned via an atomic counter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Group(usize);
 

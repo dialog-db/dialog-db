@@ -1,13 +1,17 @@
+/// Concept application for querying entities that match a concept pattern.
+pub mod application;
+/// Concept predicates for entity-centric queries.
+pub mod predicate;
 /// Single-attribute concept wrapper ([`With<A>`]) and its query types.
 pub mod with;
 pub use with::{With, WithQuery, WithTerms};
 
+pub use application::ConceptApplication;
+pub use predicate::ConceptPredicate;
+
 #[cfg(test)]
 use crate::Assertion;
-pub use crate::dsl::Predicate;
-pub use crate::predicate::concept::ConceptPredicate;
-#[cfg(test)]
-use crate::proposition::ConceptApplication;
+pub use crate::predicate::Predicate;
 #[cfg(test)]
 use crate::query::Output;
 use crate::{Entity, Parameters};
@@ -113,7 +117,7 @@ mod tests {
     };
     use crate::attribute::{Attribute as _, AttributeDescriptor};
     use crate::concept::With;
-    use crate::proposition::relation::RelationApplication;
+    use crate::relation::application::RelationApplication;
     use crate::rule::Match;
     use crate::term::Term;
     use crate::the;

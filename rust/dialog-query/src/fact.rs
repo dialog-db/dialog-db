@@ -8,7 +8,18 @@ pub use crate::types::Scalar;
 use dialog_common::ConditionalSend;
 use serde::{Deserialize, Serialize};
 
-/// A fact represents persisted data with a cause - can be an assertion or retraction
+/// A stored EAV datum tagged with its provenance ([`Cause`]).
+///
+/// Facts are the atomic unit of the knowledge base. Each fact records an
+/// `(attribute, entity, value)` triple together with a content-addressed
+/// `cause` that identifies the write operation that produced it. Facts come
+/// in two flavours:
+/// - `Assertion` — states that the triple holds.
+/// - `Retraction` — states that a previously asserted triple no longer holds.
+///
+/// The generic parameter `T` defaults to [`Value`] (dynamically typed) but
+/// can be narrowed to a specific scalar type (e.g. `Fact<String>`) when the
+/// attribute's type is known at compile time.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Serialize, Deserialize)]
 pub enum Fact<T: Scalar + ConditionalSend = Value> {
     /// An assertion fact with cause
@@ -84,7 +95,7 @@ mod integration_tests {
 
     use super::*;
     use crate::artifact::{Artifacts, Attribute, Entity, Value};
-    use crate::proposition::relation::RelationApplication;
+    use crate::relation::application::RelationApplication;
     use crate::{Assertion, Session};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;

@@ -1,179 +1,26 @@
+use super::{Plan, Prerequisites};
 use crate::error::CompileError;
-use crate::{Environment, Parameters, Premise, Requirement, Schema, Source, Term};
-use crate::{fact::Scalar, predicate::DeductiveRule};
+use crate::{Environment, Parameters, Premise, Requirement, Schema, Term};
 use std::collections::HashSet;
-use std::fmt::Display;
-use thiserror::Error;
 
-/// Errors that can occur during rule or formula analysis.
-/// These errors indicate structural problems with rules that would prevent execution.
-#[derive(Error, Debug, Clone, PartialEq)]
-pub enum AnalyzerError {
-    /// A rule parameter is defined in the conclusion but never used by any premise.
-    /// This indicates a likely error in the rule definition.
-    #[error("Rule {rule} does not makes use of the \"{parameter}\" parameter")]
-    UnusedParameter {
-        /// The rule with the unused parameter.
-        rule: DeductiveRule,
-        /// The name of the unused parameter.
-        parameter: String,
-    },
-    /// A rule application is missing a required parameter that the rule needs.
-    #[error("Rule {rule} application omits required parameter \"{parameter}\"")]
-    RequiredParameter {
-        /// The rule missing the parameter.
-        rule: DeductiveRule,
-        /// The name of the missing required parameter.
-        parameter: String,
-    },
-    /// A formula application is missing a required cell value.
-    #[error("Formula {formula} application omits required cell \"{cell}\"")]
-    OmitsRequiredCell {
-        /// The formula missing the cell.
-        formula: &'static str,
-        /// The name of the missing required cell.
-        cell: String,
-    },
-    /// A rule uses a local variable that cannot be satisfied by any premise.
-    /// This makes the rule impossible to execute.
-    #[error("Rule {rule} makes use of local {variable} that no premise can provide")]
-    RequiredLocalVariable {
-        /// The rule with the unsatisfiable local variable.
-        rule: DeductiveRule,
-        /// The name of the local variable no premise can provide.
-        variable: String,
-    },
-
-    /// A rule references a variable that is never bound by any premise or parameter.
-    #[error("Rule {rule} does not bind a variable \"{variable}\"")]
-    UnboundVariable {
-        /// The rule containing the unbound variable.
-        rule: DeductiveRule,
-        /// The name of the variable that is never bound.
-        variable: String,
-    },
-}
-
-/// A set of variable names that must be bound before a premise can execute.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct Required(HashSet<String>);
-
-impl Required {
-    /// Creates an empty set of required bindings.
-    pub fn new() -> Self {
-        Self::default()
-    }
-    /// Removes all entries from the required set.
-    pub fn clear(&mut self) {
-        self.0.clear();
-    }
-    /// Returns the number of required bindings.
-    pub fn count(&self) -> usize {
-        self.0.len()
-    }
-    /// Adds the variable name from `term` to the required set. Panics if the term is unnamed.
-    pub fn add<T: Scalar>(&mut self, term: &Term<T>) {
-        match term {
-            Term::Constant(_) => {}
-            Term::Variable { name, .. } => {
-                let dependency = name
-                    .clone()
-                    .expect(".required must be passed a named variable");
-                self.0.insert(dependency);
-            }
-        }
-    }
-
-    /// Removes the variable name from the required set. Returns `true` if it was present.
-    pub fn remove<T: Scalar>(&mut self, term: &Term<T>) -> bool {
-        match term {
-            Term::Variable {
-                name: Some(name), ..
-            } => self.0.remove(name),
-            _ => false,
-        }
-    }
-}
-impl Display for Required {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut iter = self.0.iter();
-        if let Some(name) = iter.next() {
-            write!(f, "{}", name)?;
-        }
-
-        for name in iter {
-            write!(f, ", {}", name)?;
-        }
-
-        write!(f, "")
-    }
-}
-
-/// Errors that can occur when estimating the cost of a premise.
-#[derive(Error, Debug, Clone, PartialEq)]
-pub enum EstimateError<'a> {
-    /// One or more required parameters are not yet bound in the environment.
-    #[error("Required parameters {required} are not bound in the environment ")]
-    RequiredParameters {
-        /// The set of required bindings that are missing.
-        required: &'a Required,
-    },
-}
-
-impl<'a> From<EstimateError<'a>> for CompileError {
-    fn from(error: EstimateError<'a>) -> Self {
-        match error {
-            EstimateError::RequiredParameters { required } => CompileError::RequiredBindings {
-                required: required.clone(),
-            },
-        }
-    }
-}
-
-/// A plan for executing a premise - ready to execute (lightweight, no cached schema/params)
+/// A premise under consideration by the query planner, tracking whether it
+/// can execute given the current variable bindings.
+///
+/// The planner examines each premise to determine whether it can execute
+/// given the current set of bound variables. A `Candidate` captures this
+/// determination along with cached schema and parameter data that allow
+/// efficient incremental re-evaluation as the environment grows.
+///
+/// A `Candidate` starts in either `Viable` (all required variables are bound)
+/// or `Blocked` (some variables are still missing). As the planner selects
+/// premises and their bindings flow into the environment, blocked candidates
+/// are updated via [`Candidate::update`] and may transition to `Viable`.
+///
+/// Once planning is complete, viable candidates are converted into [`Plan`]
+/// values (which drop the cached schema/params) for execution.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Plan {
-    /// The premise this plan will execute.
-    pub premise: Premise,
-    /// Estimated execution cost.
-    pub cost: usize,
-    /// Variables that this plan will bind upon execution.
-    pub binds: Environment,
-    /// Variables already bound in the environment when this plan runs.
-    pub env: Environment,
-}
-
-impl Plan {
-    /// Returns the estimated execution cost.
-    pub fn cost(&self) -> usize {
-        self.cost
-    }
-
-    /// Returns the set of variables this plan will bind.
-    pub fn binds(&self) -> &Environment {
-        &self.binds
-    }
-
-    /// Returns the environment of already-bound variables for this plan.
-    pub fn env(&self) -> &Environment {
-        &self.env
-    }
-
-    /// Evaluate this plan with the given answers and source
-    pub fn evaluate<S: Source, M: crate::selection::Answers>(
-        self,
-        answers: M,
-        source: &S,
-    ) -> impl crate::selection::Answers {
-        self.premise.evaluate(answers, source)
-    }
-}
-
-/// Analysis result for a premise - either viable or blocked
-/// Both variants cache schema/params for efficient updates
-#[derive(Debug, Clone, PartialEq)]
-pub enum Analysis {
-    /// Plan is ready to execute.
+pub enum Candidate {
+    /// All prerequisites are satisfied — this premise can execute now.
     Viable {
         /// The premise to execute.
         premise: Premise,
@@ -188,7 +35,8 @@ pub enum Analysis {
         /// Cached parameters for efficient incremental updates.
         params: Parameters,
     },
-    /// Plan is blocked on missing requirements.
+    /// One or more prerequisites are unsatisfied — this premise cannot
+    /// execute until the missing variables are bound by earlier premises.
     Blocked {
         /// The premise that cannot yet execute.
         premise: Premise,
@@ -199,7 +47,7 @@ pub enum Analysis {
         /// Variables already bound in the environment.
         env: Environment,
         /// Variables that must be bound before this premise can execute.
-        requires: Required,
+        requires: Prerequisites,
         /// Cached schema for efficient incremental updates.
         schema: Schema,
         /// Cached parameters for efficient incremental updates.
@@ -207,7 +55,7 @@ pub enum Analysis {
     },
 }
 
-impl Analysis {
+impl Candidate {
     /// Analyzes a premise to determine whether it is viable or blocked,
     /// and computes its estimated cost in an empty environment.
     pub fn from(premise: Premise) -> Self {
@@ -222,18 +70,18 @@ impl Analysis {
         // If None, the premise is unbound and should use a high cost
         let cost = premise.estimate(&env).unwrap_or(usize::MAX);
         let mut binds = Environment::new();
-        let mut requires = Required::new();
+        let mut requires = Prerequisites::new();
 
         // Track which choice groups are satisfied by constants
-        let mut satisfied_groups = std::collections::HashSet::new();
+        let mut satisfied_groups = HashSet::new();
 
-        // First pass: identify groups satisfied by constants
+        // First pass: identify requirement groups satisfied by constants
         for (name, constraint) in schema.iter() {
             if let Some(term) = params.get(name)
                 && let Requirement::Required(Some(group)) = &constraint.requirement
                 && matches!(term, Term::Constant(_))
             {
-                // If this parameter is a constant, its group is satisfied
+                // If parameter is a constant, its group is satisfied
                 satisfied_groups.insert(*group);
             }
         }
@@ -260,11 +108,11 @@ impl Analysis {
                                 binds.add(term);
                             }
                         } else {
-                            requires.add(term);
+                            requires.insert(term);
                         }
                     }
                     Requirement::Required(None) => {
-                        requires.add(term);
+                        requires.insert(term);
                     }
                     Requirement::Optional => {
                         // Negations don't bind variables, so skip adding to binds
@@ -276,9 +124,9 @@ impl Analysis {
             }
         }
 
-        // If no requirements, create Viable analysis
-        if requires.count() == 0 {
-            Analysis::Viable {
+        // If no requirements, create Viable candidate
+        if requires.is_empty() {
+            Candidate::Viable {
                 premise,
                 cost,
                 binds,
@@ -287,7 +135,7 @@ impl Analysis {
                 params,
             }
         } else {
-            Analysis::Blocked {
+            Candidate::Blocked {
                 premise,
                 cost,
                 binds,
@@ -298,12 +146,12 @@ impl Analysis {
             }
         }
     }
-    /// Update this analysis with new bindings from the environment.
+    /// Update this candidate with new bindings from the environment.
     /// May transition from Blocked to Viable if requirements are satisfied.
     /// Only processes relevant bindings and updates incrementally.
     pub fn update(&mut self, new_bindings: &Environment) {
         match self {
-            Analysis::Viable {
+            Candidate::Viable {
                 premise,
                 cost,
                 binds,
@@ -333,7 +181,7 @@ impl Analysis {
                 // Re-estimate cost based on updated environment
                 *cost = premise.estimate(env).unwrap_or(usize::MAX);
             }
-            Analysis::Blocked {
+            Candidate::Blocked {
                 premise,
                 cost,
                 binds,
@@ -343,7 +191,7 @@ impl Analysis {
                 params,
             } => {
                 // Track which choice groups now have at least one bound parameter
-                let mut satisfied_groups = std::collections::HashSet::new();
+                let mut satisfied_groups = HashSet::new();
 
                 // Process only relevant bindings (parameters that got bound)
                 for (name, constraint) in schema.iter() {
@@ -386,8 +234,8 @@ impl Analysis {
                 *cost = premise.estimate(env).unwrap_or(usize::MAX);
 
                 // If no requirements remain, transition to Viable
-                if requires.count() == 0 {
-                    *self = Analysis::Viable {
+                if requires.is_empty() {
+                    *self = Candidate::Viable {
                         premise: premise.clone(),
                         cost: *cost,
                         binds: binds.clone(),
@@ -400,35 +248,35 @@ impl Analysis {
         }
     }
 
-    /// Get the cost of this analysis (whether viable or blocked)
+    /// Get the cost of this candidate (whether viable or blocked)
     pub fn cost(&self) -> usize {
         match self {
-            Analysis::Viable { cost, .. } => *cost,
-            Analysis::Blocked { cost, .. } => *cost,
+            Candidate::Viable { cost, .. } => *cost,
+            Candidate::Blocked { cost, .. } => *cost,
         }
     }
 
-    /// Check if this analysis is viable
+    /// Check if this candidate is viable
     pub fn is_viable(&self) -> bool {
-        matches!(self, Analysis::Viable { .. })
+        matches!(self, Candidate::Viable { .. })
     }
 
-    /// Get the premise this analysis is for
+    /// Get the premise this candidate is for
     pub fn premise(&self) -> &Premise {
         match self {
-            Analysis::Viable { premise, .. } => premise,
-            Analysis::Blocked { premise, .. } => premise,
+            Candidate::Viable { premise, .. } => premise,
+            Candidate::Blocked { premise, .. } => premise,
         }
     }
 }
 
-impl From<Premise> for Analysis {
+impl From<Premise> for Candidate {
     fn from(premise: Premise) -> Self {
-        Analysis::from(premise)
+        Candidate::from(premise)
     }
 }
 
-impl From<Plan> for Analysis {
+impl From<Plan> for Candidate {
     fn from(plan: Plan) -> Self {
         Self::Viable {
             schema: plan.premise.schema(),
@@ -441,7 +289,7 @@ impl From<Plan> for Analysis {
     }
 }
 
-impl From<&Plan> for Analysis {
+impl From<&Plan> for Candidate {
     fn from(plan: &Plan) -> Self {
         Self::Viable {
             schema: plan.premise.schema(),
@@ -454,12 +302,12 @@ impl From<&Plan> for Analysis {
     }
 }
 
-impl TryFrom<Analysis> for Plan {
+impl TryFrom<Candidate> for Plan {
     type Error = CompileError;
 
-    fn try_from(analysis: Analysis) -> Result<Self, Self::Error> {
-        match analysis {
-            Analysis::Viable {
+    fn try_from(candidate: Candidate) -> Result<Self, Self::Error> {
+        match candidate {
+            Candidate::Viable {
                 premise,
                 cost,
                 binds,
@@ -474,7 +322,7 @@ impl TryFrom<Analysis> for Plan {
                     env,
                 })
             }
-            Analysis::Blocked { requires, .. } => {
+            Candidate::Blocked { requires, .. } => {
                 Err(CompileError::RequiredBindings { required: requires })
             }
         }
@@ -484,12 +332,12 @@ impl TryFrom<Analysis> for Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::formula::Formula;
     use crate::formula::string::Length;
-    use crate::predicate::formula::Formula;
-    use crate::{Environment, Parameters, Term, Value};
+    use crate::{Environment, Parameters, Premise, Term, Value};
 
     #[dialog_common::test]
-    fn test_analysis_from_premise_all_derived() {
+    fn test_candidate_from_premise_all_derived() {
         let mut params = Parameters::new();
         params.insert("of".to_string(), Term::<Value>::var("text".to_string()));
         params.insert("is".to_string(), Term::<Value>::var("len".to_string()));
@@ -497,12 +345,12 @@ mod tests {
         let application = Length::apply(params).unwrap();
         let premise = Premise::from(application);
 
-        let analysis = Analysis::from(premise);
-        assert!(!analysis.is_viable());
+        let candidate = Candidate::from(premise);
+        assert!(!candidate.is_viable());
     }
 
     #[dialog_common::test]
-    fn test_analysis_from_premise_with_constant() {
+    fn test_candidate_from_premise_with_constant() {
         let mut params = Parameters::new();
         params.insert(
             "of".to_string(),
@@ -513,12 +361,12 @@ mod tests {
         let application = Length::apply(params).unwrap();
         let premise = Premise::from(application);
 
-        let analysis = Analysis::from(premise);
-        assert!(analysis.is_viable());
+        let candidate = Candidate::from(premise);
+        assert!(candidate.is_viable());
     }
 
     #[dialog_common::test]
-    fn test_analysis_update_transitions_to_viable() {
+    fn test_candidate_update_transitions_to_viable() {
         let mut params = Parameters::new();
         params.insert("of".to_string(), Term::<Value>::var("text"));
         params.insert("is".to_string(), Term::<Value>::var("len"));
@@ -526,18 +374,18 @@ mod tests {
         let application = Length::apply(params).unwrap();
         let premise = Premise::from(application);
 
-        let mut analysis = Analysis::from(premise);
-        assert!(!analysis.is_viable());
+        let mut candidate = Candidate::from(premise);
+        assert!(!candidate.is_viable());
 
         let mut env = Environment::new();
         env.add(&Term::<Value>::var("text"));
-        analysis.update(&env);
+        candidate.update(&env);
 
-        assert!(analysis.is_viable());
+        assert!(candidate.is_viable());
     }
 
     #[dialog_common::test]
-    fn test_analysis_update_reduces_cost_when_derived_bound() {
+    fn test_candidate_update_reduces_cost_when_derived_bound() {
         let mut params = Parameters::new();
         params.insert(
             "of".to_string(),
@@ -548,23 +396,23 @@ mod tests {
         let application = Length::apply(params).unwrap();
         let premise = Premise::from(application);
 
-        let mut analysis = Analysis::from(premise);
-        let initial_cost = analysis.cost();
-        assert!(analysis.is_viable());
+        let mut candidate = Candidate::from(premise);
+        let initial_cost = candidate.cost();
+        assert!(candidate.is_viable());
 
         let mut env = Environment::new();
         env.add(&Term::<Value>::var("len".to_string()));
-        analysis.update(&env);
+        candidate.update(&env);
 
         assert_eq!(
-            analysis.cost(),
+            candidate.cost(),
             initial_cost,
             "Formula cost should remain constant regardless of bound variables"
         );
     }
 
     #[dialog_common::test]
-    fn test_analysis_try_into_plan_when_viable() {
+    fn test_candidate_try_into_plan_when_viable() {
         let mut params = Parameters::new();
         params.insert(
             "of".to_string(),
@@ -575,15 +423,15 @@ mod tests {
         let application = Length::apply(params).unwrap();
         let premise = Premise::from(application);
 
-        let analysis = Analysis::from(premise);
-        assert!(analysis.is_viable());
+        let candidate = Candidate::from(premise);
+        assert!(candidate.is_viable());
 
-        let plan = Plan::try_from(analysis);
+        let plan = Plan::try_from(candidate);
         assert!(plan.is_ok());
     }
 
     #[dialog_common::test]
-    fn test_analysis_try_into_plan_when_blocked() {
+    fn test_candidate_try_into_plan_when_blocked() {
         let mut params = Parameters::new();
         params.insert("of".to_string(), Term::<Value>::var("text".to_string()));
         params.insert("is".to_string(), Term::<Value>::var("len".to_string()));
@@ -591,35 +439,34 @@ mod tests {
         let application = Length::apply(params).unwrap();
         let premise = Premise::from(application);
 
-        let analysis = Analysis::from(premise);
-        assert!(!analysis.is_viable());
+        let candidate = Candidate::from(premise);
+        assert!(!candidate.is_viable());
 
-        let plan = Plan::try_from(analysis);
+        let plan = Plan::try_from(candidate);
         assert!(plan.is_err());
     }
 }
 
 #[cfg(test)]
 mod cost_model_tests {
-    use crate::analyzer::Analysis;
+    use super::Candidate;
     use crate::artifact::Entity;
     use crate::attribute::Cardinality;
+    use crate::concept::application::ConceptApplication;
+    use crate::concept::predicate::ConceptPredicate;
+    use crate::formula::Formula;
     use crate::formula::string::Length;
-    use crate::predicate::RelationDescriptor;
-    use crate::predicate::concept::ConceptPredicate;
-    use crate::predicate::formula::Formula;
-    use crate::proposition::concept::ConceptApplication;
-    use crate::proposition::{Proposition, RelationApplication};
+    use crate::proposition::Proposition;
+    use crate::relation::application::RelationApplication;
+    use crate::relation::descriptor::RelationDescriptor;
     use crate::schema::{
         CONCEPT_OVERHEAD, INDEX_SCAN, RANGE_READ_COST, RANGE_SCAN_COST, SEGMENT_READ_COST,
     };
     use crate::the;
     use crate::{AttributeDescriptor, Environment, Parameters, Premise, Term, Type, Value};
 
-    // Test 1: Constants don't add to cost
     #[dialog_common::test]
     fn test_constants_do_not_add_cost() {
-        // All constants - should only have SEGMENT_READ_COST
         let entity_val: Entity = Entity::new().unwrap();
 
         let app = RelationApplication::new(
@@ -631,20 +478,19 @@ mod cost_model_tests {
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
         let premise = Premise::When(Proposition::Relation(Box::new(app)));
-        let analysis = Analysis::from(premise);
+        let candidate = Candidate::from(premise);
 
         assert_eq!(
-            analysis.cost(),
+            candidate.cost(),
             SEGMENT_READ_COST,
             "All constants should only cost SEGMENT_READ_COST ({}), got {}",
             SEGMENT_READ_COST,
-            analysis.cost()
+            candidate.cost()
         );
     }
 
     #[dialog_common::test]
     fn test_one_constant_two_variables() {
-        // Constant "the" satisfies group, "of" and "is" are derived
         let app = RelationApplication::new(
             Term::Constant("user".to_string()),
             Term::Constant("name".to_string()),
@@ -654,20 +500,17 @@ mod cost_model_tests {
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
         let premise = Premise::When(Proposition::Relation(Box::new(app)));
-        let analysis = Analysis::from(premise);
+        let candidate = Candidate::from(premise);
 
-        // With new cost model: 1 constraint (only 'the' constant is bound)
-        // 1 constraint with Cardinality::One = RANGE_SCAN_COST
         assert_eq!(
-            analysis.cost(),
+            candidate.cost(),
             RANGE_SCAN_COST,
             "With 1 constraint (just constant 'the'), cost should be RANGE_SCAN_COST ({}), got {}",
             RANGE_SCAN_COST,
-            analysis.cost()
+            candidate.cost()
         );
     }
 
-    // Test 2: Parameters in env are removed from costs
     #[dialog_common::test]
     fn test_env_variables_reduce_cost() {
         let app = RelationApplication::new(
@@ -680,33 +523,25 @@ mod cost_model_tests {
         );
         let premise = Premise::When(Proposition::Relation(Box::new(app)));
 
-        let mut analysis = Analysis::from(premise);
-        let initial_cost = analysis.cost();
-        // With new cost model: 1 constraint (just 'the' constant)
-        // 1 constraint with Cardinality::One = RANGE_SCAN_COST
+        let mut candidate = Candidate::from(premise);
+        let initial_cost = candidate.cost();
         assert_eq!(initial_cost, RANGE_SCAN_COST);
 
-        // Bind entity in environment
         let mut env = Environment::new();
         env.add(&Term::<Value>::var("entity"));
-        analysis.update(&env);
+        candidate.update(&env);
 
-        let after_entity = analysis.cost();
-        // After binding entity: 2 constraints ('the' + 'entity')
-        // 2 constraints with Cardinality::One = SEGMENT_READ_COST
+        let after_entity = candidate.cost();
         assert_eq!(
             after_entity, SEGMENT_READ_COST,
             "After binding entity, cost should decrease to SEGMENT_READ_COST. Expected {}, got {}",
             SEGMENT_READ_COST, after_entity
         );
 
-        // Bind value as well
         env.add(&Term::<Value>::var("value"));
-        analysis.update(&env);
+        candidate.update(&env);
 
-        let final_cost = analysis.cost();
-        // After binding value: 3 constraints (all bound)
-        // 3 constraints with Cardinality::One = SEGMENT_READ_COST (same as 2)
+        let final_cost = candidate.cost();
         assert_eq!(
             final_cost, SEGMENT_READ_COST,
             "After binding all variables, cost stays at SEGMENT_READ_COST ({}), got {}",
@@ -725,15 +560,11 @@ mod cost_model_tests {
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
-        // Create analysis with entity already in environment
         let mut env = Environment::new();
         env.add(&Term::<Value>::var("entity"));
 
-        // Use estimate() with the pre-populated env
         let cost = app.estimate(&env).unwrap_or(usize::MAX);
 
-        // With entity in env: 2 constraints ('the' constant + 'entity' in env)
-        // 2 constraints with Cardinality::One = SEGMENT_READ_COST
         assert_eq!(
             cost, SEGMENT_READ_COST,
             "Variable already in env counts as bound. Expected SEGMENT_READ_COST ({}), got {}",
@@ -741,7 +572,6 @@ mod cost_model_tests {
         );
     }
 
-    // Test 3: Cardinality affects cost
     #[dialog_common::test]
     fn test_cardinality_many_costs_more_than_one() {
         let one_app = RelationApplication::new(
@@ -762,25 +592,23 @@ mod cost_model_tests {
             Some(RelationDescriptor::new(None, Cardinality::Many)),
         );
 
-        let one_analysis = Analysis::from(Premise::When(Proposition::Relation(Box::new(one_app))));
-        let many_analysis =
-            Analysis::from(Premise::When(Proposition::Relation(Box::new(many_app))));
+        let one_candidate =
+            Candidate::from(Premise::When(Proposition::Relation(Box::new(one_app))));
+        let many_candidate =
+            Candidate::from(Premise::When(Proposition::Relation(Box::new(many_app))));
 
         assert!(
-            many_analysis.cost() > one_analysis.cost(),
+            many_candidate.cost() > one_candidate.cost(),
             "Cardinality::Many should cost more than Cardinality::One. One: {}, Many: {}",
-            one_analysis.cost(),
-            many_analysis.cost()
+            one_candidate.cost(),
+            many_candidate.cost()
         );
 
-        // With new cost model: 1 constraint (just 'the' constant)
-        // Cardinality::One with 1 constraint = RANGE_SCAN_COST (1000)
-        // Cardinality::Many with 1 constraint = INDEX_SCAN (5000)
-        assert_eq!(one_analysis.cost(), RANGE_SCAN_COST);
-        assert_eq!(many_analysis.cost(), INDEX_SCAN);
+        assert_eq!(one_candidate.cost(), RANGE_SCAN_COST);
+        assert_eq!(many_candidate.cost(), INDEX_SCAN);
 
         let expected_diff = INDEX_SCAN - RANGE_SCAN_COST;
-        let actual_diff = many_analysis.cost() - one_analysis.cost();
+        let actual_diff = many_candidate.cost() - one_candidate.cost();
 
         assert_eq!(
             actual_diff, expected_diff,
@@ -791,8 +619,6 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn test_fully_bound_cardinality_should_not_differ() {
-        // When all parameters are known (constants or bound), cardinality shouldn't matter much
-        // because we're doing a precise lookup, not a scan
         let entity_val: Entity = Entity::new().unwrap();
         let value_val = Value::String("rust".to_string());
 
@@ -814,28 +640,23 @@ mod cost_model_tests {
             Some(RelationDescriptor::new(None, Cardinality::Many)),
         );
 
-        let one_analysis = Analysis::from(Premise::When(Proposition::Relation(Box::new(one_app))));
-        let many_analysis =
-            Analysis::from(Premise::When(Proposition::Relation(Box::new(many_app))));
+        let one_candidate =
+            Candidate::from(Premise::When(Proposition::Relation(Box::new(one_app))));
+        let many_candidate =
+            Candidate::from(Premise::When(Proposition::Relation(Box::new(many_app))));
 
-        // With new cost model: 3 constraints (all constants)
-        // Cardinality::One with 3 constraints = SEGMENT_READ_COST (100)
-        // Cardinality::Many with 3 constraints = RANGE_READ_COST (200)
-        assert_eq!(one_analysis.cost(), SEGMENT_READ_COST);
-        assert_eq!(many_analysis.cost(), RANGE_READ_COST);
+        assert_eq!(one_candidate.cost(), SEGMENT_READ_COST);
+        assert_eq!(many_candidate.cost(), RANGE_READ_COST);
 
-        // Cardinality still matters a bit even when fully bound, but the difference is small
-        assert!(many_analysis.cost() > one_analysis.cost());
+        assert!(many_candidate.cost() > one_candidate.cost());
         assert!(
-            many_analysis.cost() < one_analysis.cost() * 3,
+            many_candidate.cost() < one_candidate.cost() * 3,
             "Fully bound Many should cost more than One, but not drastically more"
         );
     }
 
-    // Test 4: Formula vs Fact costs
     #[dialog_common::test]
     fn test_formula_cheaper_than_fact_no_io() {
-        // Formula with constant input (no IO needed)
         let mut formula_params = Parameters::new();
         formula_params.insert(
             "of".to_string(),
@@ -844,9 +665,8 @@ mod cost_model_tests {
         formula_params.insert("is".to_string(), Term::<Value>::var("len"));
 
         let formula_app = Length::apply(formula_params).unwrap();
-        let formula_analysis = Analysis::from(Premise::from(formula_app));
+        let formula_candidate = Candidate::from(Premise::from(formula_app));
 
-        // Fact with constant attribute (requires IO)
         let fact_app = RelationApplication::new(
             Term::Constant("user".to_string()),
             Term::Constant("name".to_string()),
@@ -855,42 +675,35 @@ mod cost_model_tests {
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
-        let fact_analysis =
-            Analysis::from(Premise::When(Proposition::Relation(Box::new(fact_app))));
+        let fact_candidate =
+            Candidate::from(Premise::When(Proposition::Relation(Box::new(fact_app))));
 
         assert!(
-            formula_analysis.cost() < fact_analysis.cost(),
+            formula_candidate.cost() < fact_candidate.cost(),
             "Formula with no IO should be cheaper than RelationApplication. Formula: {}, Fact: {}",
-            formula_analysis.cost(),
-            fact_analysis.cost()
+            formula_candidate.cost(),
+            fact_candidate.cost()
         );
     }
 
     #[dialog_common::test]
     fn test_formula_requiring_fact_costs_more() {
-        // Formula that needs variable bound by fact (requires IO transitively)
         let mut formula_params = Parameters::new();
-        formula_params.insert("of".to_string(), Term::<Value>::var("text")); // Needs to be bound first
+        formula_params.insert("of".to_string(), Term::<Value>::var("text"));
         formula_params.insert("is".to_string(), Term::<Value>::var("len"));
 
         let formula_app = Length::apply(formula_params).unwrap();
         let formula_premise = Premise::from(formula_app);
-        let formula_analysis = Analysis::from(formula_premise);
+        let formula_candidate = Candidate::from(formula_premise);
 
-        // This formula is blocked - needs "text" to be bound
         assert!(
-            !formula_analysis.is_viable(),
+            !formula_candidate.is_viable(),
             "Formula requiring unbound variable should be blocked"
         );
-
-        // To make it viable, we'd need a fact to bind "text" first
-        // The combined cost would be: fact_cost + formula_cost
-        // which is more than just the formula with a constant
     }
 
     #[dialog_common::test]
     fn test_concept_equals_fact_cost_nothing_bound() {
-        // Create a RelationApplication with constant attribute name
         let fact_app = RelationApplication::new(
             Term::Constant("user".to_string()),
             Term::Constant("name".to_string()),
@@ -900,7 +713,6 @@ mod cost_model_tests {
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
-        // Create a ConceptApplication with single attribute
         let concept = ConceptPredicate::from([(
             "name",
             AttributeDescriptor::new(
@@ -920,16 +732,12 @@ mod cost_model_tests {
             predicate: concept,
         };
 
-        // Both should have same cost when nothing is bound
         let env = Environment::new();
 
         let fact_cost = fact_app.estimate(&env).expect("Should have cost");
         let concept_cost = concept_app.estimate(&env).expect("Should have cost");
 
-        // Fact cost is just the scan
         assert_eq!(fact_cost, RANGE_SCAN_COST);
-
-        // Concept cost includes overhead for potential rule evaluation
         assert_eq!(concept_cost, RANGE_SCAN_COST + CONCEPT_OVERHEAD);
 
         assert!(
@@ -943,7 +751,6 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn test_concept_equals_fact_cost_value_bound() {
-        // Create a RelationApplication with constant attribute name
         let fact_app = RelationApplication::new(
             Term::Constant("user".to_string()),
             Term::Constant("name".to_string()),
@@ -953,7 +760,6 @@ mod cost_model_tests {
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
-        // Create a ConceptApplication with single attribute
         let concept = ConceptPredicate::from([(
             "name",
             AttributeDescriptor::new(
@@ -973,23 +779,18 @@ mod cost_model_tests {
             predicate: concept,
         };
 
-        // Bind the value
         let mut env = Environment::new();
         env.add(&Term::<Value>::var("value"));
 
         let fact_cost = fact_app.estimate(&env).expect("Should have cost");
         let concept_cost = concept_app.estimate(&env).expect("Should have cost");
 
-        // Fact cost
         assert_eq!(fact_cost, SEGMENT_READ_COST);
-
-        // Concept cost includes overhead
         assert_eq!(concept_cost, SEGMENT_READ_COST + CONCEPT_OVERHEAD);
     }
 
     #[dialog_common::test]
     fn test_concept_equals_fact_cost_entity_bound() {
-        // Create a RelationApplication with constant attribute name
         let fact_app = RelationApplication::new(
             Term::Constant("user".to_string()),
             Term::Constant("name".to_string()),
@@ -999,7 +800,6 @@ mod cost_model_tests {
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
-        // Create a ConceptApplication with single attribute
         let concept = ConceptPredicate::from([(
             "name",
             AttributeDescriptor::new(
@@ -1019,23 +819,18 @@ mod cost_model_tests {
             predicate: concept,
         };
 
-        // Bind the entity
         let mut env = Environment::new();
         env.add(&Term::<Value>::var("entity"));
 
         let fact_cost = fact_app.estimate(&env).expect("Should have cost");
         let concept_cost = concept_app.estimate(&env).expect("Should have cost");
 
-        // Fact cost
         assert_eq!(fact_cost, SEGMENT_READ_COST);
-
-        // Concept cost includes overhead
         assert_eq!(concept_cost, SEGMENT_READ_COST + CONCEPT_OVERHEAD);
     }
 
     #[dialog_common::test]
     fn test_concept_equals_fact_cost_cardinality_many_nothing_bound() {
-        // Create a RelationApplication with Cardinality::Many
         let fact_app = RelationApplication::new(
             Term::Constant("user".to_string()),
             Term::Constant("tags".to_string()),
@@ -1045,7 +840,6 @@ mod cost_model_tests {
             Some(RelationDescriptor::new(None, Cardinality::Many)),
         );
 
-        // Create a ConceptApplication with single Cardinality::Many attribute
         let tag = AttributeDescriptor::new(
             the!("user/tags"),
             "User tags",
@@ -1064,22 +858,17 @@ mod cost_model_tests {
             predicate: concept,
         };
 
-        // Nothing bound
         let env = Environment::new();
 
         let fact_cost = fact_app.estimate(&env).expect("Should have cost");
         let concept_cost = concept_app.estimate(&env).expect("Should have cost");
 
-        // Fact cost
         assert_eq!(fact_cost, INDEX_SCAN);
-
-        // Concept cost includes overhead
         assert_eq!(concept_cost, INDEX_SCAN + CONCEPT_OVERHEAD);
     }
 
     #[dialog_common::test]
     fn test_concept_equals_fact_cost_cardinality_many_value_bound() {
-        // Create a RelationApplication with Cardinality::Many
         let fact_app = RelationApplication::new(
             Term::Constant("user".to_string()),
             Term::Constant("tags".to_string()),
@@ -1089,7 +878,6 @@ mod cost_model_tests {
             Some(RelationDescriptor::new(None, Cardinality::Many)),
         );
 
-        // Create a ConceptApplication with single Cardinality::Many attribute
         let tag = AttributeDescriptor::new(
             the!("user/tags"),
             "User tags",
@@ -1108,25 +896,18 @@ mod cost_model_tests {
             predicate: concept,
         };
 
-        // Bind the value
         let mut env = Environment::new();
         env.add(&Term::<Value>::var("tag"));
 
         let fact_cost = fact_app.estimate(&env).expect("Should have cost");
         let concept_cost = concept_app.estimate(&env).expect("Should have cost");
 
-        // Fact cost
         assert_eq!(fact_cost, RANGE_SCAN_COST);
-
-        // Concept cost includes overhead
         assert_eq!(concept_cost, RANGE_SCAN_COST + CONCEPT_OVERHEAD);
     }
 
     #[dialog_common::test]
     fn test_cost_accumulation_through_planning() {
-        // Test that costs accumulate correctly when planning multiple premises
-
-        // First premise: binds "entity" and "name"
         let p1 = RelationApplication::new(
             Term::Constant("user".to_string()),
             Term::Constant("name".to_string()),
@@ -1136,39 +917,32 @@ mod cost_model_tests {
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
-        // Second premise: uses bound "entity", binds "age"
         let p2 = RelationApplication::new(
             Term::Constant("user".to_string()),
             Term::Constant("age".to_string()),
-            Term::<Entity>::var("entity"), // Already bound by p1
+            Term::<Entity>::var("entity"),
             Term::<Value>::var("age"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
-        let a1 = Analysis::from(Premise::When(Proposition::Relation(Box::new(p1))));
+        let a1 = Candidate::from(Premise::When(Proposition::Relation(Box::new(p1))));
         let cost1 = a1.cost();
 
-        // First premise: 1 constraint (just 'the' constant)
-        // 1 constraint with Cardinality::One = RANGE_SCAN_COST
         assert_eq!(cost1, RANGE_SCAN_COST);
 
-        // Simulate p2 with entity already bound
-        let mut a2 = Analysis::from(Premise::When(Proposition::Relation(Box::new(p2.clone()))));
+        let mut a2 = Candidate::from(Premise::When(Proposition::Relation(Box::new(p2.clone()))));
         let mut env = Environment::new();
         env.add(&Term::<Value>::var("entity"));
         a2.update(&env);
         let cost2 = a2.cost();
 
-        // Second premise with entity bound: 2 constraints ('the' constant + 'entity' in env)
-        // 2 constraints with Cardinality::One = SEGMENT_READ_COST
         assert_eq!(
             cost2, SEGMENT_READ_COST,
             "Second premise with bound entity should cost SEGMENT_READ_COST. Expected {}, got {}",
             SEGMENT_READ_COST, cost2
         );
 
-        // Total cost should be sum of both
         let total = cost1 + cost2;
         let expected_total = RANGE_SCAN_COST + SEGMENT_READ_COST;
         assert_eq!(
@@ -1196,11 +970,11 @@ mod cost_model_tests {
         }
 
         let premise = Premise::When(Proposition::Relation(Box::new(app)));
-        let mut analysis = Analysis::from(premise);
+        let mut candidate = Candidate::from(premise);
 
         eprintln!("\nInitial state:");
-        eprintln!("  Cost: {}", analysis.cost());
-        if let Analysis::Viable { binds, .. } = &analysis {
+        eprintln!("  Cost: {}", candidate.cost());
+        if let Candidate::Viable { binds, .. } = &candidate {
             eprintln!("  Binds: {:?}", binds.variables);
         }
 
@@ -1208,11 +982,11 @@ mod cost_model_tests {
         env.add(&Term::<Value>::var("entity"));
 
         eprintln!("\nUpdating with entity bound...");
-        analysis.update(&env);
+        candidate.update(&env);
 
         eprintln!("\nAfter update:");
-        eprintln!("  Cost: {}", analysis.cost());
-        if let Analysis::Viable { binds, env, .. } = &analysis {
+        eprintln!("  Cost: {}", candidate.cost());
+        if let Candidate::Viable { binds, env, .. } = &candidate {
             eprintln!("  Binds: {:?}", binds.variables);
             eprintln!("  Env: {:?}", env.variables);
         }

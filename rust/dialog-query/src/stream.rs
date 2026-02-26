@@ -6,7 +6,11 @@ use tokio::sync::mpsc::unbounded_channel;
 
 use crate::QueryError;
 
-/// A TryStream that is conditionally Send based on the target platform
+/// A fallible stream that is `Send` on native targets and `!Send` on WASM.
+///
+/// This marker trait adapts the `Send` bound to the compilation target so
+/// that the same query evaluation code works in both multi-threaded native
+/// runtimes and single-threaded WASM environments.
 pub trait SendStream<T>:
     TryStream<Ok = T, Error = QueryError, Item = Result<T, QueryError>> + ConditionalSend
 {

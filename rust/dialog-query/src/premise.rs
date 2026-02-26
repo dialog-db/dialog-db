@@ -7,20 +7,31 @@
 
 pub use super::constraint::Constraint;
 pub use super::negation::Negation;
-use super::proposition::FormulaApplication;
-pub use super::proposition::Proposition;
-pub use crate::environment::Environment;
+use crate::Source;
+use crate::environment::Environment;
 pub use crate::error::{AnalyzerError, PlanError, QueryResult};
-pub use crate::{Source, selection::Answer, selection::Answers};
+use crate::formula::application::FormulaApplication;
+use crate::proposition::Proposition;
+use crate::selection::{Answer, Answers};
+use crate::{Parameters, Schema};
 use futures_util::future::Either;
 use std::fmt::Display;
 
-/// Represents a premise in a rule - a condition that must be satisfied.
+/// A single condition in a deductive rule's body.
 ///
-/// Premises can be:
-/// - **Applications**: Query the knowledge base (facts, concepts, formulas)
-/// - **Constraints**: Express relationships between variables (equality, etc.)
-/// - **Exclusions**: Negated premises that filter out matches
+/// Rules are built from an ordered sequence of premises. During query
+/// planning each premise is wrapped in an [`Candidate`](crate::Candidate)
+/// to determine whether it can execute given the current variable bindings.
+/// At execution time, premises are evaluated in the order chosen by the
+/// planner: each premise receives the stream of [`Answer`](crate::selection::Answer)s
+/// produced so far and extends it with new bindings.
+///
+/// There are three kinds of premise:
+/// - `When` — queries the knowledge base via a [`Proposition`] (fact, concept,
+///   or formula lookup).
+/// - `Where` — applies a [`Constraint`] between already-bound variables
+///   (equality, comparison, etc.).
+/// - `Unless` — a [`Negation`] that *excludes* answers matching a pattern.
 ///
 /// TODO: Large enum variant - Constrain (320 bytes) is much larger than other variants.
 /// Consider boxing Constraint to reduce memory usage when storing Apply/Exclude variants.
@@ -38,7 +49,7 @@ pub enum Premise {
 impl Premise {
     /// Estimate the cost of this premise given the current environment.
     /// Returns None if the premise cannot be executed without more constraints.
-    pub fn estimate(&self, env: &crate::Environment) -> Option<usize> {
+    pub fn estimate(&self, env: &Environment) -> Option<usize> {
         match self {
             Premise::When(application) => application.estimate(env),
             Premise::Where(constraint) => constraint.estimate(env),
@@ -47,7 +58,7 @@ impl Premise {
     }
 
     /// Returns the parameter bindings for this premise
-    pub fn parameters(&self) -> crate::Parameters {
+    pub fn parameters(&self) -> Parameters {
         match self {
             Premise::When(application) => application.parameters(),
             Premise::Where(constraint) => constraint.parameters(),
@@ -56,20 +67,12 @@ impl Premise {
     }
 
     /// Returns the schema describing this premise's parameters
-    pub fn schema(&self) -> crate::Schema {
+    pub fn schema(&self) -> Schema {
         match self {
             Premise::When(application) => application.schema(),
             Premise::Where(constraint) => constraint.schema(),
             Premise::Unless(negation) => negation.schema(),
         }
-    }
-
-    /// Analyze this premise in the given environment.
-    /// Returns either a viable plan (ready to execute) or a blocked plan (missing requirements).
-    pub fn analyze(&self, env: &crate::Environment) -> crate::analyzer::Analysis {
-        let mut analysis = crate::analyzer::Analysis::from(self.clone());
-        analysis.update(env);
-        analysis
     }
 
     /// Evaluate this premise with the given answers and source

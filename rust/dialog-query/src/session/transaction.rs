@@ -3,47 +3,29 @@
 //! Provides a more extensible and efficient alternative to the direct Claim -> Instruction conversion.
 //! Claims can now add operations to a Transaction which accumulates changes and optimizes before committing.
 
+mod change;
+mod edit;
+mod stream;
+
+pub use change::*;
+pub use edit::*;
+pub use stream::*;
+
 use crate::Claim;
-use crate::artifact::{Artifact, Attribute, DialogArtifactsError, Entity, Instruction, Value};
+use crate::artifact::{Artifact, Attribute, Entity, Instruction};
 use crate::assertion::Assertion;
-use futures_util::Stream;
 use std::collections::HashMap;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 
-/// Error types that can occur during transaction operations
-#[derive(Debug, thiserror::Error)]
-pub enum TransactionError {
-    /// The requested operation is not valid
-    #[error("Invalid operation: {reason}")]
-    InvalidOperation {
-        /// Reason why the operation is invalid
-        reason: String,
-    },
-    /// An error from the underlying storage layer
-    #[error("Storage error: {0}")]
-    Storage(#[from] DialogArtifactsError),
-}
-
-/// Changes organized by entity -> attribute -> operations.
-/// Each `(entity, attribute)` pair may have multiple changes — for example
-/// asserting several values on a `Cardinality::Many` attribute in one
-/// transaction.
-pub type Changes = HashMap<Entity, HashMap<Attribute, Vec<Change>>>;
-
-/// Type of change
-#[derive(Debug, Clone, PartialEq)]
-pub enum Change {
-    /// Assert a value for an entity-attribute pair
-    Assert(Value),
-    /// Retract a value from an entity-attribute pair
-    Retract(Value),
-}
-
-/// A transaction accumulates changes before committing them as instructions.
+/// An in-memory buffer of pending writes that can be committed atomically.
 ///
-/// Multiple values can be asserted for the same `(entity, attribute)` pair
-/// within a single transaction — all are preserved as separate instructions.
+/// A `Transaction` collects [`Change`] operations (assert / retract) grouped
+/// by `(entity, attribute)`. When committed via [`Session::commit`](super::Session),
+/// the transaction is converted into a stream of [`Instruction`]s and
+/// written to the underlying store in one batch.
+///
+/// Build a transaction using the [`Edit`] trait — call
+/// [`Session::edit`](super::Session) to get an empty transaction, then
+/// assert or retract claims into it.
 #[derive(Debug)]
 pub struct Transaction {
     /// Changes organized by entity -> attribute -> operation
@@ -172,49 +154,6 @@ impl IntoIterator for Transaction {
     }
 }
 
-/// Implement Stream for Transaction to provide async instruction streaming
-///
-/// This delegates to the IntoIterator implementation for simplicity and consistency.
-/// The transaction is converted to instructions and then streamed via the iterator.
-///
-/// # Examples
-///
-/// ```rs
-/// use dialog_query::Transaction;
-/// use futures_util::StreamExt;
-///
-/// let mut transaction = session.edit();
-/// // ... add operations to transaction ...
-///
-/// // Stream the instructions asynchronously
-/// let mut stream = Box::pin(transaction);
-/// while let Some(instruction) = stream.next().await {
-///     // Process each instruction
-///     println!("Processing: {:?}", instruction);
-/// }
-/// ```
-/// Stream adapter that yields instructions from a consumed transaction
-pub struct TransactionStream {
-    /// Iterator over the transaction's instructions
-    iter: std::vec::IntoIter<Instruction>,
-}
-
-impl From<Transaction> for TransactionStream {
-    fn from(transaction: Transaction) -> Self {
-        Self {
-            iter: transaction.into_iter(),
-        }
-    }
-}
-
-impl Stream for TransactionStream {
-    type Item = Instruction;
-
-    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Poll::Ready(self.iter.next())
-    }
-}
-
 /// Implement Edit for Transaction so transactions can be composed
 impl Edit for Transaction {
     fn merge(self, transaction: &mut Transaction) {
@@ -226,15 +165,6 @@ impl Edit for Transaction {
             }
         }
     }
-}
-
-/// Trait for types that can merge operations into a Transaction
-///
-/// This is the key extensibility point - Claims and other types
-/// implement this trait to merge their operations into a transaction
-pub trait Edit {
-    /// Merge this item's operations into the transaction
-    fn merge(self, transaction: &mut Transaction);
 }
 
 #[cfg(test)]

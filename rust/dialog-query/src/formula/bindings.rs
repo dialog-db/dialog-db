@@ -31,8 +31,9 @@
 
 use crate::artifact::TypeError;
 use crate::error::FormulaEvaluationError;
+use crate::formula::application::FormulaApplication;
 use crate::selection::{Answer, Factors};
-use crate::{Parameters, Value};
+use crate::{Parameters, Term, Value};
 use std::sync::Arc;
 
 /// Parameter-to-value bindings for formula evaluation.
@@ -60,7 +61,7 @@ pub struct Bindings {
     /// The formula application these bindings belong to
     /// Used to create Factor::Derived with proper provenance
     /// Stored as Arc to avoid cloning the entire FormulaApplication
-    formula: Arc<crate::proposition::formula::FormulaApplication>,
+    formula: Arc<FormulaApplication>,
 }
 
 impl Bindings {
@@ -71,7 +72,7 @@ impl Bindings {
     /// * `source` - The answer containing current variable bindings and provenance
     /// * `terms` - Mapping from formula parameter names to query terms
     pub fn new(
-        formula: Arc<crate::proposition::formula::FormulaApplication>,
+        formula: Arc<FormulaApplication>,
         source: impl Into<Answer>,
         terms: Parameters,
     ) -> Self {
@@ -192,11 +193,11 @@ impl Bindings {
 
         // For constant terms, verify the computed value matches the constant.
         // Answer::assign treats constants as no-ops, so we must check here.
-        if let crate::Term::Constant(expected) = term {
+        if let Term::Constant(expected) = term {
             if expected != value {
                 return Err(FormulaEvaluationError::VariableInconsistency {
                     parameter: key.into(),
-                    actual: crate::Term::Constant(value.clone()),
+                    actual: Term::Constant(value.clone()),
                     expected: term.clone(),
                 });
             }
@@ -217,7 +218,7 @@ impl Bindings {
             FormulaEvaluationError::VariableInconsistency {
                 parameter: key.into(),
                 actual: term.clone(),
-                expected: crate::Term::Constant(value.clone()),
+                expected: Term::Constant(value.clone()),
             }
         })?;
 
@@ -238,12 +239,12 @@ mod tests {
     use crate::Term;
 
     // Helper to create a test formula for bindings tests
-    fn test_formula() -> crate::proposition::formula::FormulaApplication {
+    fn test_formula() -> crate::formula::application::FormulaApplication {
         use std::sync::OnceLock;
-        static EMPTY_CELLS: OnceLock<crate::predicate::formula::Cells> = OnceLock::new();
-        let cells = EMPTY_CELLS.get_or_init(crate::predicate::formula::Cells::new);
+        static EMPTY_CELLS: OnceLock<crate::formula::cell::Cells> = OnceLock::new();
+        let cells = EMPTY_CELLS.get_or_init(crate::formula::cell::Cells::new);
 
-        crate::proposition::formula::FormulaApplication {
+        crate::formula::application::FormulaApplication {
             name: "test",
             compute: |_| Ok(vec![]),
             cost: 0,
@@ -357,13 +358,13 @@ mod tests {
 
         // Try to assign a conflicting value
         use std::sync::OnceLock;
-        static EMPTY_CELLS: OnceLock<crate::predicate::formula::Cells> = OnceLock::new();
-        let cells = EMPTY_CELLS.get_or_init(crate::predicate::formula::Cells::new);
+        static EMPTY_CELLS: OnceLock<crate::formula::cell::Cells> = OnceLock::new();
+        let cells = EMPTY_CELLS.get_or_init(crate::formula::cell::Cells::new);
 
         let conflicting_factor = Factor::Derived {
             value: Value::UnsignedInt(100),
             from: HashMap::new(),
-            formula: Arc::new(crate::proposition::formula::FormulaApplication {
+            formula: Arc::new(crate::formula::application::FormulaApplication {
                 name: "test",
                 compute: |_| Ok(vec![]),
                 cost: 0,

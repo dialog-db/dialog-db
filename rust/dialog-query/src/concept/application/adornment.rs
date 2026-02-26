@@ -60,7 +60,7 @@ impl Adornment {
     /// Reconstruct an `Environment` from this adornment and the concept's terms.
     ///
     /// Bridges the adornment back to the planner's `Environment` type so
-    /// existing `Join::plan(&scope)` works without changes to the planner.
+    /// existing `Conjunction::plan(&scope)` works without changes to the planner.
     pub fn into_environment(self, terms: &Parameters) -> Environment {
         let mut sorted_keys: Vec<&String> = terms.keys().collect();
         sorted_keys.sort();

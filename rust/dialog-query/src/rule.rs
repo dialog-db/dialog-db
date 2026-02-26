@@ -6,393 +6,18 @@
 //! The design is based on the TypeScript implementation in @query/src/plan/rule.js
 //! and follows the patterns described in the design document at notes/rules.md.
 
-pub use crate::dsl::Match;
-use crate::premise::Premise;
+/// Deductive rule definitions for deriving new facts.
+pub mod deductive;
+/// Premises collection type.
+pub mod premises;
+/// When trait and tuple implementations.
+pub mod when;
 
-/// Trait for types that can be converted into a When collection
-///
-/// This trait enables ergonomic rule definitions by allowing various types
-/// to be used as rule premises:
-/// - Single items: `Into<Premise>` types
-/// - Tuples: `(Match<A>, Match<B>, ...)`
-/// - Arrays: `[Match<A>; N]`
-/// - Vectors: `Vec<Match<A>>`
-///
-/// # Examples
-///
-/// ```rs
-/// // Return a tuple of different Match types
-/// fn my_rule(emp: Match<Employee>) -> impl When {
-///     (
-///         Match::<Stuff> { this: emp.this, name: emp.name },
-///         Match::<OtherStuff> { this: emp.this, value: emp.value },
-///     )
-/// }
-/// ```
-pub trait When {
-    /// Convert this collection into a set of premises
-    fn into_premises(self) -> Premises;
-}
+pub use deductive::DeductiveRule;
+pub use premises::*;
+pub use when::*;
 
-/// An ordered collection of premises used in rule definitions
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct Premises(Vec<Premise>);
-
-impl Premises {
-    /// Create a new empty When collection
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Get the number of statements
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    /// Check if empty
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    /// Get an iterator over the statements
-    pub fn iter(&self) -> impl Iterator<Item = &Premise> {
-        self.0.iter()
-    }
-
-    /// Add a statement-producing item to this When
-    pub fn extend<T: When>(&mut self, items: T) {
-        self.0.extend(items.into_premises());
-    }
-
-    /// Get the inner Vec for compatibility
-    pub fn into_vec(self) -> Vec<Premise> {
-        self.0
-    }
-
-    /// Get reference to inner Vec for compatibility
-    pub fn as_vec(&self) -> &Vec<Premise> {
-        &self.0
-    }
-}
-
-impl IntoIterator for Premises {
-    type Item = Premise;
-    type IntoIter = std::vec::IntoIter<Premise>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
-    }
-}
-
-impl<'a> IntoIterator for &'a Premises {
-    type Item = &'a Premise;
-    type IntoIter = std::slice::Iter<'a, Premise>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.iter()
-    }
-}
-
-impl<T: Into<Premise>> From<Vec<T>> for Premises {
-    fn from(source: Vec<T>) -> Self {
-        let mut premises = vec![];
-        for each in source {
-            premises.push(each.into());
-        }
-        Premises(premises)
-    }
-}
-
-impl<T: Into<Premise>, const N: usize> From<[T; N]> for Premises {
-    fn from(source: [T; N]) -> Self {
-        let mut premises = vec![];
-        for each in source {
-            premises.push(each.into());
-        }
-        Premises(premises)
-    }
-}
-
-// Implement IntoWhen for When itself
-impl When for Premises {
-    fn into_premises(self) -> Premises {
-        self
-    }
-}
-
-// Implement IntoWhen for arrays
-impl<T: Into<Premise>, const N: usize> When for [T; N] {
-    fn into_premises(self) -> Premises {
-        self.into()
-    }
-}
-
-// Implement IntoWhen for Vec
-impl<T: Into<Premise>> When for Vec<T> {
-    fn into_premises(self) -> Premises {
-        self.into()
-    }
-}
-
-// Implement IntoWhen for tuples of different sizes
-// This allows heterogeneous premise types in a single rule
-
-impl<T1> When for (T1,)
-where
-    T1: Into<Premise>,
-{
-    fn into_premises(self) -> Premises {
-        Premises(vec![self.0.into()])
-    }
-}
-
-impl<T1, T2> When for (T1, T2)
-where
-    T1: Into<Premise>,
-    T2: Into<Premise>,
-{
-    fn into_premises(self) -> Premises {
-        Premises(vec![self.0.into(), self.1.into()])
-    }
-}
-
-impl<T1, T2, T3> When for (T1, T2, T3)
-where
-    T1: Into<Premise>,
-    T2: Into<Premise>,
-    T3: Into<Premise>,
-{
-    fn into_premises(self) -> Premises {
-        Premises(vec![self.0.into(), self.1.into(), self.2.into()])
-    }
-}
-
-impl<T1, T2, T3, T4> When for (T1, T2, T3, T4)
-where
-    T1: Into<Premise>,
-    T2: Into<Premise>,
-    T3: Into<Premise>,
-    T4: Into<Premise>,
-{
-    fn into_premises(self) -> Premises {
-        Premises(vec![
-            self.0.into(),
-            self.1.into(),
-            self.2.into(),
-            self.3.into(),
-        ])
-    }
-}
-
-impl<T1, T2, T3, T4, T5> When for (T1, T2, T3, T4, T5)
-where
-    T1: Into<Premise>,
-    T2: Into<Premise>,
-    T3: Into<Premise>,
-    T4: Into<Premise>,
-    T5: Into<Premise>,
-{
-    fn into_premises(self) -> Premises {
-        Premises(vec![
-            self.0.into(),
-            self.1.into(),
-            self.2.into(),
-            self.3.into(),
-            self.4.into(),
-        ])
-    }
-}
-
-impl<T1, T2, T3, T4, T5, T6> When for (T1, T2, T3, T4, T5, T6)
-where
-    T1: Into<Premise>,
-    T2: Into<Premise>,
-    T3: Into<Premise>,
-    T4: Into<Premise>,
-    T5: Into<Premise>,
-    T6: Into<Premise>,
-{
-    fn into_premises(self) -> Premises {
-        Premises(vec![
-            self.0.into(),
-            self.1.into(),
-            self.2.into(),
-            self.3.into(),
-            self.4.into(),
-            self.5.into(),
-        ])
-    }
-}
-
-impl<T1, T2, T3, T4, T5, T6, T7> When for (T1, T2, T3, T4, T5, T6, T7)
-where
-    T1: Into<Premise>,
-    T2: Into<Premise>,
-    T3: Into<Premise>,
-    T4: Into<Premise>,
-    T5: Into<Premise>,
-    T6: Into<Premise>,
-    T7: Into<Premise>,
-{
-    fn into_premises(self) -> Premises {
-        Premises(vec![
-            self.0.into(),
-            self.1.into(),
-            self.2.into(),
-            self.3.into(),
-            self.4.into(),
-            self.5.into(),
-            self.6.into(),
-        ])
-    }
-}
-
-impl<T1, T2, T3, T4, T5, T6, T7, T8> When for (T1, T2, T3, T4, T5, T6, T7, T8)
-where
-    T1: Into<Premise>,
-    T2: Into<Premise>,
-    T3: Into<Premise>,
-    T4: Into<Premise>,
-    T5: Into<Premise>,
-    T6: Into<Premise>,
-    T7: Into<Premise>,
-    T8: Into<Premise>,
-{
-    fn into_premises(self) -> Premises {
-        Premises(vec![
-            self.0.into(),
-            self.1.into(),
-            self.2.into(),
-            self.3.into(),
-            self.4.into(),
-            self.5.into(),
-            self.6.into(),
-            self.7.into(),
-        ])
-    }
-}
-
-impl<T1, T2, T3, T4, T5, T6, T7, T8, T9> When for (T1, T2, T3, T4, T5, T6, T7, T8, T9)
-where
-    T1: Into<Premise>,
-    T2: Into<Premise>,
-    T3: Into<Premise>,
-    T4: Into<Premise>,
-    T5: Into<Premise>,
-    T6: Into<Premise>,
-    T7: Into<Premise>,
-    T8: Into<Premise>,
-    T9: Into<Premise>,
-{
-    fn into_premises(self) -> Premises {
-        Premises(vec![
-            self.0.into(),
-            self.1.into(),
-            self.2.into(),
-            self.3.into(),
-            self.4.into(),
-            self.5.into(),
-            self.6.into(),
-            self.7.into(),
-            self.8.into(),
-        ])
-    }
-}
-
-impl<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10> When for (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10)
-where
-    T1: Into<Premise>,
-    T2: Into<Premise>,
-    T3: Into<Premise>,
-    T4: Into<Premise>,
-    T5: Into<Premise>,
-    T6: Into<Premise>,
-    T7: Into<Premise>,
-    T8: Into<Premise>,
-    T9: Into<Premise>,
-    T10: Into<Premise>,
-{
-    fn into_premises(self) -> Premises {
-        Premises(vec![
-            self.0.into(),
-            self.1.into(),
-            self.2.into(),
-            self.3.into(),
-            self.4.into(),
-            self.5.into(),
-            self.6.into(),
-            self.7.into(),
-            self.8.into(),
-            self.9.into(),
-        ])
-    }
-}
-
-impl<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11> When
-    for (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11)
-where
-    T1: Into<Premise>,
-    T2: Into<Premise>,
-    T3: Into<Premise>,
-    T4: Into<Premise>,
-    T5: Into<Premise>,
-    T6: Into<Premise>,
-    T7: Into<Premise>,
-    T8: Into<Premise>,
-    T9: Into<Premise>,
-    T10: Into<Premise>,
-    T11: Into<Premise>,
-{
-    fn into_premises(self) -> Premises {
-        Premises(vec![
-            self.0.into(),
-            self.1.into(),
-            self.2.into(),
-            self.3.into(),
-            self.4.into(),
-            self.5.into(),
-            self.6.into(),
-            self.7.into(),
-            self.8.into(),
-            self.9.into(),
-            self.10.into(),
-        ])
-    }
-}
-
-impl<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12> When
-    for (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12)
-where
-    T1: Into<Premise>,
-    T2: Into<Premise>,
-    T3: Into<Premise>,
-    T4: Into<Premise>,
-    T5: Into<Premise>,
-    T6: Into<Premise>,
-    T7: Into<Premise>,
-    T8: Into<Premise>,
-    T9: Into<Premise>,
-    T10: Into<Premise>,
-    T11: Into<Premise>,
-    T12: Into<Premise>,
-{
-    fn into_premises(self) -> Premises {
-        Premises(vec![
-            self.0.into(),
-            self.1.into(),
-            self.2.into(),
-            self.3.into(),
-            self.4.into(),
-            self.5.into(),
-            self.6.into(),
-            self.7.into(),
-            self.8.into(),
-            self.9.into(),
-            self.10.into(),
-            self.11.into(),
-        ])
-    }
-}
+pub use crate::predicate::Match;
 
 /// Macro for creating When collections with clean array-like syntax
 ///
@@ -400,7 +25,7 @@ where
 ///
 /// ```rust
 /// use dialog_query::{when, When, Term, artifact::Value};
-/// use dialog_query::proposition::relation::RelationApplication;
+/// use dialog_query::relation::application::RelationApplication;
 ///
 /// fn example() -> impl When {
 ///     let r1 = RelationApplication::new(
@@ -438,16 +63,17 @@ mod tests {
     use crate::artifact::{Artifacts, Entity, Type};
     use crate::attribute::{AttributeDescriptor, Cardinality};
     use crate::claim::Claim;
+    use crate::concept::application::ConceptApplication;
+    use crate::concept::predicate::ConceptPredicate;
     use crate::concept::{Concept, ConceptProof};
-    use crate::dsl::Predicate;
     use crate::error::InconsistencyError;
-    use crate::predicate::concept::ConceptPredicate;
-    use crate::proposition::ConceptApplication;
+    use crate::predicate::Predicate;
+    use crate::premise::Premise;
     use crate::selection::Answer;
     use crate::term::Term;
     use crate::the;
     use crate::types::Scalar;
-    use crate::{Assertion, Parameters, Premise, Proposition, QueryError, Session, Transaction};
+    use crate::{Assertion, Parameters, Proposition, QueryError, Session, Transaction};
 
     // Manual implementation of Person struct with Concept and Rule traits
     // This serves as a template for what the derive macro should generate
