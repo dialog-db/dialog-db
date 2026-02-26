@@ -15,6 +15,7 @@ pub mod cell;
 pub mod input;
 
 pub use application::*;
+pub use bindings::*;
 pub use cell::*;
 pub use input::*;
 
@@ -36,7 +37,6 @@ use crate::Predicate;
 use crate::error::{FormulaEvaluationError, SchemaError};
 use crate::selection::Answer;
 use crate::{Parameters, Schema};
-use bindings::Bindings;
 
 /// Core trait for implementing formulas in the query system
 ///

@@ -238,27 +238,27 @@ pub fn derive(input: TokenStream) -> TokenStream {
         #namespace_static_decl
 
         impl dialog_query::Predicate for #struct_name {
-            type Proof = dialog_query::concept::With<Self>;
-            type Application = dialog_query::concept::WithQuery<Self>;
-            type Descriptor = dialog_query::attribute::AttributeDescriptor;
+            type Proof = dialog_query::With<Self>;
+            type Application = dialog_query::WithQuery<Self>;
+            type Descriptor = dialog_query::AttributeDescriptor;
         }
 
-        impl dialog_query::attribute::Attribute for #struct_name {
+        impl dialog_query::Attribute for #struct_name {
             type Type = #wrapped_type;
 
-            type Query = dialog_query::concept::WithQuery<Self>;
-            type Proof = dialog_query::concept::With<Self>;
-            type Term = dialog_query::concept::WithTerms<Self>;
+            type Query = dialog_query::WithQuery<Self>;
+            type Proof = dialog_query::With<Self>;
+            type Term = dialog_query::WithTerms<Self>;
 
-            fn descriptor() -> dialog_query::attribute::AttributeDescriptor {
+            fn descriptor() -> dialog_query::AttributeDescriptor {
                 let the = format!("{}/{}", #namespace_expr, #attr_name_lit)
-                    .parse::<dialog_query::attribute::The>()
+                    .parse::<dialog_query::The>()
                     .expect("attribute selector must be valid");
-                dialog_query::attribute::AttributeDescriptor::new(
+                dialog_query::AttributeDescriptor::new(
                     the,
                     #description_lit,
                     #cardinality,
-                    <#wrapped_type as dialog_query::types::IntoType>::TYPE,
+                    <#wrapped_type as dialog_query::IntoType>::TYPE,
                 )
             }
 
@@ -275,8 +275,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl std::fmt::Debug for #struct_name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.debug_struct(stringify!(#struct_name))
-                    .field("namespace", &<Self as dialog_query::attribute::Attribute>::descriptor().namespace())
-                    .field("name", &<Self as dialog_query::attribute::Attribute>::descriptor().name())
+                    .field("namespace", &<Self as dialog_query::Attribute>::descriptor().namespace())
+                    .field("name", &<Self as dialog_query::Attribute>::descriptor().name())
                     .field("value", &self.0)
                     .finish()
             }
@@ -286,8 +286,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl std::fmt::Display for #struct_name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 write!(f, "{}/{}: {:?}",
-                    <Self as dialog_query::attribute::Attribute>::descriptor().namespace(),
-                    <Self as dialog_query::attribute::Attribute>::descriptor().name(),
+                    <Self as dialog_query::Attribute>::descriptor().namespace(),
+                    <Self as dialog_query::Attribute>::descriptor().name(),
                     self.0
                 )
             }
@@ -296,7 +296,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         // Generic From implementation for any type that can convert into the wrapped type
         impl<U: ::std::convert::Into<#wrapped_type>> ::std::convert::From<U> for #struct_name {
             fn from(value: U) -> Self {
-                <Self as dialog_query::attribute::Attribute>::new(value.into())
+                <Self as dialog_query::Attribute>::new(value.into())
             }
         }
     };

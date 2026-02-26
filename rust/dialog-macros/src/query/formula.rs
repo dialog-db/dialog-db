@@ -173,7 +173,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             let doc_lit = syn::LitStr::new(doc, proc_macro2::Span::call_site());
             quote! {
                 #[doc = #doc_lit]
-                pub #name: dialog_query::term::Term<#ty>
+                pub #name: dialog_query::Term<#ty>
             }
         })
         .collect();
@@ -259,7 +259,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
 
         /// Static storage for formula cells
-        static #cells_name: ::std::sync::OnceLock<dialog_query::formula::cell::Cells> = ::std::sync::OnceLock::new();
+        static #cells_name: ::std::sync::OnceLock<dialog_query::Cells> = ::std::sync::OnceLock::new();
 
         impl dialog_query::Predicate for #struct_name {
             type Proof = #struct_name;
@@ -267,23 +267,23 @@ pub fn derive(input: TokenStream) -> TokenStream {
             type Descriptor = dialog_query::Entity;
         }
 
-        impl dialog_query::formula::FormulaQuery for #match_name {
+        impl dialog_query::FormulaQuery for #match_name {
             type Predicate = #struct_name;
         }
 
-        impl dialog_query::query::Application for #match_name {
+        impl dialog_query::Application for #match_name {
             type Proof = #struct_name;
 
-            fn evaluate<S: dialog_query::query::Source, M: dialog_query::selection::Answers>(
+            fn evaluate<S: dialog_query::Source, M: dialog_query::Answers>(
                 self,
                 answers: M,
                 _source: &S,
-            ) -> impl dialog_query::selection::Answers {
-                let application: dialog_query::formula::application::FormulaApplication = self.into();
+            ) -> impl dialog_query::Answers {
+                let application: dialog_query::FormulaApplication = self.into();
                 application.evaluate(answers)
             }
 
-            fn realize(&self, source: dialog_query::selection::Answer) -> std::result::Result<Self::Proof, dialog_query::QueryError> {
+            fn realize(&self, source: dialog_query::Answer) -> std::result::Result<Self::Proof, dialog_query::QueryError> {
                 Ok(#struct_name {
                     #(#all_field_names: source.get(&self.#all_field_names)?),*
                 })
@@ -300,14 +300,14 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         impl From<#match_name> for dialog_query::Premise {
             fn from(source: #match_name) -> Self {
-                let app: dialog_query::formula::application::FormulaApplication = source.into();
+                let app: dialog_query::FormulaApplication = source.into();
                 dialog_query::Premise::When(dialog_query::Proposition::Formula(app))
             }
         }
 
         impl From<#match_name> for dialog_query::Proposition {
             fn from(source: #match_name) -> Self {
-                let app: dialog_query::formula::application::FormulaApplication = source.into();
+                let app: dialog_query::FormulaApplication = source.into();
                 dialog_query::Proposition::Formula(app)
             }
         }
@@ -321,17 +321,17 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         }
 
-        impl ::std::convert::TryFrom<&mut dialog_query::formula::bindings::Bindings> for #input_name {
-            type Error = dialog_query::error::FormulaEvaluationError;
+        impl ::std::convert::TryFrom<&mut dialog_query::Bindings> for #input_name {
+            type Error = dialog_query::FormulaEvaluationError;
 
-            fn try_from(bindings: &mut dialog_query::formula::bindings::Bindings) -> ::std::result::Result<Self, Self::Error> {
+            fn try_from(bindings: &mut dialog_query::Bindings) -> ::std::result::Result<Self, Self::Error> {
                 Ok(#input_name {
                     #(#input_field_names: bindings.resolve(#input_field_name_lits)?.try_into()?),*
                 })
             }
         }
 
-        impl dialog_query::formula::Formula for #struct_name {
+        impl dialog_query::Formula for #struct_name {
             type Input = #input_name;
             type Query = #match_name;
 
@@ -339,9 +339,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 #operator_lit
             }
 
-            fn cells() -> &'static dialog_query::formula::cell::Cells {
+            fn cells() -> &'static dialog_query::Cells {
                 #cells_name.get_or_init(|| {
-                    dialog_query::formula::cell::Cells::define(|builder| {
+                    dialog_query::Cells::define(|builder| {
                         #(#cell_definitions)*
                     })
                 })
@@ -355,7 +355,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 #struct_name::derive(input)
             }
 
-            fn write(&self, bindings: &mut dialog_query::formula::bindings::Bindings) -> ::std::result::Result<(), dialog_query::error::FormulaEvaluationError> {
+            fn write(&self, bindings: &mut dialog_query::Bindings) -> ::std::result::Result<(), dialog_query::FormulaEvaluationError> {
                 #(#write_statements)*
                 ::std::result::Result::Ok(())
             }
