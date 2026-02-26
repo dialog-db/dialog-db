@@ -15,7 +15,7 @@ use syn::{Attribute, Expr, Lit, Meta, Type};
 /// - None for Value types (accepts any type)
 pub fn type_to_value_data_type(ty: &Type) -> TokenStream {
     quote! {
-        <#ty as dialog_query::types::IntoType>::TYPE
+        <#ty as dialog_query::IntoType>::TYPE
     }
 }
 
@@ -198,7 +198,7 @@ pub fn parse_cardinality_attribute(attrs: &[Attribute]) -> TokenStream {
                     if let Meta::List(list) = &attr.meta {
                         let tokens_str = list.tokens.to_string();
                         if tokens_str.contains("many") {
-                            return quote! { dialog_query::attribute::Cardinality::Many };
+                            return quote! { dialog_query::Cardinality::Many };
                         }
                     }
                 }
@@ -210,5 +210,5 @@ pub fn parse_cardinality_attribute(attrs: &[Attribute]) -> TokenStream {
     }
 
     // Default to One
-    quote! { dialog_query::attribute::Cardinality::One }
+    quote! { dialog_query::Cardinality::One }
 }

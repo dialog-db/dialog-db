@@ -166,7 +166,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         // Generate Match field (Term<InnerType>) where InnerType is the Attribute's Type
         match_fields.push(quote! {
             #[doc = #doc_comment_lit]
-            pub #field_name: dialog_query::term::Term<#inner_type>
+            pub #field_name: dialog_query::Term<#inner_type>
         });
 
         terms_methods.push(quote! {
@@ -181,21 +181,21 @@ pub fn derive(input: TokenStream) -> TokenStream {
         rule_when_fields.push(quote! {
             {
                 let value_term = match &terms.#field_name {
-                    dialog_query::term::Term::Variable { name, .. } => dialog_query::term::Term::Variable {
+                    dialog_query::Term::Variable { name, .. } => dialog_query::Term::Variable {
                         name: name.clone(),
                         content_type: Default::default(),
                     },
-                    dialog_query::term::Term::Constant(value) => dialog_query::term::Term::Constant(dialog_query::types::Scalar::as_value(value)),
+                    dialog_query::Term::Constant(value) => dialog_query::Term::Constant(dialog_query::Scalar::as_value(value)),
                 };
 
-                dialog_query::relation::application::RelationApplication::new(
-                    dialog_query::term::Term::Constant(<#field_type as dialog_query::Attribute>::descriptor().namespace().to_string()),
-                    dialog_query::term::Term::Constant(<#field_type as dialog_query::Attribute>::descriptor().name().to_string()),
+                dialog_query::RelationApplication::new(
+                    dialog_query::Term::Constant(<#field_type as dialog_query::Attribute>::descriptor().namespace().to_string()),
+                    dialog_query::Term::Constant(<#field_type as dialog_query::Attribute>::descriptor().name().to_string()),
                     terms.this.clone(),
                     value_term,
-                    dialog_query::term::Toerm::blank(),
-                    Some(dialog_query::relation::descriptor::RelationDescriptor::new(
-                        <<#field_type as dialog_query::Attribute>::Type as dialog_query::types::IntoType>::TYPE,
+                    dialog_query::Term::blank(),
+                    Some(dialog_query::RelationDescriptor::new(
+                        <<#field_type as dialog_query::Attribute>::Type as dialog_query::IntoType>::TYPE,
                         <#field_type as dialog_query::Attribute>::descriptor().cardinality(),
                     )),
                 )
@@ -207,7 +207,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             dialog_query::Assertion::new(
                 <#field_type as dialog_query::Attribute>::selector(),
                 self.this.clone(),
-                dialog_query::types::Scalar::as_value(<#field_type as dialog_query::Attribute>::value(&self.#field_name)),
+                dialog_query::Scalar::as_value(<#field_type as dialog_query::Attribute>::value(&self.#field_name)),
             )
         });
     }
@@ -239,7 +239,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         #[derive(Debug, Clone, PartialEq)]
         pub struct #match_name {
             /// The entity being matched
-            pub this: dialog_query::term::Term<dialog_query::artifact::Entity>,
+            pub this: dialog_query::Term<dialog_query::Entity>,
             #(#match_fields),*
         }
 
@@ -265,19 +265,19 @@ pub fn derive(input: TokenStream) -> TokenStream {
         pub const #operator_const_name: &str = #namespace_lit;
 
         // Implement Queryable trait for the Match struct
-        impl dialog_query::query::Application for #match_name {
+        impl dialog_query::Application for #match_name {
             type Proof = #struct_name;
 
-            fn evaluate<S: dialog_query::query::Source, M: dialog_query::selection::Answers>(
+            fn evaluate<S: dialog_query::Source, M: dialog_query::Answers>(
                 self,
                 answers: M,
                 source: &S,
-            ) -> impl dialog_query::selection::Answers {
-                let application: dialog_query::concept::application::ConceptApplication = self.into();
+            ) -> impl dialog_query::Answers {
+                let application: dialog_query::ConceptApplication = self.into();
                 application.evaluate(answers, source)
             }
 
-            fn realize(&self, source: dialog_query::selection::Answer) -> std::result::Result<Self::Proof, dialog_query::QueryError> {
+            fn realize(&self, source: dialog_query::Answer) -> std::result::Result<Self::Proof, dialog_query::QueryError> {
                 Ok(#struct_name {
                     this: source.get(&self.this)?,
                     #(#field_names: #field_types(source.get(&self.#field_names)?)),*
@@ -288,11 +288,11 @@ pub fn derive(input: TokenStream) -> TokenStream {
         // Add inherent perform method so users don't need to import Application trait
         impl #match_name {
             /// Execute this query against the given source
-            pub fn perform<S: dialog_query::query::Source>(
+            pub fn perform<S: dialog_query::Source>(
                 self,
                 source: &S,
-            ) -> impl dialog_query::query::Output<#struct_name> {
-                dialog_query::query::Application::perform(self, source)
+            ) -> impl dialog_query::Output<#struct_name> {
+                dialog_query::Application::perform(self, source)
             }
         }
 
@@ -310,9 +310,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
 
         // Implement From<StructName> for ConceptPredicate
-        impl From<#struct_name> for dialog_query::concept::predicate::ConceptPredicate {
+        impl From<#struct_name> for dialog_query::ConceptPredicate {
             fn from(_: #struct_name) -> Self {
-                dialog_query::concept::predicate::ConceptPredicate::from(vec![
+                dialog_query::ConceptPredicate::from(vec![
                     #(
                         (#field_name_lits, <#field_types as dialog_query::Attribute>::descriptor())
                     ),*
@@ -321,9 +321,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
 
         // Implement From<MatchName> for ConceptPredicate
-        impl From<#match_name> for dialog_query::concept::predicate::ConceptPredicate {
+        impl From<#match_name> for dialog_query::ConceptPredicate {
             fn from(_: #match_name) -> Self {
-                dialog_query::concept::predicate::ConceptPredicate::from(vec![
+                dialog_query::ConceptPredicate::from(vec![
                     #(
                         (#field_name_lits, <#field_types as dialog_query::Attribute>::descriptor())
                     ),*
@@ -334,8 +334,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
         // Implement From<Match> for Premise
         impl From<#match_name> for dialog_query::Premise {
             fn from(source: #match_name) -> Self {
-                let predicate: dialog_query::concept::predicate::ConceptPredicate = source.clone().into();
-                let app = dialog_query::concept::application::ConceptApplication {
+                let predicate: dialog_query::ConceptPredicate = source.clone().into();
+                let app = dialog_query::ConceptApplication {
                     terms: source.into(),
                     predicate,
                 };
@@ -346,8 +346,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
         // Implement From<Match> for Application
         impl From<#match_name> for dialog_query::Proposition {
             fn from(source: #match_name) -> Self {
-                let predicate: dialog_query::concept::predicate::ConceptPredicate = source.clone().into();
-                let app = dialog_query::concept::application::ConceptApplication {
+                let predicate: dialog_query::ConceptPredicate = source.clone().into();
+                let app = dialog_query::ConceptApplication {
                     terms: source.into(),
                     predicate,
                 };
@@ -356,10 +356,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
 
         // Implement From<Match> for ConceptApplication
-        impl From<#match_name> for dialog_query::concept::application::ConceptApplication {
+        impl From<#match_name> for dialog_query::ConceptApplication {
             fn from(source: #match_name) -> Self {
-                let predicate: dialog_query::concept::predicate::ConceptPredicate = source.clone().into();
-                dialog_query::concept::application::ConceptApplication {
+                let predicate: dialog_query::ConceptPredicate = source.clone().into();
+                dialog_query::ConceptApplication {
                     terms: source.into(),
                     predicate,
                 }
@@ -367,10 +367,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
 
         // Implement From<&Match> for ConceptApplication
-        impl From<&#match_name> for dialog_query::concept::application::ConceptApplication {
+        impl From<&#match_name> for dialog_query::ConceptApplication {
             fn from(source: &#match_name) -> Self {
-                let predicate: dialog_query::concept::predicate::ConceptPredicate = source.clone().into();
-                dialog_query::concept::application::ConceptApplication {
+                let predicate: dialog_query::ConceptPredicate = source.clone().into();
+                dialog_query::ConceptApplication {
                     terms: source.into(),
                     predicate,
                 }
@@ -378,14 +378,14 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
 
         // Implement Instance trait for the concept struct
-        impl dialog_query::concept::ConceptProof for #struct_name {
-            fn this(&self) -> &dialog_query::artifact::Entity {
+        impl dialog_query::ConceptProof for #struct_name {
+            fn this(&self) -> &dialog_query::Entity {
                 &self.this
             }
         }
 
         // Implement Concept trait
-        impl dialog_query::concept::Concept for #struct_name {
+        impl dialog_query::Concept for #struct_name {
             type Term = #terms_name;
 
             fn description() -> &'static str {
@@ -393,7 +393,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
 
             fn this(&self) -> dialog_artifacts::Entity {
-                let predicate: dialog_query::concept::predicate::ConceptPredicate = self.clone().into();
+                let predicate: dialog_query::ConceptPredicate = self.clone().into();
                 predicate.this()
             }
         }
@@ -411,7 +411,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
 
         // Implement Claim trait
-        impl dialog_query::claim::Claim for #struct_name {
+        impl dialog_query::Claim for #struct_name {
             fn assert(self, transaction: &mut dialog_query::Transaction) {
                 #(
                     #instance_relations.assert(transaction);
@@ -427,22 +427,22 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         // Implement Not trait to enable !concept syntax for retraction
         impl std::ops::Not for #struct_name {
-            type Output = dialog_query::claim::Revert<Self>;
+            type Output = dialog_query::Revert<Self>;
 
             fn not(self) -> Self::Output {
-                dialog_query::claim::Claim::revert(self)
+                dialog_query::Claim::revert(self)
             }
         }
 
-        impl dialog_query::dsl::Predicate for #struct_name {
+        impl dialog_query::Predicate for #struct_name {
             type Proof = #struct_name;
             type Application = #match_name;
-            type Descriptor = dialog_query::concept::predicate::ConceptPredicate;
+            type Descriptor = dialog_query::ConceptPredicate;
         }
 
         // Implement Rule trait
         impl #struct_name {
-            fn when(terms: dialog_query::Match<Self>) -> dialog_query::rule::Premises {
+            fn when(terms: dialog_query::Query<Self>) -> dialog_query::Premises {
                 let selectors = vec![
                     #(#rule_when_fields),*
                 ];
