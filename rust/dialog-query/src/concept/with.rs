@@ -281,11 +281,11 @@ mod tests {
 
     #[dialog_common::test]
     fn it_constructs_match_from_literal() {
-        use crate::{Entity, Match, Term};
+        use crate::{Entity, Query, Term};
 
         let entity_id = Entity::new().unwrap();
 
-        let query = Match::<crate::concept::With<test_pascal::UserName>> {
+        let query = Query::<crate::concept::With<test_pascal::UserName>> {
             this: Term::from(entity_id),
             has: Term::from("Alice".to_string()),
         };
@@ -296,11 +296,11 @@ mod tests {
 
     #[dialog_common::test]
     fn it_constructs_queryable_match_pattern() {
-        use crate::{Entity, Match, Term};
+        use crate::{Entity, Query, Term};
 
         let entity_id = Entity::new().unwrap();
 
-        let query = Match::<crate::concept::With<test_pascal::UserName>> {
+        let query = Query::<crate::concept::With<test_pascal::UserName>> {
             this: Term::from(entity_id),
             has: Term::from("Alice".to_string()),
         };
@@ -311,9 +311,9 @@ mod tests {
 
     #[dialog_common::test]
     fn it_constructs_default_match() {
-        use crate::{Match, Term};
+        use crate::{Query, Term};
 
-        let query = Match::<crate::concept::With<test_pascal::UserName>>::default();
+        let query = Query::<crate::concept::With<test_pascal::UserName>>::default();
 
         assert!(matches!(query.this, Term::Variable { .. }));
         assert!(matches!(query.has, Term::Variable { .. }));
@@ -760,7 +760,7 @@ mod tests {
     async fn it_queries_via_with_shortcut() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
         use crate::concept::With;
-        use crate::{Entity, Match, Session};
+        use crate::{Entity, Query, Session};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
 
@@ -791,7 +791,7 @@ mod tests {
         session.commit(edit).await?;
 
         let names: Vec<With<employee_shortcut::Name>> =
-            Match::<With<employee_shortcut::Name>>::default()
+            Query::<With<employee_shortcut::Name>>::default()
                 .perform(&session)
                 .try_collect()
                 .await?;
@@ -813,7 +813,7 @@ mod tests {
         assert!(found_bob, "Should find Bob");
 
         let jobs: Vec<With<employee_shortcut::Job>> =
-            Match::<With<employee_shortcut::Job>>::default()
+            Query::<With<employee_shortcut::Job>>::default()
                 .perform(&session)
                 .try_collect()
                 .await?;
@@ -839,7 +839,7 @@ mod tests {
         use crate::artifact::Artifacts;
         use crate::assertion::Assertion;
         use crate::concept::With;
-        use crate::{Entity, Match, Session, Term, Transaction};
+        use crate::{Entity, Query, Session, Term, Transaction};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
 
@@ -859,7 +859,7 @@ mod tests {
         instance.clone().assert(&mut transaction);
         session.commit(transaction).await?;
 
-        let query = Match::<With<note_concept::Title>> {
+        let query = Query::<With<note_concept::Title>> {
             this: Term::from(entity.clone()),
             has: Term::var("has"),
         };
@@ -892,7 +892,7 @@ mod tests {
         use crate::artifact::Artifacts;
         use crate::concept::With;
         use crate::the;
-        use crate::{Association, Entity, Match, Session, Term, Value};
+        use crate::{Association, Entity, Query, Session, Term, Value};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
 
@@ -924,7 +924,7 @@ mod tests {
             ])
             .await?;
 
-        let query = Match::<With<note_rule::Title>> {
+        let query = Query::<With<note_rule::Title>> {
             this: Term::var("entity"),
             has: Term::var("has"),
         };
@@ -965,7 +965,7 @@ mod tests {
         use crate::artifact::Artifacts;
         use crate::concept::With;
         use crate::the;
-        use crate::{Association, Entity, Match, Session, Term, Value};
+        use crate::{Association, Entity, Query, Session, Term, Value};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
 
@@ -997,7 +997,7 @@ mod tests {
             ])
             .await?;
 
-        let query = Match::<With<note_rule::Title>> {
+        let query = Query::<With<note_rule::Title>> {
             this: Term::var("entity"),
             has: Term::from("Target Note".to_string()),
         };

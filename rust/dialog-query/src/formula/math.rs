@@ -643,7 +643,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_generates_match_struct() {
-        let match_pattern = crate::Match::<TestSum> {
+        let match_pattern = crate::Query::<TestSum> {
             of: Term::var("x"),
             with: Term::var("y"),
             is: Term::var("result"),
@@ -659,7 +659,7 @@ mod tests {
         use dialog_storage::MemoryStorageBackend;
 
         // Create a SumMatch with all variables
-        let query = crate::Match::<Sum> {
+        let query = crate::Query::<Sum> {
             of: Term::var("x"),
             with: Term::var("y"),
             is: Term::var("result"),
@@ -709,7 +709,7 @@ mod tests {
         use dialog_storage::MemoryStorageBackend;
 
         // Input fields are constants, derived field is a variable
-        let query = crate::Match::<Sum> {
+        let query = crate::Query::<Sum> {
             of: Term::from(5u32),
             with: Term::from(3u32),
             is: Term::var("result"),
@@ -748,7 +748,7 @@ mod tests {
         use dialog_storage::MemoryStorageBackend;
 
         // Derived field is a constant matching the expected result
-        let query = crate::Match::<Sum> {
+        let query = crate::Query::<Sum> {
             of: Term::var("x"),
             with: Term::var("y"),
             is: Term::from(8u32),
@@ -790,7 +790,7 @@ mod tests {
         use dialog_storage::MemoryStorageBackend;
 
         // Derived field is a constant that does NOT match (5 + 3 ≠ 99)
-        let query = crate::Match::<Sum> {
+        let query = crate::Query::<Sum> {
             of: Term::var("x"),
             with: Term::var("y"),
             is: Term::from(99u32),
@@ -832,7 +832,7 @@ mod tests {
         use dialog_storage::MemoryStorageBackend;
 
         // Mix: one input is constant, one is variable, derived is variable
-        let query = crate::Match::<Sum> {
+        let query = crate::Query::<Sum> {
             of: Term::from(10u32),
             with: Term::var("y"),
             is: Term::var("result"),
@@ -871,7 +871,7 @@ mod tests {
         use dialog_storage::MemoryStorageBackend;
 
         // Both inputs use the same variable (x + x)
-        let query = crate::Match::<Sum> {
+        let query = crate::Query::<Sum> {
             of: Term::var("x"),
             with: Term::var("x"),
             is: Term::var("result"),

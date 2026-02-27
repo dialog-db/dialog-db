@@ -17,8 +17,6 @@ pub use deductive::DeductiveRule;
 pub use premises::*;
 pub use when::*;
 
-pub use crate::predicate::Match;
-
 /// Macro for creating When collections with clean array-like syntax
 ///
 /// This macro provides the most concise way to create rule conditions:
@@ -71,7 +69,7 @@ mod tests {
     use crate::term::Term;
     use crate::the;
     use crate::types::Scalar;
-    use crate::{Association, Parameters, Proposition, QueryError, Session, Transaction};
+    use crate::{Association, Parameters, Proposition, Query, QueryError, Session, Transaction};
 
     // Manual implementation of Person struct with Concept and Rule traits
     // This serves as a template for what the derive macro should generate
@@ -277,8 +275,8 @@ mod tests {
         use dialog_storage::MemoryStorageBackend;
 
         // Define a rule function using the clean API
-        fn person_rule(person: Match<Person>) -> impl When {
-            (Match::<Person> {
+        fn person_rule(person: Query<Person>) -> impl When {
+            (Query::<Person> {
                 this: person.this,
                 name: person.name,
                 age: person.age,
@@ -322,15 +320,15 @@ mod tests {
         // Test that the generated module and types exist
         let entity = Term::var("person_entity");
 
-        // Test the generated Match struct
-        let _person_match = Match::<MacroPerson> {
+        // Test the generated Query struct
+        let _person_match = Query::<MacroPerson> {
             this: entity.clone(),
             name: Term::var("person_name"),
             birthday: Term::var("person_birthday"),
         };
 
         // Test that MacroPerson implements Concept
-        let concept: ConceptDescriptor = Match::<MacroPerson>::default().into();
+        let concept: ConceptDescriptor = Query::<MacroPerson>::default().into();
         // Operator is now a computed URI
         assert!(
             concept.this().to_string().starts_with("concept:"),
@@ -353,7 +351,7 @@ mod tests {
         assert_eq!(attrs[1].1.content_type(), Some(Type::UnsignedInt));
 
         // Test that MacroPerson implements Rule
-        let test_match = Match::<MacroPerson> {
+        let test_match = Query::<MacroPerson> {
             this: Term::var("person"),
             name: Term::var("name"),
             birthday: Term::var("birthday"),

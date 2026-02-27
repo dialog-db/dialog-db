@@ -535,7 +535,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_uses_into_in_match_construction() {
-        use crate::{Concept, Entity, Match, Term};
+        use crate::{Concept, Entity, Query, Term};
 
         #[derive(Concept, Debug, Clone)]
         pub struct Employee {
@@ -545,7 +545,7 @@ mod tests {
             pub salary: employee_term::Salary,
         }
 
-        let pattern = Match::<Employee> {
+        let pattern = Query::<Employee> {
             this: Term::var("e"),
             name: Term::var("name"),
             salary: Term::var("salary"),
@@ -554,7 +554,7 @@ mod tests {
 
         assert!(pattern.job.is_constant());
 
-        let pattern2 = Match::<Employee> {
+        let pattern2 = Query::<Employee> {
             this: Term::var("e"),
             name: Term::var("name"),
             salary: Term::var("salary"),
