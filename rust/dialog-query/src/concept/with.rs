@@ -270,6 +270,7 @@ where
 mod tests {
     use crate::attribute::Attribute;
     use crate::selection::Answer;
+    use crate::the;
 
     mod test_pascal {
         use crate::Attribute;
@@ -279,7 +280,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_match_struct_literal() {
+    fn it_constructs_match_from_literal() {
         use crate::{Entity, Match, Term};
 
         let entity_id = Entity::new().unwrap();
@@ -294,7 +295,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_quarriable_match_pattern() {
+    fn it_constructs_queryable_match_pattern() {
         use crate::{Entity, Match, Term};
 
         let entity_id = Entity::new().unwrap();
@@ -309,7 +310,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_default_match_constructor() {
+    fn it_constructs_default_match() {
         use crate::{Match, Term};
 
         let query = Match::<crate::concept::With<test_pascal::UserName>>::default();
@@ -339,7 +340,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_single_attribute_assert_and_retract() -> anyhow::Result<()> {
+    async fn it_asserts_and_retracts_single_attribute() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Value};
         use crate::concept::With;
         use crate::relation::query::RelationQuery;
@@ -362,8 +363,7 @@ mod tests {
             .await?;
 
         let query = RelationQuery::new(
-            Term::Constant("employee-txn".into()),
-            Term::Constant("name".into()),
+            Term::Constant(the!("employee-txn/name")),
             alice.clone().into(),
             Term::blank(),
             Term::blank(),
@@ -387,8 +387,7 @@ mod tests {
             .await?;
 
         let query = RelationQuery::new(
-            Term::Constant("employee-txn".into()),
-            Term::Constant("name".into()),
+            Term::Constant(the!("employee-txn/name")),
             alice.into(),
             Term::blank(),
             Term::blank(),
@@ -403,7 +402,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_multiple_attributes_assert() -> anyhow::Result<()> {
+    async fn it_asserts_multiple_attributes() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Value};
         use crate::concept::With;
         use crate::relation::query::RelationQuery;
@@ -433,8 +432,7 @@ mod tests {
             .await?;
 
         let name_query = RelationQuery::new(
-            Term::Constant("employee-txn".into()),
-            Term::Constant("name".into()),
+            Term::Constant(the!("employee-txn/name")),
             bob.clone().into(),
             Term::blank(),
             Term::blank(),
@@ -442,8 +440,7 @@ mod tests {
         );
 
         let job_query = RelationQuery::new(
-            Term::Constant("employee-txn".into()),
-            Term::Constant("job".into()),
+            Term::Constant(the!("employee-txn/job")),
             bob.clone().into(),
             Term::blank(),
             Term::blank(),
@@ -470,7 +467,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_three_attributes_assert() -> anyhow::Result<()> {
+    async fn it_asserts_three_attributes() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Value};
         use crate::concept::With;
         use crate::relation::query::RelationQuery;
@@ -507,8 +504,7 @@ mod tests {
             .await?;
 
         let name_query = RelationQuery::new(
-            Term::Constant("employee-txn".into()),
-            Term::Constant("name".into()),
+            Term::Constant(the!("employee-txn/name")),
             charlie.clone().into(),
             Term::blank(),
             Term::blank(),
@@ -516,8 +512,7 @@ mod tests {
         );
 
         let job_query = RelationQuery::new(
-            Term::Constant("employee-txn".into()),
-            Term::Constant("job".into()),
+            Term::Constant(the!("employee-txn/job")),
             charlie.clone().into(),
             Term::blank(),
             Term::blank(),
@@ -525,8 +520,7 @@ mod tests {
         );
 
         let salary_query = RelationQuery::new(
-            Term::Constant("employee-txn".into()),
-            Term::Constant("salary".into()),
+            Term::Constant(the!("employee-txn/salary")),
             charlie.clone().into(),
             Term::blank(),
             Term::blank(),
@@ -561,7 +555,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_multiple_attributes_retract() -> anyhow::Result<()> {
+    async fn it_retracts_multiple_attributes() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
         use crate::concept::With;
         use crate::relation::query::RelationQuery;
@@ -605,8 +599,7 @@ mod tests {
             .await?;
 
         let name_query = RelationQuery::new(
-            Term::Constant("employee-txn".into()),
-            Term::Constant("name".into()),
+            Term::Constant(the!("employee-txn/name")),
             dave.clone().into(),
             Term::blank(),
             Term::blank(),
@@ -614,8 +607,7 @@ mod tests {
         );
 
         let job_query = RelationQuery::new(
-            Term::Constant("employee-txn".into()),
-            Term::Constant("job".into()),
+            Term::Constant(the!("employee-txn/job")),
             dave.clone().into(),
             Term::blank(),
             Term::blank(),
@@ -639,7 +631,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_update_attribute() -> anyhow::Result<()> {
+    async fn it_updates_attribute() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Value};
         use crate::concept::With;
         use crate::relation::query::RelationQuery;
@@ -679,8 +671,7 @@ mod tests {
             .await?;
 
         let query = RelationQuery::new(
-            Term::Constant("employee-txn".into()),
-            Term::Constant("job".into()),
+            Term::Constant(the!("employee-txn/job")),
             eve.into(),
             Term::blank(),
             Term::blank(),
@@ -699,7 +690,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_entity_reference_attribute() -> anyhow::Result<()> {
+    async fn it_handles_entity_reference_attribute() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Value};
         use crate::concept::With;
         use crate::relation::query::RelationQuery;
@@ -740,8 +731,7 @@ mod tests {
             .await?;
 
         let query = RelationQuery::new(
-            Term::Constant("employee-txn".into()),
-            Term::Constant("manager".into()),
+            Term::Constant(the!("employee-txn/manager")),
             employee_entity.into(),
             Term::blank(),
             Term::blank(),
@@ -767,7 +757,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_with_query_shortcut() -> anyhow::Result<()> {
+    async fn it_queries_via_with_shortcut() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
         use crate::concept::With;
         use crate::{Entity, Match, Session};
@@ -845,7 +835,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_attribute_claim() -> anyhow::Result<()> {
+    async fn it_claims_attribute() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
         use crate::assertion::Assertion;
         use crate::concept::With;
@@ -898,7 +888,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_adhoc_concept_query() -> anyhow::Result<()> {
+    async fn it_queries_adhoc_concept() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
         use crate::concept::With;
         use crate::the;
@@ -971,7 +961,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_adhoc_concept_query_with_filter() -> anyhow::Result<()> {
+    async fn it_filters_adhoc_concept_query() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
         use crate::concept::With;
         use crate::the;

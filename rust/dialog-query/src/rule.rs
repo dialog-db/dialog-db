@@ -24,21 +24,19 @@ pub use crate::predicate::Match;
 /// This macro provides the most concise way to create rule conditions:
 ///
 /// ```rust
-/// use dialog_query::{when, When, Term, artifact::Value};
+/// use dialog_query::{when, When, Term, artifact::Value, the};
 /// use dialog_query::relation::query::RelationQuery;
 ///
 /// fn example() -> impl When {
 ///     let r1 = RelationQuery::new(
-///         Term::Constant("ns".into()),
-///         Term::Constant("attr1".into()),
+///         Term::Constant(the!("ns/attr1")),
 ///         Term::var("entity"),
 ///         Term::from(Value::String("value1".to_string())),
 ///         Term::blank(),
 ///         None,
 ///     );
 ///     let r2 = RelationQuery::new(
-///         Term::Constant("ns".into()),
-///         Term::Constant("attr2".into()),
+///         Term::Constant(the!("ns/attr2")),
 ///         Term::var("entity"),
 ///         Term::var("value2"),
 ///         Term::blank(),
@@ -275,7 +273,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_install_rule_api() {
+    async fn it_install_rule_api() {
         use dialog_storage::MemoryStorageBackend;
 
         // Define a rule function using the clean API
@@ -320,7 +318,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_derive_rule_generates_types() {
+    fn it_derive_rule_generates_types() {
         // Test that the generated module and types exist
         let entity = Term::var("person_entity");
 
@@ -366,7 +364,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_attribute_descriptors() {
+    fn it_attribute_descriptors() {
         use crate::attribute::Attribute;
         // Test that attribute descriptors are accessible via the Attribute trait
         let name_desc = macro_person::Name::descriptor();

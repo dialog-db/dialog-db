@@ -9,18 +9,17 @@ pub use query::RelationQuery;
 
 pub use crate::artifact::{Artifact, Attribute, Cause, Entity, Value};
 pub use crate::attribute::Cardinality;
+use crate::attribute::The;
 use serde::{Deserialize, Serialize};
 
 /// A relation represents a read-side query result with full metadata.
 ///
 /// This is the result type for relation queries. It carries the attribute
-/// metadata (domain, name, cardinality) alongside the entity-value data.
+/// metadata (the, cardinality) alongside the entity-value data.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Relation {
-    /// The domain of the attribute (e.g., "user")
-    pub domain: String,
-    /// The name of the attribute within the domain (e.g., "name")
-    pub name: String,
+    /// The relation identifier (e.g., "user/name")
+    pub the: The,
     /// The entity (subject)
     pub of: Entity,
     /// The value (object)
@@ -32,11 +31,19 @@ pub struct Relation {
 }
 
 impl Relation {
-    /// Get the combined attribute string (e.g., "user/name")
+    /// Get the attribute for this relation
     pub fn the(&self) -> Attribute {
-        format!("{}/{}", self.domain, self.name)
-            .parse()
-            .expect("Failed to parse combined attribute")
+        Attribute::from(&self.the)
+    }
+
+    /// Get the domain of this relation's attribute
+    pub fn domain(&self) -> &str {
+        self.the.domain()
+    }
+
+    /// Get the name of this relation's attribute
+    pub fn name(&self) -> &str {
+        self.the.name()
     }
 
     /// Get the entity of this relation
@@ -57,15 +64,8 @@ impl Relation {
 
 impl From<&Artifact> for Relation {
     fn from(artifact: &Artifact) -> Self {
-        let attr_str = artifact.the.to_string();
-        let (domain, name) = attr_str
-            .split_once('/')
-            .map(|(ns, n)| (ns.to_string(), n.to_string()))
-            .unwrap_or_else(|| (String::new(), attr_str));
-
         Relation {
-            domain,
-            name,
+            the: The::from(artifact.the.clone()),
             of: artifact.of.clone(),
             is: artifact.is.clone(),
             cause: artifact.cause.clone().unwrap_or(Cause([0; 32])),

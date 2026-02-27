@@ -303,7 +303,7 @@ mod tests {
     // tests and the planning tests above verify the core logic.
 
     #[dialog_common::test]
-    async fn test_concept_application_query_execution() -> anyhow::Result<()> {
+    async fn it_executes_concept_query() -> anyhow::Result<()> {
         use dialog_artifacts::{Artifacts, Entity};
         use dialog_storage::MemoryStorageBackend;
 
@@ -411,7 +411,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_concept_application_with_bound_entity_query() -> anyhow::Result<()> {
+    async fn it_executes_query_with_bound_entity() -> anyhow::Result<()> {
         use dialog_artifacts::{Artifacts, Entity};
         use dialog_storage::MemoryStorageBackend;
 
@@ -486,7 +486,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_concept_as_conclusion_operations() {
+    fn it_operates_on_concept_conclusion() {
         let concept = ConceptDescriptor::from(vec![
             (
                 "name",
@@ -517,7 +517,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_concept_creation() {
+    fn it_creates_concept_descriptor() {
         let concept = ConceptDescriptor::from(vec![(
             "name".to_string(),
             AttributeDescriptor::new(
@@ -538,7 +538,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_concept_application_analysis() {
+    fn it_analyzes_concept_application() {
         let concept = ConceptDescriptor::from(vec![
             (
                 "name".to_string(),
@@ -581,7 +581,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_deductive_rule_parameters() {
+    fn it_extracts_deductive_rule_parameters() {
         use std::collections::HashSet;
 
         let predicate = ConceptDescriptor::from([
@@ -614,10 +614,9 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_premise_construction() {
+    fn it_constructs_premises() {
         let relation = RelationQuery::new(
-            Term::Constant("person".into()),
-            Term::Constant("name".into()),
+            Term::Constant(the!("person/name")),
             Term::var("person"),
             Term::Constant(Value::String("Alice".to_string())),
             Term::blank(),
@@ -635,7 +634,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_error_types() {
+    fn it_produces_expected_error_types() {
         use crate::QueryError;
         use crate::error::{AnalyzerError, PlanError};
 
@@ -676,11 +675,10 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_application_variants() {
+    fn it_handles_application_variants() {
         // Test Relation application
         let relation = RelationQuery::new(
-            Term::Constant("test".into()),
-            Term::Constant("attr".into()),
+            Term::Constant(the!("test/attr")),
             Term::blank(),
             Term::blank(),
             Term::blank(),
@@ -720,10 +718,9 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_negation_construction() {
+    fn it_constructs_negation() {
         let relation = RelationQuery::new(
-            Term::Constant("test".into()),
-            Term::Constant("attr".into()),
+            Term::Constant(the!("test/attr")),
             Term::blank(),
             Term::blank(),
             Term::blank(),
@@ -742,7 +739,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_concept_application_respects_constant_entity_parameter() -> anyhow::Result<()> {
+    async fn it_respects_constant_entity_parameter() -> anyhow::Result<()> {
         use dialog_artifacts::{Artifacts, Entity};
         use dialog_storage::MemoryStorageBackend;
 
@@ -809,8 +806,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_concept_application_respects_constant_attribute_parameter() -> anyhow::Result<()>
-    {
+    async fn it_respects_constant_attribute_parameter() -> anyhow::Result<()> {
         use dialog_artifacts::{Artifacts, Entity};
         use dialog_storage::MemoryStorageBackend;
 
@@ -899,8 +895,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_concept_application_respects_multiple_constant_parameters() -> anyhow::Result<()>
-    {
+    async fn it_respects_multiple_constant_parameters() -> anyhow::Result<()> {
         use dialog_artifacts::{Artifacts, Entity};
         use dialog_storage::MemoryStorageBackend;
 

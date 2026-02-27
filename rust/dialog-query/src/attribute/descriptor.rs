@@ -187,8 +187,7 @@ impl AttributeDescriptor {
             .unwrap_or(Term::blank());
 
         Ok(RelationQuery::new(
-            Term::Constant(self.domain().to_string()),
-            Term::Constant(self.name().to_string()),
+            Term::Constant(self.the().clone()),
             of,
             is,
             cause,

@@ -117,26 +117,8 @@ impl Answer {
 
                 let application = Arc::new(application.to_owned());
 
-                // Bind domain and name as string variables
                 self.assign(
-                    &application.domain().as_unknown(),
-                    &Factor::Selected {
-                        selector: Selector::The,
-                        application: application.clone(),
-                        fact: fact.clone(),
-                    },
-                )?;
-                self.assign(
-                    &application.name().as_unknown(),
-                    &Factor::Selected {
-                        selector: Selector::The,
-                        application: application.clone(),
-                        fact: fact.clone(),
-                    },
-                )?;
-                // Also bind the combined attribute term
-                self.assign(
-                    &application.attribute().as_unknown(),
+                    &application.the().as_unknown(),
                     &Factor::Selected {
                         selector: Selector::The,
                         application: application.clone(),

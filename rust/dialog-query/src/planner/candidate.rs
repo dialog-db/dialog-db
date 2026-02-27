@@ -470,8 +470,7 @@ mod cost_model_tests {
         let entity_val: Entity = Entity::new().unwrap();
 
         let app = RelationQuery::new(
-            Term::Constant("user".to_string()),
-            Term::Constant("name".to_string()),
+            Term::Constant(the!("user/name")),
             Term::Constant(entity_val),
             Term::Constant(Value::String("test".to_string())),
             Term::var("cause"),
@@ -492,8 +491,7 @@ mod cost_model_tests {
     #[dialog_common::test]
     fn test_one_constant_two_variables() {
         let app = RelationQuery::new(
-            Term::Constant("user".to_string()),
-            Term::Constant("name".to_string()),
+            Term::Constant(the!("user/name")),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("value"),
             Term::var("cause"),
@@ -514,8 +512,7 @@ mod cost_model_tests {
     #[dialog_common::test]
     fn test_env_variables_reduce_cost() {
         let app = RelationQuery::new(
-            Term::Constant("user".to_string()),
-            Term::Constant("name".to_string()),
+            Term::Constant(the!("user/name")),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("value"),
             Term::var("cause"),
@@ -552,8 +549,7 @@ mod cost_model_tests {
     #[dialog_common::test]
     fn test_variables_already_in_initial_env_dont_add_cost() {
         let app = RelationQuery::new(
-            Term::Constant("user".to_string()),
-            Term::Constant("name".to_string()),
+            Term::Constant(the!("user/name")),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("value"),
             Term::var("cause"),
@@ -575,8 +571,7 @@ mod cost_model_tests {
     #[dialog_common::test]
     fn test_cardinality_many_costs_more_than_one() {
         let one_app = RelationQuery::new(
-            Term::Constant("user".to_string()),
-            Term::Constant("tags".to_string()),
+            Term::Constant(the!("user/tags")),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("tag"),
             Term::var("cause"),
@@ -584,8 +579,7 @@ mod cost_model_tests {
         );
 
         let many_app = RelationQuery::new(
-            Term::Constant("user".to_string()),
-            Term::Constant("tags".to_string()),
+            Term::Constant(the!("user/tags")),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("tag"),
             Term::var("cause"),
@@ -623,8 +617,7 @@ mod cost_model_tests {
         let value_val = Value::String("rust".to_string());
 
         let one_app = RelationQuery::new(
-            Term::Constant("user".to_string()),
-            Term::Constant("tags".to_string()),
+            Term::Constant(the!("user/tags")),
             Term::Constant(entity_val.clone()),
             Term::Constant(value_val.clone()),
             Term::var("cause"),
@@ -632,8 +625,7 @@ mod cost_model_tests {
         );
 
         let many_app = RelationQuery::new(
-            Term::Constant("user".to_string()),
-            Term::Constant("tags".to_string()),
+            Term::Constant(the!("user/tags")),
             Term::Constant(entity_val),
             Term::Constant(value_val),
             Term::var("cause"),
@@ -668,8 +660,7 @@ mod cost_model_tests {
         let formula_candidate = Candidate::from(Premise::from(formula_app));
 
         let fact_app = RelationQuery::new(
-            Term::Constant("user".to_string()),
-            Term::Constant("name".to_string()),
+            Term::Constant(the!("user/name")),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("value"),
             Term::var("cause"),
@@ -705,8 +696,7 @@ mod cost_model_tests {
     #[dialog_common::test]
     fn test_concept_equals_fact_cost_nothing_bound() {
         let fact_app = RelationQuery::new(
-            Term::Constant("user".to_string()),
-            Term::Constant("name".to_string()),
+            Term::Constant(the!("user/name")),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("value"),
             Term::var("cause"),
@@ -752,8 +742,7 @@ mod cost_model_tests {
     #[dialog_common::test]
     fn test_concept_equals_fact_cost_value_bound() {
         let fact_app = RelationQuery::new(
-            Term::Constant("user".to_string()),
-            Term::Constant("name".to_string()),
+            Term::Constant(the!("user/name")),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("value"),
             Term::var("cause"),
@@ -792,8 +781,7 @@ mod cost_model_tests {
     #[dialog_common::test]
     fn test_concept_equals_fact_cost_entity_bound() {
         let fact_app = RelationQuery::new(
-            Term::Constant("user".to_string()),
-            Term::Constant("name".to_string()),
+            Term::Constant(the!("user/name")),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("value"),
             Term::var("cause"),
@@ -832,8 +820,7 @@ mod cost_model_tests {
     #[dialog_common::test]
     fn test_concept_equals_fact_cost_cardinality_many_nothing_bound() {
         let fact_app = RelationQuery::new(
-            Term::Constant("user".to_string()),
-            Term::Constant("tags".to_string()),
+            Term::Constant(the!("user/tags")),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("tag"),
             Term::var("cause"),
@@ -870,8 +857,7 @@ mod cost_model_tests {
     #[dialog_common::test]
     fn test_concept_equals_fact_cost_cardinality_many_value_bound() {
         let fact_app = RelationQuery::new(
-            Term::Constant("user".to_string()),
-            Term::Constant("tags".to_string()),
+            Term::Constant(the!("user/tags")),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("tag"),
             Term::var("cause"),
@@ -909,8 +895,7 @@ mod cost_model_tests {
     #[dialog_common::test]
     fn test_cost_accumulation_through_planning() {
         let p1 = RelationQuery::new(
-            Term::Constant("user".to_string()),
-            Term::Constant("name".to_string()),
+            Term::Constant(the!("user/name")),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("name"),
             Term::var("cause"),
@@ -918,8 +903,7 @@ mod cost_model_tests {
         );
 
         let p2 = RelationQuery::new(
-            Term::Constant("user".to_string()),
-            Term::Constant("age".to_string()),
+            Term::Constant(the!("user/age")),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("age"),
             Term::var("cause"),
@@ -955,8 +939,7 @@ mod cost_model_tests {
     #[dialog_common::test]
     fn debug_update_cost() {
         let app = RelationQuery::new(
-            Term::Constant("user".to_string()),
-            Term::Constant("name".to_string()),
+            Term::Constant(the!("user/name")),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("value"),
             Term::var("cause"),

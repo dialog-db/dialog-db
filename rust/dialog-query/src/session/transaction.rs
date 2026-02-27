@@ -189,7 +189,7 @@ mod tests {
     use crate::the;
 
     #[dialog_common::test]
-    fn test_transaction_basic_operations() -> anyhow::Result<()> {
+    fn it_creates_and_asserts_associations() -> anyhow::Result<()> {
         let mut transaction = Transaction::new();
         let alice = Entity::new()?;
 
@@ -211,7 +211,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_transaction_accumulates_multiple_values() -> anyhow::Result<()> {
+    fn it_accumulates_multiple_values() -> anyhow::Result<()> {
         let mut transaction = Transaction::new();
         let alice = Entity::new()?;
         let first_value = Value::String("Alice".to_string());
@@ -248,7 +248,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_associate_unique_replaces_previous_value() -> anyhow::Result<()> {
+    fn it_replaces_previous_value_with_unique() -> anyhow::Result<()> {
         let mut transaction = Transaction::new();
         let alice = Entity::new()?;
         let first_value = Value::String("Alice".to_string());
@@ -284,7 +284,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_associate_unique_does_not_affect_other_attributes() -> anyhow::Result<()> {
+    fn it_preserves_other_attributes_on_unique() -> anyhow::Result<()> {
         let mut transaction = Transaction::new();
         let alice = Entity::new()?;
         transaction.associate_unique(Association {
@@ -307,7 +307,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_into_iterator() -> anyhow::Result<()> {
+    fn it_converts_to_iterator() -> anyhow::Result<()> {
         let mut transaction = Transaction::new();
         let alice = Entity::new()?;
         let bob = Entity::new()?;
@@ -332,7 +332,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_transaction_stream() -> anyhow::Result<()> {
+    async fn it_streams_transaction_artifacts() -> anyhow::Result<()> {
         use futures_util::StreamExt;
 
         let mut transaction = Transaction::new();
