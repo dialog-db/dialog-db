@@ -28,6 +28,8 @@ pub mod proposition;
 pub mod assertion;
 /// Entity-attribute-value association triples for writes.
 pub mod association;
+/// Read-side claim type for query results.
+pub mod claim;
 /// Concept definitions for entity-centric pattern matching.
 pub mod concept;
 /// Constraint system for filtering and validating variable bindings.
@@ -36,8 +38,6 @@ pub mod constraint;
 pub mod environment;
 /// Error types for the query engine.
 pub mod error;
-/// Claim and scalar types for the knowledge base.
-pub mod fact;
 /// Built-in formulas for data transformations and computations.
 pub mod formula;
 /// Negation support for excluding matching results.
@@ -52,7 +52,7 @@ pub mod predicate;
 pub mod premise;
 /// Query trait and store abstractions for polymorphic querying.
 pub mod query;
-/// Read-side relation type for query results.
+/// Relation query and descriptor types.
 pub mod relation;
 /// Rule-based deduction system for deriving facts.
 pub mod rule;
@@ -73,6 +73,7 @@ pub use artifact::{Attribute as ArtifactAttribute, Entity, Type, Value};
 pub use assertion::*;
 pub use association::Association;
 pub use attribute::{Attribute, AttributeDescriptor, Cardinality, The};
+pub use claim::Claim;
 pub use concept::application::{ConceptQuery, ConceptRules};
 pub use concept::descriptor::{ConceptConclusion, ConceptDescriptor};
 pub use concept::{Concept, Conclusion, With, WithQuery, WithTerms};
@@ -86,9 +87,8 @@ pub use predicate::*;
 pub use premise::*;
 pub use proposition::Proposition;
 pub use query::{Application, Output, Source, Store};
-pub use relation::Relation;
-pub use relation::descriptor::RelationDescriptor;
-pub use relation::query::RelationQuery;
+pub use relation::RelationDescriptor;
+pub use relation::RelationQuery;
 pub use rule::*;
 pub use schema::*;
 pub use selection::*;

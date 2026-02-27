@@ -1,5 +1,5 @@
 use crate::Term;
-use crate::fact::Scalar;
+use crate::types::Scalar;
 use std::collections::HashSet;
 use std::fmt::Display;
 

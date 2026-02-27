@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::artifact::{Type, TypeError, Value};
 use crate::error::{InconsistencyError, QueryError};
 use crate::relation::query::RelationQuery;
-use crate::{Relation, Term, types::Scalar};
+use crate::{Claim, Term, types::Scalar};
 
 use super::{Answers, Evidence, Factor, Factors, Selector};
 
@@ -16,7 +16,7 @@ use super::{Answers, Evidence, Factor, Factors, Selector};
 /// fact, derived by a formula, or provided as a query parameter.
 ///
 /// In addition to named bindings (`conclusions`), an `Answer` tracks the
-/// raw [`Relation`] facts matched by each [`RelationQuery`]. This
+/// raw [`Claim`] facts matched by each [`RelationQuery`]. This
 /// allows downstream code to reconstruct the full provenance chain for any
 /// value in the result.
 ///
@@ -32,7 +32,7 @@ pub struct Answer {
     /// Applications: maps RelationQuery to the fact it matched.
     /// This allows us to realize facts even when the application had only constants/blanks.
     /// The facts stored here represent all facts that contributed to this answer.
-    facts: HashMap<RelationQuery, Arc<Relation>>,
+    facts: HashMap<RelationQuery, Arc<Claim>>,
 }
 
 impl Answer {
@@ -47,7 +47,7 @@ impl Answer {
     }
 
     /// Get all tracked relations from the applications.
-    pub fn facts(&self) -> impl Iterator<Item = &Arc<Relation>> {
+    pub fn facts(&self) -> impl Iterator<Item = &Arc<Claim>> {
         self.facts.values()
     }
 
@@ -62,7 +62,7 @@ impl Answer {
     pub fn record(
         &mut self,
         application: &RelationQuery,
-        fact: Arc<Relation>,
+        fact: Arc<Claim>,
     ) -> Result<(), InconsistencyError> {
         // Check if this application already has a different fact
         if let Some(existing_fact) = self.facts.get(application) {
@@ -83,19 +83,19 @@ impl Answer {
     /// Realize a relation from a RelationQuery.
     /// First tries to extract from named variable conclusions.
     /// Falls back to looking up the application in the recorded applications.
-    pub fn realize(&self, application: &RelationQuery) -> Result<Relation, QueryError> {
+    pub fn realize(&self, application: &RelationQuery) -> Result<Claim, QueryError> {
         // Try to extract from a named variable conclusion first
         // This gives us the full relation with all its components
         if let Term::Variable { name: Some(_), .. } = application.of()
             && let Some(factors) = self.resolve_factors(&application.of().as_unknown())
         {
-            return Ok(Relation::from(factors));
+            return Ok(Claim::from(factors));
         }
 
         if let Term::Variable { name: Some(_), .. } = application.is()
             && let Some(factors) = self.resolve_factors(&application.is().as_unknown())
         {
-            return Ok(Relation::from(factors));
+            return Ok(Claim::from(factors));
         }
 
         // No named variables - look up by application
