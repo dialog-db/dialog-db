@@ -262,28 +262,28 @@ pub fn derive(input: TokenStream) -> TokenStream {
         static #cells_name: ::std::sync::OnceLock<dialog_query::Cells> = ::std::sync::OnceLock::new();
 
         impl dialog_query::Predicate for #struct_name {
-            type Proof = #struct_name;
+            type Conclusion = #struct_name;
             type Application = #match_name;
             type Descriptor = dialog_query::Entity;
         }
 
-        impl dialog_query::FormulaQuery for #match_name {
+        impl dialog_query::FormulaApplication for #match_name {
             type Predicate = #struct_name;
         }
 
         impl dialog_query::Application for #match_name {
-            type Proof = #struct_name;
+            type Conclusion = #struct_name;
 
             fn evaluate<S: dialog_query::Source, M: dialog_query::Answers>(
                 self,
                 answers: M,
                 _source: &S,
             ) -> impl dialog_query::Answers {
-                let application: dialog_query::FormulaApplication = self.into();
+                let application: dialog_query::FormulaQuery = self.into();
                 application.evaluate(answers)
             }
 
-            fn realize(&self, source: dialog_query::Answer) -> std::result::Result<Self::Proof, dialog_query::QueryError> {
+            fn realize(&self, source: dialog_query::Answer) -> std::result::Result<Self::Conclusion, dialog_query::QueryError> {
                 Ok(#struct_name {
                     #(#all_field_names: source.get(&self.#all_field_names)?),*
                 })
@@ -300,14 +300,14 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         impl From<#match_name> for dialog_query::Premise {
             fn from(source: #match_name) -> Self {
-                let app: dialog_query::FormulaApplication = source.into();
+                let app: dialog_query::FormulaQuery = source.into();
                 dialog_query::Premise::When(dialog_query::Proposition::Formula(app))
             }
         }
 
         impl From<#match_name> for dialog_query::Proposition {
             fn from(source: #match_name) -> Self {
-                let app: dialog_query::FormulaApplication = source.into();
+                let app: dialog_query::FormulaQuery = source.into();
                 dialog_query::Proposition::Formula(app)
             }
         }

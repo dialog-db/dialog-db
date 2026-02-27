@@ -1,35 +1,50 @@
 use crate::artifact::{Attribute as ArtifactsAttribute, DialogArtifactsError};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// Maximum length in bytes for an attribute selector (`"namespace/name"`).
+/// Maximum length in bytes for an attribute selector (`"domain/name"`).
 pub const MAX_SELECTOR_LENGTH: usize = 64;
 
-/// A validated attribute selector (`"namespace/name"`).
+/// Nominal relation identifier comprised of the domain and name
+/// components. It denotes the kind of relation entity and value
+/// form. Validates on construction.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct The {
-    /// The domain namespace.
-    pub namespace: String,
+    /// The attribute domain.
+    domain: String,
     /// The attribute name.
-    pub name: String,
+    name: String,
+}
+
+impl The {
+    /// Returns the attribute domain.
+    pub fn domain(&self) -> &str {
+        &self.domain
+    }
+
+    /// Returns the attribute name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 impl std::fmt::Display for The {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}", self.namespace, self.name)
+        write!(f, "{}/{}", self.domain, self.name)
     }
 }
 
 impl std::str::FromStr for The {
     type Err = DialogArtifactsError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (namespace, name) = s.split_once('/').ok_or_else(|| {
+        let (domain, name) = s.split_once('/').ok_or_else(|| {
             DialogArtifactsError::InvalidAttribute(format!(
-                "Attribute format is \"namespace/predicate\", but got \"{s}\""
+                "Attribute format is \"domain/predicate\", but got \"{s}\""
             ))
         })?;
         // Validate via ArtifactsAttribute to enforce length limit
         let _: ArtifactsAttribute = s.parse()?;
         Ok(Self {
-            namespace: namespace.to_owned(),
+            domain: domain.to_owned(),
             name: name.to_owned(),
         })
     }
@@ -54,13 +69,32 @@ impl From<&The> for ArtifactsAttribute {
 impl From<ArtifactsAttribute> for The {
     fn from(attr: ArtifactsAttribute) -> Self {
         let s = attr.to_string();
-        let (namespace, name) = s
+        let (domain, name) = s
             .split_once('/')
             .expect("ArtifactsAttribute always contains '/'");
         Self {
-            namespace: namespace.to_owned(),
+            domain: domain.to_owned(),
             name: name.to_owned(),
         }
+    }
+}
+
+impl Serialize for The {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for The {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
     }
 }
 

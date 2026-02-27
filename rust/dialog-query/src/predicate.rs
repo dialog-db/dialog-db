@@ -2,13 +2,13 @@ use crate::Entity;
 use crate::query::Application;
 use dialog_common::ConditionalSend;
 
-/// Associates a domain type with its query, proof, and descriptor types.
+/// Associates a domain type with its query, conclusion, and descriptor types.
 ///
 /// Implemented by `#[derive(Concept)]` and `#[derive(Formula)]` structs,
 /// `Predicate` is the trait-level glue that connects:
 /// - `Application` — the query pattern struct (fields as [`Term`](crate::Term)s)
 ///   used to build premises.
-/// - `Proof` — the concrete result struct whose fields are resolved values.
+/// - `Conclusion` — the concrete result struct whose fields are resolved values.
 /// - `Descriptor` — an entity-like identifier for the predicate itself.
 ///
 /// Use the [`Query`] type alias for ergonomic construction:
@@ -20,10 +20,10 @@ use dialog_common::ConditionalSend;
 /// };
 /// ```
 pub trait Predicate {
-    /// The materialized proof type produced by resolving a query.
-    type Proof: ConditionalSend + 'static;
+    /// The materialized conclusion type produced by resolving a query.
+    type Conclusion: ConditionalSend + 'static;
     /// The application type associated with this predicate
-    type Application: Application<Proof = Self::Proof>;
+    type Application: Application<Conclusion = Self::Conclusion>;
     /// The descriptor type that identifies this predicate. Must convert to Entity.
     type Descriptor: Into<Entity>;
 }

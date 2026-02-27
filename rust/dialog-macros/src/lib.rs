@@ -66,7 +66,7 @@ pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Derive macro to generate Concept implementation from a struct definition.
 ///
 /// Generates all necessary boilerplate for implementing a concept,
-/// including Match, Instance, Claim, and Attributes types.
+/// including Query, Conclusion, Assertion, and Term types.
 ///
 /// The struct must have a `this: Entity` field. All other fields must implement
 /// the `dialog_query::attribute::Attribute` trait.
@@ -100,7 +100,7 @@ pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// # impl<T> Term<T> { fn var(_: &str) -> Self { todo!() } }
 /// # struct Employee { this: Entity }
 /// // Query pattern with Term-wrapped fields
-/// pub struct EmployeeMatch {
+/// pub struct EmployeeQuery {
 ///     pub this: Term<Entity>,
 ///     pub name: Term<String>,  // <Name as Attribute>::Type
 ///     pub role: Term<String>,  // <Role as Attribute>::Type
@@ -115,29 +115,31 @@ pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// }
 ///
 /// // Concept trait — ties everything together
-/// # trait Concept { type Instance; type Match; type Term; }
+/// # trait Concept { type Conclusion; type Query; type Term; }
 /// impl Concept for Employee {
-///     type Instance = Employee;
-///     type Match = EmployeeMatch;
+///     type Conclusion = Employee;
+///     type Query = EmployeeQuery;
 ///     type Term = EmployeeTerms;
 /// }
 ///
-/// // Match trait — reconstructs Employee from query answers
-/// # trait Match { type Concept; type Instance; }
-/// impl Match for EmployeeMatch {
-///     type Concept = Employee;
-///     type Instance = Employee;
+/// // Application trait — reconstructs Employee from query answers
+/// # trait Application { type Conclusion; }
+/// impl Application for EmployeeQuery {
+///     type Conclusion = Employee;
 /// }
 ///
-/// // Instance trait — extracts the entity
-/// # trait Instance { fn this(&self) -> Entity; }
-/// impl Instance for Employee {
-///     fn this(&self) -> Entity { todo!() }
+/// // Conclusion trait — extracts the entity
+/// # trait Conclusion { fn this(&self) -> &Entity; }
+/// impl Conclusion for Employee {
+///     fn this(&self) -> &Entity { todo!() }
 /// }
 ///
-/// // Claim trait — assert/retract into transactions
-/// # trait Claim {}
-/// impl Claim for Employee {}
+/// // Assertion trait — assert/retract into transactions
+/// # trait Assertion { fn assert(self, transaction: &mut ()); fn retract(self, transaction: &mut ()); }
+/// impl Assertion for Employee {
+///     fn assert(self, transaction: &mut ()) { todo!() }
+///     fn retract(self, transaction: &mut ()) { todo!() }
+/// }
 ///
 /// // Not operator — enables `!employee` for retraction
 /// impl std::ops::Not for Employee {
@@ -145,7 +147,7 @@ pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///     fn not(self) -> Self::Output { todo!() }
 /// }
 ///
-/// // IntoIterator — converts to Relations for storage
+/// // IntoIterator — converts to Associations for storage
 /// impl IntoIterator for Employee {
 ///     type Item = ();
 ///     type IntoIter = std::vec::IntoIter<()>;
@@ -158,12 +160,12 @@ pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```no_run
 /// # struct Employee; struct Term<T>(T);
 /// # impl<T> Term<T> { fn var(_: &str) -> Self { todo!() } fn from(_: T) -> Self { todo!() } }
-/// # struct EmployeeMatch { this: Term<()>, name: Term<String>, role: Term<()> }
+/// # struct EmployeeQuery { this: Term<()>, name: Term<String>, role: Term<()> }
 /// # impl Employee { fn query<S>(_: S) -> std::vec::IntoIter<Employee> { todo!() } }
-/// # impl EmployeeMatch { fn query<S>(self, _: S) -> std::vec::IntoIter<Employee> { todo!() } }
+/// # impl EmployeeQuery { fn query<S>(self, _: S) -> std::vec::IntoIter<Employee> { todo!() } }
 /// # let session = ();
 /// // Query with a pattern
-/// let match_pattern = EmployeeMatch {
+/// let query = EmployeeQuery {
 ///     this: Term::var("this"),
 ///     name: Term::from("Alice".to_string()),
 ///     role: Term::var("role"),
@@ -223,8 +225,8 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
 ///     pub second: String,
 /// }
 ///
-/// // Match struct — all fields as Terms for query patterns
-/// pub struct ConcatenateMatch {
+/// // Query struct — all fields as Terms for query patterns
+/// pub struct ConcatenateQuery {
 ///     pub first: Term<String>,
 ///     pub second: Term<String>,
 ///     pub is: Term<String>,
@@ -233,10 +235,10 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
 /// // Formula trait — describes the computation and writes derived fields
 /// # struct Bindings;
 /// # struct FormulaEvaluationError;
-/// # trait Formula { type Input; type Match; fn operator() -> &'static str; fn cost() -> usize; fn derive(input: ConcatenateInput) -> Vec<Concatenate>; fn write(&self, bindings: &mut Bindings) -> Result<(), FormulaEvaluationError>; }
+/// # trait Formula { type Input; type Query; fn operator() -> &'static str; fn cost() -> usize; fn derive(input: ConcatenateInput) -> Vec<Concatenate>; fn write(&self, bindings: &mut Bindings) -> Result<(), FormulaEvaluationError>; }
 /// impl Formula for Concatenate {
 ///     type Input = ConcatenateInput;
-///     type Match = ConcatenateMatch;
+///     type Query = ConcatenateQuery;
 ///
 ///     fn operator() -> &'static str { "concatenate" }
 ///     fn cost() -> usize { 2 }  // sum of derived field costs
@@ -255,9 +257,9 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
 /// ```no_run
 /// # struct Term<T>(T);
 /// # impl<T> Term<T> { fn var(_: &str) -> Self { todo!() } }
-/// # struct ConcatenateMatch { first: Term<String>, second: Term<String>, is: Term<String> }
+/// # struct ConcatenateQuery { first: Term<String>, second: Term<String>, is: Term<String> }
 /// // Use in a query to concatenate first + last name
-/// let pattern = ConcatenateMatch {
+/// let pattern = ConcatenateQuery {
 ///     first: Term::var("first"),
 ///     second: Term::var("last"),
 ///     is: Term::var("full_name"),
@@ -276,9 +278,10 @@ pub fn derive_formula(input: TokenStream) -> TokenStream {
 /// # Attributes
 ///
 /// - `#[cardinality(many)]` - Marks the attribute as having many values (defaults to One)
-/// - `#[namespace(custom)]` or `#[namespace("io.gozala")]` - Override the default namespace
+/// - `#[domain(custom)]` or `#[domain("io.gozala")]` - Override the default domain
+///   (`#[namespace(...)]` is accepted as a legacy alias)
 ///
-/// The default namespace is derived from the module path (last segment, with
+/// The default domain is derived from the module path (last segment, with
 /// underscores converted to hyphens). The attribute name is derived from the
 /// struct name converted to kebab-case.
 ///
@@ -303,42 +306,42 @@ pub fn derive_formula(input: TokenStream) -> TokenStream {
 ///
 /// ```no_run
 /// # struct Name(String);
-/// # struct WithMatch<T>(T); struct With<T>(T); struct WithTerms<T>(T);
+/// # struct WithQuery<T>(T); struct With<T>(T); struct WithTerms<T>(T);
 /// # enum Cardinality { One }
+/// # struct AttributeDescriptor;
+/// # impl AttributeDescriptor { fn new() -> Self { Self } }
 /// // Attribute trait — maps the newtype to its inner value type
-/// # trait Attribute { type Type; type Match; type Instance; type Term;
-/// #   const NAMESPACE: &'static str; const NAME: &'static str;
-/// #   const DESCRIPTION: &'static str; const CARDINALITY: Cardinality;
+/// # trait Attribute { type Type; type Query; type Conclusion; type Term;
+/// #   fn descriptor() -> AttributeDescriptor;
 /// #   fn value(&self) -> &Self::Type; fn new(value: Self::Type) -> Self; }
 /// impl Attribute for Name {
 ///     type Type = String;
-///     type Match = WithMatch<Self>;
-///     type Instance = With<Self>;
+///     type Query = WithQuery<Self>;
+///     type Conclusion = With<Self>;
 ///     type Term = WithTerms<Self>;
 ///
-///     // Namespace derived from module path: "employee"
-///     const NAMESPACE: &'static str = "employee";
-///     // Name derived from struct name: "Name" -> "name"
-///     const NAME: &'static str = "name";
-///     const DESCRIPTION: &'static str = "A person's given name";
-///     const CARDINALITY: Cardinality = Cardinality::One;
+///     fn descriptor() -> AttributeDescriptor {
+///         // Domain derived from module path: "employee"
+///         // Name derived from struct name: "Name" -> "name"
+///         AttributeDescriptor::new(/* ... */)
+///     }
 ///
 ///     fn value(&self) -> &String { &self.0 }
 ///     fn new(value: String) -> Self { Self(value) }
 /// }
 ///
-/// // Debug — shows namespace, name, and value
+/// // Debug — shows domain, name, and value
 /// impl std::fmt::Debug for Name {
 ///     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 ///         f.debug_struct("Name")
-///             .field("namespace", &"employee")
+///             .field("domain", &"employee")
 ///             .field("name", &"name")
 ///             .field("value", &self.0)
 ///             .finish()
 ///     }
 /// }
 ///
-/// // Display — shows "namespace/name: value"
+/// // Display — shows "domain/name: value"
 /// impl std::fmt::Display for Name {
 ///     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 ///         write!(f, "employee/name: {:?}", self.0)
@@ -360,7 +363,7 @@ pub fn derive_formula(input: TokenStream) -> TokenStream {
 /// // Create attribute values
 /// let name = employee::Name("Alice".to_string());
 /// ```
-#[proc_macro_derive(Attribute, attributes(cardinality, namespace))]
+#[proc_macro_derive(Attribute, attributes(cardinality, domain, namespace))]
 pub fn derive_attribute(input: TokenStream) -> TokenStream {
     query::attribute::derive(input)
 }

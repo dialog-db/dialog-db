@@ -6,7 +6,7 @@ pub use futures_util::stream::{Stream, StreamExt, TryStream};
 ///
 /// This is the consumer-facing counterpart to [`Answers`](crate::selection::Answers).
 /// Where `Answers` carries raw [`Answer`](crate::selection::Answer) rows,
-/// `Output<T>` carries fully realized `T` values (e.g. a concept proof
+/// `Output<T>` carries fully realized `T` values (e.g. a concept conclusion
 /// struct). It is produced by [`Application::perform`](crate::query::Application::perform).
 pub trait Output<T: ConditionalSend>:
     Stream<Item = Result<T, QueryError>> + 'static + ConditionalSend

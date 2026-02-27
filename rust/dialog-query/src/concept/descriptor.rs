@@ -1,16 +1,16 @@
 use crate::Predicate;
+use crate::assertion::Retraction;
 use crate::attribute::{AttributeDescriptor, Attribution};
-use crate::claim::Revert;
-use crate::concept::application::ConceptApplication;
-use crate::concept::{Concept, ConceptProof};
+use crate::concept::application::ConceptQuery;
+use crate::concept::{Concept, Conclusion};
 use crate::error::SchemaError;
 use crate::query::{Application, Source};
 use crate::selection::{Answer, Answers};
 use crate::term::Term;
 use crate::types::Scalar;
 use crate::{
-    Assertion, Cardinality, Claim, Entity, Field, Parameters, Proposition, QueryError, Requirement,
-    Schema, Transaction, Type, Value,
+    Assertion, Association, Cardinality, Entity, Field, Parameters, Proposition, QueryError,
+    Requirement, Schema, Transaction, Type, Value,
 };
 
 use base58::ToBase58;
@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ops::Not;
 
-/// A concept predicate — a named set of attribute descriptors that together
+/// A concept descriptor — a named set of attribute descriptors that together
 /// describe an entity type. Concepts are similar to tables in relational
 /// databases but are more flexible as they can be derived from rules rather
 /// than just stored directly.
@@ -26,18 +26,18 @@ use std::ops::Not;
 /// Concepts are identified by a blake3 hash of their attribute set, encoded
 /// as a URI in the format `concept:{hash}`.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ConceptPredicate(Vec<(String, AttributeDescriptor)>);
+pub struct ConceptDescriptor(Vec<(String, AttributeDescriptor)>);
 
-impl Default for ConceptPredicate {
+impl Default for ConceptDescriptor {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl ConceptPredicate {
-    /// Creates an empty concept predicate.
+impl ConceptDescriptor {
+    /// Creates an empty concept descriptor.
     pub fn new() -> Self {
-        ConceptPredicate(Vec::new())
+        ConceptDescriptor(Vec::new())
     }
 
     /// Returns an iterator over all attributes as (name, descriptor) pairs.
@@ -45,12 +45,12 @@ impl ConceptPredicate {
         self.0.iter().map(|(k, v)| (k.as_str(), v))
     }
 
-    /// Returns the number of attributes in this predicate.
+    /// Returns the number of attributes in this descriptor.
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
-    /// Returns true if this predicate has no attributes.
+    /// Returns true if this descriptor has no attributes.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -60,7 +60,7 @@ impl ConceptPredicate {
         self.0.iter().map(|(k, _)| k.as_str())
     }
 
-    /// Conforms the provided parameters to the schema of the attributes.
+    /// Validates the provided parameters against the schema of the attributes.
     pub fn conform(&self, parameters: Parameters) -> Result<Parameters, SchemaError> {
         for (name, attribute) in self.iter() {
             let parameter = parameters.get(name);
@@ -77,7 +77,7 @@ impl ConceptPredicate {
         std::iter::once("this").chain(self.keys())
     }
 
-    /// Derives a `Schema` from this predicate's attributes.
+    /// Derives a `Schema` from this descriptor's attributes.
     pub fn schema(&self) -> Schema {
         Schema::from(self)
     }
@@ -121,15 +121,15 @@ impl ConceptPredicate {
             .expect("valid entity URI")
     }
 
-    /// Creates an application for this concept predicate.
+    /// Creates a query application for this concept descriptor.
     pub fn apply(&self, parameters: Parameters) -> Result<Proposition, SchemaError> {
-        Ok(Proposition::Concept(ConceptApplication {
+        Ok(Proposition::Concept(ConceptQuery {
             terms: self.conform(parameters)?,
             predicate: self.clone(),
         }))
     }
 
-    /// Validates a model against this predicate's schema and creates an instance.
+    /// Validates a model against this descriptor's schema and creates an instance.
     fn conform_model(&self, model: Model) -> Result<Conception, SchemaError> {
         let mut relations = vec![];
         for (name, attribute) in self.iter() {
@@ -150,20 +150,20 @@ impl ConceptPredicate {
         })
     }
 
-    /// Creates a builder for editing an existing entity with this predicate's schema.
+    /// Creates a builder for editing an existing entity with this descriptor's schema.
     pub fn edit(&self, entity: Entity) -> Builder<'_> {
         Builder::edit(entity, self)
     }
 
-    /// Creates a builder for creating a new entity with this predicate's schema.
+    /// Creates a builder for creating a new entity with this descriptor's schema.
     pub fn create(&self) -> Builder<'_> {
         Builder::new(self)
     }
 }
 
-impl<const N: usize> From<[(&str, AttributeDescriptor); N]> for ConceptPredicate {
+impl<const N: usize> From<[(&str, AttributeDescriptor); N]> for ConceptDescriptor {
     fn from(arr: [(&str, AttributeDescriptor); N]) -> Self {
-        ConceptPredicate(
+        ConceptDescriptor(
             arr.into_iter()
                 .map(|(name, attr)| (name.to_string(), attr))
                 .collect(),
@@ -171,15 +171,15 @@ impl<const N: usize> From<[(&str, AttributeDescriptor); N]> for ConceptPredicate
     }
 }
 
-impl<const N: usize> From<[(String, AttributeDescriptor); N]> for ConceptPredicate {
+impl<const N: usize> From<[(String, AttributeDescriptor); N]> for ConceptDescriptor {
     fn from(arr: [(String, AttributeDescriptor); N]) -> Self {
-        ConceptPredicate(arr.into_iter().collect())
+        ConceptDescriptor(arr.into_iter().collect())
     }
 }
 
-impl From<Vec<(&str, AttributeDescriptor)>> for ConceptPredicate {
+impl From<Vec<(&str, AttributeDescriptor)>> for ConceptDescriptor {
     fn from(vec: Vec<(&str, AttributeDescriptor)>) -> Self {
-        ConceptPredicate(
+        ConceptDescriptor(
             vec.into_iter()
                 .map(|(name, attr)| (name.to_string(), attr))
                 .collect(),
@@ -187,19 +187,19 @@ impl From<Vec<(&str, AttributeDescriptor)>> for ConceptPredicate {
     }
 }
 
-impl From<Vec<(String, AttributeDescriptor)>> for ConceptPredicate {
+impl From<Vec<(String, AttributeDescriptor)>> for ConceptDescriptor {
     fn from(vec: Vec<(String, AttributeDescriptor)>) -> Self {
-        ConceptPredicate(vec)
+        ConceptDescriptor(vec)
     }
 }
 
-impl From<HashMap<String, AttributeDescriptor>> for ConceptPredicate {
+impl From<HashMap<String, AttributeDescriptor>> for ConceptDescriptor {
     fn from(map: HashMap<String, AttributeDescriptor>) -> Self {
-        ConceptPredicate(map.into_iter().collect())
+        ConceptDescriptor(map.into_iter().collect())
     }
 }
 
-impl Serialize for ConceptPredicate {
+impl Serialize for ConceptDescriptor {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -209,18 +209,18 @@ impl Serialize for ConceptPredicate {
     }
 }
 
-impl<'de> Deserialize<'de> for ConceptPredicate {
+impl<'de> Deserialize<'de> for ConceptDescriptor {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         let map = HashMap::<String, AttributeDescriptor>::deserialize(deserializer)?;
-        Ok(ConceptPredicate::from(map))
+        Ok(ConceptDescriptor::from(map))
     }
 }
 
-impl From<&ConceptPredicate> for Schema {
-    fn from(predicate: &ConceptPredicate) -> Self {
+impl From<&ConceptDescriptor> for Schema {
+    fn from(predicate: &ConceptDescriptor) -> Self {
         let mut schema = Schema::new();
         for (name, attribute) in predicate.iter() {
             schema.insert(
@@ -283,11 +283,11 @@ impl Conception {
     }
 }
 
-impl Claim for Conception {
+impl Assertion for Conception {
     fn assert(self, transaction: &mut Transaction) {
         for attribution in self.with {
-            transaction.associate(Assertion::new(
-                attribution.the,
+            transaction.associate(Association::new(
+                attribution.the.into(),
                 self.this.clone(),
                 attribution.is,
             ));
@@ -295,8 +295,8 @@ impl Claim for Conception {
     }
     fn retract(self, transaction: &mut Transaction) {
         for attribution in self.with {
-            transaction.dissociate(Assertion::new(
-                attribution.the,
+            transaction.dissociate(Association::new(
+                attribution.the.into(),
                 self.this.clone(),
                 attribution.is,
             ));
@@ -305,7 +305,7 @@ impl Claim for Conception {
 }
 
 impl Not for Conception {
-    type Output = Revert<Self>;
+    type Output = Retraction<Self>;
 
     fn not(self) -> Self::Output {
         self.revert()
@@ -315,12 +315,12 @@ impl Not for Conception {
 /// A builder for constructing concept instances with validation.
 #[derive(Debug, Clone)]
 pub struct Builder<'a> {
-    predicate: &'a ConceptPredicate,
+    predicate: &'a ConceptDescriptor,
     model: Model,
 }
 impl<'a> Builder<'a> {
     /// Creates a new builder for a fresh entity.
-    pub fn new(predicate: &'a ConceptPredicate) -> Self {
+    pub fn new(predicate: &'a ConceptDescriptor) -> Self {
         Self::edit(
             Entity::new().expect("should be able to generate new entity"),
             predicate,
@@ -328,7 +328,7 @@ impl<'a> Builder<'a> {
     }
 
     /// Creates a new builder for editing an existing entity.
-    pub fn edit(this: Entity, predicate: &'a ConceptPredicate) -> Self {
+    pub fn edit(this: Entity, predicate: &'a ConceptDescriptor) -> Self {
         Builder {
             predicate,
             model: Model {
@@ -350,20 +350,20 @@ impl<'a> Builder<'a> {
     }
 }
 
-/// A dynamic proof — an entity with its resolved field values.
+/// A dynamic conclusion — an entity with its resolved field values.
 ///
 /// Field values are accessed by the term bindings from the query.
 /// The `terms` map provides the mapping from field names to variable terms
 /// used in the answer.
 #[derive(Debug, Clone)]
-pub struct DynamicProof {
+pub struct ConceptConclusion {
     this: Entity,
     terms: Parameters,
     answer: Answer,
 }
 
-impl DynamicProof {
-    /// Returns the entity this proof describes.
+impl ConceptConclusion {
+    /// Returns the entity this conclusion describes.
     pub fn entity(&self) -> &Entity {
         &self.this
     }
@@ -402,32 +402,32 @@ impl DynamicProof {
     }
 }
 
-impl ConceptProof for DynamicProof {
+impl Conclusion for ConceptConclusion {
     fn this(&self) -> &Entity {
         &self.this
     }
 }
 
-impl From<ConceptPredicate> for Entity {
-    fn from(predicate: ConceptPredicate) -> Self {
+impl From<ConceptDescriptor> for Entity {
+    fn from(predicate: ConceptDescriptor) -> Self {
         predicate.this()
     }
 }
 
-impl From<ConceptApplication> for ConceptPredicate {
-    fn from(app: ConceptApplication) -> Self {
+impl From<ConceptQuery> for ConceptDescriptor {
+    fn from(app: ConceptQuery) -> Self {
         app.predicate
     }
 }
 
-impl Application for ConceptApplication {
-    type Proof = DynamicProof;
+impl Application for ConceptQuery {
+    type Conclusion = ConceptConclusion;
 
     fn evaluate<S: Source, M: Answers>(self, answers: M, source: &S) -> impl Answers {
-        ConceptApplication::evaluate(self, answers, source)
+        ConceptQuery::evaluate(self, answers, source)
     }
 
-    fn realize(&self, source: Answer) -> Result<Self::Proof, QueryError> {
+    fn realize(&self, source: Answer) -> Result<Self::Conclusion, QueryError> {
         let this_term = self
             .terms
             .get("this")
@@ -451,7 +451,7 @@ impl Application for ConceptApplication {
                 }
             },
         };
-        Ok(DynamicProof {
+        Ok(ConceptConclusion {
             this: entity,
             terms: self.terms.clone(),
             answer: source,
@@ -459,13 +459,13 @@ impl Application for ConceptApplication {
     }
 }
 
-impl Predicate for ConceptPredicate {
-    type Proof = DynamicProof;
-    type Application = ConceptApplication;
-    type Descriptor = ConceptPredicate;
+impl Predicate for ConceptDescriptor {
+    type Conclusion = ConceptConclusion;
+    type Application = ConceptQuery;
+    type Descriptor = ConceptDescriptor;
 }
 
-impl Concept for ConceptPredicate {
+impl Concept for ConceptDescriptor {
     type Term = ();
 
     fn this(&self) -> Entity {
@@ -484,7 +484,7 @@ mod tests {
 
     #[dialog_common::test]
     fn test_concept_serialization_to_specific_json() {
-        let predicate = ConceptPredicate::from([
+        let predicate = ConceptDescriptor::from([
             (
                 "name",
                 AttributeDescriptor::new(
@@ -513,13 +513,13 @@ mod tests {
         assert_eq!(obj.len(), 2);
 
         let name_attr = obj["name"].as_object().expect("Should have name attribute");
-        assert_eq!(name_attr["namespace"], "user");
+        assert_eq!(name_attr["domain"], "user");
         assert_eq!(name_attr["name"], "name");
         assert_eq!(name_attr["description"], "User's name");
         assert_eq!(name_attr["type"], "String");
 
         let age_attr = obj["age"].as_object().expect("Should have age attribute");
-        assert_eq!(age_attr["namespace"], "user");
+        assert_eq!(age_attr["domain"], "user");
         assert_eq!(age_attr["name"], "age");
         assert_eq!(age_attr["description"], "User's age");
         assert_eq!(age_attr["type"], "UnsignedInt");
@@ -529,20 +529,20 @@ mod tests {
     fn test_concept_deserialization_from_specific_json() {
         let json = r#"{
             "email": {
-                "namespace": "person",
+                "domain": "person",
                 "name": "email",
                 "description": "Person's email address",
                 "type": "String"
             },
             "active": {
-                "namespace": "person",
+                "domain": "person",
                 "name": "active",
                 "description": "Whether person is active",
                 "type": "Boolean"
             }
         }"#;
 
-        let predicate: ConceptPredicate = serde_json::from_str(json).expect("Should deserialize");
+        let predicate: ConceptDescriptor = serde_json::from_str(json).expect("Should deserialize");
 
         assert!(
             predicate.this().to_string().starts_with("concept:"),
@@ -555,7 +555,7 @@ mod tests {
             .find(|(k, _)| *k == "email")
             .map(|(_, v)| v)
             .expect("Should have email attribute");
-        assert_eq!(email_attr.namespace(), "person");
+        assert_eq!(email_attr.domain(), "person");
         assert_eq!(email_attr.name(), "email");
         assert_eq!(email_attr.description(), "Person's email address");
         assert_eq!(email_attr.content_type(), Some(Type::String));
@@ -565,7 +565,7 @@ mod tests {
             .find(|(k, _)| *k == "active")
             .map(|(_, v)| v)
             .expect("Should have active attribute");
-        assert_eq!(active_attr.namespace(), "person");
+        assert_eq!(active_attr.domain(), "person");
         assert_eq!(active_attr.name(), "active");
         assert_eq!(active_attr.description(), "Whether person is active");
         assert_eq!(active_attr.content_type(), Some(Type::Boolean));
@@ -573,7 +573,7 @@ mod tests {
 
     #[dialog_common::test]
     fn test_concept_round_trip_serialization() {
-        let original = ConceptPredicate::from([(
+        let original = ConceptDescriptor::from([(
             "score",
             AttributeDescriptor::new(
                 the!("game/score"),
@@ -584,7 +584,7 @@ mod tests {
         )]);
 
         let json = serde_json::to_string(&original).expect("Should serialize");
-        let deserialized: ConceptPredicate =
+        let deserialized: ConceptDescriptor =
             serde_json::from_str(&json).expect("Should deserialize");
 
         assert_eq!(original.this(), deserialized.this());
@@ -600,7 +600,7 @@ mod tests {
             .find(|(k, _)| *k == "score")
             .map(|(_, v)| v)
             .unwrap();
-        assert_eq!(orig_score.namespace(), deser_score.namespace());
+        assert_eq!(orig_score.domain(), deser_score.domain());
         assert_eq!(orig_score.name(), deser_score.name());
         assert_eq!(orig_score.description(), deser_score.description());
         assert_eq!(orig_score.content_type(), deser_score.content_type());
@@ -608,7 +608,7 @@ mod tests {
 
     #[dialog_common::test]
     fn test_expected_json_structure() {
-        let predicate = ConceptPredicate::from(vec![(
+        let predicate = ConceptDescriptor::from(vec![(
             "id".to_string(),
             AttributeDescriptor::new(
                 the!("product/id"),
@@ -622,7 +622,7 @@ mod tests {
 
         let expected_structure = r#"{
   "id": {
-    "namespace": "product",
+    "domain": "product",
     "name": "id",
     "description": "Product ID",
     "type": "UnsignedInt"
@@ -641,7 +641,7 @@ mod tests {
 
     #[dialog_common::test]
     fn test_concept_field_names_do_not_affect_hash() {
-        let pred1 = ConceptPredicate::from(vec![
+        let pred1 = ConceptDescriptor::from(vec![
             (
                 "field_a".to_string(),
                 AttributeDescriptor::new(
@@ -662,7 +662,7 @@ mod tests {
             ),
         ]);
 
-        let pred2 = ConceptPredicate::from(vec![
+        let pred2 = ConceptDescriptor::from(vec![
             (
                 "different_field_1".to_string(),
                 AttributeDescriptor::new(
@@ -698,7 +698,7 @@ mod tests {
 
     #[dialog_common::test]
     fn test_concept_attribute_order_does_not_affect_hash() {
-        let pred1 = ConceptPredicate::from(vec![
+        let pred1 = ConceptDescriptor::from(vec![
             (
                 "name".to_string(),
                 AttributeDescriptor::new(
@@ -719,7 +719,7 @@ mod tests {
             ),
         ]);
 
-        let pred2 = ConceptPredicate::from(vec![
+        let pred2 = ConceptDescriptor::from(vec![
             (
                 "age".to_string(),
                 AttributeDescriptor::new(
@@ -755,7 +755,7 @@ mod tests {
 
     #[dialog_common::test]
     fn test_concept_different_attributes_different_hash() {
-        let pred1 = ConceptPredicate::from(vec![(
+        let pred1 = ConceptDescriptor::from(vec![(
             "name".to_string(),
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -765,7 +765,7 @@ mod tests {
             ),
         )]);
 
-        let pred2 = ConceptPredicate::from(vec![(
+        let pred2 = ConceptDescriptor::from(vec![(
             "email".to_string(),
             AttributeDescriptor::new(
                 the!("person/email"),

@@ -10,18 +10,18 @@ use super::{Output, Source};
 /// A query pattern that can be evaluated against a [`Source`] to produce
 /// typed results.
 ///
-/// Every `#[derive(Concept)]` and `#[derive(Formula)]` match struct
+/// Every `#[derive(Concept)]` and `#[derive(Formula)]` query struct
 /// implements `Application`. The trait has two core methods:
 /// - [`evaluate`](Application::evaluate) — takes an answer stream and a
 ///   source, and returns a new answer stream with additional bindings.
 /// - [`realize`](Application::realize) — converts a fully-bound
-///   [`Answer`](crate::selection::Answer) into the concrete `Proof` type.
+///   [`Answer`](crate::selection::Answer) into the concrete `Conclusion` type.
 ///
 /// The convenience method [`perform`](Application::perform) chains them
-/// together into a single `Output<Proof>` stream ready for consumption.
+/// together into a single `Output<Conclusion>` stream ready for consumption.
 pub trait Application: Clone + ConditionalSend + 'static {
     /// The concrete result type produced by this query.
-    type Proof: ConditionalSend + 'static;
+    type Conclusion: ConditionalSend + 'static;
 
     /// Evaluate this query, producing a stream of answers.
     fn evaluate<S: Source, M: selection::Answers>(
@@ -31,10 +31,10 @@ pub trait Application: Clone + ConditionalSend + 'static {
     ) -> impl selection::Answers;
 
     /// Convert an answer into a concrete result value.
-    fn realize(&self, input: selection::Answer) -> Result<Self::Proof, QueryError>;
+    fn realize(&self, input: selection::Answer) -> Result<Self::Conclusion, QueryError>;
 
     /// Execute this query against a source, returning a stream of typed results.
-    fn perform<S: Source>(self, source: &S) -> impl Output<Self::Proof>
+    fn perform<S: Source>(self, source: &S) -> impl Output<Self::Conclusion>
     where
         Self: Sized,
     {

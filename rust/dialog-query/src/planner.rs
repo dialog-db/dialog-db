@@ -192,11 +192,11 @@ mod tests {
 
     #[dialog_common::test]
     fn test_join_plan_with_two_fact_applications() {
-        use crate::relation::application::RelationApplication;
         use crate::relation::descriptor::RelationDescriptor;
+        use crate::relation::query::RelationQuery;
         use crate::{Cardinality, Proposition, Term, Value};
 
-        let fact1 = RelationApplication::new(
+        let fact1 = RelationQuery::new(
             Term::Constant("person".to_string()),
             Term::Constant("name".to_string()),
             Term::var("person"),
@@ -205,7 +205,7 @@ mod tests {
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
-        let fact2 = RelationApplication::new(
+        let fact2 = RelationQuery::new(
             Term::Constant("person".to_string()),
             Term::Constant("age".to_string()),
             Term::var("person"),
@@ -240,12 +240,12 @@ mod tests {
 
     #[dialog_common::test]
     fn test_join_plan_execution_order() {
-        use crate::relation::application::RelationApplication;
         use crate::relation::descriptor::RelationDescriptor;
+        use crate::relation::query::RelationQuery;
         use crate::{Cardinality, Proposition, Term};
         use dialog_artifacts::Entity;
 
-        let fact1 = RelationApplication::new(
+        let fact1 = RelationQuery::new(
             Term::Constant("person".to_string()),
             Term::Constant("name".to_string()),
             Term::Constant(Entity::try_from("urn:alice".to_string()).unwrap()),
@@ -254,7 +254,7 @@ mod tests {
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
-        let fact2 = RelationApplication::new(
+        let fact2 = RelationQuery::new(
             Term::Constant("greeting".to_string()),
             Term::Constant("text".to_string()),
             Term::var("name"),
@@ -278,11 +278,11 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_join_plan_query_execution() -> anyhow::Result<()> {
-        use crate::relation::application::RelationApplication;
         use crate::relation::descriptor::RelationDescriptor;
+        use crate::relation::query::RelationQuery;
         use crate::session::Session;
-        use crate::{Assertion, Cardinality, Proposition, Term, Value};
-        use dialog_artifacts::{Artifacts, Attribute, Entity};
+        use crate::{Association, Cardinality, Proposition, Term, Value, the};
+        use dialog_artifacts::{Artifacts, Entity};
         use dialog_storage::MemoryStorageBackend;
 
         let backend = MemoryStorageBackend::default();
@@ -294,30 +294,30 @@ mod tests {
 
         session
             .transact(vec![
-                Assertion {
-                    the: "person/name".parse::<Attribute>()?,
+                Association {
+                    the: the!("person/name"),
                     of: alice.clone(),
                     is: Value::String("Alice".to_string()),
                 },
-                Assertion {
-                    the: "person/age".parse::<Attribute>()?,
+                Association {
+                    the: the!("person/age"),
                     of: alice.clone(),
                     is: Value::UnsignedInt(25),
                 },
-                Assertion {
-                    the: "person/name".parse::<Attribute>()?,
+                Association {
+                    the: the!("person/name"),
                     of: bob.clone(),
                     is: Value::String("Bob".to_string()),
                 },
-                Assertion {
-                    the: "person/age".parse::<Attribute>()?,
+                Association {
+                    the: the!("person/age"),
                     of: bob.clone(),
                     is: Value::UnsignedInt(30),
                 },
             ])
             .await?;
 
-        let fact1 = RelationApplication::new(
+        let fact1 = RelationQuery::new(
             Term::Constant("person".to_string()),
             Term::Constant("name".to_string()),
             Term::var("person"),
@@ -326,7 +326,7 @@ mod tests {
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
-        let fact2 = RelationApplication::new(
+        let fact2 = RelationQuery::new(
             Term::Constant("person".to_string()),
             Term::Constant("age".to_string()),
             Term::var("person"),

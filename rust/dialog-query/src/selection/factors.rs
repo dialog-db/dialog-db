@@ -63,7 +63,7 @@ impl From<&Factors> for Relation {
         if let Some(factor) = factors.evidence().next() {
             if let Some(relation) = factor.fact() {
                 Relation {
-                    namespace: relation.namespace.clone(),
+                    domain: relation.domain.clone(),
                     name: relation.name.clone(),
                     of: relation.of.clone(),
                     is: relation.is.clone(),

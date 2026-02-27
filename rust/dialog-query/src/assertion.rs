@@ -1,64 +1,53 @@
+pub use super::association::Association;
 pub use crate::artifact::{Artifact, Attribute, Instruction};
-pub use crate::claim::Claim;
-use crate::claim::Revert;
-pub use crate::session::transaction::{Change, Edit, Transaction};
-pub use crate::{Entity, Value};
-use serde::{Deserialize, Serialize};
+pub use crate::error::TransactionError;
+pub use crate::session::transaction::{Edit, Transaction};
 use std::ops::Not;
 
-/// An assertion represents an entity-attribute-value triple for writes.
+/// A domain-level write operation that can be asserted or retracted.
 ///
-/// This is the fundamental unit of data in the dialog-query system.
-/// Assertions follow the EAV pattern:
-/// - `the` - attribute (predicate/property)
-/// - `of` - entity (subject)
-/// - `is` - value (object)
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Assertion {
-    /// The attribute (predicate) - what property is being asserted
-    pub the: Attribute,
-    /// The entity (subject) - what entity the property applies to
-    pub of: Entity,
-    /// The value (object) - what value the property has
-    pub is: Value,
-}
+/// `Assertion` is the high-level write API. Types like [`Association`],
+/// [`With<A>`](crate:::With), and user-defined concept structs
+/// implement this trait. Asserting a claim adds facts to the knowledge
+/// base; retracting it removes them. The [`Retraction`] wrapper inverts the
+/// direction — asserting a `Retraction<C>` retracts the inner claim.
+pub trait Assertion: Sized {
+    /// Asserts the claim into a given transaction.
+    fn assert(self, transaction: &mut Transaction);
+    /// Retracts the claim from a given transaction.
+    fn retract(self, transaction: &mut Transaction);
 
-impl Assertion {
-    /// Create a new assertion from its components
-    pub fn new(the: Attribute, of: Entity, is: Value) -> Self {
-        Self { the, of, is }
+    /// Creates a claim that is inverse of this one.
+    fn revert(self) -> Retraction<Self> {
+        Retraction(self)
     }
 }
 
-/// A retraction reverses an assertion, removing it from the store.
-pub type Retraction = Revert<Assertion>;
-
-impl From<Assertion> for Change {
-    fn from(assertion: Assertion) -> Self {
-        Change::Assert(assertion.is)
+impl<C: Assertion> Edit for C {
+    fn merge(self, transaction: &mut Transaction) {
+        self.assert(transaction);
     }
 }
 
-impl From<Retraction> for Change {
-    fn from(retraction: Retraction) -> Self {
-        Change::Retract(retraction.not().is)
+/// A claim wrapper that inverts the assert/retract direction.
+///
+/// When merged into a [`Transaction`](crate::session::transaction::Transaction),
+/// a `Retraction<C>` calls `C::retract` instead of `C::assert`, effectively
+/// undoing the original claim. Applying `Not` to a `Retraction` recovers the
+/// original claim.
+pub struct Retraction<C: Assertion>(C);
+impl<C: Assertion> Edit for Retraction<C> {
+    fn merge(self, transaction: &mut Transaction) {
+        self.0.retract(transaction);
     }
 }
 
-impl Claim for Assertion {
-    fn assert(self, transaction: &mut Transaction) {
-        transaction.associate(self);
-    }
-
-    fn retract(self, transaction: &mut Transaction) {
-        transaction.dissociate(self);
-    }
-}
-
-impl Not for Assertion {
-    type Output = Revert<Assertion>;
+/// Negation produces edit that retracts original claim when merged.
+impl<C: Assertion> Not for Retraction<C> {
+    type Output = C;
 
     fn not(self) -> Self::Output {
-        self.revert()
+        let Retraction(claim) = self;
+        claim
     }
 }

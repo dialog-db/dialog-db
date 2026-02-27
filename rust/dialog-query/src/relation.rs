@@ -1,11 +1,11 @@
 //! Read-side relation type representing a query result with full metadata.
 
-/// Relation application for queries.
-pub mod application;
 /// Relation descriptor for parameter signatures.
 pub mod descriptor;
-pub use application::RelationApplication;
+/// Relation application for queries.
+pub mod query;
 pub use descriptor::RelationDescriptor;
+pub use query::RelationQuery;
 
 pub use crate::artifact::{Artifact, Attribute, Cause, Entity, Value};
 pub use crate::attribute::Cardinality;
@@ -14,12 +14,12 @@ use serde::{Deserialize, Serialize};
 /// A relation represents a read-side query result with full metadata.
 ///
 /// This is the result type for relation queries. It carries the attribute
-/// metadata (namespace, name, cardinality) alongside the entity-value data.
+/// metadata (domain, name, cardinality) alongside the entity-value data.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Relation {
-    /// The namespace of the attribute (e.g., "user")
-    pub namespace: String,
-    /// The name of the attribute within the namespace (e.g., "name")
+    /// The domain of the attribute (e.g., "user")
+    pub domain: String,
+    /// The name of the attribute within the domain (e.g., "name")
     pub name: String,
     /// The entity (subject)
     pub of: Entity,
@@ -34,7 +34,7 @@ pub struct Relation {
 impl Relation {
     /// Get the combined attribute string (e.g., "user/name")
     pub fn the(&self) -> Attribute {
-        format!("{}/{}", self.namespace, self.name)
+        format!("{}/{}", self.domain, self.name)
             .parse()
             .expect("Failed to parse combined attribute")
     }
@@ -58,13 +58,13 @@ impl Relation {
 impl From<&Artifact> for Relation {
     fn from(artifact: &Artifact) -> Self {
         let attr_str = artifact.the.to_string();
-        let (namespace, name) = attr_str
+        let (domain, name) = attr_str
             .split_once('/')
             .map(|(ns, n)| (ns.to_string(), n.to_string()))
             .unwrap_or_else(|| (String::new(), attr_str));
 
         Relation {
-            namespace,
+            domain,
             name,
             of: artifact.of.clone(),
             is: artifact.is.clone(),

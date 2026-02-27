@@ -24,10 +24,10 @@ pub mod attribute;
 /// Proposition types for querying the knowledge base.
 pub mod proposition;
 
-/// Entity-attribute-value assertion triples for writes.
+/// Assertion trait for asserting and retracting facts.
 pub mod assertion;
-/// Claim trait for asserting and retracting facts.
-pub mod claim;
+/// Entity-attribute-value association triples for writes.
+pub mod association;
 /// Concept definitions for entity-centric pattern matching.
 pub mod concept;
 /// Constraint system for filtering and validating variable bindings.
@@ -36,7 +36,7 @@ pub mod constraint;
 pub mod environment;
 /// Error types for the query engine.
 pub mod error;
-/// Fact and scalar types for the knowledge base.
+/// Claim and scalar types for the knowledge base.
 pub mod fact;
 /// Built-in formulas for data transformations and computations.
 pub mod formula;
@@ -70,12 +70,12 @@ pub mod term;
 pub mod types;
 
 pub use artifact::{Attribute as ArtifactAttribute, Entity, Type, Value};
-pub use assertion::Assertion;
+pub use assertion::*;
+pub use association::Association;
 pub use attribute::{Attribute, AttributeDescriptor, Cardinality, The};
-pub use claim::*;
-pub use concept::application::{ConceptApplication, ConceptRules};
-pub use concept::predicate::{ConceptPredicate, DynamicProof};
-pub use concept::{Concept, ConceptProof, With, WithQuery, WithTerms};
+pub use concept::application::{ConceptQuery, ConceptRules};
+pub use concept::descriptor::{ConceptConclusion, ConceptDescriptor};
+pub use concept::{Concept, Conclusion, With, WithQuery, WithTerms};
 pub use environment::*;
 pub use error::*;
 pub use formula::*;
@@ -87,8 +87,8 @@ pub use premise::*;
 pub use proposition::Proposition;
 pub use query::{Application, Output, Source, Store};
 pub use relation::Relation;
-pub use relation::application::RelationApplication;
 pub use relation::descriptor::RelationDescriptor;
+pub use relation::query::RelationQuery;
 pub use rule::*;
 pub use schema::*;
 pub use selection::*;

@@ -6,7 +6,7 @@
 
 use super::adornment::Adornment;
 use crate::DeductiveRule;
-use crate::concept::predicate::ConceptPredicate;
+use crate::concept::descriptor::ConceptDescriptor;
 use crate::parameters::Parameters;
 use crate::planner::Disjunction;
 use crate::selection::Answer;
@@ -28,9 +28,9 @@ pub struct ConceptRules {
 impl ConceptRules {
     /// Create a new `ConceptRules` from a concept predicate.
     /// The predicate is used to derive the default rule.
-    pub fn new(predicate: &ConceptPredicate) -> Self {
+    pub fn new(descriptor: &ConceptDescriptor) -> Self {
         Self {
-            implicit: DeductiveRule::from(predicate),
+            implicit: DeductiveRule::from(descriptor),
             installed: Vec::new(),
             plans: Arc::new(RwLock::new(HashMap::new())),
         }

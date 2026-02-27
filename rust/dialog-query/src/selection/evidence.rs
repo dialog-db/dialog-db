@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use crate::Relation;
 use crate::Term;
 use crate::artifact::Value;
-use crate::formula::application::FormulaApplication;
-use crate::relation::application::RelationApplication;
+use crate::formula::query::FormulaQuery;
+use crate::relation::query::RelationQuery;
 
 use super::Factors;
 
@@ -19,7 +19,7 @@ pub enum Evidence<'a> {
     /// Selected from a relation query.
     Relation {
         /// The relation application that produced this match.
-        application: &'a RelationApplication,
+        application: &'a RelationQuery,
         /// The matched relation.
         fact: &'a Relation,
     },
@@ -32,7 +32,7 @@ pub enum Evidence<'a> {
         /// The facts that were read to produce this derived value, keyed by parameter name.
         from: HashMap<String, Factors>,
         /// The formula application that produced this value.
-        formula: &'a FormulaApplication,
+        formula: &'a FormulaQuery,
     },
     /// Applied parameter.
     Parameter {

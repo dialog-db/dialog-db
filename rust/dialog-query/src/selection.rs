@@ -35,13 +35,13 @@ mod tests {
         use crate::attribute::Cardinality;
 
         let attr_str = attr.to_string();
-        let (namespace, name) = attr_str
+        let (domain, name) = attr_str
             .split_once('/')
             .map(|(ns, n)| (ns.to_string(), n.to_string()))
             .unwrap_or_else(|| (String::new(), attr_str));
 
         Relation {
-            namespace,
+            domain,
             name,
             of: entity,
             is: value,
@@ -52,10 +52,10 @@ mod tests {
 
     // Helper to create a Factor::Selected for testing
     fn create_test_factor(selector: Selector, fact: Arc<Relation>) -> Factor {
-        use crate::relation::application::RelationApplication;
+        use crate::relation::query::RelationQuery;
 
-        // Create a minimal RelationApplication for testing
-        let application = Arc::new(RelationApplication::new(
+        // Create a minimal RelationQuery for testing
+        let application = Arc::new(RelationQuery::new(
             Term::var("the_ns"),
             Term::var("the_name"),
             Term::var("of"),

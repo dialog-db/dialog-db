@@ -1,4 +1,4 @@
-pub use crate::concept::predicate::ConceptPredicate;
+pub use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::{CompileError, SchemaError};
 pub use crate::planner::Plan;
 pub use crate::planner::{Conjunction, Planner};
@@ -12,14 +12,17 @@ use std::fmt::Display;
 pub struct DeductiveRule {
     /// Conclusion that this rule reaches if all premises hold. This is
     /// typically what datalog calls rule head.
-    conclusion: ConceptPredicate,
+    conclusion: ConceptDescriptor,
     /// Execution plan for the rule's premises, ordered for optimal
     /// evaluation. Produced by [`Planner::plan`] during compilation.
     join: Conjunction,
 }
 impl DeductiveRule {
     /// Create a new uncompiled rule from a conclusion and premises
-    pub fn new(conclusion: ConceptPredicate, premises: Vec<Premise>) -> Result<Self, CompileError> {
+    pub fn new(
+        conclusion: ConceptDescriptor,
+        premises: Vec<Premise>,
+    ) -> Result<Self, CompileError> {
         // Convert premises to an intermediate form, then compile
         let uncompiled = UncompiledDeductiveRule {
             conclusion,
@@ -29,7 +32,7 @@ impl DeductiveRule {
     }
 
     /// Returns the conclusion predicate for this rule.
-    pub fn conclusion(&self) -> &ConceptPredicate {
+    pub fn conclusion(&self) -> &ConceptDescriptor {
         &self.conclusion
     }
 
@@ -60,7 +63,7 @@ impl DeductiveRule {
 
 /// Internal helper for rules before compilation
 pub struct UncompiledDeductiveRule {
-    conclusion: ConceptPredicate,
+    conclusion: ConceptDescriptor,
     premises: Vec<Premise>,
 }
 
@@ -112,19 +115,19 @@ impl Display for DeductiveRule {
     }
 }
 
-impl From<&ConceptPredicate> for DeductiveRule {
-    fn from(concept: &ConceptPredicate) -> Self {
+impl From<&ConceptDescriptor> for DeductiveRule {
+    fn from(concept: &ConceptDescriptor) -> Self {
         use crate::artifact::Entity;
-        use crate::relation::application::RelationApplication;
         use crate::relation::descriptor::RelationDescriptor;
+        use crate::relation::query::RelationQuery;
 
         let mut premises = Vec::new();
 
         let this = Term::<Entity>::var("this");
         for (name, attribute) in concept.iter() {
             premises.push(
-                RelationApplication::new(
-                    Term::Constant(attribute.namespace().to_string()),
+                RelationQuery::new(
+                    Term::Constant(attribute.domain().to_string()),
                     Term::Constant(attribute.name().to_string()),
                     this.clone(),
                     Term::var(name),
@@ -147,13 +150,13 @@ mod tests {
     use super::*;
     use crate::artifact::{Entity, Type};
     use crate::attribute::AttributeDescriptor;
-    use crate::relation::application::RelationApplication;
     use crate::relation::descriptor::RelationDescriptor;
+    use crate::relation::query::RelationQuery;
     use crate::the;
 
     #[dialog_common::test]
     fn test_rule_compiles_with_valid_premises() {
-        let conclusion = ConceptPredicate::from(vec![
+        let conclusion = ConceptDescriptor::from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -175,7 +178,7 @@ mod tests {
         ]);
         let this = Term::<Entity>::var("this");
         let premises = vec![
-            RelationApplication::new(
+            RelationQuery::new(
                 Term::Constant("user".to_string()),
                 Term::Constant("name".to_string()),
                 this.clone(),
@@ -184,7 +187,7 @@ mod tests {
                 Some(RelationDescriptor::new(None, Cardinality::One)),
             )
             .into(),
-            RelationApplication::new(
+            RelationQuery::new(
                 Term::Constant("user".to_string()),
                 Term::Constant("age".to_string()),
                 this,
@@ -200,7 +203,7 @@ mod tests {
 
     #[dialog_common::test]
     fn test_rule_fails_with_unconstrained_fact() {
-        let conclusion = ConceptPredicate::from(vec![
+        let conclusion = ConceptDescriptor::from(vec![
             (
                 "key",
                 AttributeDescriptor::new(
@@ -221,7 +224,7 @@ mod tests {
             ),
         ]);
         let premises = vec![
-            RelationApplication::new(
+            RelationQuery::new(
                 Term::var("key_ns"),
                 Term::var("key_name"),
                 Term::<Entity>::var("user"),
@@ -236,7 +239,7 @@ mod tests {
 
     #[dialog_common::test]
     fn test_rule_fails_with_unconstrained_relation() {
-        let conclusion = ConceptPredicate::from(vec![
+        let conclusion = ConceptDescriptor::from(vec![
             (
                 "key",
                 AttributeDescriptor::new(
@@ -260,7 +263,7 @@ mod tests {
         // All terms are variables — no constants at all.
         // The planner should reject this at install time.
         let premises = vec![
-            RelationApplication::new(
+            RelationQuery::new(
                 Term::var("ns"),
                 Term::var("attr"),
                 Term::<Entity>::var("user"),
@@ -280,7 +283,7 @@ mod tests {
 
     #[dialog_common::test]
     fn test_rule_fails_with_unused_parameter() {
-        let conclusion = ConceptPredicate::from(vec![
+        let conclusion = ConceptDescriptor::from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -301,7 +304,7 @@ mod tests {
             ),
         ]);
         let premises = vec![
-            RelationApplication::new(
+            RelationQuery::new(
                 Term::Constant("user".to_string()),
                 Term::Constant("name".to_string()),
                 Term::<Entity>::var("this"),
@@ -320,7 +323,7 @@ mod tests {
 
     #[dialog_common::test]
     fn test_rule_fails_with_no_premises() {
-        let conclusion = ConceptPredicate::from(vec![
+        let conclusion = ConceptDescriptor::from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -345,7 +348,7 @@ mod tests {
 
     #[dialog_common::test]
     fn test_rule_compiles_with_chained_dependencies() {
-        let conclusion = ConceptPredicate::from(vec![
+        let conclusion = ConceptDescriptor::from(vec![
             (
                 "key",
                 AttributeDescriptor::new(
@@ -367,7 +370,7 @@ mod tests {
         ]);
         let this = Term::<Entity>::var("this");
         let premises = vec![
-            RelationApplication::new(
+            RelationQuery::new(
                 Term::Constant("user".to_string()),
                 Term::Constant("name".to_string()),
                 this.clone(),
@@ -376,9 +379,9 @@ mod tests {
                 Some(RelationDescriptor::new(None, Cardinality::One)),
             )
             .into(),
-            // Use explicit namespace/name with ?key as the name variable
+            // Use explicit domain/name with ?key as the name variable
             // to ensure the conclusion parameter "key" gets bound.
-            RelationApplication::new(
+            RelationQuery::new(
                 Term::var("key"),
                 Term::blank(),
                 this,
@@ -395,13 +398,13 @@ mod tests {
 
     #[dialog_common::test]
     fn test_rule_parameter_name_vs_variable_name() {
-        let conclusion = ConceptPredicate::from(vec![(
+        let conclusion = ConceptDescriptor::from(vec![(
             "key",
             AttributeDescriptor::new(the!("result/key"), "", Cardinality::One, Some(Type::String)),
         )]);
 
         let premises = vec![
-            RelationApplication::new(
+            RelationQuery::new(
                 Term::Constant("user".to_string()),
                 Term::Constant("name".to_string()),
                 Term::<Entity>::var("this"),

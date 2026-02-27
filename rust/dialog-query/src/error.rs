@@ -617,8 +617,8 @@ pub enum CompileError {
 /// Errors from parsing syntactic constructs
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum SyntaxError {
-    /// An attribute string does not match the expected `namespace/predicate` format
-    #[error("Attribute format is \"namespace/predicate\", but got \"{actual}\"")]
+    /// An attribute string does not match the expected `domain/predicate` format
+    #[error("Attribute format is \"domain/predicate\", but got \"{actual}\"")]
     InvalidAttributeSyntax {
         /// The invalid attribute string
         actual: String,

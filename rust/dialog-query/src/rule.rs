@@ -25,10 +25,10 @@ pub use crate::predicate::Match;
 ///
 /// ```rust
 /// use dialog_query::{when, When, Term, artifact::Value};
-/// use dialog_query::relation::application::RelationApplication;
+/// use dialog_query::relation::query::RelationQuery;
 ///
 /// fn example() -> impl When {
-///     let r1 = RelationApplication::new(
+///     let r1 = RelationQuery::new(
 ///         Term::Constant("ns".into()),
 ///         Term::Constant("attr1".into()),
 ///         Term::var("entity"),
@@ -36,7 +36,7 @@ pub use crate::predicate::Match;
 ///         Term::blank(),
 ///         None,
 ///     );
-///     let r2 = RelationApplication::new(
+///     let r2 = RelationQuery::new(
 ///         Term::Constant("ns".into()),
 ///         Term::Constant("attr2".into()),
 ///         Term::var("entity"),
@@ -61,11 +61,11 @@ mod tests {
 
     use super::*;
     use crate::artifact::{Artifacts, Entity, Type};
+    use crate::assertion::Assertion;
     use crate::attribute::{AttributeDescriptor, Cardinality};
-    use crate::claim::Claim;
-    use crate::concept::application::ConceptApplication;
-    use crate::concept::predicate::ConceptPredicate;
-    use crate::concept::{Concept, ConceptProof};
+    use crate::concept::application::ConceptQuery;
+    use crate::concept::descriptor::ConceptDescriptor;
+    use crate::concept::{Concept, Conclusion};
     use crate::error::InconsistencyError;
     use crate::predicate::Predicate;
     use crate::premise::Premise;
@@ -73,7 +73,7 @@ mod tests {
     use crate::term::Term;
     use crate::the;
     use crate::types::Scalar;
-    use crate::{Assertion, Parameters, Proposition, QueryError, Session, Transaction};
+    use crate::{Association, Parameters, Proposition, QueryError, Session, Transaction};
 
     // Manual implementation of Person struct with Concept and Rule traits
     // This serves as a template for what the derive macro should generate
@@ -86,7 +86,7 @@ mod tests {
         pub age: u32,
     }
 
-    /// Match pattern for Person - has Term-wrapped fields for querying
+    /// Query pattern for Person - has Term-wrapped fields for querying
     #[derive(Debug, Clone)]
     pub struct PersonMatch {
         /// The entity being matched
@@ -122,8 +122,8 @@ mod tests {
         }
     }
 
-    fn person_predicate() -> ConceptPredicate {
-        ConceptPredicate::from(vec![
+    fn person_predicate() -> ConceptDescriptor {
+        ConceptDescriptor::from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -145,13 +145,13 @@ mod tests {
         ])
     }
 
-    impl From<Person> for ConceptPredicate {
+    impl From<Person> for ConceptDescriptor {
         fn from(_: Person) -> Self {
             person_predicate()
         }
     }
 
-    impl From<PersonMatch> for ConceptPredicate {
+    impl From<PersonMatch> for ConceptDescriptor {
         fn from(_: PersonMatch) -> Self {
             person_predicate()
         }
@@ -161,80 +161,44 @@ mod tests {
         type Term = PersonTerms;
 
         fn this(&self) -> Entity {
-            let predicate: ConceptPredicate = self.clone().into();
+            let predicate: ConceptDescriptor = self.clone().into();
             predicate.this()
         }
     }
 
     impl IntoIterator for Person {
-        type Item = Assertion;
-        type IntoIter = std::vec::IntoIter<Assertion>;
+        type Item = Association;
+        type IntoIter = std::vec::IntoIter<Association>;
 
         fn into_iter(self) -> Self::IntoIter {
             vec![
-                Assertion::new(
-                    "person/name"
-                        .parse()
-                        .expect("Failed to parse person/name attribute"),
-                    self.this.clone(),
-                    self.name.as_value(),
-                ),
-                Assertion::new(
-                    "person/age"
-                        .parse()
-                        .expect("Failed to parse person/age attribute"),
-                    self.this.clone(),
-                    self.age.as_value(),
-                ),
+                Association::new(the!("person/name"), self.this.clone(), self.name.as_value()),
+                Association::new(the!("person/age"), self.this.clone(), self.age.as_value()),
             ]
             .into_iter()
         }
     }
 
-    impl Claim for Person {
+    impl Assertion for Person {
         fn assert(self, transaction: &mut Transaction) {
-            Assertion::new(
-                "person/name"
-                    .parse()
-                    .expect("Failed to parse person/name attribute"),
-                self.this.clone(),
-                self.name.as_value(),
-            )
-            .assert(transaction);
-            Assertion::new(
-                "person/age"
-                    .parse()
-                    .expect("Failed to parse person/age attribute"),
-                self.this.clone(),
-                self.age.as_value(),
-            )
-            .assert(transaction);
+            Association::new(the!("person/name"), self.this.clone(), self.name.as_value())
+                .assert(transaction);
+            Association::new(the!("person/age"), self.this.clone(), self.age.as_value())
+                .assert(transaction);
         }
 
         fn retract(self, transaction: &mut Transaction) {
-            Assertion::new(
-                "person/name"
-                    .parse()
-                    .expect("Failed to parse person/name attribute"),
-                self.this.clone(),
-                self.name.as_value(),
-            )
-            .retract(transaction);
-            Assertion::new(
-                "person/age"
-                    .parse()
-                    .expect("Failed to parse person/age attribute"),
-                self.this.clone(),
-                self.age.as_value(),
-            )
-            .retract(transaction);
+            Association::new(the!("person/name"), self.this.clone(), self.name.as_value())
+                .retract(transaction);
+            Association::new(the!("person/age"), self.this.clone(), self.age.as_value())
+                .retract(transaction);
         }
     }
 
     impl Predicate for Person {
-        type Proof = Person;
+        type Conclusion = Person;
         type Application = PersonMatch;
-        type Descriptor = ConceptPredicate;
+        type Descriptor = ConceptDescriptor;
     }
 
     impl TryFrom<Answer> for Person {
@@ -262,18 +226,18 @@ mod tests {
     }
 
     impl crate::query::Application for PersonMatch {
-        type Proof = Person;
+        type Conclusion = Person;
 
         fn evaluate<S: crate::query::Source, M: crate::selection::Answers>(
             self,
             answers: M,
             source: &S,
         ) -> impl crate::selection::Answers {
-            let application: ConceptApplication = self.into();
+            let application: ConceptQuery = self.into();
             application.evaluate(answers, source)
         }
 
-        fn realize(&self, source: Answer) -> Result<Self::Proof, QueryError> {
+        fn realize(&self, source: Answer) -> Result<Self::Conclusion, QueryError> {
             Ok(Person {
                 this: source.get(&self.this)?,
                 name: source.get(&self.name)?,
@@ -282,10 +246,10 @@ mod tests {
         }
     }
 
-    impl From<PersonMatch> for ConceptApplication {
+    impl From<PersonMatch> for ConceptQuery {
         fn from(source: PersonMatch) -> Self {
-            let predicate: ConceptPredicate = source.clone().into();
-            ConceptApplication {
+            let predicate: ConceptDescriptor = source.clone().into();
+            ConceptQuery {
                 terms: source.into(),
                 predicate,
             }
@@ -304,7 +268,7 @@ mod tests {
         }
     }
 
-    impl ConceptProof for Person {
+    impl Conclusion for Person {
         fn this(&self) -> &Entity {
             panic!("Instance trait implementation requires an entity field")
         }
@@ -368,7 +332,7 @@ mod tests {
         };
 
         // Test that MacroPerson implements Concept
-        let concept: ConceptPredicate = Match::<MacroPerson>::default().into();
+        let concept: ConceptDescriptor = Match::<MacroPerson>::default().into();
         // Operator is now a computed URI
         assert!(
             concept.this().to_string().starts_with("concept:"),
@@ -380,12 +344,12 @@ mod tests {
 
         assert_eq!(attrs.len(), 2);
         assert_eq!(attrs[0].0, "name");
-        assert_eq!(attrs[0].1.namespace(), "macro-person");
+        assert_eq!(attrs[0].1.domain(), "macro-person");
         assert_eq!(attrs[0].1.name(), "name");
         assert_eq!(attrs[0].1.description(), "Name of the person");
         assert_eq!(attrs[0].1.content_type(), Some(Type::String));
         assert_eq!(attrs[1].0, "birthday");
-        assert_eq!(attrs[1].1.namespace(), "macro-person");
+        assert_eq!(attrs[1].1.domain(), "macro-person");
         assert_eq!(attrs[1].1.name(), "birthday");
         assert_eq!(attrs[1].1.description(), "Birthday of the person");
         assert_eq!(attrs[1].1.content_type(), Some(Type::UnsignedInt));
@@ -407,9 +371,9 @@ mod tests {
         // Test that attribute descriptors are accessible via the Attribute trait
         let name_desc = macro_person::Name::descriptor();
         let birthday_desc = macro_person::Birthday::descriptor();
-        assert_eq!(name_desc.namespace(), "macro-person");
+        assert_eq!(name_desc.domain(), "macro-person");
         assert_eq!(name_desc.name(), "name");
-        assert_eq!(birthday_desc.namespace(), "macro-person");
+        assert_eq!(birthday_desc.domain(), "macro-person");
         assert_eq!(birthday_desc.name(), "birthday");
     }
 }

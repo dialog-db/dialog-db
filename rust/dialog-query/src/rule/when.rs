@@ -6,18 +6,18 @@ use crate::premise::Premise;
 /// This trait enables ergonomic rule definitions by allowing various types
 /// to be used as rule premises:
 /// - Single items: `Into<Premise>` types
-/// - Tuples: `(Match<A>, Match<B>, ...)`
-/// - Arrays: `[Match<A>; N]`
-/// - Vectors: `Vec<Match<A>>`
+/// - Tuples: `(Query<A>, Query<B>, ...)`
+/// - Arrays: `[Query<A>; N]`
+/// - Vectors: `Vec<Query<A>>`
 ///
 /// # Examples
 ///
 /// ```rs
-/// // Return a tuple of different Match types
-/// fn my_rule(emp: Match<Employee>) -> impl When {
+/// // Return a tuple of different Query types
+/// fn my_rule(emp: Query<Employee>) -> impl When {
 ///     (
-///         Match::<Stuff> { this: emp.this, name: emp.name },
-///         Match::<OtherStuff> { this: emp.this, value: emp.value },
+///         Query::<Stuff> { this: emp.this, name: emp.name },
+///         Query::<OtherStuff> { this: emp.this, value: emp.value },
 ///     )
 /// }
 /// ```

@@ -142,32 +142,33 @@ pub fn parse_derived_attribute(attrs: &[Attribute]) -> Option<usize> {
     None
 }
 
-/// Parse the `#[namespace(...)]` attribute
+/// Parse the `#[domain(...)]` attribute to extract the domain value.
 ///
 /// Supports:
-/// - `#[namespace(custom)]` - simple identifier syntax
-/// - `#[namespace("io.gozala")]` - string literal syntax (for dotted namespaces)
-/// - `#[namespace = "legacy"]` - legacy syntax (still supported)
+/// - `#[domain(custom)]` - simple identifier syntax
+/// - `#[domain("io.gozala")]` - string literal syntax (for dotted domains)
+/// - `#[domain = "value"]` - name-value syntax
+/// - `#[namespace(...)]` - legacy alias (same syntax variants)
 ///
-/// Returns `Some(namespace)` if specified, `None` to use default
-pub fn parse_namespace_attribute(attrs: &[Attribute]) -> Option<String> {
+/// Returns `Some(domain)` if specified, `None` to use default
+pub fn parse_domain_attribute(attrs: &[Attribute]) -> Option<String> {
     for attr in attrs {
-        if attr.path().is_ident("namespace") {
+        if attr.path().is_ident("domain") || attr.path().is_ident("namespace") {
             if let Meta::List(list) = &attr.meta {
                 let tokens = list.tokens.clone();
 
-                // First try parsing as a string literal: #[namespace("custom")]
+                // First try parsing as a string literal: #[domain("custom")]
                 if let Ok(lit) = syn::parse2::<syn::LitStr>(tokens.clone()) {
                     return Some(lit.value());
                 }
 
-                // Then try parsing as a simple identifier: #[namespace(custom)]
+                // Then try parsing as a simple identifier: #[domain(custom)]
                 if let Ok(ident) = syn::parse2::<syn::Ident>(tokens) {
                     return Some(ident.to_string());
                 }
             }
 
-            // Support legacy #[namespace = "..."] syntax
+            // Support #[domain = "..."] syntax
             if let Meta::NameValue(nv) = &attr.meta
                 && let Expr::Lit(expr_lit) = &nv.value
                 && let Lit::Str(lit) = &expr_lit.lit
