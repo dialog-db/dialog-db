@@ -37,9 +37,9 @@ use std::hash::Hash;
 /// variables (may need binding), or blanks (wildcards).
 ///
 /// # JSON Serialization
-/// - Named typed variable `Term<String>`: `{ "?": { "name": "var_name", "type": "String" } }`
+/// - Named typed variable `Term<String>`: `{ "?": { "name": "var_name", "type": "Text" } }`
 /// - Named untyped variable `Term<Value>`: `{ "?": { "name": "var_name" } }`
-/// - Anonymous typed variable `Term<String>`: `{ "?": { "type": "String" } }`
+/// - Anonymous typed variable `Term<String>`: `{ "?": { "type": "Text" } }`
 /// - Anonymous untyped variable `Term<Value>`: `{ "?": {} }`
 /// - Constants: Plain JSON values (e.g., `"Alice"`, `42`, `true`)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
@@ -558,13 +558,13 @@ mod tests {
         let string = Term::<String>::default();
         assert_eq!(
             serde_json::to_string(&string).unwrap(),
-            r#"{"?":{"type":"String"}}"#
+            r#"{"?":{"type":"Text"}}"#
         );
 
         let title = Term::<String>::var("title");
         assert_eq!(
             serde_json::to_string(&title).unwrap(),
-            r#"{"?":{"name":"title","type":"String"}}"#
+            r#"{"?":{"name":"title","type":"Text"}}"#
         );
 
         let _title = Term::<Value>::var("title");

@@ -513,32 +513,30 @@ mod tests {
         assert_eq!(obj.len(), 2);
 
         let name_attr = obj["name"].as_object().expect("Should have name attribute");
-        assert_eq!(name_attr["domain"], "user");
-        assert_eq!(name_attr["name"], "name");
+        assert_eq!(name_attr["the"], "user/name");
         assert_eq!(name_attr["description"], "User's name");
-        assert_eq!(name_attr["type"], "String");
+        assert_eq!(name_attr["cardinality"], "one");
+        assert_eq!(name_attr["as"], "Text");
 
         let age_attr = obj["age"].as_object().expect("Should have age attribute");
-        assert_eq!(age_attr["domain"], "user");
-        assert_eq!(age_attr["name"], "age");
+        assert_eq!(age_attr["the"], "user/age");
         assert_eq!(age_attr["description"], "User's age");
-        assert_eq!(age_attr["type"], "UnsignedInt");
+        assert_eq!(age_attr["cardinality"], "one");
+        assert_eq!(age_attr["as"], "UnsignedInteger");
     }
 
     #[dialog_common::test]
     fn test_concept_deserialization_from_specific_json() {
         let json = r#"{
             "email": {
-                "domain": "person",
-                "name": "email",
+                "the": "person/email",
                 "description": "Person's email address",
-                "type": "String"
+                "as": "Text"
             },
             "active": {
-                "domain": "person",
-                "name": "active",
+                "the": "person/active",
                 "description": "Whether person is active",
-                "type": "Boolean"
+                "as": "Boolean"
             }
         }"#;
 
@@ -622,10 +620,10 @@ mod tests {
 
         let expected_structure = r#"{
   "id": {
-    "domain": "product",
-    "name": "id",
+    "the": "product/id",
     "description": "Product ID",
-    "type": "UnsignedInt"
+    "cardinality": "one",
+    "as": "UnsignedInteger"
   }
 }"#;
 

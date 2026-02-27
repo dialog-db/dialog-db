@@ -830,10 +830,13 @@ pub enum ValueDataType {
     /// A boolean
     Boolean = 2,
     /// A UTF-8 string
+    #[serde(rename = "Text")]
     String = 3,
     /// A 128-bit unsigned integer
+    #[serde(rename = "UnsignedInteger")]
     UnsignedInt = 4,
     /// A 128-bit signed integer
+    #[serde(rename = "SignedInteger")]
     SignedInt = 5,
     /// A floating point number
     Float = 6,
