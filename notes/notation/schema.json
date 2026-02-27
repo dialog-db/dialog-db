@@ -15,7 +15,9 @@
         },
         "the": {
           "type": "string",
-          "description": "The relation in domain/name format (e.g. 'diy.cook/quantity'). In abbreviated notation, inferred from the enclosing key (domain) and label (name)."
+          "description": "The relation in domain/name format (e.g. 'diy.cook/quantity'). Max 64 bytes total. Domain: lowercase letters, digits, hyphens, dots; must start with a letter. Name: lowercase kebab-case (no dots); must start with a letter.",
+          "maxLength": 64,
+          "pattern": "^[a-z][a-z0-9.-]*[a-z0-9]?/[a-z][a-z0-9-]*[a-z0-9]?$"
         },
         "cardinality": {
           "$ref": "#/$defs/Cardinality",
@@ -52,7 +54,8 @@
         "Entity",
         "Boolean",
         "Text",
-        "Integer",
+        "UnsignedInteger",
+        "SignedInteger",
         "Float",
         "Symbol"
       ],

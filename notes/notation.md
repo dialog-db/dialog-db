@@ -16,21 +16,23 @@ An attribute's identity is the tuple `(the, type, cardinality)`. A concept's ide
 
 The `the` component within an attribute is nominal: it carries meaning beyond structure. `diy.cook/quantity` and `diy.cook/price` may both be `(*, Integer, one)` structurally, but they are distinct attributes because `the` denotes the kind of relation they form, which is what makes it part of the identity in the first place.
 
+### Selector
+
+An attribute selector is the combined `domain/name` string. The total length must not exceed **64 bytes**, which is the storage-layer encoding budget.
+
 ### Domain
 
-A domain is a dot-separated reversed domain name, always normalized to lowercase. Domains group related attributes and colocate them in the index, which complements dialog's query-driven replication: all attributes sharing a domain prefix can be fetched together efficiently, making it practical to replicate a coherent slice of information without pulling unrelated data. The reversed domain notation avoids collisions between independently developed schemas.
+A domain groups related attributes. Domains may use dot-separated segments for hierarchical organization, following a reversed domain name convention to avoid collisions between independently developed schemas.
 
 **Rules:**
 
-- Dot-separated segments in reverse domain order
-- All segments lowercase
-- Each segment: 1–63 ASCII alphanumeric characters or hyphens
-- Hyphens not allowed at start or end of a segment
-- Top-level domain must not start with a digit
-- At least two segments required
-- Maximum 253 characters total (including dots)
+- Lowercase ASCII letters, digits, hyphens, and dots
+- Must start with a letter
+- Must not end with a dot or hyphen
+- At least one character
 
 ```
+person
 diy.cook
 io.gozala.person
 org.example.hr
@@ -39,7 +41,7 @@ org.example.hr
 **Regexp:**
 
 ```
-^[a-z]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$
+^[a-z][a-z0-9.-]*[a-z0-9]$|^[a-z]$
 ```
 
 ### Name
@@ -48,10 +50,10 @@ The name component of an attribute uses lowercase kebab-case.
 
 **Rules:**
 
-- Lowercase ASCII letters, digits, and hyphens
+- Lowercase ASCII letters, digits, and hyphens (no dots)
 - Must start with a letter
-- Hyphens not allowed at start or end
-- 1–63 characters
+- Must not end with a hyphen
+- At least one character
 
 ```
 quantity
@@ -62,25 +64,20 @@ recipe-step
 **Regexp:**
 
 ```
-^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$
+^[a-z][a-z0-9-]*[a-z0-9]$|^[a-z]$
 ```
 
 ### References
 
-In the formal notation, all references are structural: attributes are described inline by their full definition `{ the, type, cardinality }` and concepts by their full set of constituent attributes. There are no names to look up; everything is self-describing.
+In the formal notation, all references are structural: attributes are described inline by their full definition `{ the, as, cardinality }` and concepts by their full set of constituent attributes. There are no names to look up; everything is self-describing.
 
-A relation is referenced by its qualified form `domain/name` with `/` as separator:
+A relation is referenced by its qualified form `domain/name` with `/` as separator. The combined selector must not exceed 64 bytes:
 
 ```
+person/name
 diy.cook/quantity
 diy.cook/ingredient-name
 io.gozala.person/name
-```
-
-**Regexp:**
-
-```
-^[a-z]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+/[a-z]([a-z0-9-]{0,61}[a-z0-9])?$
 ```
 
 ### Attribute
@@ -128,7 +125,7 @@ as: Text
       "as": {
         "description": "Value type of the attribute. If omitted, any type is allowed.",
         "type": "string",
-        "enum": ["Bytes", "Entity", "Boolean", "Text", "Integer", "Float", "Symbol"]
+        "enum": ["Bytes", "Entity", "Boolean", "Text", "UnsignedInteger", "SignedInteger", "Float", "Symbol"]
       }
     },
     "required": ["the"]
@@ -141,15 +138,16 @@ as: Text
 
 The `as` field declares what kind of value the attribute admits. Scalar types from the `dialog` domain can be referenced without qualification:
 
-| Type      | Description                 |
-|-----------|-----------------------------|
-| `Bytes`   | Raw byte sequence           |
-| `Entity`  | Reference to another entity |
-| `Boolean` | `true` or `false`           |
-| `Text`    | UTF-8 string                |
-| `Integer` | Signed integer              |
-| `Float`   | IEEE 754 floating point     |
-| `Symbol`  | Symbolic identifier         |
+| Type              | Description                 |
+|-------------------|-----------------------------|
+| `Bytes`           | Raw byte sequence           |
+| `Entity`          | Reference to another entity |
+| `Boolean`         | `true` or `false`           |
+| `Text`            | UTF-8 string                |
+| `UnsignedInteger` | Unsigned integer            |
+| `SignedInteger`   | Signed integer              |
+| `Float`           | IEEE 754 floating point     |
+| `Symbol`          | Symbolic identifier         |
 
 #### Future Attribute Extensions
 
@@ -170,7 +168,7 @@ An attribute will also be able to reference a concept as its value type, or cons
       "quantity": {
         "description": "Amount needed",
         "the": "diy.cook/quantity",
-        "as": "Integer"
+        "as": "UnsignedInteger"
       }
     }
   }
@@ -294,7 +292,7 @@ Fields under `maybe` define attributes that the entity may or may not have relat
     "duration": {
       "description": "Time in minutes this step takes",
       "the": "diy.cook.recipe-step/duration",
-      "as": "Integer"
+      "as": "UnsignedInteger"
     }
   }
 }
@@ -424,7 +422,7 @@ A concept definition is effectively a rule with an implied conjunction. Every pa
       "quantity": {
         "description": "Amount needed",
         "the": "diy.cook/quantity",
-        "as": "Integer"
+        "as": "UnsignedInteger"
       },
       "unit": {
         "description": "Unit of measurement",
@@ -448,7 +446,7 @@ A concept definition is effectively a rule with an implied conjunction. Every pa
     {
       "assert": {
         "with": {
-          "quantity": { "the": "diy.cook/quantity", "as": "Integer" }
+          "quantity": { "the": "diy.cook/quantity", "as": "UnsignedInteger" }
         }
       },
       "where": {
@@ -666,7 +664,7 @@ A pure computation, similar to formulas in a spreadsheet. Given bound input fiel
     {
       "assert": {
         "with": {
-          "quantity": { "the": "diy.cook/quantity", "as": "Integer" }
+          "quantity": { "the": "diy.cook/quantity", "as": "UnsignedInteger" }
         }
       },
       "where": {
@@ -1130,7 +1128,7 @@ The **label** under which an attribute is defined implies its name; the **enclos
 diy.cook:
   quantity:
     description: Amount needed
-    as: Integer
+    as: UnsignedInteger
 ```
 
 Expands to:
@@ -1139,7 +1137,7 @@ Expands to:
 description: Amount needed
 the: diy.cook/quantity
 cardinality: one
-as: Integer
+as: UnsignedInteger
 ```
 
 The label `quantity` becomes the name, the enclosing key `diy.cook` becomes the domain, and `cardinality` defaults to `one`.
@@ -1238,7 +1236,7 @@ diy.cook:
   quantity-int:
     the: ./quantity
     description: Quantity as a whole number
-    as: Integer
+    as: UnsignedInteger
 ```
 
 Expands to:
@@ -1247,7 +1245,7 @@ Expands to:
 description: Quantity as a whole number
 the: diy.cook/quantity
 cardinality: one
-as: Integer
+as: UnsignedInteger
 ```
 
 The label `quantity-int` is the key used for referencing this definition, but `the` overrides the actual attribute name to `quantity`. This attribute is referenceable as `diy.cook/quantity-int` in the abbreviated notation.
@@ -1261,7 +1259,7 @@ diy.cook:
   quantity:
     the: io.gozala.person/.
     description: Quantity as a person attribute
-    as: Integer
+    as: UnsignedInteger
 ```
 
 Expands to:
@@ -1270,7 +1268,7 @@ Expands to:
 description: Quantity as a person attribute
 the: io.gozala.person/quantity
 cardinality: one
-as: Integer
+as: UnsignedInteger
 ```
 
 The name `quantity` comes from the label, but the domain is overridden to `io.gozala.person`.
@@ -1454,7 +1452,7 @@ Expands to:
     "description": "An ingredient",
     "with": {
       "name": { "the": "diy.cook/ingredient-name", "as": "Text" },
-      "quantity": { "the": "diy.cook/quantity", "as": "Integer" },
+      "quantity": { "the": "diy.cook/quantity", "as": "UnsignedInteger" },
       "unit": { "the": "diy.cook/unit", "as": "Text" }
     }
   },
