@@ -1,5 +1,5 @@
 use crate::Cardinality;
-use crate::Relation;
+use crate::Claim;
 pub use crate::artifact::Attribute;
 pub use crate::artifact::{ArtifactSelector, Constrained};
 use crate::attribute::The;
@@ -151,14 +151,13 @@ impl RelationQuery {
         self.relation.as_ref()
     }
 
-    /// Resolve an artifact into a `Relation` using this application's cardinality.
-    pub fn resolve(&self, artifact: &Artifact) -> Relation {
-        Relation {
+    /// Resolve an artifact into a `Claim`.
+    pub fn resolve(&self, artifact: &Artifact) -> Claim {
+        Claim {
             the: The::from(artifact.the.clone()),
             of: artifact.of.clone(),
             is: artifact.is.clone(),
             cause: artifact.cause.clone().unwrap_or(Cause([0; 32])),
-            cardinality: self.cardinality(),
         }
     }
 
@@ -391,8 +390,8 @@ impl RelationQuery {
         }
     }
 
-    /// Construct a Relation from the given answer by resolving all terms.
-    pub fn realize(&self, source: Answer) -> Result<Relation, QueryError> {
+    /// Construct a Claim from the given answer by resolving all terms.
+    pub fn realize(&self, source: Answer) -> Result<Claim, QueryError> {
         let the_term = match &self.the {
             Term::Variable { name: None, .. } => Term::Variable {
                 name: Some("__the".to_string()),
@@ -420,17 +419,16 @@ impl RelationQuery {
             _ => source.get(&the_term)?,
         };
 
-        Ok(Relation {
+        Ok(Claim {
             the,
             of: source.get(&of_term)?,
             is: source.get(&is_term)?,
             cause: Cause([0; 32]),
-            cardinality: self.cardinality(),
         })
     }
 
     /// Execute this relation application, returning a stream of relations.
-    pub fn perform<S: Source>(self, source: &S) -> impl Output<Relation>
+    pub fn perform<S: Source>(self, source: &S) -> impl Output<Claim>
     where
         Self: Sized,
     {
@@ -439,13 +437,13 @@ impl RelationQuery {
 }
 
 impl Application for RelationQuery {
-    type Conclusion = Relation;
+    type Conclusion = Claim;
 
     fn evaluate<S: Source, M: Answers>(self, answers: M, source: &S) -> impl Answers {
         self.evaluate_with_provenance(source.clone(), answers)
     }
 
-    fn realize(&self, input: Answer) -> Result<Relation, QueryError> {
+    fn realize(&self, input: Answer) -> Result<Claim, QueryError> {
         input.realize(self)
     }
 }
@@ -492,7 +490,7 @@ impl TryFrom<&RelationQuery> for ArtifactSelector<Constrained> {
 
 impl Display for RelationQuery {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Relation {{")?;
+        write!(f, "Claim {{")?;
         write!(f, "the: {},", self.the)?;
         write!(f, "of: {},", self.of)?;
         write!(f, "is: {},", self.is)?;
@@ -1019,6 +1017,189 @@ mod tests {
         assert_eq!(fact.the(), Attribute::from(name_attr));
         assert_eq!(fact.of(), &alice);
         assert_eq!(fact.is(), &Value::String("Alice".to_string()));
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_retracts_facts() -> anyhow::Result<()> {
+        use crate::artifact::Artifacts;
+
+        let storage_backend = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        let alice = Entity::new()?;
+
+        let alice_name = Association {
+            the: the!("user/name"),
+            of: alice.clone(),
+            is: Value::String("Alice".to_string()),
+        };
+
+        let mut session = Session::open(artifacts.clone());
+        session.transact(vec![alice_name.clone()]).await?;
+
+        let query_constant = RelationQuery::new(
+            Term::Constant(the!("user/name")),
+            alice.clone().into(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
+
+        let results = query_constant
+            .perform(&Session::open(artifacts.clone()))
+            .try_vec()
+            .await?;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].of(), &alice);
+        assert_eq!(results[0].is(), &Value::String("Alice".to_string()));
+
+        let mut session = Session::open(artifacts.clone());
+        session.transact([!alice_name]).await?;
+
+        let query2 = RelationQuery::new(
+            Term::Constant(the!("user/name")),
+            alice.clone().into(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
+
+        let results2 = query2
+            .perform(&Session::open(artifacts.clone()))
+            .try_vec()
+            .await?;
+
+        assert_eq!(results2.len(), 0, "Fact should be retracted");
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_mixes_constants_and_variables() -> anyhow::Result<()> {
+        use crate::artifact::Artifacts;
+
+        let alice = Entity::new()?;
+
+        let storage_backend = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        let claims = vec![Association {
+            the: the!("user/name"),
+            of: alice.clone(),
+            is: Value::String("Alice".to_string()),
+        }];
+
+        let mut session = Session::open(artifacts.clone());
+        session.transact(claims).await?;
+
+        let mixed_query = RelationQuery::new(
+            Term::Constant(the!("user/name")),
+            alice.clone().into(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
+
+        let results = mixed_query
+            .perform(&Session::open(artifacts.clone()))
+            .try_vec()
+            .await?;
+
+        assert_eq!(results.len(), 1, "Should find Alice's name fact");
+        assert_eq!(results[0].domain(), "user");
+        assert_eq!(results[0].name(), "name");
+        assert_eq!(results[0].of(), &alice);
+        assert_eq!(results[0].is(), &Value::String("Alice".to_string()));
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_queries_without_descriptor() -> anyhow::Result<()> {
+        use crate::artifact::Artifacts;
+
+        let storage_backend = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        let claims = vec![
+            Association {
+                the: the!("user/name"),
+                of: alice.clone(),
+                is: Value::String("Alice".to_string()),
+            },
+            Association {
+                the: the!("user/name"),
+                of: bob.clone(),
+                is: Value::String("Bob".to_string()),
+            },
+        ];
+
+        let mut session = Session::open(artifacts.clone());
+        session.transact(claims).await?;
+
+        let query = RelationQuery::new(
+            Term::Constant(the!("user/name")),
+            Term::blank(),
+            Term::blank(),
+            Term::blank(),
+            None,
+        );
+
+        let results = query
+            .perform(&Session::open(artifacts.clone()))
+            .try_vec()
+            .await?;
+
+        assert_eq!(results.len(), 2, "Should find both Alice and Bob");
+
+        let has_alice = results
+            .iter()
+            .any(|f| f.of == alice && f.is == Value::String("Alice".to_string()));
+        let has_bob = results
+            .iter()
+            .any(|f| f.of == bob && f.is == Value::String("Bob".to_string()));
+        assert!(has_alice && has_bob);
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_accepts_string_literal_as_value_term() -> anyhow::Result<()> {
+        use crate::artifact::Artifacts;
+
+        let storage_backend = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        let alice = Entity::new()?;
+
+        let claims = vec![Association {
+            the: the!("user/name"),
+            of: alice.clone(),
+            is: Value::String("Alice".to_string()),
+        }];
+
+        let mut session = Session::open(artifacts.clone());
+        session.transact(claims).await?;
+
+        let query = RelationQuery::new(
+            Term::Constant(the!("user/name")),
+            alice.clone().into(),
+            "Alice".into(),
+            Term::blank(),
+            None,
+        );
+
+        let results = query
+            .perform(&Session::open(artifacts.clone()))
+            .try_vec()
+            .await?;
+        assert_eq!(results.len(), 1);
 
         Ok(())
     }

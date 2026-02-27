@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::Relation;
+use crate::Claim;
 use crate::artifact::Value;
 use crate::formula::query::FormulaQuery;
 use crate::relation::query::RelationQuery;
@@ -30,7 +30,7 @@ pub enum Factor {
         /// The relation application that matched this fact.
         application: Arc<RelationQuery>,
         /// The matched fact itself.
-        fact: Arc<Relation>,
+        fact: Arc<Claim>,
     },
     /// Derived from a formula computation - tracks the input facts and formula used.
     Derived {
@@ -50,7 +50,7 @@ pub enum Factor {
 
 impl Factor {
     /// Get the underlying relation if this factor is directly from a relation (not derived)
-    pub fn fact(&self) -> Option<&Relation> {
+    pub fn fact(&self) -> Option<&Claim> {
         match self {
             Factor::Selected { fact, .. } => Some(fact.as_ref()),
             Factor::Derived { .. } => None,

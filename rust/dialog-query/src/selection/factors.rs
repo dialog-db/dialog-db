@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::Relation;
+use crate::Claim;
 use crate::artifact::Value;
 
 use super::Factor;
@@ -56,7 +56,7 @@ impl From<&Factors> for Value {
     }
 }
 
-impl From<&Factors> for Relation {
+impl From<&Factors> for Claim {
     /// Extract the relation from factors.
     /// Uses the first factor's source relation (primary or first alternate).
     fn from(factors: &Factors) -> Self {

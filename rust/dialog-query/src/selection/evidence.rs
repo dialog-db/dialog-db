@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::Relation;
+use crate::Claim;
 use crate::Term;
 use crate::artifact::Value;
 use crate::formula::query::FormulaQuery;
@@ -21,7 +21,7 @@ pub enum Evidence<'a> {
         /// The relation application that produced this match.
         application: &'a RelationQuery,
         /// The matched relation.
-        fact: &'a Relation,
+        fact: &'a Claim,
     },
     /// Derived using formula application.
     Derived {

@@ -15,7 +15,7 @@ pub use selector::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Relation;
+    use crate::Claim;
     use crate::Term;
     use crate::artifact::{Attribute, Entity, Value};
     use crate::error::InconsistencyError;
@@ -30,21 +30,20 @@ mod tests {
     use std::str::FromStr;
 
     // Helper function to create a test relation for Answer tests
-    fn create_test_relation(entity: Entity, attr: Attribute, value: Value) -> Relation {
+    fn create_test_claim(entity: Entity, attr: Attribute, value: Value) -> Claim {
         use crate::artifact::Cause;
-        use crate::attribute::{Cardinality, The};
+        use crate::attribute::The;
 
-        Relation {
+        Claim {
             the: The::from(attr),
             of: entity,
             is: value,
             cause: Cause([0u8; 32]),
-            cardinality: Cardinality::Many,
         }
     }
 
     // Helper to create a Factor::Selected for testing
-    fn create_test_factor(selector: Selector, fact: Arc<Relation>) -> Factor {
+    fn create_test_factor(selector: Selector, fact: Arc<Claim>) -> Factor {
         use crate::relation::query::RelationQuery;
 
         // Create a minimal RelationQuery for testing
@@ -68,7 +67,7 @@ mod tests {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/name").unwrap();
         let value = Value::String("Alice".to_string());
-        let fact = Arc::new(create_test_relation(
+        let fact = Arc::new(create_test_claim(
             entity.clone(),
             attr.clone(),
             value.clone(),
@@ -118,7 +117,7 @@ mod tests {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/name").unwrap();
         let value = Value::String("Alice".to_string());
-        let fact = Arc::new(create_test_relation(
+        let fact = Arc::new(create_test_claim(
             entity.clone(),
             attr.clone(),
             value.clone(),
@@ -145,7 +144,7 @@ mod tests {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/age").unwrap();
         let value = Value::UnsignedInt(25);
-        let fact = Arc::new(create_test_relation(
+        let fact = Arc::new(create_test_claim(
             entity.clone(),
             attr.clone(),
             value.clone(),
@@ -172,7 +171,7 @@ mod tests {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/score").unwrap();
         let value = Value::SignedInt(-10);
-        let fact = Arc::new(create_test_relation(
+        let fact = Arc::new(create_test_claim(
             entity.clone(),
             attr.clone(),
             value.clone(),
@@ -199,7 +198,7 @@ mod tests {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/active").unwrap();
         let value = Value::Boolean(true);
-        let fact = Arc::new(create_test_relation(
+        let fact = Arc::new(create_test_claim(
             entity.clone(),
             attr.clone(),
             value.clone(),
@@ -227,7 +226,7 @@ mod tests {
         let attr = Attribute::from_str("user/id").unwrap();
         let entity_value = Entity::new().unwrap();
         let value = Value::Entity(entity_value.clone());
-        let fact = Arc::new(create_test_relation(
+        let fact = Arc::new(create_test_claim(
             entity.clone(),
             attr.clone(),
             value.clone(),
@@ -301,7 +300,7 @@ mod tests {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/name").unwrap();
         let value = Value::String("Alice".to_string());
-        let fact = Arc::new(create_test_relation(
+        let fact = Arc::new(create_test_claim(
             entity.clone(),
             attr.clone(),
             value.clone(),
@@ -334,12 +333,12 @@ mod tests {
         let value = Value::String("Alice".to_string());
 
         // Create two different facts with the same value but different entities
-        let fact1 = Arc::new(create_test_relation(
+        let fact1 = Arc::new(create_test_claim(
             entity1.clone(),
             attr.clone(),
             value.clone(),
         ));
-        let fact2 = Arc::new(create_test_relation(
+        let fact2 = Arc::new(create_test_claim(
             entity2.clone(),
             attr.clone(),
             value.clone(),
@@ -382,7 +381,7 @@ mod tests {
         // Create multiple facts
         let name_attr = Attribute::from_str("user/name").unwrap();
         let name_value = Value::String("Bob".to_string());
-        let name_fact = Arc::new(create_test_relation(
+        let name_fact = Arc::new(create_test_claim(
             entity.clone(),
             name_attr.clone(),
             name_value.clone(),
@@ -391,7 +390,7 @@ mod tests {
 
         let age_attr = Attribute::from_str("user/age").unwrap();
         let age_value = Value::UnsignedInt(30);
-        let age_fact = Arc::new(create_test_relation(
+        let age_fact = Arc::new(create_test_claim(
             entity.clone(),
             age_attr.clone(),
             age_value.clone(),
@@ -400,7 +399,7 @@ mod tests {
 
         let active_attr = Attribute::from_str("user/active").unwrap();
         let active_value = Value::Boolean(true);
-        let active_fact = Arc::new(create_test_relation(
+        let active_fact = Arc::new(create_test_claim(
             entity.clone(),
             active_attr.clone(),
             active_value.clone(),
@@ -439,7 +438,7 @@ mod tests {
         // Create multiple facts
         let name_attr = Attribute::from_str("user/name").unwrap();
         let name_value = Value::String("Charlie".to_string());
-        let name_fact = Arc::new(create_test_relation(
+        let name_fact = Arc::new(create_test_claim(
             entity.clone(),
             name_attr.clone(),
             name_value.clone(),
@@ -448,7 +447,7 @@ mod tests {
 
         let age_attr = Attribute::from_str("user/age").unwrap();
         let age_value = Value::UnsignedInt(35);
-        let age_fact = Arc::new(create_test_relation(
+        let age_fact = Arc::new(create_test_claim(
             entity.clone(),
             age_attr.clone(),
             age_value.clone(),
