@@ -1,3 +1,7 @@
+/// Named attribute collections for concept descriptors.
+mod named_attributes;
+pub use named_attributes::NamedAttributes;
+
 use crate::Predicate;
 use crate::assertion::Retraction;
 use crate::attribute::{AttributeDescriptor, Attribution};
@@ -18,6 +22,19 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ops::Not;
 
+/// Deserializes an optional `NamedAttributes` map, treating an empty map as `None`.
+fn deserialize_maybe<'de, D>(deserializer: D) -> Result<Option<NamedAttributes>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let map = HashMap::<String, AttributeDescriptor>::deserialize(deserializer)?;
+    if map.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(NamedAttributes::from(map)))
+    }
+}
+
 /// A concept descriptor — a named set of attribute descriptors that together
 /// describe an entity type. Concepts are similar to tables in relational
 /// databases but are more flexible as they can be derived from rules rather
@@ -25,44 +42,46 @@ use std::ops::Not;
 ///
 /// Concepts are identified by a blake3 hash of their attribute set, encoded
 /// as a URI in the format `concept:{hash}`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ConceptDescriptor(Vec<(String, AttributeDescriptor)>);
-
-impl Default for ConceptDescriptor {
-    fn default() -> Self {
-        Self::new()
-    }
+///
+/// Serializes to the formal notation:
+/// ```json
+/// { "description": "...", "with": { "fieldName": { "the": "domain/name", ... } } }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConceptDescriptor {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    with: NamedAttributes,
+    /// Optional attributes — not yet supported by the query engine.
+    ///
+    /// Accepted during deserialization to ensure documents written against
+    /// the full schema are validated now rather than silently accepted and
+    /// broken later when `maybe` support lands.  Skipped during
+    /// serialization because the engine never produces them.
+    ///
+    /// An empty map deserializes to `None` (treated as absent).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_maybe"
+    )]
+    maybe: Option<NamedAttributes>,
 }
 
 impl ConceptDescriptor {
-    /// Creates an empty concept descriptor.
-    pub fn new() -> Self {
-        ConceptDescriptor(Vec::new())
+    /// Returns the description of this concept, if any.
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
     }
 
-    /// Returns an iterator over all attributes as (name, descriptor) pairs.
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = (&str, &AttributeDescriptor)> {
-        self.0.iter().map(|(k, v)| (k.as_str(), v))
-    }
-
-    /// Returns the number of attributes in this descriptor.
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    /// Returns true if this descriptor has no attributes.
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    /// Returns an iterator over attribute names.
-    pub fn keys(&self) -> impl Iterator<Item = &str> + '_ {
-        self.0.iter().map(|(k, _)| k.as_str())
+    /// Returns a reference to the named attributes.
+    pub fn with(&self) -> &NamedAttributes {
+        &self.with
     }
 
     /// Validates the provided parameters against the schema of the attributes.
     pub fn conform(&self, parameters: Parameters) -> Result<Parameters, SchemaError> {
-        for (name, attribute) in self.iter() {
+        for (name, attribute) in self.with().iter() {
             let parameter = parameters.get(name);
             attribute
                 .conform(parameter)
@@ -74,7 +93,7 @@ impl ConceptDescriptor {
 
     /// Returns an iterator over operand names, starting with "this" followed by attribute keys.
     pub fn operands(&self) -> impl Iterator<Item = &str> {
-        std::iter::once("this").chain(self.keys())
+        std::iter::once("this").chain(self.with().keys())
     }
 
     /// Derives a `Schema` from this descriptor's attributes.
@@ -96,7 +115,7 @@ impl ConceptDescriptor {
 
         let mut attr_map: BTreeMap<String, EmptyObject> = BTreeMap::new();
 
-        for (_name, schema) in self.iter() {
+        for (_name, schema) in self.with().iter() {
             let uri = schema.to_uri();
             attr_map.insert(uri, EmptyObject {});
         }
@@ -132,7 +151,7 @@ impl ConceptDescriptor {
     /// Validates a model against this descriptor's schema and creates an instance.
     fn conform_model(&self, model: Model) -> Result<Conception, SchemaError> {
         let mut relations = vec![];
-        for (name, attribute) in self.iter() {
+        for (name, attribute) in self.with().iter() {
             if let Some(value) = model.attributes.get(name) {
                 let relation = attribute
                     .resolve(value.clone())
@@ -163,66 +182,58 @@ impl ConceptDescriptor {
 
 impl<const N: usize> From<[(&str, AttributeDescriptor); N]> for ConceptDescriptor {
     fn from(arr: [(&str, AttributeDescriptor); N]) -> Self {
-        ConceptDescriptor(
-            arr.into_iter()
-                .map(|(name, attr)| (name.to_string(), attr))
-                .collect(),
-        )
+        ConceptDescriptor {
+            description: None,
+            maybe: None,
+            with: NamedAttributes::from(arr),
+        }
     }
 }
 
 impl<const N: usize> From<[(String, AttributeDescriptor); N]> for ConceptDescriptor {
     fn from(arr: [(String, AttributeDescriptor); N]) -> Self {
-        ConceptDescriptor(arr.into_iter().collect())
+        ConceptDescriptor {
+            description: None,
+            maybe: None,
+            with: NamedAttributes::from(arr),
+        }
     }
 }
 
 impl From<Vec<(&str, AttributeDescriptor)>> for ConceptDescriptor {
     fn from(vec: Vec<(&str, AttributeDescriptor)>) -> Self {
-        ConceptDescriptor(
-            vec.into_iter()
-                .map(|(name, attr)| (name.to_string(), attr))
-                .collect(),
-        )
+        ConceptDescriptor {
+            description: None,
+            maybe: None,
+            with: NamedAttributes::from(vec),
+        }
     }
 }
 
 impl From<Vec<(String, AttributeDescriptor)>> for ConceptDescriptor {
     fn from(vec: Vec<(String, AttributeDescriptor)>) -> Self {
-        ConceptDescriptor(vec)
+        ConceptDescriptor {
+            description: None,
+            maybe: None,
+            with: NamedAttributes::from(vec),
+        }
     }
 }
 
 impl From<HashMap<String, AttributeDescriptor>> for ConceptDescriptor {
     fn from(map: HashMap<String, AttributeDescriptor>) -> Self {
-        ConceptDescriptor(map.into_iter().collect())
-    }
-}
-
-impl Serialize for ConceptDescriptor {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let map: HashMap<&str, &AttributeDescriptor> = self.iter().collect();
-        map.serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for ConceptDescriptor {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let map = HashMap::<String, AttributeDescriptor>::deserialize(deserializer)?;
-        Ok(ConceptDescriptor::from(map))
+        ConceptDescriptor {
+            description: None,
+            maybe: None,
+            with: NamedAttributes::from(map),
+        }
     }
 }
 
 impl From<&ConceptDescriptor> for Schema {
     fn from(predicate: &ConceptDescriptor) -> Self {
         let mut schema = Schema::new();
-        for (name, attribute) in predicate.iter() {
+        for (name, attribute) in predicate.with().iter() {
             schema.insert(
                 name.into(),
                 Field {
@@ -510,15 +521,20 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should parse");
         let obj = parsed.as_object().expect("Should be object");
 
-        assert_eq!(obj.len(), 2);
+        let with_obj = obj["with"].as_object().expect("Should have 'with' wrapper");
+        assert_eq!(with_obj.len(), 2);
 
-        let name_attr = obj["name"].as_object().expect("Should have name attribute");
+        let name_attr = with_obj["name"]
+            .as_object()
+            .expect("Should have name attribute");
         assert_eq!(name_attr["the"], "user/name");
         assert_eq!(name_attr["description"], "User's name");
         assert_eq!(name_attr["cardinality"], "one");
         assert_eq!(name_attr["as"], "Text");
 
-        let age_attr = obj["age"].as_object().expect("Should have age attribute");
+        let age_attr = with_obj["age"]
+            .as_object()
+            .expect("Should have age attribute");
         assert_eq!(age_attr["the"], "user/age");
         assert_eq!(age_attr["description"], "User's age");
         assert_eq!(age_attr["cardinality"], "one");
@@ -528,15 +544,17 @@ mod tests {
     #[dialog_common::test]
     fn test_concept_deserialization_from_specific_json() {
         let json = r#"{
-            "email": {
-                "the": "person/email",
-                "description": "Person's email address",
-                "as": "Text"
-            },
-            "active": {
-                "the": "person/active",
-                "description": "Whether person is active",
-                "as": "Boolean"
+            "with": {
+                "email": {
+                    "the": "person/email",
+                    "description": "Person's email address",
+                    "as": "Text"
+                },
+                "active": {
+                    "the": "person/active",
+                    "description": "Whether person is active",
+                    "as": "Boolean"
+                }
             }
         }"#;
 
@@ -546,9 +564,10 @@ mod tests {
             predicate.this().to_string().starts_with("concept:"),
             "Operator should be a concept URI"
         );
-        assert_eq!(predicate.len(), 2);
+        assert_eq!(predicate.with().iter().count(), 2);
 
         let email_attr = predicate
+            .with()
             .iter()
             .find(|(k, _)| *k == "email")
             .map(|(_, v)| v)
@@ -559,6 +578,7 @@ mod tests {
         assert_eq!(email_attr.content_type(), Some(Type::String));
 
         let active_attr = predicate
+            .with()
             .iter()
             .find(|(k, _)| *k == "active")
             .map(|(_, v)| v)
@@ -567,6 +587,63 @@ mod tests {
         assert_eq!(active_attr.name(), "active");
         assert_eq!(active_attr.description(), "Whether person is active");
         assert_eq!(active_attr.content_type(), Some(Type::Boolean));
+    }
+
+    #[dialog_common::test]
+    fn test_concept_deserialization_with_description() {
+        let json = r#"{
+            "description": "A user profile",
+            "with": {
+                "name": {
+                    "the": "user/name",
+                    "description": "User's name",
+                    "as": "Text"
+                }
+            }
+        }"#;
+
+        let predicate: ConceptDescriptor = serde_json::from_str(json).expect("Should deserialize");
+        assert_eq!(predicate.description(), Some("A user profile"));
+        assert_eq!(predicate.with().iter().count(), 1);
+    }
+
+    #[dialog_common::test]
+    fn test_concept_serialization_with_description() {
+        let mut predicate = ConceptDescriptor::from([(
+            "name",
+            AttributeDescriptor::new(
+                the!("user/name"),
+                "User's name",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
+        predicate.description = Some("A user profile".to_string());
+
+        let json = serde_json::to_string(&predicate).expect("Should serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should parse");
+
+        assert_eq!(parsed["description"], "A user profile");
+        assert!(parsed["with"].is_object());
+    }
+
+    #[dialog_common::test]
+    fn test_concept_serialization_omits_null_description() {
+        let predicate = ConceptDescriptor::from([(
+            "name",
+            AttributeDescriptor::new(
+                the!("user/name"),
+                "User's name",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
+
+        let json = serde_json::to_string(&predicate).expect("Should serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should parse");
+
+        assert!(parsed.get("description").is_none());
+        assert!(parsed["with"].is_object());
     }
 
     #[dialog_common::test]
@@ -586,14 +663,19 @@ mod tests {
             serde_json::from_str(&json).expect("Should deserialize");
 
         assert_eq!(original.this(), deserialized.this());
-        assert_eq!(original.len(), deserialized.len());
+        assert_eq!(
+            original.with().iter().count(),
+            deserialized.with().iter().count()
+        );
 
         let orig_score = original
+            .with()
             .iter()
             .find(|(k, _)| *k == "score")
             .map(|(_, v)| v)
             .unwrap();
         let deser_score = deserialized
+            .with()
             .iter()
             .find(|(k, _)| *k == "score")
             .map(|(_, v)| v)
@@ -619,11 +701,13 @@ mod tests {
         let json = serde_json::to_string_pretty(&predicate).expect("Should serialize");
 
         let expected_structure = r#"{
-  "id": {
-    "the": "product/id",
-    "description": "Product ID",
-    "cardinality": "one",
-    "as": "UnsignedInteger"
+  "with": {
+    "id": {
+      "the": "product/id",
+      "description": "Product ID",
+      "cardinality": "one",
+      "as": "UnsignedInteger"
+    }
   }
 }"#;
 
@@ -784,5 +868,361 @@ mod tests {
             pred2.this().to_string(),
             "Concepts with different attributes should have different URIs"
         );
+    }
+
+    /// Validates serialized output conforms to dialog-schema.json Concept definition:
+    /// - Top-level object
+    /// - "with" key is required, maps field names to Attribute objects
+    /// - "description" key is optional string
+    /// - Each Attribute has "the" (required), optional "description", "cardinality", "as"
+    /// - No unexpected top-level keys (only "description", "with")
+    #[dialog_common::test]
+    fn test_serialization_conforms_to_schema() {
+        let predicate = ConceptDescriptor::from([
+            (
+                "name",
+                AttributeDescriptor::new(
+                    the!("user/name"),
+                    "User's name",
+                    Cardinality::One,
+                    Some(Type::String),
+                ),
+            ),
+            (
+                "age",
+                AttributeDescriptor::new(
+                    the!("user/age"),
+                    "User's age",
+                    Cardinality::One,
+                    Some(Type::UnsignedInt),
+                ),
+            ),
+        ]);
+
+        let json = serde_json::to_string(&predicate).expect("Should serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should parse");
+        let obj = parsed.as_object().expect("Top-level must be object");
+
+        // Only allowed top-level keys per schema: "description", "with", "maybe"
+        for key in obj.keys() {
+            assert!(
+                ["description", "with", "maybe"].contains(&key.as_str()),
+                "Unexpected top-level key: {key}"
+            );
+        }
+
+        // "with" is required per schema
+        let with = obj
+            .get("with")
+            .expect("'with' is required by schema")
+            .as_object()
+            .expect("'with' must be an object (NamedRelations)");
+
+        // "with" must have at least one entry (minProperties: 1)
+        assert!(
+            !with.is_empty(),
+            "'with' must have at least one attribute (minProperties: 1)"
+        );
+
+        // Each attribute in "with" must conform to Attribute schema
+        for (field_name, attr_value) in with {
+            let attr = attr_value
+                .as_object()
+                .unwrap_or_else(|| panic!("Attribute '{field_name}' must be an object"));
+
+            // "the" is required per Attribute schema
+            let the = attr
+                .get("the")
+                .unwrap_or_else(|| panic!("Attribute '{field_name}' must have 'the'"));
+            let the_str = the
+                .as_str()
+                .unwrap_or_else(|| panic!("'the' in '{field_name}' must be a string"));
+
+            // "the" must match domain/name pattern
+            assert!(
+                the_str.contains('/'),
+                "'the' in '{field_name}' must be in domain/name format, got: {the_str}"
+            );
+
+            // Only allowed attribute keys per schema
+            for key in attr.keys() {
+                assert!(
+                    ["the", "description", "cardinality", "as"].contains(&key.as_str()),
+                    "Unexpected key '{key}' in attribute '{field_name}'"
+                );
+            }
+
+            // "cardinality" if present must be "one" or "many"
+            if let Some(card) = attr.get("cardinality") {
+                let card_str = card.as_str().expect("cardinality must be a string");
+                assert!(
+                    ["one", "many"].contains(&card_str),
+                    "Invalid cardinality '{card_str}' in '{field_name}'"
+                );
+            }
+        }
+    }
+
+    /// Validates that a schema-conformant Concept fixture (as an external user
+    /// would write it) round-trips correctly through deserialization and
+    /// re-serialization.
+    #[dialog_common::test]
+    fn test_schema_conformant_fixture_round_trips() {
+        let fixture = r#"{
+            "description": "A recipe ingredient with quantity and unit",
+            "with": {
+                "quantity": {
+                    "the": "diy.cook/quantity",
+                    "description": "How much of this ingredient",
+                    "cardinality": "one",
+                    "as": "UnsignedInteger"
+                },
+                "name": {
+                    "the": "diy.cook/ingredient-name",
+                    "description": "Name of the ingredient",
+                    "as": "Text"
+                }
+            }
+        }"#;
+
+        let concept: ConceptDescriptor =
+            serde_json::from_str(fixture).expect("Schema-conformant fixture should deserialize");
+
+        assert_eq!(
+            concept.description(),
+            Some("A recipe ingredient with quantity and unit")
+        );
+        assert_eq!(concept.with().iter().count(), 2);
+
+        // Re-serialize and verify the structure is preserved
+        let json = serde_json::to_string(&concept).expect("Should re-serialize");
+        let reparsed: serde_json::Value = serde_json::from_str(&json).expect("Should parse");
+
+        assert_eq!(
+            reparsed["description"],
+            "A recipe ingredient with quantity and unit"
+        );
+
+        let with = reparsed["with"].as_object().expect("Should have 'with'");
+        assert_eq!(with["quantity"]["the"], "diy.cook/quantity");
+        assert_eq!(with["name"]["the"], "diy.cook/ingredient-name");
+        assert_eq!(with["name"]["as"], "Text");
+    }
+
+    /// Validates that a minimal schema-conformant fixture (only required fields)
+    /// deserializes correctly.
+    #[dialog_common::test]
+    fn test_minimal_schema_conformant_fixture() {
+        let fixture = r#"{
+            "with": {
+                "status": {
+                    "the": "task/status"
+                }
+            }
+        }"#;
+
+        let concept: ConceptDescriptor =
+            serde_json::from_str(fixture).expect("Minimal fixture should deserialize");
+
+        assert_eq!(concept.description(), None);
+        assert_eq!(concept.with().iter().count(), 1);
+
+        let (name, attr) = concept.with().iter().next().unwrap();
+        assert_eq!(name, "status");
+        assert_eq!(attr.domain(), "task");
+        assert_eq!(attr.name(), "status");
+    }
+
+    #[dialog_common::test]
+    fn test_rejects_missing_with() {
+        let json = r#"{
+            "description": "No attributes"
+        }"#;
+
+        let result = serde_json::from_str::<ConceptDescriptor>(json);
+        assert!(result.is_err(), "Should reject object without 'with'");
+    }
+
+    #[dialog_common::test]
+    fn test_rejects_flat_format_without_with_wrapper() {
+        // Pre-wrapper format: attributes at top level instead of under "with"
+        let json = r#"{
+            "name": {
+                "the": "user/name",
+                "description": "User's name",
+                "as": "Text"
+            }
+        }"#;
+
+        let result = serde_json::from_str::<ConceptDescriptor>(json);
+        assert!(
+            result.is_err(),
+            "Should reject flat format (no 'with' wrapper)"
+        );
+    }
+
+    #[dialog_common::test]
+    fn test_rejects_with_as_array() {
+        let json = r#"{
+            "with": [
+                { "the": "user/name" }
+            ]
+        }"#;
+
+        let result = serde_json::from_str::<ConceptDescriptor>(json);
+        assert!(result.is_err(), "Should reject 'with' as array");
+    }
+
+    #[dialog_common::test]
+    fn test_rejects_with_as_string() {
+        let json = r#"{
+            "with": "user/name"
+        }"#;
+
+        let result = serde_json::from_str::<ConceptDescriptor>(json);
+        assert!(result.is_err(), "Should reject 'with' as string");
+    }
+
+    #[dialog_common::test]
+    fn test_rejects_attribute_missing_the() {
+        let json = r#"{
+            "with": {
+                "name": {
+                    "description": "Missing the field",
+                    "as": "Text"
+                }
+            }
+        }"#;
+
+        let result = serde_json::from_str::<ConceptDescriptor>(json);
+        assert!(
+            result.is_err(),
+            "Should reject attribute without required 'the'"
+        );
+    }
+
+    #[dialog_common::test]
+    fn test_rejects_description_as_number() {
+        let json = r#"{
+            "description": 42,
+            "with": {
+                "name": { "the": "user/name" }
+            }
+        }"#;
+
+        let result = serde_json::from_str::<ConceptDescriptor>(json);
+        assert!(result.is_err(), "Should reject non-string description");
+    }
+
+    #[dialog_common::test]
+    fn test_rejects_the_without_domain_slash_name() {
+        let json = r#"{
+            "with": {
+                "name": {
+                    "the": "invalid",
+                    "as": "Text"
+                }
+            }
+        }"#;
+
+        let result = serde_json::from_str::<ConceptDescriptor>(json);
+        assert!(
+            result.is_err(),
+            "Should reject 'the' without domain/name format"
+        );
+    }
+
+    #[dialog_common::test]
+    fn test_rejects_invalid_cardinality() {
+        let json = r#"{
+            "with": {
+                "tags": {
+                    "the": "post/tags",
+                    "cardinality": "several"
+                }
+            }
+        }"#;
+
+        let result = serde_json::from_str::<ConceptDescriptor>(json);
+        assert!(result.is_err(), "Should reject invalid cardinality value");
+    }
+
+    #[dialog_common::test]
+    fn test_rejects_empty_object() {
+        let json = r#"{}"#;
+
+        let result = serde_json::from_str::<ConceptDescriptor>(json);
+        assert!(result.is_err(), "Should reject empty object");
+    }
+
+    #[dialog_common::test]
+    fn test_accepts_maybe_field() {
+        let json = r#"{
+            "with": {
+                "name": { "the": "user/name", "as": "Text" }
+            },
+            "maybe": {
+                "bio": { "the": "user/bio", "as": "Text" }
+            }
+        }"#;
+
+        let concept: ConceptDescriptor =
+            serde_json::from_str(json).expect("Should accept 'maybe' field");
+
+        assert_eq!(concept.with().iter().count(), 1);
+    }
+
+    #[dialog_common::test]
+    fn test_maybe_is_validated_on_parse() {
+        let json = r#"{
+            "with": {
+                "name": { "the": "user/name", "as": "Text" }
+            },
+            "maybe": {
+                "bio": { "the": "invalid" }
+            }
+        }"#;
+
+        let result = serde_json::from_str::<ConceptDescriptor>(json);
+        assert!(
+            result.is_err(),
+            "Should validate 'maybe' attributes even though they are not yet supported"
+        );
+    }
+
+    #[dialog_common::test]
+    fn test_maybe_not_serialized() {
+        let concept = ConceptDescriptor::from([(
+            "name",
+            AttributeDescriptor::new(
+                the!("user/name"),
+                "User's name",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
+
+        let json = serde_json::to_string(&concept).expect("Should serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should parse");
+
+        assert!(
+            parsed.get("maybe").is_none(),
+            "Should not serialize 'maybe' when absent"
+        );
+    }
+
+    #[dialog_common::test]
+    fn test_empty_maybe_deserializes_to_none() {
+        let json = r#"{
+            "with": {
+                "name": { "the": "user/name", "as": "Text" }
+            },
+            "maybe": {}
+        }"#;
+
+        let concept: ConceptDescriptor =
+            serde_json::from_str(json).expect("Should accept empty 'maybe'");
+
+        assert_eq!(concept.maybe, None, "Empty 'maybe' should become None");
     }
 }

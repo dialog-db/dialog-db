@@ -340,7 +340,7 @@ mod tests {
         );
 
         // Test the attributes() method
-        let attrs = concept.iter().collect::<Vec<_>>();
+        let attrs = concept.with().iter().collect::<Vec<_>>();
 
         assert_eq!(attrs.len(), 2);
         assert_eq!(attrs[0].0, "name");

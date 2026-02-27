@@ -105,7 +105,7 @@ impl Display for DeductiveRule {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} {{", self.conclusion.this())?;
         write!(f, "this: {},", Type::Entity)?;
-        for (name, attribute) in self.conclusion.iter() {
+        for (name, attribute) in self.conclusion.with().iter() {
             match attribute.content_type() {
                 Some(ty) => write!(f, "{}: {},", name, ty)?,
                 None => write!(f, "{}: Any,", name)?,
@@ -124,7 +124,7 @@ impl From<&ConceptDescriptor> for DeductiveRule {
         let mut premises = Vec::new();
 
         let this = Term::<Entity>::var("this");
-        for (name, attribute) in concept.iter() {
+        for (name, attribute) in concept.with().iter() {
             premises.push(
                 RelationQuery::new(
                     Term::Constant(attribute.domain().to_string()),
