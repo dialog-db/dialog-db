@@ -8,7 +8,7 @@ use crate::types::{Scalar, Type};
 use crate::{Parameters, Term};
 
 use base58::ToBase58;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
 /// A validated attribute–value pair with its cardinality, produced by
 /// [`AttributeDescriptor::resolve`]. Used inside [`Conception`](crate::concept::descriptor::Conception)
@@ -32,11 +32,14 @@ pub struct Attribution {
 /// 2. During query construction, where [`resolve`](AttributeDescriptor::resolve)
 ///    validates a runtime value against the descriptor's type and produces
 ///    an [`Attribution`].
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttributeDescriptor {
     the: The,
+    #[serde(default)]
     description: String,
+    #[serde(default)]
     cardinality: Cardinality,
+    #[serde(rename = "as", default, skip_serializing_if = "Option::is_none")]
     content_type: Option<Type>,
 }
 
@@ -277,108 +280,211 @@ impl From<AttributeDescriptor> for ArtifactsAttribute {
     }
 }
 
-impl Serialize for AttributeDescriptor {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("Attribute", 4)?;
-        state.serialize_field("domain", self.domain())?;
-        state.serialize_field("name", self.name())?;
-        state.serialize_field("description", self.description())?;
-        state.serialize_field("type", &self.content_type())?;
-        state.end()
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::the;
+
+    #[dialog_common::test]
+    fn it_serializes_all_fields() {
+        let attr = AttributeDescriptor::new(
+            the!("io.gozala.person/name"),
+            "Name of the person",
+            Cardinality::One,
+            Some(Type::String),
+        );
+        let json: serde_json::Value = serde_json::to_value(&attr).unwrap();
+        assert_eq!(json["the"], "io.gozala.person/name");
+        assert_eq!(json["description"], "Name of the person");
+        assert_eq!(json["cardinality"], "one");
+        assert_eq!(json["as"], "Text");
     }
-}
 
-impl<'de> Deserialize<'de> for AttributeDescriptor {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        use serde::de::{self, MapAccess, Visitor};
-        use std::fmt;
+    #[dialog_common::test]
+    fn it_serializes_many_cardinality() {
+        let attr = AttributeDescriptor::new(
+            the!("person/email"),
+            "Email addresses",
+            Cardinality::Many,
+            Some(Type::String),
+        );
+        let json: serde_json::Value = serde_json::to_value(&attr).unwrap();
+        assert_eq!(json["cardinality"], "many");
+    }
 
-        #[derive(Deserialize)]
-        #[serde(field_identifier, rename_all = "snake_case")]
-        enum Field {
-            Domain,
-            Name,
-            Description,
-            #[serde(rename = "type")]
-            DataType,
+    #[dialog_common::test]
+    fn it_omits_as_when_type_is_none() {
+        let attr = AttributeDescriptor::new(
+            the!("person/data"),
+            "Arbitrary data",
+            Cardinality::One,
+            None,
+        );
+        let json: serde_json::Value = serde_json::to_value(&attr).unwrap();
+        assert!(json.get("as").is_none() || json["as"].is_null());
+    }
+
+    #[dialog_common::test]
+    fn it_serializes_all_value_types() {
+        let cases: Vec<(Type, &str)> = vec![
+            (Type::Bytes, "Bytes"),
+            (Type::Entity, "Entity"),
+            (Type::Boolean, "Boolean"),
+            (Type::String, "Text"),
+            (Type::UnsignedInt, "UnsignedInteger"),
+            (Type::SignedInt, "SignedInteger"),
+            (Type::Float, "Float"),
+            (Type::Symbol, "Symbol"),
+        ];
+        for (ty, expected_name) in cases {
+            let attr =
+                AttributeDescriptor::new(the!("test/field"), "test", Cardinality::One, Some(ty));
+            let json: serde_json::Value = serde_json::to_value(&attr).unwrap();
+            assert_eq!(
+                json["as"], expected_name,
+                "Type {:?} should serialize as {expected_name}",
+                ty
+            );
         }
+    }
 
-        struct AttributeVisitor;
+    #[dialog_common::test]
+    fn it_deserializes_all_fields() {
+        let json = r#"{
+            "the": "io.gozala.person/name",
+            "description": "Name of the person",
+            "cardinality": "one",
+            "as": "Text"
+        }"#;
+        let attr: AttributeDescriptor = serde_json::from_str(json).unwrap();
+        assert_eq!(attr.domain(), "io.gozala.person");
+        assert_eq!(attr.name(), "name");
+        assert_eq!(attr.description(), "Name of the person");
+        assert_eq!(attr.cardinality(), Cardinality::One);
+        assert_eq!(attr.content_type(), Some(Type::String));
+    }
 
-        impl<'de> Visitor<'de> for AttributeVisitor {
-            type Value = AttributeDescriptor;
+    #[dialog_common::test]
+    fn it_defaults_optional_fields() {
+        let json = r#"{ "the": "person/name" }"#;
+        let attr: AttributeDescriptor = serde_json::from_str(json).unwrap();
+        assert_eq!(attr.domain(), "person");
+        assert_eq!(attr.name(), "name");
+        assert_eq!(attr.description(), "");
+        assert_eq!(attr.cardinality(), Cardinality::One);
+        assert_eq!(attr.content_type(), None);
+    }
 
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("struct Attribute")
-            }
+    #[dialog_common::test]
+    fn it_deserializes_many_cardinality() {
+        let json = r#"{
+            "the": "person/email",
+            "cardinality": "many",
+            "as": "Text"
+        }"#;
+        let attr: AttributeDescriptor = serde_json::from_str(json).unwrap();
+        assert_eq!(attr.cardinality(), Cardinality::Many);
+    }
 
-            fn visit_map<V>(self, mut map: V) -> Result<AttributeDescriptor, V::Error>
-            where
-                V: MapAccess<'de>,
-            {
-                let mut domain: Option<String> = None;
-                let mut name: Option<String> = None;
-                let mut description: Option<String> = None;
-                let mut data_type = None;
+    #[dialog_common::test]
+    fn it_round_trips() {
+        let original = AttributeDescriptor::new(
+            the!("diy.cook/quantity"),
+            "Amount needed",
+            Cardinality::Many,
+            Some(Type::UnsignedInt),
+        );
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: AttributeDescriptor = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
+    }
 
-                while let Some(key) = map.next_key()? {
-                    match key {
-                        Field::Domain => {
-                            if domain.is_some() {
-                                return Err(de::Error::duplicate_field("domain"));
-                            }
-                            domain = Some(map.next_value()?);
-                        }
-                        Field::Name => {
-                            if name.is_some() {
-                                return Err(de::Error::duplicate_field("name"));
-                            }
-                            name = Some(map.next_value()?);
-                        }
-                        Field::Description => {
-                            if description.is_some() {
-                                return Err(de::Error::duplicate_field("description"));
-                            }
-                            description = Some(map.next_value()?);
-                        }
-                        Field::DataType => {
-                            if data_type.is_some() {
-                                return Err(de::Error::duplicate_field("data_type"));
-                            }
-                            data_type = Some(map.next_value()?);
-                        }
-                    }
-                }
+    #[dialog_common::test]
+    fn it_rejects_missing_the() {
+        let json = r#"{ "description": "oops", "as": "Text" }"#;
+        let result = serde_json::from_str::<AttributeDescriptor>(json);
+        assert!(result.is_err(), "should reject attribute without 'the'");
+    }
 
-                let domain = domain.ok_or_else(|| de::Error::missing_field("domain"))?;
-                let name = name.ok_or_else(|| de::Error::missing_field("name"))?;
-                let description =
-                    description.ok_or_else(|| de::Error::missing_field("description"))?;
-                let data_type = data_type.ok_or_else(|| de::Error::missing_field("data_type"))?;
+    #[dialog_common::test]
+    fn it_rejects_the_without_slash() {
+        let json = r#"{ "the": "no-slash-here" }"#;
+        let result = serde_json::from_str::<AttributeDescriptor>(json);
+        assert!(result.is_err(), "should reject 'the' without '/' separator");
+    }
 
-                let the = format!("{domain}/{name}")
-                    .parse::<The>()
-                    .map_err(de::Error::custom)?;
-                Ok(AttributeDescriptor::new(
-                    the,
-                    description,
-                    Cardinality::One,
-                    data_type,
-                ))
-            }
-        }
+    #[dialog_common::test]
+    fn it_rejects_empty_the() {
+        let json = r#"{ "the": "" }"#;
+        let result = serde_json::from_str::<AttributeDescriptor>(json);
+        assert!(result.is_err(), "should reject empty 'the'");
+    }
 
-        deserializer.deserialize_struct(
-            "Attribute",
-            &["domain", "name", "description", "data_type"],
-            AttributeVisitor,
-        )
+    #[dialog_common::test]
+    fn it_ignores_type_field() {
+        let json = r#"{ "the": "person/name", "type": "Text" }"#;
+        let attr: AttributeDescriptor = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            attr.content_type(),
+            None,
+            "'type' field should be ignored — must use 'as'"
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_rejects_unknown_type() {
+        let json = r#"{ "the": "person/name", "as": "Blob" }"#;
+        let result = serde_json::from_str::<AttributeDescriptor>(json);
+        assert!(result.is_err(), "should reject unknown type name 'Blob'");
+    }
+
+    #[dialog_common::test]
+    fn it_rejects_invalid_cardinality() {
+        let json = r#"{ "the": "person/name", "cardinality": "few" }"#;
+        let result = serde_json::from_str::<AttributeDescriptor>(json);
+        assert!(result.is_err(), "should reject invalid cardinality 'few'");
+    }
+
+    #[dialog_common::test]
+    fn it_rejects_the_exceeding_max_length() {
+        let long = format!("{}/{}", "a".repeat(50), "b".repeat(50));
+        let json = format!(r#"{{ "the": "{long}" }}"#);
+        let result = serde_json::from_str::<AttributeDescriptor>(&json);
+        assert!(
+            result.is_err(),
+            "should reject 'the' exceeding max selector length"
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_rejects_old_domain_name_format() {
+        let json = r#"{
+            "domain": "person",
+            "name": "email",
+            "description": "Email",
+            "type": "String"
+        }"#;
+        let result = serde_json::from_str::<AttributeDescriptor>(json);
+        assert!(
+            result.is_err(),
+            "should reject old format using domain/name/type fields"
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_rejects_non_string_type() {
+        let json = r#"{ "the": "person/name", "as": 42 }"#;
+        let result = serde_json::from_str::<AttributeDescriptor>(json);
+        assert!(result.is_err(), "should reject non-string type value");
+    }
+
+    #[dialog_common::test]
+    fn it_rejects_non_string_cardinality() {
+        let json = r#"{ "the": "person/name", "cardinality": 1 }"#;
+        let result = serde_json::from_str::<AttributeDescriptor>(json);
+        assert!(
+            result.is_err(),
+            "should reject non-string cardinality value"
+        );
     }
 }

@@ -98,9 +98,11 @@ pub const CONCEPT_OVERHEAD: usize = 1_000;
 /// scans over it are more expensive. The cost model in
 /// [`Cardinality::estimate`] uses this to assign costs that the planner
 /// uses when ordering premises.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Cardinality {
     /// The attribute holds a single value per entity.
+    #[default]
     One,
     /// The attribute holds multiple values per entity.
     Many,
