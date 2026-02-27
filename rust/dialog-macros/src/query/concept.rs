@@ -338,7 +338,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     terms: source.into(),
                     predicate,
                 };
-                dialog_query::Premise::When(dialog_query::Proposition::Concept(app))
+                dialog_query::Premise::Assert(dialog_query::Proposition::Concept(app))
             }
         }
 

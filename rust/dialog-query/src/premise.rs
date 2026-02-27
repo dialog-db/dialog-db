@@ -5,9 +5,9 @@
 //!
 //! Note: Premises are only used in rule conditions (the "when" part), not in conclusions.
 
-pub use super::constraint::Constraint;
 pub use super::negation::Negation;
 use crate::Source;
+use crate::constraint::Constraint;
 use crate::environment::Environment;
 pub use crate::error::{AnalyzerError, PlanError, QueryResult};
 use crate::formula::query::FormulaQuery;
@@ -26,22 +26,14 @@ use std::fmt::Display;
 /// planner: each premise receives the stream of [`Answer`](crate::selection::Answer)s
 /// produced so far and extends it with new bindings.
 ///
-/// There are three kinds of premise:
-/// - `When` — queries the knowledge base via a [`Proposition`] (fact, concept,
-///   or formula lookup).
-/// - `Where` — applies a [`Constraint`] between already-bound variables
-///   (equality, comparison, etc.).
+/// There are two kinds of premise:
+/// - `When` — queries the knowledge base or applies a constraint via a
+///   [`Proposition`] (fact, concept, formula, or constraint).
 /// - `Unless` — a [`Negation`] that *excludes* answers matching a pattern.
-///
-/// TODO: Large enum variant - Constrain (320 bytes) is much larger than other variants.
-/// Consider boxing Constraint to reduce memory usage when storing Apply/Exclude variants.
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Premise {
-    /// A positive premise that queries the knowledge base.
-    When(Proposition),
-    /// A constraint that relates variables (equality, comparison, etc.).
-    Where(Constraint),
+    /// A positive premise that queries the knowledge base or applies a constraint.
+    Assert(Proposition),
     /// A negated premise that excludes matches from the selection.
     Unless(Negation),
 }
@@ -51,8 +43,7 @@ impl Premise {
     /// Returns None if the premise cannot be executed without more constraints.
     pub fn estimate(&self, env: &Environment) -> Option<usize> {
         match self {
-            Premise::When(application) => application.estimate(env),
-            Premise::Where(constraint) => constraint.estimate(env),
+            Premise::Assert(application) => application.estimate(env),
             Premise::Unless(negation) => negation.estimate(env),
         }
     }
@@ -60,8 +51,7 @@ impl Premise {
     /// Returns the parameter bindings for this premise
     pub fn parameters(&self) -> Parameters {
         match self {
-            Premise::When(application) => application.parameters(),
-            Premise::Where(constraint) => constraint.parameters(),
+            Premise::Assert(application) => application.parameters(),
             Premise::Unless(negation) => negation.parameters(),
         }
     }
@@ -69,8 +59,7 @@ impl Premise {
     /// Returns the schema describing this premise's parameters
     pub fn schema(&self) -> Schema {
         match self {
-            Premise::When(application) => application.schema(),
-            Premise::Where(constraint) => constraint.schema(),
+            Premise::Assert(application) => application.schema(),
             Premise::Unless(negation) => negation.schema(),
         }
     }
@@ -78,10 +67,7 @@ impl Premise {
     /// Evaluate this premise with the given answers and source
     pub fn evaluate<S: Source, M: Answers>(self, answers: M, source: &S) -> impl Answers {
         match self {
-            Premise::When(application) => {
-                Either::Left(Either::Left(application.evaluate(answers, source)))
-            }
-            Premise::Where(constraint) => Either::Left(Either::Right(constraint.evaluate(answers))),
+            Premise::Assert(application) => Either::Left(application.evaluate(answers, source)),
             Premise::Unless(negation) => Either::Right(negation.evaluate(answers, source)),
         }
     }
@@ -95,21 +81,31 @@ impl Premise {
 impl Display for Premise {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Premise::When(application) => Display::fmt(&application, f),
-            Premise::Where(constraint) => Display::fmt(&constraint, f),
+            Premise::Assert(application) => Display::fmt(&application, f),
             Premise::Unless(negation) => Display::fmt(&negation, f),
+        }
+    }
+}
+
+impl std::ops::Not for Premise {
+    type Output = Premise;
+
+    fn not(self) -> Self::Output {
+        match self {
+            Premise::Assert(proposition) => Premise::Unless(Negation::not(proposition)),
+            Premise::Unless(Negation(proposition)) => Premise::Assert(proposition),
         }
     }
 }
 
 impl From<Constraint> for Premise {
     fn from(constraint: Constraint) -> Self {
-        Premise::Where(constraint)
+        Premise::Assert(Proposition::Constraint(constraint))
     }
 }
 
 impl From<FormulaQuery> for Premise {
     fn from(application: FormulaQuery) -> Self {
-        Premise::When(Proposition::Formula(application))
+        Premise::Assert(Proposition::Formula(application))
     }
 }

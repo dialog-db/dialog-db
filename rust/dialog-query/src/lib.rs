@@ -77,6 +77,7 @@ pub use claim::Claim;
 pub use concept::application::{ConceptQuery, ConceptRules};
 pub use concept::descriptor::{ConceptConclusion, ConceptDescriptor};
 pub use concept::{Concept, Conclusion, With, WithQuery, WithTerms};
+pub use constraint::Constraint;
 pub use environment::*;
 pub use error::*;
 pub use formula::*;

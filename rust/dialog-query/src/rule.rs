@@ -260,7 +260,7 @@ mod tests {
 
     impl From<PersonMatch> for Premise {
         fn from(source: PersonMatch) -> Self {
-            Premise::When(source.into())
+            Premise::Assert(source.into())
         }
     }
 

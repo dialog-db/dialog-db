@@ -626,7 +626,7 @@ mod tests {
         let premise = Premise::from(relation);
 
         match premise {
-            Premise::When(Proposition::Relation(_)) => {
+            Premise::Assert(Proposition::Relation(_)) => {
                 // Expected case - RelationQuery produces Relation premise
             }
             _ => panic!("Expected Relation application"),
