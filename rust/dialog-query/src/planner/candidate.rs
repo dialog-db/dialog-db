@@ -452,13 +452,13 @@ mod cost_model_tests {
     use super::Candidate;
     use crate::artifact::Entity;
     use crate::attribute::Cardinality;
-    use crate::concept::application::ConceptApplication;
-    use crate::concept::predicate::ConceptPredicate;
+    use crate::concept::application::ConceptQuery;
+    use crate::concept::descriptor::ConceptDescriptor;
     use crate::formula::Formula;
     use crate::formula::string::Length;
     use crate::proposition::Proposition;
-    use crate::relation::application::RelationApplication;
     use crate::relation::descriptor::RelationDescriptor;
+    use crate::relation::query::RelationQuery;
     use crate::schema::{
         CONCEPT_OVERHEAD, INDEX_SCAN, RANGE_READ_COST, RANGE_SCAN_COST, SEGMENT_READ_COST,
     };
@@ -469,7 +469,7 @@ mod cost_model_tests {
     fn test_constants_do_not_add_cost() {
         let entity_val: Entity = Entity::new().unwrap();
 
-        let app = RelationApplication::new(
+        let app = RelationQuery::new(
             Term::Constant("user".to_string()),
             Term::Constant("name".to_string()),
             Term::Constant(entity_val),
@@ -491,7 +491,7 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn test_one_constant_two_variables() {
-        let app = RelationApplication::new(
+        let app = RelationQuery::new(
             Term::Constant("user".to_string()),
             Term::Constant("name".to_string()),
             Term::<Entity>::var("entity"),
@@ -513,7 +513,7 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn test_env_variables_reduce_cost() {
-        let app = RelationApplication::new(
+        let app = RelationQuery::new(
             Term::Constant("user".to_string()),
             Term::Constant("name".to_string()),
             Term::<Entity>::var("entity"),
@@ -551,7 +551,7 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn test_variables_already_in_initial_env_dont_add_cost() {
-        let app = RelationApplication::new(
+        let app = RelationQuery::new(
             Term::Constant("user".to_string()),
             Term::Constant("name".to_string()),
             Term::<Entity>::var("entity"),
@@ -574,7 +574,7 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn test_cardinality_many_costs_more_than_one() {
-        let one_app = RelationApplication::new(
+        let one_app = RelationQuery::new(
             Term::Constant("user".to_string()),
             Term::Constant("tags".to_string()),
             Term::<Entity>::var("entity"),
@@ -583,7 +583,7 @@ mod cost_model_tests {
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
-        let many_app = RelationApplication::new(
+        let many_app = RelationQuery::new(
             Term::Constant("user".to_string()),
             Term::Constant("tags".to_string()),
             Term::<Entity>::var("entity"),
@@ -622,7 +622,7 @@ mod cost_model_tests {
         let entity_val: Entity = Entity::new().unwrap();
         let value_val = Value::String("rust".to_string());
 
-        let one_app = RelationApplication::new(
+        let one_app = RelationQuery::new(
             Term::Constant("user".to_string()),
             Term::Constant("tags".to_string()),
             Term::Constant(entity_val.clone()),
@@ -631,7 +631,7 @@ mod cost_model_tests {
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
-        let many_app = RelationApplication::new(
+        let many_app = RelationQuery::new(
             Term::Constant("user".to_string()),
             Term::Constant("tags".to_string()),
             Term::Constant(entity_val),
@@ -667,7 +667,7 @@ mod cost_model_tests {
         let formula_app = Length::apply(formula_params).unwrap();
         let formula_candidate = Candidate::from(Premise::from(formula_app));
 
-        let fact_app = RelationApplication::new(
+        let fact_app = RelationQuery::new(
             Term::Constant("user".to_string()),
             Term::Constant("name".to_string()),
             Term::<Entity>::var("entity"),
@@ -680,7 +680,7 @@ mod cost_model_tests {
 
         assert!(
             formula_candidate.cost() < fact_candidate.cost(),
-            "Formula with no IO should be cheaper than RelationApplication. Formula: {}, Fact: {}",
+            "Formula with no IO should be cheaper than RelationQuery. Formula: {}, Fact: {}",
             formula_candidate.cost(),
             fact_candidate.cost()
         );
@@ -704,7 +704,7 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn test_concept_equals_fact_cost_nothing_bound() {
-        let fact_app = RelationApplication::new(
+        let fact_app = RelationQuery::new(
             Term::Constant("user".to_string()),
             Term::Constant("name".to_string()),
             Term::<Entity>::var("entity"),
@@ -713,7 +713,7 @@ mod cost_model_tests {
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
-        let concept = ConceptPredicate::from([(
+        let concept = ConceptDescriptor::from([(
             "name",
             AttributeDescriptor::new(
                 the!("user/name"),
@@ -727,7 +727,7 @@ mod cost_model_tests {
         terms.insert("this".to_string(), Term::<Value>::var("entity"));
         terms.insert("name".to_string(), Term::<Value>::var("value"));
 
-        let concept_app = ConceptApplication {
+        let concept_app = ConceptQuery {
             terms,
             predicate: concept,
         };
@@ -742,7 +742,7 @@ mod cost_model_tests {
 
         assert!(
             concept_cost > fact_cost,
-            "ConceptApplication should cost more than RelationApplication due to rule overhead. \
+            "ConceptQuery should cost more than RelationQuery due to rule overhead. \
              Fact: {}, Concept: {}",
             fact_cost,
             concept_cost
@@ -751,7 +751,7 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn test_concept_equals_fact_cost_value_bound() {
-        let fact_app = RelationApplication::new(
+        let fact_app = RelationQuery::new(
             Term::Constant("user".to_string()),
             Term::Constant("name".to_string()),
             Term::<Entity>::var("entity"),
@@ -760,7 +760,7 @@ mod cost_model_tests {
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
-        let concept = ConceptPredicate::from([(
+        let concept = ConceptDescriptor::from([(
             "name",
             AttributeDescriptor::new(
                 the!("user/name"),
@@ -774,7 +774,7 @@ mod cost_model_tests {
         terms.insert("this".to_string(), Term::<Value>::var("entity"));
         terms.insert("name".to_string(), Term::<Value>::var("value"));
 
-        let concept_app = ConceptApplication {
+        let concept_app = ConceptQuery {
             terms,
             predicate: concept,
         };
@@ -791,7 +791,7 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn test_concept_equals_fact_cost_entity_bound() {
-        let fact_app = RelationApplication::new(
+        let fact_app = RelationQuery::new(
             Term::Constant("user".to_string()),
             Term::Constant("name".to_string()),
             Term::<Entity>::var("entity"),
@@ -800,7 +800,7 @@ mod cost_model_tests {
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
-        let concept = ConceptPredicate::from([(
+        let concept = ConceptDescriptor::from([(
             "name",
             AttributeDescriptor::new(
                 the!("user/name"),
@@ -814,7 +814,7 @@ mod cost_model_tests {
         terms.insert("this".to_string(), Term::<Value>::var("entity"));
         terms.insert("name".to_string(), Term::<Value>::var("value"));
 
-        let concept_app = ConceptApplication {
+        let concept_app = ConceptQuery {
             terms,
             predicate: concept,
         };
@@ -831,7 +831,7 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn test_concept_equals_fact_cost_cardinality_many_nothing_bound() {
-        let fact_app = RelationApplication::new(
+        let fact_app = RelationQuery::new(
             Term::Constant("user".to_string()),
             Term::Constant("tags".to_string()),
             Term::<Entity>::var("entity"),
@@ -847,13 +847,13 @@ mod cost_model_tests {
             Some(Type::String),
         );
 
-        let concept = ConceptPredicate::from([("tags", tag)]);
+        let concept = ConceptDescriptor::from([("tags", tag)]);
 
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Value>::var("entity"));
         terms.insert("tags".to_string(), Term::<Value>::var("tag"));
 
-        let concept_app = ConceptApplication {
+        let concept_app = ConceptQuery {
             terms,
             predicate: concept,
         };
@@ -869,7 +869,7 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn test_concept_equals_fact_cost_cardinality_many_value_bound() {
-        let fact_app = RelationApplication::new(
+        let fact_app = RelationQuery::new(
             Term::Constant("user".to_string()),
             Term::Constant("tags".to_string()),
             Term::<Entity>::var("entity"),
@@ -885,13 +885,13 @@ mod cost_model_tests {
             Some(Type::String),
         );
 
-        let concept = ConceptPredicate::from([("tags", tag)]);
+        let concept = ConceptDescriptor::from([("tags", tag)]);
 
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Value>::var("entity"));
         terms.insert("tags".to_string(), Term::<Value>::var("tag"));
 
-        let concept_app = ConceptApplication {
+        let concept_app = ConceptQuery {
             terms,
             predicate: concept,
         };
@@ -908,7 +908,7 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn test_cost_accumulation_through_planning() {
-        let p1 = RelationApplication::new(
+        let p1 = RelationQuery::new(
             Term::Constant("user".to_string()),
             Term::Constant("name".to_string()),
             Term::<Entity>::var("entity"),
@@ -917,7 +917,7 @@ mod cost_model_tests {
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
-        let p2 = RelationApplication::new(
+        let p2 = RelationQuery::new(
             Term::Constant("user".to_string()),
             Term::Constant("age".to_string()),
             Term::<Entity>::var("entity"),
@@ -954,7 +954,7 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn debug_update_cost() {
-        let app = RelationApplication::new(
+        let app = RelationQuery::new(
             Term::Constant("user".to_string()),
             Term::Constant("name".to_string()),
             Term::<Entity>::var("entity"),

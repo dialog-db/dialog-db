@@ -1,16 +1,16 @@
 /// Concept application for querying entities that match a concept pattern.
 pub mod application;
-/// Concept predicates for entity-centric queries.
-pub mod predicate;
+/// Concept descriptors for entity-centric queries.
+pub mod descriptor;
 /// Single-attribute concept wrapper ([`With<A>`]) and its query types.
 pub mod with;
 pub use with::{With, WithQuery, WithTerms};
 
-pub use application::ConceptApplication;
-pub use predicate::ConceptPredicate;
+pub use application::ConceptQuery;
+pub use descriptor::ConceptDescriptor;
 
 #[cfg(test)]
-use crate::Assertion;
+use crate::Association;
 pub use crate::predicate::Predicate;
 #[cfg(test)]
 use crate::query::Output;
@@ -30,10 +30,10 @@ use std::fmt::Debug;
 ///
 /// Note: IntoIterator is not a bound on this trait to allow attributes to
 /// implement Concept by delegating to their instance types (e.g., Title
-/// delegates to WithTitle). Instance types still implement IntoIterator.
+/// delegates to With<Title>). Conclusion types still implement IntoIterator.
 pub trait Concept: Predicate + Clone + Debug
 where
-    Self::Proof: ConceptProof,
+    Self::Conclusion: Conclusion,
 {
     /// Typed term accessors for building queries (e.g. `PersonTerms::name()`).
     type Term;
@@ -64,10 +64,10 @@ where
 /// entity it describes. This trait surfaces that field, serving two purposes:
 ///
 /// 1. **Compile-time enforcement** — the `#[derive(Concept)]` macro generates
-///    an `Instance` impl whose return type is `&Entity`. If the `this` field
+///    a `Conclusion` impl whose return type is `&Entity`. If the `this` field
 ///    is missing the macro emits an error; if it has the wrong type the
 ///    generated impl produces a type mismatch.
-/// 2. **Uniform entity access** — any code generic over `Instance` can
+/// 2. **Uniform entity access** — any code generic over `Conclusion` can
 ///    retrieve the underlying entity without knowing the concrete concept
 ///    type.
 ///
@@ -103,7 +103,7 @@ where
 ///     pub name: attrs::Name,
 /// }
 /// ```
-pub trait ConceptProof: ConditionalSend {
+pub trait Conclusion: ConditionalSend {
     /// Each instance has a corresponding entity and this method
     /// returns a reference to it.
     fn this(&self) -> &Entity;
@@ -117,12 +117,12 @@ mod tests {
     };
     use crate::attribute::{Attribute as _, AttributeDescriptor};
     use crate::concept::With;
-    use crate::relation::application::RelationApplication;
+    use crate::relation::query::RelationQuery;
     use crate::rule::Match;
     use crate::term::Term;
     use crate::the;
     use crate::types::Scalar;
-    use crate::{Answer, Cardinality, Claim, Concept, QueryError, Session, Transaction};
+    use crate::{Answer, Assertion, Cardinality, Concept, QueryError, Session, Transaction};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
@@ -168,8 +168,8 @@ mod tests {
         }
     }
 
-    fn person_predicate() -> ConceptPredicate {
-        ConceptPredicate::from(vec![
+    fn person_predicate() -> ConceptDescriptor {
+        ConceptDescriptor::from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -191,13 +191,13 @@ mod tests {
         ])
     }
 
-    impl From<Person> for ConceptPredicate {
+    impl From<Person> for ConceptDescriptor {
         fn from(_: Person) -> Self {
             person_predicate()
         }
     }
 
-    impl From<PersonMatch> for ConceptPredicate {
+    impl From<PersonMatch> for ConceptDescriptor {
         fn from(_: PersonMatch) -> Self {
             person_predicate()
         }
@@ -208,23 +208,23 @@ mod tests {
         type Term = PersonTerms;
 
         fn this(&self) -> Entity {
-            let predicate: ConceptPredicate = self.clone().into();
+            let predicate: ConceptDescriptor = self.clone().into();
             predicate.this()
         }
     }
 
     impl IntoIterator for Person {
-        type Item = Assertion;
-        type IntoIter = std::vec::IntoIter<Assertion>;
+        type Item = Association;
+        type IntoIter = std::vec::IntoIter<Association>;
 
         fn into_iter(self) -> Self::IntoIter {
             vec![
-                Assertion::new(
+                Association::new(
                     "person/name".parse().expect("Failed to parse attribute"),
                     self.this.clone(),
                     self.name.as_value(),
                 ),
-                Assertion::new(
+                Association::new(
                     "person/age".parse().expect("Failed to parse attribute"),
                     self.this.clone(),
                     self.age.as_value(),
@@ -234,15 +234,15 @@ mod tests {
         }
     }
 
-    impl Claim for Person {
+    impl Assertion for Person {
         fn assert(self, transaction: &mut Transaction) {
-            transaction.associate(Assertion {
+            transaction.associate(Association {
                 the: "person/name".parse().expect("Failed to parse attribute"),
                 of: self.this.clone(),
                 is: self.name.as_value(),
             });
 
-            transaction.associate(Assertion {
+            transaction.associate(Association {
                 the: "person/age".parse().expect("Failed to parse attribute"),
                 of: self.this.clone(),
                 is: self.age.as_value(),
@@ -250,13 +250,13 @@ mod tests {
         }
 
         fn retract(self, transaction: &mut Transaction) {
-            transaction.dissociate(Assertion {
+            transaction.dissociate(Association {
                 the: "person/name".parse().expect("Failed to parse attribute"),
                 of: self.this.clone(),
                 is: self.name.as_value(),
             });
 
-            transaction.dissociate(Assertion {
+            transaction.dissociate(Association {
                 the: "person/age".parse().expect("Failed to parse attribute"),
                 of: self.this.clone(),
                 is: self.age.as_value(),
@@ -265,9 +265,9 @@ mod tests {
     }
 
     impl Predicate for Person {
-        type Proof = Person;
+        type Conclusion = Person;
         type Application = PersonMatch;
-        type Descriptor = ConceptPredicate;
+        type Descriptor = ConceptDescriptor;
     }
 
     // Implement TryFrom<selection::Answer> for Person
@@ -285,7 +285,7 @@ mod tests {
     }
 
     // Implement Instance for Person
-    impl ConceptProof for Person {
+    impl Conclusion for Person {
         fn this(&self) -> &Entity {
             &self.this
         }
@@ -330,11 +330,11 @@ mod tests {
         }
     }
 
-    // Implement From<PersonMatch> for ConceptApplication
-    impl From<PersonMatch> for ConceptApplication {
+    // Implement From<PersonMatch> for ConceptQuery
+    impl From<PersonMatch> for ConceptQuery {
         fn from(source: PersonMatch) -> Self {
-            let predicate: ConceptPredicate = source.clone().into();
-            ConceptApplication {
+            let predicate: ConceptDescriptor = source.clone().into();
+            ConceptQuery {
                 terms: source.into(),
                 predicate,
             }
@@ -343,18 +343,18 @@ mod tests {
 
     // Implement Queryable for PersonMatch
     impl crate::query::Application for PersonMatch {
-        type Proof = Person;
+        type Conclusion = Person;
 
         fn evaluate<S: crate::query::Source, M: crate::selection::Answers>(
             self,
             answers: M,
             source: &S,
         ) -> impl crate::selection::Answers {
-            let application: ConceptApplication = self.into();
+            let application: ConceptQuery = self.into();
             application.evaluate(answers, source)
         }
 
-        fn realize(&self, source: Answer) -> std::result::Result<Self::Proof, QueryError> {
+        fn realize(&self, source: Answer) -> std::result::Result<Self::Conclusion, QueryError> {
             Ok(Person {
                 this: source.get(&self.this)?,
                 name: source.get(&self.name)?,
@@ -453,7 +453,7 @@ mod tests {
         };
 
         // Test Instance trait - should return the same entity
-        assert_eq!(ConceptProof::this(&person), &entity);
+        assert_eq!(Conclusion::this(&person), &entity);
     }
 
     #[dialog_common::test]
@@ -586,8 +586,8 @@ mod tests {
         let alice = Entity::new()?;
 
         // Create minimal test data
-        let claims = vec![Assertion {
-            the: "person/name".parse::<ArtifactAttribute>()?,
+        let claims = vec![Association {
+            the: the!("person/name"),
             of: alice.clone(),
             is: Value::String("Alice".to_string()),
         }];
@@ -596,7 +596,7 @@ mod tests {
         session.transact(claims).await?;
 
         // Test: Search for non-existent person using individual fact selector
-        let missing_query = RelationApplication::new(
+        let missing_query = RelationQuery::new(
             Term::Constant("person".into()),
             Term::Constant("name".into()),
             Term::var("person"),
@@ -656,13 +656,13 @@ mod tests {
                 name: employee::Name("Bob".to_string()),
                 role: employee::Role("janitor".to_string()),
             })
-            .assert(Assertion {
-                the: "employee/name".parse::<ArtifactAttribute>()?,
+            .assert(Association {
+                the: the!("employee/name"),
                 of: mallory.clone(),
                 is: Value::String("Mallory".to_string()),
             })
-            .assert(Assertion {
-                the: "employee/role".parse::<ArtifactAttribute>()?,
+            .assert(Association {
+                the: the!("employee/role"),
                 of: mallory.clone(),
                 is: Value::String("Hacker".to_string()),
             });
@@ -810,11 +810,11 @@ mod tests {
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         let alice = Entity::new()?;
-        let name_attr: ArtifactAttribute = "user/name".parse()?;
+        let name_attr = the!("user/name");
 
         // Assert a relation
         let mut session = Session::open(artifacts.clone());
-        let name_relation = Assertion {
+        let name_relation = Association {
             the: name_attr.clone(),
             of: alice.clone(),
             is: Value::String("Alice".to_string()),
@@ -829,7 +829,7 @@ mod tests {
         let facts: Vec<_> = session
             .select(
                 ArtifactSelector::new()
-                    .the(name_attr.clone())
+                    .the(name_attr.clone().into())
                     .of(alice.clone()),
             )
             .try_collect()
@@ -845,7 +845,7 @@ mod tests {
         let facts_after: Vec<_> = session
             .select(
                 ArtifactSelector::new()
-                    .the(name_attr.clone())
+                    .the(name_attr.clone().into())
                     .of(alice.clone()),
             )
             .try_collect()
@@ -905,7 +905,7 @@ mod tests {
         let mut session = Session::open(store.clone());
         session.transact(vec![alice.clone()]).await?;
 
-        let name_query = RelationApplication::new(
+        let name_query = RelationQuery::new(
             Term::Constant("person-attr-concept".into()),
             Term::Constant("name".into()),
             Term::Constant(alice_id.clone()),
@@ -914,7 +914,7 @@ mod tests {
             None,
         );
 
-        let birthday_query = RelationApplication::new(
+        let birthday_query = RelationQuery::new(
             Term::Constant("person-attr-concept".into()),
             Term::Constant("birthday".into()),
             Term::Constant(alice_id.clone()),
@@ -1058,7 +1058,7 @@ mod tests {
         let mut session = Session::open(store.clone());
         session.transact(vec![alice_with_birthday]).await?;
 
-        let name_query = RelationApplication::new(
+        let name_query = RelationQuery::new(
             Term::Constant("person-attr-concept".into()),
             Term::Constant("name".into()),
             Term::Constant(alice_id.clone()),
@@ -1067,7 +1067,7 @@ mod tests {
             None,
         );
 
-        let email_query = RelationApplication::new(
+        let email_query = RelationQuery::new(
             Term::Constant("person-attr-concept".into()),
             Term::Constant("email".into()),
             Term::Constant(alice_id.clone()),
@@ -1076,7 +1076,7 @@ mod tests {
             None,
         );
 
-        let birthday_query = RelationApplication::new(
+        let birthday_query = RelationQuery::new(
             Term::Constant("person-attr-concept".into()),
             Term::Constant("birthday".into()),
             Term::Constant(alice_id.clone()),
@@ -1128,7 +1128,7 @@ mod tests {
         let mut session = Session::open(store.clone());
         session.transact(vec![!alice]).await?;
 
-        let name_query = RelationApplication::new(
+        let name_query = RelationQuery::new(
             Term::Constant("person-attr-concept".into()),
             Term::Constant("name".into()),
             Term::Constant(alice_id.clone()),
@@ -1137,7 +1137,7 @@ mod tests {
             None,
         );
 
-        let birthday_query = RelationApplication::new(
+        let birthday_query = RelationQuery::new(
             Term::Constant("person-attr-concept".into()),
             Term::Constant("birthday".into()),
             Term::Constant(alice_id),

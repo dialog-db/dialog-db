@@ -5,19 +5,19 @@
 //! - Type conversions (to_string, parse_number)
 //! - Boolean logic (and, or, not)
 
-/// Formula application for computed values.
-pub mod application;
 /// Bindings for reading/writing values during formula evaluation.
 pub mod bindings;
 /// Formula cell types for parameter slot definitions.
 pub mod cell;
 /// Input type alias for formula input cells.
 pub mod input;
+/// Formula query for computed values.
+pub mod query;
 
-pub use application::*;
 pub use bindings::*;
 pub use cell::*;
 pub use input::*;
+pub use query::*;
 
 /// Type conversion formulas (to_string, parse_number)
 pub mod conversions;
@@ -47,8 +47,8 @@ use crate::{Parameters, Schema};
 ///
 /// - `Input`: The input type that can be constructed from a [`Bindings`].
 ///   This type should contain all the fields the formula needs to read.
-/// - `Match`: Currently unused, reserved for future macro generation that
-///   will create match patterns for formula applications.
+/// - `Query`: Currently unused, reserved for future macro generation that
+///   will create query patterns for formula applications.
 ///
 /// # Implementation Guide
 ///
@@ -74,7 +74,7 @@ pub trait Formula: Predicate + Sized + Clone {
     ///
     /// This type is used by the derive macro to generate query patterns
     /// for formula applications.
-    type Query: FormulaQuery<Predicate = Self>;
+    type Query: FormulaApplication<Predicate = Self>;
 
     /// Returns the estimated cost of evaluating this formula.
     fn cost() -> usize;
@@ -126,7 +126,7 @@ pub trait Formula: Predicate + Sized + Clone {
     /// Create a formula application with term bindings
     ///
     /// This method binds the formula to specific term mappings, creating
-    /// a non-generic [`FormulaApplication`] that can be evaluated over streams of matches
+    /// a non-generic [`FormulaQuery`] that can be evaluated over streams of matches
     /// and integrated with the deductive rule system.
     ///
     /// # Arguments
@@ -144,10 +144,10 @@ pub trait Formula: Predicate + Sized + Clone {
     /// let app = Sum::apply(terms)?;
     /// # Ok::<(), dialog_query::error::SchemaError>(())
     /// ```
-    fn apply(terms: Parameters) -> Result<FormulaApplication, SchemaError> {
+    fn apply(terms: Parameters) -> Result<FormulaQuery, SchemaError> {
         let cells = Self::cells();
 
-        Ok(FormulaApplication {
+        Ok(FormulaQuery {
             name: Self::operator(),
             cells,
             cost: Self::cost(),
@@ -162,14 +162,14 @@ pub trait In: for<'a> TryFrom<&'a mut Bindings, Error = FormulaEvaluationError> 
 impl<T: for<'a> TryFrom<&'a mut Bindings, Error = FormulaEvaluationError>> In for T {}
 
 /// Trait for formula query patterns that can be converted into [`Parameters`].
-pub trait FormulaQuery: Sized + Clone + Into<Parameters> {
+pub trait FormulaApplication: Sized + Clone + Into<Parameters> {
     /// The formula predicate type this query corresponds to.
     type Predicate: Formula<Query = Self>;
 }
 
-impl<T: FormulaQuery + Clone> From<T> for FormulaApplication {
+impl<T: FormulaApplication + Clone> From<T> for FormulaQuery {
     fn from(value: T) -> Self {
-        FormulaApplication {
+        FormulaQuery {
             name: T::Predicate::operator(),
             cells: T::Predicate::cells(),
             cost: T::Predicate::cost(),

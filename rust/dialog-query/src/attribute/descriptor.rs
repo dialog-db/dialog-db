@@ -1,8 +1,8 @@
 use crate::artifact::{Attribute as ArtifactsAttribute, Entity, Value};
 use crate::attribute::The;
 use crate::error::{SchemaError, TypeError};
-use crate::relation::application::RelationApplication;
 use crate::relation::descriptor::RelationDescriptor;
+use crate::relation::query::RelationQuery;
 use crate::schema::Cardinality;
 use crate::types::{Scalar, Type};
 use crate::{Parameters, Term};
@@ -11,7 +11,7 @@ use base58::ToBase58;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// A validated attribute–value pair with its cardinality, produced by
-/// [`AttributeDescriptor::resolve`]. Used inside [`Conception`](crate::concept::predicate::Conception)
+/// [`AttributeDescriptor::resolve`]. Used inside [`Conception`](crate::concept::descriptor::Conception)
 /// to represent the set of facts that make up a concept instance.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Attribution {
@@ -27,7 +27,7 @@ pub struct Attribution {
 /// ([`The`]), human-readable description, value type, and cardinality.
 ///
 /// `AttributeDescriptor` is used in two contexts:
-/// 1. Inside a [`ConceptPredicate`](crate::concept::predicate::ConceptPredicate)
+/// 1. Inside a [`ConceptDescriptor`](crate::concept::descriptor::ConceptDescriptor)
 ///    to describe each attribute that makes up the concept.
 /// 2. During query construction, where [`resolve`](AttributeDescriptor::resolve)
 ///    validates a runtime value against the descriptor's type and produces
@@ -56,19 +56,19 @@ impl AttributeDescriptor {
         }
     }
 
-    /// Returns a reference to the validated selector.
+    /// Returns a relation identifier comprised of the attribute's domain and name.
     pub fn the(&self) -> &The {
         &self.the
     }
 
-    /// Returns the domain namespace.
-    pub fn namespace(&self) -> &str {
-        &self.the.namespace
+    /// Returns the attribute domain.
+    pub fn domain(&self) -> &str {
+        self.the.domain()
     }
 
     /// Returns the attribute name.
     pub fn name(&self) -> &str {
-        &self.the.name
+        self.the.name()
     }
 
     /// Returns the human-readable description.
@@ -149,9 +149,9 @@ impl AttributeDescriptor {
             .expect("Should succeed if we know attribute")
     }
 
-    /// Builds a [`RelationApplication`] from named parameters, type-checking each
+    /// Builds a [`RelationQuery`] from named parameters, type-checking each
     /// binding against this attribute's schema.
-    pub fn apply(&self, parameters: Parameters) -> Result<RelationApplication, SchemaError> {
+    pub fn apply(&self, parameters: Parameters) -> Result<RelationQuery, SchemaError> {
         // Check that type of the `is` parameter matches the attribute's data type
         self.conform(parameters.get("is"))
             .map_err(|e| e.at("is".to_string()))?;
@@ -183,8 +183,8 @@ impl AttributeDescriptor {
             .and_then(|t| t.clone().try_into().ok())
             .unwrap_or(Term::blank());
 
-        Ok(RelationApplication::new(
-            Term::Constant(self.namespace().to_string()),
+        Ok(RelationQuery::new(
+            Term::Constant(self.domain().to_string()),
             Term::Constant(self.name().to_string()),
             of,
             is,
@@ -199,7 +199,7 @@ impl AttributeDescriptor {
     /// Encode this attribute descriptor as CBOR for hashing
     ///
     /// Creates a CBOR-encoded representation with fields:
-    /// - domain: namespace
+    /// - domain: domain
     /// - name: name
     /// - cardinality: cardinality
     /// - type: content_type
@@ -218,7 +218,7 @@ impl AttributeDescriptor {
         }
 
         let schema = CborAttributeDescriptor {
-            domain: self.namespace(),
+            domain: self.domain(),
             name: self.name(),
             cardinality: self.cardinality(),
             content_type: self.content_type(),
@@ -284,7 +284,7 @@ impl Serialize for AttributeDescriptor {
     {
         use serde::ser::SerializeStruct;
         let mut state = serializer.serialize_struct("Attribute", 4)?;
-        state.serialize_field("namespace", self.namespace())?;
+        state.serialize_field("domain", self.domain())?;
         state.serialize_field("name", self.name())?;
         state.serialize_field("description", self.description())?;
         state.serialize_field("type", &self.content_type())?;
@@ -303,7 +303,7 @@ impl<'de> Deserialize<'de> for AttributeDescriptor {
         #[derive(Deserialize)]
         #[serde(field_identifier, rename_all = "snake_case")]
         enum Field {
-            Namespace,
+            Domain,
             Name,
             Description,
             #[serde(rename = "type")]
@@ -323,18 +323,18 @@ impl<'de> Deserialize<'de> for AttributeDescriptor {
             where
                 V: MapAccess<'de>,
             {
-                let mut namespace: Option<String> = None;
+                let mut domain: Option<String> = None;
                 let mut name: Option<String> = None;
                 let mut description: Option<String> = None;
                 let mut data_type = None;
 
                 while let Some(key) = map.next_key()? {
                     match key {
-                        Field::Namespace => {
-                            if namespace.is_some() {
-                                return Err(de::Error::duplicate_field("namespace"));
+                        Field::Domain => {
+                            if domain.is_some() {
+                                return Err(de::Error::duplicate_field("domain"));
                             }
-                            namespace = Some(map.next_value()?);
+                            domain = Some(map.next_value()?);
                         }
                         Field::Name => {
                             if name.is_some() {
@@ -357,13 +357,13 @@ impl<'de> Deserialize<'de> for AttributeDescriptor {
                     }
                 }
 
-                let namespace = namespace.ok_or_else(|| de::Error::missing_field("namespace"))?;
+                let domain = domain.ok_or_else(|| de::Error::missing_field("domain"))?;
                 let name = name.ok_or_else(|| de::Error::missing_field("name"))?;
                 let description =
                     description.ok_or_else(|| de::Error::missing_field("description"))?;
                 let data_type = data_type.ok_or_else(|| de::Error::missing_field("data_type"))?;
 
-                let the = format!("{namespace}/{name}")
+                let the = format!("{domain}/{name}")
                     .parse::<The>()
                     .map_err(de::Error::custom)?;
                 Ok(AttributeDescriptor::new(
@@ -377,7 +377,7 @@ impl<'de> Deserialize<'de> for AttributeDescriptor {
 
         deserializer.deserialize_struct(
             "Attribute",
-            &["namespace", "name", "description", "data_type"],
+            &["domain", "name", "description", "data_type"],
             AttributeVisitor,
         )
     }

@@ -1,15 +1,16 @@
 use crate::Predicate;
+use crate::assertion::{Assertion, Retraction};
 use crate::attribute::{Attribute, AttributeDescriptor};
-use crate::claim::{Claim, Revert};
-use crate::concept::application::ConceptApplication;
-use crate::concept::predicate::ConceptPredicate;
-use crate::concept::{Concept, ConceptProof};
+use crate::concept::application::ConceptQuery;
+use crate::concept::descriptor::ConceptDescriptor;
+use crate::concept::{Concept, Conclusion};
 use crate::negation::Negation;
 use crate::query::{Application, Output, Source};
 use crate::selection::{Answer, Answers};
 use crate::types::Scalar;
 use crate::{
-    Assertion, Cardinality, Entity, Parameters, Premise, Proposition, QueryError, Term, Transaction,
+    Association, Cardinality, Entity, Parameters, Premise, Proposition, QueryError, Term,
+    Transaction,
 };
 use std::marker::PhantomData;
 
@@ -20,7 +21,7 @@ use std::marker::PhantomData;
 /// # Examples
 ///
 /// ```rs
-/// // Assertion
+/// // Association
 /// tr.assert(With {
 ///     this: alice,
 ///     has: person::Name("Alice".into())
@@ -33,7 +34,7 @@ use std::marker::PhantomData;
 /// });
 ///
 /// // Query
-/// Match::<With<person::Name>> {
+/// Query::<With<person::Name>> {
 ///     this: Term::var("entity"),
 ///     has: Term::var("name")
 /// }
@@ -48,7 +49,7 @@ pub struct With<A: Attribute> {
 
 /// Query pattern for entities with a specific attribute.
 ///
-/// Use with the `Match` type alias to query for entities that have an attribute.
+/// Use with the `Query` type alias to query for entities that have an attribute.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WithQuery<A: Attribute> {
     /// Term matching the entity. Defaults to a variable named `"this"`.
@@ -94,21 +95,21 @@ impl<A: Attribute> WithTerms<A> {
     }
 }
 
-impl<A: Attribute> From<With<A>> for ConceptPredicate
+impl<A: Attribute> From<With<A>> for ConceptDescriptor
 where
     A: Clone + std::fmt::Debug + Send + 'static,
 {
     fn from(_: With<A>) -> Self {
-        ConceptPredicate::from(vec![("has", A::descriptor())])
+        ConceptDescriptor::from(vec![("has", A::descriptor())])
     }
 }
 
-impl<A: Attribute> From<WithQuery<A>> for ConceptPredicate
+impl<A: Attribute> From<WithQuery<A>> for ConceptDescriptor
 where
     A: Clone + std::fmt::Debug + Send + 'static,
 {
     fn from(_: WithQuery<A>) -> Self {
-        ConceptPredicate::from(vec![("has", A::descriptor())])
+        ConceptDescriptor::from(vec![("has", A::descriptor())])
     }
 }
 
@@ -123,7 +124,7 @@ where
     }
 
     fn this(&self) -> Entity {
-        let predicate: ConceptPredicate = self.clone().into();
+        let predicate: ConceptDescriptor = self.clone().into();
         predicate.this()
     }
 }
@@ -132,12 +133,12 @@ impl<A: Attribute> Predicate for With<A>
 where
     A: Clone + std::fmt::Debug + Send + 'static,
 {
-    type Proof = With<A>;
+    type Conclusion = With<A>;
     type Application = WithQuery<A>;
     type Descriptor = AttributeDescriptor;
 }
 
-impl<A: Attribute> ConceptProof for With<A>
+impl<A: Attribute> Conclusion for With<A>
 where
     A: Clone + Send,
 {
@@ -146,21 +147,22 @@ where
     }
 }
 
-impl<A: Attribute> Claim for With<A>
+impl<A: Attribute> Assertion for With<A>
 where
     A: Clone,
 {
     fn assert(self, transaction: &mut Transaction) {
-        let assertion = Assertion::new(A::selector(), self.this, self.has.value().as_value());
+        let association = Association::new(A::the(), self.this, self.has.value().as_value());
         if A::descriptor().cardinality() == Cardinality::One {
-            transaction.associate_unique(assertion);
+            transaction.associate_unique(association);
         } else {
-            transaction.associate(assertion);
+            transaction.associate(association);
         }
     }
 
     fn retract(self, transaction: &mut Transaction) {
-        Assertion::new(A::selector(), self.this, self.has.value().as_value()).retract(transaction);
+        Association::new(A::the(), self.this, self.has.value().as_value())
+            .retract(transaction);
     }
 }
 
@@ -168,7 +170,7 @@ impl<A: Attribute> std::ops::Not for With<A>
 where
     A: Clone,
 {
-    type Output = Revert<With<A>>;
+    type Output = Retraction<With<A>>;
 
     fn not(self) -> Self::Output {
         self.revert()
@@ -179,12 +181,12 @@ impl<A: Attribute> IntoIterator for With<A>
 where
     A: Clone,
 {
-    type Item = Assertion;
-    type IntoIter = std::iter::Once<Assertion>;
+    type Item = Association;
+    type IntoIter = std::iter::Once<Association>;
 
     fn into_iter(self) -> Self::IntoIter {
-        std::iter::once(Assertion::new(
-            A::selector(),
+        std::iter::once(Association::new(
+            A::the(),
             self.this,
             self.has.value().as_value(),
         ))
@@ -195,14 +197,14 @@ impl<A: Attribute> Application for WithQuery<A>
 where
     A: Clone + std::fmt::Debug + Send + 'static,
 {
-    type Proof = With<A>;
+    type Conclusion = With<A>;
 
     fn evaluate<S: Source, M: Answers>(self, answers: M, source: &S) -> impl Answers {
-        let application: ConceptApplication = self.into();
+        let application: ConceptQuery = self.into();
         application.evaluate(answers, source)
     }
 
-    fn realize(&self, source: Answer) -> Result<Self::Proof, QueryError> {
+    fn realize(&self, source: Answer) -> Result<Self::Conclusion, QueryError> {
         Ok(With {
             this: source.get(&self.this)?,
             has: A::new(source.get(&self.has)?),
@@ -234,13 +236,13 @@ where
     }
 }
 
-impl<A: Attribute> From<WithQuery<A>> for ConceptApplication
+impl<A: Attribute> From<WithQuery<A>> for ConceptQuery
 where
     A: Clone + std::fmt::Debug + Send + 'static,
 {
     fn from(source: WithQuery<A>) -> Self {
-        let predicate: ConceptPredicate = source.clone().into();
-        ConceptApplication {
+        let predicate: ConceptDescriptor = source.clone().into();
+        ConceptQuery {
             terms: source.into(),
             predicate,
         }
@@ -341,7 +343,7 @@ mod tests {
     async fn test_single_attribute_assert_and_retract() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Value};
         use crate::concept::With;
-        use crate::relation::application::RelationApplication;
+        use crate::relation::query::RelationQuery;
         use crate::{Entity, Session, Term};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
@@ -360,7 +362,7 @@ mod tests {
             }])
             .await?;
 
-        let query = RelationApplication::new(
+        let query = RelationQuery::new(
             Term::Constant("employee-txn".into()),
             Term::Constant("name".into()),
             alice.clone().into(),
@@ -385,7 +387,7 @@ mod tests {
             }])
             .await?;
 
-        let query = RelationApplication::new(
+        let query = RelationQuery::new(
             Term::Constant("employee-txn".into()),
             Term::Constant("name".into()),
             alice.into(),
@@ -405,7 +407,7 @@ mod tests {
     async fn test_multiple_attributes_assert() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Value};
         use crate::concept::With;
-        use crate::relation::application::RelationApplication;
+        use crate::relation::query::RelationQuery;
         use crate::{Entity, Session, Term};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
@@ -431,7 +433,7 @@ mod tests {
             }])
             .await?;
 
-        let name_query = RelationApplication::new(
+        let name_query = RelationQuery::new(
             Term::Constant("employee-txn".into()),
             Term::Constant("name".into()),
             bob.clone().into(),
@@ -440,7 +442,7 @@ mod tests {
             None,
         );
 
-        let job_query = RelationApplication::new(
+        let job_query = RelationQuery::new(
             Term::Constant("employee-txn".into()),
             Term::Constant("job".into()),
             bob.clone().into(),
@@ -472,7 +474,7 @@ mod tests {
     async fn test_three_attributes_assert() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Value};
         use crate::concept::With;
-        use crate::relation::application::RelationApplication;
+        use crate::relation::query::RelationQuery;
         use crate::{Entity, Session, Term};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
@@ -505,7 +507,7 @@ mod tests {
             }])
             .await?;
 
-        let name_query = RelationApplication::new(
+        let name_query = RelationQuery::new(
             Term::Constant("employee-txn".into()),
             Term::Constant("name".into()),
             charlie.clone().into(),
@@ -514,7 +516,7 @@ mod tests {
             None,
         );
 
-        let job_query = RelationApplication::new(
+        let job_query = RelationQuery::new(
             Term::Constant("employee-txn".into()),
             Term::Constant("job".into()),
             charlie.clone().into(),
@@ -523,7 +525,7 @@ mod tests {
             None,
         );
 
-        let salary_query = RelationApplication::new(
+        let salary_query = RelationQuery::new(
             Term::Constant("employee-txn".into()),
             Term::Constant("salary".into()),
             charlie.clone().into(),
@@ -563,7 +565,7 @@ mod tests {
     async fn test_multiple_attributes_retract() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
         use crate::concept::With;
-        use crate::relation::application::RelationApplication;
+        use crate::relation::query::RelationQuery;
         use crate::{Entity, Session, Term};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
@@ -603,7 +605,7 @@ mod tests {
             }])
             .await?;
 
-        let name_query = RelationApplication::new(
+        let name_query = RelationQuery::new(
             Term::Constant("employee-txn".into()),
             Term::Constant("name".into()),
             dave.clone().into(),
@@ -612,7 +614,7 @@ mod tests {
             None,
         );
 
-        let job_query = RelationApplication::new(
+        let job_query = RelationQuery::new(
             Term::Constant("employee-txn".into()),
             Term::Constant("job".into()),
             dave.clone().into(),
@@ -641,7 +643,7 @@ mod tests {
     async fn test_update_attribute() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Value};
         use crate::concept::With;
-        use crate::relation::application::RelationApplication;
+        use crate::relation::query::RelationQuery;
         use crate::{Entity, Session, Term};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
@@ -677,7 +679,7 @@ mod tests {
             }])
             .await?;
 
-        let query = RelationApplication::new(
+        let query = RelationQuery::new(
             Term::Constant("employee-txn".into()),
             Term::Constant("job".into()),
             eve.into(),
@@ -701,7 +703,7 @@ mod tests {
     async fn test_entity_reference_attribute() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Value};
         use crate::concept::With;
-        use crate::relation::application::RelationApplication;
+        use crate::relation::query::RelationQuery;
         use crate::{Entity, Session, Term};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
@@ -738,7 +740,7 @@ mod tests {
             }])
             .await?;
 
-        let query = RelationApplication::new(
+        let query = RelationQuery::new(
             Term::Constant("employee-txn".into()),
             Term::Constant("manager".into()),
             employee_entity.into(),
@@ -846,7 +848,7 @@ mod tests {
     #[dialog_common::test]
     async fn test_attribute_claim() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
-        use crate::claim::Claim;
+        use crate::assertion::Assertion;
         use crate::concept::With;
         use crate::{Entity, Match, Session, Term, Transaction};
         use dialog_storage::MemoryStorageBackend;
@@ -900,8 +902,8 @@ mod tests {
     async fn test_adhoc_concept_query() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
         use crate::concept::With;
-        use crate::{Assertion, Entity, Match, Session, Term, Value};
-        use dialog_artifacts::Attribute as ArtifactAttribute;
+        use crate::the;
+        use crate::{Association, Entity, Match, Session, Term, Value};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
 
@@ -915,18 +917,18 @@ mod tests {
 
         session
             .transact(vec![
-                Assertion {
-                    the: "note-rule/title".parse::<ArtifactAttribute>()?,
+                Association {
+                    the: the!("note-rule/title"),
                     of: note1.clone(),
                     is: Value::String("First Note".to_string()),
                 },
-                Assertion {
-                    the: "note-rule/title".parse::<ArtifactAttribute>()?,
+                Association {
+                    the: the!("note-rule/title"),
                     of: note2.clone(),
                     is: Value::String("Second Note".to_string()),
                 },
-                Assertion {
-                    the: "note-rule/title".parse::<ArtifactAttribute>()?,
+                Association {
+                    the: the!("note-rule/title"),
                     of: note3.clone(),
                     is: Value::String("Third Note".to_string()),
                 },
@@ -973,8 +975,8 @@ mod tests {
     async fn test_adhoc_concept_query_with_filter() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
         use crate::concept::With;
-        use crate::{Assertion, Entity, Match, Session, Term, Value};
-        use dialog_artifacts::Attribute as ArtifactAttribute;
+        use crate::the;
+        use crate::{Association, Entity, Match, Session, Term, Value};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
 
@@ -988,18 +990,18 @@ mod tests {
 
         session
             .transact(vec![
-                Assertion {
-                    the: "note-rule/title".parse::<ArtifactAttribute>()?,
+                Association {
+                    the: the!("note-rule/title"),
                     of: note1.clone(),
                     is: Value::String("Target Note".to_string()),
                 },
-                Assertion {
-                    the: "note-rule/title".parse::<ArtifactAttribute>()?,
+                Association {
+                    the: the!("note-rule/title"),
                     of: note2.clone(),
                     is: Value::String("Other Note".to_string()),
                 },
-                Assertion {
-                    the: "note-rule/title".parse::<ArtifactAttribute>()?,
+                Association {
+                    the: the!("note-rule/title"),
                     of: note3.clone(),
                     is: Value::String("Another Note".to_string()),
                 },

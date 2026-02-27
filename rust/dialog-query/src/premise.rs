@@ -10,7 +10,7 @@ pub use super::negation::Negation;
 use crate::Source;
 use crate::environment::Environment;
 pub use crate::error::{AnalyzerError, PlanError, QueryResult};
-use crate::formula::application::FormulaApplication;
+use crate::formula::query::FormulaQuery;
 use crate::proposition::Proposition;
 use crate::selection::{Answer, Answers};
 use crate::{Parameters, Schema};
@@ -108,8 +108,8 @@ impl From<Constraint> for Premise {
     }
 }
 
-impl From<FormulaApplication> for Premise {
-    fn from(application: FormulaApplication) -> Self {
+impl From<FormulaQuery> for Premise {
+    fn from(application: FormulaQuery) -> Self {
         Premise::When(Proposition::Formula(application))
     }
 }

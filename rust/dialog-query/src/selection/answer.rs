@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::artifact::{Type, TypeError, Value};
 use crate::error::{InconsistencyError, QueryError};
-use crate::relation::application::RelationApplication;
+use crate::relation::query::RelationQuery;
 use crate::{Relation, Term, types::Scalar};
 
 use super::{Answers, Evidence, Factor, Factors, Selector};
@@ -16,7 +16,7 @@ use super::{Answers, Evidence, Factor, Factors, Selector};
 /// fact, derived by a formula, or provided as a query parameter.
 ///
 /// In addition to named bindings (`conclusions`), an `Answer` tracks the
-/// raw [`Relation`] facts matched by each [`RelationApplication`]. This
+/// raw [`Relation`] facts matched by each [`RelationQuery`]. This
 /// allows downstream code to reconstruct the full provenance chain for any
 /// value in the result.
 ///
@@ -29,10 +29,10 @@ pub struct Answer {
     /// Conclusions: named variable bindings where we've concluded values from facts.
     /// Maps variable names to their values with provenance (which facts support this binding).
     conclusions: HashMap<String, Factors>,
-    /// Applications: maps RelationApplication to the fact it matched.
+    /// Applications: maps RelationQuery to the fact it matched.
     /// This allows us to realize facts even when the application had only constants/blanks.
     /// The facts stored here represent all facts that contributed to this answer.
-    facts: HashMap<RelationApplication, Arc<Relation>>,
+    facts: HashMap<RelationQuery, Arc<Relation>>,
 }
 
 impl Answer {
@@ -56,19 +56,19 @@ impl Answer {
         self.conclusions.iter()
     }
 
-    /// Record that a RelationApplication matched a specific fact.
+    /// Record that a RelationQuery matched a specific claim.
     /// Returns an error if the same application already mapped to a different fact,
     /// which would indicate an inconsistency (shouldn't happen in practice, but we check).
     pub fn record(
         &mut self,
-        application: &RelationApplication,
+        application: &RelationQuery,
         fact: Arc<Relation>,
     ) -> Result<(), InconsistencyError> {
         // Check if this application already has a different fact
         if let Some(existing_fact) = self.facts.get(application) {
             if !Arc::ptr_eq(existing_fact, &fact) {
                 return Err(InconsistencyError::AssignmentError(format!(
-                    "RelationApplication {:?} already mapped to a different fact",
+                    "RelationQuery {:?} already mapped to a different fact",
                     application
                 )));
             }
@@ -80,10 +80,10 @@ impl Answer {
         Ok(())
     }
 
-    /// Realize a relation from a RelationApplication.
+    /// Realize a relation from a RelationQuery.
     /// First tries to extract from named variable conclusions.
     /// Falls back to looking up the application in the recorded applications.
-    pub fn realize(&self, application: &RelationApplication) -> Result<Relation, QueryError> {
+    pub fn realize(&self, application: &RelationQuery) -> Result<Relation, QueryError> {
         // Try to extract from a named variable conclusion first
         // This gives us the full relation with all its components
         if let Term::Variable { name: Some(_), .. } = application.of()
@@ -117,9 +117,9 @@ impl Answer {
 
                 let application = Arc::new(application.to_owned());
 
-                // Bind namespace and name as string variables
+                // Bind domain and name as string variables
                 self.assign(
-                    &application.namespace().as_unknown(),
+                    &application.domain().as_unknown(),
                     &Factor::Selected {
                         selector: Selector::The,
                         application: application.clone(),
@@ -325,7 +325,7 @@ impl Answer {
     /// Resolves a term to its typed value.
     /// Resolve a variable term into a constant term if this answer has a
     /// binding for it. Otherwise, return the original term.
-    /// This is similar to Match::resolve but works with Answer bindings.
+    /// This is similar to `Application::realize` but works with Answer bindings.
     pub fn resolve_term<T: Scalar>(&self, term: &Term<T>) -> Term<T> {
         match term {
             Term::Variable { name, .. } => {
@@ -364,7 +364,7 @@ impl Answer {
     }
 
     /// Convenience method to get a value for a variable.
-    /// Similar to Match::get but works with Answer.
+    /// Convenience method to get a typed value from this answer.
     pub fn get<T>(&self, term: &Term<T>) -> Result<T, InconsistencyError>
     where
         T: Scalar + std::convert::TryFrom<Value>,

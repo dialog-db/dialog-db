@@ -11,8 +11,8 @@ pub const PARAM_COST: usize = 10;
 
 /// A formula premise bound to specific term arguments.
 ///
-/// Unlike a [`RelationApplication`](crate::relation::application::RelationApplication)
-/// which reads from the fact store, a `FormulaApplication` performs pure
+/// Unlike a [`RelationQuery`](crate::relation::query::RelationQuery)
+/// which reads from the fact store, a `FormulaQuery` performs pure
 /// computation: it reads already-bound variables via [`Bindings`], runs a
 /// user-defined `compute` function, and writes the results back as new
 /// variable bindings.
@@ -21,7 +21,7 @@ pub const PARAM_COST: usize = 10;
 /// names, types, and requirement levels) so the planner can determine
 /// prerequisites and estimate cost without invoking the formula.
 #[derive(Debug, Clone)]
-pub struct FormulaApplication {
+pub struct FormulaQuery {
     /// Formula identifier being applied
     pub name: &'static str,
     /// Formula cells for planning and analysis
@@ -37,7 +37,7 @@ pub struct FormulaApplication {
     pub compute: fn(&mut Bindings) -> Result<Vec<Answer>, FormulaEvaluationError>,
 }
 
-impl PartialEq for FormulaApplication {
+impl PartialEq for FormulaQuery {
     fn eq(&self, other: &Self) -> bool {
         // Compare all fields except the function pointer, which doesn't have meaningful equality
         self.name == other.name
@@ -48,7 +48,7 @@ impl PartialEq for FormulaApplication {
     }
 }
 
-impl FormulaApplication {
+impl FormulaQuery {
     /// Computes answers using this formula
     pub fn derive(&self, input: Answer) -> Result<Vec<Answer>, FormulaEvaluationError> {
         // Create Arc from self for bindings - this is a cheap pointer clone, not cloning the whole struct
@@ -118,7 +118,7 @@ impl FormulaApplication {
     }
 }
 
-impl Display for FormulaApplication {
+impl Display for FormulaQuery {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} {{", self.name)?;
         for (name, term) in self.parameters.iter() {

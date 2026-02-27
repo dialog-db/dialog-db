@@ -6,7 +6,7 @@ pub mod rules;
 pub use rules::ConceptRules;
 
 use crate::attribute::AttributeDescriptor;
-use crate::concept::predicate::ConceptPredicate;
+use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::InconsistencyError;
 use crate::planner::Disjunction;
 use crate::schema::CONCEPT_OVERHEAD;
@@ -85,16 +85,16 @@ fn merge_parameters(
 
 /// Represents an application of a concept with specific term bindings.
 /// This is used when querying for entities that match a concept pattern.
-/// Note: The name has a typo (should be ConceptApplication) but is kept for compatibility.
+/// Note: The name has a typo (should be ConceptQuery) but is kept for compatibility.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ConceptApplication {
+pub struct ConceptQuery {
     /// The term bindings for this concept application.
     pub terms: Parameters,
     /// The concept predicate being applied.
-    pub predicate: ConceptPredicate,
+    pub predicate: ConceptDescriptor,
 }
 
-impl ConceptApplication {
+impl ConceptQuery {
     /// Estimate the cost of this concept application given the current environment.
     /// A concept is essentially a join over N fact lookups (one per attribute).
     /// Each fact lookup has the form: (this, attribute_i, value_i).
@@ -275,7 +275,7 @@ impl ConceptApplication {
     }
 }
 
-impl Display for ConceptApplication {
+impl Display for ConceptQuery {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} {{", self.predicate.this())?;
         for (name, term) in self.terms.iter() {
@@ -289,13 +289,13 @@ impl Display for ConceptApplication {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::concept::predicate::ConceptPredicate;
-    use crate::relation::application::RelationApplication;
+    use crate::concept::descriptor::ConceptDescriptor;
+    use crate::relation::query::RelationQuery;
     use crate::selection::Answer;
     use crate::the;
     use crate::{
-        Assertion, AttributeDescriptor, Cardinality, DeductiveRule, Negation, Parameters, Premise,
-        Proposition, Session, Term, Type, Value,
+        Association, AttributeDescriptor, Cardinality, DeductiveRule, Negation, Parameters,
+        Premise, Proposition, Session, Term, Type, Value,
     };
 
     // Note: Async tests are commented out due to Rust recursion limit issues in test compilation
@@ -304,7 +304,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_concept_application_query_execution() -> anyhow::Result<()> {
-        use dialog_artifacts::{Artifacts, Attribute as ArtifactAttribute, Entity};
+        use dialog_artifacts::{Artifacts, Entity};
         use dialog_storage::MemoryStorageBackend;
 
         // Create a store and session
@@ -317,23 +317,23 @@ mod tests {
 
         session
             .transact(vec![
-                Assertion {
-                    the: "person/name".parse::<ArtifactAttribute>()?,
+                Association {
+                    the: the!("person/name"),
                     of: alice.clone(),
                     is: Value::String("Alice".to_string()),
                 },
-                Assertion {
-                    the: "person/age".parse::<ArtifactAttribute>()?,
+                Association {
+                    the: the!("person/age"),
                     of: alice.clone(),
                     is: Value::UnsignedInt(25),
                 },
-                Assertion {
-                    the: "person/name".parse::<ArtifactAttribute>()?,
+                Association {
+                    the: the!("person/name"),
                     of: bob.clone(),
                     is: Value::String("Bob".to_string()),
                 },
-                Assertion {
-                    the: "person/age".parse::<ArtifactAttribute>()?,
+                Association {
+                    the: the!("person/age"),
                     of: bob.clone(),
                     is: Value::UnsignedInt(30),
                 },
@@ -341,7 +341,7 @@ mod tests {
             .await?;
 
         // Create a person concept
-        let concept = ConceptPredicate::from(vec![
+        let concept = ConceptDescriptor::from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -367,7 +367,7 @@ mod tests {
         terms.insert("name".to_string(), Term::var("name"));
         terms.insert("age".to_string(), Term::var("age"));
 
-        let application = ConceptApplication {
+        let application = ConceptQuery {
             terms,
             predicate: concept,
         };
@@ -412,7 +412,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_concept_application_with_bound_entity_query() -> anyhow::Result<()> {
-        use dialog_artifacts::{Artifacts, Attribute as ArtifactAttribute, Entity};
+        use dialog_artifacts::{Artifacts, Entity};
         use dialog_storage::MemoryStorageBackend;
 
         // Create a store and session
@@ -424,13 +424,13 @@ mod tests {
 
         session
             .transact(vec![
-                Assertion {
-                    the: "person/name".parse::<ArtifactAttribute>()?,
+                Association {
+                    the: the!("person/name"),
                     of: alice.clone(),
                     is: Value::String("Alice".to_string()),
                 },
-                Assertion {
-                    the: "person/age".parse::<ArtifactAttribute>()?,
+                Association {
+                    the: the!("person/age"),
                     of: alice.clone(),
                     is: Value::UnsignedInt(25),
                 },
@@ -438,7 +438,7 @@ mod tests {
             .await?;
 
         // Create a person concept
-        let concept = ConceptPredicate::from(vec![
+        let concept = ConceptDescriptor::from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -464,7 +464,7 @@ mod tests {
         terms.insert("name".to_string(), Term::var("name"));
         terms.insert("age".to_string(), Term::var("age"));
 
-        let application = ConceptApplication {
+        let application = ConceptQuery {
             terms,
             predicate: concept,
         };
@@ -487,7 +487,7 @@ mod tests {
 
     #[dialog_common::test]
     fn test_concept_as_conclusion_operations() {
-        let concept = ConceptPredicate::from(vec![
+        let concept = ConceptDescriptor::from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -518,7 +518,7 @@ mod tests {
 
     #[dialog_common::test]
     fn test_concept_creation() {
-        let concept = ConceptPredicate::from(vec![(
+        let concept = ConceptDescriptor::from(vec![(
             "name".to_string(),
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -539,7 +539,7 @@ mod tests {
 
     #[dialog_common::test]
     fn test_concept_application_analysis() {
-        let concept = ConceptPredicate::from(vec![
+        let concept = ConceptDescriptor::from(vec![
             (
                 "name".to_string(),
                 AttributeDescriptor::new(
@@ -564,7 +564,7 @@ mod tests {
         terms.insert("name".to_string(), Term::var("person_name"));
         terms.insert("age".to_string(), Term::var("person_age"));
 
-        let concept_app = ConceptApplication {
+        let concept_app = ConceptQuery {
             terms,
             predicate: concept,
         };
@@ -584,7 +584,7 @@ mod tests {
     fn test_deductive_rule_parameters() {
         use std::collections::HashSet;
 
-        let predicate = ConceptPredicate::from([
+        let predicate = ConceptDescriptor::from([
             (
                 "name".to_string(),
                 AttributeDescriptor::new(
@@ -615,7 +615,7 @@ mod tests {
 
     #[dialog_common::test]
     fn test_premise_construction() {
-        let relation = RelationApplication::new(
+        let relation = RelationQuery::new(
             Term::Constant("person".into()),
             Term::Constant("name".into()),
             Term::var("person"),
@@ -628,7 +628,7 @@ mod tests {
 
         match premise {
             Premise::When(Proposition::Relation(_)) => {
-                // Expected case - RelationApplication produces Relation premise
+                // Expected case - RelationQuery produces Relation premise
             }
             _ => panic!("Expected Relation application"),
         }
@@ -640,7 +640,7 @@ mod tests {
         use crate::error::{AnalyzerError, PlanError};
 
         // Test AnalyzerError creation
-        let predicate = ConceptPredicate::from(vec![(
+        let predicate = ConceptDescriptor::from(vec![(
             "name",
             AttributeDescriptor::new(the!("test/name"), "", Cardinality::One, Some(Type::String)),
         )]);
@@ -678,7 +678,7 @@ mod tests {
     #[dialog_common::test]
     fn test_application_variants() {
         // Test Relation application
-        let relation = RelationApplication::new(
+        let relation = RelationQuery::new(
             Term::Constant("test".into()),
             Term::Constant("attr".into()),
             Term::blank(),
@@ -698,9 +698,9 @@ mod tests {
         // Test other variants exist
         let mut terms = Parameters::new();
         terms.insert("test".to_string(), Term::var("test_var"));
-        let concept_app = Proposition::Concept(ConceptApplication {
+        let concept_app = Proposition::Concept(ConceptQuery {
             terms,
-            predicate: ConceptPredicate::new(),
+            predicate: ConceptDescriptor::new(),
         });
 
         match concept_app {
@@ -713,7 +713,7 @@ mod tests {
 
     #[dialog_common::test]
     fn test_negation_construction() {
-        let relation = RelationApplication::new(
+        let relation = RelationQuery::new(
             Term::Constant("test".into()),
             Term::Constant("attr".into()),
             Term::blank(),
@@ -735,7 +735,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn test_concept_application_respects_constant_entity_parameter() -> anyhow::Result<()> {
-        use dialog_artifacts::{Artifacts, Attribute, Entity};
+        use dialog_artifacts::{Artifacts, Entity};
         use dialog_storage::MemoryStorageBackend;
 
         let backend = MemoryStorageBackend::default();
@@ -747,20 +747,20 @@ mod tests {
 
         session
             .transact(vec![
-                Assertion {
-                    the: "person/name".parse::<Attribute>()?,
+                Association {
+                    the: the!("person/name"),
                     of: alice.clone(),
                     is: Value::String("Alice".to_string()),
                 },
-                Assertion {
-                    the: "person/name".parse::<Attribute>()?,
+                Association {
+                    the: the!("person/name"),
                     of: bob.clone(),
                     is: Value::String("Bob".to_string()),
                 },
             ])
             .await?;
 
-        let concept = ConceptPredicate::from(vec![(
+        let concept = ConceptDescriptor::from(vec![(
             "name",
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -778,7 +778,7 @@ mod tests {
         );
         terms.insert("name".to_string(), Term::var("name"));
 
-        let app = ConceptApplication {
+        let app = ConceptQuery {
             terms,
             predicate: concept,
         };
@@ -803,7 +803,7 @@ mod tests {
     #[dialog_common::test]
     async fn test_concept_application_respects_constant_attribute_parameter() -> anyhow::Result<()>
     {
-        use dialog_artifacts::{Artifacts, Attribute, Entity};
+        use dialog_artifacts::{Artifacts, Entity};
         use dialog_storage::MemoryStorageBackend;
 
         let backend = MemoryStorageBackend::default();
@@ -815,30 +815,30 @@ mod tests {
 
         session
             .transact(vec![
-                Assertion {
-                    the: "person/name".parse::<Attribute>()?,
+                Association {
+                    the: the!("person/name"),
                     of: alice.clone(),
                     is: Value::String("Alice".to_string()),
                 },
-                Assertion {
-                    the: "person/age".parse::<Attribute>()?,
+                Association {
+                    the: the!("person/age"),
                     of: alice.clone(),
                     is: Value::UnsignedInt(25),
                 },
-                Assertion {
-                    the: "person/name".parse::<Attribute>()?,
+                Association {
+                    the: the!("person/name"),
                     of: bob.clone(),
                     is: Value::String("Bob".to_string()),
                 },
-                Assertion {
-                    the: "person/age".parse::<Attribute>()?,
+                Association {
+                    the: the!("person/age"),
                     of: bob.clone(),
                     is: Value::UnsignedInt(30),
                 },
             ])
             .await?;
 
-        let concept = ConceptPredicate::from(vec![
+        let concept = ConceptDescriptor::from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -868,7 +868,7 @@ mod tests {
         );
         terms.insert("age".to_string(), Term::var("age"));
 
-        let app = ConceptApplication {
+        let app = ConceptQuery {
             terms,
             predicate: concept,
         };
@@ -893,7 +893,7 @@ mod tests {
     #[dialog_common::test]
     async fn test_concept_application_respects_multiple_constant_parameters() -> anyhow::Result<()>
     {
-        use dialog_artifacts::{Artifacts, Attribute, Entity};
+        use dialog_artifacts::{Artifacts, Entity};
         use dialog_storage::MemoryStorageBackend;
 
         let backend = MemoryStorageBackend::default();
@@ -905,30 +905,30 @@ mod tests {
 
         session
             .transact(vec![
-                Assertion {
-                    the: "person/name".parse::<Attribute>()?,
+                Association {
+                    the: the!("person/name"),
                     of: alice.clone(),
                     is: Value::String("Alice".to_string()),
                 },
-                Assertion {
-                    the: "person/age".parse::<Attribute>()?,
+                Association {
+                    the: the!("person/age"),
                     of: alice.clone(),
                     is: Value::UnsignedInt(25),
                 },
-                Assertion {
-                    the: "person/name".parse::<Attribute>()?,
+                Association {
+                    the: the!("person/name"),
                     of: bob.clone(),
                     is: Value::String("Bob".to_string()),
                 },
-                Assertion {
-                    the: "person/age".parse::<Attribute>()?,
+                Association {
+                    the: the!("person/age"),
                     of: bob.clone(),
                     is: Value::UnsignedInt(30),
                 },
             ])
             .await?;
 
-        let concept = ConceptPredicate::from(vec![
+        let concept = ConceptDescriptor::from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -958,7 +958,7 @@ mod tests {
         );
         terms.insert("age".to_string(), Term::Constant(Value::UnsignedInt(25)));
 
-        let app = ConceptApplication {
+        let app = ConceptQuery {
             terms,
             predicate: concept,
         };

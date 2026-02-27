@@ -1,7 +1,7 @@
 use crate::Entity;
 use crate::QueryError;
 use crate::concept::application::ConceptRules;
-use crate::concept::predicate::ConceptPredicate;
+use crate::concept::descriptor::ConceptDescriptor;
 use crate::rule::deductive::DeductiveRule;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -44,7 +44,7 @@ impl RuleRegistry {
     /// Acquire rules for the given concept. Creates the default rule from
     /// the predicate's attributes on first access — so this always returns
     /// a ConceptRules regardless of whether any rules were explicitly installed.
-    pub fn acquire(&self, predicate: &ConceptPredicate) -> Result<ConceptRules, QueryError> {
+    pub fn acquire(&self, predicate: &ConceptDescriptor) -> Result<ConceptRules, QueryError> {
         let entity = predicate.this();
         Ok(self
             .rules

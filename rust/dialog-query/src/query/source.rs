@@ -1,6 +1,6 @@
 use crate::artifact::ArtifactStore;
 use crate::concept::application::ConceptRules;
-use crate::concept::predicate::ConceptPredicate;
+use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::QueryError;
 use dialog_common::{ConditionalSend, ConditionalSync};
 
@@ -19,5 +19,5 @@ pub trait Source: ArtifactStore + Clone + ConditionalSend + ConditionalSync + 's
     /// and a per-adornment plan cache. Always returns a value. If no rules were
     /// explicitly registered, an implicit rule (derived from the predicate's
     /// attributes) is used.
-    fn acquire(&self, predicate: &ConceptPredicate) -> Result<ConceptRules, QueryError>;
+    fn acquire(&self, predicate: &ConceptDescriptor) -> Result<ConceptRules, QueryError>;
 }

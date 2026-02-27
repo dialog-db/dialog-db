@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use crate::Relation;
 use crate::artifact::Value;
-use crate::formula::application::FormulaApplication;
-use crate::relation::application::RelationApplication;
+use crate::formula::query::FormulaQuery;
+use crate::relation::query::RelationQuery;
 
 use super::Factors;
 use super::Selector;
@@ -28,7 +28,7 @@ pub enum Factor {
         /// Which fact component this value came from.
         selector: Selector,
         /// The relation application that matched this fact.
-        application: Arc<RelationApplication>,
+        application: Arc<RelationQuery>,
         /// The matched fact itself.
         fact: Arc<Relation>,
     },
@@ -39,7 +39,7 @@ pub enum Factor {
         /// The facts that were read to produce this derived value, keyed by parameter name.
         from: HashMap<String, Factors>,
         /// The formula application that produced this value.
-        formula: Arc<FormulaApplication>,
+        formula: Arc<FormulaQuery>,
     },
     /// A value provided externally as a query parameter.
     Parameter {

@@ -52,11 +52,7 @@ fn pick_winner(current: Artifact, challenger: Artifact) -> Artifact {
 /// candidate from `evaluate_cardinality_many` is verified by a secondary
 /// `(attribute, entity)` range scan to find the true winner. Yields the
 /// answer only if the candidate matches the winner.
-fn verify_winner<S: Source>(
-    source: S,
-    selector: RelationApplication,
-    input: Answer,
-) -> impl Answers {
+fn verify_winner<S: Source>(source: S, selector: RelationQuery, input: Answer) -> impl Answers {
     try_stream! {
         let attribute_term = selector.attribute();
         let attribute: Attribute = input.get(&attribute_term)?;
@@ -89,19 +85,19 @@ fn verify_winner<S: Source>(
 /// A relation premise bound to specific term arguments.
 ///
 /// Represents a query against the fact store in the form
-/// `(namespace, name, entity, value, cause)` where each position is a
+/// `(domain, name, entity, value, cause)` where each position is a
 /// [`Term`] — either a constant that constrains the lookup or a variable
 /// that will be bound by the results.
 ///
-/// At the storage boundary the `namespace` and `name` constants are
-/// combined into a `dialog_artifacts::Attribute` via `"namespace/name".parse()`.
+/// At the storage boundary the `domain` and `name` constants are
+/// combined into a `dialog_artifacts::Attribute` via `"domain/name".parse()`.
 /// The optional [`RelationDescriptor`] provides type and cardinality
 /// metadata used by the cost estimator during planning.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct RelationApplication {
-    /// Namespace of the attribute (e.g., "person")
-    namespace: Term<String>,
-    /// Name of the attribute within namespace (e.g., "name")
+pub struct RelationQuery {
+    /// Domain of the attribute (e.g., "person")
+    domain: Term<String>,
+    /// Name of the attribute within domain (e.g., "name")
     name: Term<String>,
     /// The entity
     of: Term<Entity>,
@@ -110,14 +106,14 @@ pub struct RelationApplication {
     /// The cause/provenance
     cause: Term<Cause>,
     /// Type and cardinality metadata, when the attribute is known.
-    /// None when namespace/name are variables.
+    /// None when domain/name are variables.
     relation: Option<RelationDescriptor>,
 }
 
-impl RelationApplication {
-    /// Create a new relation application with separate namespace and name.
+impl RelationQuery {
+    /// Create a new relation application with separate domain and name.
     pub fn new(
-        namespace: Term<String>,
+        domain: Term<String>,
         name: Term<String>,
         of: Term<Entity>,
         is: Term<Value>,
@@ -125,7 +121,7 @@ impl RelationApplication {
         relation: Option<RelationDescriptor>,
     ) -> Self {
         Self {
-            namespace,
+            domain,
             name,
             of,
             is,
@@ -134,9 +130,9 @@ impl RelationApplication {
         }
     }
 
-    /// Get the namespace term.
-    pub fn namespace(&self) -> &Term<String> {
-        &self.namespace
+    /// Get the domain term.
+    pub fn domain(&self) -> &Term<String> {
+        &self.domain
     }
 
     /// Get the name term.
@@ -167,13 +163,13 @@ impl RelationApplication {
     /// Resolve an artifact into a `Relation` using this application's cardinality.
     pub fn resolve(&self, artifact: &Artifact) -> Relation {
         let attr_str = artifact.the.to_string();
-        let (namespace, name) = attr_str
+        let (domain, name) = attr_str
             .split_once('/')
             .map(|(ns, n)| (ns.to_string(), n.to_string()))
             .unwrap_or_else(|| (String::new(), attr_str));
 
         Relation {
-            namespace,
+            domain,
             name,
             of: artifact.of.clone(),
             is: artifact.is.clone(),
@@ -191,13 +187,13 @@ impl RelationApplication {
             .unwrap_or(Cardinality::Many)
     }
 
-    /// Combine namespace + name back into a `Term<Attribute>`.
+    /// Combine domain + name back into a `Term<Attribute>`.
     ///
-    /// - If both are constants, produces `Term::Constant("namespace/name".parse())`
+    /// - If both are constants, produces `Term::Constant("domain/name".parse())`
     /// - If either is a variable, produces a variable term (using the name variable's name
     ///   or falling back to "the")
     pub fn attribute(&self) -> Term<Attribute> {
-        match (&self.namespace, &self.name) {
+        match (&self.domain, &self.name) {
             (Term::Constant(ns), Term::Constant(n)) => {
                 let combined = format!("{}/{}", ns, n);
                 Term::Constant(
@@ -223,9 +219,9 @@ impl RelationApplication {
         let mut schema = Schema::new();
 
         schema.insert(
-            "namespace".to_string(),
+            "domain".to_string(),
             Field {
-                description: "Namespace of the attribute".to_string(),
+                description: "Domain of the attribute".to_string(),
                 content_type: Some(Type::String),
                 requirement: requirement.required(),
                 cardinality: Cardinality::One,
@@ -272,8 +268,8 @@ impl RelationApplication {
     /// the `(attribute, entity)` pair to verify that the matched value is the
     /// winner. This adds `SECONDARY_LOOKUP_COST` per match to the estimate.
     pub fn estimate(&self, env: &Environment) -> Option<usize> {
-        // The attribute is "known" if both namespace and name are bound
-        let the = env.contains(&self.namespace) && env.contains(&self.name);
+        // The attribute is "known" if both domain and name are bound
+        let the = env.contains(&self.domain) && env.contains(&self.name);
         let of = env.contains(&self.of);
         let is = env.contains(&self.is);
 
@@ -294,7 +290,7 @@ impl RelationApplication {
     pub fn parameters(&self) -> Parameters {
         let mut params = Parameters::new();
 
-        params.insert("namespace".to_string(), self.namespace.as_unknown());
+        params.insert("domain".to_string(), self.domain.as_unknown());
         params.insert("name".to_string(), self.name.as_unknown());
         params.insert("of".to_string(), self.of.as_unknown());
         params.insert("is".to_string(), self.is.clone());
@@ -302,17 +298,17 @@ impl RelationApplication {
     }
 }
 
-impl RelationApplication {
+impl RelationQuery {
     /// Resolves variables from the given answer.
     pub fn resolve_from_answer(&self, source: &Answer) -> Self {
-        let namespace = source.resolve_term(&self.namespace);
+        let domain = source.resolve_term(&self.domain);
         let name = source.resolve_term(&self.name);
         let of = source.resolve_term(&self.of);
         let is = source.resolve_term(&self.is);
         let cause = source.resolve_term(&self.cause);
 
         Self {
-            namespace,
+            domain,
             name,
             of,
             is,
@@ -384,7 +380,7 @@ impl RelationApplication {
     ) -> impl Answers {
         let entity_known = matches!(&self.of, Term::Constant(_));
         let attribute_known = matches!(
-            (&self.namespace, &self.name),
+            (&self.domain, &self.name),
             (Term::Constant(_), Term::Constant(_))
         );
 
@@ -450,9 +446,9 @@ impl RelationApplication {
     /// Construct a Relation from the given answer by resolving all terms.
     pub fn realize(&self, source: Answer) -> Result<Relation, QueryError> {
         // Convert blank variables to internal names for retrieval
-        let namespace_term = match &self.namespace {
+        let domain_term = match &self.domain {
             Term::Variable { name: None, .. } => Term::Variable {
-                name: Some("__namespace".to_string()),
+                name: Some("__domain".to_string()),
                 content_type: Default::default(),
             },
             term => term.clone(),
@@ -479,9 +475,9 @@ impl RelationApplication {
             term => term.clone(),
         };
 
-        let namespace: String = match &namespace_term {
+        let domain: String = match &domain_term {
             Term::Constant(ns) => ns.clone(),
-            _ => source.get(&namespace_term)?,
+            _ => source.get(&domain_term)?,
         };
         let name: String = match &name_term {
             Term::Constant(n) => n.clone(),
@@ -489,7 +485,7 @@ impl RelationApplication {
         };
 
         Ok(Relation {
-            namespace,
+            domain,
             name,
             of: source.get(&of_term)?,
             is: source.get(&is_term)?,
@@ -507,8 +503,8 @@ impl RelationApplication {
     }
 }
 
-impl Application for RelationApplication {
-    type Proof = Relation;
+impl Application for RelationQuery {
+    type Conclusion = Relation;
 
     fn evaluate<S: Source, M: Answers>(self, answers: M, source: &S) -> impl Answers {
         self.evaluate_with_provenance(source.clone(), answers)
@@ -519,14 +515,14 @@ impl Application for RelationApplication {
     }
 }
 
-impl TryFrom<&RelationApplication> for ArtifactSelector<Constrained> {
+impl TryFrom<&RelationQuery> for ArtifactSelector<Constrained> {
     type Error = QueryError;
 
-    fn try_from(from: &RelationApplication) -> Result<Self, Self::Error> {
+    fn try_from(from: &RelationQuery) -> Result<Self, Self::Error> {
         let mut selector: Option<ArtifactSelector<Constrained>> = None;
 
-        // Combine namespace + name constants into a single attribute
-        if let (Term::Constant(ns), Term::Constant(n)) = (&from.namespace, &from.name) {
+        // Combine domain + name constants into a single attribute
+        if let (Term::Constant(ns), Term::Constant(n)) = (&from.domain, &from.name) {
             let combined = format!("{}/{}", ns, n);
             if let Ok(attr) = combined.parse::<Attribute>() {
                 selector = Some(match selector {
@@ -564,10 +560,10 @@ impl TryFrom<&RelationApplication> for ArtifactSelector<Constrained> {
     }
 }
 
-impl Display for RelationApplication {
+impl Display for RelationQuery {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Relation {{")?;
-        write!(f, "namespace: {},", self.namespace)?;
+        write!(f, "domain: {},", self.domain)?;
         write!(f, "name: {},", self.name)?;
         write!(f, "of: {},", self.of)?;
         write!(f, "is: {},", self.is)?;
@@ -576,7 +572,7 @@ impl Display for RelationApplication {
     }
 }
 
-impl std::ops::Not for RelationApplication {
+impl std::ops::Not for RelationQuery {
     type Output = Premise;
 
     fn not(self) -> Self::Output {
@@ -584,20 +580,20 @@ impl std::ops::Not for RelationApplication {
     }
 }
 
-impl From<RelationApplication> for Proposition {
-    fn from(application: RelationApplication) -> Self {
+impl From<RelationQuery> for Proposition {
+    fn from(application: RelationQuery) -> Self {
         Proposition::Relation(Box::new(application))
     }
 }
 
-impl From<RelationApplication> for Premise {
-    fn from(application: RelationApplication) -> Self {
+impl From<RelationQuery> for Premise {
+    fn from(application: RelationQuery) -> Self {
         Premise::When(Proposition::Relation(Box::new(application)))
     }
 }
 
-impl From<&RelationApplication> for Premise {
-    fn from(application: &RelationApplication) -> Self {
+impl From<&RelationQuery> for Premise {
+    fn from(application: &RelationQuery) -> Self {
         Premise::When(Proposition::Relation(Box::new(application.clone())))
     }
 }
@@ -607,21 +603,22 @@ mod tests {
     use super::*;
     use crate::query::Output;
     use crate::selection::{Answer, Answers};
-    use crate::{Assertion, Session};
+    use crate::{Association, Session, the};
     use dialog_storage::MemoryStorageBackend;
     use futures_util::stream::once;
 
     #[dialog_common::test]
     async fn test_relation_application_with_provenance() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
+        use crate::the;
 
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         let alice = Entity::new()?;
-        let name_attr = "person/name".parse::<Attribute>()?;
+        let name_attr = the!("person/name");
 
-        let claims = vec![Assertion {
+        let claims = vec![Association {
             the: name_attr.clone(),
             of: alice.clone(),
             is: Value::String("Alice".to_string()),
@@ -630,7 +627,7 @@ mod tests {
         let mut session = Session::open(artifacts.clone());
         session.transact(claims).await?;
 
-        let rel_app = RelationApplication::new(
+        let rel_app = RelationQuery::new(
             Term::Constant("person".to_string()),
             Term::Constant("name".to_string()),
             Term::var("person"),
@@ -667,18 +664,19 @@ mod tests {
     #[dialog_common::test]
     async fn test_cardinality_one_returns_single_value() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
+        use crate::the;
 
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         let alice = Entity::new()?;
-        let name_attr = "person/name".parse::<Attribute>()?;
+        let name_attr = the!("person/name");
 
         // Assert two different values for the same entity-attribute pair
         // in separate transactions so both persist in the store.
         let mut session = Session::open(artifacts.clone());
         session
-            .transact(vec![Assertion {
+            .transact(vec![Association {
                 the: name_attr.clone(),
                 of: alice.clone(),
                 is: Value::String("Alice".to_string()),
@@ -687,7 +685,7 @@ mod tests {
 
         let mut session = Session::open(artifacts.clone());
         session
-            .transact(vec![Assertion {
+            .transact(vec![Association {
                 the: name_attr.clone(),
                 of: alice.clone(),
                 is: Value::String("Alicia".to_string()),
@@ -695,7 +693,7 @@ mod tests {
             .await?;
 
         // Query with Cardinality::One — should return only one value
-        let rel_app = RelationApplication::new(
+        let rel_app = RelationQuery::new(
             Term::Constant("person".to_string()),
             Term::Constant("name".to_string()),
             Term::var("person"),
@@ -718,7 +716,7 @@ mod tests {
         );
 
         // Query with Cardinality::Many — should return both values
-        let rel_app_many = RelationApplication::new(
+        let rel_app_many = RelationQuery::new(
             Term::Constant("person".to_string()),
             Term::Constant("name".to_string()),
             Term::var("person"),
@@ -750,7 +748,7 @@ mod tests {
         ($artifacts:expr, $the:expr, $of:expr, $is:expr) => {{
             let mut session = Session::open($artifacts.clone());
             session
-                .transact(vec![Assertion {
+                .transact(vec![Association {
                     the: $the.clone(),
                     of: $of.clone(),
                     is: $is,
@@ -772,8 +770,8 @@ mod tests {
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         let alice = Entity::new()?;
-        let name_attr = "person/name".parse::<Attribute>()?;
-        let age_attr = "person/age".parse::<Attribute>()?;
+        let name_attr = the!("person/name");
+        let age_attr = the!("person/age");
 
         // Two conflicting values for person/name of alice
         assert_relation!(artifacts, name_attr, alice, Value::String("Alice".into()));
@@ -782,7 +780,7 @@ mod tests {
         assert_relation!(artifacts, age_attr, alice, Value::SignedInt(30));
 
         // Entity is known → EAV scan, attribute is variable
-        let rel_app = RelationApplication::new(
+        let rel_app = RelationQuery::new(
             Term::var("ns"),
             Term::var("attr"),
             Term::Constant(alice.clone()),
@@ -802,8 +800,14 @@ mod tests {
             results.len()
         );
 
-        let name_results: Vec<_> = results.iter().filter(|f| f.the() == name_attr).collect();
-        let age_results: Vec<_> = results.iter().filter(|f| f.the() == age_attr).collect();
+        let name_results: Vec<_> = results
+            .iter()
+            .filter(|f| f.the() == Attribute::from(&name_attr))
+            .collect();
+        let age_results: Vec<_> = results
+            .iter()
+            .filter(|f| f.the() == Attribute::from(&age_attr))
+            .collect();
 
         assert_eq!(name_results.len(), 1, "Should have exactly one name result");
         assert_eq!(age_results.len(), 1, "Should have exactly one age result");
@@ -825,7 +829,7 @@ mod tests {
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
-        let name_attr = "person/name".parse::<Attribute>()?;
+        let name_attr = the!("person/name");
 
         // Two conflicting values for alice's name
         assert_relation!(artifacts, name_attr, alice, Value::String("Alice".into()));
@@ -836,7 +840,7 @@ mod tests {
         assert_relation!(artifacts, name_attr, bob, Value::String("Robert".into()));
 
         // Attribute is known, entity is variable → AEV scan
-        let rel_app = RelationApplication::new(
+        let rel_app = RelationQuery::new(
             Term::Constant("person".to_string()),
             Term::Constant("name".to_string()),
             Term::var("person"),
@@ -884,7 +888,7 @@ mod tests {
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         let alice = Entity::new()?;
-        let name_attr = "person/name".parse::<Attribute>()?;
+        let name_attr = the!("person/name");
 
         // Two conflicting values for alice's name
         assert_relation!(artifacts, name_attr, alice, Value::String("Alice".into()));
@@ -892,7 +896,7 @@ mod tests {
 
         // Determine the expected winner: query with attribute known to get the
         // winner from AEV, then verify the VAE lookup matches.
-        let aev_app = RelationApplication::new(
+        let aev_app = RelationQuery::new(
             Term::Constant("person".to_string()),
             Term::Constant("name".to_string()),
             Term::var("person"),
@@ -910,7 +914,7 @@ mod tests {
         let expected_winner_value = aev_results[0].is().clone();
 
         // Now query by the winning value with only value known → VAE scan
-        let vae_app = RelationApplication::new(
+        let vae_app = RelationQuery::new(
             Term::var("ns"),
             Term::var("attr"),
             Term::var("person"),
@@ -941,7 +945,7 @@ mod tests {
             Value::String("Alice".into())
         };
 
-        let vae_loser_app = RelationApplication::new(
+        let vae_loser_app = RelationQuery::new(
             Term::var("ns"),
             Term::var("attr"),
             Term::var("person"),
@@ -976,13 +980,13 @@ mod tests {
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         let alice = Entity::new()?;
-        let name_attr = "person/name".parse::<Attribute>()?;
+        let name_attr = the!("person/name");
 
         assert_relation!(artifacts, name_attr, alice, Value::String("Alice".into()));
         assert_relation!(artifacts, name_attr, alice, Value::String("Alicia".into()));
 
         // EAV path (entity known)
-        let eav_app = RelationApplication::new(
+        let eav_app = RelationQuery::new(
             Term::var("ns"),
             Term::var("attr"),
             Term::Constant(alice.clone()),
@@ -995,13 +999,13 @@ mod tests {
         let eav_results = eav_app.perform(&session).try_vec().await?;
         let eav_name_results: Vec<_> = eav_results
             .iter()
-            .filter(|f| f.the() == name_attr)
+            .filter(|f| f.the() == Attribute::from(&name_attr))
             .collect();
         assert_eq!(eav_name_results.len(), 1);
         let eav_winner = eav_name_results[0].is().clone();
 
         // AEV path (attribute known)
-        let aev_app = RelationApplication::new(
+        let aev_app = RelationQuery::new(
             Term::Constant("person".to_string()),
             Term::Constant("name".to_string()),
             Term::var("person"),
@@ -1028,17 +1032,17 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_relation_application_from_split_namespace_name() -> anyhow::Result<()> {
+    async fn test_relation_application_from_split_domain_name() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
 
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         let alice = Entity::new()?;
-        let name_attr = "person/name".parse::<Attribute>()?;
+        let name_attr = the!("person/name");
 
-        let claims = vec![Assertion {
-            the: name_attr.clone(),
+        let claims = vec![Association {
+            the: name_attr.into(),
             of: alice.clone(),
             is: Value::String("Alice".to_string()),
         }];
@@ -1046,7 +1050,7 @@ mod tests {
         let mut session = Session::open(artifacts.clone());
         session.transact(claims).await?;
 
-        let rel_app = RelationApplication::new(
+        let rel_app = RelationQuery::new(
             Term::Constant("person".to_string()),
             Term::Constant("name".to_string()),
             Term::var("person"),
@@ -1055,8 +1059,8 @@ mod tests {
             None,
         );
 
-        // Verify namespace/name
-        assert_eq!(rel_app.namespace(), &Term::Constant("person".to_string()));
+        // Verify domain/name
+        assert_eq!(rel_app.domain(), &Term::Constant("person".to_string()));
         assert_eq!(rel_app.name(), &Term::Constant("name".to_string()));
 
         let session = Session::open(artifacts);
@@ -1072,14 +1076,15 @@ mod tests {
     #[dialog_common::test]
     async fn test_relation_application_query() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
+        use crate::{The, the};
 
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         let alice = Entity::new()?;
-        let name_attr = "person/name".parse::<Attribute>()?;
+        let name_attr = the!("person/name");
 
-        let claims = vec![Assertion {
+        let claims = vec![Association {
             the: name_attr.clone(),
             of: alice.clone(),
             is: Value::String("Alice".to_string()),
@@ -1088,7 +1093,7 @@ mod tests {
         let mut session = Session::open(artifacts.clone());
         session.transact(claims).await?;
 
-        let rel_app = RelationApplication::new(
+        let rel_app = RelationQuery::new(
             Term::Constant("person".to_string()),
             Term::Constant("name".to_string()),
             Term::var("person"),
@@ -1105,7 +1110,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let fact = &results[0];
-        assert_eq!(fact.the(), name_attr);
+        assert_eq!(fact.the(), Attribute::from(name_attr));
         assert_eq!(fact.of(), &alice);
         assert_eq!(fact.is(), &Value::String("Alice".to_string()));
 

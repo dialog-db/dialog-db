@@ -5,7 +5,7 @@ use super::Transaction;
 /// This is the extensibility point for the write path. Any type that
 /// knows how to express itself as assertions and/or retractions
 /// implements `Edit` and can be passed to
-/// [`Transaction::edit`](super::Transaction::edit). The [`Claim`](crate::Claim)
+/// [`Transaction::edit`](super::Transaction::edit). The [`Assertion`](crate::Assertion)
 /// trait provides a higher-level API on top of `Edit` that separates
 /// assert and retract directions.
 pub trait Edit {

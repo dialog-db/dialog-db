@@ -1,9 +1,9 @@
-pub use crate::concept::application::ConceptApplication;
+pub use crate::concept::application::ConceptQuery;
 pub use crate::error::AnalyzerError;
 pub use crate::error::{PlanError, QueryResult};
-pub use crate::formula::application::FormulaApplication;
+pub use crate::formula::query::FormulaQuery;
 pub use crate::premise::{Negation, Premise};
-pub use crate::relation::application::RelationApplication;
+pub use crate::relation::query::RelationQuery;
 use crate::selection::Answers;
 pub use crate::{Environment, Parameters, Schema, Source};
 use futures_util::future::Either;
@@ -23,13 +23,13 @@ pub use std::fmt::Display;
 /// rather than querying stored data.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Proposition {
-    /// Relation query with separate namespace and name.
-    /// Boxed to reduce enum size (RelationApplication is ~432 bytes vs ~96 for other variants).
-    Relation(Box<RelationApplication>),
+    /// Relation query with separate domain and name.
+    /// Boxed to reduce enum size (RelationQuery is ~432 bytes vs ~96 for other variants).
+    Relation(Box<RelationQuery>),
     /// Concept realization - matching entities against concept patterns
-    Concept(ConceptApplication),
+    Concept(ConceptQuery),
     /// Application of a formula for computation
-    Formula(FormulaApplication),
+    Formula(FormulaQuery),
 }
 
 impl Proposition {
@@ -81,14 +81,14 @@ impl Proposition {
     }
 }
 
-impl From<ConceptApplication> for Proposition {
-    fn from(selector: ConceptApplication) -> Self {
+impl From<ConceptQuery> for Proposition {
+    fn from(selector: ConceptQuery) -> Self {
         Proposition::Concept(selector)
     }
 }
 
-impl From<FormulaApplication> for Proposition {
-    fn from(application: FormulaApplication) -> Self {
+impl From<FormulaQuery> for Proposition {
+    fn from(application: FormulaQuery) -> Self {
         Proposition::Formula(application)
     }
 }

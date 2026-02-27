@@ -1,11 +1,12 @@
-use crate::artifact::{Attribute, Entity, Value};
+use crate::artifact::{Entity, Value};
+use crate::attribute::The;
 use std::collections::HashMap;
 
 /// Changes organized by entity -> attribute -> operations.
 /// Each `(entity, attribute)` pair may have multiple changes — for example
 /// asserting several values on a `Cardinality::Many` attribute in one
 /// transaction.
-pub type Changes = HashMap<Entity, HashMap<Attribute, Vec<Change>>>;
+pub type Changes = HashMap<Entity, HashMap<The, Vec<Change>>>;
 
 /// A single write operation on an `(entity, attribute)` pair inside a
 /// [`Transaction`](super::Transaction).

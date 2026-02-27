@@ -31,7 +31,7 @@
 
 use crate::artifact::TypeError;
 use crate::error::FormulaEvaluationError;
-use crate::formula::application::FormulaApplication;
+use crate::formula::query::FormulaQuery;
 use crate::selection::{Answer, Factors};
 use crate::{Parameters, Term, Value};
 use std::sync::Arc;
@@ -60,8 +60,8 @@ pub struct Bindings {
 
     /// The formula application these bindings belong to
     /// Used to create Factor::Derived with proper provenance
-    /// Stored as Arc to avoid cloning the entire FormulaApplication
-    formula: Arc<FormulaApplication>,
+    /// Stored as Arc to avoid cloning the entire FormulaQuery
+    formula: Arc<FormulaQuery>,
 }
 
 impl Bindings {
@@ -71,11 +71,7 @@ impl Bindings {
     /// * `formula` - The formula application being evaluated (for provenance tracking)
     /// * `source` - The answer containing current variable bindings and provenance
     /// * `terms` - Mapping from formula parameter names to query terms
-    pub fn new(
-        formula: Arc<FormulaApplication>,
-        source: impl Into<Answer>,
-        terms: Parameters,
-    ) -> Self {
+    pub fn new(formula: Arc<FormulaQuery>, source: impl Into<Answer>, terms: Parameters) -> Self {
         Self {
             source: source.into(),
             terms,
@@ -209,7 +205,7 @@ impl Bindings {
         let factor = Factor::Derived {
             value: value.clone(),
             from: self.reads.clone(), // Use the tracked reads as dependencies
-            formula: Arc::clone(&self.formula), // Clone the Arc, not the FormulaApplication
+            formula: Arc::clone(&self.formula), // Clone the Arc, not the FormulaQuery
         };
 
         // Assign to the answer - this will fail if there's a conflicting value
@@ -239,12 +235,12 @@ mod tests {
     use crate::Term;
 
     // Helper to create a test formula for bindings tests
-    fn test_formula() -> crate::formula::application::FormulaApplication {
+    fn test_formula() -> crate::formula::query::FormulaQuery {
         use std::sync::OnceLock;
         static EMPTY_CELLS: OnceLock<crate::formula::cell::Cells> = OnceLock::new();
         let cells = EMPTY_CELLS.get_or_init(crate::formula::cell::Cells::new);
 
-        crate::formula::application::FormulaApplication {
+        crate::formula::query::FormulaQuery {
             name: "test",
             compute: |_| Ok(vec![]),
             cost: 0,
@@ -364,7 +360,7 @@ mod tests {
         let conflicting_factor = Factor::Derived {
             value: Value::UnsignedInt(100),
             from: HashMap::new(),
-            formula: Arc::new(crate::formula::application::FormulaApplication {
+            formula: Arc::new(crate::formula::query::FormulaQuery {
                 name: "test",
                 compute: |_| Ok(vec![]),
                 cost: 0,

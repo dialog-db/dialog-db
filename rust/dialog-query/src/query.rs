@@ -24,9 +24,10 @@ impl<T> Store for T where T: ArtifactStoreMut + Clone + ConditionalSend {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::artifact::{Artifacts, Attribute, Entity, Value};
-    use crate::relation::application::RelationApplication;
-    use crate::{Assertion, Session, Term};
+    use crate::artifact::{Artifacts, Entity, Value};
+    use crate::relation::query::RelationQuery;
+    use crate::the;
+    use crate::{Association, Session, Term};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
@@ -39,18 +40,18 @@ mod tests {
         let bob = Entity::new()?;
 
         let claims = vec![
-            Assertion {
-                the: "user/name".parse::<Attribute>()?,
+            Association {
+                the: the!("user/name"),
                 of: alice.clone(),
                 is: Value::String("Alice".to_string()),
             },
-            Assertion {
-                the: "user/email".parse::<Attribute>()?,
+            Association {
+                the: the!("user/email"),
                 of: alice.clone(),
                 is: Value::String("alice@example.com".to_string()),
             },
-            Assertion {
-                the: "user/name".parse::<Attribute>()?,
+            Association {
+                the: the!("user/name"),
                 of: bob.clone(),
                 is: Value::String("Bob".to_string()),
             },
@@ -59,7 +60,7 @@ mod tests {
         let mut session = Session::open(artifacts.clone());
         session.transact(claims).await?;
 
-        let alice_query = RelationApplication::new(
+        let alice_query = RelationQuery::new(
             Term::from("user"),
             Term::from("name"),
             alice.clone().into(),
@@ -72,7 +73,7 @@ mod tests {
         let result = alice_query.perform(&session).try_vec().await;
         assert!(result.is_ok());
 
-        let all_names_query = RelationApplication::new(
+        let all_names_query = RelationQuery::new(
             Term::from("user"),
             Term::from("name"),
             Term::blank(),
@@ -85,7 +86,7 @@ mod tests {
         let result = all_names_query.perform(&session).try_vec().await;
         assert!(result.is_ok());
 
-        let email_query = RelationApplication::new(
+        let email_query = RelationQuery::new(
             Term::from("user"),
             Term::from("email"),
             alice.clone().into(),
@@ -106,7 +107,7 @@ mod tests {
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
-        let variable_query = RelationApplication::new(
+        let variable_query = RelationQuery::new(
             Term::from("user"),
             Term::from("name"),
             Term::<Entity>::var("user"),
@@ -128,8 +129,8 @@ mod tests {
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         let alice = Entity::new()?;
-        let claims = vec![Assertion {
-            the: "user/name".parse::<Attribute>()?,
+        let claims = vec![Association {
+            the: the!("user/name"),
             of: alice.clone(),
             is: Value::String("Alice".to_string()),
         }];
@@ -137,7 +138,7 @@ mod tests {
         let mut session = Session::open(artifacts.clone());
         session.transact(claims).await?;
 
-        let fact_selector = RelationApplication::new(
+        let fact_selector = RelationQuery::new(
             Term::from("user"),
             Term::from("name"),
             alice.clone().into(),
@@ -162,23 +163,23 @@ mod tests {
         let bob = Entity::new()?;
 
         let claims = vec![
-            Assertion {
-                the: "user/name".parse::<Attribute>()?,
+            Association {
+                the: the!("user/name"),
                 of: alice.clone(),
                 is: Value::String("Alice".to_string()),
             },
-            Assertion {
-                the: "user/role".parse::<Attribute>()?,
+            Association {
+                the: the!("user/role"),
                 of: alice.clone(),
                 is: Value::String("admin".to_string()),
             },
-            Assertion {
-                the: "user/name".parse::<Attribute>()?,
+            Association {
+                the: the!("user/name"),
                 of: bob.clone(),
                 is: Value::String("Bob".to_string()),
             },
-            Assertion {
-                the: "user/role".parse::<Attribute>()?,
+            Association {
+                the: the!("user/role"),
                 of: bob.clone(),
                 is: Value::String("user".to_string()),
             },
@@ -188,7 +189,7 @@ mod tests {
         session.transact(claims).await?;
 
         let session = Session::open(artifacts.clone());
-        let admin_result = RelationApplication::new(
+        let admin_result = RelationQuery::new(
             Term::from("user"),
             Term::from("role"),
             Term::blank(),
@@ -202,7 +203,7 @@ mod tests {
         assert!(admin_result.is_ok());
 
         let session = Session::open(artifacts);
-        let names_result = RelationApplication::new(
+        let names_result = RelationQuery::new(
             Term::from("user"),
             Term::from("name"),
             Term::blank(),
