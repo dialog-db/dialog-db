@@ -1,5 +1,4 @@
 use crate::Predicate;
-use crate::assertion::{Assertion, Retraction};
 use crate::attribute::{Attribute, AttributeDescriptor};
 use crate::concept::application::ConceptQuery;
 use crate::concept::descriptor::ConceptDescriptor;
@@ -7,6 +6,7 @@ use crate::concept::{Concept, Conclusion};
 use crate::negation::Negation;
 use crate::query::{Application, Output, Source};
 use crate::selection::{Answer, Answers};
+use crate::statement::{Retraction, Statement};
 use crate::types::Scalar;
 use crate::{
     Association, Cardinality, Entity, Parameters, Premise, Proposition, QueryError, Term,
@@ -147,7 +147,7 @@ where
     }
 }
 
-impl<A: Attribute> Assertion for With<A>
+impl<A: Attribute> Statement for With<A>
 where
     A: Clone,
 {
@@ -837,8 +837,8 @@ mod tests {
     #[dialog_common::test]
     async fn it_claims_attribute() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
-        use crate::assertion::Assertion;
         use crate::concept::With;
+        use crate::statement::Statement;
         use crate::{Entity, Query, Session, Term, Transaction};
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;

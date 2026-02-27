@@ -122,7 +122,7 @@ mod tests {
     use crate::term::Term;
     use crate::the;
     use crate::types::Scalar;
-    use crate::{Answer, Assertion, Cardinality, Concept, QueryError, Session, Transaction};
+    use crate::{Answer, Cardinality, Concept, QueryError, Session, Statement, Transaction};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
@@ -234,7 +234,7 @@ mod tests {
         }
     }
 
-    impl Assertion for Person {
+    impl Statement for Person {
         fn assert(self, transaction: &mut Transaction) {
             transaction.associate(Association {
                 the: "person/name".parse().expect("Failed to parse attribute"),

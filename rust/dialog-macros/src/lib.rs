@@ -66,7 +66,7 @@ pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Derive macro to generate Concept implementation from a struct definition.
 ///
 /// Generates all necessary boilerplate for implementing a concept,
-/// including Query, Conclusion, Assertion, and Term types.
+/// including Query, Conclusion, Statement, and Term types.
 ///
 /// The struct must have a `this: Entity` field. All other fields must implement
 /// the `dialog_query::attribute::Attribute` trait.
@@ -134,9 +134,9 @@ pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///     fn this(&self) -> &Entity { todo!() }
 /// }
 ///
-/// // Assertion trait — assert/retract into transactions
-/// # trait Assertion { fn assert(self, transaction: &mut ()); fn retract(self, transaction: &mut ()); }
-/// impl Assertion for Employee {
+/// // Statement trait — assert/retract into transactions
+/// # trait Statement { fn assert(self, transaction: &mut ()); fn retract(self, transaction: &mut ()); }
+/// impl Statement for Employee {
 ///     fn assert(self, transaction: &mut ()) { todo!() }
 ///     fn retract(self, transaction: &mut ()) { todo!() }
 /// }

@@ -11,7 +11,7 @@ use base58::ToBase58;
 use serde::{Deserialize, Serialize};
 
 /// A validated attribute–value pair with its cardinality, produced by
-/// [`AttributeDescriptor::resolve`]. Used inside [`Conception`](crate::concept::descriptor::Conception)
+/// [`AttributeDescriptor::resolve`]. Used inside [`ConceptStatement`](crate::concept::descriptor::ConceptStatement)
 /// to represent the set of facts that make up a concept instance.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Attribution {
