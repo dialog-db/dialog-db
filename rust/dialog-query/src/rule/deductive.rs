@@ -415,4 +415,78 @@ mod tests {
             assert_eq!(variable, "key", "Should report 'key' as unbound");
         }
     }
+
+    #[dialog_common::test]
+    fn it_rejects_negated_constraint_with_unbound_variable() {
+        use crate::relation::descriptor::RelationDescriptor;
+        use crate::relation::query::RelationQuery;
+
+        let conclusion = ConceptDescriptor::from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
+
+        let name = Term::<Value>::var("name");
+        let z = Term::<Value>::var("z");
+        let premises = vec![
+            RelationQuery::new(
+                Term::Constant(the!("person/name")),
+                Term::<Entity>::var("this"),
+                name.clone(),
+                Term::var("cause"),
+                Some(RelationDescriptor::new(None, Cardinality::One)),
+            )
+            .into(),
+            // ?z is never bound by any premise — should fail to compile
+            !name.is(z),
+        ];
+
+        let result = DeductiveRule::new(conclusion, premises);
+        assert!(
+            result.is_err(),
+            "Should reject rule with negated constraint referencing unbound variable ?z"
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_rejects_negated_constraint_with_unbound_variable_on_left() {
+        use crate::relation::descriptor::RelationDescriptor;
+        use crate::relation::query::RelationQuery;
+
+        let conclusion = ConceptDescriptor::from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
+
+        let name = Term::<Value>::var("name");
+        let z = Term::<Value>::var("z");
+        let premises = vec![
+            RelationQuery::new(
+                Term::Constant(the!("person/name")),
+                Term::<Entity>::var("this"),
+                name.clone(),
+                Term::var("cause"),
+                Some(RelationDescriptor::new(None, Cardinality::One)),
+            )
+            .into(),
+            // flipped: ?z (unbound) on the left, ?name (bound) on the right
+            !z.is(name),
+        ];
+
+        let result = DeductiveRule::new(conclusion, premises);
+        assert!(
+            result.is_err(),
+            "Should reject rule with negated constraint referencing unbound variable ?z (flipped)"
+        );
+    }
 }

@@ -301,7 +301,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl From<#match_name> for dialog_query::Premise {
             fn from(source: #match_name) -> Self {
                 let app: dialog_query::FormulaQuery = source.into();
-                dialog_query::Premise::When(dialog_query::Proposition::Formula(app))
+                dialog_query::Premise::Assert(dialog_query::Proposition::Formula(app))
             }
         }
 

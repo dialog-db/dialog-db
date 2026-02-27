@@ -22,19 +22,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ops::Not;
 
-/// Deserializes an optional `NamedAttributes` map, treating an empty map as `None`.
-fn deserialize_maybe<'de, D>(deserializer: D) -> Result<Option<NamedAttributes>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let map = HashMap::<String, AttributeDescriptor>::deserialize(deserializer)?;
-    if map.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(NamedAttributes::from(map)))
-    }
-}
-
 /// A concept descriptor — a named set of attribute descriptors that together
 /// describe an entity type. Concepts are similar to tables in relational
 /// databases but are more flexible as they can be derived from rules rather
@@ -258,6 +245,19 @@ impl From<&ConceptDescriptor> for Schema {
         }
 
         schema
+    }
+}
+
+/// Deserializes an optional `NamedAttributes` map, treating an empty map as `None`.
+fn deserialize_maybe<'de, D>(deserializer: D) -> Result<Option<NamedAttributes>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let map = HashMap::<String, AttributeDescriptor>::deserialize(deserializer)?;
+    if map.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(NamedAttributes::from(map)))
     }
 }
 

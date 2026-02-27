@@ -510,6 +510,39 @@ mod tests {
         let plan = Plan::try_from(candidate);
         assert!(plan.is_err());
     }
+
+    #[dialog_common::test]
+    fn it_blocks_negated_constraint_with_unbound_variables() {
+        let x = Term::<Value>::var("x");
+        let y = Term::<Value>::var("y");
+        let premise = !x.clone().is(y);
+        let candidate = Candidate::from(premise);
+
+        assert!(
+            !candidate.is_viable(),
+            "Negated constraint with unbound variables should be blocked"
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_unblocks_negated_constraint_when_variables_bound() {
+        let x = Term::<Value>::var("x");
+        let y = Term::<Value>::var("y");
+        let premise = !x.clone().is(y.clone());
+        let mut candidate = Candidate::from(premise);
+
+        assert!(!candidate.is_viable());
+
+        let mut env = Environment::new();
+        env.add(&x);
+        env.add(&y);
+        candidate.update(&env);
+
+        assert!(
+            candidate.is_viable(),
+            "Negated constraint should become viable when all variables are bound"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -541,7 +574,7 @@ mod cost_model_tests {
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
-        let premise = Premise::When(Proposition::Relation(Box::new(app)));
+        let premise = Premise::Assert(Proposition::Relation(Box::new(app)));
         let candidate = Candidate::from(premise);
 
         assert_eq!(
@@ -562,7 +595,7 @@ mod cost_model_tests {
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
-        let premise = Premise::When(Proposition::Relation(Box::new(app)));
+        let premise = Premise::Assert(Proposition::Relation(Box::new(app)));
         let candidate = Candidate::from(premise);
 
         assert_eq!(
@@ -583,7 +616,7 @@ mod cost_model_tests {
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
-        let premise = Premise::When(Proposition::Relation(Box::new(app)));
+        let premise = Premise::Assert(Proposition::Relation(Box::new(app)));
 
         let mut candidate = Candidate::from(premise);
         let initial_cost = candidate.cost();
@@ -652,9 +685,9 @@ mod cost_model_tests {
         );
 
         let one_candidate =
-            Candidate::from(Premise::When(Proposition::Relation(Box::new(one_app))));
+            Candidate::from(Premise::Assert(Proposition::Relation(Box::new(one_app))));
         let many_candidate =
-            Candidate::from(Premise::When(Proposition::Relation(Box::new(many_app))));
+            Candidate::from(Premise::Assert(Proposition::Relation(Box::new(many_app))));
 
         assert!(
             many_candidate.cost() > one_candidate.cost(),
@@ -698,9 +731,9 @@ mod cost_model_tests {
         );
 
         let one_candidate =
-            Candidate::from(Premise::When(Proposition::Relation(Box::new(one_app))));
+            Candidate::from(Premise::Assert(Proposition::Relation(Box::new(one_app))));
         let many_candidate =
-            Candidate::from(Premise::When(Proposition::Relation(Box::new(many_app))));
+            Candidate::from(Premise::Assert(Proposition::Relation(Box::new(many_app))));
 
         assert_eq!(one_candidate.cost(), SEGMENT_READ_COST);
         assert_eq!(many_candidate.cost(), RANGE_READ_COST);
@@ -732,7 +765,7 @@ mod cost_model_tests {
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
         let fact_candidate =
-            Candidate::from(Premise::When(Proposition::Relation(Box::new(fact_app))));
+            Candidate::from(Premise::Assert(Proposition::Relation(Box::new(fact_app))));
 
         assert!(
             formula_candidate.cost() < fact_candidate.cost(),
@@ -975,12 +1008,12 @@ mod cost_model_tests {
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
-        let a1 = Candidate::from(Premise::When(Proposition::Relation(Box::new(p1))));
+        let a1 = Candidate::from(Premise::Assert(Proposition::Relation(Box::new(p1))));
         let cost1 = a1.cost();
 
         assert_eq!(cost1, RANGE_SCAN_COST);
 
-        let mut a2 = Candidate::from(Premise::When(Proposition::Relation(Box::new(p2.clone()))));
+        let mut a2 = Candidate::from(Premise::Assert(Proposition::Relation(Box::new(p2.clone()))));
         let mut env = Environment::new();
         env.add(&Term::<Value>::var("entity"));
         a2.update(&env);
@@ -1017,7 +1050,7 @@ mod cost_model_tests {
             eprintln!("  {}: {:?}", name, constraint.requirement);
         }
 
-        let premise = Premise::When(Proposition::Relation(Box::new(app)));
+        let premise = Premise::Assert(Proposition::Relation(Box::new(app)));
         let mut candidate = Candidate::from(premise);
 
         eprintln!("\nInitial state:");
@@ -1049,7 +1082,7 @@ mod cost_model_tests {
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
-        let premise = Premise::When(Proposition::Relation(Box::new(app)));
+        let premise = Premise::Assert(Proposition::Relation(Box::new(app)));
         let mut candidate = Candidate::from(premise);
 
         // Bind entity → cost should decrease
@@ -1087,7 +1120,7 @@ mod cost_model_tests {
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::Many)),
         );
-        let premise = Premise::When(Proposition::Relation(Box::new(app)));
+        let premise = Premise::Assert(Proposition::Relation(Box::new(app)));
         let mut candidate = Candidate::from(premise);
 
         assert_eq!(

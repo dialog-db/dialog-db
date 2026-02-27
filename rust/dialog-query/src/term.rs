@@ -15,6 +15,7 @@ use std::marker::PhantomData;
 use crate::artifact::{Attribute as ArtifactAttribute, Cause, Entity, Type, TypeError, Value};
 use crate::constraint::{Constraint, Equality};
 use crate::error::SyntaxError;
+use crate::proposition::Proposition;
 use crate::types::{IntoType, Scalar};
 use crate::{Attribute, Premise};
 use serde::{Deserialize, Serialize};
@@ -232,7 +233,9 @@ where
     /// let constraint = Term::<Value>::var("x").is(Term::<Value>::var("y"));
     /// ```
     pub fn is<Other: Into<Term<T>>>(self, other: Other) -> Premise {
-        Constraint::Equality(Equality::new(self.as_unknown(), other.into().as_unknown())).into()
+        Premise::Assert(Proposition::Constraint(Constraint::Equality(
+            Equality::new(self.as_unknown(), other.into().as_unknown()),
+        )))
     }
 
     /// Convert this typed term to an untyped Term<Value>
@@ -739,6 +742,7 @@ mod tests {
     #[dialog_common::test]
     fn it_creates_equality_constraint() {
         use crate::Premise;
+        use crate::proposition::Proposition;
 
         // Create two variable terms
         let x = Term::<Value>::var("x");
@@ -747,9 +751,9 @@ mod tests {
         // Use is() to create an equality constraint
         let premise = x.is(y);
 
-        // Verify it creates a Constraint Premise
+        // Verify it creates a Constraint wrapped in Proposition
         match premise {
-            Premise::Where(Constraint::Equality(constraint)) => {
+            Premise::Assert(Proposition::Constraint(Constraint::Equality(constraint))) => {
                 // Verify the constraint has the right structure
                 assert_eq!(constraint.this.name(), Some("x"));
                 assert_eq!(constraint.is.name(), Some("y"));
@@ -761,6 +765,7 @@ mod tests {
     #[dialog_common::test]
     fn it_creates_equality_with_constant() {
         use crate::Premise;
+        use crate::proposition::Proposition;
 
         // Create a variable and a constant
         let x = Term::<Value>::var("x");
@@ -769,9 +774,9 @@ mod tests {
         // Use is() to create a constraint between variable and constant
         let premise = x.is(constant);
 
-        // Verify it creates a Constraint Premise
+        // Verify it creates a Constraint wrapped in Proposition
         match premise {
-            Premise::Where(Constraint::Equality(constraint)) => {
+            Premise::Assert(Proposition::Constraint(Constraint::Equality(constraint))) => {
                 assert_eq!(constraint.this.name(), Some("x"));
                 assert!(constraint.is.is_constant());
             }

@@ -214,8 +214,8 @@ mod tests {
         );
 
         let premises = vec![
-            crate::Premise::When(Proposition::Relation(Box::new(fact1))),
-            crate::Premise::When(Proposition::Relation(Box::new(fact2))),
+            crate::Premise::Assert(Proposition::Relation(Box::new(fact1))),
+            crate::Premise::Assert(Proposition::Relation(Box::new(fact2))),
         ];
 
         let plan = Planner::from(premises)
@@ -261,8 +261,8 @@ mod tests {
         );
 
         let premises = vec![
-            crate::Premise::When(Proposition::Relation(Box::new(fact1))),
-            crate::Premise::When(Proposition::Relation(Box::new(fact2))),
+            crate::Premise::Assert(Proposition::Relation(Box::new(fact1))),
+            crate::Premise::Assert(Proposition::Relation(Box::new(fact2))),
         ];
 
         let plan = Planner::from(premises)
@@ -331,8 +331,8 @@ mod tests {
         );
 
         let premises = vec![
-            crate::Premise::When(Proposition::Relation(Box::new(fact1))),
-            crate::Premise::When(Proposition::Relation(Box::new(fact2))),
+            crate::Premise::Assert(Proposition::Relation(Box::new(fact1))),
+            crate::Premise::Assert(Proposition::Relation(Box::new(fact2))),
         ];
         let plan = Planner::from(premises).plan(&Environment::new())?;
 
@@ -391,7 +391,7 @@ mod tests {
             Some(RelationDescriptor::new(None, Cardinality::Many)),
         );
 
-        let premises = vec![Premise::When(Proposition::Relation(Box::new(hobby)))];
+        let premises = vec![Premise::Assert(Proposition::Relation(Box::new(hobby)))];
         let plan = Planner::from(premises)
             .plan(&Environment::new())
             .expect("Should compile");

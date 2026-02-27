@@ -94,3 +94,84 @@ impl Display for Negation {
         write!(f, "! {}", application)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::Session;
+    use crate::artifact::Artifacts;
+    use crate::error::QueryError;
+    use crate::selection::{Answer, Evidence};
+    use crate::{Term, Value};
+    use dialog_storage::MemoryStorageBackend;
+    use futures_util::TryStreamExt;
+
+    #[dialog_common::test]
+    async fn it_passes_answer_when_negated_equality_not_satisfied() -> Result<(), QueryError> {
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await.unwrap();
+        let session = Session::open(store);
+
+        // a=1, b=2 → equality finds no match → negation keeps the answer
+        let a = Term::<Value>::var("a");
+        let b = Term::<Value>::var("b");
+        let premise = !a.clone().is(b.clone());
+
+        let mut answer = Answer::new();
+        answer.merge(Evidence::Parameter {
+            term: &a,
+            value: &Value::from(1),
+        })?;
+        answer.merge(Evidence::Parameter {
+            term: &b,
+            value: &Value::from(2),
+        })?;
+
+        let results: Vec<Answer> = premise
+            .evaluate(answer.seed(), &session)
+            .try_collect()
+            .await?;
+
+        assert_eq!(
+            results.len(),
+            1,
+            "Answer where a != b should pass through negated equality"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_filters_answer_when_negated_equality_satisfied() -> Result<(), QueryError> {
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await.unwrap();
+        let session = Session::open(store);
+
+        // a=1, b=1 → equality matches → negation drops the answer
+        let a = Term::<Value>::var("a");
+        let b = Term::<Value>::var("b");
+        let premise = !a.clone().is(b.clone());
+
+        let mut answer = Answer::new();
+        answer.merge(Evidence::Parameter {
+            term: &a,
+            value: &Value::from(1),
+        })?;
+        answer.merge(Evidence::Parameter {
+            term: &b,
+            value: &Value::from(1),
+        })?;
+
+        let results: Vec<Answer> = premise
+            .evaluate(answer.seed(), &session)
+            .try_collect()
+            .await?;
+
+        assert_eq!(
+            results.len(),
+            0,
+            "Answer where a == b should be filtered out by negated equality"
+        );
+
+        Ok(())
+    }
+}

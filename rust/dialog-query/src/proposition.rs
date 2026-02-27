@@ -1,4 +1,5 @@
 pub use crate::concept::application::ConceptQuery;
+use crate::constraint::Constraint;
 pub use crate::error::AnalyzerError;
 pub use crate::error::{PlanError, QueryResult};
 pub use crate::formula::query::FormulaQuery;
@@ -17,10 +18,8 @@ pub use std::fmt::Display;
 ///   associated deductive rules.
 /// - `Formula` — pure computation that derives new bindings from existing
 ///   ones without touching the fact store.
-///
-/// Constraints (equality, comparison) are *not* propositions — they live in
-/// [`Premise::Where`](crate::Premise::Where) because they relate variables
-/// rather than querying stored data.
+/// - `Constraint` — pure variable constraint (equality, comparison) that
+///   filters or infers bindings without querying stored data.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Proposition {
     /// Relation query with separate domain and name.
@@ -30,6 +29,8 @@ pub enum Proposition {
     Concept(ConceptQuery),
     /// Application of a formula for computation
     Formula(FormulaQuery),
+    /// Constraint between variables (equality, comparison, etc.)
+    Constraint(Constraint),
 }
 
 impl Proposition {
@@ -41,19 +42,23 @@ impl Proposition {
             Proposition::Relation(application) => application.estimate(env),
             Proposition::Concept(application) => application.estimate(env),
             Proposition::Formula(application) => application.estimate(env),
+            Proposition::Constraint(constraint) => constraint.estimate(env),
         }
     }
 
     /// Evaluate this application against the given context, producing answers
     pub fn evaluate<S: Source, M: Answers>(self, answers: M, source: &S) -> impl Answers {
         match self {
-            Proposition::Relation(application) => Either::Left(Either::Left(
+            Proposition::Relation(application) => Either::Left(Either::Left(Either::Left(
                 application.evaluate_with_provenance(source.clone(), answers),
-            )),
-            Proposition::Concept(application) => {
-                Either::Left(Either::Right(application.evaluate(answers, source)))
+            ))),
+            Proposition::Concept(application) => Either::Left(Either::Left(Either::Right(
+                application.evaluate(answers, source),
+            ))),
+            Proposition::Formula(application) => {
+                Either::Left(Either::Right(application.evaluate(answers)))
             }
-            Proposition::Formula(application) => Either::Right(application.evaluate(answers)),
+            Proposition::Constraint(constraint) => Either::Right(constraint.evaluate(answers)),
         }
     }
 
@@ -63,6 +68,7 @@ impl Proposition {
             Proposition::Relation(application) => application.parameters(),
             Proposition::Concept(application) => application.parameters(),
             Proposition::Formula(application) => application.parameters(),
+            Proposition::Constraint(constraint) => constraint.parameters(),
         }
     }
 
@@ -72,6 +78,7 @@ impl Proposition {
             Proposition::Relation(application) => application.schema(),
             Proposition::Concept(application) => application.schema(),
             Proposition::Formula(application) => application.schema(),
+            Proposition::Constraint(constraint) => constraint.schema(),
         }
     }
 
@@ -99,6 +106,13 @@ impl Display for Proposition {
             Proposition::Relation(application) => Display::fmt(application, f),
             Proposition::Concept(application) => Display::fmt(application, f),
             Proposition::Formula(application) => Display::fmt(application, f),
+            Proposition::Constraint(constraint) => Display::fmt(constraint, f),
         }
+    }
+}
+
+impl From<Constraint> for Proposition {
+    fn from(constraint: Constraint) -> Self {
+        Proposition::Constraint(constraint)
     }
 }

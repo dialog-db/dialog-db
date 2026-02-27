@@ -515,13 +515,13 @@ impl From<RelationQuery> for Proposition {
 
 impl From<RelationQuery> for Premise {
     fn from(application: RelationQuery) -> Self {
-        Premise::When(Proposition::Relation(Box::new(application)))
+        Premise::Assert(Proposition::Relation(Box::new(application)))
     }
 }
 
 impl From<&RelationQuery> for Premise {
     fn from(application: &RelationQuery) -> Self {
-        Premise::When(Proposition::Relation(Box::new(application.clone())))
+        Premise::Assert(Proposition::Relation(Box::new(application.clone())))
     }
 }
 

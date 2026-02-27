@@ -262,7 +262,7 @@ where
     A: Clone + std::fmt::Debug + Send + 'static,
 {
     fn from(source: WithQuery<A>) -> Self {
-        Premise::When(source.into())
+        Premise::Assert(source.into())
     }
 }
 
@@ -866,7 +866,7 @@ mod tests {
 
         let premise: crate::Premise = query.into();
         let application = match premise {
-            crate::Premise::When(app) => app,
+            crate::Premise::Assert(app) => app,
             _ => panic!("Expected Apply premise"),
         };
 
@@ -932,7 +932,7 @@ mod tests {
         let premise: crate::Premise = query.into();
 
         let application = match premise {
-            crate::Premise::When(app) => app,
+            crate::Premise::Assert(app) => app,
             _ => panic!("Expected Apply premise"),
         };
 
@@ -1005,7 +1005,7 @@ mod tests {
         let premise: crate::Premise = query.into();
 
         let application = match premise {
-            crate::Premise::When(app) => app,
+            crate::Premise::Assert(app) => app,
             _ => panic!("Expected Apply premise"),
         };
 
