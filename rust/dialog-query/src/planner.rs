@@ -371,4 +371,58 @@ mod tests {
 
         Ok(())
     }
+
+    #[dialog_common::test]
+    fn it_restores_cost_when_replanned_to_empty_scope() {
+        use crate::relation::descriptor::RelationDescriptor;
+        use crate::relation::query::RelationQuery;
+        use crate::schema::{INDEX_SCAN, RANGE_SCAN_COST};
+        use crate::{Cardinality, Proposition, Term};
+        use dialog_artifacts::Entity;
+
+        // Cardinality::Many premise:
+        //   1/3 constraints (just 'the'): INDEX_SCAN = 5000
+        //   2/3 constraints (the + of):   RANGE_SCAN_COST = 1000
+        let hobby = RelationQuery::new(
+            Term::Constant(the!("person/hobbies")),
+            Term::<Entity>::var("entity"),
+            Term::<Value>::var("hobby"),
+            Term::var("cause"),
+            Some(RelationDescriptor::new(None, Cardinality::Many)),
+        );
+
+        let premises = vec![Premise::When(Proposition::Relation(Box::new(hobby)))];
+        let plan = Planner::from(premises)
+            .plan(&Environment::new())
+            .expect("Should compile");
+
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(
+            plan.steps[0].cost, INDEX_SCAN,
+            "With 1/3 constraints, cost should be INDEX_SCAN"
+        );
+
+        // Replan with entity bound → cheaper
+        let mut env_with_entity = Environment::new();
+        env_with_entity.add(&Term::<Value>::var("entity"));
+
+        let replanned = plan
+            .plan(&env_with_entity)
+            .expect("Should replan with entity");
+
+        assert_eq!(
+            replanned.steps[0].cost, RANGE_SCAN_COST,
+            "With 2/3 constraints, cost should be RANGE_SCAN_COST"
+        );
+
+        // Replan back to empty → cost should return to original
+        let replanned_empty = plan
+            .plan(&Environment::new())
+            .expect("Should replan back to empty");
+
+        assert_eq!(
+            replanned_empty.steps[0].cost, INDEX_SCAN,
+            "After replanning back to empty env, cost should return to INDEX_SCAN"
+        );
+    }
 }
