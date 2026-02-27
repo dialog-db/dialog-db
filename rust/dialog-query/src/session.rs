@@ -357,7 +357,7 @@ mod tests {
     use crate::selection::Answer;
     use crate::the;
     use crate::{
-        Association, AttributeDescriptor, Cardinality, Concept, Match, Parameters, Term, Type,
+        Association, AttributeDescriptor, Cardinality, Concept, Parameters, Query, Term, Type,
         concept::descriptor::ConceptDescriptor,
     };
 
@@ -632,7 +632,7 @@ mod tests {
 
         // employee can be derived from the stuff concept
         let employee_predicate: crate::concept::descriptor::ConceptDescriptor =
-            Match::<Employee>::default().into();
+            Query::<Employee>::default().into();
         let employee_from_stuff = DeductiveRule::new(
             employee_predicate,
             vec![
@@ -660,7 +660,7 @@ mod tests {
         let mut session = Session::open(store).register(employee_from_stuff)?;
 
         let stuff_predicate: crate::concept::descriptor::ConceptDescriptor =
-            Match::<Stuff>::default().into();
+            Query::<Stuff>::default().into();
         let alice = stuff_predicate
             .create()
             .with("name", "Alice".to_string())
@@ -681,7 +681,7 @@ mod tests {
 
         session.transact(vec![alice, bob]).await?;
 
-        let query_stuff = Match::<Stuff> {
+        let query_stuff = Query::<Stuff> {
             this: Term::var("stuff"),
             name: Term::var("name"),
             role: Term::var("job"),
@@ -693,7 +693,7 @@ mod tests {
 
         // Now we query for employees and expect that employee_from_stuff
         // rule will provide a translation
-        let query_employee = Match::<Employee> {
+        let query_employee = Query::<Employee> {
             this: Term::var("employee"),
             name: Term::var("name"),
             job: Term::var("job"),
@@ -752,11 +752,11 @@ mod tests {
         }
 
         // Define a rule using the clean function API - no manual DeductiveRule construction!
-        fn employee_from_stuff(employee: Match<Employee>) -> impl When {
+        fn employee_from_stuff(employee: Query<Employee>) -> impl When {
             // This rule says: "An employee exists when there's stuff with matching attributes"
             // The premises check for stuff/name and stuff/role matching employee/name and employee/job
             (
-                Match::<Stuff> {
+                Query::<Stuff> {
                     this: employee.this.clone(),
                     name: employee.name.clone(),
                     role: employee.job,
@@ -780,7 +780,7 @@ mod tests {
 
         // Create test data as Stuff
         let stuff_predicate: crate::concept::descriptor::ConceptDescriptor =
-            Match::<Stuff>::default().into();
+            Query::<Stuff>::default().into();
         let alice = stuff_predicate
             .create()
             .with("name", "Alice".to_string())
@@ -796,7 +796,7 @@ mod tests {
         session.transact(vec![alice, bob]).await?;
 
         // Verify Stuff records exist
-        let query_stuff = Match::<Stuff> {
+        let query_stuff = Query::<Stuff> {
             this: Term::var("stuff"),
             name: Term::var("name"),
             role: Term::var("job"),
@@ -806,7 +806,7 @@ mod tests {
         assert_eq!(stuff.len(), 2, "Should have 2 Stuff records");
 
         // Query for Employees - the rule should derive them from Stuff
-        let query_employee = Match::<Employee> {
+        let query_employee = Query::<Employee> {
             this: Term::var("employee"),
             name: Term::var("name"),
             job: Term::var("job"),
@@ -997,14 +997,14 @@ mod tests {
         }
 
         // Rule: a MatchingNote is a Note whose title matches "Hello*"
-        fn matching_notes(result: Match<MatchingNote>) -> impl When {
+        fn matching_notes(result: Query<MatchingNote>) -> impl When {
             let title = Term::<String>::var("_title");
             (
-                Match::<Note> {
+                Query::<Note> {
                     this: result.this,
                     title: title.clone(),
                 },
-                Match::<Like> {
+                Query::<Like> {
                     text: title,
                     pattern: Term::from("Hello*".to_string()),
                     is: result.title,
@@ -1031,7 +1031,7 @@ mod tests {
         });
         session.commit(transaction).await?;
 
-        let results = Match::<MatchingNote> {
+        let results = Query::<MatchingNote> {
             this: Term::var("note"),
             title: Term::var("title"),
         }
@@ -1078,19 +1078,19 @@ mod tests {
         }
 
         // Rule: a NonDraftNote is a Note whose title does NOT match "Draft:*"
-        fn non_draft_notes(result: Match<NonDraftNote>) -> impl When {
+        fn non_draft_notes(result: Query<NonDraftNote>) -> impl When {
             let title = Term::<String>::var("_title");
             (
-                Match::<Note> {
+                Query::<Note> {
                     this: result.this,
                     title: title.clone(),
                 },
-                Match::<Like> {
+                Query::<Like> {
                     text: title.clone(),
                     pattern: Term::from("*".to_string()),
                     is: result.title,
                 },
-                !Match::<Like> {
+                !Query::<Like> {
                     text: title,
                     pattern: Term::from("Draft:*".to_string()),
                     is: Term::blank(),
@@ -1121,7 +1121,7 @@ mod tests {
         });
         session.commit(transaction).await?;
 
-        let results = Match::<NonDraftNote> {
+        let results = Query::<NonDraftNote> {
             this: Term::var("note"),
             title: Term::var("title"),
         }
@@ -1164,7 +1164,7 @@ mod tests {
         }
 
         // Define a rule using the clean function API - no manual DeductiveRule construction!
-        fn employee_with_implicit_title(employee: Match<Employee>) -> impl When {
+        fn employee_with_implicit_title(employee: Query<Employee>) -> impl When {
             // This rule says: "An employee exists when there's stuff with matching attributes"
             // The premises check for stuff/name and stuff/role matching employee/name and employee/job
             (
@@ -1210,7 +1210,7 @@ mod tests {
         session.commit(transaction).await?;
 
         // Verify Stuff records exist
-        let employees = Match::<Employee> {
+        let employees = Query::<Employee> {
             this: Term::var("employee"),
             name: Term::var("name"),
             role: Term::var("title"),

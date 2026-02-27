@@ -112,13 +112,13 @@ pub trait Conclusion: ConditionalSend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Query;
     use crate::artifact::{
         ArtifactSelector, ArtifactStore, Artifacts, Attribute as ArtifactAttribute, Type, Value,
     };
     use crate::attribute::{Attribute as _, AttributeDescriptor};
     use crate::concept::With;
     use crate::relation::query::RelationQuery;
-    use crate::rule::Match;
     use crate::term::Term;
     use crate::the;
     use crate::types::Scalar;
@@ -613,7 +613,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_queries_with_concept_dsl() -> Result<()> {
-        use crate::Match;
+        use crate::Query;
 
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
@@ -668,7 +668,7 @@ mod tests {
 
         session.commit(transaction).await?;
 
-        let employee = Match::<Employee> {
+        let employee = Query::<Employee> {
             this: Term::var("this"),
             name: Term::var("name"),
             role: Term::var("role"),
@@ -964,7 +964,7 @@ mod tests {
         let mut session = Session::open(store.clone());
         session.transact(vec![alice, bob]).await?;
 
-        let query = Match::<DerivedPerson> {
+        let query = Query::<DerivedPerson> {
             this: Term::var("person"),
             name: Term::var("name"),
             birthday: Term::var("birthday"),
@@ -1012,7 +1012,7 @@ mod tests {
         let mut session = Session::open(store.clone());
         session.transact(vec![alice, bob]).await?;
 
-        let query = Match::<DerivedPerson> {
+        let query = Query::<DerivedPerson> {
             this: Term::var("person"),
             name: Term::from("Alice"),
             birthday: Term::var("birthday"),
@@ -1196,12 +1196,12 @@ mod tests {
         });
         session.commit(edit).await?;
 
-        let employees_shortcut: Vec<ShortcutEmployee> = Match::<ShortcutEmployee>::default()
+        let employees_shortcut: Vec<ShortcutEmployee> = Query::<ShortcutEmployee>::default()
             .perform(&session)
             .try_collect()
             .await?;
 
-        let employees_explicit: Vec<ShortcutEmployee> = Match::<ShortcutEmployee>::default()
+        let employees_explicit: Vec<ShortcutEmployee> = Query::<ShortcutEmployee>::default()
             .perform(&session)
             .try_collect()
             .await?;
@@ -1246,12 +1246,12 @@ mod tests {
         });
         session.commit(edit).await?;
 
-        let result1: Vec<ShortcutEmployee> = Match::<ShortcutEmployee>::default()
+        let result1: Vec<ShortcutEmployee> = Query::<ShortcutEmployee>::default()
             .perform(&session)
             .try_collect()
             .await?;
 
-        let result2: Vec<ShortcutEmployee> = Match::<ShortcutEmployee> {
+        let result2: Vec<ShortcutEmployee> = Query::<ShortcutEmployee> {
             this: Term::var("this"),
             name: Term::var("name"),
             job: Term::var("job"),
@@ -1260,7 +1260,7 @@ mod tests {
         .try_collect()
         .await?;
 
-        let result3: Vec<ShortcutEmployee> = Match::<ShortcutEmployee>::default()
+        let result3: Vec<ShortcutEmployee> = Query::<ShortcutEmployee>::default()
             .perform(&session)
             .try_collect()
             .await?;
@@ -1326,7 +1326,7 @@ mod tests {
         });
         session.commit(transaction).await?;
 
-        let alice_query = Match::<HelperPerson> {
+        let alice_query = Query::<HelperPerson> {
             this: Term::var("person"),
             name: Term::from("Alice".to_string()),
         };
@@ -1336,7 +1336,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name.value(), "Alice");
 
-        let all_people_query = Match::<HelperPerson> {
+        let all_people_query = Query::<HelperPerson> {
             this: Term::var("person"),
             name: Term::var("name"),
         };
@@ -1376,7 +1376,7 @@ mod tests {
         });
         session.commit(transaction).await?;
 
-        let alice_engineering_query = Match::<HelperEmployee> {
+        let alice_engineering_query = Query::<HelperEmployee> {
             this: Term::var("employee"),
             name: Term::from("Alice".to_string()),
             department: Term::from("Engineering".to_string()),
@@ -1421,7 +1421,7 @@ mod tests {
         });
         session.commit(transaction).await?;
 
-        let engineering_query = Match::<HelperEmployee> {
+        let engineering_query = Query::<HelperEmployee> {
             this: Term::var("employee"),
             name: Term::var("name"),
             department: Term::from("Engineering".to_string()),

@@ -45,7 +45,3 @@ pub trait Predicate {
 /// ```
 #[allow(type_alias_bounds)]
 pub type Query<T: Predicate> = T::Application;
-
-/// Convenience alias kept for backward compatibility during migration.
-#[allow(type_alias_bounds)]
-pub type Match<T: Predicate> = T::Application;

@@ -193,7 +193,7 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Match, Parameters, Term, selection::Answer};
+    use crate::{Parameters, Query, Term, selection::Answer};
 
     #[dialog_common::test]
     fn it_concatenates_strings() {
@@ -586,7 +586,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_constructs_like_match_struct() {
-        let pattern = Match::<Like> {
+        let pattern = Query::<Like> {
             text: Term::var("title"),
             pattern: Term::from("Hello*".to_string()),
             is: Term::var("matched"),

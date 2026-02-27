@@ -216,6 +216,6 @@ mod tests {
 
         // The scope doesn't care what value the variable has
         // It only tracks the variable NAME for query planning
-        // The actual value is stored in Match, not VariableScope
+        // The actual value is stored in Query, not VariableScope
     }
 }
