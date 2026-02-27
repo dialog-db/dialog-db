@@ -24,8 +24,6 @@ pub mod attribute;
 /// Proposition types for querying the knowledge base.
 pub mod proposition;
 
-/// Assertion trait for asserting and retracting facts.
-pub mod assertion;
 /// Entity-attribute-value association triples for writes.
 pub mod association;
 /// Read-side claim type for query results.
@@ -62,6 +60,8 @@ pub mod schema;
 pub mod selection;
 /// Database sessions for querying and committing changes.
 pub mod session;
+/// Statement trait for asserting and retracting facts.
+pub mod statement;
 /// Stream utilities for async query result iteration.
 pub mod stream;
 /// Term types for pattern matching with variables and constants.
@@ -70,7 +70,6 @@ pub mod term;
 pub mod types;
 
 pub use artifact::{Attribute as ArtifactAttribute, Entity, Type, Value};
-pub use assertion::*;
 pub use association::Association;
 pub use attribute::{Attribute, AttributeDescriptor, Cardinality, The};
 pub use claim::Claim;
@@ -95,6 +94,7 @@ pub use schema::*;
 pub use selection::*;
 pub use session::transaction::{Edit, Transaction};
 pub use session::{QuerySession, Session};
+pub use statement::*;
 pub use stream::*;
 pub use term::*;
 pub use types::{IntoType, Scalar};

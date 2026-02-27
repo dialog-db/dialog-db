@@ -1,7 +1,7 @@
 //! Transaction system for dialog-query
 //!
-//! Provides a more extensible and efficient alternative to the direct Assertion -> Instruction conversion.
-//! Assertions can now add operations to a Transaction which accumulates changes and optimizes before committing.
+//! Provides a more extensible and efficient alternative to the direct Statement -> Instruction conversion.
+//! Statements can now add operations to a Transaction which accumulates changes and optimizes before committing.
 
 mod change;
 mod edit;
@@ -11,7 +11,7 @@ pub use change::*;
 pub use edit::*;
 pub use stream::*;
 
-use crate::Assertion;
+use crate::Statement;
 use crate::artifact::{Artifact, Entity, Instruction};
 use crate::association::{Association, Attribute};
 use crate::attribute::The;
@@ -42,13 +42,13 @@ impl Transaction {
     }
 
     /// Assert a claim into this transaction
-    pub fn assert<C: Assertion>(&mut self, claim: C) -> &mut Self {
+    pub fn assert<C: Statement>(&mut self, claim: C) -> &mut Self {
         claim.assert(self);
         self
     }
 
     /// Retract a claim from this transaction
-    pub fn retract<C: Assertion>(&mut self, claim: C) -> &mut Self {
+    pub fn retract<C: Statement>(&mut self, claim: C) -> &mut Self {
         claim.retract(self);
         self
     }

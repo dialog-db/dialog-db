@@ -57,7 +57,6 @@ mod tests {
 
     use super::*;
     use crate::artifact::{Artifacts, Entity, Type};
-    use crate::assertion::Assertion;
     use crate::attribute::{AttributeDescriptor, Cardinality};
     use crate::concept::application::ConceptQuery;
     use crate::concept::descriptor::ConceptDescriptor;
@@ -66,6 +65,7 @@ mod tests {
     use crate::predicate::Predicate;
     use crate::premise::Premise;
     use crate::selection::Answer;
+    use crate::statement::Statement;
     use crate::term::Term;
     use crate::the;
     use crate::types::Scalar;
@@ -175,7 +175,7 @@ mod tests {
         }
     }
 
-    impl Assertion for Person {
+    impl Statement for Person {
         fn assert(self, transaction: &mut Transaction) {
             Association::new(the!("person/name"), self.this.clone(), self.name.as_value())
                 .assert(transaction);

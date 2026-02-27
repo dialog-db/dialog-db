@@ -3,18 +3,18 @@ mod named_attributes;
 pub use named_attributes::NamedAttributes;
 
 use crate::Predicate;
-use crate::assertion::Retraction;
 use crate::attribute::{AttributeDescriptor, Attribution};
 use crate::concept::application::ConceptQuery;
 use crate::concept::{Concept, Conclusion};
 use crate::error::SchemaError;
 use crate::query::{Application, Source};
 use crate::selection::{Answer, Answers};
+use crate::statement::Retraction;
 use crate::term::Term;
 use crate::types::Scalar;
 use crate::{
-    Assertion, Association, Cardinality, Entity, Field, Parameters, Proposition, QueryError,
-    Requirement, Schema, Transaction, Type, Value,
+    Association, Cardinality, Entity, Field, Parameters, Proposition, QueryError, Requirement,
+    Schema, Statement, Transaction, Type, Value,
 };
 
 use base58::ToBase58;
@@ -136,7 +136,7 @@ impl ConceptDescriptor {
     }
 
     /// Validates a model against this descriptor's schema and creates an instance.
-    fn conform_model(&self, model: Model) -> Result<Conception, SchemaError> {
+    fn conform_model(&self, model: Model) -> Result<ConceptStatement, SchemaError> {
         let mut relations = vec![];
         for (name, attribute) in self.with().iter() {
             if let Some(value) = model.attributes.get(name) {
@@ -150,7 +150,7 @@ impl ConceptDescriptor {
                 });
             }
         }
-        Ok(Conception {
+        Ok(ConceptStatement {
             this: model.this,
             with: relations,
         })
@@ -276,13 +276,13 @@ struct Model {
 /// with all attributes properly typed and confirmed to exist. Can be converted
 /// to artifacts for storage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Conception {
+pub struct ConceptStatement {
     /// The entity this instance represents
     pub this: Entity,
     /// The validated relations (attribute-value pairs) for this instance
     pub with: Vec<Attribution>,
 }
-impl Conception {
+impl ConceptStatement {
     /// Returns a reference to the entity this instance represents.
     pub fn this(&self) -> &'_ Entity {
         &self.this
@@ -294,7 +294,7 @@ impl Conception {
     }
 }
 
-impl Assertion for Conception {
+impl Statement for ConceptStatement {
     fn assert(self, transaction: &mut Transaction) {
         for attribution in self.with {
             transaction.associate(Association::new(
@@ -315,7 +315,7 @@ impl Assertion for Conception {
     }
 }
 
-impl Not for Conception {
+impl Not for ConceptStatement {
     type Output = Retraction<Self>;
 
     fn not(self) -> Self::Output {
@@ -356,7 +356,7 @@ impl<'a> Builder<'a> {
     }
 
     /// Builds and validates the concept instance.
-    pub fn build(self) -> Result<Conception, SchemaError> {
+    pub fn build(self) -> Result<ConceptStatement, SchemaError> {
         self.predicate.conform_model(self.model)
     }
 }

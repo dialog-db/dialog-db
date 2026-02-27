@@ -57,7 +57,7 @@
 //! // -- IntoIterator impl --
 //! // Iterates over Relation values (one per attribute) for asserting facts.
 //!
-//! // -- Assertion impl --
+//! // -- Statement impl --
 //! // Person::assert(tx) / Person::retract(tx) for transactional writes.
 //!
 //! // -- Not impl --
@@ -409,8 +409,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         }
 
-        // Implement Assertion trait
-        impl dialog_query::Assertion for #struct_name {
+        // Implement Statement trait
+        impl dialog_query::Statement for #struct_name {
             fn assert(self, transaction: &mut dialog_query::Transaction) {
                 #(
                     #instance_relations.assert(transaction);
@@ -429,7 +429,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             type Output = dialog_query::Retraction<Self>;
 
             fn not(self) -> Self::Output {
-                dialog_query::Assertion::revert(self)
+                dialog_query::Statement::revert(self)
             }
         }
 

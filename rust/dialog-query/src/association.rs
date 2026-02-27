@@ -1,7 +1,7 @@
 pub use crate::artifact::{Artifact, Attribute, Instruction};
-use crate::assertion::{Assertion, Retraction};
 use crate::attribute::The;
 pub use crate::session::transaction::{Change, Edit, Transaction};
+use crate::statement::{Retraction, Statement};
 pub use crate::{Entity, Value};
 use serde::{Deserialize, Serialize};
 use std::ops::Not;
@@ -45,7 +45,7 @@ impl From<Dissociation> for Change {
     }
 }
 
-impl Assertion for Association {
+impl Statement for Association {
     fn assert(self, transaction: &mut Transaction) {
         transaction.associate(self);
     }
