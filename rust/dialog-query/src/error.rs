@@ -695,6 +695,51 @@ impl<'a> From<EstimateError<'a>> for CompileError {
     }
 }
 
+/// Error from validating a relation identifier (`The`).
+///
+/// Carries the raw input bytes so it can be produced in `const` context.
+/// The human-readable input is rendered on display.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InvalidIdentifier<'a> {
+    /// The raw input that failed validation.
+    pub input: &'a [u8],
+    /// Why the input is invalid.
+    pub reason: &'static str,
+}
+
+impl std::fmt::Display for InvalidIdentifier<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let input = String::from_utf8_lossy(self.input);
+        write!(f, "invalid relation \"{input}\": {}", self.reason)
+    }
+}
+
+impl std::error::Error for InvalidIdentifier<'_> {}
+
+/// Owned version of [`InvalidIdentifier`] for use in contexts that cannot
+/// carry the input lifetime (e.g. [`FromStr`](std::str::FromStr)).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OwnedInvalidIdentifier {
+    /// The input that failed validation.
+    pub input: String,
+    /// Why the input is invalid.
+    pub reason: &'static str,
+}
+
+impl std::fmt::Display for OwnedInvalidIdentifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid relation \"{}\": {}", self.input, self.reason)
+    }
+}
+
+impl std::error::Error for OwnedInvalidIdentifier {}
+
+impl From<OwnedInvalidIdentifier> for DialogArtifactsError {
+    fn from(e: OwnedInvalidIdentifier) -> Self {
+        DialogArtifactsError::InvalidAttribute(e.to_string())
+    }
+}
+
 /// Error types that can occur during transaction operations
 #[derive(Debug, Error)]
 pub enum TransactionError {
