@@ -161,8 +161,7 @@ where
     }
 
     fn retract(self, transaction: &mut Transaction) {
-        Association::new(A::the(), self.this, self.has.value().as_value())
-            .retract(transaction);
+        Association::new(A::the(), self.this, self.has.value().as_value()).retract(transaction);
     }
 }
 
