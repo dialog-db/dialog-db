@@ -146,10 +146,15 @@ impl Candidate {
             }
         }
     }
-    /// Update this candidate with new bindings from the environment.
+    /// Synchronize this candidate with the given target scope.
+    ///
+    /// Variables present in `target_scope` are moved from `binds` to `env`,
+    /// and variables absent from `target_scope` are moved from `env` back to
+    /// `binds`. This handles both incremental updates (scope grows) and
+    /// replanning scenarios (scope shrinks or differs).
+    ///
     /// May transition from Blocked to Viable if requirements are satisfied.
-    /// Only processes relevant bindings and updates incrementally.
-    pub fn update(&mut self, new_bindings: &Environment) {
+    pub fn update(&mut self, target_scope: &Environment) {
         match self {
             Candidate::Viable {
                 premise,
@@ -159,20 +164,37 @@ impl Candidate {
                 schema,
                 params,
             } => {
-                // Only process bindings that are relevant to this plan
                 for (name, _constraint) in schema.iter() {
                     if let Some(term) = params.get(name) {
                         if matches!(term, Term::Constant(_)) || term.is_blank() {
                             continue;
                         }
 
-                        // If this term was in binds and is now bound, move it to env
-                        if new_bindings.contains(term) && binds.contains(term) {
-                            // Add to env (only relevant bindings)
-                            env.add(term);
+                        let in_target = target_scope.contains(term);
+                        let in_env = env.contains(term);
+                        let in_binds = binds.contains(term);
 
-                            // Remove from binds (incremental update)
-                            binds.remove(term);
+                        match (in_target, in_env, in_binds) {
+                            // Variable is in target but only in binds → move to env
+                            (true, false, true) => {
+                                env.add(term);
+                                binds.remove(term);
+                            }
+                            // Variable is in target but tracked nowhere → add to env
+                            (true, false, false) => {
+                                env.add(term);
+                            }
+                            // Variable left target but is in env → move back to binds
+                            (false, true, false) => {
+                                env.remove(term);
+                                binds.add(term);
+                            }
+                            // Variable not in target and not tracked → add to binds
+                            (false, false, false) => {
+                                binds.add(term);
+                            }
+                            // Already consistent: (true, true, _) or (false, false, true)
+                            _ => {}
                         }
                     }
                 }
@@ -189,25 +211,70 @@ impl Candidate {
                 schema,
                 params,
             } => {
+                let is_negation = matches!(premise, Premise::Unless(_));
+
                 // Track which choice groups now have at least one bound parameter
                 let mut satisfied_groups = HashSet::new();
 
-                // Process only relevant bindings (parameters that got bound)
+                // First pass: synchronize each parameter with the target scope
                 for (name, constraint) in schema.iter() {
-                    if let Some(term) = params.get(name)
-                        && new_bindings.contains(term)
-                    {
-                        // Check if this term is relevant to this plan
-                        let was_required = requires.remove(term);
-                        let was_bound = binds.remove(term);
+                    if let Some(term) = params.get(name) {
+                        if matches!(term, Term::Constant(_)) || term.is_blank() {
+                            continue;
+                        }
 
-                        if was_required || was_bound {
-                            // This parameter is now bound (add to env)
-                            env.add(term);
+                        let in_target = target_scope.contains(term);
+                        let in_env = env.contains(term);
 
-                            // If this is part of a choice group, mark that group as satisfied
-                            if let Requirement::Required(Some(group)) = &constraint.requirement {
-                                satisfied_groups.insert(*group);
+                        if in_target && !in_env {
+                            // Variable entered the scope → move from requires/binds to env
+                            let was_required = requires.remove(term);
+                            let was_bound = binds.remove(term);
+
+                            if was_required || was_bound {
+                                env.add(term);
+
+                                if let Requirement::Required(Some(group)) = &constraint.requirement
+                                {
+                                    satisfied_groups.insert(*group);
+                                }
+                            }
+                        } else if !in_target && in_env {
+                            // Variable left the scope → move from env back to
+                            // requires or binds depending on its schema requirement
+                            env.remove(term);
+
+                            match &constraint.requirement {
+                                Requirement::Required(Some(group)) => {
+                                    // Will be resolved in second pass once we
+                                    // know which groups are still satisfied
+                                    requires.insert(term);
+                                    // Check if the group might still be satisfied
+                                    // by another bound parameter
+                                    let group_still_satisfied =
+                                        schema.iter().any(|(other_name, other_constraint)| {
+                                            other_name != name
+                                                && matches!(
+                                                    &other_constraint.requirement,
+                                                    Requirement::Required(Some(g)) if *g == *group
+                                                )
+                                                && params.get(other_name).is_some_and(|t| {
+                                                    env.contains(t)
+                                                        || matches!(t, Term::Constant(_))
+                                                })
+                                        });
+                                    if group_still_satisfied {
+                                        satisfied_groups.insert(*group);
+                                    }
+                                }
+                                Requirement::Required(None) => {
+                                    requires.insert(term);
+                                }
+                                Requirement::Optional => {
+                                    if !is_negation {
+                                        binds.add(term);
+                                    }
+                                }
                             }
                         }
                     }
@@ -971,5 +1038,84 @@ mod cost_model_tests {
             eprintln!("  Binds: {:?}", binds.variables);
             eprintln!("  Env: {:?}", env.variables);
         }
+    }
+
+    #[dialog_common::test]
+    fn it_restores_cost_when_variable_leaves_scope() {
+        let app = RelationQuery::new(
+            Term::Constant(the!("user/name")),
+            Term::<Entity>::var("entity"),
+            Term::<Value>::var("value"),
+            Term::var("cause"),
+            Some(RelationDescriptor::new(None, Cardinality::One)),
+        );
+        let premise = Premise::When(Proposition::Relation(Box::new(app)));
+        let mut candidate = Candidate::from(premise);
+
+        // Bind entity → cost should decrease
+        let mut env_with_entity = Environment::new();
+        env_with_entity.add(&Term::<Value>::var("entity"));
+        candidate.update(&env_with_entity);
+
+        assert_eq!(
+            candidate.cost(),
+            SEGMENT_READ_COST,
+            "After binding entity, cost should be SEGMENT_READ_COST"
+        );
+
+        // Now update back to empty environment → cost should increase again
+        let empty_env = Environment::new();
+        candidate.update(&empty_env);
+
+        assert_eq!(
+            candidate.cost(),
+            RANGE_SCAN_COST,
+            "After removing entity from scope, cost should return to RANGE_SCAN_COST. \
+             Without bidirectional update, stale env retains entity binding."
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_restores_cost_for_cardinality_many_when_variable_leaves_scope() {
+        // Cardinality::Many makes the cost difference more dramatic:
+        //   1/3 constraints (just 'the'): INDEX_SCAN = 5000
+        //   2/3 constraints (the + of):   RANGE_SCAN_COST = 1000
+        let app = RelationQuery::new(
+            Term::Constant(the!("person/hobbies")),
+            Term::<Entity>::var("entity"),
+            Term::<Value>::var("hobby"),
+            Term::var("cause"),
+            Some(RelationDescriptor::new(None, Cardinality::Many)),
+        );
+        let premise = Premise::When(Proposition::Relation(Box::new(app)));
+        let mut candidate = Candidate::from(premise);
+
+        assert_eq!(
+            candidate.cost(),
+            INDEX_SCAN,
+            "With 1/3 constraints, Cardinality::Many should cost INDEX_SCAN"
+        );
+
+        // Bind entity → 2/3 constraints
+        let mut env_with_entity = Environment::new();
+        env_with_entity.add(&Term::<Value>::var("entity"));
+        candidate.update(&env_with_entity);
+
+        assert_eq!(
+            candidate.cost(),
+            RANGE_SCAN_COST,
+            "With 2/3 constraints, cost should drop to RANGE_SCAN_COST"
+        );
+
+        // Update back to empty → should revert to 1/3 constraints
+        let empty_env = Environment::new();
+        candidate.update(&empty_env);
+
+        assert_eq!(
+            candidate.cost(),
+            INDEX_SCAN,
+            "After replanning back to empty env, cost should return to INDEX_SCAN. \
+             Without bidirectional update, stale env would keep the lower cost."
+        );
     }
 }
