@@ -121,7 +121,7 @@ impl ConceptQuery {
         if this_bound {
             // Entity is known - each attribute is a lookup (the + of known)
             let mut total = CONCEPT_OVERHEAD; // Add overhead for potential rule evaluation
-            for (name, attribute) in self.predicate.iter() {
+            for (name, attribute) in self.predicate.with().iter() {
                 // Check if this attribute's value is also bound
                 total += attribute.estimate(
                     true,
@@ -140,7 +140,7 @@ impl ConceptQuery {
             let mut unbound_one: Option<&AttributeDescriptor> = None;
             let mut unbound_many: Option<&AttributeDescriptor> = None;
 
-            for (name, attribute) in self.predicate.iter() {
+            for (name, attribute) in self.predicate.with().iter() {
                 if let Some(term) = self.terms.get(name) {
                     if env.contains(term) {
                         match attribute.cardinality() {
@@ -201,7 +201,7 @@ impl ConceptQuery {
             // of=false (finding entity), is=bound
             let mut total = CONCEPT_OVERHEAD + lead.estimate(false, bound);
 
-            for (name, attribute) in self.predicate.iter() {
+            for (name, attribute) in self.predicate.with().iter() {
                 if lead != attribute {
                     total += attribute.estimate(
                         true,
@@ -509,7 +509,7 @@ mod tests {
         ]);
 
         // Test that attributes are present
-        let param_names: Vec<&str> = concept.keys().collect();
+        let param_names: Vec<&str> = concept.with().keys().collect();
         assert!(param_names.contains(&"name"));
         assert!(param_names.contains(&"age"));
         assert!(!param_names.contains(&"height"));
@@ -533,8 +533,8 @@ mod tests {
             concept.this().to_string().starts_with("concept:"),
             "Operator should be a concept URI"
         );
-        assert_eq!(concept.len(), 1);
-        assert!(concept.keys().any(|k| k == "name"));
+        assert_eq!(concept.with().iter().count(), 1);
+        assert!(concept.with().keys().any(|k| k == "name"));
     }
 
     #[dialog_common::test]
@@ -700,7 +700,15 @@ mod tests {
         terms.insert("test".to_string(), Term::var("test_var"));
         let concept_app = Proposition::Concept(ConceptQuery {
             terms,
-            predicate: ConceptDescriptor::new(),
+            predicate: ConceptDescriptor::from([(
+                "name",
+                AttributeDescriptor::new(
+                    the!("test/name"),
+                    "Test name",
+                    Cardinality::One,
+                    Some(Type::String),
+                ),
+            )]),
         });
 
         match concept_app {

@@ -374,10 +374,10 @@ mod tests {
         );
 
         // Test Person has 2 attributes (name and age)
-        assert_eq!(concept.len(), 2);
+        assert_eq!(concept.with().iter().count(), 2);
 
         // Verify attribute names
-        let attr_names: Vec<&str> = concept.iter().map(|(name, _)| name).collect();
+        let attr_names: Vec<&str> = concept.with().iter().map(|(name, _)| name).collect();
         assert!(attr_names.contains(&"name"));
         assert!(attr_names.contains(&"age"));
     }
@@ -567,10 +567,10 @@ mod tests {
 
         // Test 2: Verify concept attributes are accessible
         let concept = person_predicate();
-        assert_eq!(concept.len(), 2); // name and age
+        assert_eq!(concept.with().iter().count(), 2); // name and age
 
         // Verify we can find specific attributes
-        let name_attr = concept.iter().find(|(name, _)| *name == "name");
+        let name_attr = concept.with().iter().find(|(name, _)| *name == "name");
         assert!(name_attr.is_some());
 
         Ok(())
