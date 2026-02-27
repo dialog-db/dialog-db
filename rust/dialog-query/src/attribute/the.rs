@@ -172,6 +172,15 @@ impl From<ArtifactsAttribute> for The {
     }
 }
 
+impl TryFrom<crate::artifact::Value> for The {
+    type Error = crate::artifact::TypeError;
+
+    fn try_from(value: crate::artifact::Value) -> Result<Self, Self::Error> {
+        let attr = ArtifactsAttribute::try_from(value)?;
+        Ok(Self(attr))
+    }
+}
+
 impl Serialize for The {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

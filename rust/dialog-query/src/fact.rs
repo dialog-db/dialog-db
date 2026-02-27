@@ -137,8 +137,7 @@ mod integration_tests {
 
         // Step 4: Test 1 - Query for user names
         let query_names = RelationQuery::new(
-            Term::Constant("user".into()),
-            Term::Constant("name".into()),
+            Term::Constant(the!("user/name")),
             Term::blank(),
             Term::blank(),
             Term::blank(),
@@ -154,16 +153,16 @@ mod integration_tests {
 
         // Check that we got the right facts
         let has_alice = facts.iter().any(|f| {
-            f.domain == "user"
-                && f.name == "name"
+            f.domain() == "user"
+                && f.name() == "name"
                 && f.of == alice
                 && f.is == Value::String("Alice".to_string())
         });
         assert!(has_alice, "Should find Alice's name fact");
 
         let has_bob = facts.iter().any(|f| {
-            f.domain == "user"
-                && f.name == "name"
+            f.domain() == "user"
+                && f.name() == "name"
                 && f.of == bob
                 && f.is == Value::String("Bob".to_string())
         });
@@ -171,8 +170,7 @@ mod integration_tests {
 
         // Step 5: Test 2 - Query for email
         let query_email = RelationQuery::new(
-            Term::Constant("user".into()),
-            Term::Constant("email".into()),
+            Term::Constant(the!("user/email")),
             Term::blank(),
             Term::blank(),
             Term::blank(),
@@ -187,8 +185,8 @@ mod integration_tests {
         assert_eq!(email_facts.len(), 1, "Should find Alice's email");
 
         let has_email = email_facts.iter().any(|f| {
-            f.domain == "user"
-                && f.name == "email"
+            f.domain() == "user"
+                && f.name() == "email"
                 && f.of == alice
                 && f.is == Value::String("alice@example.com".to_string())
         });
@@ -196,8 +194,7 @@ mod integration_tests {
 
         // Step 6: Test 3 - Query for specific user
         let query_alice = RelationQuery::new(
-            Term::Constant("user".into()),
-            Term::Constant("name".into()),
+            Term::Constant(the!("user/name")),
             alice.clone().into(),
             Term::blank(),
             Term::blank(),
@@ -234,8 +231,7 @@ mod integration_tests {
 
         // Step 2: Verify fact exists
         let query_constant = RelationQuery::new(
-            Term::Constant("user".into()),
-            Term::Constant("name".into()),
+            Term::Constant(the!("user/name")),
             alice.clone().into(),
             Term::blank(),
             Term::blank(),
@@ -251,8 +247,8 @@ mod integration_tests {
 
         // Verify the fact content
         let has_alice = results.iter().any(|f| {
-            f.domain == "user"
-                && f.name == "name"
+            f.domain() == "user"
+                && f.name() == "name"
                 && f.of == alice
                 && f.is == Value::String("Alice".to_string())
         });
@@ -263,8 +259,7 @@ mod integration_tests {
 
         // Step 4: Verify fact is gone
         let query2 = RelationQuery::new(
-            Term::Constant("user".into()),
-            Term::Constant("name".into()),
+            Term::Constant(the!("user/name")),
             alice.clone().into(),
             Term::blank(),
             Term::blank(),
@@ -314,8 +309,7 @@ mod integration_tests {
 
         // Test 1: All constants
         let all_constants_query = RelationQuery::new(
-            Term::Constant("user".into()),
-            Term::Constant("name".into()),
+            Term::Constant(the!("user/name")),
             alice.clone().into(),
             Term::Constant(Value::String("Alice".to_string())),
             Term::blank(),
@@ -331,8 +325,7 @@ mod integration_tests {
 
         // Test 2: Find Alice specifically
         let mixed_query = RelationQuery::new(
-            Term::Constant("user".into()),
-            Term::Constant("name".into()),
+            Term::Constant(the!("user/name")),
             Term::blank(),
             Term::Constant(Value::String("Alice".to_string())),
             Term::blank(),
@@ -348,8 +341,7 @@ mod integration_tests {
 
         // Test 3: Find all names
         let find_all_names = RelationQuery::new(
-            Term::Constant("user".into()),
-            Term::Constant("name".into()),
+            Term::Constant(the!("user/name")),
             Term::blank(),
             Term::blank(),
             Term::blank(),
@@ -428,8 +420,7 @@ mod integration_tests {
 
         // Query 1: Find all admins by role
         let admin_query = RelationQuery::new(
-            Term::Constant("user".into()),
-            Term::Constant("role".into()),
+            Term::Constant(the!("user/role")),
             Term::blank(),
             Term::Constant(Value::String("admin".to_string())),
             Term::blank(),
@@ -458,8 +449,7 @@ mod integration_tests {
 
         // Query 2: Find all user roles
         let role_query = RelationQuery::new(
-            Term::Constant("user".into()),
-            Term::Constant("role".into()),
+            Term::Constant(the!("user/role")),
             Term::blank(),
             Term::blank(),
             Term::blank(),
@@ -475,8 +465,7 @@ mod integration_tests {
 
         // Query 3: Find Bob specifically using all constants
         let bob_query = RelationQuery::new(
-            Term::Constant("user".into()),
-            Term::Constant("name".into()),
+            Term::Constant(the!("user/name")),
             bob.clone().into(),
             Term::Constant(Value::String("Bob".to_string())),
             Term::blank(),
@@ -519,8 +508,7 @@ mod integration_tests {
         session.transact(claims).await?;
 
         let query_with_variables = RelationQuery::new(
-            Term::Constant("user".into()),
-            Term::Constant("name".into()),
+            Term::Constant(the!("user/name")),
             Term::blank(),
             Term::blank(),
             Term::blank(),
@@ -573,8 +561,7 @@ mod integration_tests {
 
         // Pattern 1: Query for user names
         let value_selector = RelationQuery::new(
-            Term::Constant("user".into()),
-            Term::Constant("name".into()),
+            Term::Constant(the!("user/name")),
             Term::blank(),
             Term::blank(),
             Term::blank(),
@@ -594,8 +581,7 @@ mod integration_tests {
 
         // Pattern 2: Query for entity values (friends)
         let entity_selector = RelationQuery::new(
-            Term::Constant("user".into()),
-            Term::Constant("friend".into()),
+            Term::Constant(the!("user/friend")),
             alice.clone().into(),
             Term::blank(),
             Term::blank(),
@@ -615,8 +601,7 @@ mod integration_tests {
 
         // Pattern 3: Test with all constants
         let constant_selector = RelationQuery::new(
-            Term::Constant("user".into()),
-            Term::Constant("name".into()),
+            Term::Constant(the!("user/name")),
             alice.clone().into(),
             Term::Constant(Value::String("Alice".to_string())),
             Term::blank(),
@@ -664,8 +649,7 @@ mod integration_tests {
 
         // Pattern 1: Find Bob by name using string constant
         let bob_query = RelationQuery::new(
-            Term::Constant("user".into()),
-            Term::Constant("name".into()),
+            Term::Constant(the!("user/name")),
             Term::blank(),
             Term::Constant(Value::String("Bob".to_string())),
             Term::blank(),
@@ -683,8 +667,7 @@ mod integration_tests {
 
         // Pattern 2: Find admin using string constant
         let admin_query = RelationQuery::new(
-            Term::Constant("user".into()),
-            Term::Constant("role".into()),
+            Term::Constant(the!("user/role")),
             Term::blank(),
             Term::Constant(Value::String("admin".to_string())),
             Term::blank(),
@@ -702,8 +685,7 @@ mod integration_tests {
 
         // Pattern 3: Find all names
         let names_query = RelationQuery::new(
-            Term::Constant("user".into()),
-            Term::Constant("name".into()),
+            Term::Constant(the!("user/name")),
             Term::blank(),
             Term::blank(),
             Term::blank(),
@@ -745,8 +727,7 @@ mod integration_tests {
         session.transact(claims).await?;
 
         let mixed_query = RelationQuery::new(
-            Term::Constant("user".into()),
-            Term::Constant("name".into()),
+            Term::Constant(the!("user/name")),
             alice.clone().into(),
             Term::blank(),
             Term::blank(),
@@ -762,8 +743,8 @@ mod integration_tests {
 
         // Verify we got the right fact
         let has_alice = results.iter().any(|f| {
-            f.domain == "user"
-                && f.name == "name"
+            f.domain() == "user"
+                && f.name() == "name"
                 && f.of == alice
                 && f.is == Value::String("Alice".to_string())
         });
@@ -809,8 +790,7 @@ mod integration_tests {
 
         // Test 1: Find admin users
         let admin_search = RelationQuery::new(
-            Term::Constant("user".into()),
-            Term::Constant("role".into()),
+            Term::Constant(the!("user/role")),
             Term::blank(),
             Term::Constant(Value::String("admin".to_string())),
             Term::blank(),
@@ -829,8 +809,7 @@ mod integration_tests {
 
         // Test 2: Find all user names
         let name_search = RelationQuery::new(
-            Term::Constant("user".into()),
-            Term::Constant("name".into()),
+            Term::Constant(the!("user/name")),
             Term::blank(),
             Term::blank(),
             Term::blank(),
@@ -887,8 +866,7 @@ mod integration_tests {
 
         // Pattern 1: Query for user names
         let value_selector = RelationQuery::new(
-            Term::Constant("user".to_string()),
-            Term::Constant("name".to_string()),
+            Term::Constant(the!("user/name")),
             Term::blank(),
             Term::blank(),
             Term::blank(),
@@ -905,8 +883,7 @@ mod integration_tests {
 
         // Pattern 2: Query for entity values (friends)
         let entity_selector = RelationQuery::new(
-            Term::Constant("user".to_string()),
-            Term::Constant("friend".to_string()),
+            Term::Constant(the!("user/friend")),
             alice.clone().into(),
             Term::blank(),
             Term::blank(),
@@ -923,8 +900,7 @@ mod integration_tests {
 
         // Pattern 3: Test with all constants
         let constant_selector = RelationQuery::new(
-            Term::Constant("user".to_string()),
-            Term::Constant("name".to_string()),
+            Term::Constant(the!("user/name")),
             alice.clone().into(),
             "Alice".into(),
             Term::blank(),

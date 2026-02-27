@@ -189,8 +189,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 };
 
                 dialog_query::RelationQuery::new(
-                    dialog_query::Term::Constant(<#field_type as dialog_query::Attribute>::descriptor().domain().to_string()),
-                    dialog_query::Term::Constant(<#field_type as dialog_query::Attribute>::descriptor().name().to_string()),
+                    dialog_query::Term::Constant(<#field_type as dialog_query::Attribute>::descriptor().the().clone()),
                     terms.this.clone(),
                     value_term,
                     dialog_query::Term::blank(),

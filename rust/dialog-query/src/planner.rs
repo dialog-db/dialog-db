@@ -189,6 +189,7 @@ impl From<&Vec<Plan>> for Planner {
 mod tests {
     use super::*;
     use crate::selection::Answer;
+    use crate::the;
 
     #[dialog_common::test]
     fn test_join_plan_with_two_fact_applications() {
@@ -197,8 +198,7 @@ mod tests {
         use crate::{Cardinality, Proposition, Term, Value};
 
         let fact1 = RelationQuery::new(
-            Term::Constant("person".to_string()),
-            Term::Constant("name".to_string()),
+            Term::Constant(the!("person/name")),
             Term::var("person"),
             Term::var("name"),
             Term::var("cause"),
@@ -206,8 +206,7 @@ mod tests {
         );
 
         let fact2 = RelationQuery::new(
-            Term::Constant("person".to_string()),
-            Term::Constant("age".to_string()),
+            Term::Constant(the!("person/age")),
             Term::var("person"),
             Term::var("age"),
             Term::var("cause"),
@@ -246,8 +245,7 @@ mod tests {
         use dialog_artifacts::Entity;
 
         let fact1 = RelationQuery::new(
-            Term::Constant("person".to_string()),
-            Term::Constant("name".to_string()),
+            Term::Constant(the!("person/name")),
             Term::Constant(Entity::try_from("urn:alice".to_string()).unwrap()),
             Term::var("name"),
             Term::var("cause"),
@@ -255,8 +253,7 @@ mod tests {
         );
 
         let fact2 = RelationQuery::new(
-            Term::Constant("greeting".to_string()),
-            Term::Constant("text".to_string()),
+            Term::Constant(the!("greeting/text")),
             Term::var("name"),
             Term::var("greeting"),
             Term::var("cause"),
@@ -318,8 +315,7 @@ mod tests {
             .await?;
 
         let fact1 = RelationQuery::new(
-            Term::Constant("person".to_string()),
-            Term::Constant("name".to_string()),
+            Term::Constant(the!("person/name")),
             Term::var("person"),
             Term::var("name"),
             Term::var("cause"),
@@ -327,8 +323,7 @@ mod tests {
         );
 
         let fact2 = RelationQuery::new(
-            Term::Constant("person".to_string()),
-            Term::Constant("age".to_string()),
+            Term::Constant(the!("person/age")),
             Term::var("person"),
             Term::var("age"),
             Term::var("cause"),

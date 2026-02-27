@@ -61,8 +61,7 @@ mod tests {
         session.transact(claims).await?;
 
         let alice_query = RelationQuery::new(
-            Term::from("user"),
-            Term::from("name"),
+            Term::Constant(the!("user/name")),
             alice.clone().into(),
             Term::from(Value::String("Alice".to_string())),
             Term::blank(),
@@ -74,8 +73,7 @@ mod tests {
         assert!(result.is_ok());
 
         let all_names_query = RelationQuery::new(
-            Term::from("user"),
-            Term::from("name"),
+            Term::Constant(the!("user/name")),
             Term::blank(),
             Term::blank(),
             Term::blank(),
@@ -87,8 +85,7 @@ mod tests {
         assert!(result.is_ok());
 
         let email_query = RelationQuery::new(
-            Term::from("user"),
-            Term::from("email"),
+            Term::Constant(the!("user/email")),
             alice.clone().into(),
             Term::blank(),
             Term::blank(),
@@ -108,8 +105,7 @@ mod tests {
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         let variable_query = RelationQuery::new(
-            Term::from("user"),
-            Term::from("name"),
+            Term::Constant(the!("user/name")),
             Term::<Entity>::var("user"),
             Term::<Value>::var("name"),
             Term::blank(),
@@ -139,8 +135,7 @@ mod tests {
         session.transact(claims).await?;
 
         let fact_selector = RelationQuery::new(
-            Term::from("user"),
-            Term::from("name"),
+            Term::Constant(the!("user/name")),
             alice.clone().into(),
             Term::blank(),
             Term::blank(),
@@ -190,8 +185,7 @@ mod tests {
 
         let session = Session::open(artifacts.clone());
         let admin_result = RelationQuery::new(
-            Term::from("user"),
-            Term::from("role"),
+            Term::Constant(the!("user/role")),
             Term::blank(),
             Term::from(Value::String("admin".to_string())),
             Term::blank(),
@@ -204,8 +198,7 @@ mod tests {
 
         let session = Session::open(artifacts);
         let names_result = RelationQuery::new(
-            Term::from("user"),
-            Term::from("name"),
+            Term::Constant(the!("user/name")),
             Term::blank(),
             Term::blank(),
             Term::blank(),

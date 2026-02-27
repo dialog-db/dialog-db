@@ -89,6 +89,7 @@ impl_into_type!(Vec<u8>, Type::Bytes);
 // Dialog-artifacts specific types
 impl_into_type!(Entity, Type::Entity);
 impl_into_type!(Attribute, Type::Symbol);
+impl_into_type!(crate::attribute::The, Type::Symbol);
 
 impl_into_type!(Cause, Type::Bytes);
 
@@ -141,6 +142,12 @@ impl_scalar!(
     Vec<u8>,
     Cause
 );
+
+impl Scalar for crate::attribute::The {
+    fn as_value(&self) -> Value {
+        Value::from(Attribute::from(self))
+    }
+}
 
 impl Scalar for usize {
     fn as_value(&self) -> Value {

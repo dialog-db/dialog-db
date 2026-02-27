@@ -32,17 +32,10 @@ mod tests {
     // Helper function to create a test relation for Answer tests
     fn create_test_relation(entity: Entity, attr: Attribute, value: Value) -> Relation {
         use crate::artifact::Cause;
-        use crate::attribute::Cardinality;
-
-        let attr_str = attr.to_string();
-        let (domain, name) = attr_str
-            .split_once('/')
-            .map(|(ns, n)| (ns.to_string(), n.to_string()))
-            .unwrap_or_else(|| (String::new(), attr_str));
+        use crate::attribute::{Cardinality, The};
 
         Relation {
-            domain,
-            name,
+            the: The::from(attr),
             of: entity,
             is: value,
             cause: Cause([0u8; 32]),
@@ -56,8 +49,7 @@ mod tests {
 
         // Create a minimal RelationQuery for testing
         let application = Arc::new(RelationQuery::new(
-            Term::var("the_ns"),
-            Term::var("the_name"),
+            Term::var("the"),
             Term::var("of"),
             Term::var("is"),
             Term::var("cause"),

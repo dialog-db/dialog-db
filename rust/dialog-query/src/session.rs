@@ -364,7 +364,7 @@ mod tests {
     use super::*;
 
     #[dialog_common::test]
-    async fn test_session() -> anyhow::Result<()> {
+    async fn it_queries_asserted_facts() -> anyhow::Result<()> {
         use dialog_storage::MemoryStorageBackend;
 
         let backend = MemoryStorageBackend::default();
@@ -468,7 +468,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_concept_planning_mixed_parameters() -> anyhow::Result<()> {
+    async fn it_plans_concept_with_mixed_parameters() -> anyhow::Result<()> {
         // Set up concept with attributes
         let mut attributes = HashMap::new();
         attributes.insert(
@@ -503,7 +503,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_assert_concept() -> anyhow::Result<()> {
+    async fn it_asserts_and_queries_concept() -> anyhow::Result<()> {
         use dialog_storage::MemoryStorageBackend;
 
         let backend = MemoryStorageBackend::default();
@@ -588,7 +588,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_rule() -> anyhow::Result<()> {
+    async fn it_evaluates_derived_rules() -> anyhow::Result<()> {
         use dialog_storage::MemoryStorageBackend;
 
         mod employee {
@@ -637,8 +637,7 @@ mod tests {
             employee_predicate,
             vec![
                 RelationQuery::new(
-                    Term::Constant("stuff".into()),
-                    Term::Constant("name".into()),
+                    Term::Constant(the!("stuff/name")),
                     Term::var("this"),
                     Term::var("name"),
                     Term::blank(),
@@ -646,8 +645,7 @@ mod tests {
                 )
                 .into(),
                 RelationQuery::new(
-                    Term::Constant("stuff".into()),
-                    Term::Constant("role".into()),
+                    Term::Constant(the!("stuff/role")),
                     Term::var("this"),
                     Term::var("job"),
                     Term::blank(),
@@ -710,7 +708,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_install_rule_api() -> anyhow::Result<()> {
+    async fn it_installs_rule_via_api() -> anyhow::Result<()> {
         use crate::rule::When;
         use dialog_storage::MemoryStorageBackend;
 
@@ -764,8 +762,7 @@ mod tests {
                     role: employee.job,
                 },
                 RelationQuery::new(
-                    Term::Constant("stuff".to_string()),
-                    Term::Constant("name".to_string()),
+                    Term::Constant(the!("stuff/name")),
                     employee.this,
                     employee.name.as_unknown(),
                     Term::blank(),
@@ -850,7 +847,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_session_source_rule_resolution() -> anyhow::Result<()> {
+    async fn it_resolves_rules_via_source_trait() -> anyhow::Result<()> {
         use dialog_storage::MemoryStorageBackend;
 
         let backend = MemoryStorageBackend::default();
@@ -894,7 +891,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_source_trait_compatibility() -> anyhow::Result<()> {
+    async fn it_accepts_source_trait_implementations() -> anyhow::Result<()> {
         use dialog_storage::MemoryStorageBackend;
 
         // Test that both QuerySession and Session can be used polymorphically as a Source
@@ -932,7 +929,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_explicit_conversion_pattern() -> anyhow::Result<()> {
+    async fn it_converts_source_explicitly() -> anyhow::Result<()> {
         use dialog_storage::MemoryStorageBackend;
 
         let backend = MemoryStorageBackend::default();
@@ -971,7 +968,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_like_formula_in_rule() -> anyhow::Result<()> {
+    async fn it_filters_with_like_formula_in_rule() -> anyhow::Result<()> {
         use crate::Attribute;
         use crate::formula::Like;
         use crate::rule::When;
@@ -1052,7 +1049,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_like_negation_in_rule() -> anyhow::Result<()> {
+    async fn it_negates_like_formula_in_rule() -> anyhow::Result<()> {
         use crate::Attribute;
         use crate::formula::Like;
         use crate::rule::When;
@@ -1142,7 +1139,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_implicit_attribute() -> anyhow::Result<()> {
+    async fn it_infers_implicit_attributes() -> anyhow::Result<()> {
         use crate::Attribute as _;
         use crate::rule::When;
         use dialog_storage::MemoryStorageBackend;
@@ -1174,8 +1171,7 @@ mod tests {
                 employee.role.is(Role("employee".into())),
                 // employee has a name
                 RelationQuery::new(
-                    Term::Constant("implicit-attr-test".into()),
-                    Term::Constant("name".into()),
+                    Term::Constant(the!("implicit-attr-test/name")),
                     employee.this.clone(),
                     employee.name.clone().as_unknown(),
                     Term::blank(),
@@ -1183,8 +1179,7 @@ mod tests {
                 ),
                 // but does not have role (using ! operator)
                 !RelationQuery::new(
-                    Term::Constant("implicit-attr-test".into()),
-                    Term::Constant("role".into()),
+                    Term::Constant(the!("implicit-attr-test/role")),
                     employee.this.clone(),
                     Term::blank(),
                     Term::blank(),
@@ -1278,7 +1273,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_plan_cache_hit_returns_same_arc() {
+    fn it_caches_plans_by_adornment() {
         use crate::selection::Answer;
 
         let person = person_concept();
@@ -1300,7 +1295,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_plan_cache_different_adornments_produce_different_plans() {
+    fn it_caches_different_plans_per_adornment() {
         use crate::selection::{Answer, Evidence};
 
         let person = person_concept();
@@ -1332,7 +1327,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_plan_cache_invalidated_on_rule_install() {
+    fn it_invalidates_cache_on_rule_install() {
         use crate::selection::Answer;
 
         let person = person_concept();
@@ -1361,7 +1356,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_plan_cache_not_invalidated_by_unrelated_rule() {
+    fn it_preserves_cache_for_unrelated_rules() {
         use crate::selection::Answer;
 
         let person = person_concept();
@@ -1395,7 +1390,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_plan_cache_duplicate_rule_does_not_invalidate() {
+    fn it_preserves_cache_for_duplicate_rules() {
         use crate::selection::Answer;
 
         let person = person_concept();
@@ -1425,7 +1420,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_plan_cache_shared_across_clones() {
+    fn it_shares_cache_across_clones() {
         use crate::selection::Answer;
 
         let person = person_concept();
@@ -1451,7 +1446,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_bound_entity_produces_cheaper_plan() {
+    fn it_produces_cheaper_plan_with_bound_entity() {
         use crate::concept::application::adornment::Adornment;
         use crate::selection::{Answer, Evidence};
 
@@ -1499,7 +1494,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_cached_plan_produces_correct_results() -> anyhow::Result<()> {
+    async fn it_produces_correct_results_from_cached_plan() -> anyhow::Result<()> {
         use dialog_storage::MemoryStorageBackend;
 
         // End-to-end test: verify that evaluating a concept with the plan cache
@@ -1575,7 +1570,8 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_cached_plan_with_bound_entity_produces_correct_results() -> anyhow::Result<()> {
+    async fn it_produces_correct_results_from_cached_plan_with_bound_entity() -> anyhow::Result<()>
+    {
         use crate::selection::{Answer, Evidence};
         use dialog_storage::MemoryStorageBackend;
 

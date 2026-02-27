@@ -62,14 +62,7 @@ impl From<&Factors> for Relation {
     fn from(factors: &Factors) -> Self {
         if let Some(factor) = factors.evidence().next() {
             if let Some(relation) = factor.fact() {
-                Relation {
-                    domain: relation.domain.clone(),
-                    name: relation.name.clone(),
-                    of: relation.of.clone(),
-                    is: relation.is.clone(),
-                    cause: relation.cause.clone(),
-                    cardinality: relation.cardinality,
-                }
+                relation.clone()
             } else {
                 panic!("Cannot convert Derived factor to Relation")
             }

@@ -494,7 +494,7 @@ mod tests {
     use crate::the;
 
     #[dialog_common::test]
-    fn test_concept_serialization_to_specific_json() {
+    fn it_serializes_to_expected_json() {
         let predicate = ConceptDescriptor::from([
             (
                 "name",
@@ -542,7 +542,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_concept_deserialization_from_specific_json() {
+    fn it_deserializes_from_json() {
         let json = r#"{
             "with": {
                 "email": {
@@ -590,7 +590,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_concept_deserialization_with_description() {
+    fn it_deserializes_with_description() {
         let json = r#"{
             "description": "A user profile",
             "with": {
@@ -608,7 +608,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_concept_serialization_with_description() {
+    fn it_serializes_with_description() {
         let mut predicate = ConceptDescriptor::from([(
             "name",
             AttributeDescriptor::new(
@@ -628,7 +628,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_concept_serialization_omits_null_description() {
+    fn it_omits_null_description_in_json() {
         let predicate = ConceptDescriptor::from([(
             "name",
             AttributeDescriptor::new(
@@ -647,7 +647,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_concept_round_trip_serialization() {
+    fn it_round_trips_through_json() {
         let original = ConceptDescriptor::from([(
             "score",
             AttributeDescriptor::new(
@@ -687,7 +687,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_expected_json_structure() {
+    fn it_produces_expected_json_structure() {
         let predicate = ConceptDescriptor::from(vec![(
             "id".to_string(),
             AttributeDescriptor::new(
@@ -722,7 +722,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_concept_field_names_do_not_affect_hash() {
+    fn it_ignores_field_names_in_hash() {
         let pred1 = ConceptDescriptor::from(vec![
             (
                 "field_a".to_string(),
@@ -779,7 +779,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_concept_attribute_order_does_not_affect_hash() {
+    fn it_ignores_attribute_order_in_hash() {
         let pred1 = ConceptDescriptor::from(vec![
             (
                 "name".to_string(),
@@ -836,7 +836,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_concept_different_attributes_different_hash() {
+    fn it_hashes_differently_for_different_attributes() {
         let pred1 = ConceptDescriptor::from(vec![(
             "name".to_string(),
             AttributeDescriptor::new(
@@ -877,7 +877,7 @@ mod tests {
     /// - Each Attribute has "the" (required), optional "description", "cardinality", "as"
     /// - No unexpected top-level keys (only "description", "with")
     #[dialog_common::test]
-    fn test_serialization_conforms_to_schema() {
+    fn it_conforms_to_json_schema() {
         let predicate = ConceptDescriptor::from([
             (
                 "name",
@@ -967,7 +967,7 @@ mod tests {
     /// would write it) round-trips correctly through deserialization and
     /// re-serialization.
     #[dialog_common::test]
-    fn test_schema_conformant_fixture_round_trips() {
+    fn it_round_trips_schema_conformant_fixture() {
         let fixture = r#"{
             "description": "A recipe ingredient with quantity and unit",
             "with": {
@@ -1012,7 +1012,7 @@ mod tests {
     /// Validates that a minimal schema-conformant fixture (only required fields)
     /// deserializes correctly.
     #[dialog_common::test]
-    fn test_minimal_schema_conformant_fixture() {
+    fn it_accepts_minimal_schema_fixture() {
         let fixture = r#"{
             "with": {
                 "status": {
@@ -1034,7 +1034,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_rejects_missing_with() {
+    fn it_rejects_missing_with() {
         let json = r#"{
             "description": "No attributes"
         }"#;
@@ -1044,7 +1044,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_rejects_flat_format_without_with_wrapper() {
+    fn it_rejects_flat_format() {
         // Pre-wrapper format: attributes at top level instead of under "with"
         let json = r#"{
             "name": {
@@ -1062,7 +1062,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_rejects_with_as_array() {
+    fn it_rejects_with_as_array() {
         let json = r#"{
             "with": [
                 { "the": "user/name" }
@@ -1074,7 +1074,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_rejects_with_as_string() {
+    fn it_rejects_with_as_string() {
         let json = r#"{
             "with": "user/name"
         }"#;
@@ -1084,7 +1084,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_rejects_attribute_missing_the() {
+    fn it_rejects_attribute_missing_the() {
         let json = r#"{
             "with": {
                 "name": {
@@ -1102,7 +1102,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_rejects_description_as_number() {
+    fn it_rejects_description_as_number() {
         let json = r#"{
             "description": 42,
             "with": {
@@ -1115,7 +1115,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_rejects_the_without_domain_slash_name() {
+    fn it_rejects_the_without_slash() {
         let json = r#"{
             "with": {
                 "name": {
@@ -1133,7 +1133,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_rejects_invalid_cardinality() {
+    fn it_rejects_invalid_cardinality() {
         let json = r#"{
             "with": {
                 "tags": {
@@ -1148,7 +1148,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_rejects_empty_object() {
+    fn it_rejects_empty_object() {
         let json = r#"{}"#;
 
         let result = serde_json::from_str::<ConceptDescriptor>(json);
@@ -1156,7 +1156,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_accepts_maybe_field() {
+    fn it_accepts_maybe_field() {
         let json = r#"{
             "with": {
                 "name": { "the": "user/name", "as": "Text" }
@@ -1173,7 +1173,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_maybe_is_validated_on_parse() {
+    fn it_validates_maybe_on_parse() {
         let json = r#"{
             "with": {
                 "name": { "the": "user/name", "as": "Text" }
@@ -1191,7 +1191,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_maybe_not_serialized() {
+    fn it_omits_maybe_in_serialization() {
         let concept = ConceptDescriptor::from([(
             "name",
             AttributeDescriptor::new(
@@ -1212,7 +1212,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_empty_maybe_deserializes_to_none() {
+    fn it_deserializes_empty_maybe_as_none() {
         let json = r#"{
             "with": {
                 "name": { "the": "user/name", "as": "Text" }

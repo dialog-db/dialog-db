@@ -95,7 +95,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_all_free() {
+    fn it_marks_all_variables_as_free() {
         let mut terms = Parameters::new();
         terms.insert("age".into(), Term::<Value>::var("a"));
         terms.insert("name".into(), Term::<Value>::var("n"));
@@ -107,7 +107,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_constant_is_bound() {
+    fn it_marks_constants_as_bound() {
         let mut terms = Parameters::new();
         terms.insert("age".into(), Term::Constant(Value::UnsignedInt(25)));
         terms.insert("name".into(), Term::<Value>::var("n"));
@@ -120,7 +120,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_variable_bound_in_answer() {
+    fn it_marks_answered_variables_as_bound() {
         let mut terms = Parameters::new();
         terms.insert("age".into(), Term::<Value>::var("a"));
         terms.insert("name".into(), Term::<Value>::var("n"));
@@ -135,7 +135,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_blank_is_free() {
+    fn it_marks_blanks_as_free() {
         let mut terms = Parameters::new();
         terms.insert("age".into(), Term::<Value>::blank());
         terms.insert("name".into(), Term::Constant(Value::String("Bob".into())));
@@ -148,7 +148,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_all_bound() {
+    fn it_marks_all_as_bound() {
         let mut terms = Parameters::new();
         terms.insert("age".into(), Term::Constant(Value::UnsignedInt(25)));
         terms.insert("name".into(), Term::Constant(Value::String("Bob".into())));
@@ -160,7 +160,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_order_independence() {
+    fn it_produces_order_independent_adornments() {
         let mut terms1 = Parameters::new();
         terms1.insert("name".into(), Term::<Value>::var("n"));
         terms1.insert("age".into(), Term::Constant(Value::UnsignedInt(25)));
@@ -177,7 +177,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_into_environment_roundtrip() {
+    fn it_round_trips_through_environment() {
         let mut terms = Parameters::new();
         terms.insert("age".into(), Term::<Value>::var("a"));
         terms.insert("name".into(), Term::Constant(Value::String("Bob".into())));
@@ -197,7 +197,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_same_binding_pattern_same_adornment() {
+    fn it_produces_same_adornment_for_same_pattern() {
         let mut terms = Parameters::new();
         terms.insert("name".into(), Term::<Value>::var("n"));
         terms.insert("age".into(), Term::<Value>::var("a"));
@@ -216,7 +216,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_different_binding_pattern_different_adornment() {
+    fn it_produces_different_adornment_for_different_pattern() {
         let mut terms = Parameters::new();
         terms.insert("name".into(), Term::<Value>::var("n"));
         terms.insert("age".into(), Term::<Value>::var("a"));

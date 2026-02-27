@@ -364,7 +364,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_person_concept_creation() {
+    fn it_creates_person_concept() {
         // Test that the Person concept has the expected properties
         let concept = person_predicate();
         // Operator is now a URI based on the hash of the concept's attributes
@@ -383,7 +383,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_person_match_creation() {
+    fn it_creates_person_match() {
         // Test creating a PersonMatch for querying
         let entity_var = Term::var("person_entity");
         let name_var = Term::var("person_name");
@@ -402,7 +402,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_person_match_with_constants() {
+    fn it_creates_match_with_constant_values() {
         // Test querying for a specific person with constant values
         let entity_var = Term::var("alice_entity");
         let name_const = Term::from("Alice".to_string());
@@ -424,7 +424,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_person_match_mixed_terms() {
+    fn it_creates_match_with_mixed_terms() {
         // Test mixing variables and constants in a match pattern
         let entity_var = Term::var("person_entity");
         let name_const = Term::from("Bob".to_string());
@@ -443,7 +443,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_person_instance_creation() {
+    fn it_creates_person_instance() {
         // Test creating a Person instance
         let entity = Entity::new().unwrap();
         let person = Person {
@@ -457,7 +457,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_concept_name_consistency() {
+    fn it_maintains_concept_name_consistency() {
         // Test that concept identifier is consistent across different access patterns
         let concept = person_predicate();
         // Operator is now a URI based on the hash of the concept's attributes
@@ -483,7 +483,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_person_match_fields() {
+    fn it_exposes_match_fields() {
         // Test that PersonMatch has the expected fields
         let entity_var = Term::var("entity");
         let name_var = Term::var("name");
@@ -502,7 +502,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_concept_debug_output() {
+    fn it_formats_debug_output() {
         // Test that our derived Debug implementations work
         let person = Person {
             this: Entity::new().unwrap(),
@@ -517,7 +517,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_concept_clone() {
+    fn it_clones_concept() {
         // Test that our derived Clone implementations work
         let entity = Entity::new().unwrap();
         let person1 = Person {
@@ -546,7 +546,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_concept_match_structure() -> Result<()> {
+    async fn it_matches_concept_structure() -> Result<()> {
         // Test that PersonMatch correctly implements the Match trait
         // This doesn't require actual querying, just tests the structure
 
@@ -577,7 +577,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_concept_query_no_matches() -> Result<()> {
+    async fn it_returns_empty_for_no_matches() -> Result<()> {
         // Test that individual fact selectors work for non-matching queries
 
         let storage_backend = MemoryStorageBackend::default();
@@ -597,8 +597,7 @@ mod tests {
 
         // Test: Search for non-existent person using individual fact selector
         let missing_query = RelationQuery::new(
-            Term::Constant("person".into()),
-            Term::Constant("name".into()),
+            Term::Constant(the!("person/name")),
             Term::var("person"),
             Term::Constant(Value::String("NonExistent".to_string())),
             Term::blank(),
@@ -613,7 +612,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_concept_dsl() -> Result<()> {
+    async fn it_queries_with_concept_dsl() -> Result<()> {
         use crate::Match;
 
         let storage_backend = MemoryStorageBackend::default();
@@ -701,7 +700,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_concept_negation_with_not_operator() -> Result<()> {
+    async fn it_negates_concept_with_not_operator() -> Result<()> {
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
@@ -805,7 +804,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_relation_negation_with_not_operator() -> Result<()> {
+    async fn it_negates_relation_with_not_operator() -> Result<()> {
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
@@ -888,7 +887,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_concept_with_attribute_fields() -> Result<()> {
+    async fn it_asserts_concept_with_attribute_fields() -> Result<()> {
         use futures_util::TryStreamExt;
 
         let backend = MemoryStorageBackend::default();
@@ -906,8 +905,7 @@ mod tests {
         session.transact(vec![alice.clone()]).await?;
 
         let name_query = RelationQuery::new(
-            Term::Constant("person-attr-concept".into()),
-            Term::Constant("name".into()),
+            Term::Constant(the!("person-attr-concept/name")),
             Term::Constant(alice_id.clone()),
             Term::blank(),
             Term::blank(),
@@ -915,8 +913,7 @@ mod tests {
         );
 
         let birthday_query = RelationQuery::new(
-            Term::Constant("person-attr-concept".into()),
-            Term::Constant("birthday".into()),
+            Term::Constant(the!("person-attr-concept/birthday")),
             Term::Constant(alice_id.clone()),
             Term::blank(),
             Term::blank(),
@@ -943,7 +940,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_query_concept_with_attribute_fields() -> Result<()> {
+    async fn it_queries_concept_with_attribute_fields() -> Result<()> {
         use futures_util::TryStreamExt;
 
         let backend = MemoryStorageBackend::default();
@@ -991,7 +988,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_concept_with_constant_term() -> Result<()> {
+    async fn it_queries_concept_with_constant_term() -> Result<()> {
         use futures_util::TryStreamExt;
 
         let backend = MemoryStorageBackend::default();
@@ -1032,7 +1029,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_attribute_reuse_across_concepts() -> Result<()> {
+    async fn it_reuses_attributes_across_concepts() -> Result<()> {
         use futures_util::TryStreamExt;
 
         let backend = MemoryStorageBackend::default();
@@ -1059,8 +1056,7 @@ mod tests {
         session.transact(vec![alice_with_birthday]).await?;
 
         let name_query = RelationQuery::new(
-            Term::Constant("person-attr-concept".into()),
-            Term::Constant("name".into()),
+            Term::Constant(the!("person-attr-concept/name")),
             Term::Constant(alice_id.clone()),
             Term::blank(),
             Term::blank(),
@@ -1068,8 +1064,7 @@ mod tests {
         );
 
         let email_query = RelationQuery::new(
-            Term::Constant("person-attr-concept".into()),
-            Term::Constant("email".into()),
+            Term::Constant(the!("person-attr-concept/email")),
             Term::Constant(alice_id.clone()),
             Term::blank(),
             Term::blank(),
@@ -1077,8 +1072,7 @@ mod tests {
         );
 
         let birthday_query = RelationQuery::new(
-            Term::Constant("person-attr-concept".into()),
-            Term::Constant("birthday".into()),
+            Term::Constant(the!("person-attr-concept/birthday")),
             Term::Constant(alice_id.clone()),
             Term::blank(),
             Term::blank(),
@@ -1108,7 +1102,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_retract_concept_with_attributes() -> Result<()> {
+    async fn it_retracts_concept_with_attributes() -> Result<()> {
         use futures_util::TryStreamExt;
 
         let backend = MemoryStorageBackend::default();
@@ -1129,8 +1123,7 @@ mod tests {
         session.transact(vec![!alice]).await?;
 
         let name_query = RelationQuery::new(
-            Term::Constant("person-attr-concept".into()),
-            Term::Constant("name".into()),
+            Term::Constant(the!("person-attr-concept/name")),
             Term::Constant(alice_id.clone()),
             Term::blank(),
             Term::blank(),
@@ -1138,8 +1131,7 @@ mod tests {
         );
 
         let birthday_query = RelationQuery::new(
-            Term::Constant("person-attr-concept".into()),
-            Term::Constant("birthday".into()),
+            Term::Constant(the!("person-attr-concept/birthday")),
             Term::Constant(alice_id),
             Term::blank(),
             Term::blank(),
@@ -1181,7 +1173,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_concept_query_shortcut() -> Result<()> {
+    async fn it_queries_concept_via_shortcut() -> Result<()> {
         use futures_util::TryStreamExt;
 
         let backend = MemoryStorageBackend::default();
@@ -1237,7 +1229,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_concept_query_shortcut_with_filter() -> Result<()> {
+    async fn it_filters_concept_query_via_shortcut() -> Result<()> {
         use futures_util::TryStreamExt;
 
         let backend = MemoryStorageBackend::default();
@@ -1315,7 +1307,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_single_attribute_query_works() -> Result<()> {
+    async fn it_queries_single_attribute() -> Result<()> {
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
@@ -1357,7 +1349,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_multi_attribute_constant_query_works() -> Result<()> {
+    async fn it_queries_multi_attribute_with_constants() -> Result<()> {
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
@@ -1402,7 +1394,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_multi_attribute_variable_query_limitation() -> Result<()> {
+    async fn it_handles_multi_attribute_variable_limitation() -> Result<()> {
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 

@@ -127,8 +127,7 @@ impl From<&ConceptDescriptor> for DeductiveRule {
         for (name, attribute) in concept.with().iter() {
             premises.push(
                 RelationQuery::new(
-                    Term::Constant(attribute.domain().to_string()),
-                    Term::Constant(attribute.name().to_string()),
+                    Term::Constant(attribute.the().clone()),
                     this.clone(),
                     Term::var(name),
                     Term::var("cause"),
@@ -179,8 +178,7 @@ mod tests {
         let this = Term::<Entity>::var("this");
         let premises = vec![
             RelationQuery::new(
-                Term::Constant("user".to_string()),
-                Term::Constant("name".to_string()),
+                Term::Constant(the!("user/name")),
                 this.clone(),
                 Term::var("name"),
                 Term::var("cause"),
@@ -188,8 +186,7 @@ mod tests {
             )
             .into(),
             RelationQuery::new(
-                Term::Constant("user".to_string()),
-                Term::Constant("age".to_string()),
+                Term::Constant(the!("user/age")),
                 this,
                 Term::var("age"),
                 Term::var("cause"),
@@ -225,8 +222,7 @@ mod tests {
         ]);
         let premises = vec![
             RelationQuery::new(
-                Term::var("key_ns"),
-                Term::var("key_name"),
+                Term::var("the"),
                 Term::<Entity>::var("user"),
                 Term::var("value"),
                 Term::var("cause"),
@@ -264,8 +260,7 @@ mod tests {
         // The planner should reject this at install time.
         let premises = vec![
             RelationQuery::new(
-                Term::var("ns"),
-                Term::var("attr"),
+                Term::var("the"),
                 Term::<Entity>::var("user"),
                 Term::var("value"),
                 Term::var("cause"),
@@ -305,8 +300,7 @@ mod tests {
         ]);
         let premises = vec![
             RelationQuery::new(
-                Term::Constant("user".to_string()),
-                Term::Constant("name".to_string()),
+                Term::Constant(the!("user/name")),
                 Term::<Entity>::var("this"),
                 Term::var("name"),
                 Term::var("cause"),
@@ -371,19 +365,17 @@ mod tests {
         let this = Term::<Entity>::var("this");
         let premises = vec![
             RelationQuery::new(
-                Term::Constant("user".to_string()),
-                Term::Constant("name".to_string()),
+                Term::Constant(the!("user/name")),
                 this.clone(),
                 Term::Constant(Value::String("jack".to_string())),
                 Term::var("cause"),
                 Some(RelationDescriptor::new(None, Cardinality::One)),
             )
             .into(),
-            // Use explicit domain/name with ?key as the name variable
+            // Use ?key as the the variable
             // to ensure the conclusion parameter "key" gets bound.
             RelationQuery::new(
                 Term::var("key"),
-                Term::blank(),
                 this,
                 Term::var("value"),
                 Term::var("cause"),
@@ -405,8 +397,7 @@ mod tests {
 
         let premises = vec![
             RelationQuery::new(
-                Term::Constant("user".to_string()),
-                Term::Constant("name".to_string()),
+                Term::Constant(the!("user/name")),
                 Term::<Entity>::var("this"),
                 Term::var("key_var"),
                 Term::var("cause"),
