@@ -537,7 +537,7 @@ mod tests {
     use futures_util::stream::once;
 
     #[dialog_common::test]
-    async fn it_relation_application_with_provenance() -> anyhow::Result<()> {
+    async fn it_evaluates_relation_with_provenance() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
         use crate::the;
 
@@ -590,7 +590,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_cardinality_one_returns_single_value() -> anyhow::Result<()> {
+    async fn it_returns_single_value_for_cardinality_one() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
         use crate::the;
 
@@ -686,7 +686,7 @@ mod tests {
 
     // Cardinality::One with entity known (EAV scan).
     #[dialog_common::test]
-    async fn it_cardinality_one_entity_known_eav_scan() -> anyhow::Result<()> {
+    async fn it_selects_winner_via_eav_scan() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
 
         let storage_backend = MemoryStorageBackend::default();
@@ -740,7 +740,7 @@ mod tests {
 
     // Cardinality::One with attribute known, entity unknown (AEV scan).
     #[dialog_common::test]
-    async fn it_cardinality_one_attribute_known_aev_scan() -> anyhow::Result<()> {
+    async fn it_selects_winner_via_aev_scan() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
 
         let storage_backend = MemoryStorageBackend::default();
@@ -796,7 +796,7 @@ mod tests {
 
     // Cardinality::One with only value known (VAE scan).
     #[dialog_common::test]
-    async fn it_cardinality_one_value_known_vae_scan() -> anyhow::Result<()> {
+    async fn it_selects_winner_via_vae_scan() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
 
         let storage_backend = MemoryStorageBackend::default();
@@ -884,7 +884,7 @@ mod tests {
 
     // Verify that the winner is deterministic.
     #[dialog_common::test]
-    async fn it_cardinality_one_winner_is_deterministic() -> anyhow::Result<()> {
+    async fn it_picks_deterministic_winner() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
 
         let storage_backend = MemoryStorageBackend::default();
@@ -941,7 +941,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_relation_application_from_the() -> anyhow::Result<()> {
+    async fn it_queries_relation_from_the() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
 
         let storage_backend = MemoryStorageBackend::default();
@@ -981,7 +981,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_relation_application_query() -> anyhow::Result<()> {
+    async fn it_executes_relation_query() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
         use crate::the;
 

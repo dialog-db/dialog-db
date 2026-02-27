@@ -250,7 +250,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_bindings_read() {
+    fn it_reads_bound_values() {
         use crate::selection::Answer;
 
         let mut terms = Parameters::new();
@@ -274,7 +274,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_bindings_missing_parameter() {
+    fn it_errors_on_missing_parameter() {
         use crate::selection::Answer;
 
         let terms = Parameters::new(); // Empty terms
@@ -290,7 +290,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_bindings_unbound_variable() {
+    fn it_errors_on_unbound_variable() {
         use crate::selection::Answer;
 
         let mut terms = Parameters::new();
@@ -308,7 +308,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_bindings_read_tracks_provenance() {
+    fn it_tracks_provenance_on_read() {
         use crate::selection::Answer;
 
         let mut params = Parameters::new();
@@ -340,7 +340,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_answer_rejects_conflicting_assignment() {
+    fn it_rejects_conflicting_assignment() {
         use crate::selection::{Answer, Factor};
         use std::collections::HashMap;
         use std::sync::Arc;
@@ -379,7 +379,7 @@ mod tests {
 
     #[dialog_common::test]
     #[allow(deprecated)]
-    fn test_bindings_write_rejects_conflicting_value() {
+    fn it_rejects_conflicting_write_value() {
         use crate::selection::Answer;
 
         let mut terms = Parameters::new();
@@ -420,7 +420,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_bindings_write_constant_matching_value() {
+    fn it_accepts_matching_constant_write() {
         use crate::selection::Answer;
 
         // Term is a constant 42 — writing 42 should succeed (consistent)
@@ -439,7 +439,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_bindings_write_constant_mismatched_value() {
+    fn it_rejects_mismatched_constant_write() {
         use crate::selection::Answer;
 
         // Term is a constant 99 — writing 8 should fail (inconsistent)
@@ -465,7 +465,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_bindings_into_parts() {
+    fn it_decomposes_into_parts() {
         use crate::selection::Answer;
 
         let mut params = Parameters::new();

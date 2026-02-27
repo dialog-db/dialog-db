@@ -550,7 +550,7 @@ mod tests {
     use super::*;
 
     #[dialog_common::test]
-    fn test_serde_integration() {
+    fn it_serializes_and_deserializes() {
         // Test serialization
         let any = Term::<Value>::default();
         assert_eq!(serde_json::to_string(&any).unwrap(), r#"{"?":{}}"#);
@@ -591,7 +591,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_term_from_value() {
+    fn it_creates_term_from_value() {
         let value = Value::String("test".to_string());
         let term = Term::from(value.clone());
 
@@ -606,7 +606,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_new_variable_system_integration() {
+    fn it_integrates_variable_system() {
         // Test that the new Variable<T> system works with Terms
         let string_var = Term::<String>::var("name");
         let untyped_var = Term::<Value>::var("anything");
@@ -627,7 +627,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_turbofish_syntax_with_terms() {
+    fn it_supports_turbofish_syntax() {
         // Test the new turbofish syntax works with Term conversion
         let name_var = Term::<String>::var("name");
         let age_var = Term::<u64>::var("age");
@@ -655,7 +655,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_term_from_implementations() {
+    fn it_converts_from_various_types() {
         // Test String conversions
         let term1: Term<String> = "hello".into();
         let term2: Term<String> = "world".to_string().into();
@@ -696,7 +696,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_term_from_variable_reference() {
+    fn it_creates_term_from_variable_reference() {
         // Test that we can convert variable references to terms
         let entity_var = Term::<Entity>::var("entity");
         let string_var = Term::<String>::var("name");
@@ -718,7 +718,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_inference() {
+    fn it_infers_term_types() {
         let thing = Term::var("hello");
 
         fn do_thing(_term: &Term<String>) {
@@ -737,7 +737,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_term_eq_creates_constraint() {
+    fn it_creates_equality_constraint() {
         use crate::Premise;
 
         // Create two variable terms
@@ -759,7 +759,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_term_eq_with_constant() {
+    fn it_creates_equality_with_constant() {
         use crate::Premise;
 
         // Create a variable and a constant

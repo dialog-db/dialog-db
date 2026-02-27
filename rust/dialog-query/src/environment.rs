@@ -154,7 +154,7 @@ mod tests {
     use super::*;
 
     #[dialog_common::test]
-    fn test_scope_add_ignores_constants() {
+    fn it_ignores_constants() {
         let mut scope = Environment::new();
 
         // Adding a constant should do nothing
@@ -172,7 +172,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_scope_add_ignores_blank_variables() {
+    fn it_ignores_blank_variables() {
         let mut scope = Environment::new();
 
         // Adding a blank variable (None name) should do nothing
@@ -186,7 +186,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_scope_add_only_adds_named_variables() {
+    fn it_adds_named_variables() {
         let mut scope = Environment::new();
 
         // Only named variables should be added
@@ -203,7 +203,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_scope_tracks_variable_names_not_values() {
+    fn it_tracks_names_not_values() {
         let mut scope = Environment::new();
 
         // Add a variable to the scope

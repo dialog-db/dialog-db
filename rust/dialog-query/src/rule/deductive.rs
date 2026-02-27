@@ -154,7 +154,7 @@ mod tests {
     use crate::the;
 
     #[dialog_common::test]
-    fn test_rule_compiles_with_valid_premises() {
+    fn it_compiles_with_valid_premises() {
         let conclusion = ConceptDescriptor::from(vec![
             (
                 "name",
@@ -199,7 +199,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_rule_fails_with_unconstrained_fact() {
+    fn it_rejects_unconstrained_fact() {
         let conclusion = ConceptDescriptor::from(vec![
             (
                 "key",
@@ -234,7 +234,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_rule_fails_with_unconstrained_relation() {
+    fn it_rejects_unconstrained_relation() {
         let conclusion = ConceptDescriptor::from(vec![
             (
                 "key",
@@ -277,7 +277,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_rule_fails_with_unused_parameter() {
+    fn it_rejects_unused_parameter() {
         let conclusion = ConceptDescriptor::from(vec![
             (
                 "name",
@@ -316,7 +316,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_rule_fails_with_no_premises() {
+    fn it_rejects_empty_premises() {
         let conclusion = ConceptDescriptor::from(vec![
             (
                 "name",
@@ -341,7 +341,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_rule_compiles_with_chained_dependencies() {
+    fn it_compiles_with_chained_dependencies() {
         let conclusion = ConceptDescriptor::from(vec![
             (
                 "key",
@@ -389,7 +389,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_rule_parameter_name_vs_variable_name() {
+    fn it_rejects_mismatched_parameter_name() {
         let conclusion = ConceptDescriptor::from(vec![(
             "key",
             AttributeDescriptor::new(the!("result/key"), "", Cardinality::One, Some(Type::String)),

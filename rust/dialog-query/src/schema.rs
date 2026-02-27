@@ -283,7 +283,7 @@ mod tests {
     use super::*;
 
     #[dialog_common::test]
-    fn test_requirement_properties() {
+    fn it_tracks_requirement_properties() {
         let required = Requirement::Required(None);
         let derived = Requirement::Optional;
 

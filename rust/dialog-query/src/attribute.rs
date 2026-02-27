@@ -198,7 +198,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_person_name() {
+    fn it_derives_person_name() {
         let _name = person::Name("hello".into());
         // Basic test that Attribute trait is implemented
         assert_eq!(person::Name::descriptor().domain(), "person");
@@ -237,7 +237,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_employee_name_derives_attribute() {
+    fn it_derives_employee_name() {
         let name = employee_derive::Name("Alice".to_string());
 
         assert_eq!(employee_derive::Name::domain(), "employee-derive");
@@ -252,7 +252,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_employee_job_derives_attribute() {
+    fn it_derives_employee_job() {
         let job = employee_derive::Job("Engineer".to_string());
 
         assert_eq!(employee_derive::Job::domain(), "employee-derive");
@@ -270,7 +270,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_employee_salary_derives_attribute() {
+    fn it_derives_employee_salary() {
         let salary = employee_derive::Salary(100000);
 
         assert_eq!(employee_derive::Salary::domain(), "employee-derive");
@@ -288,7 +288,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_person_derive_domain() {
+    fn it_derives_person_domain() {
         let name = person_derive::Name("Bob".to_string());
 
         assert_eq!(person_derive::Name::domain(), "person-derive");
@@ -301,7 +301,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_cardinality_many() {
+    fn it_derives_cardinality_many() {
         assert_eq!(person_derive::Manages::cardinality(), Cardinality::Many);
         assert_eq!(
             person_derive::Manages::description(),
@@ -320,7 +320,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_custom_domain_override_derive() {
+    fn it_overrides_domain_via_derive() {
         let field = custom_ns_derive::Field("value".to_string());
 
         assert_eq!(custom_ns_derive::Field::domain(), "custom");
@@ -355,7 +355,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_attribute_hash_stability() {
+    fn it_produces_stable_hash() {
         let hash1 = employee_ident::Name::hash();
         let hash2 = employee_ident::Name::hash();
 
@@ -366,7 +366,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_different_attributes_different_hashes() {
+    fn it_hashes_differently_for_different_attributes() {
         let name_hash = employee_ident::Name::hash();
         let salary_hash = employee_ident::Salary::hash();
         let job_hash = employee_ident::Job::hash();
@@ -386,7 +386,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_same_name_different_domain_different_hashes() {
+    fn it_hashes_differently_for_different_domains() {
         let employee_name_hash = employee_ident::Name::hash();
         let person_name_hash = person_ident::Name::hash();
 
@@ -397,7 +397,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_attribute_uri_format() {
+    fn it_formats_uri() {
         let uri = employee_ident::Name::to_uri();
 
         assert!(
@@ -409,7 +409,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_attribute_uri_roundtrip() {
+    fn it_round_trips_uri() {
         let uri = employee_ident::Name::to_uri();
         let parsed_hash = AttributeDescriptor::parse_uri(&uri);
 
@@ -422,7 +422,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_attribute_uri_parse_invalid() {
+    fn it_rejects_invalid_uri() {
         assert!(
             AttributeDescriptor::parse_uri("invalid").is_none(),
             "Should fail to parse URI without 'the:' prefix"
@@ -440,7 +440,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_attribute_schema_hash_stability() {
+    fn it_produces_stable_schema_hash() {
         let schema_hash = employee_ident::Name::descriptor().hash();
         let trait_hash = employee_ident::Name::hash();
 
@@ -451,7 +451,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_attribute_cbor_encoding() {
+    fn it_encodes_to_cbor() {
         let cbor1 = employee_ident::Name::descriptor().to_cbor_bytes();
         let cbor2 = employee_ident::Name::descriptor().to_cbor_bytes();
 
@@ -460,7 +460,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_attribute_description_does_not_affect_hash() {
+    fn it_excludes_description_from_hash() {
         let attr1 = AttributeDescriptor::new(
             the!("user/email"),
             "Primary email address",
@@ -504,7 +504,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_attribute_into_term() {
+    fn it_converts_into_term() {
         let name = employee_term::Name("Alice".into());
         let name_term: Term<String> = name.into();
         assert!(name_term.is_constant());
@@ -519,7 +519,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_attribute_from_method() {
+    fn it_creates_from_method() {
         let name = employee_term::Name::from("Alice");
         assert_eq!(name.value(), "Alice");
 
@@ -534,7 +534,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_attribute_into_in_match_construction() {
+    fn it_uses_into_in_match_construction() {
         use crate::{Concept, Entity, Match, Term};
 
         #[derive(Concept, Debug, Clone)]
@@ -607,7 +607,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_underscore_to_hyphen_conversion() {
+    fn it_converts_underscores_to_hyphens() {
         assert_eq!(account_name::Name::domain(), "account-name");
         assert_eq!(account_name::Name::name(), "name");
         assert_eq!(
@@ -617,14 +617,14 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_nested_module_domain() {
+    fn it_derives_nested_module_domain() {
         assert_eq!(ns_my::config::Key::domain(), "config");
         assert_eq!(ns_my::config::Key::name(), "key");
         assert_eq!(ns_my::config::Key::selector().to_string(), "config/key");
     }
 
     #[dialog_common::test]
-    fn test_explicit_domain_override() {
+    fn it_overrides_domain_explicitly() {
         assert_eq!(NsValue::domain(), "my.custom.namespace");
         assert_eq!(NsValue::name(), "ns-value");
         assert_eq!(
@@ -634,7 +634,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_domain_identifier_syntax() {
+    fn it_accepts_domain_identifier_syntax() {
         assert_eq!(NsCustomValue::domain(), "custom");
         assert_eq!(NsCustomValue::name(), "ns-custom-value");
         assert_eq!(
@@ -644,7 +644,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_domain_string_literal_syntax() {
+    fn it_accepts_domain_string_literal() {
         assert_eq!(NsDottedValue::domain(), "io.gozala");
         assert_eq!(NsDottedValue::name(), "ns-dotted-value");
         assert_eq!(
@@ -654,7 +654,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_nested_underscore_conversion() {
+    fn it_converts_nested_underscores() {
         assert_eq!(ns_my_app::user_profile::Email::domain(), "user-profile");
         assert_eq!(ns_my_app::user_profile::Email::name(), "email");
         assert_eq!(
@@ -664,7 +664,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_all_metadata_preserved() {
+    fn it_preserves_all_metadata() {
         let name = account_name::Name("John Doe".to_string());
 
         assert_eq!(account_name::Name::domain(), "account-name");
@@ -690,18 +690,18 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_pascal_case_to_kebab_case() {
+    fn it_converts_pascal_to_kebab() {
         assert_eq!(test_pascal::UserName::name(), "user-name");
     }
 
     #[dialog_common::test]
-    fn test_consecutive_capitals() {
+    fn it_converts_consecutive_capitals() {
         assert_eq!(test_pascal::HTTPRequest::name(), "http-request");
         assert_eq!(test_pascal::APIKey::name(), "api-key");
     }
 
     #[dialog_common::test]
-    fn test_static_values() {
+    fn it_exposes_static_values() {
         let ns = test_pascal::UserName::domain();
         let name = test_pascal::UserName::name();
         let desc = test_pascal::UserName::description();
@@ -712,7 +712,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_schema_static() {
+    fn it_exposes_static_schema() {
         let schema = &test_pascal::UserName::descriptor();
         assert_eq!(schema.name(), "user-name");
         assert_eq!(schema.cardinality(), Cardinality::One);

@@ -32,7 +32,7 @@ mod tests {
     use dialog_storage::MemoryStorageBackend;
 
     #[dialog_common::test]
-    async fn test_fact_selector_query_trait() -> Result<()> {
+    async fn it_queries_via_fact_selector() -> Result<()> {
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
@@ -100,7 +100,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_query_trait_with_variables_succeeds_if_constants_present() -> Result<()> {
+    async fn it_succeeds_with_variables_and_constants() -> Result<()> {
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
@@ -120,7 +120,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_polymorphic_querying() -> Result<()> {
+    async fn it_queries_polymorphically() -> Result<()> {
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
@@ -150,7 +150,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_chaining_query_operations() -> Result<()> {
+    async fn it_chains_query_operations() -> Result<()> {
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 

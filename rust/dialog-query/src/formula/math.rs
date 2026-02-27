@@ -133,7 +133,7 @@ mod tests {
     use crate::*;
 
     #[dialog_common::test]
-    fn test_sum_formula_basic() -> anyhow::Result<()> {
+    fn it_sums_two_values() -> anyhow::Result<()> {
         // Create Terms mapping
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x"));
@@ -185,7 +185,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_sum_formula_missing_input() -> anyhow::Result<()> {
+    fn it_errors_on_missing_sum_input() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x"));
         terms.insert("with".to_string(), Term::var("missing"));
@@ -207,7 +207,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_sum_formula_multiple_expand() -> anyhow::Result<()> {
+    fn it_expands_sum_to_multiple_types() -> anyhow::Result<()> {
         // Test multiple expansions without the stream complexity
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("a"));
@@ -283,7 +283,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_multiple_try_from_types() -> anyhow::Result<()> {
+    fn it_converts_between_numeric_types() -> anyhow::Result<()> {
         // Test various data types with standard TryFrom<Value>
         let bool_val = Value::Boolean(true);
         assert!(bool::try_from(bool_val).unwrap());
@@ -303,7 +303,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_difference_formula() -> anyhow::Result<()> {
+    fn it_computes_difference() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x"));
         terms.insert("subtract".to_string(), Term::var("y"));
@@ -331,7 +331,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_difference_formula_underflow() -> anyhow::Result<()> {
+    fn it_handles_difference_underflow() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x"));
         terms.insert("subtract".to_string(), Term::var("y"));
@@ -362,7 +362,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_product_formula() -> anyhow::Result<()> {
+    fn it_computes_product() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x"));
         terms.insert("times".to_string(), Term::var("y"));
@@ -390,7 +390,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_quotient_formula() -> anyhow::Result<()> {
+    fn it_computes_quotient() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x"));
         terms.insert("by".to_string(), Term::var("y"));
@@ -418,7 +418,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_quotient_formula_division_by_zero() -> anyhow::Result<()> {
+    fn it_errors_on_division_by_zero() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x"));
         terms.insert("by".to_string(), Term::var("y"));
@@ -442,7 +442,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_modulo_formula() -> anyhow::Result<()> {
+    fn it_computes_modulo() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x"));
         terms.insert("by".to_string(), Term::var("y"));
@@ -470,7 +470,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_modulo_formula_by_zero() -> anyhow::Result<()> {
+    fn it_errors_on_modulo_by_zero() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x"));
         terms.insert("by".to_string(), Term::var("y"));
@@ -491,7 +491,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_integration_math_operations() -> anyhow::Result<()> {
+    fn it_chains_math_operations() -> anyhow::Result<()> {
         // Test Sum formula: 10 + 5 = 15
         let mut sum_terms = Parameters::new();
         sum_terms.insert("of".to_string(), Term::var("x"));
@@ -559,7 +559,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_formula_chaining() -> anyhow::Result<()> {
+    fn it_chains_formula_results() -> anyhow::Result<()> {
         use crate::formula::conversions::{ParseNumber, ToString};
 
         // First: Parse a number from string
@@ -635,14 +635,14 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_input_struct_generated() {
+    fn it_generates_input_struct() {
         let input = crate::formula::Input::<TestSum> { of: 5, with: 3 };
         assert_eq!(input.of, 5);
         assert_eq!(input.with, 3);
     }
 
     #[dialog_common::test]
-    fn test_match_struct_generated() {
+    fn it_generates_match_struct() {
         let match_pattern = crate::Match::<TestSum> {
             of: Term::var("x"),
             with: Term::var("y"),
@@ -653,7 +653,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_formula_application_perform_all_variables() -> anyhow::Result<()> {
+    async fn it_performs_formula_with_all_variables() -> anyhow::Result<()> {
         use crate::query::Application;
         use crate::{Session, artifact::Artifacts};
         use dialog_storage::MemoryStorageBackend;
@@ -703,7 +703,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_formula_application_perform_constant_inputs() -> anyhow::Result<()> {
+    async fn it_performs_formula_with_constant_inputs() -> anyhow::Result<()> {
         use crate::query::Application;
         use crate::{Session, artifact::Artifacts};
         use dialog_storage::MemoryStorageBackend;
@@ -742,7 +742,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_formula_application_perform_constant_derived() -> anyhow::Result<()> {
+    async fn it_performs_formula_with_constant_derived() -> anyhow::Result<()> {
         use crate::query::Application;
         use crate::{Session, artifact::Artifacts};
         use dialog_storage::MemoryStorageBackend;
@@ -784,7 +784,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_formula_application_perform_inconsistent_constant() -> anyhow::Result<()> {
+    async fn it_rejects_inconsistent_constant_in_formula() -> anyhow::Result<()> {
         use crate::query::Application;
         use crate::{Session, artifact::Artifacts};
         use dialog_storage::MemoryStorageBackend;
@@ -826,7 +826,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_formula_application_perform_mixed_terms() -> anyhow::Result<()> {
+    async fn it_performs_formula_with_mixed_terms() -> anyhow::Result<()> {
         use crate::query::Application;
         use crate::{Session, artifact::Artifacts};
         use dialog_storage::MemoryStorageBackend;
@@ -865,7 +865,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_formula_application_perform_shared_variable() -> anyhow::Result<()> {
+    async fn it_performs_formula_with_shared_variable() -> anyhow::Result<()> {
         use crate::query::Application;
         use crate::{Session, artifact::Artifacts};
         use dialog_storage::MemoryStorageBackend;
@@ -904,7 +904,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_error_handling() -> anyhow::Result<()> {
+    fn it_handles_formula_errors() -> anyhow::Result<()> {
         // Test division by zero in Quotient formula
         let mut quotient_terms = Parameters::new();
         quotient_terms.insert("of".to_string(), Term::var("dividend"));
