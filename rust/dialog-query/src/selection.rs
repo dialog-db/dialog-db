@@ -22,7 +22,7 @@ mod tests {
     use std::sync::Arc;
 
     #[dialog_common::test]
-    async fn test_answer_seed_produces_one_empty_answer() {
+    async fn it_seeds_one_empty_answer() {
         use futures_util::TryStreamExt;
         let results: Vec<Answer> = Answer::new().seed().try_collect().await.unwrap();
         assert_eq!(results.len(), 1);
@@ -64,7 +64,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_answer_contains_bound_variable() {
+    fn it_contains_bound_variable() {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/name").unwrap();
         let value = Value::String("Alice".to_string());
@@ -87,7 +87,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_answer_contains_unbound_variable() {
+    fn it_excludes_unbound_variable() {
         let answer = Answer::new();
         let name_term = Term::<Value>::var("name");
 
@@ -96,7 +96,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_answer_contains_constant() {
+    fn it_contains_constant() {
         let answer = Answer::new();
         let constant_term = Term::Constant(Value::String("constant_value".to_string()));
 
@@ -105,7 +105,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_answer_contains_blank_variable() {
+    fn it_excludes_blank_variable() {
         let answer = Answer::new();
         let blank_term = Term::<Value>::blank();
 
@@ -114,7 +114,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_answer_resolve_string() {
+    fn it_resolves_string() {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/name").unwrap();
         let value = Value::String("Alice".to_string());
@@ -141,7 +141,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_answer_resolve_u32() {
+    fn it_resolves_u32() {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/age").unwrap();
         let value = Value::UnsignedInt(25);
@@ -168,7 +168,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_answer_resolve_i32() {
+    fn it_resolves_i32() {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/score").unwrap();
         let value = Value::SignedInt(-10);
@@ -195,7 +195,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_answer_resolve_bool() {
+    fn it_resolves_bool() {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/active").unwrap();
         let value = Value::Boolean(true);
@@ -222,7 +222,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_answer_resolve_entity() {
+    fn it_resolves_entity() {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/id").unwrap();
         let entity_value = Entity::new().unwrap();
@@ -250,7 +250,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_answer_resolve_constant() {
+    fn it_resolves_constant() {
         let answer = Answer::new();
         let constant_term = Term::Constant("constant_value".to_string());
 
@@ -263,7 +263,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_answer_resolve_unbound_variable() {
+    fn it_errors_on_unbound_variable() {
         let answer = Answer::new();
         let name_term = Term::<String>::var("name");
 
@@ -281,7 +281,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_answer_resolve_blank_variable() {
+    fn it_errors_on_blank_variable() {
         let answer = Answer::new();
         let blank_term = Term::<String>::blank();
 
@@ -297,7 +297,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_answer_resolve_type_mismatch() {
+    fn it_errors_on_type_mismatch() {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/name").unwrap();
         let value = Value::String("Alice".to_string());
@@ -327,7 +327,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_answer_factors_evidence() {
+    fn it_tracks_factors_evidence() {
         let entity1 = Entity::new().unwrap();
         let entity2 = Entity::new().unwrap();
         let attr = Attribute::from_str("user/name").unwrap();
@@ -376,7 +376,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_answer_resolve_multiple_types() {
+    fn it_resolves_multiple_types() {
         let entity = Entity::new().unwrap();
 
         // Create multiple facts
@@ -433,7 +433,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_answer_extend() {
+    fn it_extends_with_multiple_bindings() {
         let entity = Entity::new().unwrap();
 
         // Create multiple facts

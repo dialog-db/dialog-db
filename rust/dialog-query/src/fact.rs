@@ -102,7 +102,7 @@ mod integration_tests {
     use dialog_storage::MemoryStorageBackend;
 
     #[dialog_common::test]
-    async fn test_fact_assert_retract_and_query_with_variables() -> Result<()> {
+    async fn it_asserts_retracts_and_queries() -> Result<()> {
         // Setup: Create in-memory storage and artifacts store
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
@@ -212,7 +212,7 @@ mod integration_tests {
     }
 
     #[dialog_common::test]
-    async fn test_retraction_workflow() -> Result<()> {
+    async fn it_retracts_facts() -> Result<()> {
         // Setup
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
@@ -277,7 +277,7 @@ mod integration_tests {
     }
 
     #[dialog_common::test]
-    async fn test_constants_vs_variables_binding() -> Result<()> {
+    async fn it_binds_constants_and_variables() -> Result<()> {
         // Setup
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
@@ -371,7 +371,7 @@ mod integration_tests {
     }
 
     #[dialog_common::test]
-    async fn test_complex_queries_with_constants() -> Result<()> {
+    async fn it_queries_with_constant_constraints() -> Result<()> {
         // Setup
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
@@ -483,7 +483,7 @@ mod integration_tests {
     }
 
     #[dialog_common::test]
-    async fn test_variable_queries_succeed_with_constants() -> Result<()> {
+    async fn it_succeeds_variable_queries_with_constants() -> Result<()> {
         // Setup store with test data
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
@@ -535,7 +535,7 @@ mod integration_tests {
     }
 
     #[dialog_common::test]
-    async fn test_typed_fact_selector_patterns() -> Result<()> {
+    async fn it_uses_typed_fact_selectors() -> Result<()> {
         // Setup test data
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
@@ -618,7 +618,7 @@ mod integration_tests {
     }
 
     #[dialog_common::test]
-    async fn test_type_inference_with_string_literals() -> Result<()> {
+    async fn it_infers_types_from_string_literals() -> Result<()> {
         // Setup test data
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
@@ -710,7 +710,7 @@ mod integration_tests {
     }
 
     #[dialog_common::test]
-    async fn test_mixed_constants_and_variables_succeed() -> Result<()> {
+    async fn it_mixes_constants_and_variables() -> Result<()> {
         let alice = Entity::new()?;
 
         // Setup store with test data
@@ -754,7 +754,7 @@ mod integration_tests {
     }
 
     #[dialog_common::test]
-    async fn test_fluent_query_building_and_execution() -> Result<()> {
+    async fn it_builds_and_executes_fluent_query() -> Result<()> {
         // Setup
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;

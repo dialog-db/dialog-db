@@ -52,7 +52,7 @@ mod tests {
     use crate::term::Term;
 
     #[dialog_common::test]
-    fn test_terms_basic_operations() {
+    fn it_performs_basic_operations() {
         let mut terms = Parameters::new();
 
         // Test insertion and retrieval

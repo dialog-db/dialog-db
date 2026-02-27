@@ -162,8 +162,7 @@ impl Candidate {
                 // Only process bindings that are relevant to this plan
                 for (name, _constraint) in schema.iter() {
                     if let Some(term) = params.get(name) {
-                        // Skip constants - they're never in binds
-                        if matches!(term, Term::Constant(_)) {
+                        if matches!(term, Term::Constant(_)) || term.is_blank() {
                             continue;
                         }
 
@@ -220,12 +219,11 @@ impl Candidate {
                         if let Requirement::Required(Some(group)) = &constraint.requirement
                             && satisfied_groups.contains(group)
                             && let Some(term) = params.get(name)
+                            && requires.remove(term)
+                            && !env.contains(term)
+                            && !is_negation
                         {
-                            // If this term was required, it's no longer required
-                            // Move it to binds if it's not already bound
-                            if requires.remove(term) && !env.contains(term) {
-                                binds.add(term);
-                            }
+                            binds.add(term);
                         }
                     }
                 }
@@ -337,7 +335,7 @@ mod tests {
     use crate::{Environment, Parameters, Premise, Term, Value};
 
     #[dialog_common::test]
-    fn test_candidate_from_premise_all_derived() {
+    fn it_creates_candidate_all_derived() {
         let mut params = Parameters::new();
         params.insert("of".to_string(), Term::<Value>::var("text".to_string()));
         params.insert("is".to_string(), Term::<Value>::var("len".to_string()));
@@ -350,7 +348,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_candidate_from_premise_with_constant() {
+    fn it_creates_candidate_with_constant() {
         let mut params = Parameters::new();
         params.insert(
             "of".to_string(),
@@ -366,7 +364,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_candidate_update_transitions_to_viable() {
+    fn it_transitions_to_viable_on_update() {
         let mut params = Parameters::new();
         params.insert("of".to_string(), Term::<Value>::var("text"));
         params.insert("is".to_string(), Term::<Value>::var("len"));
@@ -385,7 +383,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_candidate_update_reduces_cost_when_derived_bound() {
+    fn it_reduces_cost_when_derived_bound() {
         let mut params = Parameters::new();
         params.insert(
             "of".to_string(),
@@ -412,7 +410,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_candidate_try_into_plan_when_viable() {
+    fn it_converts_viable_candidate_to_plan() {
         let mut params = Parameters::new();
         params.insert(
             "of".to_string(),
@@ -431,7 +429,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_candidate_try_into_plan_when_blocked() {
+    fn it_rejects_blocked_candidate_conversion() {
         let mut params = Parameters::new();
         params.insert("of".to_string(), Term::<Value>::var("text".to_string()));
         params.insert("is".to_string(), Term::<Value>::var("len".to_string()));
@@ -466,7 +464,7 @@ mod cost_model_tests {
     use crate::{AttributeDescriptor, Environment, Parameters, Premise, Term, Type, Value};
 
     #[dialog_common::test]
-    fn test_constants_do_not_add_cost() {
+    fn it_excludes_constants_from_cost() {
         let entity_val: Entity = Entity::new().unwrap();
 
         let app = RelationQuery::new(
@@ -489,7 +487,7 @@ mod cost_model_tests {
     }
 
     #[dialog_common::test]
-    fn test_one_constant_two_variables() {
+    fn it_costs_one_constant_two_variables() {
         let app = RelationQuery::new(
             Term::Constant(the!("user/name")),
             Term::<Entity>::var("entity"),
@@ -510,7 +508,7 @@ mod cost_model_tests {
     }
 
     #[dialog_common::test]
-    fn test_env_variables_reduce_cost() {
+    fn it_reduces_cost_for_env_variables() {
         let app = RelationQuery::new(
             Term::Constant(the!("user/name")),
             Term::<Entity>::var("entity"),
@@ -547,7 +545,7 @@ mod cost_model_tests {
     }
 
     #[dialog_common::test]
-    fn test_variables_already_in_initial_env_dont_add_cost() {
+    fn it_excludes_initial_env_variables_from_cost() {
         let app = RelationQuery::new(
             Term::Constant(the!("user/name")),
             Term::<Entity>::var("entity"),
@@ -569,7 +567,7 @@ mod cost_model_tests {
     }
 
     #[dialog_common::test]
-    fn test_cardinality_many_costs_more_than_one() {
+    fn it_costs_more_for_cardinality_many() {
         let one_app = RelationQuery::new(
             Term::Constant(the!("user/tags")),
             Term::<Entity>::var("entity"),
@@ -612,7 +610,7 @@ mod cost_model_tests {
     }
 
     #[dialog_common::test]
-    fn test_fully_bound_cardinality_should_not_differ() {
+    fn it_costs_same_when_fully_bound() {
         let entity_val: Entity = Entity::new().unwrap();
         let value_val = Value::String("rust".to_string());
 
@@ -648,7 +646,7 @@ mod cost_model_tests {
     }
 
     #[dialog_common::test]
-    fn test_formula_cheaper_than_fact_no_io() {
+    fn it_costs_less_for_formula_without_io() {
         let mut formula_params = Parameters::new();
         formula_params.insert(
             "of".to_string(),
@@ -678,7 +676,7 @@ mod cost_model_tests {
     }
 
     #[dialog_common::test]
-    fn test_formula_requiring_fact_costs_more() {
+    fn it_costs_more_for_formula_with_fact() {
         let mut formula_params = Parameters::new();
         formula_params.insert("of".to_string(), Term::<Value>::var("text"));
         formula_params.insert("is".to_string(), Term::<Value>::var("len"));
@@ -694,7 +692,7 @@ mod cost_model_tests {
     }
 
     #[dialog_common::test]
-    fn test_concept_equals_fact_cost_nothing_bound() {
+    fn it_matches_fact_cost_nothing_bound() {
         let fact_app = RelationQuery::new(
             Term::Constant(the!("user/name")),
             Term::<Entity>::var("entity"),
@@ -740,7 +738,7 @@ mod cost_model_tests {
     }
 
     #[dialog_common::test]
-    fn test_concept_equals_fact_cost_value_bound() {
+    fn it_matches_fact_cost_value_bound() {
         let fact_app = RelationQuery::new(
             Term::Constant(the!("user/name")),
             Term::<Entity>::var("entity"),
@@ -779,7 +777,7 @@ mod cost_model_tests {
     }
 
     #[dialog_common::test]
-    fn test_concept_equals_fact_cost_entity_bound() {
+    fn it_matches_fact_cost_entity_bound() {
         let fact_app = RelationQuery::new(
             Term::Constant(the!("user/name")),
             Term::<Entity>::var("entity"),
@@ -818,7 +816,7 @@ mod cost_model_tests {
     }
 
     #[dialog_common::test]
-    fn test_concept_equals_fact_cost_cardinality_many_nothing_bound() {
+    fn it_matches_fact_cost_many_nothing_bound() {
         let fact_app = RelationQuery::new(
             Term::Constant(the!("user/tags")),
             Term::<Entity>::var("entity"),
@@ -855,7 +853,7 @@ mod cost_model_tests {
     }
 
     #[dialog_common::test]
-    fn test_concept_equals_fact_cost_cardinality_many_value_bound() {
+    fn it_matches_fact_cost_many_value_bound() {
         let fact_app = RelationQuery::new(
             Term::Constant(the!("user/tags")),
             Term::<Entity>::var("entity"),
@@ -893,7 +891,7 @@ mod cost_model_tests {
     }
 
     #[dialog_common::test]
-    fn test_cost_accumulation_through_planning() {
+    fn it_accumulates_cost_through_planning() {
         let p1 = RelationQuery::new(
             Term::Constant(the!("user/name")),
             Term::<Entity>::var("entity"),

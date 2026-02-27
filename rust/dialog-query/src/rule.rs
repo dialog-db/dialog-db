@@ -273,7 +273,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_install_rule_api() {
+    async fn it_installs_rule() {
         use dialog_storage::MemoryStorageBackend;
 
         // Define a rule function using the clean API
@@ -318,7 +318,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn it_derive_rule_generates_types() {
+    fn it_generates_derived_rule_types() {
         // Test that the generated module and types exist
         let entity = Term::var("person_entity");
 
@@ -364,7 +364,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn it_attribute_descriptors() {
+    fn it_exposes_attribute_descriptors() {
         use crate::attribute::Attribute;
         // Test that attribute descriptors are accessible via the Attribute trait
         let name_desc = macro_person::Name::descriptor();

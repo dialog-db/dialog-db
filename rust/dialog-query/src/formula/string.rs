@@ -196,7 +196,7 @@ mod tests {
     use crate::{Match, Parameters, Term, selection::Answer};
 
     #[dialog_common::test]
-    fn test_concatenate_formula() {
+    fn it_concatenates_strings() {
         let mut terms = Parameters::new();
         terms.insert("first".to_string(), Term::var("x"));
         terms.insert("second".to_string(), Term::var("y"));
@@ -223,7 +223,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_length_formula() {
+    fn it_computes_string_length() {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("text"));
         terms.insert("is".to_string(), Term::var("len"));
@@ -247,7 +247,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_uppercase_formula() {
+    fn it_converts_to_uppercase() {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("text"));
         terms.insert("is".to_string(), Term::var("upper"));
@@ -271,7 +271,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_lowercase_formula() {
+    fn it_converts_to_lowercase() {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("text"));
         terms.insert("is".to_string(), Term::var("lower"));
@@ -295,7 +295,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_empty_string_length() {
+    fn it_returns_zero_for_empty_string() {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("text"));
         terms.insert("is".to_string(), Term::var("len"));
@@ -319,7 +319,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_concatenate_empty_strings() {
+    fn it_concatenates_empty_strings() {
         let mut terms = Parameters::new();
         terms.insert("first".to_string(), Term::var("x"));
         terms.insert("second".to_string(), Term::var("y"));
@@ -348,7 +348,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_integration_string_operations() -> anyhow::Result<()> {
+    fn it_chains_string_operations() -> anyhow::Result<()> {
         // Test Concatenate formula
         let mut concat_terms = Parameters::new();
         concat_terms.insert("first".to_string(), Term::var("fname"));
@@ -412,7 +412,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_like_exact_match() {
+    fn it_matches_like_exact() {
         let mut terms = Parameters::new();
         terms.insert("text".to_string(), Term::var("t"));
         terms.insert("pattern".to_string(), Term::var("p"));
@@ -437,7 +437,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_like_star_wildcard() {
+    fn it_matches_like_star_wildcard() {
         let mut terms = Parameters::new();
         terms.insert("text".to_string(), Term::var("t"));
         terms.insert("pattern".to_string(), Term::var("p"));
@@ -483,7 +483,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_like_question_wildcard() {
+    fn it_matches_like_question_wildcard() {
         let mut terms = Parameters::new();
         terms.insert("text".to_string(), Term::var("t"));
         terms.insert("pattern".to_string(), Term::var("p"));
@@ -511,7 +511,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_like_escape() {
+    fn it_matches_like_with_escape() {
         let mut terms = Parameters::new();
         terms.insert("text".to_string(), Term::var("t"));
         terms.insert("pattern".to_string(), Term::var("p"));
@@ -539,7 +539,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_like_match_all() {
+    fn it_matches_like_star_all() {
         let mut terms = Parameters::new();
         terms.insert("text".to_string(), Term::var("t"));
         terms.insert("pattern".to_string(), Term::var("p"));
@@ -557,7 +557,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_like_backtracking() {
+    fn it_matches_like_with_backtracking() {
         assert!(glob_match("*121", "12121"));
         assert!(glob_match("*113", "1113"));
         assert!(glob_match("*113", "11113"));
@@ -570,7 +570,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_like_empty_inputs() {
+    fn it_handles_like_empty_inputs() {
         assert!(glob_match("*", ""));
         assert!(glob_match("", ""));
         assert!(!glob_match("?", ""));
@@ -579,13 +579,13 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_like_escaped_question() {
+    fn it_matches_like_escaped_question() {
         assert!(glob_match("a\\?b", "a?b"));
         assert!(!glob_match("a\\?b", "axb"));
     }
 
     #[dialog_common::test]
-    fn test_like_match_struct() {
+    fn it_constructs_like_match_struct() {
         let pattern = Match::<Like> {
             text: Term::var("title"),
             pattern: Term::from("Hello*".to_string()),
@@ -598,7 +598,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_like_escaped_backslash() {
+    fn it_matches_like_escaped_backslash() {
         assert!(glob_match("a\\\\b", "a\\b"));
         assert!(!glob_match("a\\\\b", "axb"));
     }

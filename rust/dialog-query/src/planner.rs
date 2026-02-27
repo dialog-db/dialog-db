@@ -192,7 +192,7 @@ mod tests {
     use crate::the;
 
     #[dialog_common::test]
-    fn test_join_plan_with_two_fact_applications() {
+    fn it_plans_two_fact_applications() {
         use crate::relation::descriptor::RelationDescriptor;
         use crate::relation::query::RelationQuery;
         use crate::{Cardinality, Proposition, Term, Value};
@@ -238,7 +238,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_join_plan_execution_order() {
+    fn it_orders_cheaper_premise_first() {
         use crate::relation::descriptor::RelationDescriptor;
         use crate::relation::query::RelationQuery;
         use crate::{Cardinality, Proposition, Term};
@@ -274,7 +274,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_join_plan_query_execution() -> anyhow::Result<()> {
+    async fn it_executes_planned_query() -> anyhow::Result<()> {
         use crate::relation::descriptor::RelationDescriptor;
         use crate::relation::query::RelationQuery;
         use crate::session::Session;

@@ -273,7 +273,7 @@ mod tests {
     use crate::{Requirement, Type};
 
     #[dialog_common::test]
-    fn test_cells() -> anyhow::Result<()> {
+    fn it_evaluates_cells() -> anyhow::Result<()> {
         let cells = Cells::define(|builder| {
             builder
                 .cell("name", Some(Type::String))
