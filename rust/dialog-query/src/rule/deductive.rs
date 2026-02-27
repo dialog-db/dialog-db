@@ -130,7 +130,7 @@ impl From<&ConceptDescriptor> for DeductiveRule {
                     Term::Constant(attribute.the().clone()),
                     this.clone(),
                     Term::var(name),
-                    Term::var("cause"),
+                    Term::blank(),
                     Some(RelationDescriptor::new(
                         attribute.content_type(),
                         attribute.cardinality(),
