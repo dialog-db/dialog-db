@@ -2,9 +2,6 @@
 pub mod application;
 /// Concept descriptors for entity-centric queries.
 pub mod descriptor;
-/// Single-attribute concept wrapper ([`With<A>`]) and its query types.
-pub mod with;
-pub use with::{With, WithQuery, WithTerms};
 
 pub use application::ConceptQuery;
 pub use descriptor::ConceptDescriptor;
@@ -30,7 +27,7 @@ use std::fmt::Debug;
 ///
 /// Note: IntoIterator is not a bound on this trait to allow attributes to
 /// implement Concept by delegating to their instance types (e.g., Title
-/// delegates to With<Title>). Conclusion types still implement IntoIterator.
+/// delegates to its AttributeStatement type). Conclusion types still implement IntoIterator.
 pub trait Concept: Predicate + Clone + Debug
 where
     Self::Conclusion: Conclusion,
@@ -117,7 +114,7 @@ mod tests {
         ArtifactSelector, ArtifactStore, Artifacts, Attribute as ArtifactAttribute, Type, Value,
     };
     use crate::attribute::{Attribute as _, AttributeDescriptor};
-    use crate::concept::With;
+
     use crate::relation::query::RelationQuery;
     use crate::term::Term;
     use crate::the;
@@ -1316,14 +1313,8 @@ mod tests {
 
         let mut session = Session::open(artifacts.clone());
         let mut transaction = session.edit();
-        transaction.assert(With {
-            this: alice,
-            has: helper_person::Name("Alice".into()),
-        });
-        transaction.assert(With {
-            this: bob,
-            has: helper_person::Name("Bob".into()),
-        });
+        transaction.assert(helper_person::Name::of(alice).is("Alice"));
+        transaction.assert(helper_person::Name::of(bob).is("Bob"));
         session.commit(transaction).await?;
 
         let alice_query = Query::<HelperPerson> {
@@ -1358,22 +1349,10 @@ mod tests {
 
         let mut session = Session::open(artifacts.clone());
         let mut transaction = session.edit();
-        transaction.assert(With {
-            this: alice.clone(),
-            has: helper_employee::Name("Alice".into()),
-        });
-        transaction.assert(With {
-            this: alice.clone(),
-            has: helper_employee::Department("Engineering".into()),
-        });
-        transaction.assert(With {
-            this: bob.clone(),
-            has: helper_employee::Name("Bob".into()),
-        });
-        transaction.assert(With {
-            this: bob,
-            has: helper_employee::Department("Sales".into()),
-        });
+        transaction.assert(helper_employee::Name::of(alice.clone()).is("Alice"));
+        transaction.assert(helper_employee::Department::of(alice.clone()).is("Engineering"));
+        transaction.assert(helper_employee::Name::of(bob.clone()).is("Bob"));
+        transaction.assert(helper_employee::Department::of(bob).is("Sales"));
         session.commit(transaction).await?;
 
         let alice_engineering_query = Query::<HelperEmployee> {
@@ -1403,22 +1382,10 @@ mod tests {
 
         let mut session = Session::open(artifacts.clone());
         let mut transaction = session.edit();
-        transaction.assert(With {
-            this: alice.clone(),
-            has: helper_employee::Name("Alice".into()),
-        });
-        transaction.assert(With {
-            this: alice.clone(),
-            has: helper_employee::Department("Engineering".into()),
-        });
-        transaction.assert(With {
-            this: bob.clone(),
-            has: helper_employee::Name("Bob".into()),
-        });
-        transaction.assert(With {
-            this: bob.clone(),
-            has: helper_employee::Department("Sales".into()),
-        });
+        transaction.assert(helper_employee::Name::of(alice.clone()).is("Alice"));
+        transaction.assert(helper_employee::Department::of(alice.clone()).is("Engineering"));
+        transaction.assert(helper_employee::Name::of(bob.clone()).is("Bob"));
+        transaction.assert(helper_employee::Department::of(bob.clone()).is("Sales"));
         session.commit(transaction).await?;
 
         let engineering_query = Query::<HelperEmployee> {

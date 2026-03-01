@@ -363,8 +363,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_exposes_attribute_descriptors() {
-        use crate::attribute::Attribute;
-        // Test that attribute descriptors are accessible via the Attribute trait
+        // Test that attribute descriptors are accessible via inherent methods
         let name_desc = macro_person::Name::descriptor();
         let birthday_desc = macro_person::Birthday::descriptor();
         assert_eq!(name_desc.domain(), "macro-person");

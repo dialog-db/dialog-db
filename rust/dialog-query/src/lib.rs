@@ -32,6 +32,8 @@ pub mod claim;
 pub mod concept;
 /// Constraint system for filtering and validating variable bindings.
 pub mod constraint;
+/// Static descriptor trait for attribute and concept metadata.
+pub mod descriptor;
 /// Variable binding environment used during query planning.
 pub mod environment;
 /// Error types for the query engine.
@@ -71,12 +73,13 @@ pub mod types;
 
 pub use artifact::{Attribute as ArtifactAttribute, Entity, Type, Value};
 pub use association::Association;
-pub use attribute::{Attribute, AttributeDescriptor, Cardinality, The};
+pub use attribute::{Attribute, AttributeDescriptor, AttributeExpressionBuilder, Cardinality, The};
 pub use claim::Claim;
 pub use concept::application::{ConceptQuery, ConceptRules};
 pub use concept::descriptor::{ConceptConclusion, ConceptDescriptor};
-pub use concept::{Concept, Conclusion, With, WithQuery, WithTerms};
+pub use concept::{Concept, Conclusion};
 pub use constraint::Constraint;
+pub use descriptor::Descriptor;
 pub use environment::*;
 pub use error::*;
 pub use formula::*;

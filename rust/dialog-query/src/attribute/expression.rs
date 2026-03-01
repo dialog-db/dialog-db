@@ -1,5 +1,7 @@
 use crate::artifact::Cause;
 use crate::attribute::Attribute;
+use crate::attribute::AttributeDescriptor;
+use crate::descriptor::Descriptor;
 use crate::negation::Negation;
 use crate::relation::descriptor::RelationDescriptor;
 use crate::relation::query::RelationQuery;
@@ -39,7 +41,24 @@ impl ExpressionCause for Term<Cause> {
     }
 }
 
-/// Intermediate builder produced by [`Attribute::of`].
+/// Trait for attribute types that support building expressions via `::of()`.
+///
+/// Provides the fluent `Name::of(entity).is(value)` syntax for creating
+/// [`AttributeExpression`]s. Automatically implemented by `#[derive(Attribute)]`.
+pub trait AttributeExpressionBuilder: Attribute {
+    /// Start building an expression for this attribute on a given entity.
+    ///
+    /// The entity can be either a concrete [`Entity`] or a [`Term<Entity>`].
+    /// Call `.is(value)` for concrete values or `.matches(term)` for query terms.
+    fn of<Of>(entity: Of) -> AttributeBuilder<Self, Of>
+    where
+        Term<Entity>: From<Of>,
+    {
+        AttributeBuilder::new(entity)
+    }
+}
+
+/// Intermediate builder produced by [`AttributeExpressionBuilder::of`].
 ///
 /// Holds the entity (or entity term) and waits for `.is(value)` or
 /// `.matches(term)` to produce an [`AttributeExpression`].
@@ -173,28 +192,33 @@ impl<A: Attribute, Of, Is> AttributeExpression<A, Of, Is, Option<Cause>> {
     }
 }
 
-pub(crate) fn relation_query<A: Attribute>(
+pub(crate) fn relation_query<A: Attribute + Descriptor<AttributeDescriptor>>(
     of: Term<Entity>,
     is: Term<Value>,
     cause: Term<Cause>,
 ) -> RelationQuery {
+    let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
     RelationQuery::new(
-        Term::Constant(A::the()),
+        Term::Constant(desc.the().clone()),
         of,
         is,
         cause,
-        Some(RelationDescriptor::new(A::content_type(), A::cardinality())),
+        Some(RelationDescriptor::new(
+            desc.content_type(),
+            desc.cardinality(),
+        )),
     )
 }
 
 // Statement impl: Entity + A (concrete value), Option<Cause>
 impl<A> Statement for AttributeExpression<A, Entity, A, Option<Cause>>
 where
-    A: Attribute + Clone,
+    A: Attribute + Descriptor<AttributeDescriptor> + Clone,
 {
     fn assert(self, transaction: &mut Transaction) {
-        let association = Association::new(A::the(), self.of, self.is.value().as_value());
-        if A::cardinality() == Cardinality::One {
+        let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
+        let association = Association::new(desc.the().clone(), self.of, self.is.value().as_value());
+        if desc.cardinality() == Cardinality::One {
             transaction.associate_unique(association);
         } else {
             transaction.associate(association);
@@ -202,14 +226,16 @@ where
     }
 
     fn retract(self, transaction: &mut Transaction) {
-        Association::new(A::the(), self.of, self.is.value().as_value()).retract(transaction);
+        let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
+        Association::new(desc.the().clone(), self.of, self.is.value().as_value())
+            .retract(transaction);
     }
 }
 
 // Not for concrete (Entity, A) → Retraction
 impl<A> std::ops::Not for AttributeExpression<A, Entity, A, Option<Cause>>
 where
-    A: Attribute + Clone,
+    A: Attribute + Descriptor<AttributeDescriptor> + Clone,
 {
     type Output = Retraction<Self>;
 
@@ -221,14 +247,15 @@ where
 // IntoIterator for concrete → single Association
 impl<A> IntoIterator for AttributeExpression<A, Entity, A, Option<Cause>>
 where
-    A: Attribute + Clone,
+    A: Attribute + Descriptor<AttributeDescriptor> + Clone,
 {
     type Item = Association;
     type IntoIter = std::iter::Once<Association>;
 
     fn into_iter(self) -> Self::IntoIter {
+        let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
         std::iter::once(Association::new(
-            A::the(),
+            desc.the().clone(),
             self.of,
             self.is.value().as_value(),
         ))
@@ -238,7 +265,7 @@ where
 // Into<Premise> — (Entity, A): concrete entity, concrete value
 impl<A, Because> From<AttributeExpression<A, Entity, A, Because>> for Premise
 where
-    A: Attribute + Clone,
+    A: Attribute + Descriptor<AttributeDescriptor> + Clone,
     Because: ExpressionCause,
 {
     fn from(expr: AttributeExpression<A, Entity, A, Because>) -> Self {
@@ -254,7 +281,7 @@ where
 // Into<Premise> — (Entity, Term<A::Type>): concrete entity, term value
 impl<A, Because> From<AttributeExpression<A, Entity, Term<A::Type>, Because>> for Premise
 where
-    A: Attribute + Clone,
+    A: Attribute + Descriptor<AttributeDescriptor> + Clone,
     A::Type: Scalar,
     Because: ExpressionCause,
 {
@@ -271,7 +298,7 @@ where
 // Into<Premise> — (Term<Entity>, A): term entity, concrete value
 impl<A, Because> From<AttributeExpression<A, Term<Entity>, A, Because>> for Premise
 where
-    A: Attribute + Clone,
+    A: Attribute + Descriptor<AttributeDescriptor> + Clone,
     Because: ExpressionCause,
 {
     fn from(expr: AttributeExpression<A, Term<Entity>, A, Because>) -> Self {
@@ -287,7 +314,7 @@ where
 // Into<Premise> — (Term<Entity>, Term<A::Type>): both terms
 impl<A, Because> From<AttributeExpression<A, Term<Entity>, Term<A::Type>, Because>> for Premise
 where
-    A: Attribute + Clone,
+    A: Attribute + Descriptor<AttributeDescriptor> + Clone,
     A::Type: Scalar,
     Because: ExpressionCause,
 {
@@ -300,7 +327,7 @@ where
 // Retraction<(Entity, A)> → Premise::Unless
 impl<A> From<Retraction<AttributeExpression<A, Entity, A, Option<Cause>>>> for Premise
 where
-    A: Attribute + Clone,
+    A: Attribute + Descriptor<AttributeDescriptor> + Clone,
 {
     fn from(retraction: Retraction<AttributeExpression<A, Entity, A, Option<Cause>>>) -> Self {
         let expr = !retraction; // unwrap via Not
@@ -315,7 +342,7 @@ where
 // Not for (Entity, Term) → Premise::Unless
 impl<A, Because> std::ops::Not for AttributeExpression<A, Entity, Term<A::Type>, Because>
 where
-    A: Attribute + Clone,
+    A: Attribute + Descriptor<AttributeDescriptor> + Clone,
     A::Type: Scalar,
     Because: ExpressionCause,
 {
@@ -333,7 +360,7 @@ where
 // Not for (Term<Entity>, A) → Premise::Unless
 impl<A, Because> std::ops::Not for AttributeExpression<A, Term<Entity>, A, Because>
 where
-    A: Attribute + Clone,
+    A: Attribute + Descriptor<AttributeDescriptor> + Clone,
     Because: ExpressionCause,
 {
     type Output = Premise;
@@ -350,7 +377,7 @@ where
 // Not for (Term<Entity>, Term<A::Type>) → Premise::Unless
 impl<A, Because> std::ops::Not for AttributeExpression<A, Term<Entity>, Term<A::Type>, Because>
 where
-    A: Attribute + Clone,
+    A: Attribute + Descriptor<AttributeDescriptor> + Clone,
     A::Type: Scalar,
     Because: ExpressionCause,
 {

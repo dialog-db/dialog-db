@@ -23,18 +23,18 @@ Facts are immutable and content-addressed. Asserting and retracting facts produc
 
 An attribute describes a relation between an entity and a value. Attributes are often referenced in `namespace/name` format (e.g. `employee/name`), where the first component is the **namespace** and the rest is the **name** — but in practice the value type and cardinality are also part of the identity. `employee/name` typed as `String` and `employee/name` typed as `Bytes` are distinct attributes that can coexist without conflict.
 
-An attribute is defined as a newtype wrapping a value type. The **namespace** is derived from the enclosing module name (underscores become hyphens), and the **name** from the struct name (converted to kebab-case). The namespace can be overridden with `#[namespace(...)]`.
+An attribute is defined as a newtype wrapping a value type. The **namespace** is derived from the enclosing module name (underscores become hyphens), and the **name** from the struct name (converted to kebab-case). The namespace can be overridden with `#[domain(...)]`.
 
 Doc comments on the struct are captured as the attribute's description.
 
 ```rs
 mod employee {
     /// Person's given name
-    #[derive(Attribute, Clone, PartialEq)]
+    #[derive(Attribute, Clone)]
     pub struct Name(pub String);   // -> "employee/name"
 
     /// Job title or function
-    #[derive(Attribute, Clone, PartialEq)]
+    #[derive(Attribute, Clone)]
     pub struct Role(pub String);   // -> "employee/role"
 }
 ```
@@ -44,7 +44,7 @@ By default an attribute has **cardinality one** — an entity has at most one va
 ```rs
 mod employee {
     /// Skills associated with the employee
-    #[derive(Attribute, Clone, PartialEq)]
+    #[derive(Attribute, Clone)]
     #[cardinality(many)]
     pub struct Skill(pub String);  // -> "employee/skill" (many)
 }
@@ -80,23 +80,33 @@ Query patterns use `Term<T>` — either a variable (`Term::var("x")`) or a const
 
 ### Attributes
 
-Single-attribute queries use the `Attribute::of(...).is(...)` expression syntax:
+Single-attribute queries use `Query::<Attribute>` with `of` (entity) and `is` (value) fields:
 
 ```rs
-
-let query = Query::<user::Name> {
-    this: Term::var("entity"),
+// All entities with a name
+let query = Query::<employee::Name> {
+    of: Term::var("entity"),
     is: Term::var("name"),
 };
 
-// All entities that have a Name
+// A specific entity's name
+let query = Query::<employee::Name> {
+    of: Term::from(alice.clone()),
+    is: Term::var("name"),
+};
+```
+
+The expression syntax can also produce premises for use in rules:
+
+```rs
+// As a premise (both terms)
 let premise: Premise = employee::Name::of(Term::var("entity"))
-    .is(Term::var("name"))
+    .matches(Term::var("name"))
     .into();
 
-// A specific entity's name
+// As a premise (concrete entity)
 let premise: Premise = employee::Name::of(alice.clone())
-    .is(Term::var("name"))
+    .matches(Term::var("name"))
     .into();
 ```
 
@@ -111,37 +121,29 @@ let pattern = Query::<Employee> {
     name: Term::from("Alice".to_string()),
     role: Term::var("role"),
 };
-let results = pattern.query(&session).try_vec().await?;
+let results = pattern.perform(&session).try_vec().await?;
 ```
 
 ## Accreting Information
 
 ### Attributes
 
-The same `Attribute::of(...).is(...)` expression syntax is used for writes. When both the entity and value are concrete, the expression implements `Statement`:
+The `Attribute::of(...).is(...)` expression syntax is used for writes. When both the entity and value are concrete, the expression implements `Statement`:
 
 ```rs
 let mut session = Session::open(artifacts);
-let mut transaction = session.edit();
+let mut edit = session.edit();
 
 // Assert single attributes
-transaction.assert(
-    employee::Name::of(alice.clone())
-        .is(employee::Name("Alice".into()))
-);
-session.transact(alice.has(employee::Role("cryptographer"));
+edit.assert(employee::Name::of(alice.clone()).is("Alice"));
+edit.assert(employee::Role::of(alice.clone()).is("cryptographer"));
 
-alice.relate(employee::Role::from("cryptographer"));
-
-transaction.assert((alice, employee::Role::from("cryptographer")));
+session.commit(edit).await?;
 
 // Retract a single attribute using ! (Not)
-transaction.retract(
-    !employee::Name::of(alice)
-        .is(employee::Name("Alice".into()))
-);
-
-session.commit(transaction).await?;
+let mut edit = session.edit();
+edit.assert(!employee::Name::of(alice).is("Alice"));
+session.commit(edit).await?;
 ```
 
 ### Concepts
@@ -172,9 +174,9 @@ Rules provide logical disjunction (OR) — they derive a concept from alternativ
 
 ```rs
 // An Employee can be derived from a Person
-fn employee_from_person(employee: Match<Employee>) -> impl When {
+fn employee_from_person(employee: Query<Employee>) -> impl When {
     (
-        Match::<Person> {
+        Query::<Person> {
             this: employee.this.clone(),
             name: employee.name.clone(),
             title: employee.role.clone(),
@@ -183,9 +185,9 @@ fn employee_from_person(employee: Match<Employee>) -> impl When {
 }
 
 // ...or from a Contractor
-fn employee_from_contractor(employee: Match<Employee>) -> impl When {
+fn employee_from_contractor(employee: Query<Employee>) -> impl When {
     (
-        Match::<Contractor> {
+        Query::<Contractor> {
             this: employee.this.clone(),
             name: employee.name.clone(),
             position: employee.role.clone(),

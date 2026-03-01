@@ -306,19 +306,17 @@ pub fn derive_formula(input: TokenStream) -> TokenStream {
 ///
 /// ```no_run
 /// # struct Name(String);
-/// # struct WithQuery<T>(T); struct With<T>(T); struct WithTerms<T>(T);
+/// # struct AttributeQuery<T>(T); struct AttributeStatement<T>(T);
 /// # enum Cardinality { One }
 /// # struct AttributeDescriptor;
 /// # impl AttributeDescriptor { fn new() -> Self { Self } }
 /// // Attribute trait — maps the newtype to its inner value type
-/// # trait Attribute { type Type; type Query; type Conclusion; type Term;
+/// # trait Attribute { type Type;
 /// #   fn descriptor() -> AttributeDescriptor;
 /// #   fn value(&self) -> &Self::Type; fn new(value: Self::Type) -> Self; }
+/// # trait Predicate { type Conclusion; type Application; type Descriptor; }
 /// impl Attribute for Name {
 ///     type Type = String;
-///     type Query = WithQuery<Self>;
-///     type Conclusion = With<Self>;
-///     type Term = WithTerms<Self>;
 ///
 ///     fn descriptor() -> AttributeDescriptor {
 ///         // Domain derived from module path: "employee"

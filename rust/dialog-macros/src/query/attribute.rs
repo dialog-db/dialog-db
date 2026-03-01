@@ -219,43 +219,81 @@ pub fn derive(input: TokenStream) -> TokenStream {
         )
     };
 
-    // Assemble the final generated code: domain consts, Attribute impl,
-    // and the Debug/Display/From trait impls.
+    // Assemble the final generated code: domain consts, Descriptor impl,
+    // Attribute impl, and the Debug/Display/From trait impls.
     let expanded = quote! {
         #domain_static_decl
 
+        impl dialog_query::Descriptor<dialog_query::AttributeDescriptor> for #struct_name {
+            fn descriptor() -> &'static dialog_query::AttributeDescriptor {
+                static DESCRIPTOR: std::sync::OnceLock<dialog_query::AttributeDescriptor> = std::sync::OnceLock::new();
+                DESCRIPTOR.get_or_init(|| {
+                    let the = format!("{}/{}", #domain_expr, #attr_name_lit)
+                        .parse::<dialog_query::The>()
+                        .expect("attribute selector must be valid");
+                    dialog_query::AttributeDescriptor::new(
+                        the,
+                        #description_lit,
+                        #cardinality,
+                        <#wrapped_type as dialog_query::IntoType>::TYPE,
+                    )
+                })
+            }
+        }
+
         impl dialog_query::Predicate for #struct_name {
-            type Conclusion = dialog_query::With<Self>;
-            type Application = dialog_query::WithQuery<Self>;
+            type Conclusion = dialog_query::attribute::expression::AttributeStatement<Self>;
+            type Application = dialog_query::attribute::query::AttributeQuery<Self>;
             type Descriptor = dialog_query::AttributeDescriptor;
         }
 
         impl dialog_query::Attribute for #struct_name {
             type Type = #wrapped_type;
 
-            fn descriptor() -> dialog_query::AttributeDescriptor {
-                let the = format!("{}/{}", #domain_expr, #attr_name_lit)
-                    .parse::<dialog_query::The>()
-                    .expect("attribute selector must be valid");
-                dialog_query::AttributeDescriptor::new(
-                    the,
-                    #description_lit,
-                    #cardinality,
-                    <#wrapped_type as dialog_query::IntoType>::TYPE,
-                )
-            }
-
             fn value(&self) -> &Self::Type {
                 &self.0
+            }
+        }
+
+        impl dialog_query::AttributeExpressionBuilder for #struct_name {}
+
+        impl #struct_name {
+            /// Start building an expression for this attribute on a given entity.
+            pub fn of<Of>(entity: Of) -> dialog_query::attribute::AttributeBuilder<Self, Of>
+            where
+                dialog_query::Term<dialog_query::Entity>: From<Of>,
+            {
+                <Self as dialog_query::AttributeExpressionBuilder>::of(entity)
+            }
+
+            /// Returns the attribute descriptor.
+            pub fn descriptor() -> &'static dialog_query::AttributeDescriptor {
+                <Self as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor()
+            }
+
+            /// Returns the relation identifier for this attribute.
+            pub fn the() -> dialog_query::The {
+                Self::descriptor().the().clone()
+            }
+
+            /// Returns the cardinality of this attribute.
+            pub fn cardinality() -> dialog_query::Cardinality {
+                Self::descriptor().cardinality()
+            }
+
+            /// Returns the expected value type, or `None` if any type is accepted.
+            pub fn content_type() -> Option<dialog_query::attribute::Type> {
+                Self::descriptor().content_type()
             }
         }
 
         // Debug implementation showing attribute metadata
         impl std::fmt::Debug for #struct_name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let desc = Self::descriptor();
                 f.debug_struct(stringify!(#struct_name))
-                    .field("domain", &<Self as dialog_query::Attribute>::descriptor().domain())
-                    .field("name", &<Self as dialog_query::Attribute>::descriptor().name())
+                    .field("domain", &desc.domain())
+                    .field("name", &desc.name())
                     .field("value", &self.0)
                     .finish()
             }
@@ -264,9 +302,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
         // Display implementation showing selector and value
         impl std::fmt::Display for #struct_name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let desc = Self::descriptor();
                 write!(f, "{}/{}: {:?}",
-                    <Self as dialog_query::Attribute>::descriptor().domain(),
-                    <Self as dialog_query::Attribute>::descriptor().name(),
+                    desc.domain(),
+                    desc.name(),
                     self.0
                 )
             }
