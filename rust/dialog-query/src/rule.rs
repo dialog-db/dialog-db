@@ -213,9 +213,9 @@ mod tests {
         fn from(source: PersonMatch) -> Self {
             let mut terms = Self::new();
 
-            terms.insert("this".into(), source.this.as_unknown());
-            terms.insert("name".into(), source.name.as_unknown());
-            terms.insert("age".into(), source.age.as_unknown());
+            terms.insert("this".into(), source.this);
+            terms.insert("name".into(), source.name);
+            terms.insert("age".into(), source.age);
 
             terms
         }

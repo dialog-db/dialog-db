@@ -1,6 +1,7 @@
 //! Syntax trait for query forms
 
 use crate::artifact::Value;
+use crate::parameter::Parameter;
 use crate::term::Term;
 use crate::types::Scalar;
 use std::collections::HashSet;
@@ -116,6 +117,17 @@ impl Environment {
             Term::Variable { name: None, .. } => false,
             // Otherwise we just check if the variable name is in the bound set.
             Term::Variable {
+                name: Some(name), ..
+            } => self.variables.contains(name),
+        }
+    }
+
+    /// Returns true if the parameter is bound in this scope.
+    pub fn contains_param(&self, param: &Parameter) -> bool {
+        match param {
+            Parameter::Constant(_) => true,
+            Parameter::Variable { name: None, .. } => false,
+            Parameter::Variable {
                 name: Some(name), ..
             } => self.variables.contains(name),
         }
