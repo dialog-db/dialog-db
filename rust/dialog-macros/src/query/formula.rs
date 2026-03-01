@@ -267,8 +267,16 @@ pub fn derive(input: TokenStream) -> TokenStream {
             type Descriptor = dialog_query::Entity;
         }
 
-        impl dialog_query::FormulaApplication for #match_name {
-            type Predicate = #struct_name;
+        impl From<#match_name> for dialog_query::FormulaQuery {
+            fn from(value: #match_name) -> Self {
+                dialog_query::FormulaQuery {
+                    name: <#struct_name as dialog_query::Formula>::operator(),
+                    cells: <#struct_name as dialog_query::Formula>::cells(),
+                    cost: <#struct_name as dialog_query::Formula>::cost(),
+                    parameters: value.into(),
+                    compute: |bindings| <#struct_name as dialog_query::Formula>::compute(bindings),
+                }
+            }
         }
 
         impl dialog_query::Application for #match_name {
@@ -333,7 +341,6 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         impl dialog_query::Formula for #struct_name {
             type Input = #input_name;
-            type Query = #match_name;
 
             fn operator() -> &'static str {
                 #operator_lit
