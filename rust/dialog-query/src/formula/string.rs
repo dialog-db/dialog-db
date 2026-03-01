@@ -215,7 +215,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::<String>::var("result"))
+                .resolve(&Parameter::var("result"))
                 .ok()
                 .and_then(|v| String::try_from(v).ok()),
             Some("Hello World".to_string())
@@ -239,7 +239,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::<u32>::var("len"))
+                .resolve(&Parameter::var("len"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(5)
@@ -263,7 +263,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::<String>::var("upper"))
+                .resolve(&Parameter::var("upper"))
                 .ok()
                 .and_then(|v| String::try_from(v).ok()),
             Some("HELLO WORLD".to_string())
@@ -287,7 +287,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::<String>::var("lower"))
+                .resolve(&Parameter::var("lower"))
                 .ok()
                 .and_then(|v| String::try_from(v).ok()),
             Some("hello world".to_string())
@@ -311,7 +311,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::<u32>::var("len"))
+                .resolve(&Parameter::var("len"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(0)
@@ -340,7 +340,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::<String>::var("result"))
+                .resolve(&Parameter::var("result"))
                 .ok()
                 .and_then(|v| String::try_from(v).ok()),
             Some("World".to_string())
@@ -429,7 +429,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(
             results[0]
-                .resolve(&Term::<String>::var("result"))
+                .resolve(&Parameter::var("result"))
                 .ok()
                 .and_then(|v| String::try_from(v).ok()),
             Some("hello".to_string())

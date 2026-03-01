@@ -160,14 +160,14 @@ mod tests {
         // Check that x and y are preserved
         assert_eq!(
             output
-                .resolve(&Term::<u32>::var("x"))
+                .resolve(&Parameter::var("x"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(5)
         );
         assert_eq!(
             output
-                .resolve(&Term::<u32>::var("y"))
+                .resolve(&Parameter::var("y"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(3)
@@ -176,7 +176,7 @@ mod tests {
         // Check that result is computed correctly
         assert_eq!(
             output
-                .resolve(&Term::<u32>::var("result"))
+                .resolve(&Parameter::var("result"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(8)
@@ -228,21 +228,21 @@ mod tests {
         let result1 = &results1[0];
         assert_eq!(
             result1
-                .resolve(&Term::<u32>::var("a"))
+                .resolve(&Parameter::var("a"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(2)
         );
         assert_eq!(
             result1
-                .resolve(&Term::<u32>::var("b"))
+                .resolve(&Parameter::var("b"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(3)
         );
         assert_eq!(
             result1
-                .resolve(&Term::<u32>::var("sum"))
+                .resolve(&Parameter::var("sum"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(5)
@@ -260,21 +260,21 @@ mod tests {
         let result2 = &results2[0];
         assert_eq!(
             result2
-                .resolve(&Term::<u32>::var("a"))
+                .resolve(&Parameter::var("a"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(10)
         );
         assert_eq!(
             result2
-                .resolve(&Term::<u32>::var("b"))
+                .resolve(&Parameter::var("b"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(15)
         );
         assert_eq!(
             result2
-                .resolve(&Term::<u32>::var("sum"))
+                .resolve(&Parameter::var("sum"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(25)
@@ -322,7 +322,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::<u32>::var("result"))
+                .resolve(&Parameter::var("result"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(7)
@@ -353,7 +353,7 @@ mod tests {
         // Should saturate at 0
         assert_eq!(
             result
-                .resolve(&Term::<u32>::var("result"))
+                .resolve(&Parameter::var("result"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(0)
@@ -381,7 +381,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::<u32>::var("result"))
+                .resolve(&Parameter::var("result"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(42)
@@ -409,7 +409,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::<u32>::var("result"))
+                .resolve(&Parameter::var("result"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(5)
@@ -461,7 +461,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::<u32>::var("result"))
+                .resolve(&Parameter::var("result"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(2)

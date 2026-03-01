@@ -569,11 +569,11 @@ mod tests {
 
         let answer = &results[0];
 
-        assert!(answer.contains(&Term::<Entity>::var("person")));
-        assert!(answer.contains(&Term::<Value>::var("name")));
+        assert!(answer.contains(&Parameter::var("person")));
+        assert!(answer.contains(&Parameter::var("name")));
 
         let person_id: Entity = answer.get(&Term::var("person"))?;
-        let name_value: Value = answer.resolve(&Term::<Value>::var("name"))?;
+        let name_value: Value = answer.resolve(&Parameter::var("name"))?;
 
         assert_eq!(person_id, alice);
         assert_eq!(name_value, Value::String("Alice".to_string()));

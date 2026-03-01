@@ -29,20 +29,19 @@ fn extract_parameters(source: &Answer, terms: &Parameters) -> Result<Answer, Inc
         match user_param {
             Parameter::Variable { name: Some(_), .. } => {
                 // For named variables, map from user variable to parameter variable
-                let param_term = Term::<Value>::var(param_name);
-                let user_term: Term<Value> = user_param.into();
-                if let Some(factors) = source.lookup(&user_term) {
+                let param = Parameter::var(param_name);
+                if let Some(factors) = source.lookup(user_param) {
                     answer.merge(Evidence::Parameter {
-                        term: &param_term,
+                        term: &param,
                         value: &factors.content(),
                     })?;
                 }
             }
             Parameter::Constant(value) => {
                 // For constants, directly bind the parameter variable to the constant value
-                let param_term = Term::<Value>::var(param_name);
+                let param = Parameter::var(param_name);
                 answer.merge(Evidence::Parameter {
-                    term: &param_term,
+                    term: &param,
                     value,
                 })?;
             }
@@ -73,12 +72,11 @@ fn merge_parameters(
         }
 
         // Try to get the factors for the parameter name from result
-        let param_term = Term::<Value>::var(param_name);
-        if let Some(factors) = result.lookup(&param_term) {
+        let param = Parameter::var(param_name);
+        if let Some(factors) = result.lookup(&param) {
             // Merge all factors under the user's variable name, preserving provenance
-            let user_term: Term<Value> = user_param.into();
             for factor in factors.evidence() {
-                merged.assign(&user_term, factor)?;
+                merged.assign(user_param, factor)?;
             }
         }
     }
@@ -388,15 +386,15 @@ mod tests {
         // Should find both Alice and Bob with their name and age
         assert_eq!(selection.len(), 2, "Should find 2 people");
 
-        let name_var: Term<Value> = Term::var("name");
-        let age_var: Term<Value> = Term::var("age");
+        let name_param = Parameter::var("name");
+        let age_param = Parameter::var("age");
 
         let mut found_alice = false;
         let mut found_bob = false;
 
         for match_result in selection.iter() {
-            let name = match_result.resolve(&name_var)?;
-            let age = match_result.resolve(&age_var)?;
+            let name = match_result.resolve(&name_param)?;
+            let age = match_result.resolve(&age_param)?;
 
             match name {
                 Value::String(n) if n == "Alice" => {
@@ -478,8 +476,9 @@ mod tests {
 
         // Create evaluation context with bound entity in the answer
         let mut answer = Answer::new();
+        let person_param = Parameter::var("person");
         answer.merge(Evidence::Parameter {
-            term: &Term::var("person"),
+            term: &person_param,
             value: &Value::from(alice),
         })?;
 
@@ -805,7 +804,7 @@ mod tests {
             "Should find only Alice, not both people"
         );
         assert_eq!(
-            selection[0].resolve(&Term::<Value>::var("name"))?,
+            selection[0].resolve(&Parameter::var("name"))?,
             Value::String("Alice".to_string())
         );
 
@@ -890,11 +889,11 @@ mod tests {
 
         assert_eq!(selection.len(), 1, "Should find only Bob");
         assert_eq!(
-            selection[0].resolve(&Term::<Value>::var("entity"))?,
+            selection[0].resolve(&Parameter::var("entity"))?,
             Value::Entity(bob.clone())
         );
         assert_eq!(
-            selection[0].resolve(&Term::<Value>::var("age"))?,
+            selection[0].resolve(&Parameter::var("age"))?,
             Value::UnsignedInt(30)
         );
 
@@ -983,7 +982,7 @@ mod tests {
             "Should find only Alice with exact name and age match"
         );
         assert_eq!(
-            selection[0].resolve(&Term::<Value>::var("entity"))?,
+            selection[0].resolve(&Parameter::var("entity"))?,
             Value::Entity(alice.clone())
         );
 

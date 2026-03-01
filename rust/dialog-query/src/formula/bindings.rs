@@ -33,7 +33,7 @@ use crate::artifact::TypeError;
 use crate::error::FormulaEvaluationError;
 use crate::formula::query::FormulaQuery;
 use crate::selection::{Answer, Factors};
-use crate::{Parameters, Term, Value};
+use crate::{Parameter, Parameters, Term, Value};
 use std::sync::Arc;
 
 /// Parameter-to-value bindings for formula evaluation.
@@ -115,17 +115,16 @@ impl Bindings {
                     parameter: key.into(),
                 })?;
 
-        let term: Term<Value> = param.clone().into();
-
         // Track what we read for provenance
-        if let Some(factors) = self.source.resolve_factors(&term) {
+        if let Some(factors) = self.source.resolve_factors(param) {
             self.reads.insert(key.to_string(), factors.clone());
         }
 
         // Get the value from the answer
+        let term: Term<Value> = param.clone().into();
         let value =
             self.source
-                .resolve(&term)
+                .resolve(param)
                 .map_err(|_| FormulaEvaluationError::UnboundVariable {
                     term: term.clone(),
                     parameter: key.into(),
@@ -189,16 +188,15 @@ impl Bindings {
                     parameter: key.into(),
                 })?;
 
-        let term: Term<Value> = param.clone().into();
-
-        // For constant terms, verify the computed value matches the constant.
+        // For constant parameters, verify the computed value matches the constant.
         // Answer::assign treats constants as no-ops, so we must check here.
-        if let Term::Constant(expected) = &term {
+        if let Parameter::Constant(expected) = param {
+            let term: Term<Value> = param.clone().into();
             if expected != value {
                 return Err(FormulaEvaluationError::VariableInconsistency {
                     parameter: key.into(),
                     actual: Term::Constant(value.clone()),
-                    expected: term.clone(),
+                    expected: term,
                 });
             }
             // Constant matches — nothing to write to the answer
@@ -213,7 +211,8 @@ impl Bindings {
         };
 
         // Assign to the answer - this will fail if there's a conflicting value
-        self.source.assign(&term, &factor).map_err(|_| {
+        let term: Term<Value> = param.clone().into();
+        self.source.assign(param, &factor).map_err(|_| {
             // Convert assignment errors to VariableInconsistency
             FormulaEvaluationError::VariableInconsistency {
                 parameter: key.into(),
@@ -374,7 +373,7 @@ mod tests {
         };
 
         // This should fail because "test" is already bound to 42
-        let result = answer.assign(&Term::var("test"), &conflicting_factor);
+        let result = answer.assign(&Parameter::var("test"), &conflicting_factor);
         assert!(
             result.is_err(),
             "Answer.assign() should reject conflicting value assignment"
@@ -496,7 +495,7 @@ mod tests {
         // Verify we got the answer back
         assert_eq!(
             answer
-                .resolve(&Term::<u32>::var("input_x"))
+                .resolve(&Parameter::var("input_x"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(10u32)

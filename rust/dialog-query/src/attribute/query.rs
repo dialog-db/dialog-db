@@ -7,7 +7,7 @@ use crate::descriptor::Descriptor;
 use crate::query::{Application, Source};
 use crate::selection::{Answer, Answers};
 use crate::types::Scalar;
-use crate::{Entity, Premise, Proposition, QueryError, Term, Value};
+use crate::{Entity, Parameter, Premise, Proposition, QueryError, Term, Value};
 
 /// A typed attribute query with named fields for entity and value.
 ///
@@ -66,8 +66,9 @@ where
     fn realize(&self, input: Answer) -> Result<Self::Conclusion, QueryError> {
         let of_term = &self.of;
         let is_term: Term<Value> = self.is.as_unknown();
+        let is_param = Parameter::from(&is_term);
         let entity: Entity = input.get(of_term)?;
-        let value: Value = input.resolve(&is_term)?;
+        let value: Value = input.resolve(&is_param)?;
         let typed_value = A::Type::try_from(value).map_err(|_| {
             crate::error::InconsistencyError::TypeError(format!(
                 "cannot convert value to {}",

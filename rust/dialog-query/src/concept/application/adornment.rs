@@ -48,8 +48,7 @@ impl Adornment {
                 let bound = match param {
                     Parameter::Constant(_) => true,
                     Parameter::Variable { name: Some(_), .. } => {
-                        let term: Term<Value> = param.into();
-                        answer.contains(&term)
+                        answer.contains(param)
                     }
                     Parameter::Variable { name: None, .. } => false,
                 };
@@ -88,13 +87,13 @@ impl Adornment {
 mod tests {
     use super::*;
     use crate::selection::Evidence;
-    use crate::{Term, Value};
+    use crate::{Parameter, Term, Value};
 
     fn bind(answer: &mut Answer, var_name: &str, value: Value) {
-        let term = Term::<Value>::var(var_name);
+        let param = Parameter::var(var_name);
         answer
             .merge(Evidence::Parameter {
-                term: &term,
+                term: &param,
                 value: &value,
             })
             .unwrap();
