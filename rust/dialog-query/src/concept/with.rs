@@ -70,6 +70,7 @@ impl<A: Attribute> Default for WithQuery<A> {
 impl<A: Attribute> WithQuery<A>
 where
     A: Clone + std::fmt::Debug + Send + 'static,
+    A: From<A::Type>,
 {
     /// Query for instances matching this pattern
     pub fn perform<S: Source>(self, source: &S) -> impl Output<With<A>> {
@@ -116,6 +117,7 @@ where
 impl<A: Attribute> Concept for With<A>
 where
     A: Clone + std::fmt::Debug + Send + 'static,
+    A: From<A::Type>,
 {
     type Term = WithTerms<A>;
 
@@ -132,6 +134,7 @@ where
 impl<A: Attribute> Predicate for With<A>
 where
     A: Clone + std::fmt::Debug + Send + 'static,
+    A: From<A::Type>,
 {
     type Conclusion = With<A>;
     type Application = WithQuery<A>;
@@ -195,6 +198,7 @@ where
 impl<A: Attribute> Application for WithQuery<A>
 where
     A: Clone + std::fmt::Debug + Send + 'static,
+    A: From<A::Type>,
 {
     type Conclusion = With<A>;
 
@@ -206,7 +210,7 @@ where
     fn realize(&self, source: Answer) -> Result<Self::Conclusion, QueryError> {
         Ok(With {
             this: source.get(&self.this)?,
-            has: A::new(source.get(&self.has)?),
+            has: A::from(source.get(&self.has)?),
         })
     }
 }

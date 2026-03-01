@@ -26,9 +26,6 @@
 //! // -- Attribute trait impl --
 //! impl Attribute for FullName {
 //!     type Type = String;
-//!     type Query = WithQuery<Self>;
-//!     type Conclusion = With<Self>;
-//!     type Term = WithTerms<Self>;
 //!
 //!     fn descriptor() -> AttributeDescriptor {
 //!         // Builds descriptor from domain/name with description, cardinality, type
@@ -37,7 +34,6 @@
 //!     }
 //!
 //!     fn value(&self) -> &String { &self.0 }
-//!     fn new(value: String) -> Self { Self(value) }
 //! }
 //!
 //! // -- Debug, Display, and From impls --
@@ -237,10 +233,6 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl dialog_query::Attribute for #struct_name {
             type Type = #wrapped_type;
 
-            type Query = dialog_query::WithQuery<Self>;
-            type Conclusion = dialog_query::With<Self>;
-            type Term = dialog_query::WithTerms<Self>;
-
             fn descriptor() -> dialog_query::AttributeDescriptor {
                 let the = format!("{}/{}", #domain_expr, #attr_name_lit)
                     .parse::<dialog_query::The>()
@@ -255,10 +247,6 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
             fn value(&self) -> &Self::Type {
                 &self.0
-            }
-
-            fn new(value: Self::Type) -> Self {
-                Self(value)
             }
         }
 
@@ -287,7 +275,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         // Generic From implementation for any type that can convert into the wrapped type
         impl<U: ::std::convert::Into<#wrapped_type>> ::std::convert::From<U> for #struct_name {
             fn from(value: U) -> Self {
-                <Self as dialog_query::Attribute>::new(value.into())
+                Self(value.into())
             }
         }
     };
