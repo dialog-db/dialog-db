@@ -1,7 +1,13 @@
 mod descriptor;
+/// Typed attribute expressions for single-attribute operations.
+pub mod expression;
+/// Typed attribute queries wrapping [`RelationQuery`](crate::relation::query::RelationQuery).
+pub mod query;
 mod the;
 
 pub use descriptor::*;
+pub use expression::{AttributeBuilder, AttributeExpression, AttributeStatement};
+pub use query::AttributeQuery;
 pub use the::*;
 
 pub use crate::artifact::{
@@ -18,7 +24,6 @@ pub use crate::{Premise, Term, The};
 /// Each attribute newtype (e.g. `struct Name(String)`) implements this
 /// trait, which provides:
 /// - The scalar Rust type of the attribute's values (`Type`).
-/// - Query, conclusion, and term associated types used by the concept system.
 /// - Conversion methods between the attribute, its underlying value, and
 ///   the storage-level [`ArtifactsAttribute`] / [`AttributeDescriptor`].
 ///
@@ -28,89 +33,51 @@ pub trait Attribute: Sized {
     /// The Rust scalar type of this attribute's values.
     type Type: Scalar;
 
-    /// The query pattern type used when querying this attribute in a concept.
-    type Query;
-    /// The concrete conclusion type when this attribute is part of a concept result.
-    type Conclusion;
-    /// The term type used when building query patterns for this attribute.
-    type Term;
-
     /// Returns a reference to the inner value.
     fn value(&self) -> &Self::Type;
 
-    /// Construct an attribute from its inner value
-    fn new(value: Self::Type) -> Self;
-
     /// Returns the attribute descriptor.
     fn descriptor() -> AttributeDescriptor;
-
-    /// Returns the domain as an owned `String`.
-    fn domain() -> String {
-        Self::descriptor().domain().into()
-    }
-    /// Returns the attribute name as an owned `String`.
-    fn name() -> String {
-        Self::descriptor().name().into()
-    }
 
     /// Returns a relation identifier comprised of the attribute's domain and name.
     fn the() -> The {
         Self::descriptor().the().clone()
     }
-    /// Returns the description as an owned `String`.
-    fn description() -> String {
-        Self::descriptor().description().into()
-    }
     /// Returns the cardinality of this attribute.
     fn cardinality() -> Cardinality {
         Self::descriptor().cardinality()
     }
-    /// Returns the parsed attribute selector (`"domain/name"`).
-    fn selector() -> ArtifactsAttribute {
-        ArtifactsAttribute::from(Self::descriptor())
-    }
-
-    /// Compute blake3 hash of this attribute's schema
-    ///
-    /// Returns a 32-byte blake3 hash of the CBOR-encoded attribute schema
-    /// (domain, name, cardinality, content_type - excluding description)
-    fn hash() -> blake3::Hash {
-        Self::descriptor().hash()
-    }
-
-    /// Format this attribute's hash as a URI
-    ///
-    /// Returns a string in the format: `the:{blake3_hash_hex}`
-    fn to_uri() -> String {
-        Self::descriptor().to_uri()
-    }
-
     /// Returns the expected value type, or `None` if any type is accepted.
     fn content_type() -> Option<Type> {
         <Self::Type as IntoType>::TYPE
     }
 
-    /// Start building a query for this attribute on a given entity.
+    /// Start building an expression for this attribute on a given entity.
+    ///
+    /// The entity can be either a concrete [`Entity`] or a [`Term<Entity>`].
+    /// Call `.is(value)` for concrete values or `.matches(term)` for query terms.
     ///
     /// ```no_run
     /// use dialog_query::attribute::Attribute;
-    /// use dialog_query::Term;
+    /// use dialog_query::{Entity, Term};
     ///
     /// #[derive(dialog_query::Attribute, Clone)]
     /// struct Name(pub String);
     ///
-    /// // Query all names for a variable entity
-    /// let query = Name::of(Term::var("entity"));
+    /// let alice = Entity::new().unwrap();
     ///
-    /// // Query with a specific value
-    /// let query = Name::of(Term::var("entity"))
-    ///     .is(Term::from("Alice".to_string()));
+    /// // Concrete: for assert/retract
+    /// let expr = Name::of(alice.clone()).is("Alice");
+    ///
+    /// // Query with terms
+    /// let expr = Name::of(Term::<Entity>::var("entity"))
+    ///     .matches(Term::<String>::var("name"));
     /// ```
-    fn of(entity: Term<Entity>) -> AttributeQueryBuilder<Self> {
-        AttributeQueryBuilder {
-            entity,
-            _marker: std::marker::PhantomData,
-        }
+    fn of<Of>(entity: Of) -> AttributeBuilder<Self, Of>
+    where
+        Term<Entity>: From<Of>,
+    {
+        AttributeBuilder::new(entity)
     }
 }
 
@@ -146,6 +113,7 @@ impl<A: Attribute> From<AttributeQueryBuilder<A>> for WithQuery<A> {
 impl<A: Attribute> AttributeQueryBuilder<A>
 where
     A: Clone + std::fmt::Debug + Send + 'static,
+    A: From<A::Type>,
 {
     /// Execute the query matching any value for this attribute.
     pub fn perform<S: crate::query::Source>(
@@ -166,17 +134,14 @@ mod tests {
 
     mod person {
         use crate::Cardinality;
-        use crate::attribute::{Attribute, AttributeDescriptor, With, WithQuery, WithTerms};
+        use crate::attribute::AttributeDescriptor;
         use crate::the;
         use crate::types::IntoType;
 
         pub struct Name(pub String);
 
-        impl Attribute for Name {
+        impl crate::attribute::Attribute for Name {
             type Type = String;
-            type Query = WithQuery<Self>;
-            type Conclusion = With<Self>;
-            type Term = WithTerms<Self>;
 
             fn descriptor() -> AttributeDescriptor {
                 AttributeDescriptor::new(
@@ -190,8 +155,10 @@ mod tests {
             fn value(&self) -> &Self::Type {
                 &self.0
             }
+        }
 
-            fn new(value: Self::Type) -> Self {
+        impl From<String> for Name {
+            fn from(value: String) -> Self {
                 Self(value)
             }
         }
@@ -240,13 +207,19 @@ mod tests {
     fn it_derives_employee_name() {
         let name = employee_derive::Name("Alice".to_string());
 
-        assert_eq!(employee_derive::Name::domain(), "employee-derive");
-        assert_eq!(employee_derive::Name::name(), "name");
-        assert_eq!(employee_derive::Name::description(), "Name of the employee");
+        assert_eq!(
+            employee_derive::Name::descriptor().domain(),
+            "employee-derive"
+        );
+        assert_eq!(employee_derive::Name::descriptor().name(), "name");
+        assert_eq!(
+            employee_derive::Name::descriptor().description(),
+            "Name of the employee"
+        );
         assert_eq!(employee_derive::Name::cardinality(), Cardinality::One);
         assert_eq!(name.value(), "Alice");
         assert_eq!(
-            employee_derive::Name::selector().to_string(),
+            employee_derive::Name::descriptor().the().to_string(),
             "employee-derive/name"
         );
     }
@@ -255,16 +228,19 @@ mod tests {
     fn it_derives_employee_job() {
         let job = employee_derive::Job("Engineer".to_string());
 
-        assert_eq!(employee_derive::Job::domain(), "employee-derive");
-        assert_eq!(employee_derive::Job::name(), "job");
         assert_eq!(
-            employee_derive::Job::description(),
+            employee_derive::Job::descriptor().domain(),
+            "employee-derive"
+        );
+        assert_eq!(employee_derive::Job::descriptor().name(), "job");
+        assert_eq!(
+            employee_derive::Job::descriptor().description(),
             "Job title of the employee"
         );
         assert_eq!(employee_derive::Job::cardinality(), Cardinality::One);
         assert_eq!(job.value(), "Engineer");
         assert_eq!(
-            employee_derive::Job::selector().to_string(),
+            employee_derive::Job::descriptor().the().to_string(),
             "employee-derive/job"
         );
     }
@@ -273,16 +249,19 @@ mod tests {
     fn it_derives_employee_salary() {
         let salary = employee_derive::Salary(100000);
 
-        assert_eq!(employee_derive::Salary::domain(), "employee-derive");
-        assert_eq!(employee_derive::Salary::name(), "salary");
         assert_eq!(
-            employee_derive::Salary::description(),
+            employee_derive::Salary::descriptor().domain(),
+            "employee-derive"
+        );
+        assert_eq!(employee_derive::Salary::descriptor().name(), "salary");
+        assert_eq!(
+            employee_derive::Salary::descriptor().description(),
             "Salary of the employee"
         );
         assert_eq!(employee_derive::Salary::cardinality(), Cardinality::One);
         assert_eq!(salary.value(), &100000u32);
         assert_eq!(
-            employee_derive::Salary::selector().to_string(),
+            employee_derive::Salary::descriptor().the().to_string(),
             "employee-derive/salary"
         );
     }
@@ -291,10 +270,10 @@ mod tests {
     fn it_derives_person_domain() {
         let name = person_derive::Name("Bob".to_string());
 
-        assert_eq!(person_derive::Name::domain(), "person-derive");
-        assert_eq!(person_derive::Name::name(), "name");
+        assert_eq!(person_derive::Name::descriptor().domain(), "person-derive");
+        assert_eq!(person_derive::Name::descriptor().name(), "name");
         assert_eq!(
-            person_derive::Name::selector().to_string(),
+            person_derive::Name::descriptor().the().to_string(),
             "person-derive/name"
         );
         assert_eq!(name.value(), "Bob");
@@ -304,10 +283,13 @@ mod tests {
     fn it_derives_cardinality_many() {
         assert_eq!(person_derive::Manages::cardinality(), Cardinality::Many);
         assert_eq!(
-            person_derive::Manages::description(),
+            person_derive::Manages::descriptor().description(),
             "Employees managed by this person"
         );
-        assert_eq!(person_derive::Manages::domain(), "person-derive");
+        assert_eq!(
+            person_derive::Manages::descriptor().domain(),
+            "person-derive"
+        );
     }
 
     mod custom_ns_derive {
@@ -323,10 +305,10 @@ mod tests {
     fn it_overrides_domain_via_derive() {
         let field = custom_ns_derive::Field("value".to_string());
 
-        assert_eq!(custom_ns_derive::Field::domain(), "custom");
-        assert_eq!(custom_ns_derive::Field::name(), "field");
+        assert_eq!(custom_ns_derive::Field::descriptor().domain(), "custom");
+        assert_eq!(custom_ns_derive::Field::descriptor().name(), "field");
         assert_eq!(
-            custom_ns_derive::Field::selector().to_string(),
+            custom_ns_derive::Field::descriptor().the().to_string(),
             "custom/field"
         );
         assert_eq!(field.value(), "value");
@@ -356,8 +338,8 @@ mod tests {
 
     #[dialog_common::test]
     fn it_produces_stable_hash() {
-        let hash1 = employee_ident::Name::hash();
-        let hash2 = employee_ident::Name::hash();
+        let hash1 = employee_ident::Name::descriptor().hash();
+        let hash2 = employee_ident::Name::descriptor().hash();
 
         assert_eq!(
             hash1, hash2,
@@ -367,9 +349,9 @@ mod tests {
 
     #[dialog_common::test]
     fn it_hashes_differently_for_different_attributes() {
-        let name_hash = employee_ident::Name::hash();
-        let salary_hash = employee_ident::Salary::hash();
-        let job_hash = employee_ident::Job::hash();
+        let name_hash = employee_ident::Name::descriptor().hash();
+        let salary_hash = employee_ident::Salary::descriptor().hash();
+        let job_hash = employee_ident::Job::descriptor().hash();
 
         assert_ne!(
             name_hash, salary_hash,
@@ -387,8 +369,8 @@ mod tests {
 
     #[dialog_common::test]
     fn it_hashes_differently_for_different_domains() {
-        let employee_name_hash = employee_ident::Name::hash();
-        let person_name_hash = person_ident::Name::hash();
+        let employee_name_hash = employee_ident::Name::descriptor().hash();
+        let person_name_hash = person_ident::Name::descriptor().hash();
 
         assert_ne!(
             employee_name_hash, person_name_hash,
@@ -398,7 +380,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_formats_uri() {
-        let uri = employee_ident::Name::to_uri();
+        let uri = employee_ident::Name::descriptor().to_uri();
 
         assert!(
             uri.starts_with("the:"),
@@ -410,13 +392,13 @@ mod tests {
 
     #[dialog_common::test]
     fn it_round_trips_uri() {
-        let uri = employee_ident::Name::to_uri();
+        let uri = employee_ident::Name::descriptor().to_uri();
         let parsed_hash = AttributeDescriptor::parse_uri(&uri);
 
         assert!(parsed_hash.is_some(), "Should be able to parse valid URI");
         assert_eq!(
             parsed_hash.unwrap(),
-            employee_ident::Name::hash(),
+            employee_ident::Name::descriptor().hash(),
             "Parsed hash should match original hash"
         );
     }
@@ -442,7 +424,7 @@ mod tests {
     #[dialog_common::test]
     fn it_produces_stable_schema_hash() {
         let schema_hash = employee_ident::Name::descriptor().hash();
-        let trait_hash = employee_ident::Name::hash();
+        let trait_hash = employee_ident::Name::descriptor().hash();
 
         assert_eq!(
             schema_hash, trait_hash,
@@ -608,57 +590,65 @@ mod tests {
 
     #[dialog_common::test]
     fn it_converts_underscores_to_hyphens() {
-        assert_eq!(account_name::Name::domain(), "account-name");
-        assert_eq!(account_name::Name::name(), "name");
+        assert_eq!(account_name::Name::descriptor().domain(), "account-name");
+        assert_eq!(account_name::Name::descriptor().name(), "name");
         assert_eq!(
-            account_name::Name::selector().to_string(),
+            account_name::Name::descriptor().the().to_string(),
             "account-name/name"
         );
     }
 
     #[dialog_common::test]
     fn it_derives_nested_module_domain() {
-        assert_eq!(ns_my::config::Key::domain(), "config");
-        assert_eq!(ns_my::config::Key::name(), "key");
-        assert_eq!(ns_my::config::Key::selector().to_string(), "config/key");
+        assert_eq!(ns_my::config::Key::descriptor().domain(), "config");
+        assert_eq!(ns_my::config::Key::descriptor().name(), "key");
+        assert_eq!(
+            ns_my::config::Key::descriptor().the().to_string(),
+            "config/key"
+        );
     }
 
     #[dialog_common::test]
     fn it_overrides_domain_explicitly() {
-        assert_eq!(NsValue::domain(), "my.custom.namespace");
-        assert_eq!(NsValue::name(), "ns-value");
+        assert_eq!(NsValue::descriptor().domain(), "my.custom.namespace");
+        assert_eq!(NsValue::descriptor().name(), "ns-value");
         assert_eq!(
-            NsValue::selector().to_string(),
+            NsValue::descriptor().the().to_string(),
             "my.custom.namespace/ns-value"
         );
     }
 
     #[dialog_common::test]
     fn it_accepts_domain_identifier_syntax() {
-        assert_eq!(NsCustomValue::domain(), "custom");
-        assert_eq!(NsCustomValue::name(), "ns-custom-value");
+        assert_eq!(NsCustomValue::descriptor().domain(), "custom");
+        assert_eq!(NsCustomValue::descriptor().name(), "ns-custom-value");
         assert_eq!(
-            NsCustomValue::selector().to_string(),
+            NsCustomValue::descriptor().the().to_string(),
             "custom/ns-custom-value"
         );
     }
 
     #[dialog_common::test]
     fn it_accepts_domain_string_literal() {
-        assert_eq!(NsDottedValue::domain(), "io.gozala");
-        assert_eq!(NsDottedValue::name(), "ns-dotted-value");
+        assert_eq!(NsDottedValue::descriptor().domain(), "io.gozala");
+        assert_eq!(NsDottedValue::descriptor().name(), "ns-dotted-value");
         assert_eq!(
-            NsDottedValue::selector().to_string(),
+            NsDottedValue::descriptor().the().to_string(),
             "io.gozala/ns-dotted-value"
         );
     }
 
     #[dialog_common::test]
     fn it_converts_nested_underscores() {
-        assert_eq!(ns_my_app::user_profile::Email::domain(), "user-profile");
-        assert_eq!(ns_my_app::user_profile::Email::name(), "email");
         assert_eq!(
-            ns_my_app::user_profile::Email::selector().to_string(),
+            ns_my_app::user_profile::Email::descriptor().domain(),
+            "user-profile"
+        );
+        assert_eq!(ns_my_app::user_profile::Email::descriptor().name(), "email");
+        assert_eq!(
+            ns_my_app::user_profile::Email::descriptor()
+                .the()
+                .to_string(),
             "user-profile/email"
         );
     }
@@ -667,9 +657,12 @@ mod tests {
     fn it_preserves_all_metadata() {
         let name = account_name::Name("John Doe".to_string());
 
-        assert_eq!(account_name::Name::domain(), "account-name");
-        assert_eq!(account_name::Name::name(), "name");
-        assert_eq!(account_name::Name::description(), "Account holder's name");
+        assert_eq!(account_name::Name::descriptor().domain(), "account-name");
+        assert_eq!(account_name::Name::descriptor().name(), "name");
+        assert_eq!(
+            account_name::Name::descriptor().description(),
+            "Account holder's name"
+        );
         assert_eq!(account_name::Name::cardinality(), Cardinality::One);
         assert_eq!(name.value(), "John Doe");
     }
@@ -691,24 +684,25 @@ mod tests {
 
     #[dialog_common::test]
     fn it_converts_pascal_to_kebab() {
-        assert_eq!(test_pascal::UserName::name(), "user-name");
+        assert_eq!(test_pascal::UserName::descriptor().name(), "user-name");
     }
 
     #[dialog_common::test]
     fn it_converts_consecutive_capitals() {
-        assert_eq!(test_pascal::HTTPRequest::name(), "http-request");
-        assert_eq!(test_pascal::APIKey::name(), "api-key");
+        assert_eq!(
+            test_pascal::HTTPRequest::descriptor().name(),
+            "http-request"
+        );
+        assert_eq!(test_pascal::APIKey::descriptor().name(), "api-key");
     }
 
     #[dialog_common::test]
     fn it_exposes_static_values() {
-        let ns = test_pascal::UserName::domain();
-        let name = test_pascal::UserName::name();
-        let desc = test_pascal::UserName::description();
+        let descriptor = test_pascal::UserName::descriptor();
 
-        assert!(!ns.is_empty());
-        assert_eq!(name, "user-name");
-        let _ = desc;
+        assert!(!descriptor.domain().is_empty());
+        assert_eq!(descriptor.name(), "user-name");
+        let _ = descriptor.description();
     }
 
     #[dialog_common::test]

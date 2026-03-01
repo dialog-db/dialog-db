@@ -78,22 +78,26 @@ pub struct Employee {
 
 Query patterns use `Term<T>` — either a variable (`Term::var("x")`) or a constant (`Term::from(value)`). Variables are bound by the query engine; constants constrain the search.
 
-### Attributes with `With<A>`
+### Attributes
 
-`With<A>` queries a single attribute relation — one fact per match:
+Single-attribute queries use the `Attribute::of(...).is(...)` expression syntax:
 
 ```rs
-// All entities that have a Name
-let named = Match::<With<employee::Name>> {
+
+let query = Query::<user::Name> {
     this: Term::var("entity"),
-    has: Term::var("name"),
-}.query(&session).try_vec().await?;
+    is: Term::var("name"),
+};
+
+// All entities that have a Name
+let premise: Premise = employee::Name::of(Term::var("entity"))
+    .is(Term::var("name"))
+    .into();
 
 // A specific entity's name
-let alice_name = Match::<With<employee::Name>> {
-    this: Term::from(alice.clone()),
-    has: Term::var("name"),
-}.query(&session).try_vec().await?;
+let premise: Premise = employee::Name::of(alice.clone())
+    .is(Term::var("name"))
+    .into();
 ```
 
 ### Concepts
@@ -102,7 +106,7 @@ Querying a concept is a logical conjunction (AND) — an entity matches only whe
 
 ```rs
 // All employees named Alice (must have both name AND role)
-let pattern = Match::<Employee> {
+let pattern = Query::<Employee> {
     this: Term::var("person"),
     name: Term::from("Alice".to_string()),
     role: Term::var("role"),
@@ -112,24 +116,32 @@ let results = pattern.query(&session).try_vec().await?;
 
 ## Accreting Information
 
-### Attributes with `With<A>`
+### Attributes
 
-`With<A>` maps directly to a single fact assertion or retraction:
+The same `Attribute::of(...).is(...)` expression syntax is used for writes. When both the entity and value are concrete, the expression implements `Statement`:
 
 ```rs
 let mut session = Session::open(artifacts);
+let mut transaction = session.edit();
 
-let mut tx = session.edit();
-tx.assert(With { this: alice.clone(), has: employee::Name("Alice".to_string()) });
-// stores the fact: { the: "employee/name", of: alice, is: "Alice" }
-tx.assert(With { this: alice.clone(), has: employee::Role("cryptographer".to_string()) });
-// stores the fact: { the: "employee/role", of: alice, is: "cryptographer" }
-session.commit(tx).await?;
+// Assert single attributes
+transaction.assert(
+    employee::Name::of(alice.clone())
+        .is(employee::Name("Alice".into()))
+);
+session.transact(alice.has(employee::Role("cryptographer"));
 
-// Retract a single attribute
-let mut tx = session.edit();
-tx.retract(With { this: alice, has: employee::Name("Alice".to_string()) });
-session.commit(tx).await?;
+alice.relate(employee::Role::from("cryptographer"));
+
+transaction.assert((alice, employee::Role::from("cryptographer")));
+
+// Retract a single attribute using ! (Not)
+transaction.retract(
+    !employee::Name::of(alice)
+        .is(employee::Name("Alice".into()))
+);
+
+session.commit(transaction).await?;
 ```
 
 ### Concepts
