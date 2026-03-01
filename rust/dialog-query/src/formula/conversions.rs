@@ -67,13 +67,13 @@ impl ParseNumber {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Entity, Parameters, Term, selection::Answer};
+    use crate::{Entity, Parameter, Parameters, Term, selection::Answer};
 
     #[dialog_common::test]
     fn it_converts_number_to_string() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("value".to_string(), Term::var("num"));
-        terms.insert("is".to_string(), Term::var("str"));
+        terms.insert("value".to_string(), Parameter::var("num"));
+        terms.insert("is".to_string(), Parameter::var("str"));
 
         let input = Answer::new().set(Term::var("num"), 42u32).unwrap();
 
@@ -95,8 +95,8 @@ mod tests {
     #[dialog_common::test]
     fn it_converts_boolean_to_string() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("value".to_string(), Term::var("bool"));
-        terms.insert("is".to_string(), Term::var("str"));
+        terms.insert("value".to_string(), Parameter::var("bool"));
+        terms.insert("is".to_string(), Parameter::var("str"));
 
         let input = Answer::new().set(Term::var("bool"), true).unwrap();
 
@@ -118,8 +118,8 @@ mod tests {
     #[dialog_common::test]
     fn it_passes_string_through() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("value".to_string(), Term::var("text"));
-        terms.insert("is".to_string(), Term::var("str"));
+        terms.insert("value".to_string(), Parameter::var("text"));
+        terms.insert("is".to_string(), Parameter::var("str"));
 
         let input = Answer::new()
             .set(Term::var("text"), "hello".to_string())
@@ -143,8 +143,8 @@ mod tests {
     #[dialog_common::test]
     fn it_converts_entity_to_string() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("value".to_string(), Term::var("entity"));
-        terms.insert("is".to_string(), Term::var("str"));
+        terms.insert("value".to_string(), Parameter::var("entity"));
+        terms.insert("is".to_string(), Parameter::var("str"));
 
         let entity = Entity::new().unwrap();
         let input = Answer::new()
@@ -166,8 +166,8 @@ mod tests {
     #[dialog_common::test]
     fn it_parses_valid_number() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("text".to_string(), Term::var("str"));
-        terms.insert("is".to_string(), Term::var("num"));
+        terms.insert("text".to_string(), Parameter::var("str"));
+        terms.insert("is".to_string(), Parameter::var("num"));
 
         let input = Answer::new()
             .set(Term::var("str"), "123".to_string())
@@ -191,8 +191,8 @@ mod tests {
     #[dialog_common::test]
     fn it_parses_number_with_whitespace() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("text".to_string(), Term::var("str"));
-        terms.insert("is".to_string(), Term::var("num"));
+        terms.insert("text".to_string(), Parameter::var("str"));
+        terms.insert("is".to_string(), Parameter::var("num"));
 
         let input = Answer::new()
             .set(Term::var("str"), "  456  ".to_string())
@@ -216,8 +216,8 @@ mod tests {
     #[dialog_common::test]
     fn it_rejects_invalid_number() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("text".to_string(), Term::var("str"));
-        terms.insert("is".to_string(), Term::var("num"));
+        terms.insert("text".to_string(), Parameter::var("str"));
+        terms.insert("is".to_string(), Parameter::var("num"));
 
         let input = Answer::new()
             .set(Term::var("str"), "not a number".to_string())
@@ -236,8 +236,8 @@ mod tests {
     #[dialog_common::test]
     fn it_rejects_empty_string_as_number() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("text".to_string(), Term::var("str"));
-        terms.insert("is".to_string(), Term::var("num"));
+        terms.insert("text".to_string(), Parameter::var("str"));
+        terms.insert("is".to_string(), Parameter::var("num"));
 
         let input = Answer::new().set(Term::var("str"), "".to_string()).unwrap();
 
@@ -254,8 +254,8 @@ mod tests {
     #[dialog_common::test]
     fn it_parses_negative_number() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("text".to_string(), Term::var("str"));
-        terms.insert("is".to_string(), Term::var("num"));
+        terms.insert("text".to_string(), Parameter::var("str"));
+        terms.insert("is".to_string(), Parameter::var("num"));
 
         let input = Answer::new()
             .set(Term::var("str"), "-123".to_string())
@@ -275,8 +275,8 @@ mod tests {
     fn it_chains_type_conversions() -> anyhow::Result<()> {
         // Test ToString formula with number
         let mut to_string_terms = Parameters::new();
-        to_string_terms.insert("value".to_string(), Term::var("input"));
-        to_string_terms.insert("is".to_string(), Term::var("str_result"));
+        to_string_terms.insert("value".to_string(), Parameter::var("input"));
+        to_string_terms.insert("is".to_string(), Parameter::var("str_result"));
 
         let to_string_formula = ToString::apply(to_string_terms)?;
 
@@ -305,8 +305,8 @@ mod tests {
 
         // Test ParseNumber formula with valid input
         let mut parse_terms = Parameters::new();
-        parse_terms.insert("text".to_string(), Term::var("str_input"));
-        parse_terms.insert("is".to_string(), Term::var("num_result"));
+        parse_terms.insert("text".to_string(), Parameter::var("str_input"));
+        parse_terms.insert("is".to_string(), Parameter::var("num_result"));
 
         let parse_formula = ParseNumber::apply(parse_terms)?;
 

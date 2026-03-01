@@ -6,8 +6,8 @@
 
 pub use crate::selection::Evidence;
 pub use crate::{
-    Answers, Cardinality, Environment, Field, Parameters, QueryError, Requirement, Schema, Term,
-    Value, try_stream,
+    Answers, Cardinality, Environment, Field, Parameter, Parameters, QueryError, Requirement,
+    Schema, Term, Value, try_stream,
 };
 use std::fmt::Display;
 
@@ -91,8 +91,8 @@ impl Equality {
     /// Returns the parameters for this constraint.
     pub fn parameters(&self) -> Parameters {
         let mut params = Parameters::new();
-        params.insert("this".to_string(), self.this.clone());
-        params.insert("is".to_string(), self.is.clone());
+        params.insert("this".to_string(), Parameter::from(&self.this));
+        params.insert("is".to_string(), Parameter::from(&self.is));
         params
     }
 

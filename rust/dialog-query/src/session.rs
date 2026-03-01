@@ -357,8 +357,8 @@ mod tests {
     use crate::selection::Answer;
     use crate::the;
     use crate::{
-        Association, AttributeDescriptor, Cardinality, Concept, Parameters, Query, Term, Type,
-        concept::descriptor::ConceptDescriptor,
+        Association, AttributeDescriptor, Cardinality, Concept, Parameter, Parameters, Query, Term,
+        Type, concept::descriptor::ConceptDescriptor,
     };
 
     use super::*;
@@ -425,11 +425,11 @@ mod tests {
             ),
         ]);
 
-        let name = Term::var("name");
-        let age = Term::var("age");
+        let name = Term::<Value>::var("name");
+        let age = Term::<Value>::var("age");
         let mut params = Parameters::new();
-        params.insert("name".into(), name.clone());
-        params.insert("age".into(), age.clone());
+        params.insert("name".into(), Parameter::var("name"));
+        params.insert("age".into(), Parameter::var("age"));
 
         // Use new query API directly on application
         let application = person.apply(params)?;
@@ -494,8 +494,8 @@ mod tests {
 
         // Mixed case - valid parameters with some matching attributes (should succeed)
         let mut mixed_params = Parameters::new();
-        mixed_params.insert("name".into(), Term::var("person_name")); // This matches
-        mixed_params.insert("age".into(), Term::blank()); // This matches but is blank
+        mixed_params.insert("name".into(), Parameter::var("person_name")); // This matches
+        mixed_params.insert("age".into(), Parameter::blank()); // This matches but is blank
 
         person.apply(mixed_params)?;
 
@@ -545,11 +545,11 @@ mod tests {
 
         session.transact(vec![alice, bob]).await?;
 
-        let name = Term::var("name");
-        let age = Term::var("age");
+        let name = Term::<Value>::var("name");
+        let age = Term::<Value>::var("age");
         let mut params = Parameters::new();
-        params.insert("name".into(), name.clone());
-        params.insert("age".into(), age.clone());
+        params.insert("name".into(), Parameter::var("name"));
+        params.insert("age".into(), Parameter::var("age"));
 
         // Let's test with empty parameters first to see the exact error
         let application = person.apply(params)?;
@@ -882,9 +882,9 @@ mod tests {
         let rules = session_with_rule.acquire(&adult_conclusion)?;
         let answer = crate::selection::Answer::new();
         let mut terms = Parameters::new();
-        terms.insert("this".into(), Term::var("e"));
-        terms.insert("name".into(), Term::var("n"));
-        terms.insert("age".into(), Term::var("a"));
+        terms.insert("this".into(), Parameter::var("e"));
+        terms.insert("name".into(), Parameter::var("n"));
+        terms.insert("age".into(), Parameter::var("a"));
         let _plan = rules.plan(&terms, &answer);
 
         Ok(())
@@ -1280,9 +1280,9 @@ mod tests {
         let rules = ConceptRules::new(&person);
 
         let mut terms = Parameters::new();
-        terms.insert("this".into(), Term::var("e"));
-        terms.insert("name".into(), Term::var("n"));
-        terms.insert("age".into(), Term::var("a"));
+        terms.insert("this".into(), Parameter::var("e"));
+        terms.insert("name".into(), Parameter::var("n"));
+        terms.insert("age".into(), Parameter::var("a"));
 
         let answer = Answer::new();
         let plan1 = rules.plan(&terms, &answer);
@@ -1302,9 +1302,9 @@ mod tests {
         let rules = ConceptRules::new(&person);
 
         let mut terms = Parameters::new();
-        terms.insert("this".into(), Term::var("e"));
-        terms.insert("name".into(), Term::var("n"));
-        terms.insert("age".into(), Term::var("a"));
+        terms.insert("this".into(), Parameter::var("e"));
+        terms.insert("name".into(), Parameter::var("n"));
+        terms.insert("age".into(), Parameter::var("a"));
 
         // All-free adornment
         let answer_free = Answer::new();
@@ -1334,9 +1334,9 @@ mod tests {
         let mut rules = ConceptRules::new(&person);
 
         let mut terms = Parameters::new();
-        terms.insert("this".into(), Term::var("e"));
-        terms.insert("name".into(), Term::var("n"));
-        terms.insert("age".into(), Term::var("a"));
+        terms.insert("this".into(), Parameter::var("e"));
+        terms.insert("name".into(), Parameter::var("n"));
+        terms.insert("age".into(), Parameter::var("a"));
 
         // Warm the cache
         let answer = Answer::new();
@@ -1361,9 +1361,9 @@ mod tests {
 
         let person = person_concept();
         let mut terms = Parameters::new();
-        terms.insert("this".into(), Term::var("e"));
-        terms.insert("name".into(), Term::var("n"));
-        terms.insert("age".into(), Term::var("a"));
+        terms.insert("this".into(), Parameter::var("e"));
+        terms.insert("name".into(), Parameter::var("n"));
+        terms.insert("age".into(), Parameter::var("a"));
 
         let mut registry = RuleRegistry::new();
 
@@ -1397,9 +1397,9 @@ mod tests {
         let mut rules = ConceptRules::new(&person);
 
         let mut terms = Parameters::new();
-        terms.insert("this".into(), Term::var("e"));
-        terms.insert("name".into(), Term::var("n"));
-        terms.insert("age".into(), Term::var("a"));
+        terms.insert("this".into(), Parameter::var("e"));
+        terms.insert("name".into(), Parameter::var("n"));
+        terms.insert("age".into(), Parameter::var("a"));
 
         // Install a rule and warm the cache
         let rule = DeductiveRule::from(&person);
@@ -1427,9 +1427,9 @@ mod tests {
         let rules = ConceptRules::new(&person);
 
         let mut terms = Parameters::new();
-        terms.insert("this".into(), Term::var("e"));
-        terms.insert("name".into(), Term::var("n"));
-        terms.insert("age".into(), Term::var("a"));
+        terms.insert("this".into(), Parameter::var("e"));
+        terms.insert("name".into(), Parameter::var("n"));
+        terms.insert("age".into(), Parameter::var("a"));
 
         // Warm cache on the original
         let answer = Answer::new();
@@ -1454,9 +1454,9 @@ mod tests {
         let rules = ConceptRules::new(&person);
 
         let mut terms = Parameters::new();
-        terms.insert("this".into(), Term::var("e"));
-        terms.insert("name".into(), Term::var("n"));
-        terms.insert("age".into(), Term::var("a"));
+        terms.insert("this".into(), Parameter::var("e"));
+        terms.insert("name".into(), Parameter::var("n"));
+        terms.insert("age".into(), Parameter::var("a"));
 
         // All-free plan
         let answer_free = Answer::new();
@@ -1532,11 +1532,10 @@ mod tests {
             .await?;
 
         let person = person_concept();
-        let name = Term::var("name");
-        let age = Term::var("age");
+        let name = Term::<Value>::var("name");
         let mut params = Parameters::new();
-        params.insert("name".into(), name.clone());
-        params.insert("age".into(), age.clone());
+        params.insert("name".into(), Parameter::var("name"));
+        params.insert("age".into(), Parameter::var("age"));
 
         let application = person.apply(params)?;
 
@@ -1612,14 +1611,14 @@ mod tests {
 
         let person = person_concept();
 
-        let name = Term::var("name");
-        let age = Term::var("age");
-        let entity = Term::var("this");
+        let name = Term::<Value>::var("name");
+        let age = Term::<Value>::var("age");
+        let entity = Term::<Value>::var("this");
 
         let mut params = Parameters::new();
-        params.insert("this".into(), entity.clone());
-        params.insert("name".into(), name.clone());
-        params.insert("age".into(), age.clone());
+        params.insert("this".into(), Parameter::var("this"));
+        params.insert("name".into(), Parameter::var("name"));
+        params.insert("age".into(), Parameter::var("age"));
 
         let application = person.apply(params)?;
 

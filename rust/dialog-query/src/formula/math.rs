@@ -136,9 +136,9 @@ mod tests {
     fn it_sums_two_values() -> anyhow::Result<()> {
         // Create Terms mapping
         let mut terms = Parameters::new();
-        terms.insert("of".to_string(), Term::var("x"));
-        terms.insert("with".to_string(), Term::var("y"));
-        terms.insert("is".to_string(), Term::var("result"));
+        terms.insert("of".to_string(), Parameter::var("x"));
+        terms.insert("with".to_string(), Parameter::var("y"));
+        terms.insert("is".to_string(), Parameter::var("result"));
 
         // Create input match with x=5, y=3
         let input = Answer::new()
@@ -187,9 +187,9 @@ mod tests {
     #[dialog_common::test]
     fn it_errors_on_missing_sum_input() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("of".to_string(), Term::var("x"));
-        terms.insert("with".to_string(), Term::var("missing"));
-        terms.insert("is".to_string(), Term::var("result"));
+        terms.insert("of".to_string(), Parameter::var("x"));
+        terms.insert("with".to_string(), Parameter::var("missing"));
+        terms.insert("is".to_string(), Parameter::var("result"));
 
         let input = Answer::new()
             .set(Term::var("x"), 5u32)
@@ -210,9 +210,9 @@ mod tests {
     fn it_expands_sum_to_multiple_types() -> anyhow::Result<()> {
         // Test multiple expansions without the stream complexity
         let mut terms = Parameters::new();
-        terms.insert("of".to_string(), Term::var("a"));
-        terms.insert("with".to_string(), Term::var("b"));
-        terms.insert("is".to_string(), Term::var("sum"));
+        terms.insert("of".to_string(), Parameter::var("a"));
+        terms.insert("with".to_string(), Parameter::var("b"));
+        terms.insert("is".to_string(), Parameter::var("sum"));
 
         let app = Sum::apply(terms)?;
 
@@ -305,9 +305,9 @@ mod tests {
     #[dialog_common::test]
     fn it_computes_difference() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("of".to_string(), Term::var("x"));
-        terms.insert("subtract".to_string(), Term::var("y"));
-        terms.insert("is".to_string(), Term::var("result"));
+        terms.insert("of".to_string(), Parameter::var("x"));
+        terms.insert("subtract".to_string(), Parameter::var("y"));
+        terms.insert("is".to_string(), Parameter::var("result"));
 
         let input = Answer::new()
             .set(Term::var("x"), 10u32)
@@ -333,9 +333,9 @@ mod tests {
     #[dialog_common::test]
     fn it_handles_difference_underflow() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("of".to_string(), Term::var("x"));
-        terms.insert("subtract".to_string(), Term::var("y"));
-        terms.insert("is".to_string(), Term::var("result"));
+        terms.insert("of".to_string(), Parameter::var("x"));
+        terms.insert("subtract".to_string(), Parameter::var("y"));
+        terms.insert("is".to_string(), Parameter::var("result"));
 
         let input = Answer::new()
             .set(Term::var("x"), 3u32)
@@ -364,9 +364,9 @@ mod tests {
     #[dialog_common::test]
     fn it_computes_product() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("of".to_string(), Term::var("x"));
-        terms.insert("times".to_string(), Term::var("y"));
-        terms.insert("is".to_string(), Term::var("result"));
+        terms.insert("of".to_string(), Parameter::var("x"));
+        terms.insert("times".to_string(), Parameter::var("y"));
+        terms.insert("is".to_string(), Parameter::var("result"));
 
         let input = Answer::new()
             .set(Term::var("x"), 6u32)
@@ -392,9 +392,9 @@ mod tests {
     #[dialog_common::test]
     fn it_computes_quotient() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("of".to_string(), Term::var("x"));
-        terms.insert("by".to_string(), Term::var("y"));
-        terms.insert("is".to_string(), Term::var("result"));
+        terms.insert("of".to_string(), Parameter::var("x"));
+        terms.insert("by".to_string(), Parameter::var("y"));
+        terms.insert("is".to_string(), Parameter::var("result"));
 
         let input = Answer::new()
             .set(Term::var("x"), 15u32)
@@ -420,9 +420,9 @@ mod tests {
     #[dialog_common::test]
     fn it_errors_on_division_by_zero() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("of".to_string(), Term::var("x"));
-        terms.insert("by".to_string(), Term::var("y"));
-        terms.insert("is".to_string(), Term::var("result"));
+        terms.insert("of".to_string(), Parameter::var("x"));
+        terms.insert("by".to_string(), Parameter::var("y"));
+        terms.insert("is".to_string(), Parameter::var("result"));
 
         let x = Term::var("x");
         let input = Answer::new()
@@ -444,9 +444,9 @@ mod tests {
     #[dialog_common::test]
     fn it_computes_modulo() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("of".to_string(), Term::var("x"));
-        terms.insert("by".to_string(), Term::var("y"));
-        terms.insert("is".to_string(), Term::var("result"));
+        terms.insert("of".to_string(), Parameter::var("x"));
+        terms.insert("by".to_string(), Parameter::var("y"));
+        terms.insert("is".to_string(), Parameter::var("result"));
 
         let input = Answer::new()
             .set(Term::var("x"), 17u32)
@@ -472,9 +472,9 @@ mod tests {
     #[dialog_common::test]
     fn it_errors_on_modulo_by_zero() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("of".to_string(), Term::var("x"));
-        terms.insert("by".to_string(), Term::var("y"));
-        terms.insert("is".to_string(), Term::var("result"));
+        terms.insert("of".to_string(), Parameter::var("x"));
+        terms.insert("by".to_string(), Parameter::var("y"));
+        terms.insert("is".to_string(), Parameter::var("result"));
 
         let input = Answer::new()
             .set(Term::var("x"), 17u32)
@@ -494,9 +494,9 @@ mod tests {
     fn it_chains_math_operations() -> anyhow::Result<()> {
         // Test Sum formula: 10 + 5 = 15
         let mut sum_terms = Parameters::new();
-        sum_terms.insert("of".to_string(), Term::var("x"));
-        sum_terms.insert("with".to_string(), Term::var("y"));
-        sum_terms.insert("is".to_string(), Term::var("sum_result"));
+        sum_terms.insert("of".to_string(), Parameter::var("x"));
+        sum_terms.insert("with".to_string(), Parameter::var("y"));
+        sum_terms.insert("is".to_string(), Parameter::var("sum_result"));
 
         let sum_formula = Sum::apply(sum_terms)?;
 
@@ -515,9 +515,9 @@ mod tests {
 
         // Test Difference formula: 20 - 8 = 12
         let mut diff_terms = Parameters::new();
-        diff_terms.insert("of".to_string(), Term::var("a"));
-        diff_terms.insert("subtract".to_string(), Term::var("b"));
-        diff_terms.insert("is".to_string(), Term::var("diff_result"));
+        diff_terms.insert("of".to_string(), Parameter::var("a"));
+        diff_terms.insert("subtract".to_string(), Parameter::var("b"));
+        diff_terms.insert("is".to_string(), Parameter::var("diff_result"));
 
         let diff_formula = Difference::apply(diff_terms)?;
 
@@ -536,9 +536,9 @@ mod tests {
 
         // Test Product formula: 6 * 7 = 42
         let mut prod_terms = Parameters::new();
-        prod_terms.insert("of".to_string(), Term::var("p"));
-        prod_terms.insert("times".to_string(), Term::var("q"));
-        prod_terms.insert("is".to_string(), Term::var("product"));
+        prod_terms.insert("of".to_string(), Parameter::var("p"));
+        prod_terms.insert("times".to_string(), Parameter::var("q"));
+        prod_terms.insert("is".to_string(), Parameter::var("product"));
 
         let product_formula = Product::apply(prod_terms)?;
 
@@ -564,8 +564,8 @@ mod tests {
 
         // First: Parse a number from string
         let mut parse_terms = Parameters::new();
-        parse_terms.insert("text".to_string(), Term::var("str_input"));
-        parse_terms.insert("is".to_string(), Term::var("parsed_num"));
+        parse_terms.insert("text".to_string(), Parameter::var("str_input"));
+        parse_terms.insert("is".to_string(), Parameter::var("parsed_num"));
 
         let parse_formula = ParseNumber::apply(parse_terms)?;
 
@@ -579,9 +579,9 @@ mod tests {
 
         // Second: Add 5 to the parsed number
         let mut sum_terms = Parameters::new();
-        sum_terms.insert("of".to_string(), Term::var("parsed_num"));
-        sum_terms.insert("with".to_string(), Term::var("addend"));
-        sum_terms.insert("is".to_string(), Term::var("final_sum"));
+        sum_terms.insert("of".to_string(), Parameter::var("parsed_num"));
+        sum_terms.insert("with".to_string(), Parameter::var("addend"));
+        sum_terms.insert("is".to_string(), Parameter::var("final_sum"));
 
         let sum_formula = Sum::apply(sum_terms)?;
 
@@ -599,8 +599,8 @@ mod tests {
 
         // Third: Convert the result back to string
         let mut to_string_terms = Parameters::new();
-        to_string_terms.insert("value".to_string(), Term::var("final_sum"));
-        to_string_terms.insert("is".to_string(), Term::var("final_string"));
+        to_string_terms.insert("value".to_string(), Parameter::var("final_sum"));
+        to_string_terms.insert("is".to_string(), Parameter::var("final_string"));
 
         let to_string_formula = ToString::apply(to_string_terms)?;
 
@@ -907,9 +907,9 @@ mod tests {
     fn it_handles_formula_errors() -> anyhow::Result<()> {
         // Test division by zero in Quotient formula
         let mut quotient_terms = Parameters::new();
-        quotient_terms.insert("of".to_string(), Term::var("dividend"));
-        quotient_terms.insert("by".to_string(), Term::var("divisor"));
-        quotient_terms.insert("is".to_string(), Term::var("quotient"));
+        quotient_terms.insert("of".to_string(), Parameter::var("dividend"));
+        quotient_terms.insert("by".to_string(), Parameter::var("divisor"));
+        quotient_terms.insert("is".to_string(), Parameter::var("quotient"));
 
         let quotient_formula = Quotient::apply(quotient_terms)?;
 
@@ -924,9 +924,9 @@ mod tests {
 
         // Test modulo by zero
         let mut modulo_terms = Parameters::new();
-        modulo_terms.insert("of".to_string(), Term::var("dividend"));
-        modulo_terms.insert("by".to_string(), Term::var("divisor"));
-        modulo_terms.insert("is".to_string(), Term::var("remainder"));
+        modulo_terms.insert("of".to_string(), Parameter::var("dividend"));
+        modulo_terms.insert("by".to_string(), Parameter::var("divisor"));
+        modulo_terms.insert("is".to_string(), Parameter::var("remainder"));
 
         let modulo_formula = Modulo::apply(modulo_terms)?;
 

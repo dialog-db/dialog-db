@@ -12,7 +12,9 @@
 //! result memoization (tabling) needed for fixpoint evaluation of recursive rules
 //! (Tekle & Liu, 2011).
 
+use crate::artifact::Value;
 use crate::environment::Environment;
+use crate::parameter::Parameter;
 use crate::parameters::Parameters;
 use crate::selection::Answer;
 use crate::term::Term;
@@ -42,11 +44,14 @@ impl Adornment {
         let mut bits: u64 = 0;
         for (i, key) in sorted_keys.iter().enumerate() {
             debug_assert!(i < 64, "Adornment supports at most 64 parameters");
-            if let Some(term) = terms.get(key) {
-                let bound = match term {
-                    Term::Constant(_) => true,
-                    Term::Variable { name: Some(_), .. } => answer.contains(term),
-                    Term::Variable { name: None, .. } => false,
+            if let Some(param) = terms.get(key) {
+                let bound = match param {
+                    Parameter::Constant(_) => true,
+                    Parameter::Variable { name: Some(_), .. } => {
+                        let term: Term<Value> = param.into();
+                        answer.contains(&term)
+                    }
+                    Parameter::Variable { name: None, .. } => false,
                 };
                 if bound {
                     bits |= 1 << i;
@@ -68,9 +73,10 @@ impl Adornment {
         let mut env = Environment::new();
         for (i, key) in sorted_keys.iter().enumerate() {
             if self.0 & (1 << i) != 0
-                && let Some(term) = terms.get(key)
+                && let Some(param) = terms.get(key)
             {
-                env.add(term);
+                let term: Term<Value> = param.into();
+                env.add(&term);
             }
         }
 

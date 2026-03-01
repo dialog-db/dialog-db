@@ -13,7 +13,8 @@ use crate::schema::CONCEPT_OVERHEAD;
 use crate::selection::Answers;
 use crate::selection::{Answer, Evidence};
 use crate::{
-    Cardinality, Environment, Parameters, QueryError, Schema, Source, Term, Value, try_stream,
+    Cardinality, Environment, Parameter, Parameters, QueryError, Schema, Source, Term, Value,
+    try_stream,
 };
 use std::fmt::Display;
 
@@ -24,19 +25,20 @@ use std::fmt::Display;
 fn extract_parameters(source: &Answer, terms: &Parameters) -> Result<Answer, InconsistencyError> {
     let mut answer = Answer::new();
 
-    for (param_name, user_term) in terms.iter() {
-        match user_term {
-            Term::Variable { name: Some(_), .. } => {
-                // For variables, map from user variable to parameter variable
+    for (param_name, user_param) in terms.iter() {
+        match user_param {
+            Parameter::Variable { name: Some(_), .. } => {
+                // For named variables, map from user variable to parameter variable
                 let param_term = Term::<Value>::var(param_name);
-                if let Some(factors) = source.lookup(user_term) {
+                let user_term: Term<Value> = user_param.into();
+                if let Some(factors) = source.lookup(&user_term) {
                     answer.merge(Evidence::Parameter {
                         term: &param_term,
                         value: &factors.content(),
                     })?;
                 }
             }
-            Term::Constant(value) => {
+            Parameter::Constant(value) => {
                 // For constants, directly bind the parameter variable to the constant value
                 let param_term = Term::<Value>::var(param_name);
                 answer.merge(Evidence::Parameter {
@@ -44,7 +46,7 @@ fn extract_parameters(source: &Answer, terms: &Parameters) -> Result<Answer, Inc
                     value,
                 })?;
             }
-            Term::Variable { name: None, .. } => {}
+            Parameter::Variable { name: None, .. } => {}
         }
     }
 
@@ -64,9 +66,9 @@ fn merge_parameters(
 
     // Map through parameters: for each parameter, if it exists in result,
     // merge it into base under the user variable name
-    for (param_name, user_term) in terms.iter() {
+    for (param_name, user_param) in terms.iter() {
         // Skip constants - they were input parameters, not results to merge back
-        if matches!(user_term, Term::Constant(_)) {
+        if matches!(user_param, Parameter::Constant(_)) {
             continue;
         }
 
@@ -74,8 +76,9 @@ fn merge_parameters(
         let param_term = Term::<Value>::var(param_name);
         if let Some(factors) = result.lookup(&param_term) {
             // Merge all factors under the user's variable name, preserving provenance
+            let user_term: Term<Value> = user_param.into();
             for factor in factors.evidence() {
-                merged.assign(user_term, factor)?;
+                merged.assign(&user_term, factor)?;
             }
         }
     }
@@ -112,8 +115,9 @@ impl ConceptQuery {
     /// - If nothing is bound: Returns None (should be blocked)
     pub fn estimate(&self, env: &Environment) -> Option<usize> {
         // Check if "this" parameter is bound
-        let this_bound = if let Some(this_term) = self.terms.get("this") {
-            env.contains(this_term)
+        let this_bound = if let Some(this_param) = self.terms.get("this") {
+            let this_term: Term<Value> = this_param.into();
+            env.contains(&this_term)
         } else {
             false
         };
@@ -125,8 +129,9 @@ impl ConceptQuery {
                 // Check if this attribute's value is also bound
                 total += attribute.estimate(
                     true,
-                    if let Some(term) = self.terms.get(name) {
-                        env.contains(term)
+                    if let Some(param) = self.terms.get(name) {
+                        let term: Term<Value> = param.into();
+                        env.contains(&term)
                     } else {
                         false
                     },
@@ -141,8 +146,9 @@ impl ConceptQuery {
             let mut unbound_many: Option<&AttributeDescriptor> = None;
 
             for (name, attribute) in self.predicate.with().iter() {
-                if let Some(term) = self.terms.get(name) {
-                    if env.contains(term) {
+                if let Some(param) = self.terms.get(name) {
+                    let term: Term<Value> = param.into();
+                    if env.contains(&term) {
                         match attribute.cardinality() {
                             Cardinality::One => {
                                 bound_one = Some(attribute);
@@ -205,8 +211,9 @@ impl ConceptQuery {
                 if lead != attribute {
                     total += attribute.estimate(
                         true,
-                        if let Some(term) = self.terms.get(name) {
-                            env.contains(term)
+                        if let Some(param) = self.terms.get(name) {
+                            let term: Term<Value> = param.into();
+                            env.contains(&term)
                         } else {
                             false
                         },
@@ -363,9 +370,9 @@ mod tests {
         ]);
 
         let mut terms = Parameters::new();
-        terms.insert("this".to_string(), Term::var("person"));
-        terms.insert("name".to_string(), Term::var("name"));
-        terms.insert("age".to_string(), Term::var("age"));
+        terms.insert("this".to_string(), Parameter::var("person"));
+        terms.insert("name".to_string(), Parameter::var("name"));
+        terms.insert("age".to_string(), Parameter::var("age"));
 
         let application = ConceptQuery {
             terms,
@@ -460,9 +467,9 @@ mod tests {
         ]);
 
         let mut terms = Parameters::new();
-        terms.insert("this".to_string(), Term::var("person"));
-        terms.insert("name".to_string(), Term::var("name"));
-        terms.insert("age".to_string(), Term::var("age"));
+        terms.insert("this".to_string(), Parameter::var("person"));
+        terms.insert("name".to_string(), Parameter::var("name"));
+        terms.insert("age".to_string(), Parameter::var("age"));
 
         let application = ConceptQuery {
             terms,
@@ -561,8 +568,8 @@ mod tests {
         ]);
 
         let mut terms = Parameters::new();
-        terms.insert("name".to_string(), Term::var("person_name"));
-        terms.insert("age".to_string(), Term::var("person_age"));
+        terms.insert("name".to_string(), Parameter::var("person_name"));
+        terms.insert("age".to_string(), Parameter::var("person_age"));
 
         let concept_app = ConceptQuery {
             terms,
@@ -695,7 +702,7 @@ mod tests {
 
         // Test other variants exist
         let mut terms = Parameters::new();
-        terms.insert("test".to_string(), Term::var("test_var"));
+        terms.insert("test".to_string(), Parameter::var("test_var"));
         let concept_app = Proposition::Concept(ConceptQuery {
             terms,
             predicate: ConceptDescriptor::from([(
@@ -781,7 +788,7 @@ mod tests {
             "this".to_string(),
             Term::Constant(Value::Entity(alice.clone())),
         );
-        terms.insert("name".to_string(), Term::var("name"));
+        terms.insert("name".to_string(), Parameter::var("name"));
 
         let app = ConceptQuery {
             terms,
@@ -865,12 +872,12 @@ mod tests {
 
         // Query with constant name value - should only return Bob
         let mut terms = Parameters::new();
-        terms.insert("this".to_string(), Term::var("entity"));
+        terms.insert("this".to_string(), Parameter::var("entity"));
         terms.insert(
             "name".to_string(),
             Term::Constant(Value::String("Bob".to_string())),
         );
-        terms.insert("age".to_string(), Term::var("age"));
+        terms.insert("age".to_string(), Parameter::var("age"));
 
         let app = ConceptQuery {
             terms,
@@ -954,7 +961,7 @@ mod tests {
 
         // Query with both name and age constants - should only match Alice
         let mut terms = Parameters::new();
-        terms.insert("this".to_string(), Term::var("entity"));
+        terms.insert("this".to_string(), Parameter::var("entity"));
         terms.insert(
             "name".to_string(),
             Term::Constant(Value::String("Alice".to_string())),

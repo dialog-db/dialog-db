@@ -108,22 +108,24 @@ impl Bindings {
 
     /// Resolve a parameter to its Value, tracking the read for provenance
     pub fn resolve(&mut self, key: &str) -> Result<Value, FormulaEvaluationError> {
-        let term =
+        let param =
             self.terms
                 .get(key)
                 .ok_or_else(|| FormulaEvaluationError::RequiredParameter {
                     parameter: key.into(),
                 })?;
 
+        let term: Term<Value> = param.clone().into();
+
         // Track what we read for provenance
-        if let Some(factors) = self.source.resolve_factors(term) {
+        if let Some(factors) = self.source.resolve_factors(&term) {
             self.reads.insert(key.to_string(), factors.clone());
         }
 
         // Get the value from the answer
         let value =
             self.source
-                .resolve(term)
+                .resolve(&term)
                 .map_err(|_| FormulaEvaluationError::UnboundVariable {
                     term: term.clone(),
                     parameter: key.into(),
@@ -180,16 +182,18 @@ impl Bindings {
         use crate::selection::Factor;
 
         // Fail if parameter not in terms (don't silently ignore)
-        let term =
+        let param =
             self.terms
                 .get(key)
                 .ok_or_else(|| FormulaEvaluationError::RequiredParameter {
                     parameter: key.into(),
                 })?;
 
+        let term: Term<Value> = param.clone().into();
+
         // For constant terms, verify the computed value matches the constant.
         // Answer::assign treats constants as no-ops, so we must check here.
-        if let Term::Constant(expected) = term {
+        if let Term::Constant(expected) = &term {
             if expected != value {
                 return Err(FormulaEvaluationError::VariableInconsistency {
                     parameter: key.into(),
@@ -209,7 +213,7 @@ impl Bindings {
         };
 
         // Assign to the answer - this will fail if there's a conflicting value
-        self.source.assign(term, &factor).map_err(|_| {
+        self.source.assign(&term, &factor).map_err(|_| {
             // Convert assignment errors to VariableInconsistency
             FormulaEvaluationError::VariableInconsistency {
                 parameter: key.into(),
@@ -232,7 +236,7 @@ impl From<TypeError> for FormulaEvaluationError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Term;
+    use crate::{Parameter, Term};
 
     // Helper to create a test formula for bindings tests
     fn test_formula() -> crate::formula::query::FormulaQuery {
@@ -254,7 +258,7 @@ mod tests {
         use crate::selection::Answer;
 
         let mut terms = Parameters::new();
-        terms.insert("value".to_string(), Term::var("test"));
+        terms.insert("value".to_string(), Parameter::var("test"));
 
         let match_data = Answer::new()
             .set(Term::var("test"), 42u32)
@@ -294,7 +298,7 @@ mod tests {
         use crate::selection::Answer;
 
         let mut terms = Parameters::new();
-        terms.insert("value".to_string(), Term::var("unbound"));
+        terms.insert("value".to_string(), Parameter::var("unbound"));
 
         let source = Answer::new(); // No bindings
         let formula = test_formula();
@@ -312,8 +316,8 @@ mod tests {
         use crate::selection::Answer;
 
         let mut params = Parameters::new();
-        params.insert("x".to_string(), Term::var("input_x"));
-        params.insert("y".to_string(), Term::var("input_y"));
+        params.insert("x".to_string(), Parameter::var("input_x"));
+        params.insert("y".to_string(), Parameter::var("input_y"));
 
         let match_data = Answer::new()
             .set(Term::var("input_x"), 10u32)
@@ -383,7 +387,7 @@ mod tests {
         use crate::selection::Answer;
 
         let mut terms = Parameters::new();
-        terms.insert("value".to_string(), Term::var("test"));
+        terms.insert("value".to_string(), Parameter::var("test"));
 
         // Create bindings with initial value
         let source = Answer::new()
@@ -469,8 +473,8 @@ mod tests {
         use crate::selection::Answer;
 
         let mut params = Parameters::new();
-        params.insert("x".to_string(), Term::var("input_x"));
-        params.insert("y".to_string(), Term::var("input_y"));
+        params.insert("x".to_string(), Parameter::var("input_x"));
+        params.insert("y".to_string(), Parameter::var("input_y"));
 
         let match_data = Answer::new()
             .set(Term::var("input_x"), 10u32)

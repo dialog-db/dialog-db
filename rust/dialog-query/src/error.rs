@@ -1,6 +1,7 @@
 //! Error types for the query engine
 
 use crate::artifact::{DialogArtifactsError, Type, TypeError as ArtifactTypeError, Value};
+use crate::parameter::Parameter;
 pub use crate::planner::Prerequisites;
 pub use crate::proposition::Proposition;
 pub use crate::rule::deductive::DeductiveRule;
@@ -227,12 +228,12 @@ pub enum FormulaEvaluationError {
     /// # Example
     /// ```no_run
     /// # use dialog_query::formula::math::Sum;
-    /// # use dialog_query::{Term, selection::Answer, Value, Parameters, Formula};
+    /// # use dialog_query::{selection::Answer, Value, Parameter, Parameters, Formula};
     /// # use dialog_query::error::SchemaError;
     /// let mut parameters = Parameters::new();
     /// // Missing required "with" parameter!
-    /// parameters.insert("of".to_string(), Term::var("x"));
-    /// parameters.insert("is".to_string(), Term::var("result"));
+    /// parameters.insert("of".to_string(), Parameter::var("x"));
+    /// parameters.insert("is".to_string(), Parameter::var("result"));
     ///
     /// // This will fail because "with" parameter is required
     /// let result = Sum::apply(parameters);
@@ -252,12 +253,12 @@ pub enum FormulaEvaluationError {
     /// # Example
     /// ```no_run
     /// # use dialog_query::formula::math::Sum;
-    /// # use dialog_query::{Term, selection::Answer, Value, Parameters, Formula};
+    /// # use dialog_query::{selection::Answer, Value, Parameter, Parameters, Formula};
     /// # use dialog_query::error::FormulaEvaluationError;
     /// # let mut parameters = Parameters::new();
-    /// # parameters.insert("of".to_string(), Term::var("x"));
-    /// # parameters.insert("with".to_string(), Term::var("y"));
-    /// # parameters.insert("is".to_string(), Term::var("result"));
+    /// # parameters.insert("of".to_string(), Parameter::var("x"));
+    /// # parameters.insert("with".to_string(), Parameter::var("y"));
+    /// # parameters.insert("is".to_string(), Parameter::var("result"));
     /// # let sum = Sum::apply(parameters).unwrap();
     /// let input = Answer::new();
     /// // Variable ?x is not bound!
@@ -537,8 +538,8 @@ pub enum TypeError {
     TypeMismatch {
         /// The expected type
         expected: Type,
-        /// The actual term encountered
-        actual: Term<Value>,
+        /// The actual parameter encountered
+        actual: Parameter,
     },
     /// A required term was not provided
     #[error("Required term is missing")]
@@ -573,8 +574,8 @@ pub enum SchemaError {
         binding: String,
         /// The expected type
         expected: Type,
-        /// The actual term encountered
-        actual: Term<Value>,
+        /// The actual parameter encountered
+        actual: Parameter,
     },
     /// A required binding was not provided
     #[error("Required binding \"{binding}\" was omitted")]
