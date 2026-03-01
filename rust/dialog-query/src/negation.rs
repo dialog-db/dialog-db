@@ -112,8 +112,8 @@ mod tests {
         let session = Session::open(store);
 
         // a=1, b=2 → equality finds no match → negation keeps the answer
-        let a = Term::<Value>::var("a");
-        let b = Term::<Value>::var("b");
+        let a = Term::<String>::var("a");
+        let b = Term::<String>::var("b");
         let premise = !a.clone().is(b.clone());
 
         let mut answer = Answer::new();
@@ -147,8 +147,8 @@ mod tests {
         let session = Session::open(store);
 
         // a=1, b=1 → equality matches → negation drops the answer
-        let a = Term::<Value>::var("a");
-        let b = Term::<Value>::var("b");
+        let a = Term::<String>::var("a");
+        let b = Term::<String>::var("b");
         let premise = !a.clone().is(b.clone());
 
         let mut answer = Answer::new();

@@ -63,7 +63,7 @@ mod tests {
         let alice_query = RelationQuery::new(
             Term::Constant(the!("user/name")),
             alice.clone().into(),
-            Term::from(Value::String("Alice".to_string())),
+            Parameter::from("Alice".to_string()),
             Term::blank(),
             None,
         );
@@ -107,7 +107,7 @@ mod tests {
         let variable_query = RelationQuery::new(
             Term::Constant(the!("user/name")),
             Term::<Entity>::var("user"),
-            Term::<Value>::var("name"),
+            Parameter::var("name"),
             Term::blank(),
             None,
         );
@@ -187,7 +187,7 @@ mod tests {
         let admin_result = RelationQuery::new(
             Term::Constant(the!("user/role")),
             Term::blank(),
-            Term::from(Value::String("admin".to_string())),
+            Parameter::from("admin".to_string()),
             Term::blank(),
             None,
         )

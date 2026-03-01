@@ -271,7 +271,7 @@ where
     fn from(expr: AttributeExpression<A, Entity, A, Because>) -> Self {
         let query = relation_query::<A>(
             Term::Constant(expr.of),
-            Term::Constant(expr.is.value().as_value()),
+            Parameter::Constant(expr.is.value().as_value()),
             expr.cause.as_cause_term(),
         );
         Premise::Assert(Proposition::Relation(Box::new(query)))

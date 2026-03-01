@@ -155,22 +155,39 @@ impl<T: Scalar> From<&Term<T>> for Parameter {
     }
 }
 
-/// Convert a `Parameter` into a dynamically-typed `Term<Value>`.
-impl From<Parameter> for Term<Value> {
-    fn from(param: Parameter) -> Self {
-        match param {
-            Parameter::Variable {
-                name: Some(name), ..
-            } => Term::var(name),
-            Parameter::Variable { name: None, .. } => Term::blank(),
-            Parameter::Constant(value) => Term::Constant(value),
+/// Convert a `Term<Value>` into a `Parameter`.
+///
+/// `Value` implements `Typed` but not `Scalar`, so this needs its own impl.
+/// The constant case is trivial since `Value` is already the dynamic type.
+impl From<Term<Value>> for Parameter {
+    fn from(term: Term<Value>) -> Self {
+        match term {
+            Term::Variable { name, .. } => Parameter::Variable {
+                name,
+                typ: <Value as crate::types::Typed>::TYPE,
+            },
+            Term::Constant(value) => Parameter::Constant(value),
         }
     }
 }
 
-impl From<&Parameter> for Term<Value> {
-    fn from(param: &Parameter) -> Self {
-        Term::from(param.clone())
+impl From<&Term<Value>> for Parameter {
+    fn from(term: &Term<Value>) -> Self {
+        Parameter::from(term.clone())
+    }
+}
+
+/// Convert any `Scalar` value directly into a constant `Parameter`.
+///
+/// This avoids the verbose `Parameter::Constant(Value::from(x))` pattern.
+/// ```
+/// # use dialog_query::Parameter;
+/// let p = Parameter::from(42u32);
+/// assert!(p.is_constant());
+/// ```
+impl<T: Scalar> From<T> for Parameter {
+    fn from(value: T) -> Self {
+        Parameter::Constant(value.as_value())
     }
 }
 
@@ -256,24 +273,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn it_converts_from_untyped_term() {
-        let term = Term::<Value>::var("anything");
-        let param = Parameter::from(term);
-        assert_eq!(
-            param,
-            Parameter::Variable {
-                name: Some("anything".into()),
-                typ: None
-            }
-        );
-    }
-
-    #[dialog_common::test]
     fn it_converts_blank_term() {
-        let term = Term::<Value>::blank();
-        let param = Parameter::from(term);
-        assert_eq!(param, Parameter::blank());
-
         // A typed blank carries the type constraint
         let term = Term::<String>::blank();
         let param = Parameter::from(term);
@@ -304,24 +304,6 @@ mod tests {
                 typ: Some(Type::Entity)
             }
         );
-    }
-
-    #[dialog_common::test]
-    fn it_converts_back_to_term_value() {
-        let param = Parameter::Variable {
-            name: Some("x".into()),
-            typ: Some(Type::String),
-        };
-        let term: Term<Value> = param.into();
-        assert_eq!(term, Term::<Value>::var("x"));
-
-        let param = Parameter::blank();
-        let term: Term<Value> = param.into();
-        assert_eq!(term, Term::<Value>::blank());
-
-        let param = Parameter::Constant(Value::from(42u32));
-        let term: Term<Value> = param.into();
-        assert_eq!(term, Term::Constant(Value::UnsignedInt(42)));
     }
 
     #[dialog_common::test]

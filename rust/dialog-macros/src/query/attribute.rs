@@ -30,7 +30,7 @@
 //!     fn descriptor() -> AttributeDescriptor {
 //!         // Builds descriptor from domain/name with description, cardinality, type
 //!         AttributeDescriptor::new(/* domain/full-name */, "A person's full name",
-//!             Cardinality::One, <String as IntoType>::TYPE)
+//!             Cardinality::One, <String as Typed>::TYPE)
 //!     }
 //!
 //!     fn value(&self) -> &String { &self.0 }
@@ -235,7 +235,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                         the,
                         #description_lit,
                         #cardinality,
-                        <#wrapped_type as dialog_query::IntoType>::TYPE,
+                        <#wrapped_type as dialog_query::Typed>::TYPE,
                     )
                 })
             }

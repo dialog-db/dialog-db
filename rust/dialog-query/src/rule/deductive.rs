@@ -367,7 +367,7 @@ mod tests {
             RelationQuery::new(
                 Term::Constant(the!("user/name")),
                 this.clone(),
-                Term::Constant(Value::String("jack".to_string())),
+                Parameter::from("jack".to_string()),
                 Term::var("cause"),
                 Some(RelationDescriptor::new(None, Cardinality::One)),
             )
@@ -431,8 +431,8 @@ mod tests {
             ),
         )]);
 
-        let name = Term::<Value>::var("name");
-        let z = Term::<Value>::var("z");
+        let name = Term::<String>::var("name");
+        let z = Term::<String>::var("z");
         let premises = vec![
             RelationQuery::new(
                 Term::Constant(the!("person/name")),
@@ -468,8 +468,8 @@ mod tests {
             ),
         )]);
 
-        let name = Term::<Value>::var("name");
-        let z = Term::<Value>::var("z");
+        let name = Term::<String>::var("name");
+        let z = Term::<String>::var("z");
         let premises = vec![
             RelationQuery::new(
                 Term::Constant(the!("person/name")),

@@ -571,7 +571,7 @@ mod tests {
         let missing_query = RelationQuery::new(
             Term::Constant(the!("person/name")),
             Term::var("person"),
-            Term::Constant(Value::String("NonExistent".to_string())),
+            Parameter::from("NonExistent".to_string()),
             Term::blank(),
             None,
         );

@@ -103,7 +103,7 @@ pub use session::{QuerySession, Session};
 pub use statement::*;
 pub use stream::*;
 pub use term::*;
-pub use types::{IntoType, Scalar};
+pub use types::{Scalar, Typed};
 
 pub use async_stream::try_stream;
 pub use dialog_macros::{Attribute, Concept, Formula};

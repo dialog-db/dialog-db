@@ -97,7 +97,7 @@ mod tests {
     #[dialog_common::test]
     fn it_contains_constant() {
         let answer = Answer::new();
-        let constant_param = Parameter::Constant(Value::String("constant_value".to_string()));
+        let constant_param = Parameter::from("constant_value".to_string());
 
         // Constants are always "bound"
         assert!(answer.contains(&constant_param));
@@ -246,7 +246,7 @@ mod tests {
     #[dialog_common::test]
     fn it_resolves_constant() {
         let answer = Answer::new();
-        let constant_param = Parameter::Constant(Value::String("constant_value".to_string()));
+        let constant_param = Parameter::from("constant_value".to_string());
 
         // Resolve constant directly
         let result = answer

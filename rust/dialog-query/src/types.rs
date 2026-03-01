@@ -28,31 +28,31 @@ pub use crate::artifact::{Attribute, Cause, Entity, Type, Value};
 ///
 /// # Usage
 /// ```rust
-/// use dialog_query::types::IntoType;
+/// use dialog_query::types::Typed;
 /// use dialog_query::artifact::Type;
 ///
-/// // For concrete types, bring IntoType trait into scope
-/// assert_eq!(<String as IntoType>::TYPE, Some(Type::String));
-/// assert_eq!(<u32 as IntoType>::TYPE, Some(Type::UnsignedInt));
+/// // For concrete types, bring Typed trait into scope
+/// assert_eq!(<String as Typed>::TYPE, Some(Type::String));
+/// assert_eq!(<u32 as Typed>::TYPE, Some(Type::UnsignedInt));
 /// ```
-pub trait IntoType {
+pub trait Typed {
     /// The corresponding runtime Type, or None for dynamically-typed Value
     const TYPE: Option<Type>;
 }
 
-/// Macro to implement IntoType for primitive types
+/// Macro to implement Typed for primitive types
 ///
 /// This macro reduces boilerplate for implementing the trait on standard Rust types.
 /// Each implementation returns Some(Type) for the appropriate variant.
 macro_rules! impl_into_type {
     ($rust_type:ty, $value_data_type:expr) => {
-        impl IntoType for $rust_type {
+        impl Typed for $rust_type {
             const TYPE: Option<Type> = Some($value_data_type);
         }
     };
 }
 
-// Implement IntoType for all supported primitive and dialog-artifacts types
+// Implement Typed for all supported primitive and dialog-artifacts types
 //
 // These implementations provide the mapping between Rust types and Type variants.
 // Note that all unsigned integer types map to UnsignedInt, and all signed integers map
@@ -93,20 +93,18 @@ impl_into_type!(crate::attribute::The, Type::Symbol);
 
 impl_into_type!(Cause, Type::Bytes);
 
-/// Special implementation for Value type
+/// `Value` is the dynamic type that can hold any of the other types at runtime.
+/// Returns `None` to indicate "any type" — there is no single static type.
 ///
-/// Value is the dynamic type that can hold any of the other types at runtime.
-/// Since it's not statically typed to any specific Type variant,
-/// we return None to indicate "this can be any type".
-///
-/// This is used by Term<Value> to indicate untyped variables in JSON serialization.
-impl IntoType for Value {
+/// Note: `Value` implements `Typed` (for type metadata) but NOT `Scalar`
+/// (no `var()`/`blank()` constructors). Use `Parameter` for the dynamic layer.
+impl Typed for Value {
     const TYPE: Option<Type> = None;
 }
 
 /// A concrete type that can be used as a term value with bidirectional Value conversion
 pub trait Scalar:
-    IntoType + Clone + std::fmt::Debug + 'static + ConditionalSend + TryFrom<Value>
+    Typed + Clone + std::fmt::Debug + 'static + ConditionalSend + TryFrom<Value>
 {
     /// Can be used to convert scalars into boxed value. It is intentionally
     /// different from `From<Scalar> impl Value` to avoid unintentional
@@ -152,11 +150,5 @@ impl Scalar for crate::attribute::The {
 impl Scalar for usize {
     fn as_value(&self) -> Value {
         Value::UnsignedInt(self.to_owned() as u128)
-    }
-}
-
-impl Scalar for Value {
-    fn as_value(&self) -> Value {
-        self.to_owned()
     }
 }

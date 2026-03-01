@@ -166,8 +166,7 @@ impl AttributeDescriptor {
         let of = parameters
             .get("this")
             .cloned()
-            .map(Term::<Value>::from)
-            .and_then(|t| t.try_into().ok())
+            .and_then(|p| p.try_into().ok())
             .unwrap_or(Term::blank());
 
         // Get the value parameter (is) — passed directly as Parameter
@@ -177,8 +176,7 @@ impl AttributeDescriptor {
         let cause = parameters
             .get("cause")
             .cloned()
-            .map(Term::<Value>::from)
-            .and_then(|t| t.try_into().ok())
+            .and_then(|p| p.try_into().ok())
             .unwrap_or(Term::blank());
 
         Ok(RelationQuery::new(

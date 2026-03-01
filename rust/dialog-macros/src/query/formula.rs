@@ -166,7 +166,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         })
         .collect();
 
-    // Generate Match struct fields (all fields as Term<T>)
+    // Generate Query struct fields — each field becomes Term<T> for pattern matching
     let match_struct_fields: Vec<_> = all_fields
         .iter()
         .map(|(name, ty, doc, _is_derived, _cost)| {
@@ -239,6 +239,17 @@ pub fn derive(input: TokenStream) -> TokenStream {
         })
         .collect();
 
+    // Generate per-field realize expressions.
+    // Each field uses `source.get(&self.field)?` which resolves and type-converts.
+    let realize_fields: Vec<_> = all_fields
+        .iter()
+        .map(|(name, _ty, _, _, _)| {
+            quote! {
+                #name: source.get(&self.#name)?
+            }
+        })
+        .collect();
+
     let expanded = quote! {
         /// Input structure for #struct_name formula
         ///
@@ -249,10 +260,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
             #(#input_struct_fields),*
         }
 
-        /// Match pattern for #struct_name formula
+        /// Match pattern for #struct_name formula.
         ///
-        /// Contains all fields (both input and derived) as Term<T> for pattern matching
-        /// in queries.
+        /// Contains all fields (both input and derived) as Term<T> for pattern matching.
         #[derive(Debug, Clone)]
         pub struct #match_name {
             #(#match_struct_fields),*
@@ -293,7 +303,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
             fn realize(&self, source: dialog_query::Answer) -> std::result::Result<Self::Conclusion, dialog_query::QueryError> {
                 Ok(#struct_name {
-                    #(#all_field_names: source.get(&self.#all_field_names)?),*
+                    #(#realize_fields),*
                 })
             }
         }

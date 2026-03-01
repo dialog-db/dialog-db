@@ -191,7 +191,7 @@ mod tests {
     fn it_plans_two_fact_applications() {
         use crate::relation::descriptor::RelationDescriptor;
         use crate::relation::query::RelationQuery;
-        use crate::{Cardinality, Proposition, Term, Value};
+        use crate::{Cardinality, Proposition, Term};
 
         let fact1 = RelationQuery::new(
             Term::Constant(the!("person/name")),
@@ -366,7 +366,7 @@ mod tests {
         use crate::relation::descriptor::RelationDescriptor;
         use crate::relation::query::RelationQuery;
         use crate::schema::{INDEX_SCAN, RANGE_SCAN_COST};
-        use crate::{Cardinality, Proposition, Term, Value};
+        use crate::{Cardinality, Parameter, Proposition, Term};
         use dialog_artifacts::Entity;
 
         // Cardinality::Many premise:
@@ -375,7 +375,7 @@ mod tests {
         let hobby = RelationQuery::new(
             Term::Constant(the!("person/hobbies")),
             Term::<Entity>::var("entity"),
-            Term::<Value>::var("hobby"),
+            Parameter::var("hobby"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::Many)),
         );
