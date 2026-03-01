@@ -183,7 +183,6 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 let value_term = match &terms.#field_name {
                     dialog_query::Term::Variable { name, .. } => dialog_query::Term::Variable {
                         name: name.clone(),
-                        content_type: Default::default(),
                     },
                     dialog_query::Term::Constant(value) => dialog_query::Term::Constant(dialog_query::Scalar::as_value(value)),
                 };
@@ -300,9 +299,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
             fn from(source: #match_name) -> Self {
                 let mut terms = Self::new();
 
-                terms.insert("this".into(), source.this.as_unknown());
+                terms.insert("this".into(), dialog_query::Parameter::from(source.this));
 
-                #(terms.insert(#field_name_lits.into(), source.#field_names.as_unknown());)*
+                #(terms.insert(#field_name_lits.into(), dialog_query::Parameter::from(source.#field_names));)*
 
                 terms
             }

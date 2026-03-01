@@ -13,8 +13,8 @@ use crate::relation::descriptor::RelationDescriptor;
 use crate::schema::SEGMENT_READ_COST;
 use crate::selection::{Answer, Answers, Evidence};
 use crate::{
-    Entity, Field, Parameters, Premise, QueryError, Requirement, Schema, Source, Term, Type, Value,
-    try_stream,
+    Entity, Field, Parameter, Parameters, Premise, QueryError, Requirement, Schema, Source, Term,
+    Type, Value, try_stream,
 };
 use dialog_artifacts::{Artifact, Cause};
 use futures_util::future::Either;
@@ -174,10 +174,7 @@ impl RelationQuery {
     pub fn attribute(&self) -> Term<Attribute> {
         match &self.the {
             Term::Constant(the) => Term::Constant(Attribute::from(the)),
-            Term::Variable { name, .. } => Term::Variable {
-                name: name.clone(),
-                content_type: Default::default(),
-            },
+            Term::Variable { name, .. } => Term::Variable { name: name.clone() },
         }
     }
 
@@ -243,9 +240,9 @@ impl RelationQuery {
     pub fn parameters(&self) -> Parameters {
         let mut params = Parameters::new();
 
-        params.insert("the".to_string(), self.the.as_unknown());
-        params.insert("of".to_string(), self.of.as_unknown());
-        params.insert("is".to_string(), self.is.clone());
+        params.insert("the".to_string(), Parameter::from(&self.the));
+        params.insert("of".to_string(), Parameter::from(&self.of));
+        params.insert("is".to_string(), Parameter::from(&self.is));
         params
     }
 }
@@ -395,21 +392,18 @@ impl RelationQuery {
         let the_term = match &self.the {
             Term::Variable { name: None, .. } => Term::Variable {
                 name: Some("__the".to_string()),
-                content_type: Default::default(),
             },
             term => term.clone(),
         };
         let of_term = match &self.of {
             Term::Variable { name: None, .. } => Term::Variable {
                 name: Some("__of".to_string()),
-                content_type: Default::default(),
             },
             term => term.clone(),
         };
         let is_term = match &self.is {
             Term::Variable { name: None, .. } => Term::Variable {
                 name: Some("__is".to_string()),
-                content_type: Default::default(),
             },
             term => term.clone(),
         };

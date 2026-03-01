@@ -1,16 +1,14 @@
-//! Term types for pattern matching and query construction
+//! Term types for pattern matching and query construction.
 //!
 //! This module implements the core `Term<T>` type that represents either:
-//! - **Variables**: Placeholders that can match any value of type T
-//! - **Constants**: Concrete values of type T
-//! - **Any**: Wildcard that matches any value regardless of type
+//! - **Variables**: Named or anonymous placeholders that match values of type `T`
+//! - **Constants**: Concrete values of type `T`
 //!
-//! The key insight is using `TermSyntax` as an intermediate representation for JSON
-//! serialization/deserialization, which allows clean separation between the API
-//! (`Term<T>`) and the JSON format (`TermSyntax<T>`).
+//! The type parameter `T` provides compile-time type safety. For the
+//! type-erased dynamic layer (parameter maps, planning, evaluation), see
+//! [`Parameter`](crate::Parameter).
 
 use std::fmt;
-use std::marker::PhantomData;
 
 use crate::artifact::{Attribute as ArtifactAttribute, Cause, Entity, Type, TypeError, Value};
 use crate::constraint::{Constraint, Equality};
@@ -18,7 +16,6 @@ use crate::error::SyntaxError;
 use crate::proposition::Proposition;
 use crate::types::{IntoType, Scalar};
 use crate::{Attribute, Premise};
-use serde::{Deserialize, Serialize};
 use std::hash::Hash;
 
 /// Either a concrete value or a named variable placeholder.
@@ -31,86 +28,33 @@ use std::hash::Hash;
 ///   Anonymous (blank) variables (`name: None`) match anything but do not
 ///   participate in joins.
 ///
-/// The type parameter `T` carries a compile-time type constraint. A
-/// `Term<String>` can only hold string values; `Term<Value>` is
-/// dynamically typed and accepts any scalar. During planning, the planner
-/// inspects terms to classify parameters as constants (already bound),
-/// variables (may need binding), or blanks (wildcards).
+/// The type parameter `T` carries a compile-time type constraint — e.g.
+/// `Term<String>` can only hold string values. Type information is carried
+/// at the Rust level via `T` and in the dynamic layer via
+/// [`Parameter`](crate::Parameter).
 ///
 /// # JSON Serialization
-/// - Named typed variable `Term<String>`: `{ "?": { "name": "var_name", "type": "Text" } }`
-/// - Named untyped variable `Term<Value>`: `{ "?": { "name": "var_name" } }`
-/// - Anonymous typed variable `Term<String>`: `{ "?": { "type": "Text" } }`
-/// - Anonymous untyped variable `Term<Value>`: `{ "?": {} }`
+/// - Named variable: `{ "?": { "name": "var_name" } }`
+/// - Anonymous variable: `{ "?": {} }`
 /// - Constants: Plain JSON values (e.g., `"Alice"`, `42`, `true`)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Term<T>
 where
     T: IntoType + Clone + 'static,
 {
-    /// A variable term can be used as matching term across conjuncts in the
-    /// predicate. If variable has name it acts as an implicit join across
-    /// conjuncts. If variable has type other than `Value`, it acts as a type
-    /// constraint.
-    ///
-    /// Two variables with the same name and different types in the same
-    /// predicate will fail to unify will fail to match anything.
+    /// A variable term — a named or anonymous placeholder that matches values
+    /// during query evaluation.
     #[serde(rename = "?")]
     Variable {
-        /// Optional variable name for join across conjuncts
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// Optional variable name for join across conjuncts.
+        /// `None` = anonymous wildcard (blank).
+        #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
-        /// Type constraint carried via PhantomData
-        #[serde(
-            rename = "type",
-            skip_serializing_if = "ContentType::<T>::is_any",
-            default = "ContentType::<T>::default"
-        )]
-        content_type: ContentType<T>,
     },
 
-    /// A concrete value of type T
-    /// For Term<Value>, serializes as plain JSON (e.g., "Alice", 42, true)
-    /// For other types, uses normal serde serialization
+    /// A concrete value of type T.
     #[serde(untagged)]
     Constant(T),
-}
-
-/// Wrapper around PhantomData<T> with additional functionality so it can
-/// be converted to and from Option<Type>.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
-#[serde(into = "Option<Type>", from = "Option<Type>")]
-pub struct ContentType<T: IntoType + Clone + 'static>(pub PhantomData<T>);
-
-impl<T: IntoType + Clone + 'static> Default for ContentType<T> {
-    fn default() -> Self {
-        ContentType(PhantomData)
-    }
-}
-
-impl<T: IntoType + Clone + 'static> ContentType<T> {
-    /// Returns true if `T` is `Value` as it can represent all supported data
-    /// types.
-    fn is_any(&self) -> bool {
-        T::TYPE.is_none()
-    }
-}
-
-impl<T> From<ContentType<T>> for Option<Type>
-where
-    T: IntoType + Clone + 'static,
-{
-    fn from(_value: ContentType<T>) -> Self {
-        T::TYPE
-    }
-}
-impl<T> From<Option<Type>> for ContentType<T>
-where
-    T: IntoType + Clone + 'static,
-{
-    fn from(_value: Option<Type>) -> Self {
-        ContentType(PhantomData)
-    }
 }
 
 /// Core functionality implementation for Term<T>
@@ -120,21 +64,17 @@ impl<T> Term<T>
 where
     T: Scalar,
 {
-    /// Create a new typed variable with the given name
-    ///
-    /// The type T is carried via PhantomData and used for type information
-    /// during serialization and type checking.
+    /// Create a new typed variable with the given name.
     pub fn var<N: Into<String>>(name: N) -> Self {
         Term::Variable {
             name: Some(name.into()),
-            content_type: ContentType(PhantomData),
         }
     }
 
-    /// Create an anonymous variable that only used to pattern match by type
-    /// unless type is `Value`. If type is `Value`, it simply matches anything.
+    /// Create an anonymous variable (wildcard).
     ///
-    /// Unlike other variables, it does not performs join across conjuncts.
+    /// Unlike named variables, blanks do not participate in joins across
+    /// conjuncts.
     pub fn blank() -> Self {
         Self::default()
     }
@@ -197,7 +137,7 @@ where
                     let value_type = Type::from(value);
                     value_type == var_type
                 } else {
-                    // Untyped variables (like Term<Value>) can unify with anything
+                    // Unconstrained variables can unify with anything
                     true
                 }
             }
@@ -238,17 +178,11 @@ where
         )))
     }
 
-    /// Convert this typed term to an untyped Term<Value>
+    /// Convert this typed term to a dynamically-typed `Term<Value>`.
     pub fn as_unknown(&self) -> Term<Value> {
         match self {
             Term::Constant(value) => Term::Constant(value.as_value()),
-            Term::Variable {
-                name,
-                content_type: _type,
-            } => Term::Variable {
-                name: name.clone(),
-                content_type: ContentType::default(),
-            },
+            Term::Variable { name, .. } => Term::Variable { name: name.clone() },
         }
     }
 }
@@ -258,10 +192,7 @@ where
     T: IntoType + Clone,
 {
     fn default() -> Self {
-        Term::Variable {
-            name: None,
-            content_type: ContentType::default(),
-        }
+        Term::Variable { name: None }
     }
 }
 
@@ -296,10 +227,7 @@ where
     }
 }
 
-/// Convenience conversions for common types to Term<Value>
-///
-/// These From implementations allow easy creation of Term<Value> constants
-/// from various types, automatically wrapping them in the appropriate Value variant.
+/// Convenience conversions from common types into constant terms.
 impl From<Value> for Term<Value> {
     fn from(value: Value) -> Self {
         Term::Constant(value)
@@ -491,52 +419,39 @@ impl<T: Scalar> From<&Option<Term<T>>> for Term<T> {
     }
 }
 
-// Removed From<Term<String>> for Term<Value> implementation to prevent type erasure
-
-// TryFrom implementations for converting Term<Value> to more specific Term types
-
-/// Convert Term<Value> to Term<Entity>
+/// Narrow a dynamically-typed term to `Term<Entity>`.
 impl TryFrom<Term<Value>> for Term<Entity> {
     type Error = TypeError;
 
     fn try_from(term: Term<Value>) -> Result<Self, Self::Error> {
         match term {
-            Term::Variable { name, .. } => Ok(Term::Variable {
-                name,
-                content_type: Default::default(),
-            }),
+            Term::Variable { name, .. } => Ok(Term::Variable { name }),
             Term::Constant(Value::Entity(e)) => Ok(Term::Constant(e)),
             Term::Constant(other) => Err(TypeError::TypeMismatch(Type::Entity, other.data_type())),
         }
     }
 }
 
-/// Convert Term<Value> to Term<Attribute>
+/// Narrow a dynamically-typed term to `Term<Attribute>`.
 impl TryFrom<Term<Value>> for Term<ArtifactAttribute> {
     type Error = TypeError;
 
     fn try_from(term: Term<Value>) -> Result<Self, Self::Error> {
         match term {
-            Term::Variable { name, .. } => Ok(Term::Variable {
-                name,
-                content_type: Default::default(),
-            }),
+            Term::Variable { name, .. } => Ok(Term::Variable { name }),
             Term::Constant(Value::Symbol(attr)) => Ok(Term::Constant(attr)),
             Term::Constant(other) => Err(TypeError::TypeMismatch(Type::Symbol, other.data_type())),
         }
     }
 }
 
-/// Convert Term<Value> to Term<Cause>
+/// Narrow a dynamically-typed term to `Term<Cause>`.
 impl TryFrom<Term<Value>> for Term<Cause> {
     type Error = TypeError;
 
     fn try_from(term: Term<Value>) -> Result<Self, Self::Error> {
         match term {
-            Term::Variable { name, .. } => Ok(Term::Variable {
-                name,
-                content_type: Default::default(),
-            }),
+            Term::Variable { name, .. } => Ok(Term::Variable { name }),
             Term::Constant(Value::Bytes(b)) => {
                 // Use TryFrom<Vec<u8>> for Cause (from reference_type! macro)
                 let cause = Cause::try_from(b)
@@ -554,20 +469,18 @@ mod tests {
 
     #[dialog_common::test]
     fn it_serializes_and_deserializes() {
-        // Test serialization
+        // Blank variables serialize as {"?": {}}
         let any = Term::<Value>::default();
         assert_eq!(serde_json::to_string(&any).unwrap(), r#"{"?":{}}"#);
 
         let string = Term::<String>::default();
-        assert_eq!(
-            serde_json::to_string(&string).unwrap(),
-            r#"{"?":{"type":"Text"}}"#
-        );
+        assert_eq!(serde_json::to_string(&string).unwrap(), r#"{"?":{}}"#);
 
+        // Named variables serialize with name only
         let title = Term::<String>::var("title");
         assert_eq!(
             serde_json::to_string(&title).unwrap(),
-            r#"{"?":{"name":"title","type":"Text"}}"#
+            r#"{"?":{"name":"title"}}"#
         );
 
         let _title = Term::<Value>::var("title");
@@ -576,21 +489,23 @@ mod tests {
             r#"{"?":{"name":"title"}}"#
         );
 
-        // Test deserialization
-        println!("Testing deserialization...");
+        // Constants serialize as plain values
+        let constant = Term::Constant("hello".to_string());
+        assert_eq!(serde_json::to_string(&constant).unwrap(), r#""hello""#);
 
-        // Test 1: Deserialize unnamed variable (Any)
+        // Deserialization
         let json1 = r#"{"?":{}}"#;
-        match serde_json::from_str::<Term<Value>>(json1) {
-            Ok(term) => {
-                println!("Deserialized term: {:?}", term);
-                assert_eq!(term, Term::default());
-            }
-            Err(e) => {
-                println!("Failed to deserialize: {}", e);
-                panic!("Deserialization failed: {}", e);
-            }
-        }
+        let term: Term<Value> = serde_json::from_str(json1).unwrap();
+        assert_eq!(term, Term::default());
+
+        let json2 = r#"{"?":{"name":"x"}}"#;
+        let term: Term<String> = serde_json::from_str(json2).unwrap();
+        assert_eq!(term, Term::<String>::var("x"));
+
+        // Extra fields like "type" are ignored during deserialization
+        let json3 = r#"{"?":{"name":"x","type":"Text"}}"#;
+        let term: Term<String> = serde_json::from_str(json3).unwrap();
+        assert_eq!(term, Term::<String>::var("x"));
     }
 
     #[dialog_common::test]
@@ -610,18 +525,12 @@ mod tests {
 
     #[dialog_common::test]
     fn it_integrates_variable_system() {
-        // Test that the new Variable<T> system works with Terms
-        let string_var = Term::<String>::var("name");
-        let untyped_var = Term::<Value>::var("anything");
+        let string_term = Term::<String>::var("name");
+        let untyped_term = Term::<Value>::var("anything");
 
-        let string_term = string_var; // Already a Term<String>
-        let untyped_term = untyped_var; // Already a Term<Value>
-
-        // Both should be variable terms
         assert!(string_term.is_variable());
         assert!(untyped_term.is_variable());
 
-        // Terms now preserve type information using direct methods
         assert_eq!(string_term.name(), Some("name"));
         assert_eq!(string_term.content_type(), Some(Type::String));
 
@@ -631,27 +540,18 @@ mod tests {
 
     #[dialog_common::test]
     fn it_supports_turbofish_syntax() {
-        // Test the new turbofish syntax works with Term conversion
-        let name_var = Term::<String>::var("name");
-        let age_var = Term::<u64>::var("age");
-        let any_var = Term::<Value>::var("wildcard");
+        let name_term = Term::<String>::var("name");
+        let age_term = Term::<u64>::var("age");
+        let any_term = Term::<Value>::var("wildcard");
 
-        // Convert to terms - now preserves types
-        let name_term = name_var; // Already a Term<String>
-        let age_term = age_var; // Already a Term<u64>
-        let any_term = any_var; // Already a Term<Value>
-
-        // All should be variable terms
         assert!(name_term.is_variable());
         assert!(age_term.is_variable());
         assert!(any_term.is_variable());
 
-        // Check names are preserved
         assert_eq!(name_term.name(), Some("name"));
         assert_eq!(age_term.name(), Some("age"));
         assert_eq!(any_term.name(), Some("wildcard"));
 
-        // Terms now preserve type information
         assert_eq!(name_term.content_type(), Some(Type::String));
         assert_eq!(age_term.content_type(), Some(Type::UnsignedInt));
         assert_eq!(any_term.content_type(), None);
@@ -700,19 +600,11 @@ mod tests {
 
     #[dialog_common::test]
     fn it_creates_term_from_variable_reference() {
-        // Test that we can convert variable references to terms
-        let entity_var = Term::<Entity>::var("entity");
-        let string_var = Term::<String>::var("name");
+        let entity_term = Term::<Entity>::var("entity");
+        let string_term = Term::<String>::var("name");
 
-        // This should work with the new implementation
-        let entity_term = entity_var.clone(); // Clone the Term
-        let string_term = string_var.clone(); // Clone the Term
-
-        // Both should be variable terms
         assert!(entity_term.is_variable());
         assert!(string_term.is_variable());
-
-        // Check that variable names are preserved
         assert_eq!(entity_term.name(), Some("entity"));
         assert_eq!(entity_term.content_type(), Some(Type::Entity));
 

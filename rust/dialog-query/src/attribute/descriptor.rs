@@ -1,10 +1,11 @@
 use crate::artifact::{Attribute as ArtifactsAttribute, Entity, Value};
 use crate::attribute::The;
 use crate::error::{SchemaError, TypeError};
+use crate::parameter::Parameter;
 use crate::relation::descriptor::RelationDescriptor;
 use crate::relation::query::RelationQuery;
 use crate::schema::Cardinality;
-use crate::types::{Scalar, Type};
+use crate::types::Type;
 use crate::{Parameters, Term};
 
 use base58::ToBase58;
@@ -89,32 +90,22 @@ impl AttributeDescriptor {
         self.content_type
     }
 
-    /// Checks that the given term's type is compatible with this attribute's
-    /// content type. Returns the term unchanged on success.
-    pub fn check<'a, U: Scalar>(&self, term: &'a Term<U>) -> Result<&'a Term<U>, TypeError> {
-        match (self.content_type(), term.content_type()) {
-            // if expected is any (has no type) it checks
-            (None, _) => Ok(term),
-            // if attribute is of some type and we're given term of unknown
-            // type that's also fine.
-            (_, None) => Ok(term),
-            // if expected isn't any (has no type) it must be equal
-            // to actual or it's a type missmatch.
-            (Some(_expected), _actual) => Ok(term),
+    /// Checks that the given parameter's type is compatible with this
+    /// attribute's content type.
+    pub fn check(&self, parameter: &Parameter) -> Result<(), TypeError> {
+        match (self.content_type(), parameter.content_type()) {
+            (None, _) => Ok(()),
+            (_, None) => Ok(()),
+            (Some(_expected), _actual) => Ok(()),
         }
     }
 
-    /// Type-checks an optional term against this attribute. Returns `Ok(None)`
-    /// if the term is absent, or delegates to [`check`](Self::check) if present.
-    pub fn conform<'a, U: Scalar>(
-        &self,
-        term: Option<&'a Term<U>>,
-    ) -> Result<Option<&'a Term<U>>, TypeError> {
-        if let Some(term) = term {
-            self.check(term)?;
+    /// Type-checks an optional parameter against this attribute.
+    pub fn conform(&self, parameter: Option<&Parameter>) -> Result<(), TypeError> {
+        if let Some(param) = parameter {
+            self.check(param)?;
         }
-
-        Ok(term)
+        Ok(())
     }
 
     /// Validates a concrete [`Value`] against this attribute's content type and
@@ -135,7 +126,7 @@ impl AttributeDescriptor {
         } else {
             Err(TypeError::TypeMismatch {
                 expected: self.content_type().unwrap(), // Safe because we checked Some above
-                actual: Term::Constant(value),
+                actual: Parameter::Constant(value.clone()),
             })
         }
     }
@@ -171,19 +162,27 @@ impl AttributeDescriptor {
             });
         }
 
-        // Get the entity term (this), converting from Term<Value>
+        // Get the entity term (this), converting from Parameter to Term<Entity>
         let of = parameters
             .get("this")
-            .and_then(|t| t.clone().try_into().ok())
+            .cloned()
+            .map(Term::<Value>::from)
+            .and_then(|t| t.try_into().ok())
             .unwrap_or(Term::blank());
 
         // Get the value term (is)
-        let is = parameters.get("is").cloned().unwrap_or(Term::blank());
+        let is: Term<Value> = parameters
+            .get("is")
+            .cloned()
+            .map(Term::from)
+            .unwrap_or(Term::blank());
 
         // Get the cause term
         let cause = parameters
             .get("cause")
-            .and_then(|t| t.clone().try_into().ok())
+            .cloned()
+            .map(Term::from)
+            .and_then(|t: Term<Value>| t.try_into().ok())
             .unwrap_or(Term::blank());
 
         Ok(RelationQuery::new(

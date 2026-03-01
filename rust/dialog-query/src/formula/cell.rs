@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::fmt::Display;
 
 use crate::error::{SchemaError, TypeError};
-use crate::types::Scalar;
-use crate::{Parameters, Requirement, Schema, Term, Type};
+use crate::parameter::Parameter;
+use crate::{Parameters, Requirement, Schema, Type};
 use serde::{Deserialize, Serialize};
 
 /// A single named parameter slot in a formula's schema.
@@ -91,51 +91,48 @@ impl Cell {
         &self.requirement
     }
 
-    /// Type checks that provided term matches cells content type. If term
-    pub fn check<'a, T: Scalar>(&self, term: &'a Term<T>) -> Result<&'a Term<T>, TypeError> {
+    /// Type checks that the provided parameter matches this cell's content type.
+    pub fn check(&self, param: &Parameter) -> Result<(), TypeError> {
         // First we type check the input to ensure it matches cell's content type
-        match (self.content_type(), term.content_type()) {
+        match (self.content_type(), param.content_type()) {
             // if expected is any (has no type) it checks
-            (None, _) => Ok(term),
+            (None, _) => Ok(()),
             // if cell is of some type and we're given term of unknown
             // type that's also fine.
-            (_, None) => Ok(term),
+            (_, None) => Ok(()),
             // if expected isn't any (has no type) it must be equal
             // to actual or it's a type missmatch.
             (Some(expected), actual) => {
                 if Some(*expected) == actual {
-                    Ok(term)
+                    Ok(())
                 } else {
                     Err(TypeError::TypeMismatch {
                         expected: *expected,
-                        actual: term.as_unknown(),
+                        actual: param.clone(),
                     })
                 }
             }
         }
     }
 
-    /// Validates that a term conforms to this cell's type and requirement constraints.
-    pub fn conform<'a, T: Scalar>(
-        &self,
-        term: Option<&'a Term<T>>,
-    ) -> Result<Option<&'a Term<T>>, TypeError> {
+    /// Validates that a parameter conforms to this cell's type and requirement constraints.
+    pub fn conform(&self, param: Option<&Parameter>) -> Result<(), TypeError> {
         // We check that cell type matches term type.
-        if let Some(term) = term {
-            self.check(term)?;
+        if let Some(param) = param {
+            self.check(param)?;
         }
 
         // Verify that required parameter is provided
         if self.requirement().is_required() {
-            match term {
-                Some(Term::Constant(_)) => Ok(()),
-                Some(Term::Variable { name: Some(_), .. }) => Ok(()),
-                Some(Term::Variable { name: None, .. }) => Err(TypeError::BlankRequirement),
+            match param {
+                Some(Parameter::Constant(_)) => Ok(()),
+                Some(Parameter::Variable { name: Some(_), .. }) => Ok(()),
+                Some(Parameter::Variable { name: None, .. }) => Err(TypeError::BlankRequirement),
                 None => Err(TypeError::OmittedRequirement),
             }?;
         };
 
-        Ok(term)
+        Ok(())
     }
 }
 
@@ -234,8 +231,8 @@ impl Cells {
     /// Conforms the provided parameters conform to the schema of the cells.
     pub fn conform(&self, parameters: Parameters) -> Result<Parameters, SchemaError> {
         for (name, cell) in self.iter() {
-            let parameter = parameters.get(name);
-            cell.conform(parameter).map_err(|e| e.at(name.into()))?;
+            cell.conform(parameters.get(name))
+                .map_err(|e| e.at(name.into()))?;
         }
 
         Ok(parameters)

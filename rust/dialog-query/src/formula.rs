@@ -126,12 +126,12 @@ pub trait Formula: Predicate + Sized + Clone {
     ///
     /// # Example
     /// ```no_run
-    /// # use dialog_query::{Parameters, Term, Formula};
+    /// # use dialog_query::{Parameter, Parameters, Formula};
     /// # use dialog_query::formula::math::Sum;
     /// let mut terms = Parameters::new();
-    /// terms.insert("of".to_string(), Term::var("input1"));
-    /// terms.insert("with".to_string(), Term::var("input2"));
-    /// terms.insert("is".to_string(), Term::var("output"));
+    /// terms.insert("of".to_string(), Parameter::var("input1"));
+    /// terms.insert("with".to_string(), Parameter::var("input2"));
+    /// terms.insert("is".to_string(), Parameter::var("output"));
     ///
     /// let app = Sum::apply(terms)?;
     /// # Ok::<(), dialog_query::error::SchemaError>(())

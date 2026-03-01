@@ -119,7 +119,9 @@ mod tests {
     use crate::term::Term;
     use crate::the;
     use crate::types::Scalar;
-    use crate::{Answer, Cardinality, Concept, QueryError, Session, Statement, Transaction};
+    use crate::{
+        Answer, Cardinality, Concept, Parameter, QueryError, Session, Statement, Transaction,
+    };
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
@@ -293,36 +295,9 @@ mod tests {
     impl From<PersonMatch> for Parameters {
         fn from(source: PersonMatch) -> Self {
             let mut terms = Self::new();
-
-            // Convert this field: Term<Entity> -> Term<Value>
-            let this_term = match source.this {
-                Term::Variable { name, .. } => Term::Variable {
-                    name: name.clone(),
-                    content_type: Default::default(),
-                },
-                Term::Constant(entity) => Term::Constant(Value::Entity(entity)),
-            };
-            terms.insert("this".into(), this_term);
-
-            // Convert attribute fields: Term<T> -> Term<Value> using Scalar::as_value()
-            let name_term = match source.name {
-                Term::Variable { name, .. } => Term::Variable {
-                    name: name.clone(),
-                    content_type: Default::default(),
-                },
-                Term::Constant(value) => Term::Constant(Scalar::as_value(&value)),
-            };
-            terms.insert("name".into(), name_term);
-
-            let age_term = match source.age {
-                Term::Variable { name, .. } => Term::Variable {
-                    name: name.clone(),
-                    content_type: Default::default(),
-                },
-                Term::Constant(value) => Term::Constant(Scalar::as_value(&value)),
-            };
-            terms.insert("age".into(), age_term);
-
+            terms.insert("this".into(), Parameter::from(source.this));
+            terms.insert("name".into(), Parameter::from(source.name));
+            terms.insert("age".into(), Parameter::from(source.age));
             terms
         }
     }

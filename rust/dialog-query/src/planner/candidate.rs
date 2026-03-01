@@ -1,4 +1,5 @@
 use super::{Plan, Prerequisites};
+use crate::artifact::Value;
 use crate::error::CompileError;
 use crate::{Environment, Parameters, Premise, Requirement, Schema, Term};
 use std::collections::HashSet;
@@ -77,9 +78,9 @@ impl Candidate {
 
         // First pass: identify requirement groups satisfied by constants
         for (name, constraint) in schema.iter() {
-            if let Some(term) = params.get(name)
+            if let Some(param) = params.get(name)
                 && let Requirement::Required(Some(group)) = &constraint.requirement
-                && matches!(term, Term::Constant(_))
+                && param.is_constant()
             {
                 // If parameter is a constant, its group is satisfied
                 satisfied_groups.insert(*group);
@@ -88,14 +89,16 @@ impl Candidate {
 
         // Second pass: categorize all parameters based on their requirement types
         for (name, constraint) in schema.iter() {
-            if let Some(term) = params.get(name) {
+            if let Some(param) = params.get(name) {
+                let term: Term<Value> = param.into();
+
                 // Constants and variables already in env don't add cost - they're already satisfied
-                if matches!(term, Term::Constant(_)) || env.contains(term) {
+                if param.is_constant() || env.contains(&term) {
                     continue;
                 }
 
                 // Blank terms are wildcards - they match anything and don't need to be bound
-                if term.is_blank() {
+                if param.is_blank() {
                     continue;
                 }
 
@@ -105,19 +108,19 @@ impl Candidate {
                         if satisfied_groups.contains(group) {
                             // Negations don't bind variables, so skip adding to binds
                             if !is_negation {
-                                binds.add(term);
+                                binds.add(&term);
                             }
                         } else {
-                            requires.insert(term);
+                            requires.insert(&term);
                         }
                     }
                     Requirement::Required(None) => {
-                        requires.insert(term);
+                        requires.insert(&term);
                     }
                     Requirement::Optional => {
                         // Negations don't bind variables, so skip adding to binds
                         if !is_negation {
-                            binds.add(term);
+                            binds.add(&term);
                         }
                     }
                 }
@@ -165,33 +168,34 @@ impl Candidate {
                 params,
             } => {
                 for (name, _constraint) in schema.iter() {
-                    if let Some(term) = params.get(name) {
-                        if matches!(term, Term::Constant(_)) || term.is_blank() {
+                    if let Some(param) = params.get(name) {
+                        if param.is_constant() || param.is_blank() {
                             continue;
                         }
 
-                        let in_target = target_scope.contains(term);
-                        let in_env = env.contains(term);
-                        let in_binds = binds.contains(term);
+                        let term: Term<Value> = param.into();
+                        let in_target = target_scope.contains(&term);
+                        let in_env = env.contains(&term);
+                        let in_binds = binds.contains(&term);
 
                         match (in_target, in_env, in_binds) {
                             // Variable is in target but only in binds → move to env
                             (true, false, true) => {
-                                env.add(term);
-                                binds.remove(term);
+                                env.add(&term);
+                                binds.remove(&term);
                             }
                             // Variable is in target but tracked nowhere → add to env
                             (true, false, false) => {
-                                env.add(term);
+                                env.add(&term);
                             }
                             // Variable left target but is in env → move back to binds
                             (false, true, false) => {
-                                env.remove(term);
-                                binds.add(term);
+                                env.remove(&term);
+                                binds.add(&term);
                             }
                             // Variable not in target and not tracked → add to binds
                             (false, false, false) => {
-                                binds.add(term);
+                                binds.add(&term);
                             }
                             // Already consistent: (true, true, _) or (false, false, true)
                             _ => {}
@@ -218,21 +222,22 @@ impl Candidate {
 
                 // First pass: synchronize each parameter with the target scope
                 for (name, constraint) in schema.iter() {
-                    if let Some(term) = params.get(name) {
-                        if matches!(term, Term::Constant(_)) || term.is_blank() {
+                    if let Some(param) = params.get(name) {
+                        if param.is_constant() || param.is_blank() {
                             continue;
                         }
 
-                        let in_target = target_scope.contains(term);
-                        let in_env = env.contains(term);
+                        let term: Term<Value> = param.into();
+                        let in_target = target_scope.contains(&term);
+                        let in_env = env.contains(&term);
 
                         if in_target && !in_env {
                             // Variable entered the scope → move from requires/binds to env
-                            let was_required = requires.remove(term);
-                            let was_bound = binds.remove(term);
+                            let was_required = requires.remove(&term);
+                            let was_bound = binds.remove(&term);
 
                             if was_required || was_bound {
-                                env.add(term);
+                                env.add(&term);
 
                                 if let Requirement::Required(Some(group)) = &constraint.requirement
                                 {
@@ -242,13 +247,13 @@ impl Candidate {
                         } else if !in_target && in_env {
                             // Variable left the scope → move from env back to
                             // requires or binds depending on its schema requirement
-                            env.remove(term);
+                            env.remove(&term);
 
                             match &constraint.requirement {
                                 Requirement::Required(Some(group)) => {
                                     // Will be resolved in second pass once we
                                     // know which groups are still satisfied
-                                    requires.insert(term);
+                                    requires.insert(&term);
                                     // Check if the group might still be satisfied
                                     // by another bound parameter
                                     let group_still_satisfied =
@@ -258,9 +263,9 @@ impl Candidate {
                                                     &other_constraint.requirement,
                                                     Requirement::Required(Some(g)) if *g == *group
                                                 )
-                                                && params.get(other_name).is_some_and(|t| {
-                                                    env.contains(t)
-                                                        || matches!(t, Term::Constant(_))
+                                                && params.get(other_name).is_some_and(|p| {
+                                                    let t: Term<Value> = p.into();
+                                                    env.contains(&t) || p.is_constant()
                                                 })
                                         });
                                     if group_still_satisfied {
@@ -268,11 +273,11 @@ impl Candidate {
                                     }
                                 }
                                 Requirement::Required(None) => {
-                                    requires.insert(term);
+                                    requires.insert(&term);
                                 }
                                 Requirement::Optional => {
                                     if !is_negation {
-                                        binds.add(term);
+                                        binds.add(&term);
                                     }
                                 }
                             }
@@ -285,12 +290,12 @@ impl Candidate {
                     for (name, constraint) in schema.iter() {
                         if let Requirement::Required(Some(group)) = &constraint.requirement
                             && satisfied_groups.contains(group)
-                            && let Some(term) = params.get(name)
-                            && requires.remove(term)
-                            && !env.contains(term)
-                            && !is_negation
+                            && let Some(param) = params.get(name)
                         {
-                            binds.add(term);
+                            let term: Term<Value> = param.into();
+                            if requires.remove(&term) && !env.contains(&term) && !is_negation {
+                                binds.add(&term);
+                            }
                         }
                     }
                 }

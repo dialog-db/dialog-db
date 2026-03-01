@@ -13,8 +13,8 @@ use crate::statement::Retraction;
 use crate::term::Term;
 use crate::types::Scalar;
 use crate::{
-    Association, Cardinality, Entity, Field, Parameters, Proposition, QueryError, Requirement,
-    Schema, Statement, Transaction, Type, Value,
+    Association, Cardinality, Entity, Field, Parameter, Parameters, Proposition, QueryError,
+    Requirement, Schema, Statement, Transaction, Type, Value,
 };
 
 use base58::ToBase58;
@@ -69,9 +69,8 @@ impl ConceptDescriptor {
     /// Validates the provided parameters against the schema of the attributes.
     pub fn conform(&self, parameters: Parameters) -> Result<Parameters, SchemaError> {
         for (name, attribute) in self.with().iter() {
-            let parameter = parameters.get(name);
             attribute
-                .conform(parameter)
+                .conform(parameters.get(name))
                 .map_err(|e| e.at(name.into()))?;
         }
 
@@ -384,27 +383,28 @@ impl ConceptConclusion {
     where
         T: Scalar + std::convert::TryFrom<Value>,
     {
-        let term = self
+        let param = self
             .terms
             .get(field)
             .ok_or_else(|| QueryError::UnboundVariable {
                 variable_name: field.to_string(),
             })?;
-        // Extract the variable name from the Term<Value> and create a typed Term<T>
-        let typed_term: Term<T> = match term {
-            Term::Variable { name, .. } => {
-                let var_name = name.as_ref().ok_or_else(|| QueryError::UnboundVariable {
-                    variable_name: field.to_string(),
-                })?;
-                Term::var(var_name.clone())
+        match param {
+            Parameter::Variable {
+                name: Some(name), ..
+            } => {
+                let typed_term: Term<T> = Term::var(name.clone());
+                self.answer.get(&typed_term).map_err(QueryError::from)
             }
-            Term::Constant(value) => {
-                return T::try_from(value.clone()).map_err(|_| QueryError::UnboundVariable {
+            Parameter::Constant(value) => {
+                T::try_from(value.clone()).map_err(|_| QueryError::UnboundVariable {
                     variable_name: field.to_string(),
-                });
+                })
             }
-        };
-        self.answer.get(&typed_term).map_err(QueryError::from)
+            Parameter::Variable { name: None, .. } => Err(QueryError::UnboundVariable {
+                variable_name: field.to_string(),
+            }),
+        }
     }
 
     /// Returns a reference to the raw answer.
@@ -439,21 +439,20 @@ impl Application for ConceptQuery {
     }
 
     fn realize(&self, source: Answer) -> Result<Self::Conclusion, QueryError> {
-        let this_term = self
+        let this_param = self
             .terms
             .get("this")
             .ok_or_else(|| QueryError::UnboundVariable {
                 variable_name: "this".to_string(),
             })?;
-        let entity: Entity = match this_term {
-            Term::Variable { name, .. } => {
-                let var_name = name.as_ref().ok_or_else(|| QueryError::UnboundVariable {
-                    variable_name: "this".to_string(),
-                })?;
-                let typed_term: Term<Entity> = Term::var(var_name.clone());
+        let entity: Entity = match this_param {
+            Parameter::Variable {
+                name: Some(name), ..
+            } => {
+                let typed_term: Term<Entity> = Term::var(name.clone());
                 source.get(&typed_term)?
             }
-            Term::Constant(value) => match value {
+            Parameter::Constant(value) => match value {
                 Value::Entity(e) => e.clone(),
                 _ => {
                     return Err(QueryError::UnboundVariable {
@@ -461,6 +460,11 @@ impl Application for ConceptQuery {
                     });
                 }
             },
+            Parameter::Variable { name: None, .. } => {
+                return Err(QueryError::UnboundVariable {
+                    variable_name: "this".to_string(),
+                });
+            }
         };
         Ok(ConceptConclusion {
             this: entity,
