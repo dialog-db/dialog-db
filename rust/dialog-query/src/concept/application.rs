@@ -686,7 +686,7 @@ mod tests {
         let relation = RelationQuery::new(
             Term::Constant(the!("test/attr")),
             Term::blank(),
-            Term::blank(),
+            Parameter::blank(),
             Term::blank(),
             None,
         );
@@ -728,7 +728,7 @@ mod tests {
         let relation = RelationQuery::new(
             Term::Constant(the!("test/attr")),
             Term::blank(),
-            Term::blank(),
+            Parameter::blank(),
             Term::blank(),
             None,
         );

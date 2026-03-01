@@ -7,7 +7,7 @@ use crate::relation::descriptor::RelationDescriptor;
 use crate::relation::query::RelationQuery;
 use crate::statement::{Retraction, Statement};
 use crate::types::Scalar;
-use crate::{Association, Cardinality, Entity, Premise, Proposition, Term, Transaction, Value};
+use crate::{Association, Cardinality, Entity, Parameter, Premise, Proposition, Term, Transaction};
 use std::marker::PhantomData;
 
 /// Cause-position in an [`AttributeExpression`].
@@ -194,7 +194,7 @@ impl<A: Attribute, Of, Is> AttributeExpression<A, Of, Is, Option<Cause>> {
 
 pub(crate) fn relation_query<A: Attribute + Descriptor<AttributeDescriptor>>(
     of: Term<Entity>,
-    is: Term<Value>,
+    is: impl Into<Parameter>,
     cause: Term<Cause>,
 ) -> RelationQuery {
     let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
@@ -288,7 +288,7 @@ where
     fn from(expr: AttributeExpression<A, Entity, Term<A::Type>, Because>) -> Self {
         let query = relation_query::<A>(
             Term::Constant(expr.of),
-            expr.is.as_unknown(),
+            expr.is,
             expr.cause.as_cause_term(),
         );
         Premise::Assert(Proposition::Relation(Box::new(query)))
@@ -304,7 +304,7 @@ where
     fn from(expr: AttributeExpression<A, Term<Entity>, A, Because>) -> Self {
         let query = relation_query::<A>(
             expr.of,
-            Term::Constant(expr.is.value().as_value()),
+            Parameter::Constant(expr.is.value().as_value()),
             expr.cause.as_cause_term(),
         );
         Premise::Assert(Proposition::Relation(Box::new(query)))
@@ -319,7 +319,7 @@ where
     Because: ExpressionCause,
 {
     fn from(expr: AttributeExpression<A, Term<Entity>, Term<A::Type>, Because>) -> Self {
-        let query = relation_query::<A>(expr.of, expr.is.as_unknown(), expr.cause.as_cause_term());
+        let query = relation_query::<A>(expr.of, expr.is, expr.cause.as_cause_term());
         Premise::Assert(Proposition::Relation(Box::new(query)))
     }
 }
@@ -395,6 +395,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artifact::Value;
     use crate::attribute::Attribute;
     use crate::premise::Premise;
     use crate::proposition::Proposition;

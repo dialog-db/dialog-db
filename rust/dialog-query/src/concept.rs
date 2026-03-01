@@ -879,7 +879,7 @@ mod tests {
         let name_query = RelationQuery::new(
             Term::Constant(the!("person-attr-concept/name")),
             Term::Constant(alice_id.clone()),
-            Term::blank(),
+            Parameter::blank(),
             Term::blank(),
             None,
         );
@@ -887,7 +887,7 @@ mod tests {
         let birthday_query = RelationQuery::new(
             Term::Constant(the!("person-attr-concept/birthday")),
             Term::Constant(alice_id.clone()),
-            Term::blank(),
+            Parameter::blank(),
             Term::blank(),
             None,
         );
@@ -1030,7 +1030,7 @@ mod tests {
         let name_query = RelationQuery::new(
             Term::Constant(the!("person-attr-concept/name")),
             Term::Constant(alice_id.clone()),
-            Term::blank(),
+            Parameter::blank(),
             Term::blank(),
             None,
         );
@@ -1038,7 +1038,7 @@ mod tests {
         let email_query = RelationQuery::new(
             Term::Constant(the!("person-attr-concept/email")),
             Term::Constant(alice_id.clone()),
-            Term::blank(),
+            Parameter::blank(),
             Term::blank(),
             None,
         );
@@ -1046,7 +1046,7 @@ mod tests {
         let birthday_query = RelationQuery::new(
             Term::Constant(the!("person-attr-concept/birthday")),
             Term::Constant(alice_id.clone()),
-            Term::blank(),
+            Parameter::blank(),
             Term::blank(),
             None,
         );
@@ -1097,7 +1097,7 @@ mod tests {
         let name_query = RelationQuery::new(
             Term::Constant(the!("person-attr-concept/name")),
             Term::Constant(alice_id.clone()),
-            Term::blank(),
+            Parameter::blank(),
             Term::blank(),
             None,
         );
@@ -1105,7 +1105,7 @@ mod tests {
         let birthday_query = RelationQuery::new(
             Term::Constant(the!("person-attr-concept/birthday")),
             Term::Constant(alice_id),
-            Term::blank(),
+            Parameter::blank(),
             Term::blank(),
             None,
         );

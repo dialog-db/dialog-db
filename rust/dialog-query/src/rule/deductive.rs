@@ -4,7 +4,7 @@ pub use crate::planner::Plan;
 pub use crate::planner::{Conjunction, Planner};
 pub use crate::premise::Premise;
 pub use crate::{Attribute, Cardinality, Parameters, Proposition, Requirement, Value};
-use crate::{Environment, Term, Type};
+use crate::{Environment, Parameter, Term, Type};
 use std::fmt::Display;
 
 /// Represents a deductive rule that can be applied creating a premise.
@@ -129,7 +129,7 @@ impl From<&ConceptDescriptor> for DeductiveRule {
                 RelationQuery::new(
                     Term::Constant(attribute.the().clone()),
                     this.clone(),
-                    Term::var(name),
+                    Parameter::var(name),
                     Term::blank(),
                     Some(RelationDescriptor::new(
                         attribute.content_type(),
@@ -180,7 +180,7 @@ mod tests {
             RelationQuery::new(
                 Term::Constant(the!("user/name")),
                 this.clone(),
-                Term::var("name"),
+                Parameter::var("name"),
                 Term::var("cause"),
                 Some(RelationDescriptor::new(None, Cardinality::One)),
             )
@@ -188,7 +188,7 @@ mod tests {
             RelationQuery::new(
                 Term::Constant(the!("user/age")),
                 this,
-                Term::var("age"),
+                Parameter::var("age"),
                 Term::var("cause"),
                 Some(RelationDescriptor::new(None, Cardinality::One)),
             )
@@ -224,7 +224,7 @@ mod tests {
             RelationQuery::new(
                 Term::var("the"),
                 Term::<Entity>::var("user"),
-                Term::var("value"),
+                Parameter::var("value"),
                 Term::var("cause"),
                 Some(RelationDescriptor::new(None, Cardinality::One)),
             )
@@ -262,7 +262,7 @@ mod tests {
             RelationQuery::new(
                 Term::var("the"),
                 Term::<Entity>::var("user"),
-                Term::var("value"),
+                Parameter::var("value"),
                 Term::var("cause"),
                 None,
             )
@@ -302,7 +302,7 @@ mod tests {
             RelationQuery::new(
                 Term::Constant(the!("user/name")),
                 Term::<Entity>::var("this"),
-                Term::var("name"),
+                Parameter::var("name"),
                 Term::var("cause"),
                 Some(RelationDescriptor::new(None, Cardinality::One)),
             )
@@ -377,7 +377,7 @@ mod tests {
             RelationQuery::new(
                 Term::var("key"),
                 this,
-                Term::var("value"),
+                Parameter::var("value"),
                 Term::var("cause"),
                 Some(RelationDescriptor::new(None, Cardinality::One)),
             )
@@ -399,7 +399,7 @@ mod tests {
             RelationQuery::new(
                 Term::Constant(the!("user/name")),
                 Term::<Entity>::var("this"),
-                Term::var("key_var"),
+                Parameter::var("key_var"),
                 Term::var("cause"),
                 Some(RelationDescriptor::new(None, Cardinality::One)),
             )

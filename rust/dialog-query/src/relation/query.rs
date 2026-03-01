@@ -58,7 +58,7 @@ fn verify_winner<S: Source>(source: S, selector: RelationQuery, input: Answer) -
         let attribute_term = selector.attribute();
         let attribute: Attribute = input.get(&attribute_term)?;
         let entity: Entity = input.get(selector.of())?;
-        let candidate_value: Value = input.get(selector.is())?;
+        let candidate_value: Value = input.resolve(selector.is())?;
         let candidate_cause: Cause = input.get(selector.cause())?;
 
         let verification_selector = ArtifactSelector::new()
@@ -100,7 +100,7 @@ pub struct RelationQuery {
     /// The entity
     of: Term<Entity>,
     /// The value
-    is: Term<Value>,
+    is: Parameter,
     /// The cause/provenance
     cause: Term<Cause>,
     /// Type and cardinality metadata, when the attribute is known.
@@ -113,10 +113,11 @@ impl RelationQuery {
     pub fn new(
         the: Term<The>,
         of: Term<Entity>,
-        is: Term<Value>,
+        is: impl Into<Parameter>,
         cause: Term<Cause>,
         relation: Option<RelationDescriptor>,
     ) -> Self {
+        let is = is.into();
         Self {
             the,
             of,
@@ -136,8 +137,8 @@ impl RelationQuery {
         &self.of
     }
 
-    /// Get the 'is' (value) term.
-    pub fn is(&self) -> &Term<Value> {
+    /// Get the 'is' (value) parameter.
+    pub fn is(&self) -> &Parameter {
         &self.is
     }
 
@@ -225,7 +226,7 @@ impl RelationQuery {
     pub fn estimate(&self, env: &Environment) -> Option<usize> {
         let the = env.contains(&self.the);
         let of = env.contains(&self.of);
-        let is = env.contains(&self.is);
+        let is = env.contains_param(&self.is);
 
         let base = self.cardinality().estimate(the, of, is)?;
 
@@ -242,7 +243,7 @@ impl RelationQuery {
 
         params.insert("the".to_string(), Parameter::from(&self.the));
         params.insert("of".to_string(), Parameter::from(&self.of));
-        params.insert("is".to_string(), Parameter::from(&self.is));
+        params.insert("is".to_string(), self.is.clone());
         params
     }
 }
@@ -252,7 +253,7 @@ impl RelationQuery {
     pub fn resolve_from_answer(&self, source: &Answer) -> Self {
         let the = source.resolve_term(&self.the);
         let of = source.resolve_term(&self.of);
-        let is = source.resolve_term(&self.is);
+        let is = source.resolve_parameter(&self.is);
         let cause = source.resolve_term(&self.cause);
 
         Self {
@@ -401,11 +402,12 @@ impl RelationQuery {
             },
             term => term.clone(),
         };
-        let is_term = match &self.is {
-            Term::Variable { name: None, .. } => Term::Variable {
+        let is_param = match &self.is {
+            Parameter::Variable { name: None, .. } => Parameter::Variable {
                 name: Some("__is".to_string()),
+                typ: None,
             },
-            term => term.clone(),
+            param => param.clone(),
         };
 
         let the: The = match &the_term {
@@ -416,7 +418,7 @@ impl RelationQuery {
         Ok(Claim {
             the,
             of: source.get(&of_term)?,
-            is: source.get(&is_term)?,
+            is: source.resolve(&is_param)?,
             cause: Cause([0; 32]),
         })
     }
@@ -467,13 +469,13 @@ impl TryFrom<&RelationQuery> for ArtifactSelector<Constrained> {
         }
 
         match &from.is {
-            Term::Constant(value) => {
+            Parameter::Constant(value) => {
                 selector = Some(match selector {
                     None => ArtifactSelector::new().is(value.clone()),
                     Some(s) => s.is(value.clone()),
                 });
             }
-            Term::Variable { .. } => {}
+            Parameter::Variable { .. } => {}
         }
 
         selector.ok_or_else(|| QueryError::EmptySelector {
@@ -551,7 +553,7 @@ mod tests {
         let rel_app = RelationQuery::new(
             Term::Constant(the!("person/name")),
             Term::var("person"),
-            Term::var("name"),
+            Parameter::var("name"),
             Term::var("cause"),
             Some(RelationDescriptor::new(
                 Some(Type::String),
@@ -616,7 +618,7 @@ mod tests {
         let rel_app = RelationQuery::new(
             Term::Constant(the!("person/name")),
             Term::var("person"),
-            Term::var("name"),
+            Parameter::var("name"),
             Term::var("cause"),
             Some(RelationDescriptor::new(
                 Some(Type::String),
@@ -638,7 +640,7 @@ mod tests {
         let rel_app_many = RelationQuery::new(
             Term::Constant(the!("person/name")),
             Term::var("person"),
-            Term::var("name"),
+            Parameter::var("name"),
             Term::var("cause"),
             Some(RelationDescriptor::new(
                 Some(Type::String),
@@ -698,7 +700,7 @@ mod tests {
         let rel_app = RelationQuery::new(
             Term::var("the"),
             Term::Constant(alice.clone()),
-            Term::var("value"),
+            Parameter::var("value"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
@@ -754,7 +756,7 @@ mod tests {
         let rel_app = RelationQuery::new(
             Term::Constant(the!("person/name")),
             Term::var("person"),
-            Term::var("name"),
+            Parameter::var("name"),
             Term::var("cause"),
             Some(RelationDescriptor::new(
                 Some(Type::String),
@@ -806,7 +808,7 @@ mod tests {
         let aev_app = RelationQuery::new(
             Term::Constant(the!("person/name")),
             Term::var("person"),
-            Term::var("name"),
+            Parameter::var("name"),
             Term::var("cause"),
             Some(RelationDescriptor::new(
                 Some(Type::String),
@@ -892,7 +894,7 @@ mod tests {
         let eav_app = RelationQuery::new(
             Term::var("the"),
             Term::Constant(alice.clone()),
-            Term::var("name"),
+            Parameter::var("name"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
@@ -910,7 +912,7 @@ mod tests {
         let aev_app = RelationQuery::new(
             Term::Constant(the!("person/name")),
             Term::var("person"),
-            Term::var("name"),
+            Parameter::var("name"),
             Term::var("cause"),
             Some(RelationDescriptor::new(
                 Some(Type::String),
@@ -954,7 +956,7 @@ mod tests {
         let rel_app = RelationQuery::new(
             Term::Constant(the!("person/name")),
             Term::var("person"),
-            Term::var("name"),
+            Parameter::var("name"),
             Term::var("cause"),
             None,
         );
@@ -995,7 +997,7 @@ mod tests {
         let rel_app = RelationQuery::new(
             Term::Constant(the!("person/name")),
             Term::var("person"),
-            Term::var("name"),
+            Parameter::var("name"),
             Term::var("cause"),
             Some(RelationDescriptor::new(
                 Some(Type::String),
@@ -1036,7 +1038,7 @@ mod tests {
         let query_constant = RelationQuery::new(
             Term::Constant(the!("user/name")),
             alice.clone().into(),
-            Term::blank(),
+            Parameter::blank(),
             Term::blank(),
             None,
         );
@@ -1056,7 +1058,7 @@ mod tests {
         let query2 = RelationQuery::new(
             Term::Constant(the!("user/name")),
             alice.clone().into(),
-            Term::blank(),
+            Parameter::blank(),
             Term::blank(),
             None,
         );
@@ -1092,7 +1094,7 @@ mod tests {
         let mixed_query = RelationQuery::new(
             Term::Constant(the!("user/name")),
             alice.clone().into(),
-            Term::blank(),
+            Parameter::blank(),
             Term::blank(),
             None,
         );
@@ -1140,7 +1142,7 @@ mod tests {
         let query = RelationQuery::new(
             Term::Constant(the!("user/name")),
             Term::blank(),
-            Term::blank(),
+            Parameter::blank(),
             Term::blank(),
             None,
         );
@@ -1184,7 +1186,7 @@ mod tests {
         let query = RelationQuery::new(
             Term::Constant(the!("user/name")),
             alice.clone().into(),
-            "Alice".into(),
+            Parameter::Constant(Value::String("Alice".into())),
             Term::blank(),
             None,
         );

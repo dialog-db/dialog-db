@@ -179,13 +179,6 @@ where
         )))
     }
 
-    /// Convert this typed term to a dynamically-typed `Term<Value>`.
-    pub fn as_unknown(&self) -> Term<Value> {
-        match self {
-            Term::Constant(value) => Term::Constant(value.as_value()),
-            Term::Variable { name, .. } => Term::Variable { name: name.clone() },
-        }
-    }
 }
 
 impl<T> Default for Term<T>
