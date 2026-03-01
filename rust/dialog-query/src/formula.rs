@@ -47,8 +47,6 @@ use crate::{Parameters, Schema};
 ///
 /// - `Input`: The input type that can be constructed from a [`Bindings`].
 ///   This type should contain all the fields the formula needs to read.
-/// - `Query`: Currently unused, reserved for future macro generation that
-///   will create query patterns for formula applications.
 ///
 /// # Implementation Guide
 ///
@@ -69,12 +67,6 @@ pub trait Formula: Predicate + Sized + Clone {
     /// This type must be constructible from a Bindings and should contain
     /// all the fields that the formula needs to read from the input.
     type Input: In;
-
-    /// Query type for formula application in queries
-    ///
-    /// This type is used by the derive macro to generate query patterns
-    /// for formula applications.
-    type Query: FormulaApplication<Predicate = Self>;
 
     /// Returns the estimated cost of evaluating this formula.
     fn cost() -> usize;
@@ -160,21 +152,3 @@ pub trait Formula: Predicate + Sized + Clone {
 /// Trait alias for types that can be constructed from a [`Bindings`] as formula input.
 pub trait In: for<'a> TryFrom<&'a mut Bindings, Error = FormulaEvaluationError> {}
 impl<T: for<'a> TryFrom<&'a mut Bindings, Error = FormulaEvaluationError>> In for T {}
-
-/// Trait for formula query patterns that can be converted into [`Parameters`].
-pub trait FormulaApplication: Sized + Clone + Into<Parameters> {
-    /// The formula predicate type this query corresponds to.
-    type Predicate: Formula<Query = Self>;
-}
-
-impl<T: FormulaApplication + Clone> From<T> for FormulaQuery {
-    fn from(value: T) -> Self {
-        FormulaQuery {
-            name: T::Predicate::operator(),
-            cells: T::Predicate::cells(),
-            cost: T::Predicate::cost(),
-            parameters: value.into(),
-            compute: |bindings| T::Predicate::compute(bindings),
-        }
-    }
-}
