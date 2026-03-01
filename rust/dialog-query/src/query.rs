@@ -27,7 +27,7 @@ mod tests {
     use crate::artifact::{Artifacts, Entity, Value};
     use crate::relation::query::RelationQuery;
     use crate::the;
-    use crate::{Association, Session, Term};
+    use crate::{Association, Parameter, Session, Term};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
@@ -75,7 +75,7 @@ mod tests {
         let all_names_query = RelationQuery::new(
             Term::Constant(the!("user/name")),
             Term::blank(),
-            Term::blank(),
+            Parameter::blank(),
             Term::blank(),
             None,
         );
@@ -87,7 +87,7 @@ mod tests {
         let email_query = RelationQuery::new(
             Term::Constant(the!("user/email")),
             alice.clone().into(),
-            Term::blank(),
+            Parameter::blank(),
             Term::blank(),
             None,
         );
@@ -137,7 +137,7 @@ mod tests {
         let fact_selector = RelationQuery::new(
             Term::Constant(the!("user/name")),
             alice.clone().into(),
-            Term::blank(),
+            Parameter::blank(),
             Term::blank(),
             None,
         );
@@ -200,7 +200,7 @@ mod tests {
         let names_result = RelationQuery::new(
             Term::Constant(the!("user/name")),
             Term::blank(),
-            Term::blank(),
+            Parameter::blank(),
             Term::blank(),
             None,
         )

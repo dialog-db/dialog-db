@@ -639,7 +639,7 @@ mod tests {
                 RelationQuery::new(
                     Term::Constant(the!("stuff/name")),
                     Term::var("this"),
-                    Term::var("name"),
+                    Parameter::var("name"),
                     Term::blank(),
                     None,
                 )
@@ -647,7 +647,7 @@ mod tests {
                 RelationQuery::new(
                     Term::Constant(the!("stuff/role")),
                     Term::var("this"),
-                    Term::var("job"),
+                    Parameter::var("job"),
                     Term::blank(),
                     None,
                 )
@@ -764,7 +764,7 @@ mod tests {
                 RelationQuery::new(
                     Term::Constant(the!("stuff/name")),
                     employee.this,
-                    employee.name.as_unknown(),
+                    employee.name.clone(),
                     Term::blank(),
                     None,
                 ),
@@ -1173,7 +1173,7 @@ mod tests {
                 RelationQuery::new(
                     Term::Constant(the!("implicit-attr-test/name")),
                     employee.this.clone(),
-                    employee.name.clone().as_unknown(),
+                    employee.name.clone(),
                     Term::blank(),
                     None,
                 ),
@@ -1181,7 +1181,7 @@ mod tests {
                 !RelationQuery::new(
                     Term::Constant(the!("implicit-attr-test/role")),
                     employee.this.clone(),
-                    Term::blank(),
+                    Parameter::blank(),
                     Term::blank(),
                     None,
                 ),

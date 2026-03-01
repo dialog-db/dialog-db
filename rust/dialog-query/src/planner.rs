@@ -188,6 +188,7 @@ impl From<&Vec<Plan>> for Planner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parameter::Parameter;
     use crate::selection::Answer;
     use crate::the;
 
@@ -200,7 +201,7 @@ mod tests {
         let fact1 = RelationQuery::new(
             Term::Constant(the!("person/name")),
             Term::var("person"),
-            Term::var("name"),
+            Parameter::var("name"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
@@ -208,7 +209,7 @@ mod tests {
         let fact2 = RelationQuery::new(
             Term::Constant(the!("person/age")),
             Term::var("person"),
-            Term::var("age"),
+            Parameter::var("age"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
@@ -247,7 +248,7 @@ mod tests {
         let fact1 = RelationQuery::new(
             Term::Constant(the!("person/name")),
             Term::Constant(Entity::try_from("urn:alice".to_string()).unwrap()),
-            Term::var("name"),
+            Parameter::var("name"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
@@ -255,7 +256,7 @@ mod tests {
         let fact2 = RelationQuery::new(
             Term::Constant(the!("greeting/text")),
             Term::var("name"),
-            Term::var("greeting"),
+            Parameter::var("greeting"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
@@ -317,7 +318,7 @@ mod tests {
         let fact1 = RelationQuery::new(
             Term::Constant(the!("person/name")),
             Term::var("person"),
-            Term::var("name"),
+            Parameter::var("name"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
@@ -325,7 +326,7 @@ mod tests {
         let fact2 = RelationQuery::new(
             Term::Constant(the!("person/age")),
             Term::var("person"),
-            Term::var("age"),
+            Parameter::var("age"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );

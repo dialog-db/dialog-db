@@ -93,8 +93,8 @@ impl Answer {
             return Ok(Claim::from(factors));
         }
 
-        if let Term::Variable { name: Some(_), .. } = application.is()
-            && let Some(factors) = self.resolve_factors(&Parameter::from(application.is()))
+        if let Parameter::Variable { name: Some(_), .. } = application.is()
+            && let Some(factors) = self.resolve_factors(application.is())
         {
             return Ok(Claim::from(factors));
         }
@@ -135,7 +135,7 @@ impl Answer {
                     },
                 )?;
                 self.assign(
-                    &Parameter::from(application.is()),
+                    application.is(),
                     &Factor::Selected {
                         selector: Selector::Is,
                         application: application.clone(),
@@ -315,6 +315,23 @@ impl Answer {
                 }
             }
             Term::Constant(_) => term.clone(),
+        }
+    }
+
+    /// Resolve a variable parameter into a constant parameter if this answer
+    /// has a binding for it. Otherwise, return the original parameter.
+    pub fn resolve_parameter(&self, param: &Parameter) -> Parameter {
+        match param {
+            Parameter::Variable {
+                name: Some(key), ..
+            } => {
+                if let Some(factors) = self.conclusions.get(key) {
+                    Parameter::Constant(factors.content().clone())
+                } else {
+                    param.clone()
+                }
+            }
+            _ => param.clone(),
         }
     }
 

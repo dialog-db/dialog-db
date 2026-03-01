@@ -50,7 +50,7 @@ mod tests {
         let application = Arc::new(RelationQuery::new(
             Term::var("the"),
             Term::var("of"),
-            Term::var("is"),
+            Parameter::var("is"),
             Term::var("cause"),
             None,
         ));

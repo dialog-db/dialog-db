@@ -59,14 +59,13 @@ where
     type Conclusion = AttributeStatement<A>;
 
     fn evaluate<S: Source, M: Answers>(self, answers: M, source: &S) -> impl Answers {
-        let query = relation_query::<A>(self.of, self.is.as_unknown(), Term::blank());
+        let query = relation_query::<A>(self.of, self.is.clone(), Term::blank());
         query.evaluate(answers, source)
     }
 
     fn realize(&self, input: Answer) -> Result<Self::Conclusion, QueryError> {
         let of_term = &self.of;
-        let is_term: Term<Value> = self.is.as_unknown();
-        let is_param = Parameter::from(&is_term);
+        let is_param = Parameter::from(&self.is);
         let entity: Entity = input.get(of_term)?;
         let value: Value = input.resolve(&is_param)?;
         let typed_value = A::Type::try_from(value).map_err(|_| {
@@ -128,7 +127,7 @@ where
     A::Type: Scalar,
 {
     fn from(query: AttributeQuery<A>) -> Self {
-        let relation = relation_query::<A>(query.of, query.is.as_unknown(), Term::blank());
+        let relation = relation_query::<A>(query.of, query.is, Term::blank());
         Premise::Assert(Proposition::Relation(Box::new(relation)))
     }
 }

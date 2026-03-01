@@ -22,7 +22,7 @@ pub use when::*;
 /// This macro provides the most concise way to create rule conditions:
 ///
 /// ```rust
-/// use dialog_query::{when, When, Term, artifact::Value, the};
+/// use dialog_query::{when, When, Term, Parameter, artifact::Value, the};
 /// use dialog_query::relation::query::RelationQuery;
 ///
 /// fn example() -> impl When {
@@ -36,7 +36,7 @@ pub use when::*;
 ///     let r2 = RelationQuery::new(
 ///         Term::Constant(the!("ns/attr2")),
 ///         Term::var("entity"),
-///         Term::var("value2"),
+///         Parameter::var("value2"),
 ///         Term::blank(),
 ///         None,
 ///     );
