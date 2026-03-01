@@ -189,13 +189,13 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 };
 
                 dialog_query::RelationQuery::new(
-                    dialog_query::Term::Constant(<#field_type as dialog_query::Attribute>::descriptor().the().clone()),
+                    dialog_query::Term::Constant(<#field_type as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().the().clone()),
                     terms.this.clone(),
                     value_term,
                     dialog_query::Term::blank(),
                     Some(dialog_query::RelationDescriptor::new(
                         <<#field_type as dialog_query::Attribute>::Type as dialog_query::IntoType>::TYPE,
-                        <#field_type as dialog_query::Attribute>::descriptor().cardinality(),
+                        <#field_type as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().cardinality(),
                     )),
                 )
             }
@@ -204,7 +204,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         // Generate Association for IntoIterator implementation
         instance_relations.push(quote! {
             dialog_query::Association::new(
-                <#field_type as dialog_query::Attribute>::the(),
+                <#field_type as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().the().clone(),
                 self.this.clone(),
                 dialog_query::Scalar::as_value(<#field_type as dialog_query::Attribute>::value(&self.#field_name)),
             )
@@ -226,9 +226,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
     );
 
     let expanded = quote! {
-        // Compile-time validation that all fields (except 'this') implement Attribute
+        // Compile-time validation that all fields (except 'this') implement Attribute + Descriptor
         const _: () = {
-            fn assert_implements_attribute<T: dialog_query::Attribute>() {}
+            fn assert_implements_attribute<T: dialog_query::Attribute + dialog_query::Descriptor<dialog_query::AttributeDescriptor>>() {}
             fn #validate_fn_name() {
                 #(assert_implements_attribute::<#field_types>();)*
             }
@@ -313,7 +313,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             fn from(_: #struct_name) -> Self {
                 dialog_query::ConceptDescriptor::from(vec![
                     #(
-                        (#field_name_lits, <#field_types as dialog_query::Attribute>::descriptor())
+                        (#field_name_lits, <#field_types as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().clone())
                     ),*
                 ])
             }
@@ -324,7 +324,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             fn from(_: #match_name) -> Self {
                 dialog_query::ConceptDescriptor::from(vec![
                     #(
-                        (#field_name_lits, <#field_types as dialog_query::Attribute>::descriptor())
+                        (#field_name_lits, <#field_types as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().clone())
                     ),*
                 ])
             }

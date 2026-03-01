@@ -38,7 +38,7 @@ use transaction::Edit;
 /// # Examples
 ///
 /// ```no_run
-/// # use dialog_query::{Session, Attribute, Entity, attribute::With};
+/// # use dialog_query::{Session, Attribute, Entity};
 /// #[derive(Attribute, Clone)]
 /// #[domain(user)]
 /// struct Name(String);
@@ -49,7 +49,7 @@ use transaction::Edit;
 ///
 /// // Commit changes using a transaction
 /// let mut edit = session.edit();
-/// edit.assert(With { this: entity, has: Name("Alice".to_string()) });
+/// edit.assert(Name::of(entity).is("Alice"));
 /// session.commit(edit).await?;
 /// # Ok(())
 /// # }
@@ -130,7 +130,7 @@ impl<S: Store> Session<S> {
     /// # Examples
     ///
     /// ```no_run
-    /// # use dialog_query::{Session, Attribute, Entity, attribute::With};
+    /// # use dialog_query::{Session, Attribute, Entity};
     /// # #[derive(Attribute, Clone)]
     /// # #[domain(user)]
     /// # struct Name(String);
@@ -140,7 +140,7 @@ impl<S: Store> Session<S> {
     /// let mut transaction = session.edit();
     ///
     /// // Add operations to the transaction
-    /// transaction.assert(With { this: entity, has: Name("Alice".to_string()) });
+    /// transaction.assert(Name::of(entity).is("Alice"));
     ///
     /// // Commit the transaction
     /// session.commit(transaction).await?;
@@ -158,7 +158,7 @@ impl<S: Store> Session<S> {
     /// # Examples
     ///
     /// ```no_run
-    /// # use dialog_query::{Session, Attribute, Entity, attribute::With};
+    /// # use dialog_query::{Session, Attribute, Entity};
     /// # #[derive(Attribute, Clone)]
     /// # #[domain(user)]
     /// # struct Name(String);
@@ -167,7 +167,7 @@ impl<S: Store> Session<S> {
     /// let mut session = Session::open(store);
     /// let mut edit = session.edit();
     ///
-    /// edit.assert(With { this: entity, has: Name("Alice".to_string()) });
+    /// edit.assert(Name::of(entity).is("Alice"));
     /// session.commit(edit).await?;
     /// # Ok(())
     /// # }
@@ -185,7 +185,7 @@ impl<S: Store> Session<S> {
     /// # Examples
     ///
     /// ```no_run
-    /// # use dialog_query::{Session, Attribute, Entity, attribute::With};
+    /// # use dialog_query::{Session, Attribute, Entity};
     /// # #[derive(Attribute, Clone)]
     /// # #[domain(user)]
     /// # struct Name(String);
@@ -196,8 +196,8 @@ impl<S: Store> Session<S> {
     ///
     /// // Can pass any items that implement Edit
     /// session.transact([
-    ///     With { this: alice, has: Name("Alice".to_string()) },
-    ///     With { this: bob, has: Name("Bob".to_string()) },
+    ///     Name::of(alice).is("Alice"),
+    ///     Name::of(bob).is("Bob"),
     /// ]).await?;
     /// # Ok(())
     /// # }
