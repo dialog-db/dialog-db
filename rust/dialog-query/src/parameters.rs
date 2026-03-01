@@ -106,9 +106,9 @@ mod tests {
         let mut params = Parameters::new();
         params.insert(
             "name".to_string(),
-            Parameter::Constant(Value::from("Alice".to_string())),
+            Parameter::from("Alice".to_string()),
         );
-        params.insert("age".to_string(), Parameter::Constant(Value::from(42u32)));
+        params.insert("age".to_string(), Parameter::from(42u32));
 
         let json = serde_json::to_value(&params).unwrap();
         let obj = json.as_object().unwrap();
@@ -128,7 +128,7 @@ mod tests {
         );
         params.insert(
             "name".to_string(),
-            Parameter::Constant(Value::from("Alice".to_string())),
+            Parameter::from("Alice".to_string()),
         );
 
         let json = serde_json::to_value(&params).unwrap();
@@ -203,9 +203,9 @@ mod tests {
         );
         original.insert(
             "name".to_string(),
-            Parameter::Constant(Value::from("Alice".to_string())),
+            Parameter::from("Alice".to_string()),
         );
-        original.insert("active".to_string(), Parameter::Constant(Value::from(true)));
+        original.insert("active".to_string(), Parameter::from(true));
 
         let json = serde_json::to_value(&original).unwrap();
         let restored: Parameters = serde_json::from_value(json).unwrap();

@@ -180,20 +180,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
         // Generate rule when field conversion
         rule_when_fields.push(quote! {
             {
-                let value_term = match &terms.#field_name {
-                    dialog_query::Term::Variable { name, .. } => dialog_query::Term::Variable {
-                        name: name.clone(),
-                    },
-                    dialog_query::Term::Constant(value) => dialog_query::Term::Constant(dialog_query::Scalar::as_value(value)),
-                };
+                let value_param = dialog_query::Parameter::from(terms.#field_name.clone());
 
                 dialog_query::RelationQuery::new(
                     dialog_query::Term::Constant(<#field_type as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().the().clone()),
                     terms.this.clone(),
-                    value_term,
+                    value_param,
                     dialog_query::Term::blank(),
                     Some(dialog_query::RelationDescriptor::new(
-                        <<#field_type as dialog_query::Attribute>::Type as dialog_query::IntoType>::TYPE,
+                        <<#field_type as dialog_query::Attribute>::Type as dialog_query::Typed>::TYPE,
                         <#field_type as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().cardinality(),
                     )),
                 )

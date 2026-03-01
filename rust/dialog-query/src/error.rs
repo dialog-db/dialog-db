@@ -9,7 +9,7 @@ pub use thiserror::Error;
 
 /// Errors that can occur during query planning and execution
 ///
-/// TODO: Large enum variant - VariableInconsistency (344 bytes) contains two Term<Value> fields
+/// TODO: Large enum variant - VariableInconsistency contains two Parameter fields
 /// which are large. Consider boxing these fields or the entire variant to reduce memory usage.
 /// Most error variants are small (24 bytes), so this wastes significant memory.
 #[allow(clippy::large_enum_variant)]

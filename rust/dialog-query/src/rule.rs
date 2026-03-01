@@ -29,7 +29,7 @@ pub use when::*;
 ///     let r1 = RelationQuery::new(
 ///         Term::Constant(the!("ns/attr1")),
 ///         Term::var("entity"),
-///         Term::from(Value::String("value1".to_string())),
+///         Parameter::from("value1".to_string()),
 ///         Term::blank(),
 ///         None,
 ///     );

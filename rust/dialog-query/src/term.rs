@@ -10,12 +10,12 @@
 
 use std::fmt;
 
-use crate::artifact::{Attribute as ArtifactAttribute, Cause, Entity, Type, TypeError, Value};
+use crate::artifact::{Attribute as ArtifactAttribute, Cause, Entity, Type, Value};
 use crate::constraint::{Constraint, Equality};
 use crate::error::SyntaxError;
 use crate::parameter::Parameter;
 use crate::proposition::Proposition;
-use crate::types::{IntoType, Scalar};
+use crate::types::{Scalar, Typed};
 use crate::{Attribute, Premise};
 use std::hash::Hash;
 
@@ -41,7 +41,7 @@ use std::hash::Hash;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Term<T>
 where
-    T: IntoType + Clone + 'static,
+    T: Typed + Clone + 'static,
 {
     /// A variable term — a named or anonymous placeholder that matches values
     /// during query evaluation.
@@ -159,10 +159,10 @@ where
     ///
     /// # Example
     /// ```
-    /// use dialog_query::{Term, Value};
+    /// use dialog_query::Term;
     ///
     /// // Create a constraint that x equals y
-    /// let constraint = Term::<Value>::var("x").is(Term::<Value>::var("y"));
+    /// let constraint = Term::<String>::var("x").is(Term::<String>::var("y"));
     /// ```
     pub fn is<Other: Into<Term<T>>>(self, other: Other) -> Premise {
         Premise::Assert(Proposition::Constraint(Constraint::Equality(
@@ -173,7 +173,7 @@ where
 
 impl<T> Default for Term<T>
 where
-    T: IntoType + Clone,
+    T: Typed + Clone,
 {
     fn default() -> Self {
         Term::Variable { name: None }
@@ -189,7 +189,7 @@ where
 ///
 impl<T> fmt::Display for Term<T>
 where
-    T: IntoType + Clone + fmt::Debug,
+    T: Typed + Clone + fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -208,13 +208,6 @@ where
             // Unnamed variables display as underscore
             Term::Variable { name: None, .. } => write!(f, "_"),
         }
-    }
-}
-
-/// Convenience conversions from common types into constant terms.
-impl From<Value> for Term<Value> {
-    fn from(value: Value) -> Self {
-        Term::Constant(value)
     }
 }
 
@@ -276,18 +269,6 @@ impl From<String> for Term<String> {
 impl From<&str> for Term<String> {
     fn from(value: &str) -> Self {
         Term::Constant(value.to_string())
-    }
-}
-
-impl From<String> for Term<Value> {
-    fn from(value: String) -> Self {
-        Term::Constant(Value::String(value))
-    }
-}
-
-impl From<&str> for Term<Value> {
-    fn from(value: &str) -> Self {
-        Term::Constant(Value::String(value.to_string()))
     }
 }
 
@@ -374,7 +355,7 @@ impl<A: Attribute> From<A> for Term<A::Type> {
 /// Allows cloning Terms when you have a reference but need an owned value.
 impl<T> From<&Term<T>> for Term<T>
 where
-    T: IntoType + Clone,
+    T: Typed + Clone,
 {
     fn from(term: &Term<T>) -> Self {
         term.clone()
@@ -391,46 +372,94 @@ impl<T: Scalar> From<&Option<Term<T>>> for Term<T> {
     }
 }
 
-/// Narrow a dynamically-typed term to `Term<Entity>`.
-impl TryFrom<Term<Value>> for Term<Entity> {
-    type Error = TypeError;
+/// Convert a `Parameter` directly into a `Term<Entity>`.
+impl TryFrom<Parameter> for Term<Entity> {
+    type Error = crate::error::TypeError;
 
-    fn try_from(term: Term<Value>) -> Result<Self, Self::Error> {
-        match term {
-            Term::Variable { name, .. } => Ok(Term::Variable { name }),
-            Term::Constant(Value::Entity(e)) => Ok(Term::Constant(e)),
-            Term::Constant(other) => Err(TypeError::TypeMismatch(Type::Entity, other.data_type())),
+    fn try_from(param: Parameter) -> Result<Self, Self::Error> {
+        match param {
+            Parameter::Variable { ref typ, .. } if typ.is_none() || *typ == Some(Type::Entity) => {
+                let Parameter::Variable { name, .. } = param else {
+                    unreachable!()
+                };
+                Ok(Term::Variable { name })
+            }
+            Parameter::Constant(Value::Entity(e)) => Ok(Term::Constant(e)),
+            other => Err(crate::error::TypeError::TypeMismatch {
+                expected: Type::Entity,
+                actual: other,
+            }),
         }
     }
 }
 
-/// Narrow a dynamically-typed term to `Term<Attribute>`.
-impl TryFrom<Term<Value>> for Term<ArtifactAttribute> {
-    type Error = TypeError;
+/// Convert a `Parameter` directly into a `Term<Attribute>`.
+impl TryFrom<Parameter> for Term<ArtifactAttribute> {
+    type Error = crate::error::TypeError;
 
-    fn try_from(term: Term<Value>) -> Result<Self, Self::Error> {
-        match term {
-            Term::Variable { name, .. } => Ok(Term::Variable { name }),
-            Term::Constant(Value::Symbol(attr)) => Ok(Term::Constant(attr)),
-            Term::Constant(other) => Err(TypeError::TypeMismatch(Type::Symbol, other.data_type())),
+    fn try_from(param: Parameter) -> Result<Self, Self::Error> {
+        match param {
+            Parameter::Variable { ref typ, .. } if typ.is_none() || *typ == Some(Type::Symbol) => {
+                let Parameter::Variable { name, .. } = param else {
+                    unreachable!()
+                };
+                Ok(Term::Variable { name })
+            }
+            Parameter::Constant(Value::Symbol(attr)) => Ok(Term::Constant(attr)),
+            other => Err(crate::error::TypeError::TypeMismatch {
+                expected: Type::Symbol,
+                actual: other,
+            }),
         }
     }
 }
 
-/// Narrow a dynamically-typed term to `Term<Cause>`.
-impl TryFrom<Term<Value>> for Term<Cause> {
-    type Error = TypeError;
+/// Convert a `Parameter` directly into a `Term<Cause>`.
+impl TryFrom<Parameter> for Term<Cause> {
+    type Error = crate::error::TypeError;
 
-    fn try_from(term: Term<Value>) -> Result<Self, Self::Error> {
-        match term {
-            Term::Variable { name, .. } => Ok(Term::Variable { name }),
-            Term::Constant(Value::Bytes(b)) => {
-                // Use TryFrom<Vec<u8>> for Cause (from reference_type! macro)
-                let cause = Cause::try_from(b)
-                    .map_err(|_| TypeError::TypeMismatch(Type::Bytes, Type::Bytes))?;
+    fn try_from(param: Parameter) -> Result<Self, Self::Error> {
+        match param {
+            Parameter::Variable { ref typ, .. } if typ.is_none() || *typ == Some(Type::Bytes) => {
+                let Parameter::Variable { name, .. } = param else {
+                    unreachable!()
+                };
+                Ok(Term::Variable { name })
+            }
+            Parameter::Constant(Value::Bytes(b)) => {
+                let cause =
+                    Cause::try_from(b).map_err(|_| crate::error::TypeError::TypeMismatch {
+                        expected: Type::Bytes,
+                        actual: Parameter::Constant(Value::Bytes(vec![])),
+                    })?;
                 Ok(Term::Constant(cause))
             }
-            Term::Constant(other) => Err(TypeError::TypeMismatch(Type::Bytes, other.data_type())),
+            other => Err(crate::error::TypeError::TypeMismatch {
+                expected: Type::Bytes,
+                actual: other,
+            }),
+        }
+    }
+}
+
+/// Convert any typed `Term<T>` into `Term<Value>`, erasing the compile-time
+/// type. Variables simply drop the type tag; constants are converted via
+/// `Scalar::as_value()`.
+///
+/// This enables formulas with `Value`-typed fields (like `ToString`) to
+/// accept any typed term:
+///
+/// ```
+/// use dialog_query::{Term, Value};
+///
+/// let typed: Term<String> = Term::var("x");
+/// let erased: Term<Value> = typed.into();
+/// ```
+impl<T: Scalar> From<Term<T>> for Term<Value> {
+    fn from(term: Term<T>) -> Self {
+        match term {
+            Term::Variable { name } => Term::Variable { name },
+            Term::Constant(v) => Term::Constant(v.as_value()),
         }
     }
 }
@@ -442,9 +471,6 @@ mod tests {
     #[dialog_common::test]
     fn it_serializes_and_deserializes() {
         // Blank variables serialize as {"?": {}}
-        let any = Term::<Value>::default();
-        assert_eq!(serde_json::to_string(&any).unwrap(), r#"{"?":{}}"#);
-
         let string = Term::<String>::default();
         assert_eq!(serde_json::to_string(&string).unwrap(), r#"{"?":{}}"#);
 
@@ -455,19 +481,13 @@ mod tests {
             r#"{"?":{"name":"title"}}"#
         );
 
-        let _title = Term::<Value>::var("title");
-        assert_eq!(
-            serde_json::to_string(&_title).unwrap(),
-            r#"{"?":{"name":"title"}}"#
-        );
-
         // Constants serialize as plain values
         let constant = Term::Constant("hello".to_string());
         assert_eq!(serde_json::to_string(&constant).unwrap(), r#""hello""#);
 
         // Deserialization
         let json1 = r#"{"?":{}}"#;
-        let term: Term<Value> = serde_json::from_str(json1).unwrap();
+        let term: Term<String> = serde_json::from_str(json1).unwrap();
         assert_eq!(term, Term::default());
 
         let json2 = r#"{"?":{"name":"x"}}"#;
@@ -478,55 +498,50 @@ mod tests {
         let json3 = r#"{"?":{"name":"x","type":"Text"}}"#;
         let term: Term<String> = serde_json::from_str(json3).unwrap();
         assert_eq!(term, Term::<String>::var("x"));
-    }
 
-    #[dialog_common::test]
-    fn it_creates_term_from_value() {
-        let value = Value::String("test".to_string());
-        let term = Term::from(value.clone());
+        // Parameters handle dynamic serialization
+        let param = Parameter::blank();
+        assert_eq!(serde_json::to_string(&param).unwrap(), r#"{"?":{}}"#);
 
-        assert!(!term.is_variable());
-        assert!(term.is_constant());
-
-        if let Some(val) = term.as_constant() {
-            assert_eq!(*val, value);
-        } else {
-            panic!("Expected constant term");
-        }
+        let param = Parameter::var("title");
+        assert_eq!(
+            serde_json::to_string(&param).unwrap(),
+            r#"{"?":{"name":"title"}}"#
+        );
     }
 
     #[dialog_common::test]
     fn it_integrates_variable_system() {
         let string_term = Term::<String>::var("name");
-        let untyped_term = Term::<Value>::var("anything");
+        let entity_term = Term::<Entity>::var("anything");
 
         assert!(string_term.is_variable());
-        assert!(untyped_term.is_variable());
+        assert!(entity_term.is_variable());
 
         assert_eq!(string_term.name(), Some("name"));
         assert_eq!(string_term.content_type(), Some(Type::String));
 
-        assert_eq!(untyped_term.name(), Some("anything"));
-        assert_eq!(untyped_term.content_type(), None);
+        assert_eq!(entity_term.name(), Some("anything"));
+        assert_eq!(entity_term.content_type(), Some(Type::Entity));
+
+        // For untyped variables, use Parameter
+        let untyped = Parameter::var("anything");
+        assert_eq!(untyped.content_type(), None);
     }
 
     #[dialog_common::test]
     fn it_supports_turbofish_syntax() {
         let name_term = Term::<String>::var("name");
         let age_term = Term::<u64>::var("age");
-        let any_term = Term::<Value>::var("wildcard");
 
         assert!(name_term.is_variable());
         assert!(age_term.is_variable());
-        assert!(any_term.is_variable());
 
         assert_eq!(name_term.name(), Some("name"));
         assert_eq!(age_term.name(), Some("age"));
-        assert_eq!(any_term.name(), Some("wildcard"));
 
         assert_eq!(name_term.content_type(), Some(Type::String));
         assert_eq!(age_term.content_type(), Some(Type::UnsignedInt));
-        assert_eq!(any_term.content_type(), None);
     }
 
     #[dialog_common::test]
@@ -597,10 +612,6 @@ mod tests {
         let data_type = thing.content_type();
 
         assert_eq!(data_type, Some(Type::String));
-
-        let unknown = Term::<Value>::var("unknown");
-
-        assert_eq!(unknown.content_type(), None);
     }
 
     #[dialog_common::test]
@@ -608,9 +619,9 @@ mod tests {
         use crate::Premise;
         use crate::proposition::Proposition;
 
-        // Create two variable terms
-        let x = Term::<Value>::var("x");
-        let y = Term::<Value>::var("y");
+        // Create two variable terms — is() works on any Scalar type
+        let x = Term::<String>::var("x");
+        let y = Term::<String>::var("y");
 
         // Use is() to create an equality constraint
         let premise = x.is(y);
@@ -632,8 +643,8 @@ mod tests {
         use crate::proposition::Proposition;
 
         // Create a variable and a constant
-        let x = Term::<Value>::var("x");
-        let constant = Term::Constant(Value::from(42));
+        let x = Term::<u32>::var("x");
+        let constant = Term::Constant(42u32);
 
         // Use is() to create a constraint between variable and constant
         let premise = x.is(constant);

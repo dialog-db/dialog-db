@@ -294,8 +294,8 @@ mod tests {
     use crate::selection::Answer;
     use crate::the;
     use crate::{
-        Association, AttributeDescriptor, Cardinality, DeductiveRule, Negation, Parameters,
-        Premise, Proposition, Session, Term, Type, Value,
+        Association, AttributeDescriptor, Cardinality, DeductiveRule, Negation, Parameter,
+        Parameters, Premise, Proposition, Session, Term, Type, Value,
     };
 
     // Note: Async tests are commented out due to Rust recursion limit issues in test compilation
@@ -619,7 +619,7 @@ mod tests {
         let relation = RelationQuery::new(
             Term::Constant(the!("person/name")),
             Term::var("person"),
-            Term::Constant(Value::String("Alice".to_string())),
+            Parameter::from("Alice".to_string()),
             Term::blank(),
             None,
         );
@@ -780,7 +780,7 @@ mod tests {
         let mut terms = Parameters::new();
         terms.insert(
             "this".to_string(),
-            Term::Constant(Value::Entity(alice.clone())),
+            Parameter::Constant(Value::Entity(alice.clone())),
         );
         terms.insert("name".to_string(), Parameter::var("name"));
 
@@ -869,7 +869,7 @@ mod tests {
         terms.insert("this".to_string(), Parameter::var("entity"));
         terms.insert(
             "name".to_string(),
-            Term::Constant(Value::String("Bob".to_string())),
+            Parameter::from("Bob".to_string()),
         );
         terms.insert("age".to_string(), Parameter::var("age"));
 
@@ -958,9 +958,12 @@ mod tests {
         terms.insert("this".to_string(), Parameter::var("entity"));
         terms.insert(
             "name".to_string(),
-            Term::Constant(Value::String("Alice".to_string())),
+            Parameter::from("Alice".to_string()),
         );
-        terms.insert("age".to_string(), Term::Constant(Value::UnsignedInt(25)));
+        terms.insert(
+            "age".to_string(),
+            Parameter::from(25u32),
+        );
 
         let app = ConceptQuery {
             terms,

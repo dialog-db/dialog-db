@@ -5,6 +5,7 @@ use crate::artifact::{Type, TypeError, Value};
 use crate::error::{InconsistencyError, QueryError};
 use crate::parameter::Parameter;
 use crate::relation::query::RelationQuery;
+use crate::types::Typed;
 use crate::{Claim, Term, types::Scalar};
 
 use super::{Answers, Evidence, Factor, Factors, Selector};
@@ -331,7 +332,9 @@ impl Answer {
     /// Get a typed value from this answer.
     pub fn get<T>(&self, term: &Term<T>) -> Result<T, InconsistencyError>
     where
-        T: Scalar + std::convert::TryFrom<Value>,
+        T: Typed + Clone + 'static,
+        Parameter: for<'a> From<&'a Term<T>>,
+        T: std::convert::TryFrom<Value>,
     {
         let value = self.resolve(&Parameter::from(term))?;
         let value_type = value.data_type();

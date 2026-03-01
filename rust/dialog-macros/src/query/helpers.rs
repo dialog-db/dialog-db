@@ -6,16 +6,17 @@ use syn::{Attribute, Expr, Lit, Meta, Type};
 
 /// Generate the Type value for a field type in static attribute declarations.
 ///
-/// This uses the IntoType trait's const TYPE associated constant to determine
-/// the type at compile time. This works because IntoType::TYPE is a const,
+/// This uses the Typed trait's const TYPE associated constant to determine
+/// the type at compile time. This works because Typed::TYPE is a const,
 /// allowing proper type detection without string matching.
 ///
 /// Returns Option<Type> directly from the trait's TYPE constant:
 /// - Some(Type::String) for String types
-/// - None for Value types (accepts any type)
+/// - Some(Type::Entity) for Entity types
+/// - etc.
 pub fn type_to_value_data_type(ty: &Type) -> TokenStream {
     quote! {
-        <#ty as dialog_query::IntoType>::TYPE
+        <#ty as dialog_query::Typed>::TYPE
     }
 }
 

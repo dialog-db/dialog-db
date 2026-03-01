@@ -825,7 +825,7 @@ mod tests {
         let vae_app = RelationQuery::new(
             Term::var("the"),
             Term::var("person"),
-            Term::Constant(expected_winner_value.clone()),
+            Parameter::Constant(expected_winner_value.clone()),
             Term::var("cause"),
             Some(RelationDescriptor::new(
                 Some(Type::String),
@@ -855,7 +855,7 @@ mod tests {
         let vae_loser_app = RelationQuery::new(
             Term::var("the"),
             Term::var("person"),
-            Term::Constant(losing_value),
+            Parameter::Constant(losing_value),
             Term::var("cause"),
             Some(RelationDescriptor::new(
                 Some(Type::String),
@@ -1186,7 +1186,7 @@ mod tests {
         let query = RelationQuery::new(
             Term::Constant(the!("user/name")),
             alice.clone().into(),
-            Parameter::Constant(Value::String("Alice".into())),
+            Parameter::from("Alice".to_string()),
             Term::blank(),
             None,
         );
