@@ -425,8 +425,8 @@ mod tests {
             ),
         ]);
 
-        let name = Term::<Value>::var("name");
-        let age = Term::<Value>::var("age");
+        let name_param = Parameter::var("name");
+        let age_param = Parameter::var("age");
         let mut params = Parameters::new();
         params.insert("name".into(), Parameter::var("name"));
         params.insert("age".into(), Parameter::var("age"));
@@ -445,8 +445,8 @@ mod tests {
         let mut found_bob = false;
 
         for match_result in selection.iter() {
-            let person_name = match_result.resolve(&name)?;
-            let person_age = match_result.resolve(&age)?;
+            let person_name = match_result.resolve(&name_param)?;
+            let person_age = match_result.resolve(&age_param)?;
 
             match person_name {
                 Value::String(name_str) if name_str == "Alice" => {
@@ -545,8 +545,8 @@ mod tests {
 
         session.transact(vec![alice, bob]).await?;
 
-        let name = Term::<Value>::var("name");
-        let age = Term::<Value>::var("age");
+        let name_param = Parameter::var("name");
+        let age_param = Parameter::var("age");
         let mut params = Parameters::new();
         params.insert("name".into(), Parameter::var("name"));
         params.insert("age".into(), Parameter::var("age"));
@@ -565,8 +565,8 @@ mod tests {
         let mut found_bob = false;
 
         for match_result in selection.iter() {
-            let person_name = match_result.resolve(&name)?;
-            let person_age = match_result.resolve(&age)?;
+            let person_name = match_result.resolve(&name_param)?;
+            let person_age = match_result.resolve(&age_param)?;
 
             match person_name {
                 Value::String(name_str) if name_str == "Alice" => {
@@ -1314,7 +1314,7 @@ mod tests {
         let mut answer_bound = Answer::new();
         answer_bound
             .merge(Evidence::Parameter {
-                term: &Term::var("e"),
+                term: &Parameter::var("e"),
                 value: &Value::from(Entity::new().unwrap()),
             })
             .unwrap();
@@ -1468,7 +1468,7 @@ mod tests {
         let mut answer_bound = Answer::new();
         answer_bound
             .merge(Evidence::Parameter {
-                term: &Term::var("e"),
+                term: &Parameter::var("e"),
                 value: &Value::from(Entity::new().unwrap()),
             })
             .unwrap();
@@ -1532,7 +1532,7 @@ mod tests {
             .await?;
 
         let person = person_concept();
-        let name = Term::<Value>::var("name");
+        let name_param = Parameter::var("name");
         let mut params = Parameters::new();
         params.insert("name".into(), Parameter::var("name"));
         params.insert("age".into(), Parameter::var("age"));
@@ -1556,9 +1556,9 @@ mod tests {
 
         // Both runs should produce the same names
         let names1: std::collections::HashSet<_> =
-            results1.iter().map(|r| r.resolve(&name).unwrap()).collect();
+            results1.iter().map(|r| r.resolve(&name_param).unwrap()).collect();
         let names2: std::collections::HashSet<_> =
-            results2.iter().map(|r| r.resolve(&name).unwrap()).collect();
+            results2.iter().map(|r| r.resolve(&name_param).unwrap()).collect();
 
         assert_eq!(
             names1, names2,
@@ -1611,9 +1611,9 @@ mod tests {
 
         let person = person_concept();
 
-        let name = Term::<Value>::var("name");
-        let age = Term::<Value>::var("age");
-        let entity = Term::<Value>::var("this");
+        let name_param = Parameter::var("name");
+        let age_param = Parameter::var("age");
+        let entity_param = Parameter::var("this");
 
         let mut params = Parameters::new();
         params.insert("this".into(), Parameter::var("this"));
@@ -1625,7 +1625,7 @@ mod tests {
         // Evaluate with alice bound in the initial answer
         let mut answer = Answer::new();
         answer.merge(Evidence::Parameter {
-            term: &entity,
+            term: &entity_param,
             value: &Value::from(alice.clone()),
         })?;
 
@@ -1637,12 +1637,12 @@ mod tests {
 
         assert_eq!(results.len(), 1, "Should find exactly one person (Alice)");
         assert_eq!(
-            results[0].resolve(&name)?,
+            results[0].resolve(&name_param)?,
             Value::String("Alice".into()),
             "Should resolve to Alice"
         );
         assert_eq!(
-            results[0].resolve(&age)?,
+            results[0].resolve(&age_param)?,
             Value::UnsignedInt(30),
             "Should have Alice's age"
         );

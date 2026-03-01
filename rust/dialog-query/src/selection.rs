@@ -16,7 +16,7 @@ pub use selector::*;
 mod tests {
     use super::*;
     use crate::Claim;
-    use crate::Term;
+    use crate::{Parameter, Term};
     use crate::artifact::{Attribute, Entity, Value};
     use crate::error::InconsistencyError;
     use std::sync::Arc;
@@ -75,7 +75,7 @@ mod tests {
         let factor = create_test_factor(Selector::Is, Arc::clone(&fact));
 
         let mut answer = Answer::new();
-        let name_term = Term::<Value>::var("name");
+        let name_term = Parameter::var("name");
 
         // Initially should not contain the variable
         assert!(!answer.contains(&name_term));
@@ -88,7 +88,7 @@ mod tests {
     #[dialog_common::test]
     fn it_excludes_unbound_variable() {
         let answer = Answer::new();
-        let name_term = Term::<Value>::var("name");
+        let name_term = Parameter::var("name");
 
         // Should not contain unbound variable
         assert!(!answer.contains(&name_term));
@@ -97,19 +97,19 @@ mod tests {
     #[dialog_common::test]
     fn it_contains_constant() {
         let answer = Answer::new();
-        let constant_term = Term::Constant(Value::String("constant_value".to_string()));
+        let constant_param = Parameter::Constant(Value::String("constant_value".to_string()));
 
         // Constants are always "bound"
-        assert!(answer.contains(&constant_term));
+        assert!(answer.contains(&constant_param));
     }
 
     #[dialog_common::test]
     fn it_excludes_blank_variable() {
         let answer = Answer::new();
-        let blank_term = Term::<Value>::blank();
+        let blank_param = Parameter::blank();
 
         // Blank variables (Any) are never "bound"
-        assert!(!answer.contains(&blank_term));
+        assert!(!answer.contains(&blank_param));
     }
 
     #[dialog_common::test]
@@ -125,15 +125,15 @@ mod tests {
         let factor = create_test_factor(Selector::Is, Arc::clone(&fact));
 
         let mut answer = Answer::new();
-        let name_term = Term::<String>::var("name");
-        let name_term_value = Term::<Value>::var("name");
+        let name_param = Parameter::var("name");
+        
 
         // Assign the value
-        answer.assign(&name_term_value, &factor).unwrap();
+        answer.assign(&name_param, &factor).unwrap();
 
         // Resolve it using the type-safe method
         let result = answer
-            .resolve(&name_term)
+            .resolve(&name_param)
             .and_then(|v| String::try_from(v).map_err(InconsistencyError::TypeConversion));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Alice");
@@ -152,15 +152,15 @@ mod tests {
         let factor = create_test_factor(Selector::Is, Arc::clone(&fact));
 
         let mut answer = Answer::new();
-        let age_term = Term::<u32>::var("age");
-        let age_term_value = Term::<Value>::var("age");
+        let age_param = Parameter::var("age");
+        
 
         // Assign the value
-        answer.assign(&age_term_value, &factor).unwrap();
+        answer.assign(&age_param, &factor).unwrap();
 
         // Resolve it using the type-safe method
         let result = answer
-            .resolve(&age_term)
+            .resolve(&age_param)
             .and_then(|v| u32::try_from(v).map_err(InconsistencyError::TypeConversion));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 25);
@@ -179,15 +179,15 @@ mod tests {
         let factor = create_test_factor(Selector::Is, Arc::clone(&fact));
 
         let mut answer = Answer::new();
-        let score_term = Term::<i32>::var("score");
-        let score_term_value = Term::<Value>::var("score");
+        let score_param = Parameter::var("score");
+        
 
         // Assign the value
-        answer.assign(&score_term_value, &factor).unwrap();
+        answer.assign(&score_param, &factor).unwrap();
 
         // Resolve it using the type-safe method
         let result = answer
-            .resolve(&score_term)
+            .resolve(&score_param)
             .and_then(|v| i32::try_from(v).map_err(InconsistencyError::TypeConversion));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), -10);
@@ -206,15 +206,15 @@ mod tests {
         let factor = create_test_factor(Selector::Is, Arc::clone(&fact));
 
         let mut answer = Answer::new();
-        let active_term = Term::<bool>::var("active");
-        let active_term_value = Term::<Value>::var("active");
+        let active_param = Parameter::var("active");
+        
 
         // Assign the value
-        answer.assign(&active_term_value, &factor).unwrap();
+        answer.assign(&active_param, &factor).unwrap();
 
         // Resolve it using the type-safe method
         let result = answer
-            .resolve(&active_term)
+            .resolve(&active_param)
             .and_then(|v| bool::try_from(v).map_err(InconsistencyError::TypeConversion));
         assert!(result.is_ok());
         assert!(result.unwrap());
@@ -234,15 +234,15 @@ mod tests {
         let factor = create_test_factor(Selector::Is, Arc::clone(&fact));
 
         let mut answer = Answer::new();
-        let entity_term = Term::<Entity>::var("entity_id");
-        let entity_term_value = Term::<Value>::var("entity_id");
+        let entity_param = Parameter::var("entity_id");
+        
 
         // Assign the value
-        answer.assign(&entity_term_value, &factor).unwrap();
+        answer.assign(&entity_param, &factor).unwrap();
 
         // Resolve it using the type-safe method
         let result = answer
-            .resolve(&entity_term)
+            .resolve(&entity_param)
             .and_then(|v| Entity::try_from(v).map_err(InconsistencyError::TypeConversion));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), entity_value);
@@ -251,11 +251,11 @@ mod tests {
     #[dialog_common::test]
     fn it_resolves_constant() {
         let answer = Answer::new();
-        let constant_term = Term::Constant("constant_value".to_string());
+        let constant_param = Parameter::Constant(Value::String("constant_value".to_string()));
 
         // Resolve constant directly
         let result = answer
-            .resolve(&constant_term)
+            .resolve(&constant_param)
             .and_then(|v| String::try_from(v).map_err(InconsistencyError::TypeConversion));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "constant_value");
@@ -264,11 +264,11 @@ mod tests {
     #[dialog_common::test]
     fn it_errors_on_unbound_variable() {
         let answer = Answer::new();
-        let name_term = Term::<String>::var("name");
+        let name_param = Parameter::var("name");
 
         // Try to resolve unbound variable (should fail)
         let result = answer
-            .resolve(&name_term)
+            .resolve(&name_param)
             .and_then(|v| String::try_from(v).map_err(InconsistencyError::TypeConversion));
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -282,11 +282,11 @@ mod tests {
     #[dialog_common::test]
     fn it_errors_on_blank_variable() {
         let answer = Answer::new();
-        let blank_term = Term::<String>::blank();
+        let blank_param = Parameter::blank();
 
         // Try to resolve blank variable (should fail)
         let result = answer
-            .resolve(&blank_term)
+            .resolve(&blank_param)
             .and_then(|v| String::try_from(v).map_err(InconsistencyError::TypeConversion));
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -308,15 +308,14 @@ mod tests {
         let factor = create_test_factor(Selector::Is, Arc::clone(&fact));
 
         let mut answer = Answer::new();
-        let name_term_value = Term::<Value>::var("name");
+        let name_param = Parameter::var("name");
 
         // Assign a string value
-        answer.assign(&name_term_value, &factor).unwrap();
+        answer.assign(&name_param, &factor).unwrap();
 
         // Try to resolve it as a u32 (should fail)
-        let age_term = Term::<u32>::var("name");
         let result = answer
-            .resolve(&age_term)
+            .resolve(&name_param)
             .and_then(|v| u32::try_from(v).map_err(InconsistencyError::TypeConversion));
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -348,7 +347,7 @@ mod tests {
         let factor2 = create_test_factor(Selector::Is, Arc::clone(&fact2));
 
         let mut answer = Answer::new();
-        let name_term = Term::<Value>::var("name");
+        let name_term = Parameter::var("name");
 
         // Assign the same value from two different facts
         answer.assign(&name_term, &factor1).unwrap();
@@ -410,21 +409,21 @@ mod tests {
 
         // Assign all values using chaining
         answer
-            .assign(&Term::<Value>::var("name"), &name_factor)
+            .assign(&Parameter::var("name"), &name_factor)
             .unwrap();
         answer
-            .assign(&Term::<Value>::var("age"), &age_factor)
+            .assign(&Parameter::var("age"), &age_factor)
             .unwrap();
         answer
-            .assign(&Term::<Value>::var("active"), &active_factor)
+            .assign(&Parameter::var("active"), &active_factor)
             .unwrap();
 
         // Resolve all values with correct types
         let name_result =
-            String::try_from(answer.resolve::<String>(&Term::var("name")).unwrap()).unwrap();
-        let age_result = u32::try_from(answer.resolve::<u32>(&Term::var("age")).unwrap()).unwrap();
+            String::try_from(answer.resolve(&Parameter::var("name")).unwrap()).unwrap();
+        let age_result = u32::try_from(answer.resolve(&Parameter::var("age")).unwrap()).unwrap();
         let active_result =
-            bool::try_from(answer.resolve::<bool>(&Term::var("active")).unwrap()).unwrap();
+            bool::try_from(answer.resolve(&Parameter::var("active")).unwrap()).unwrap();
 
         assert_eq!(name_result, "Bob");
         assert_eq!(age_result, 30);
@@ -456,8 +455,8 @@ mod tests {
 
         // Use extend to assign multiple values at once
         let assignments = vec![
-            (Term::<Value>::var("name"), name_factor),
-            (Term::<Value>::var("age"), age_factor),
+            (Parameter::var("name"), name_factor),
+            (Parameter::var("age"), age_factor),
         ];
 
         let mut answer = Answer::new();
@@ -465,8 +464,8 @@ mod tests {
 
         // Verify all values were assigned
         let name_result =
-            String::try_from(answer.resolve::<String>(&Term::var("name")).unwrap()).unwrap();
-        let age_result = u32::try_from(answer.resolve::<u32>(&Term::var("age")).unwrap()).unwrap();
+            String::try_from(answer.resolve(&Parameter::var("name")).unwrap()).unwrap();
+        let age_result = u32::try_from(answer.resolve(&Parameter::var("age")).unwrap()).unwrap();
 
         assert_eq!(name_result, "Charlie");
         assert_eq!(age_result, 35);

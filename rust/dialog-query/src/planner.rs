@@ -278,7 +278,7 @@ mod tests {
         use crate::relation::descriptor::RelationDescriptor;
         use crate::relation::query::RelationQuery;
         use crate::session::Session;
-        use crate::{Association, Cardinality, Proposition, Term, Value, the};
+        use crate::{Association, Cardinality, Parameter, Proposition, Term, Value, the};
         use dialog_artifacts::{Artifacts, Entity};
         use dialog_storage::MemoryStorageBackend;
 
@@ -343,15 +343,15 @@ mod tests {
 
         assert_eq!(selection.len(), 2, "Should find 2 people");
 
-        let name_var: Term<Value> = Term::var("name");
-        let age_var: Term<Value> = Term::var("age");
+        let name_param = Parameter::var("name");
+        let age_param = Parameter::var("age");
 
         let mut found_alice = false;
         let mut found_bob = false;
 
         for match_result in selection.iter() {
-            let name = match_result.resolve(&name_var)?;
-            let age = match_result.resolve(&age_var)?;
+            let name = match_result.resolve(&name_param)?;
+            let age = match_result.resolve(&age_param)?;
 
             match name {
                 Value::String(n) if n == "Alice" => {

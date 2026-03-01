@@ -97,7 +97,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::<bool>::var("result"))
+                .resolve(&Parameter::var("result"))
                 .ok()
                 .and_then(|v| bool::try_from(v).ok()),
             Some(true)
@@ -125,7 +125,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::<bool>::var("result"))
+                .resolve(&Parameter::var("result"))
                 .ok()
                 .and_then(|v| bool::try_from(v).ok()),
             Some(false)
@@ -153,7 +153,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::<bool>::var("result"))
+                .resolve(&Parameter::var("result"))
                 .ok()
                 .and_then(|v| bool::try_from(v).ok()),
             Some(false)
@@ -181,7 +181,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::<bool>::var("result"))
+                .resolve(&Parameter::var("result"))
                 .ok()
                 .and_then(|v| bool::try_from(v).ok()),
             Some(true)
@@ -209,7 +209,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::<bool>::var("result"))
+                .resolve(&Parameter::var("result"))
                 .ok()
                 .and_then(|v| bool::try_from(v).ok()),
             Some(false)
@@ -232,7 +232,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::<bool>::var("result"))
+                .resolve(&Parameter::var("result"))
                 .ok()
                 .and_then(|v| bool::try_from(v).ok()),
             Some(false)
@@ -256,7 +256,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::<bool>::var("result"))
+                .resolve(&Parameter::var("result"))
                 .ok()
                 .and_then(|v| bool::try_from(v).ok()),
             Some(true)
@@ -296,7 +296,7 @@ mod tests {
         let final_result = &not_results[0];
         assert_eq!(
             final_result
-                .resolve(&Term::<bool>::var("final_result"))
+                .resolve(&Parameter::var("final_result"))
                 .ok()
                 .and_then(|v| bool::try_from(v).ok()),
             Some(true)

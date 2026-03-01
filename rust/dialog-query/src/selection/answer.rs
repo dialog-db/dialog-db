@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::artifact::{Type, TypeError, Value};
 use crate::error::{InconsistencyError, QueryError};
+use crate::parameter::Parameter;
 use crate::relation::query::RelationQuery;
 use crate::{Claim, Term, types::Scalar};
 
@@ -87,13 +88,13 @@ impl Answer {
         // Try to extract from a named variable conclusion first
         // This gives us the full relation with all its components
         if let Term::Variable { name: Some(_), .. } = application.of()
-            && let Some(factors) = self.resolve_factors(&application.of().as_unknown())
+            && let Some(factors) = self.resolve_factors(&Parameter::from(application.of()))
         {
             return Ok(Claim::from(factors));
         }
 
         if let Term::Variable { name: Some(_), .. } = application.is()
-            && let Some(factors) = self.resolve_factors(&application.is().as_unknown())
+            && let Some(factors) = self.resolve_factors(&Parameter::from(application.is()))
         {
             return Ok(Claim::from(factors));
         }
@@ -118,7 +119,7 @@ impl Answer {
                 let application = Arc::new(application.to_owned());
 
                 self.assign(
-                    &application.the().as_unknown(),
+                    &Parameter::from(application.the()),
                     &Factor::Selected {
                         selector: Selector::The,
                         application: application.clone(),
@@ -126,7 +127,7 @@ impl Answer {
                     },
                 )?;
                 self.assign(
-                    &application.of().as_unknown(),
+                    &Parameter::from(application.of()),
                     &Factor::Selected {
                         selector: Selector::Of,
                         application: application.clone(),
@@ -134,7 +135,7 @@ impl Answer {
                     },
                 )?;
                 self.assign(
-                    &application.is().as_unknown(),
+                    &Parameter::from(application.is()),
                     &Factor::Selected {
                         selector: Selector::Is,
                         application: application.clone(),
@@ -142,7 +143,7 @@ impl Answer {
                     },
                 )?;
                 self.assign(
-                    &application.cause().as_unknown(),
+                    &Parameter::from(application.cause()),
                     &Factor::Selected {
                         selector: Selector::Cause,
                         application,
@@ -174,52 +175,27 @@ impl Answer {
         }
     }
 
-    /// Look up the factors bound to a named variable term.
-    pub fn lookup(&self, term: &Term<Value>) -> Option<&Factors> {
-        match term {
-            Term::Variable {
+    /// Look up the factors bound to a named variable parameter.
+    pub fn lookup(&self, param: &Parameter) -> Option<&Factors> {
+        match param {
+            Parameter::Variable {
                 name: Some(key), ..
             } => self.conclusions.get(key),
-            Term::Variable { name: None, .. } => None,
-            Term::Constant(_) => None,
+            _ => None,
         }
     }
 
-    /// Assign a term to a factor - just calls conclude() which handles all cases.
-    /// This is provided for backward compatibility.
+    /// Assign a parameter to a factor.
     pub fn assign(
         &mut self,
-        term: &Term<Value>,
+        param: &Parameter,
         factor: &Factor,
     ) -> Result<(), InconsistencyError> {
-        self.conclude(term, factor)
-    }
-
-    /// Extends this answer by assigning multiple term-factor pairs.
-    pub fn extend<I>(&mut self, assignments: I) -> Result<(), InconsistencyError>
-    where
-        I: IntoIterator<Item = (Term<Value>, Factor)>,
-    {
-        for (term, factor) in assignments {
-            self.assign(&term, &factor)?;
-        }
-        Ok(())
-    }
-
-    /// Conclude a value for a named variable from a factor.
-    /// This binds the variable to the value with provenance tracking.
-    /// Ignores blank variables and constants (no-op for those).
-    pub fn conclude(
-        &mut self,
-        term: &Term<Value>,
-        factor: &Factor,
-    ) -> Result<(), InconsistencyError> {
-        match term {
-            Term::Variable {
+        match param {
+            Parameter::Variable {
                 name: Some(name), ..
             } => {
                 if let Some(factors) = self.conclusions.get_mut(name) {
-                    // Check if the new factor's content matches existing content
                     if factors.content() != factor.content() {
                         Err(InconsistencyError::AssignmentError(format!(
                             "Can not set {:?} to {:?} because it is already set to {:?}.",
@@ -228,7 +204,6 @@ impl Answer {
                             factors.content()
                         )))
                     } else {
-                        // Add the factor (idempotent if already present)
                         factors.add(factor.clone());
                         if let Factor::Selected {
                             application, fact, ..
@@ -236,7 +211,6 @@ impl Answer {
                         {
                             self.record(application.as_ref(), fact.clone())?;
                         }
-
                         Ok(())
                     }
                 } else {
@@ -245,69 +219,83 @@ impl Answer {
                     Ok(())
                 }
             }
-            Term::Variable { name: None, .. } | Term::Constant(_) => {
-                // Blank variables and constants are ignored - no-op
-                Ok(())
-            }
+            Parameter::Variable { name: None, .. } | Parameter::Constant(_) => Ok(()),
         }
     }
 
-    /// Returns true if term can be read from this answer.
-    pub fn contains<T: Scalar>(&self, term: &Term<T>) -> bool {
-        match term {
-            Term::Variable { name, .. } => {
-                if let Some(key) = name {
-                    self.conclusions.contains_key(key)
-                } else {
-                    // We don't capture values for Any
-                    false
-                }
-            }
-            Term::Constant(_) => true, // Constants are always "bound"
+    /// Extends this answer by assigning multiple parameter-factor pairs.
+    pub fn extend<I>(&mut self, assignments: I) -> Result<(), InconsistencyError>
+    where
+        I: IntoIterator<Item = (Parameter, Factor)>,
+    {
+        for (param, factor) in assignments {
+            self.assign(&param, &factor)?;
+        }
+        Ok(())
+    }
+
+    /// Returns true if the parameter is bound in this answer.
+    pub fn contains(&self, param: &Parameter) -> bool {
+        match param {
+            Parameter::Variable {
+                name: Some(key), ..
+            } => self.conclusions.contains_key(key),
+            Parameter::Variable { name: None, .. } => false,
+            Parameter::Constant(_) => true,
         }
     }
 
-    /// Resolves factors that were assigned to the given term.
-    pub fn resolve_factors<T: Scalar>(&self, term: &Term<T>) -> Option<&Factors> {
-        match term {
-            Term::Variable {
+    /// Returns true if the term is bound in this answer.
+    pub fn contains_term<T: Scalar>(&self, term: &Term<T>) -> bool {
+        self.contains(&Parameter::from(term))
+    }
+
+    /// Resolves factors that were assigned to the given parameter.
+    pub fn resolve_factors(&self, param: &Parameter) -> Option<&Factors> {
+        match param {
+            Parameter::Variable {
                 name: Some(name), ..
             } => self.conclusions.get(name),
-            Term::Variable { name: None, .. } => None,
-            Term::Constant(_) => None,
+            _ => None,
         }
     }
 
-    /// Resolve a term to its Value without type conversion.
+    /// Resolve a parameter to its Value.
     ///
     /// For variables, looks up the binding and returns the raw Value.
-    /// For constants, converts the constant to a Value.
+    /// For constants, returns the constant value.
     ///
     /// Returns an error if the variable is not bound.
-    pub fn resolve<T>(&self, term: &Term<T>) -> Result<Value, InconsistencyError>
-    where
-        T: Scalar,
-    {
-        match term {
-            Term::Variable { name, .. } => {
-                if let Some(key) = name {
-                    if let Some(factors) = self.conclusions.get(key) {
-                        Ok(factors.content().clone())
-                    } else {
-                        Err(InconsistencyError::UnboundVariableError(key.clone()))
-                    }
+    pub fn resolve(&self, param: &Parameter) -> Result<Value, InconsistencyError> {
+        match param {
+            Parameter::Variable {
+                name: Some(key), ..
+            } => {
+                if let Some(factors) = self.conclusions.get(key) {
+                    Ok(factors.content().clone())
                 } else {
-                    Err(InconsistencyError::UnboundVariableError("_".into()))
+                    Err(InconsistencyError::UnboundVariableError(key.clone()))
                 }
             }
-            Term::Constant(value) => Ok(value.as_value()),
+            Parameter::Variable { name: None, .. } => {
+                Err(InconsistencyError::UnboundVariableError("_".into()))
+            }
+            Parameter::Constant(value) => Ok(value.clone()),
         }
     }
 
-    /// Resolves a term to its typed value.
+    /// Resolve a typed term to its Value.
+    ///
+    /// Convenience wrapper that converts the term to a Parameter first.
+    pub fn resolve_term_value<T: Scalar>(
+        &self,
+        term: &Term<T>,
+    ) -> Result<Value, InconsistencyError> {
+        self.resolve(&Parameter::from(term))
+    }
+
     /// Resolve a variable term into a constant term if this answer has a
     /// binding for it. Otherwise, return the original term.
-    /// This is similar to `Application::realize` but works with Answer bindings.
     pub fn resolve_term<T: Scalar>(&self, term: &Term<T>) -> Term<T> {
         match term {
             Term::Variable { name, .. } => {
@@ -317,7 +305,6 @@ impl Answer {
                         if let Ok(converted) = T::try_from(value) {
                             Term::Constant(converted)
                         } else {
-                            // Conversion failed - return original term
                             term.clone()
                         }
                     } else {
@@ -331,9 +318,7 @@ impl Answer {
         }
     }
 
-    /// Convenience method to set a variable to a value without provenance tracking.
-    /// This creates a Parameter factor for the value.
-    /// Useful for testing and simple cases where provenance isn't needed.
+    /// Set a variable to a value without provenance tracking.
     pub fn set<T: Scalar>(mut self, term: Term<T>, value: T) -> Result<Self, InconsistencyError>
     where
         Value: From<T>,
@@ -341,17 +326,16 @@ impl Answer {
         let factor = Factor::Parameter {
             value: value.into(),
         };
-        self.assign(&term.as_unknown(), &factor)?;
+        self.assign(&Parameter::from(&term), &factor)?;
         Ok(self)
     }
 
-    /// Convenience method to get a value for a variable.
-    /// Convenience method to get a typed value from this answer.
+    /// Get a typed value from this answer.
     pub fn get<T>(&self, term: &Term<T>) -> Result<T, InconsistencyError>
     where
         T: Scalar + std::convert::TryFrom<Value>,
     {
-        let value = self.resolve(term)?;
+        let value = self.resolve(&Parameter::from(term))?;
         let value_type = value.data_type();
         T::try_from(value).map_err(|_| {
             InconsistencyError::TypeConversion(TypeError::TypeMismatch(

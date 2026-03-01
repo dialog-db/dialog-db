@@ -107,8 +107,8 @@ impl Equality {
     /// A stream of answers that satisfy the constraint, with any necessary
     /// variable bindings added through inference.
     pub fn evaluate<M: Answers>(self, answers: M) -> impl Answers {
-        let this = self.this;
-        let is = self.is;
+        let this = Parameter::from(self.this);
+        let is = Parameter::from(self.is);
         try_stream! {
             for await each in answers {
                 let input = each?;
@@ -175,11 +175,11 @@ mod tests {
 
         let mut answer = Answer::new();
         answer.merge(Evidence::Parameter {
-            term: &Term::var("x"),
+            term: &Parameter::var("x"),
             value: &Value::from(42),
         })?;
         answer.merge(Evidence::Parameter {
-            term: &Term::var("y"),
+            term: &Parameter::var("y"),
             value: &Value::from(42),
         })?;
 
@@ -188,7 +188,7 @@ mod tests {
 
         assert_eq!(results.len(), 1, "Should have one result");
         assert_eq!(
-            results[0].resolve(&Term::<Value>::var("x"))?,
+            results[0].resolve(&Parameter::var("x"))?,
             Value::from(42),
             "x should still be 42"
         );
@@ -202,11 +202,11 @@ mod tests {
 
         let mut answer = Answer::new();
         answer.merge(Evidence::Parameter {
-            term: &Term::var("x"),
+            term: &Parameter::var("x"),
             value: &Value::from(42),
         })?;
         answer.merge(Evidence::Parameter {
-            term: &Term::var("y"),
+            term: &Parameter::var("y"),
             value: &Value::from(99),
         })?;
 
@@ -228,7 +228,7 @@ mod tests {
 
         let mut answer = Answer::new();
         answer.merge(Evidence::Parameter {
-            term: &Term::var("y"),
+            term: &Parameter::var("y"),
             value: &Value::from(42),
         })?;
 
@@ -237,7 +237,7 @@ mod tests {
 
         assert_eq!(results.len(), 1, "Should have one result");
         assert_eq!(
-            results[0].resolve(&Term::<Value>::var("x"))?,
+            results[0].resolve(&Parameter::var("x"))?,
             Value::from(42),
             "x should be inferred as 42"
         );

@@ -84,7 +84,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::<String>::var("str"))
+                .resolve(&Parameter::var("str"))
                 .ok()
                 .and_then(|v| String::try_from(v).ok()),
             Some("42".to_string())
@@ -107,7 +107,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::<String>::var("str"))
+                .resolve(&Parameter::var("str"))
                 .ok()
                 .and_then(|v| String::try_from(v).ok()),
             Some("true".to_string())
@@ -132,7 +132,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::<String>::var("str"))
+                .resolve(&Parameter::var("str"))
                 .ok()
                 .and_then(|v| String::try_from(v).ok()),
             Some("hello".to_string())
@@ -157,7 +157,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(
-            String::try_from(result.resolve(&Term::<String>::var("str"))?)?,
+            String::try_from(result.resolve(&Parameter::var("str"))?)?,
             entity.to_string()
         );
         Ok(())
@@ -180,7 +180,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::<u32>::var("num"))
+                .resolve(&Parameter::var("num"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(123)
@@ -205,7 +205,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::<u32>::var("num"))
+                .resolve(&Parameter::var("num"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(456)
