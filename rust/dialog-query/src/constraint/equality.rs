@@ -31,21 +31,21 @@ const EQUALITY_COST: usize = 1;
 /// # Example
 /// ```no_run
 /// # use dialog_query::constraint::equality::Equality;
-/// # use dialog_query::Term;
+/// # use dialog_query::Parameter;
 /// // x must equal y
-/// let eq = Equality::new(Term::var("x"), Term::var("y"));
+/// let eq = Equality::new(Parameter::var("x"), Parameter::var("y"));
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct Equality {
-    /// The left-hand term of the equality constraint
-    pub this: Term<Value>,
-    /// The right-hand term of the equality constraint
-    pub is: Term<Value>,
+    /// The left-hand parameter of the equality constraint
+    pub this: Parameter,
+    /// The right-hand parameter of the equality constraint
+    pub is: Parameter,
 }
 
 impl Equality {
-    /// Creates a new equality constraint between two terms.
-    pub fn new(this: Term<Value>, is: Term<Value>) -> Self {
+    /// Creates a new equality constraint between two parameters.
+    pub fn new(this: Parameter, is: Parameter) -> Self {
         Self { this, is }
     }
 
@@ -81,7 +81,7 @@ impl Equality {
     /// Returns `Some(cost)` if the constraint can be evaluated (at least one term is bound).
     /// Returns `None` if the constraint cannot be evaluated yet (neither term is bound).
     pub fn estimate(&self, env: &Environment) -> Option<usize> {
-        if env.contains(&self.this) | env.contains(&self.is) {
+        if env.contains_param(&self.this) | env.contains_param(&self.is) {
             Some(EQUALITY_COST)
         } else {
             None
@@ -91,8 +91,8 @@ impl Equality {
     /// Returns the parameters for this constraint.
     pub fn parameters(&self) -> Parameters {
         let mut params = Parameters::new();
-        params.insert("this".to_string(), Parameter::from(&self.this));
-        params.insert("is".to_string(), Parameter::from(&self.is));
+        params.insert("this".to_string(), self.this.clone());
+        params.insert("is".to_string(), self.is.clone());
         params
     }
 
@@ -107,8 +107,8 @@ impl Equality {
     /// A stream of answers that satisfy the constraint, with any necessary
     /// variable bindings added through inference.
     pub fn evaluate<M: Answers>(self, answers: M) -> impl Answers {
-        let this = Parameter::from(self.this);
-        let is = Parameter::from(self.is);
+        let this = self.this;
+        let is = self.is;
         try_stream! {
             for await each in answers {
                 let input = each?;
@@ -171,7 +171,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_passes_when_both_terms_equal() -> Result<(), QueryError> {
-        let constraint = Equality::new(Term::var("x"), Term::var("y"));
+        let constraint = Equality::new(Parameter::var("x"), Parameter::var("y"));
 
         let mut answer = Answer::new();
         answer.merge(Evidence::Parameter {
@@ -198,7 +198,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_filters_when_terms_differ() -> Result<(), QueryError> {
-        let constraint = Equality::new(Term::var("x"), Term::var("y"));
+        let constraint = Equality::new(Parameter::var("x"), Parameter::var("y"));
 
         let mut answer = Answer::new();
         answer.merge(Evidence::Parameter {
@@ -224,7 +224,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_infers_this_from_is() -> Result<(), QueryError> {
-        let constraint = Equality::new(Term::var("x"), Term::var("y"));
+        let constraint = Equality::new(Parameter::var("x"), Parameter::var("y"));
 
         let mut answer = Answer::new();
         answer.merge(Evidence::Parameter {
@@ -247,7 +247,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_estimates_zero_cost_when_bound() {
-        let constraint = Equality::new(Term::var("x"), Term::var("y"));
+        let constraint = Equality::new(Parameter::var("x"), Parameter::var("y"));
 
         let mut env = Environment::new();
         env.add(&Term::<Value>::var("x"));
@@ -261,7 +261,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_estimates_none_when_unbound() {
-        let constraint = Equality::new(Term::var("x"), Term::var("y"));
+        let constraint = Equality::new(Parameter::var("x"), Parameter::var("y"));
         let env = Environment::new();
 
         assert_eq!(

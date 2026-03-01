@@ -12,6 +12,7 @@ use std::fmt;
 
 use crate::artifact::{Attribute as ArtifactAttribute, Cause, Entity, Type, TypeError, Value};
 use crate::constraint::{Constraint, Equality};
+use crate::parameter::Parameter;
 use crate::error::SyntaxError;
 use crate::proposition::Proposition;
 use crate::types::{IntoType, Scalar};
@@ -174,7 +175,7 @@ where
     /// ```
     pub fn is<Other: Into<Term<T>>>(self, other: Other) -> Premise {
         Premise::Assert(Proposition::Constraint(Constraint::Equality(
-            Equality::new(self.as_unknown(), other.into().as_unknown()),
+            Equality::new(Parameter::from(&self), Parameter::from(&other.into())),
         )))
     }
 

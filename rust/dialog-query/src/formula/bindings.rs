@@ -428,7 +428,7 @@ mod tests {
 
         // Term is a constant 42 — writing 42 should succeed (consistent)
         let mut terms = Parameters::new();
-        terms.insert("value".to_string(), Term::from(42u32).as_unknown());
+        terms.insert("value".to_string(), Term::from(42u32));
 
         let source = Answer::new();
         let formula = test_formula();
@@ -447,7 +447,7 @@ mod tests {
 
         // Term is a constant 99 — writing 8 should fail (inconsistent)
         let mut terms = Parameters::new();
-        terms.insert("value".to_string(), Term::from(99u32).as_unknown());
+        terms.insert("value".to_string(), Term::from(99u32));
 
         let source = Answer::new();
         let formula = test_formula();
