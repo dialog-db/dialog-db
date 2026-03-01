@@ -107,6 +107,37 @@ impl Parameter {
             _ => None,
         }
     }
+
+    /// Returns `true` if this parameter is bound in the given environment.
+    ///
+    /// Constants are always bound. Named variables are bound if their name
+    /// appears in the environment. Anonymous variables are never bound.
+    pub fn is_bound(&self, env: &crate::Environment) -> bool {
+        match self {
+            Parameter::Constant(_) => true,
+            Parameter::Variable { name: None, .. } => false,
+            Parameter::Variable { name: Some(n), .. } => env.contains(n),
+        }
+    }
+
+    /// Adds this parameter's variable name to the environment.
+    ///
+    /// Only named variables are added; constants and blanks are ignored.
+    pub fn bind(&self, env: &mut crate::Environment) {
+        if let Parameter::Variable { name: Some(n), .. } = self {
+            env.add(n.clone());
+        }
+    }
+
+    /// Removes this parameter's variable name from the environment.
+    ///
+    /// Returns `true` if the name was present. Constants and blanks return `false`.
+    pub fn unbind(&self, env: &mut crate::Environment) -> bool {
+        match self {
+            Parameter::Variable { name: Some(n), .. } => env.remove(n),
+            _ => false,
+        }
+    }
 }
 
 impl<T: Scalar> From<Term<T>> for Parameter {

@@ -81,7 +81,7 @@ impl Equality {
     /// Returns `Some(cost)` if the constraint can be evaluated (at least one term is bound).
     /// Returns `None` if the constraint cannot be evaluated yet (neither term is bound).
     pub fn estimate(&self, env: &Environment) -> Option<usize> {
-        if env.contains_param(&self.this) | env.contains_param(&self.is) {
+        if self.this.is_bound(env) | self.is.is_bound(env) {
             Some(EQUALITY_COST)
         } else {
             None
@@ -250,7 +250,7 @@ mod tests {
         let constraint = Equality::new(Parameter::var("x"), Parameter::var("y"));
 
         let mut env = Environment::new();
-        env.add(&Term::<Value>::var("x"));
+        env.add("x");
 
         assert_eq!(
             constraint.estimate(&env),

@@ -1,11 +1,10 @@
 //! Error types for the query engine
 
 use crate::artifact::{DialogArtifactsError, Type, TypeError as ArtifactTypeError, Value};
+pub use crate::environment::Environment;
 use crate::parameter::Parameter;
-pub use crate::planner::Prerequisites;
 pub use crate::proposition::Proposition;
 pub use crate::rule::deductive::DeductiveRule;
-use crate::term::Term;
 pub use thiserror::Error;
 
 /// Errors that can occur during query planning and execution
@@ -51,10 +50,10 @@ pub enum QueryError {
     VariableInconsistency {
         /// The parameter name where the inconsistency was found
         parameter: String,
-        /// The actual term bound to the variable
-        actual: Term<Value>,
-        /// The expected term for the variable
-        expected: Term<Value>,
+        /// The actual value bound to the variable
+        actual: Parameter,
+        /// The expected value for the variable
+        expected: Parameter,
     },
 
     /// A variable appears in both input and output of a formula
@@ -148,8 +147,8 @@ impl From<InconsistencyError> for QueryError {
             InconsistencyError::TypeMismatch { expected, actual } => {
                 QueryError::VariableInconsistency {
                     parameter: "value".to_string(),
-                    expected: Term::Constant(expected),
-                    actual: Term::Constant(actual),
+                    expected: Parameter::Constant(expected),
+                    actual: Parameter::Constant(actual),
                 }
             }
             _ => QueryError::InvalidTerm {
@@ -269,8 +268,8 @@ pub enum FormulaEvaluationError {
     UnboundVariable {
         /// The parameter name that requires a bound variable
         parameter: String,
-        /// The unbound term
-        term: Term<Value>,
+        /// The unbound parameter
+        term: Parameter,
     },
 
     /// Attempt to write a value that conflicts with an existing binding
@@ -295,10 +294,10 @@ pub enum FormulaEvaluationError {
     VariableInconsistency {
         /// The parameter where the inconsistency was detected
         parameter: String,
-        /// The actual term bound to the variable
-        actual: Term<Value>,
-        /// The expected term for the variable
-        expected: Term<Value>,
+        /// The actual value bound to the variable
+        actual: Parameter,
+        /// The expected value for the variable
+        expected: Parameter,
     },
 
     /// Type conversion failed when casting a Value to the requested type
@@ -329,14 +328,14 @@ impl From<InconsistencyError> for FormulaEvaluationError {
             InconsistencyError::UnboundVariableError(var) => {
                 FormulaEvaluationError::UnboundVariable {
                     parameter: var.clone(),
-                    term: Term::var(&var),
+                    term: Parameter::var(&var),
                 }
             }
             InconsistencyError::AssignmentError(msg) => {
                 FormulaEvaluationError::VariableInconsistency {
                     parameter: msg,
-                    actual: Term::var("_"),
-                    expected: Term::var("_"),
+                    actual: Parameter::blank(),
+                    expected: Parameter::blank(),
                 }
             }
             InconsistencyError::UnexpectedType { expected, actual } => {
@@ -348,14 +347,14 @@ impl From<InconsistencyError> for FormulaEvaluationError {
             }
             InconsistencyError::TypeError(msg) => FormulaEvaluationError::VariableInconsistency {
                 parameter: msg,
-                actual: Term::var("_"),
-                expected: Term::var("_"),
+                actual: Parameter::blank(),
+                expected: Parameter::blank(),
             },
             InconsistencyError::TypeMismatch { expected, actual } => {
                 FormulaEvaluationError::VariableInconsistency {
                     parameter: "value".to_string(),
-                    actual: Term::Constant(actual),
-                    expected: Term::Constant(expected),
+                    actual: Parameter::Constant(actual),
+                    expected: Parameter::Constant(expected),
                 }
             }
             InconsistencyError::UnconstrainedSelector => {
@@ -436,8 +435,8 @@ pub enum PlanError {
         rule: DeductiveRule,
         /// The required parameter name
         parameter: String,
-        /// The unbound term that was passed
-        term: Term<Value>,
+        /// The unbound parameter that was passed
+        term: Parameter,
     },
 
     /// A premise application passes an unbound variable into a required parameter
@@ -449,8 +448,8 @@ pub enum PlanError {
         application: Box<Proposition>,
         /// The required parameter name
         parameter: String,
-        /// The unbound term that was passed
-        term: Term<Value>,
+        /// The unbound parameter that was passed
+        term: Parameter,
     },
 
     /// A formula application is missing a required cell
@@ -494,8 +493,8 @@ pub enum PlanError {
         formula: &'static str,
         /// The cell that received an unbound parameter
         cell: String,
-        /// The unbound parameter term
-        parameter: Term<Value>,
+        /// The unbound parameter
+        parameter: Parameter,
     },
 
     /// An application was provided with no non-blank parameters
@@ -603,7 +602,7 @@ pub enum CompileError {
     #[error("Required bindings {required} are not bound in the rule environment")]
     RequiredBindings {
         /// The set of required but unbound bindings
-        required: Prerequisites,
+        required: Environment,
     },
     /// A variable referenced in the rule is not bound
     #[error("Rule {rule} does not bind a variable \"{variable}\"")]
@@ -682,7 +681,7 @@ pub enum EstimateError<'a> {
     #[error("Required parameters {required} are not bound in the environment ")]
     RequiredParameters {
         /// The set of required bindings that are missing.
-        required: &'a Prerequisites,
+        required: &'a Environment,
     },
 }
 

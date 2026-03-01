@@ -13,8 +13,7 @@ use crate::schema::CONCEPT_OVERHEAD;
 use crate::selection::Answers;
 use crate::selection::{Answer, Evidence};
 use crate::{
-    Cardinality, Environment, Parameter, Parameters, QueryError, Schema, Source, Term, Value,
-    try_stream,
+    Cardinality, Environment, Parameter, Parameters, QueryError, Schema, Source, try_stream,
 };
 use std::fmt::Display;
 
@@ -113,9 +112,8 @@ impl ConceptQuery {
     /// - If nothing is bound: Returns None (should be blocked)
     pub fn estimate(&self, env: &Environment) -> Option<usize> {
         // Check if "this" parameter is bound
-        let this_bound = if let Some(this_param) = self.terms.get("this") {
-            let this_term: Term<Value> = this_param.into();
-            env.contains(&this_term)
+        let this_bound = if let Some(this) = self.terms.get("this") {
+            this.is_bound(env)
         } else {
             false
         };
@@ -128,8 +126,7 @@ impl ConceptQuery {
                 total += attribute.estimate(
                     true,
                     if let Some(param) = self.terms.get(name) {
-                        let term: Term<Value> = param.into();
-                        env.contains(&term)
+                        param.is_bound(env)
                     } else {
                         false
                     },
@@ -145,8 +142,7 @@ impl ConceptQuery {
 
             for (name, attribute) in self.predicate.with().iter() {
                 if let Some(param) = self.terms.get(name) {
-                    let term: Term<Value> = param.into();
-                    if env.contains(&term) {
+                    if param.is_bound(env) {
                         match attribute.cardinality() {
                             Cardinality::One => {
                                 bound_one = Some(attribute);
@@ -210,8 +206,7 @@ impl ConceptQuery {
                     total += attribute.estimate(
                         true,
                         if let Some(param) = self.terms.get(name) {
-                            let term: Term<Value> = param.into();
-                            env.contains(&term)
+                            param.is_bound(env)
                         } else {
                             false
                         },

@@ -12,12 +12,10 @@
 //! result memoization (tabling) needed for fixpoint evaluation of recursive rules
 //! (Tekle & Liu, 2011).
 
-use crate::artifact::Value;
 use crate::environment::Environment;
 use crate::parameter::Parameter;
 use crate::parameters::Parameters;
 use crate::selection::Answer;
-use crate::term::Term;
 
 /// Compact representation of which concept parameters are bound.
 ///
@@ -47,9 +45,7 @@ impl Adornment {
             if let Some(param) = terms.get(key) {
                 let bound = match param {
                     Parameter::Constant(_) => true,
-                    Parameter::Variable { name: Some(_), .. } => {
-                        answer.contains(param)
-                    }
+                    Parameter::Variable { name: Some(_), .. } => answer.contains(param),
                     Parameter::Variable { name: None, .. } => false,
                 };
                 if bound {
@@ -74,8 +70,7 @@ impl Adornment {
             if self.0 & (1 << i) != 0
                 && let Some(param) = terms.get(key)
             {
-                let term: Term<Value> = param.into();
-                env.add(&term);
+                param.bind(&mut env);
             }
         }
 
@@ -197,8 +192,8 @@ mod tests {
         // "name" is a constant — Environment.add ignores constants
         // "this" maps to var "e" which is bound → should be in env
         // "age" maps to var "a" which is free → should not be in env
-        assert!(env.contains(&Term::<Value>::var("e")));
-        assert!(!env.contains(&Term::<Value>::var("a")));
+        assert!(env.contains("e"));
+        assert!(!env.contains("a"));
     }
 
     #[dialog_common::test]

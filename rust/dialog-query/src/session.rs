@@ -1478,11 +1478,11 @@ mod tests {
 
         // The entity-bound environment should contain "e"
         assert!(
-            env_bound.contains(&Term::<Value>::var("e")),
+            env_bound.contains("e"),
             "Bound adornment should include entity variable in environment"
         );
         assert!(
-            !env_free.contains(&Term::<Value>::var("e")),
+            !env_free.contains("e"),
             "Free adornment should not include entity variable in environment"
         );
 
@@ -1555,10 +1555,14 @@ mod tests {
         assert_eq!(results2.len(), 2, "Cached query should find 2 people");
 
         // Both runs should produce the same names
-        let names1: std::collections::HashSet<_> =
-            results1.iter().map(|r| r.resolve(&name_param).unwrap()).collect();
-        let names2: std::collections::HashSet<_> =
-            results2.iter().map(|r| r.resolve(&name_param).unwrap()).collect();
+        let names1: std::collections::HashSet<_> = results1
+            .iter()
+            .map(|r| r.resolve(&name_param).unwrap())
+            .collect();
+        let names2: std::collections::HashSet<_> = results2
+            .iter()
+            .map(|r| r.resolve(&name_param).unwrap())
+            .collect();
 
         assert_eq!(
             names1, names2,

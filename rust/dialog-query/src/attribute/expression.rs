@@ -286,11 +286,8 @@ where
     Because: ExpressionCause,
 {
     fn from(expr: AttributeExpression<A, Entity, Term<A::Type>, Because>) -> Self {
-        let query = relation_query::<A>(
-            Term::Constant(expr.of),
-            expr.is,
-            expr.cause.as_cause_term(),
-        );
+        let query =
+            relation_query::<A>(Term::Constant(expr.of), expr.is, expr.cause.as_cause_term());
         Premise::Assert(Proposition::Relation(Box::new(query)))
     }
 }

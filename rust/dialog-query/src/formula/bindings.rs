@@ -33,7 +33,7 @@ use crate::artifact::TypeError;
 use crate::error::FormulaEvaluationError;
 use crate::formula::query::FormulaQuery;
 use crate::selection::{Answer, Factors};
-use crate::{Parameter, Parameters, Term, Value};
+use crate::{Parameter, Parameters, Value};
 use std::sync::Arc;
 
 /// Parameter-to-value bindings for formula evaluation.
@@ -121,12 +121,11 @@ impl Bindings {
         }
 
         // Get the value from the answer
-        let term: Term<Value> = param.clone().into();
         let value =
             self.source
                 .resolve(param)
                 .map_err(|_| FormulaEvaluationError::UnboundVariable {
-                    term: term.clone(),
+                    term: param.clone(),
                     parameter: key.into(),
                 })?;
 
@@ -191,12 +190,11 @@ impl Bindings {
         // For constant parameters, verify the computed value matches the constant.
         // Answer::assign treats constants as no-ops, so we must check here.
         if let Parameter::Constant(expected) = param {
-            let term: Term<Value> = param.clone().into();
             if expected != value {
                 return Err(FormulaEvaluationError::VariableInconsistency {
                     parameter: key.into(),
-                    actual: Term::Constant(value.clone()),
-                    expected: term,
+                    actual: Parameter::Constant(value.clone()),
+                    expected: param.clone(),
                 });
             }
             // Constant matches — nothing to write to the answer
@@ -211,13 +209,11 @@ impl Bindings {
         };
 
         // Assign to the answer - this will fail if there's a conflicting value
-        let term: Term<Value> = param.clone().into();
         self.source.assign(param, &factor).map_err(|_| {
-            // Convert assignment errors to VariableInconsistency
             FormulaEvaluationError::VariableInconsistency {
                 parameter: key.into(),
-                actual: term.clone(),
-                expected: Term::Constant(value.clone()),
+                actual: param.clone(),
+                expected: Parameter::Constant(value.clone()),
             }
         })?;
 

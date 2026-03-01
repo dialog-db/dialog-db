@@ -198,7 +198,7 @@ impl Field {
 /// Whether a parameter must be externally bound before a premise can execute.
 ///
 /// The planner uses this to partition a premise's parameters into
-/// [`Prerequisites`](crate::planner::Prerequisites) (must be bound) and
+/// prerequisites (must be bound) and
 /// bindings the premise will produce. Parameters in the same [`Group`] form
 /// a *choice group* — if any member of the group is bound, the entire group
 /// is satisfied.
