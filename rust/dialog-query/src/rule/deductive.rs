@@ -81,7 +81,7 @@ impl UncompiledDeductiveRule {
         // rule premises, otherwise we produce an error since rule evaluation
         // would not be able to bind such parameter.
         for name in self.conclusion.operands() {
-            if !join.binds.contains(&Term::<Value>::var(name)) {
+            if !join.binds.contains(name) {
                 // Create a temporary rule for the error message
                 let temp_rule = DeductiveRule {
                     conclusion: self.conclusion.clone(),

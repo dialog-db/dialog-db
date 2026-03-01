@@ -1,7 +1,6 @@
-use super::{Plan, Prerequisites};
-use crate::artifact::Value;
+use super::Plan;
 use crate::error::CompileError;
-use crate::{Environment, Parameters, Premise, Requirement, Schema, Term};
+use crate::{Environment, Parameters, Premise, Requirement, Schema};
 use std::collections::HashSet;
 
 /// A premise under consideration by the query planner, tracking whether it
@@ -48,7 +47,7 @@ pub enum Candidate {
         /// Variables already bound in the environment.
         env: Environment,
         /// Variables that must be bound before this premise can execute.
-        requires: Prerequisites,
+        requires: Environment,
         /// Cached schema for efficient incremental updates.
         schema: Schema,
         /// Cached parameters for efficient incremental updates.
@@ -71,7 +70,7 @@ impl Candidate {
         // If None, the premise is unbound and should use a high cost
         let cost = premise.estimate(&env).unwrap_or(usize::MAX);
         let mut binds = Environment::new();
-        let mut requires = Prerequisites::new();
+        let mut requires = Environment::new();
 
         // Track which choice groups are satisfied by constants
         let mut satisfied_groups = HashSet::new();
@@ -90,10 +89,8 @@ impl Candidate {
         // Second pass: categorize all parameters based on their requirement types
         for (name, constraint) in schema.iter() {
             if let Some(param) = params.get(name) {
-                let term: Term<Value> = param.into();
-
                 // Constants and variables already in env don't add cost - they're already satisfied
-                if param.is_constant() || env.contains(&term) {
+                if param.is_constant() || param.is_bound(&env) {
                     continue;
                 }
 
@@ -108,19 +105,19 @@ impl Candidate {
                         if satisfied_groups.contains(group) {
                             // Negations don't bind variables, so skip adding to binds
                             if !is_negation {
-                                binds.add(&term);
+                                param.bind(&mut binds);
                             }
                         } else {
-                            requires.insert(&term);
+                            param.bind(&mut requires);
                         }
                     }
                     Requirement::Required(None) => {
-                        requires.insert(&term);
+                        param.bind(&mut requires);
                     }
                     Requirement::Optional => {
                         // Negations don't bind variables, so skip adding to binds
                         if !is_negation {
-                            binds.add(&term);
+                            param.bind(&mut binds);
                         }
                     }
                 }
@@ -173,29 +170,28 @@ impl Candidate {
                             continue;
                         }
 
-                        let term: Term<Value> = param.into();
-                        let in_target = target_scope.contains(&term);
-                        let in_env = env.contains(&term);
-                        let in_binds = binds.contains(&term);
+                        let in_target = param.is_bound(target_scope);
+                        let in_env = param.is_bound(env);
+                        let in_binds = param.is_bound(binds);
 
                         match (in_target, in_env, in_binds) {
                             // Variable is in target but only in binds → move to env
                             (true, false, true) => {
-                                env.add(&term);
-                                binds.remove(&term);
+                                param.bind(env);
+                                param.unbind(binds);
                             }
                             // Variable is in target but tracked nowhere → add to env
                             (true, false, false) => {
-                                env.add(&term);
+                                param.bind(env);
                             }
                             // Variable left target but is in env → move back to binds
                             (false, true, false) => {
-                                env.remove(&term);
-                                binds.add(&term);
+                                param.unbind(env);
+                                param.bind(binds);
                             }
                             // Variable not in target and not tracked → add to binds
                             (false, false, false) => {
-                                binds.add(&term);
+                                param.bind(binds);
                             }
                             // Already consistent: (true, true, _) or (false, false, true)
                             _ => {}
@@ -227,17 +223,16 @@ impl Candidate {
                             continue;
                         }
 
-                        let term: Term<Value> = param.into();
-                        let in_target = target_scope.contains(&term);
-                        let in_env = env.contains(&term);
+                        let in_target = param.is_bound(target_scope);
+                        let in_env = param.is_bound(env);
 
                         if in_target && !in_env {
                             // Variable entered the scope → move from requires/binds to env
-                            let was_required = requires.remove(&term);
-                            let was_bound = binds.remove(&term);
+                            let was_required = param.unbind(requires);
+                            let was_bound = param.unbind(binds);
 
                             if was_required || was_bound {
-                                env.add(&term);
+                                param.bind(env);
 
                                 if let Requirement::Required(Some(group)) = &constraint.requirement
                                 {
@@ -247,13 +242,13 @@ impl Candidate {
                         } else if !in_target && in_env {
                             // Variable left the scope → move from env back to
                             // requires or binds depending on its schema requirement
-                            env.remove(&term);
+                            param.unbind(env);
 
                             match &constraint.requirement {
                                 Requirement::Required(Some(group)) => {
                                     // Will be resolved in second pass once we
                                     // know which groups are still satisfied
-                                    requires.insert(&term);
+                                    param.bind(requires);
                                     // Check if the group might still be satisfied
                                     // by another bound parameter
                                     let group_still_satisfied =
@@ -264,8 +259,7 @@ impl Candidate {
                                                     Requirement::Required(Some(g)) if *g == *group
                                                 )
                                                 && params.get(other_name).is_some_and(|p| {
-                                                    let t: Term<Value> = p.into();
-                                                    env.contains(&t) || p.is_constant()
+                                                    p.is_bound(env) || p.is_constant()
                                                 })
                                         });
                                     if group_still_satisfied {
@@ -273,11 +267,11 @@ impl Candidate {
                                     }
                                 }
                                 Requirement::Required(None) => {
-                                    requires.insert(&term);
+                                    param.bind(requires);
                                 }
                                 Requirement::Optional => {
                                     if !is_negation {
-                                        binds.add(&term);
+                                        param.bind(binds);
                                     }
                                 }
                             }
@@ -291,11 +285,11 @@ impl Candidate {
                         if let Requirement::Required(Some(group)) = &constraint.requirement
                             && satisfied_groups.contains(group)
                             && let Some(param) = params.get(name)
+                            && param.unbind(requires)
+                            && !param.is_bound(env)
+                            && !is_negation
                         {
-                            let term: Term<Value> = param.into();
-                            if requires.remove(&term) && !env.contains(&term) && !is_negation {
-                                binds.add(&term);
-                            }
+                            param.bind(binds);
                         }
                     }
                 }
@@ -448,7 +442,7 @@ mod tests {
         assert!(!candidate.is_viable());
 
         let mut env = Environment::new();
-        env.add(&Term::<Value>::var("text"));
+        env.add("text");
         candidate.update(&env);
 
         assert!(candidate.is_viable());
@@ -471,7 +465,7 @@ mod tests {
         assert!(candidate.is_viable());
 
         let mut env = Environment::new();
-        env.add(&Term::<Value>::var("len".to_string()));
+        env.add("len");
         candidate.update(&env);
 
         assert_eq!(
@@ -539,8 +533,8 @@ mod tests {
         assert!(!candidate.is_viable());
 
         let mut env = Environment::new();
-        env.add(&x);
-        env.add(&y);
+        x.bind(&mut env);
+        y.bind(&mut env);
         candidate.update(&env);
 
         assert!(
@@ -628,7 +622,7 @@ mod cost_model_tests {
         assert_eq!(initial_cost, RANGE_SCAN_COST);
 
         let mut env = Environment::new();
-        env.add(&Term::<Value>::var("entity"));
+        env.add("entity");
         candidate.update(&env);
 
         let after_entity = candidate.cost();
@@ -638,7 +632,7 @@ mod cost_model_tests {
             SEGMENT_READ_COST, after_entity
         );
 
-        env.add(&Term::<Value>::var("value"));
+        env.add("value");
         candidate.update(&env);
 
         let final_cost = candidate.cost();
@@ -660,7 +654,7 @@ mod cost_model_tests {
         );
 
         let mut env = Environment::new();
-        env.add(&Term::<Value>::var("entity"));
+        env.add("entity");
 
         let cost = app.estimate(&env).unwrap_or(usize::MAX);
 
@@ -872,7 +866,7 @@ mod cost_model_tests {
         };
 
         let mut env = Environment::new();
-        env.add(&Term::<Value>::var("value"));
+        env.add("value");
 
         let fact_cost = fact_app.estimate(&env).expect("Should have cost");
         let concept_cost = concept_app.estimate(&env).expect("Should have cost");
@@ -911,7 +905,7 @@ mod cost_model_tests {
         };
 
         let mut env = Environment::new();
-        env.add(&Term::<Value>::var("entity"));
+        env.add("entity");
 
         let fact_cost = fact_app.estimate(&env).expect("Should have cost");
         let concept_cost = concept_app.estimate(&env).expect("Should have cost");
@@ -986,7 +980,7 @@ mod cost_model_tests {
         };
 
         let mut env = Environment::new();
-        env.add(&Term::<Value>::var("tag"));
+        env.add("tag");
 
         let fact_cost = fact_app.estimate(&env).expect("Should have cost");
         let concept_cost = concept_app.estimate(&env).expect("Should have cost");
@@ -1020,7 +1014,7 @@ mod cost_model_tests {
 
         let mut a2 = Candidate::from(Premise::Assert(Proposition::Relation(Box::new(p2.clone()))));
         let mut env = Environment::new();
-        env.add(&Term::<Value>::var("entity"));
+        env.add("entity");
         a2.update(&env);
         let cost2 = a2.cost();
 
@@ -1061,11 +1055,11 @@ mod cost_model_tests {
         eprintln!("\nInitial state:");
         eprintln!("  Cost: {}", candidate.cost());
         if let Candidate::Viable { binds, .. } = &candidate {
-            eprintln!("  Binds: {:?}", binds.variables);
+            eprintln!("  Binds: {:?}", binds);
         }
 
         let mut env = Environment::new();
-        env.add(&Term::<Value>::var("entity"));
+        env.add("entity");
 
         eprintln!("\nUpdating with entity bound...");
         candidate.update(&env);
@@ -1073,8 +1067,8 @@ mod cost_model_tests {
         eprintln!("\nAfter update:");
         eprintln!("  Cost: {}", candidate.cost());
         if let Candidate::Viable { binds, env, .. } = &candidate {
-            eprintln!("  Binds: {:?}", binds.variables);
-            eprintln!("  Env: {:?}", env.variables);
+            eprintln!("  Binds: {:?}", binds);
+            eprintln!("  Env: {:?}", env);
         }
     }
 
@@ -1092,7 +1086,7 @@ mod cost_model_tests {
 
         // Bind entity → cost should decrease
         let mut env_with_entity = Environment::new();
-        env_with_entity.add(&Term::<Value>::var("entity"));
+        env_with_entity.add("entity");
         candidate.update(&env_with_entity);
 
         assert_eq!(
@@ -1136,7 +1130,7 @@ mod cost_model_tests {
 
         // Bind entity → 2/3 constraints
         let mut env_with_entity = Environment::new();
-        env_with_entity.add(&Term::<Value>::var("entity"));
+        env_with_entity.add("entity");
         candidate.update(&env_with_entity);
 
         assert_eq!(

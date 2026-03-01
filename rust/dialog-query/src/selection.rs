@@ -16,9 +16,9 @@ pub use selector::*;
 mod tests {
     use super::*;
     use crate::Claim;
-    use crate::{Parameter, Term};
     use crate::artifact::{Attribute, Entity, Value};
     use crate::error::InconsistencyError;
+    use crate::{Parameter, Term};
     use std::sync::Arc;
 
     #[dialog_common::test]
@@ -126,7 +126,6 @@ mod tests {
 
         let mut answer = Answer::new();
         let name_param = Parameter::var("name");
-        
 
         // Assign the value
         answer.assign(&name_param, &factor).unwrap();
@@ -153,7 +152,6 @@ mod tests {
 
         let mut answer = Answer::new();
         let age_param = Parameter::var("age");
-        
 
         // Assign the value
         answer.assign(&age_param, &factor).unwrap();
@@ -180,7 +178,6 @@ mod tests {
 
         let mut answer = Answer::new();
         let score_param = Parameter::var("score");
-        
 
         // Assign the value
         answer.assign(&score_param, &factor).unwrap();
@@ -207,7 +204,6 @@ mod tests {
 
         let mut answer = Answer::new();
         let active_param = Parameter::var("active");
-        
 
         // Assign the value
         answer.assign(&active_param, &factor).unwrap();
@@ -235,7 +231,6 @@ mod tests {
 
         let mut answer = Answer::new();
         let entity_param = Parameter::var("entity_id");
-        
 
         // Assign the value
         answer.assign(&entity_param, &factor).unwrap();
@@ -411,9 +406,7 @@ mod tests {
         answer
             .assign(&Parameter::var("name"), &name_factor)
             .unwrap();
-        answer
-            .assign(&Parameter::var("age"), &age_factor)
-            .unwrap();
+        answer.assign(&Parameter::var("age"), &age_factor).unwrap();
         answer
             .assign(&Parameter::var("active"), &active_factor)
             .unwrap();

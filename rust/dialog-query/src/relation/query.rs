@@ -224,9 +224,9 @@ impl RelationQuery {
     /// the `(attribute, entity)` pair to verify that the matched value is the
     /// winner. This adds `SECONDARY_LOOKUP_COST` per match to the estimate.
     pub fn estimate(&self, env: &Environment) -> Option<usize> {
-        let the = env.contains(&self.the);
-        let of = env.contains(&self.of);
-        let is = env.contains_param(&self.is);
+        let the = self.the.is_bound(env);
+        let of = self.of.is_bound(env);
+        let is = self.is.is_bound(env);
 
         let base = self.cardinality().estimate(the, of, is)?;
 

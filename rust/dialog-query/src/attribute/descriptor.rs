@@ -170,19 +170,15 @@ impl AttributeDescriptor {
             .and_then(|t| t.try_into().ok())
             .unwrap_or(Term::blank());
 
-        // Get the value term (is)
-        let is: Term<Value> = parameters
-            .get("is")
-            .cloned()
-            .map(Term::from)
-            .unwrap_or(Term::blank());
+        // Get the value parameter (is) — passed directly as Parameter
+        let is = parameters.get("is").cloned().unwrap_or(Parameter::blank());
 
         // Get the cause term
         let cause = parameters
             .get("cause")
             .cloned()
-            .map(Term::from)
-            .and_then(|t: Term<Value>| t.try_into().ok())
+            .map(Term::<Value>::from)
+            .and_then(|t| t.try_into().ok())
             .unwrap_or(Term::blank());
 
         Ok(RelationQuery::new(

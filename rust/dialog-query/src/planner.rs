@@ -2,17 +2,13 @@ mod candidate;
 mod conjunction;
 mod disjunction;
 mod plan;
-mod prerequisites;
 
 pub use candidate::*;
 pub use conjunction::*;
 pub use disjunction::*;
 pub use plan::*;
-pub use prerequisites::*;
 
-use crate::artifact::Value;
 use crate::error::CompileError;
-use crate::term::Term;
 use crate::{Environment, Premise};
 
 /// State machine that greedily selects the cheapest viable premise at each
@@ -62,10 +58,9 @@ impl Planner {
         }
 
         let mut binds = Environment::new();
-        for var_name in &bound.variables {
-            let var: Term<Value> = Term::var(var_name);
-            if !env.contains(&var) {
-                binds.add(&var);
+        for var_name in bound.iter() {
+            if !env.contains(var_name) {
+                binds.add(var_name);
             }
         }
 
@@ -81,7 +76,7 @@ impl Planner {
     fn fail(candidates: &[Candidate]) -> Result<Plan, CompileError> {
         if candidates.is_empty() {
             return Err(CompileError::RequiredBindings {
-                required: Prerequisites::new(),
+                required: Environment::new(),
             });
         }
 
@@ -226,16 +221,9 @@ mod tests {
         assert_eq!(plan.steps.len(), 2, "Should have two steps");
         assert!(plan.cost > 0, "Should have non-zero cost");
 
-        let person_var: Term<Value> = Term::var("person");
-        let name_var: Term<Value> = Term::var("name");
-        let age_var: Term<Value> = Term::var("age");
-
-        assert!(
-            plan.binds.contains(&person_var),
-            "Should bind person variable"
-        );
-        assert!(plan.binds.contains(&name_var), "Should bind name variable");
-        assert!(plan.binds.contains(&age_var), "Should bind age variable");
+        assert!(plan.binds.contains("person"), "Should bind person variable");
+        assert!(plan.binds.contains("name"), "Should bind name variable");
+        assert!(plan.binds.contains("age"), "Should bind age variable");
     }
 
     #[dialog_common::test]
@@ -271,7 +259,7 @@ mod tests {
             .expect("Planning should succeed");
 
         assert_eq!(plan.steps.len(), 2);
-        assert_eq!(plan.binds.variables.len(), 2, "Should bind 2 variables");
+        assert_eq!(plan.binds.len(), 2, "Should bind 2 variables");
     }
 
     #[dialog_common::test]
@@ -378,7 +366,7 @@ mod tests {
         use crate::relation::descriptor::RelationDescriptor;
         use crate::relation::query::RelationQuery;
         use crate::schema::{INDEX_SCAN, RANGE_SCAN_COST};
-        use crate::{Cardinality, Proposition, Term};
+        use crate::{Cardinality, Proposition, Term, Value};
         use dialog_artifacts::Entity;
 
         // Cardinality::Many premise:
@@ -405,7 +393,7 @@ mod tests {
 
         // Replan with entity bound → cheaper
         let mut env_with_entity = Environment::new();
-        env_with_entity.add(&Term::<Value>::var("entity"));
+        env_with_entity.add("entity");
 
         let replanned = plan
             .plan(&env_with_entity)

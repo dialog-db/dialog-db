@@ -186,11 +186,7 @@ impl Answer {
     }
 
     /// Assign a parameter to a factor.
-    pub fn assign(
-        &mut self,
-        param: &Parameter,
-        factor: &Factor,
-    ) -> Result<(), InconsistencyError> {
+    pub fn assign(&mut self, param: &Parameter, factor: &Factor) -> Result<(), InconsistencyError> {
         match param {
             Parameter::Variable {
                 name: Some(name), ..
@@ -245,11 +241,6 @@ impl Answer {
         }
     }
 
-    /// Returns true if the term is bound in this answer.
-    pub fn contains_term<T: Scalar>(&self, term: &Term<T>) -> bool {
-        self.contains(&Parameter::from(term))
-    }
-
     /// Resolves factors that were assigned to the given parameter.
     pub fn resolve_factors(&self, param: &Parameter) -> Option<&Factors> {
         match param {
@@ -282,16 +273,6 @@ impl Answer {
             }
             Parameter::Constant(value) => Ok(value.clone()),
         }
-    }
-
-    /// Resolve a typed term to its Value.
-    ///
-    /// Convenience wrapper that converts the term to a Parameter first.
-    pub fn resolve_term_value<T: Scalar>(
-        &self,
-        term: &Term<T>,
-    ) -> Result<Value, InconsistencyError> {
-        self.resolve(&Parameter::from(term))
     }
 
     /// Resolve a variable term into a constant term if this answer has a

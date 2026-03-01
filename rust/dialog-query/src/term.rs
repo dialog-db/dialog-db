@@ -12,8 +12,8 @@ use std::fmt;
 
 use crate::artifact::{Attribute as ArtifactAttribute, Cause, Entity, Type, TypeError, Value};
 use crate::constraint::{Constraint, Equality};
-use crate::parameter::Parameter;
 use crate::error::SyntaxError;
+use crate::parameter::Parameter;
 use crate::proposition::Proposition;
 use crate::types::{IntoType, Scalar};
 use crate::{Attribute, Premise};
@@ -85,11 +85,6 @@ where
         matches!(self, Term::Variable { .. })
     }
 
-    /// Check if this term is a named variable
-    pub fn is_named_variable(&self) -> bool {
-        matches!(self, Term::Variable { name: Some(_), .. })
-    }
-
     /// Check if this term is a constant value
     pub fn is_constant(&self) -> bool {
         matches!(self, Term::Constant(_))
@@ -125,31 +120,6 @@ where
         }
     }
 
-    /// Check if this term can unify with the given value
-    ///
-    /// Used during pattern matching to determine if a term can be bound to a value:
-    /// - Variables: Check if value's type matches the variable's type (if typed)
-    /// - Constants: Always return true (compatibility - actual comparison needs value conversion)
-    pub fn can_unify_with(&self, value: &Value) -> bool {
-        match self {
-            Term::Variable { .. } => {
-                // For typed variables, check if the value matches the expected type
-                if let Some(var_type) = T::TYPE {
-                    let value_type = Type::from(value);
-                    value_type == var_type
-                } else {
-                    // Unconstrained variables can unify with anything
-                    true
-                }
-            }
-            Term::Constant(_) => {
-                // For constants, we can't easily compare without knowing if T: Into<Value>
-                // Return true to maintain compatibility - actual equality should be checked elsewhere
-                true
-            }
-        }
-    }
-
     /// Get the constant value if this term is a constant
     ///
     /// Returns None for variables
@@ -157,6 +127,27 @@ where
         match self {
             Term::Constant(value) => Some(value),
             Term::Variable { .. } => None,
+        }
+    }
+
+    /// Returns `true` if this term is bound in the given environment.
+    ///
+    /// Constants are always bound. Named variables are bound if their name
+    /// appears in the environment. Anonymous variables are never bound.
+    pub fn is_bound(&self, env: &crate::Environment) -> bool {
+        match self {
+            Term::Constant(_) => true,
+            Term::Variable { name: None, .. } => false,
+            Term::Variable { name: Some(n), .. } => env.contains(n),
+        }
+    }
+
+    /// Adds this term's variable name to the environment.
+    ///
+    /// Only named variables are added; constants and blanks are ignored.
+    pub fn bind(&self, env: &mut crate::Environment) {
+        if let Term::Variable { name: Some(n), .. } = self {
+            env.add(n.clone());
         }
     }
 
@@ -178,7 +169,6 @@ where
             Equality::new(Parameter::from(&self), Parameter::from(&other.into())),
         )))
     }
-
 }
 
 impl<T> Default for Term<T>
@@ -225,18 +215,6 @@ where
 impl From<Value> for Term<Value> {
     fn from(value: Value) -> Self {
         Term::Constant(value)
-    }
-}
-
-impl From<ArtifactAttribute> for Term<Value> {
-    fn from(attr: ArtifactAttribute) -> Self {
-        Term::Constant(Value::String(attr.to_string()))
-    }
-}
-
-impl From<Entity> for Term<Value> {
-    fn from(entity: Entity) -> Self {
-        Term::Constant(Value::Entity(entity))
     }
 }
 
