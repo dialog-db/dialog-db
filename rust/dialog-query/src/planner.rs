@@ -183,7 +183,6 @@ impl From<&Vec<Plan>> for Planner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parameter::Parameter;
     use crate::selection::Answer;
     use crate::the;
 
@@ -194,17 +193,17 @@ mod tests {
         use crate::{Cardinality, Proposition, Term};
 
         let fact1 = RelationQuery::new(
-            Term::Constant(the!("person/name")),
+            Term::from(the!("person/name")),
             Term::var("person"),
-            Parameter::var("name"),
+            Term::var("name"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
         let fact2 = RelationQuery::new(
-            Term::Constant(the!("person/age")),
+            Term::from(the!("person/age")),
             Term::var("person"),
-            Parameter::var("age"),
+            Term::var("age"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
@@ -234,17 +233,17 @@ mod tests {
         use dialog_artifacts::Entity;
 
         let fact1 = RelationQuery::new(
-            Term::Constant(the!("person/name")),
-            Term::Constant(Entity::try_from("urn:alice".to_string()).unwrap()),
-            Parameter::var("name"),
+            Term::from(the!("person/name")),
+            Term::from(Entity::try_from("urn:alice".to_string()).unwrap()),
+            Term::var("name"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
         let fact2 = RelationQuery::new(
-            Term::Constant(the!("greeting/text")),
+            Term::from(the!("greeting/text")),
             Term::var("name"),
-            Parameter::var("greeting"),
+            Term::var("greeting"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
@@ -267,7 +266,8 @@ mod tests {
         use crate::relation::descriptor::RelationDescriptor;
         use crate::relation::query::RelationQuery;
         use crate::session::Session;
-        use crate::{Association, Cardinality, Parameter, Proposition, Term, Value, the};
+
+        use crate::{Association, Cardinality, Proposition, Term, Value, the};
         use dialog_artifacts::{Artifacts, Entity};
         use dialog_storage::MemoryStorageBackend;
 
@@ -304,17 +304,17 @@ mod tests {
             .await?;
 
         let fact1 = RelationQuery::new(
-            Term::Constant(the!("person/name")),
+            Term::from(the!("person/name")),
             Term::var("person"),
-            Parameter::var("name"),
+            Term::var("name"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
         let fact2 = RelationQuery::new(
-            Term::Constant(the!("person/age")),
+            Term::from(the!("person/age")),
             Term::var("person"),
-            Parameter::var("age"),
+            Term::var("age"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
@@ -332,8 +332,8 @@ mod tests {
 
         assert_eq!(selection.len(), 2, "Should find 2 people");
 
-        let name_param = Parameter::var("name");
-        let age_param = Parameter::var("age");
+        let name_param = Term::var("name");
+        let age_param = Term::var("age");
 
         let mut found_alice = false;
         let mut found_bob = false;
@@ -366,16 +366,17 @@ mod tests {
         use crate::relation::descriptor::RelationDescriptor;
         use crate::relation::query::RelationQuery;
         use crate::schema::{INDEX_SCAN, RANGE_SCAN_COST};
-        use crate::{Cardinality, Parameter, Proposition, Term};
+
+        use crate::{Cardinality, Proposition, Term};
         use dialog_artifacts::Entity;
 
         // Cardinality::Many premise:
         //   1/3 constraints (just 'the'): INDEX_SCAN = 5000
         //   2/3 constraints (the + of):   RANGE_SCAN_COST = 1000
         let hobby = RelationQuery::new(
-            Term::Constant(the!("person/hobbies")),
+            Term::from(the!("person/hobbies")),
             Term::<Entity>::var("entity"),
-            Parameter::var("hobby"),
+            Term::var("hobby"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::Many)),
         );

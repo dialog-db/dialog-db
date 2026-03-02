@@ -166,6 +166,18 @@ impl From<&The> for ArtifactsAttribute {
     }
 }
 
+impl From<The> for crate::artifact::Value {
+    fn from(the: The) -> Self {
+        crate::artifact::Value::from(ArtifactsAttribute::from(the))
+    }
+}
+
+impl From<&The> for crate::artifact::Value {
+    fn from(the: &The) -> Self {
+        crate::artifact::Value::from(ArtifactsAttribute::from(the))
+    }
+}
+
 impl From<ArtifactsAttribute> for The {
     fn from(attr: ArtifactsAttribute) -> Self {
         Self(attr)

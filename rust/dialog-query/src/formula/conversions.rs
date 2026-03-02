@@ -37,29 +37,71 @@ impl ToString {
     }
 }
 
-/// ParseNumber formula that converts a string to a number (u32)
+/// Parse a string into an unsigned integer (u128)
 #[derive(Debug, Clone, Formula)]
-pub struct ParseNumber {
+pub struct ParseUnsignedInteger {
     /// String to parse
     pub text: String,
-    /// Parsed number
+    /// Parsed unsigned integer
     #[derived(cost = 2)]
-    pub is: u32,
+    pub is: u128,
 }
 
-impl ParseNumber {
-    /// Parse the text as a u32, returning empty on parse failure
+impl ParseUnsignedInteger {
+    /// Parse the text as u128, returning empty on failure
     pub fn derive(input: Input<Self>) -> Vec<Self> {
-        // Try to parse the string as a u32
-        match input.text.trim().parse::<u32>() {
-            Ok(number) => vec![ParseNumber {
+        match input.text.trim().parse::<u128>() {
+            Ok(number) => vec![ParseUnsignedInteger {
                 text: input.text,
                 is: number,
             }],
-            Err(_) => {
-                // Return empty Vec if parsing fails - this will be filtered out
-                vec![]
-            }
+            Err(_) => vec![],
+        }
+    }
+}
+
+/// Parse a string into a signed integer (i128)
+#[derive(Debug, Clone, Formula)]
+pub struct ParseSignedInteger {
+    /// String to parse
+    pub text: String,
+    /// Parsed signed integer
+    #[derived(cost = 2)]
+    pub is: i128,
+}
+
+impl ParseSignedInteger {
+    /// Parse the text as i128, returning empty on failure
+    pub fn derive(input: Input<Self>) -> Vec<Self> {
+        match input.text.trim().parse::<i128>() {
+            Ok(number) => vec![ParseSignedInteger {
+                text: input.text,
+                is: number,
+            }],
+            Err(_) => vec![],
+        }
+    }
+}
+
+/// Parse a string into a floating point number (f64)
+#[derive(Debug, Clone, Formula)]
+pub struct ParseFloat {
+    /// String to parse
+    pub text: String,
+    /// Parsed float
+    #[derived(cost = 2)]
+    pub is: f64,
+}
+
+impl ParseFloat {
+    /// Parse the text as f64, returning empty on failure
+    pub fn derive(input: Input<Self>) -> Vec<Self> {
+        match input.text.trim().parse::<f64>() {
+            Ok(number) => vec![ParseFloat {
+                text: input.text,
+                is: number,
+            }],
+            Err(_) => vec![],
         }
     }
 }
@@ -67,268 +109,278 @@ impl ParseNumber {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Entity, Parameter, Parameters, Term, selection::Answer};
+    use crate::query::{Application, Output};
+    use crate::selection::Answer;
+    use crate::{Entity, Query, Session, Term, artifact::Artifacts};
+    use dialog_storage::MemoryStorageBackend;
+    use futures_util::TryStreamExt;
 
     #[dialog_common::test]
-    fn it_converts_number_to_string() -> anyhow::Result<()> {
-        let mut terms = Parameters::new();
-        terms.insert("value".to_string(), Parameter::var("num"));
-        terms.insert("is".to_string(), Parameter::var("str"));
+    async fn it_converts_number_to_string() -> anyhow::Result<()> {
+        let storage = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage).await?;
+        let session = Session::open(artifacts);
 
-        let input = Answer::new().set(Term::var("num"), 42u32).unwrap();
-
-        let app = ToString::apply(terms)?;
-        let results = app.derive(input).expect("ToString failed");
+        let query = Query::<ToString> {
+            value: Term::from(42u32).into(),
+            is: Term::var("result"),
+        };
+        let results = query.perform(&session).try_vec().await?;
 
         assert_eq!(results.len(), 1);
-        let result = &results[0];
-        assert_eq!(
-            result
-                .resolve(&Parameter::var("str"))
-                .ok()
-                .and_then(|v| String::try_from(v).ok()),
-            Some("42".to_string())
-        );
+        assert_eq!(results[0].is, "42");
         Ok(())
     }
 
     #[dialog_common::test]
-    fn it_converts_boolean_to_string() -> anyhow::Result<()> {
-        let mut terms = Parameters::new();
-        terms.insert("value".to_string(), Parameter::var("bool"));
-        terms.insert("is".to_string(), Parameter::var("str"));
+    async fn it_converts_boolean_to_string() -> anyhow::Result<()> {
+        let storage = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage).await?;
+        let session = Session::open(artifacts);
 
-        let input = Answer::new().set(Term::var("bool"), true).unwrap();
-
-        let app = ToString::apply(terms)?;
-        let results = app.derive(input).expect("ToString failed");
+        let query = Query::<ToString> {
+            value: Term::from(true).into(),
+            is: Term::var("result"),
+        };
+        let results = query.perform(&session).try_vec().await?;
 
         assert_eq!(results.len(), 1);
-        let result = &results[0];
-        assert_eq!(
-            result
-                .resolve(&Parameter::var("str"))
-                .ok()
-                .and_then(|v| String::try_from(v).ok()),
-            Some("true".to_string())
-        );
+        assert_eq!(results[0].is, "true");
         Ok(())
     }
 
     #[dialog_common::test]
-    fn it_passes_string_through() -> anyhow::Result<()> {
-        let mut terms = Parameters::new();
-        terms.insert("value".to_string(), Parameter::var("text"));
-        terms.insert("is".to_string(), Parameter::var("str"));
+    async fn it_passes_string_through() -> anyhow::Result<()> {
+        let storage = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage).await?;
+        let session = Session::open(artifacts);
 
-        let input = Answer::new()
-            .set(Term::var("text"), "hello".to_string())
-            .unwrap();
-
-        let app = ToString::apply(terms)?;
-        let results = app.derive(input).expect("ToString failed");
+        let query = Query::<ToString> {
+            value: Term::from("hello".to_string()).into(),
+            is: Term::var("result"),
+        };
+        let results = query.perform(&session).try_vec().await?;
 
         assert_eq!(results.len(), 1);
-        let result = &results[0];
-        assert_eq!(
-            result
-                .resolve(&Parameter::var("str"))
-                .ok()
-                .and_then(|v| String::try_from(v).ok()),
-            Some("hello".to_string())
-        );
+        assert_eq!(results[0].is, "hello");
         Ok(())
     }
 
     #[dialog_common::test]
-    fn it_converts_entity_to_string() -> anyhow::Result<()> {
-        let mut terms = Parameters::new();
-        terms.insert("value".to_string(), Parameter::var("entity"));
-        terms.insert("is".to_string(), Parameter::var("str"));
+    async fn it_converts_entity_to_string() -> anyhow::Result<()> {
+        let storage = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage).await?;
+        let session = Session::open(artifacts);
 
-        let entity = Entity::new().unwrap();
-        let input = Answer::new()
-            .set(Term::var("entity"), entity.clone())
-            .unwrap();
-
-        let app = ToString::apply(terms)?;
-        let results = app.derive(input).expect("ToString failed");
+        let entity = Entity::new()?;
+        let query = Query::<ToString> {
+            value: Term::from(entity.clone()).into(),
+            is: Term::var("result"),
+        };
+        let results = query.perform(&session).try_vec().await?;
 
         assert_eq!(results.len(), 1);
-        let result = &results[0];
-        assert_eq!(
-            String::try_from(result.resolve(&Parameter::var("str"))?)?,
-            entity.to_string()
-        );
+        assert_eq!(results[0].is, entity.to_string());
         Ok(())
     }
 
     #[dialog_common::test]
-    fn it_parses_valid_number() -> anyhow::Result<()> {
-        let mut terms = Parameters::new();
-        terms.insert("text".to_string(), Parameter::var("str"));
-        terms.insert("is".to_string(), Parameter::var("num"));
+    async fn it_converts_float_to_string() -> anyhow::Result<()> {
+        let storage = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage).await?;
+        let session = Session::open(artifacts);
 
-        let input = Answer::new()
-            .set(Term::var("str"), "123".to_string())
-            .unwrap();
-
-        let app = ParseNumber::apply(terms)?;
-        let results = app.derive(input).expect("ParseNumber failed");
+        let query = Query::<ToString> {
+            value: Term::from(3.14f64).into(),
+            is: Term::var("result"),
+        };
+        let results = query.perform(&session).try_vec().await?;
 
         assert_eq!(results.len(), 1);
-        let result = &results[0];
-        assert_eq!(
-            result
-                .resolve(&Parameter::var("num"))
-                .ok()
-                .and_then(|v| u32::try_from(v).ok()),
-            Some(123)
-        );
+        assert_eq!(results[0].is, "3.14");
         Ok(())
     }
 
     #[dialog_common::test]
-    fn it_parses_number_with_whitespace() -> anyhow::Result<()> {
-        let mut terms = Parameters::new();
-        terms.insert("text".to_string(), Parameter::var("str"));
-        terms.insert("is".to_string(), Parameter::var("num"));
+    async fn it_converts_variable_input_to_string() -> anyhow::Result<()> {
+        let storage = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage).await?;
+        let session = Session::open(artifacts);
 
-        let input = Answer::new()
-            .set(Term::var("str"), "  456  ".to_string())
-            .unwrap();
+        let query = Query::<ToString> {
+            value: Term::var("input"),
+            is: Term::var("result"),
+        };
+        let input = Answer::new().set(Term::var("input"), 42u32)?;
+        let query_copy = query.clone();
+        let answers: Vec<Answer> = query.evaluate(input.seed(), &session).try_collect().await?;
 
-        let app = ParseNumber::apply(terms)?;
-        let results = app.derive(input).expect("ParseNumber failed");
-
-        assert_eq!(results.len(), 1);
-        let result = &results[0];
-        assert_eq!(
-            result
-                .resolve(&Parameter::var("num"))
-                .ok()
-                .and_then(|v| u32::try_from(v).ok()),
-            Some(456)
-        );
+        assert_eq!(answers.len(), 1);
+        let proof = query_copy.realize(answers[0].clone())?;
+        assert_eq!(proof.is, "42");
         Ok(())
     }
 
     #[dialog_common::test]
-    fn it_rejects_invalid_number() -> anyhow::Result<()> {
-        let mut terms = Parameters::new();
-        terms.insert("text".to_string(), Parameter::var("str"));
-        terms.insert("is".to_string(), Parameter::var("num"));
+    async fn it_parses_unsigned_integer() -> anyhow::Result<()> {
+        let storage = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage).await?;
+        let session = Session::open(artifacts);
 
-        let input = Answer::new()
-            .set(Term::var("str"), "not a number".to_string())
-            .unwrap();
+        let query = Query::<ParseUnsignedInteger> {
+            text: Term::from("123".to_string()),
+            is: Term::var("num"),
+        };
+        let results = query.perform(&session).try_vec().await?;
 
-        let app = ParseNumber::apply(terms)?;
-        let results = app
-            .derive(input)
-            .expect("ParseNumber should handle invalid input");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].is, 123);
+        Ok(())
+    }
 
-        // Should return empty Vec for invalid input
+    #[dialog_common::test]
+    async fn it_parses_unsigned_integer_with_whitespace() -> anyhow::Result<()> {
+        let storage = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage).await?;
+        let session = Session::open(artifacts);
+
+        let query = Query::<ParseUnsignedInteger> {
+            text: Term::from("  456  ".to_string()),
+            is: Term::var("num"),
+        };
+        let results = query.perform(&session).try_vec().await?;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].is, 456);
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_rejects_negative_as_unsigned() -> anyhow::Result<()> {
+        let storage = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage).await?;
+        let session = Session::open(artifacts);
+
+        let query = Query::<ParseUnsignedInteger> {
+            text: Term::from("-123".to_string()),
+            is: Term::var("num"),
+        };
+        let results = query.perform(&session).try_vec().await?;
+
         assert_eq!(results.len(), 0);
         Ok(())
     }
 
     #[dialog_common::test]
-    fn it_rejects_empty_string_as_number() -> anyhow::Result<()> {
-        let mut terms = Parameters::new();
-        terms.insert("text".to_string(), Parameter::var("str"));
-        terms.insert("is".to_string(), Parameter::var("num"));
+    async fn it_parses_signed_integer() -> anyhow::Result<()> {
+        let storage = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage).await?;
+        let session = Session::open(artifacts);
 
-        let input = Answer::new().set(Term::var("str"), "".to_string()).unwrap();
+        let query = Query::<ParseSignedInteger> {
+            text: Term::from("-123".to_string()),
+            is: Term::var("num"),
+        };
+        let results = query.perform(&session).try_vec().await?;
 
-        let app = ParseNumber::apply(terms)?;
-        let results = app
-            .derive(input)
-            .expect("ParseNumber should handle empty string");
-
-        // Should return empty Vec for empty string
-        assert_eq!(results.len(), 0);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].is, -123);
         Ok(())
     }
 
     #[dialog_common::test]
-    fn it_parses_negative_number() -> anyhow::Result<()> {
-        let mut terms = Parameters::new();
-        terms.insert("text".to_string(), Parameter::var("str"));
-        terms.insert("is".to_string(), Parameter::var("num"));
+    async fn it_parses_positive_as_signed() -> anyhow::Result<()> {
+        let storage = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage).await?;
+        let session = Session::open(artifacts);
 
-        let input = Answer::new()
-            .set(Term::var("str"), "-123".to_string())
-            .unwrap();
+        let query = Query::<ParseSignedInteger> {
+            text: Term::from("42".to_string()),
+            is: Term::var("num"),
+        };
+        let results = query.perform(&session).try_vec().await?;
 
-        let app = ParseNumber::apply(terms)?;
-        let results = app
-            .derive(input)
-            .expect("ParseNumber should handle negative input");
-
-        // Should return empty Vec for negative numbers since we parse as u32
-        assert_eq!(results.len(), 0);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].is, 42);
         Ok(())
     }
 
     #[dialog_common::test]
-    fn it_chains_type_conversions() -> anyhow::Result<()> {
-        // Test ToString formula with number
-        let mut to_string_terms = Parameters::new();
-        to_string_terms.insert("value".to_string(), Parameter::var("input"));
-        to_string_terms.insert("is".to_string(), Parameter::var("str_result"));
+    async fn it_parses_float() -> anyhow::Result<()> {
+        let storage = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage).await?;
+        let session = Session::open(artifacts);
 
-        let to_string_formula = ToString::apply(to_string_terms)?;
+        let query = Query::<ParseFloat> {
+            text: Term::from("3.14".to_string()),
+            is: Term::var("num"),
+        };
+        let results = query.perform(&session).try_vec().await?;
 
-        let number_input = Answer::new().set(Term::var("input"), 42u32).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!((results[0].is - 3.14).abs() < f64::EPSILON);
+        Ok(())
+    }
 
-        let string_results = to_string_formula.derive(number_input)?;
-        assert_eq!(string_results.len(), 1);
-        assert_eq!(
-            string_results[0]
-                .get::<String>(&Term::var("str_result"))
-                .ok(),
-            Some("42".to_string())
-        );
+    #[dialog_common::test]
+    async fn it_parses_negative_float() -> anyhow::Result<()> {
+        let storage = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage).await?;
+        let session = Session::open(artifacts);
 
-        // Test ToString formula with boolean
-        let bool_input = Answer::new().set(Term::var("input"), true).unwrap();
+        let query = Query::<ParseFloat> {
+            text: Term::from("-2.5".to_string()),
+            is: Term::var("num"),
+        };
+        let results = query.perform(&session).try_vec().await?;
 
-        let bool_string_results = to_string_formula.derive(bool_input)?;
-        assert_eq!(bool_string_results.len(), 1);
-        assert_eq!(
-            bool_string_results[0]
-                .get::<String>(&Term::var("str_result"))
-                .ok(),
-            Some("true".to_string())
-        );
+        assert_eq!(results.len(), 1);
+        assert!((results[0].is - -2.5).abs() < f64::EPSILON);
+        Ok(())
+    }
 
-        // Test ParseNumber formula with valid input
-        let mut parse_terms = Parameters::new();
-        parse_terms.insert("text".to_string(), Parameter::var("str_input"));
-        parse_terms.insert("is".to_string(), Parameter::var("num_result"));
+    #[dialog_common::test]
+    async fn it_parses_integer_as_float() -> anyhow::Result<()> {
+        let storage = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage).await?;
+        let session = Session::open(artifacts);
 
-        let parse_formula = ParseNumber::apply(parse_terms)?;
+        let query = Query::<ParseFloat> {
+            text: Term::from("42".to_string()),
+            is: Term::var("num"),
+        };
+        let results = query.perform(&session).try_vec().await?;
 
-        let parse_input = Answer::new()
-            .set(Term::var("str_input"), "123".to_string())
-            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert!((results[0].is - 42.0).abs() < f64::EPSILON);
+        Ok(())
+    }
 
-        let parse_results = parse_formula.derive(parse_input)?;
-        assert_eq!(parse_results.len(), 1);
-        assert_eq!(
-            parse_results[0].get::<u32>(&Term::var("num_result")).ok(),
-            Some(123)
-        );
+    #[dialog_common::test]
+    async fn it_rejects_invalid_text() -> anyhow::Result<()> {
+        let storage = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage).await?;
+        let session = Session::open(artifacts);
 
-        // Test ParseNumber formula with invalid input
-        let invalid_input = Answer::new()
-            .set(Term::var("str_input"), "not a number".to_string())
-            .unwrap();
+        for text in ["not a number", ""] {
+            let query = Query::<ParseUnsignedInteger> {
+                text: Term::from(text.to_string()),
+                is: Term::var("num"),
+            };
+            assert_eq!(query.perform(&session).try_vec().await?.len(), 0);
 
-        let invalid_results = parse_formula.derive(invalid_input)?;
-        assert_eq!(invalid_results.len(), 0);
+            let query = Query::<ParseSignedInteger> {
+                text: Term::from(text.to_string()),
+                is: Term::var("num"),
+            };
+            assert_eq!(query.perform(&session).try_vec().await?.len(), 0);
 
+            let query = Query::<ParseFloat> {
+                text: Term::from(text.to_string()),
+                is: Term::var("num"),
+            };
+            assert_eq!(query.perform(&session).try_vec().await?.len(), 0);
+        }
         Ok(())
     }
 }

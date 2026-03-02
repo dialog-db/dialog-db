@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::fmt::Display;
 
 use crate::error::{SchemaError, TypeError};
-use crate::parameter::Parameter;
+use crate::term::Term;
+use crate::types::Any;
 use crate::{Parameters, Requirement, Schema, Type};
 use serde::{Deserialize, Serialize};
 
@@ -92,7 +93,7 @@ impl Cell {
     }
 
     /// Type checks that the provided parameter matches this cell's content type.
-    pub fn check(&self, param: &Parameter) -> Result<(), TypeError> {
+    pub fn check(&self, param: &Term<Any>) -> Result<(), TypeError> {
         // First we type check the input to ensure it matches cell's content type
         match (self.content_type(), param.content_type()) {
             // if expected is any (has no type) it checks
@@ -116,7 +117,7 @@ impl Cell {
     }
 
     /// Validates that a parameter conforms to this cell's type and requirement constraints.
-    pub fn conform(&self, param: Option<&Parameter>) -> Result<(), TypeError> {
+    pub fn conform(&self, param: Option<&Term<Any>>) -> Result<(), TypeError> {
         // We check that cell type matches term type.
         if let Some(param) = param {
             self.check(param)?;
@@ -125,9 +126,9 @@ impl Cell {
         // Verify that required parameter is provided
         if self.requirement().is_required() {
             match param {
-                Some(Parameter::Constant(_)) => Ok(()),
-                Some(Parameter::Variable { name: Some(_), .. }) => Ok(()),
-                Some(Parameter::Variable { name: None, .. }) => Err(TypeError::BlankRequirement),
+                Some(Term::Constant(_)) => Ok(()),
+                Some(Term::Variable { name: Some(_), .. }) => Ok(()),
+                Some(Term::Variable { name: None, .. }) => Err(TypeError::BlankRequirement),
                 None => Err(TypeError::OmittedRequirement),
             }?;
         };

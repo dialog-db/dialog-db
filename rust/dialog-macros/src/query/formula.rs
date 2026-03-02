@@ -311,7 +311,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl ::std::convert::From<#match_name> for dialog_query::Parameters {
             fn from(terms: #match_name) -> Self {
                 let mut parameters = Self::new();
-                #(parameters.insert(#all_field_name_lits.into(), dialog_query::Parameter::from(terms.#all_field_names));)*
+                #(parameters.insert(#all_field_name_lits.into(), dialog_query::Term::<dialog_query::types::Any>::from(terms.#all_field_names));)*
                 parameters
             }
         }

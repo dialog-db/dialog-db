@@ -193,14 +193,15 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Parameter, Parameters, Query, Term, selection::Answer};
+
+    use crate::{Parameters, Query, Term, selection::Answer};
 
     #[dialog_common::test]
     fn it_concatenates_strings() {
         let mut terms = Parameters::new();
-        terms.insert("first".to_string(), Parameter::var("x"));
-        terms.insert("second".to_string(), Parameter::var("y"));
-        terms.insert("is".to_string(), Parameter::var("result"));
+        terms.insert("first".to_string(), Term::var("x"));
+        terms.insert("second".to_string(), Term::var("y"));
+        terms.insert("is".to_string(), Term::var("result"));
 
         let input = Answer::new()
             .set(Term::var("x"), "Hello".to_string())
@@ -215,7 +216,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Parameter::var("result"))
+                .resolve(&Term::var("result"))
                 .ok()
                 .and_then(|v| String::try_from(v).ok()),
             Some("Hello World".to_string())
@@ -225,8 +226,8 @@ mod tests {
     #[dialog_common::test]
     fn it_computes_string_length() {
         let mut terms = Parameters::new();
-        terms.insert("of".to_string(), Parameter::var("text"));
-        terms.insert("is".to_string(), Parameter::var("len"));
+        terms.insert("of".to_string(), Term::var("text"));
+        terms.insert("is".to_string(), Term::var("len"));
 
         let input = Answer::new()
             .set(Term::var("text"), "Hello".to_string())
@@ -239,7 +240,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Parameter::var("len"))
+                .resolve(&Term::var("len"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(5)
@@ -249,8 +250,8 @@ mod tests {
     #[dialog_common::test]
     fn it_converts_to_uppercase() {
         let mut terms = Parameters::new();
-        terms.insert("of".to_string(), Parameter::var("text"));
-        terms.insert("is".to_string(), Parameter::var("upper"));
+        terms.insert("of".to_string(), Term::var("text"));
+        terms.insert("is".to_string(), Term::var("upper"));
 
         let input = Answer::new()
             .set(Term::var("text"), "hello world".to_string())
@@ -263,7 +264,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Parameter::var("upper"))
+                .resolve(&Term::var("upper"))
                 .ok()
                 .and_then(|v| String::try_from(v).ok()),
             Some("HELLO WORLD".to_string())
@@ -273,8 +274,8 @@ mod tests {
     #[dialog_common::test]
     fn it_converts_to_lowercase() {
         let mut terms = Parameters::new();
-        terms.insert("of".to_string(), Parameter::var("text"));
-        terms.insert("is".to_string(), Parameter::var("lower"));
+        terms.insert("of".to_string(), Term::var("text"));
+        terms.insert("is".to_string(), Term::var("lower"));
 
         let input = Answer::new()
             .set(Term::var("text"), "HELLO WORLD".to_string())
@@ -287,7 +288,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Parameter::var("lower"))
+                .resolve(&Term::var("lower"))
                 .ok()
                 .and_then(|v| String::try_from(v).ok()),
             Some("hello world".to_string())
@@ -297,8 +298,8 @@ mod tests {
     #[dialog_common::test]
     fn it_returns_zero_for_empty_string() {
         let mut terms = Parameters::new();
-        terms.insert("of".to_string(), Parameter::var("text"));
-        terms.insert("is".to_string(), Parameter::var("len"));
+        terms.insert("of".to_string(), Term::var("text"));
+        terms.insert("is".to_string(), Term::var("len"));
 
         let input = Answer::new()
             .set(Term::var("text"), "".to_string())
@@ -311,7 +312,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Parameter::var("len"))
+                .resolve(&Term::var("len"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(0)
@@ -321,9 +322,9 @@ mod tests {
     #[dialog_common::test]
     fn it_concatenates_empty_strings() {
         let mut terms = Parameters::new();
-        terms.insert("first".to_string(), Parameter::var("x"));
-        terms.insert("second".to_string(), Parameter::var("y"));
-        terms.insert("is".to_string(), Parameter::var("result"));
+        terms.insert("first".to_string(), Term::var("x"));
+        terms.insert("second".to_string(), Term::var("y"));
+        terms.insert("is".to_string(), Term::var("result"));
 
         let input = Answer::new()
             .set(Term::var("x"), "".to_string())
@@ -340,7 +341,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Parameter::var("result"))
+                .resolve(&Term::var("result"))
                 .ok()
                 .and_then(|v| String::try_from(v).ok()),
             Some("World".to_string())
@@ -351,9 +352,9 @@ mod tests {
     fn it_chains_string_operations() -> anyhow::Result<()> {
         // Test Concatenate formula
         let mut concat_terms = Parameters::new();
-        concat_terms.insert("first".to_string(), Parameter::var("fname"));
-        concat_terms.insert("second".to_string(), Parameter::var("lname"));
-        concat_terms.insert("is".to_string(), Parameter::var("full_name"));
+        concat_terms.insert("first".to_string(), Term::var("fname"));
+        concat_terms.insert("second".to_string(), Term::var("lname"));
+        concat_terms.insert("is".to_string(), Term::var("full_name"));
 
         let concat_formula = Concatenate::apply(concat_terms)?;
 
@@ -374,8 +375,8 @@ mod tests {
 
         // Test Length formula
         let mut length_terms = Parameters::new();
-        length_terms.insert("of".to_string(), Parameter::var("text"));
-        length_terms.insert("is".to_string(), Parameter::var("length"));
+        length_terms.insert("of".to_string(), Term::var("text"));
+        length_terms.insert("is".to_string(), Term::var("length"));
 
         let length_formula = Length::apply(length_terms)?;
 
@@ -392,8 +393,8 @@ mod tests {
 
         // Test Uppercase formula
         let mut upper_terms = Parameters::new();
-        upper_terms.insert("of".to_string(), Parameter::var("input"));
-        upper_terms.insert("is".to_string(), Parameter::var("output"));
+        upper_terms.insert("of".to_string(), Term::var("input"));
+        upper_terms.insert("is".to_string(), Term::var("output"));
 
         let upper_formula = Uppercase::apply(upper_terms)?;
 
@@ -414,9 +415,9 @@ mod tests {
     #[dialog_common::test]
     fn it_matches_like_exact() {
         let mut terms = Parameters::new();
-        terms.insert("text".to_string(), Parameter::var("t"));
-        terms.insert("pattern".to_string(), Parameter::var("p"));
-        terms.insert("is".to_string(), Parameter::var("result"));
+        terms.insert("text".to_string(), Term::var("t"));
+        terms.insert("pattern".to_string(), Term::var("p"));
+        terms.insert("is".to_string(), Term::var("result"));
 
         let input = Answer::new()
             .set(Term::var("t"), "hello".to_string())
@@ -429,7 +430,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(
             results[0]
-                .resolve(&Parameter::var("result"))
+                .resolve(&Term::var("result"))
                 .ok()
                 .and_then(|v| String::try_from(v).ok()),
             Some("hello".to_string())
@@ -439,9 +440,9 @@ mod tests {
     #[dialog_common::test]
     fn it_matches_like_star_wildcard() {
         let mut terms = Parameters::new();
-        terms.insert("text".to_string(), Parameter::var("t"));
-        terms.insert("pattern".to_string(), Parameter::var("p"));
-        terms.insert("is".to_string(), Parameter::var("result"));
+        terms.insert("text".to_string(), Term::var("t"));
+        terms.insert("pattern".to_string(), Term::var("p"));
+        terms.insert("is".to_string(), Term::var("result"));
 
         let app = Like::apply(terms).expect("apply should work");
 
@@ -485,9 +486,9 @@ mod tests {
     #[dialog_common::test]
     fn it_matches_like_question_wildcard() {
         let mut terms = Parameters::new();
-        terms.insert("text".to_string(), Parameter::var("t"));
-        terms.insert("pattern".to_string(), Parameter::var("p"));
-        terms.insert("is".to_string(), Parameter::var("result"));
+        terms.insert("text".to_string(), Term::var("t"));
+        terms.insert("pattern".to_string(), Term::var("p"));
+        terms.insert("is".to_string(), Term::var("result"));
 
         let app = Like::apply(terms).expect("apply should work");
 
@@ -513,9 +514,9 @@ mod tests {
     #[dialog_common::test]
     fn it_matches_like_with_escape() {
         let mut terms = Parameters::new();
-        terms.insert("text".to_string(), Parameter::var("t"));
-        terms.insert("pattern".to_string(), Parameter::var("p"));
-        terms.insert("is".to_string(), Parameter::var("result"));
+        terms.insert("text".to_string(), Term::var("t"));
+        terms.insert("pattern".to_string(), Term::var("p"));
+        terms.insert("is".to_string(), Term::var("result"));
 
         let app = Like::apply(terms).expect("apply should work");
 
@@ -541,9 +542,9 @@ mod tests {
     #[dialog_common::test]
     fn it_matches_like_star_all() {
         let mut terms = Parameters::new();
-        terms.insert("text".to_string(), Parameter::var("t"));
-        terms.insert("pattern".to_string(), Parameter::var("p"));
-        terms.insert("is".to_string(), Parameter::var("result"));
+        terms.insert("text".to_string(), Term::var("t"));
+        terms.insert("pattern".to_string(), Term::var("p"));
+        terms.insert("is".to_string(), Term::var("result"));
 
         let app = Like::apply(terms).expect("apply should work");
 

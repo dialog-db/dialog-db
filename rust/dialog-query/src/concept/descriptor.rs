@@ -13,8 +13,8 @@ use crate::statement::Retraction;
 use crate::term::Term;
 use crate::types::Scalar;
 use crate::{
-    Association, Cardinality, Entity, Field, Parameter, Parameters, Proposition, QueryError,
-    Requirement, Schema, Statement, Transaction, Type, Value,
+    Association, Cardinality, Entity, Field, Parameters, Proposition, QueryError, Requirement,
+    Schema, Statement, Transaction, Type, Value,
 };
 
 use base58::ToBase58;
@@ -350,7 +350,7 @@ impl<'a> Builder<'a> {
 
     /// Sets an attribute value for the concept instance being built.
     pub fn with<T: Scalar>(mut self, name: &str, value: T) -> Self {
-        self.model.attributes.insert(name.into(), value.as_value());
+        self.model.attributes.insert(name.into(), value.into());
         self
     }
 
@@ -390,18 +390,18 @@ impl ConceptConclusion {
                 variable_name: field.to_string(),
             })?;
         match param {
-            Parameter::Variable {
+            Term::Variable {
                 name: Some(name), ..
             } => {
                 let typed_term: Term<T> = Term::var(name.clone());
                 self.answer.get(&typed_term).map_err(QueryError::from)
             }
-            Parameter::Constant(value) => {
+            Term::Constant(value) => {
                 T::try_from(value.clone()).map_err(|_| QueryError::UnboundVariable {
                     variable_name: field.to_string(),
                 })
             }
-            Parameter::Variable { name: None, .. } => Err(QueryError::UnboundVariable {
+            Term::Variable { name: None, .. } => Err(QueryError::UnboundVariable {
                 variable_name: field.to_string(),
             }),
         }
@@ -446,13 +446,13 @@ impl Application for ConceptQuery {
                 variable_name: "this".to_string(),
             })?;
         let entity: Entity = match this_param {
-            Parameter::Variable {
+            Term::Variable {
                 name: Some(name), ..
             } => {
                 let typed_term: Term<Entity> = Term::var(name.clone());
                 source.get(&typed_term)?
             }
-            Parameter::Constant(value) => match value {
+            Term::Constant(value) => match value {
                 Value::Entity(e) => e.clone(),
                 _ => {
                     return Err(QueryError::UnboundVariable {
@@ -460,7 +460,7 @@ impl Application for ConceptQuery {
                     });
                 }
             },
-            Parameter::Variable { name: None, .. } => {
+            Term::Variable { name: None, .. } => {
                 return Err(QueryError::UnboundVariable {
                     variable_name: "this".to_string(),
                 });

@@ -118,10 +118,8 @@ mod tests {
     use crate::relation::query::RelationQuery;
     use crate::term::Term;
     use crate::the;
-    use crate::types::Scalar;
-    use crate::{
-        Answer, Cardinality, Concept, Parameter, QueryError, Session, Statement, Transaction,
-    };
+    use crate::types::Any;
+    use crate::{Answer, Cardinality, Concept, QueryError, Session, Statement, Transaction};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
@@ -221,12 +219,12 @@ mod tests {
                 Association::new(
                     "person/name".parse().expect("Failed to parse attribute"),
                     self.this.clone(),
-                    self.name.as_value(),
+                    Value::from(self.name.clone()),
                 ),
                 Association::new(
                     "person/age".parse().expect("Failed to parse attribute"),
                     self.this.clone(),
-                    self.age.as_value(),
+                    Value::from(self.age.clone()),
                 ),
             ]
             .into_iter()
@@ -238,13 +236,13 @@ mod tests {
             transaction.associate(Association {
                 the: "person/name".parse().expect("Failed to parse attribute"),
                 of: self.this.clone(),
-                is: self.name.as_value(),
+                is: Value::from(self.name.clone()),
             });
 
             transaction.associate(Association {
                 the: "person/age".parse().expect("Failed to parse attribute"),
                 of: self.this.clone(),
-                is: self.age.as_value(),
+                is: Value::from(self.age.clone()),
             });
         }
 
@@ -252,13 +250,13 @@ mod tests {
             transaction.dissociate(Association {
                 the: "person/name".parse().expect("Failed to parse attribute"),
                 of: self.this.clone(),
-                is: self.name.as_value(),
+                is: Value::from(self.name.clone()),
             });
 
             transaction.dissociate(Association {
                 the: "person/age".parse().expect("Failed to parse attribute"),
                 of: self.this.clone(),
-                is: self.age.as_value(),
+                is: Value::from(self.age.clone()),
             });
         }
     }
@@ -295,9 +293,9 @@ mod tests {
     impl From<PersonMatch> for Parameters {
         fn from(source: PersonMatch) -> Self {
             let mut terms = Self::new();
-            terms.insert("this".into(), Parameter::from(source.this));
-            terms.insert("name".into(), Parameter::from(source.name));
-            terms.insert("age".into(), Parameter::from(source.age));
+            terms.insert("this".into(), Term::<Any>::from(source.this));
+            terms.insert("name".into(), Term::<Any>::from(source.name));
+            terms.insert("age".into(), Term::<Any>::from(source.age));
             terms
         }
     }
@@ -569,9 +567,9 @@ mod tests {
 
         // Test: Search for non-existent person using individual fact selector
         let missing_query = RelationQuery::new(
-            Term::Constant(the!("person/name")),
+            Term::from(the!("person/name")),
             Term::var("person"),
-            Parameter::from("NonExistent".to_string()),
+            Term::constant("NonExistent".to_string()),
             Term::blank(),
             None,
         );
@@ -877,17 +875,17 @@ mod tests {
         session.transact(vec![alice.clone()]).await?;
 
         let name_query = RelationQuery::new(
-            Term::Constant(the!("person-attr-concept/name")),
-            Term::Constant(alice_id.clone()),
-            Parameter::blank(),
+            Term::from(the!("person-attr-concept/name")),
+            Term::from(alice_id.clone()),
+            Term::blank(),
             Term::blank(),
             None,
         );
 
         let birthday_query = RelationQuery::new(
-            Term::Constant(the!("person-attr-concept/birthday")),
-            Term::Constant(alice_id.clone()),
-            Parameter::blank(),
+            Term::from(the!("person-attr-concept/birthday")),
+            Term::from(alice_id.clone()),
+            Term::blank(),
             Term::blank(),
             None,
         );
@@ -1028,25 +1026,25 @@ mod tests {
         session.transact(vec![alice_with_birthday]).await?;
 
         let name_query = RelationQuery::new(
-            Term::Constant(the!("person-attr-concept/name")),
-            Term::Constant(alice_id.clone()),
-            Parameter::blank(),
+            Term::from(the!("person-attr-concept/name")),
+            Term::from(alice_id.clone()),
+            Term::blank(),
             Term::blank(),
             None,
         );
 
         let email_query = RelationQuery::new(
-            Term::Constant(the!("person-attr-concept/email")),
-            Term::Constant(alice_id.clone()),
-            Parameter::blank(),
+            Term::from(the!("person-attr-concept/email")),
+            Term::from(alice_id.clone()),
+            Term::blank(),
             Term::blank(),
             None,
         );
 
         let birthday_query = RelationQuery::new(
-            Term::Constant(the!("person-attr-concept/birthday")),
-            Term::Constant(alice_id.clone()),
-            Parameter::blank(),
+            Term::from(the!("person-attr-concept/birthday")),
+            Term::from(alice_id.clone()),
+            Term::blank(),
             Term::blank(),
             None,
         );
@@ -1095,17 +1093,17 @@ mod tests {
         session.transact(vec![!alice]).await?;
 
         let name_query = RelationQuery::new(
-            Term::Constant(the!("person-attr-concept/name")),
-            Term::Constant(alice_id.clone()),
-            Parameter::blank(),
+            Term::from(the!("person-attr-concept/name")),
+            Term::from(alice_id.clone()),
+            Term::blank(),
             Term::blank(),
             None,
         );
 
         let birthday_query = RelationQuery::new(
-            Term::Constant(the!("person-attr-concept/birthday")),
-            Term::Constant(alice_id),
-            Parameter::blank(),
+            Term::from(the!("person-attr-concept/birthday")),
+            Term::from(alice_id),
+            Term::blank(),
             Term::blank(),
             None,
         );

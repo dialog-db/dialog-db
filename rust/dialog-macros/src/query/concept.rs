@@ -180,15 +180,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
         // Generate rule when field conversion
         rule_when_fields.push(quote! {
             {
-                let value_param = dialog_query::Parameter::from(terms.#field_name.clone());
+                let value_param = dialog_query::Term::<dialog_query::types::Any>::from(terms.#field_name.clone());
 
                 dialog_query::RelationQuery::new(
-                    dialog_query::Term::Constant(<#field_type as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().the().clone()),
+                    dialog_query::Term::Constant(dialog_query::Value::from(<#field_type as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().the().clone())),
                     terms.this.clone(),
                     value_param,
                     dialog_query::Term::blank(),
                     Some(dialog_query::RelationDescriptor::new(
-                        <<#field_type as dialog_query::Attribute>::Type as dialog_query::Typed>::TYPE,
+                        <<<#field_type as dialog_query::Attribute>::Type as dialog_query::Typed>::Descriptor as dialog_query::TypeDescriptor>::TYPE,
                         <#field_type as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().cardinality(),
                     )),
                 )
@@ -200,7 +200,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             dialog_query::Association::new(
                 <#field_type as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().the().clone(),
                 self.this.clone(),
-                dialog_query::Scalar::as_value(<#field_type as dialog_query::Attribute>::value(&self.#field_name)),
+                dialog_query::Value::from(<#field_type as dialog_query::Attribute>::value(&self.#field_name).clone()),
             )
         });
     }
@@ -294,9 +294,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
             fn from(source: #match_name) -> Self {
                 let mut terms = Self::new();
 
-                terms.insert("this".into(), dialog_query::Parameter::from(source.this));
+                terms.insert("this".into(), dialog_query::Term::<dialog_query::types::Any>::from(source.this));
 
-                #(terms.insert(#field_name_lits.into(), dialog_query::Parameter::from(source.#field_names));)*
+                #(terms.insert(#field_name_lits.into(), dialog_query::Term::<dialog_query::types::Any>::from(source.#field_names));)*
 
                 terms
             }

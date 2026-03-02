@@ -3,8 +3,9 @@ use std::collections::HashMap;
 use crate::Claim;
 use crate::artifact::Value;
 use crate::formula::query::FormulaQuery;
-use crate::parameter::Parameter;
 use crate::relation::query::RelationQuery;
+use crate::term::Term;
+use crate::types::Any;
 
 use super::Factors;
 
@@ -26,7 +27,7 @@ pub enum Evidence<'a> {
     /// Derived using formula application.
     Derived {
         /// The parameter being bound.
-        term: &'a Parameter,
+        term: &'a Term<Any>,
         /// The computed value.
         value: Box<Value>,
         /// The facts that were read to produce this derived value, keyed by parameter name.
@@ -37,7 +38,7 @@ pub enum Evidence<'a> {
     /// Applied parameter.
     Parameter {
         /// The parameter being bound.
-        term: &'a Parameter,
+        term: &'a Term<Any>,
         /// The parameter value.
         value: &'a Value,
     },

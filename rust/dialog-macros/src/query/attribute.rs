@@ -235,7 +235,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                         the,
                         #description_lit,
                         #cardinality,
-                        <#wrapped_type as dialog_query::Typed>::TYPE,
+                        <<#wrapped_type as dialog_query::Typed>::Descriptor as dialog_query::TypeDescriptor>::TYPE,
                     )
                 })
             }

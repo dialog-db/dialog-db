@@ -16,9 +16,10 @@ pub use selector::*;
 mod tests {
     use super::*;
     use crate::Claim;
+    use crate::Term;
     use crate::artifact::{Attribute, Entity, Value};
     use crate::error::InconsistencyError;
-    use crate::{Parameter, Term};
+
     use std::sync::Arc;
 
     #[dialog_common::test]
@@ -50,7 +51,7 @@ mod tests {
         let application = Arc::new(RelationQuery::new(
             Term::var("the"),
             Term::var("of"),
-            Parameter::var("is"),
+            Term::var("is"),
             Term::var("cause"),
             None,
         ));
@@ -75,7 +76,7 @@ mod tests {
         let factor = create_test_factor(Selector::Is, Arc::clone(&fact));
 
         let mut answer = Answer::new();
-        let name_term = Parameter::var("name");
+        let name_term = Term::var("name");
 
         // Initially should not contain the variable
         assert!(!answer.contains(&name_term));
@@ -88,7 +89,7 @@ mod tests {
     #[dialog_common::test]
     fn it_excludes_unbound_variable() {
         let answer = Answer::new();
-        let name_term = Parameter::var("name");
+        let name_term = Term::var("name");
 
         // Should not contain unbound variable
         assert!(!answer.contains(&name_term));
@@ -97,7 +98,7 @@ mod tests {
     #[dialog_common::test]
     fn it_contains_constant() {
         let answer = Answer::new();
-        let constant_param = Parameter::from("constant_value".to_string());
+        let constant_param = Term::constant("constant_value".to_string());
 
         // Constants are always "bound"
         assert!(answer.contains(&constant_param));
@@ -106,7 +107,7 @@ mod tests {
     #[dialog_common::test]
     fn it_excludes_blank_variable() {
         let answer = Answer::new();
-        let blank_param = Parameter::blank();
+        let blank_param = Term::blank();
 
         // Blank variables (Any) are never "bound"
         assert!(!answer.contains(&blank_param));
@@ -125,7 +126,7 @@ mod tests {
         let factor = create_test_factor(Selector::Is, Arc::clone(&fact));
 
         let mut answer = Answer::new();
-        let name_param = Parameter::var("name");
+        let name_param = Term::var("name");
 
         // Assign the value
         answer.assign(&name_param, &factor).unwrap();
@@ -151,7 +152,7 @@ mod tests {
         let factor = create_test_factor(Selector::Is, Arc::clone(&fact));
 
         let mut answer = Answer::new();
-        let age_param = Parameter::var("age");
+        let age_param = Term::var("age");
 
         // Assign the value
         answer.assign(&age_param, &factor).unwrap();
@@ -177,7 +178,7 @@ mod tests {
         let factor = create_test_factor(Selector::Is, Arc::clone(&fact));
 
         let mut answer = Answer::new();
-        let score_param = Parameter::var("score");
+        let score_param = Term::var("score");
 
         // Assign the value
         answer.assign(&score_param, &factor).unwrap();
@@ -203,7 +204,7 @@ mod tests {
         let factor = create_test_factor(Selector::Is, Arc::clone(&fact));
 
         let mut answer = Answer::new();
-        let active_param = Parameter::var("active");
+        let active_param = Term::var("active");
 
         // Assign the value
         answer.assign(&active_param, &factor).unwrap();
@@ -230,7 +231,7 @@ mod tests {
         let factor = create_test_factor(Selector::Is, Arc::clone(&fact));
 
         let mut answer = Answer::new();
-        let entity_param = Parameter::var("entity_id");
+        let entity_param = Term::var("entity_id");
 
         // Assign the value
         answer.assign(&entity_param, &factor).unwrap();
@@ -246,7 +247,7 @@ mod tests {
     #[dialog_common::test]
     fn it_resolves_constant() {
         let answer = Answer::new();
-        let constant_param = Parameter::from("constant_value".to_string());
+        let constant_param = Term::constant("constant_value".to_string());
 
         // Resolve constant directly
         let result = answer
@@ -259,7 +260,7 @@ mod tests {
     #[dialog_common::test]
     fn it_errors_on_unbound_variable() {
         let answer = Answer::new();
-        let name_param = Parameter::var("name");
+        let name_param = Term::var("name");
 
         // Try to resolve unbound variable (should fail)
         let result = answer
@@ -277,7 +278,7 @@ mod tests {
     #[dialog_common::test]
     fn it_errors_on_blank_variable() {
         let answer = Answer::new();
-        let blank_param = Parameter::blank();
+        let blank_param = Term::blank();
 
         // Try to resolve blank variable (should fail)
         let result = answer
@@ -303,7 +304,7 @@ mod tests {
         let factor = create_test_factor(Selector::Is, Arc::clone(&fact));
 
         let mut answer = Answer::new();
-        let name_param = Parameter::var("name");
+        let name_param = Term::var("name");
 
         // Assign a string value
         answer.assign(&name_param, &factor).unwrap();
@@ -342,7 +343,7 @@ mod tests {
         let factor2 = create_test_factor(Selector::Is, Arc::clone(&fact2));
 
         let mut answer = Answer::new();
-        let name_term = Parameter::var("name");
+        let name_term = Term::var("name");
 
         // Assign the same value from two different facts
         answer.assign(&name_term, &factor1).unwrap();
@@ -403,20 +404,14 @@ mod tests {
         let mut answer = Answer::new();
 
         // Assign all values using chaining
-        answer
-            .assign(&Parameter::var("name"), &name_factor)
-            .unwrap();
-        answer.assign(&Parameter::var("age"), &age_factor).unwrap();
-        answer
-            .assign(&Parameter::var("active"), &active_factor)
-            .unwrap();
+        answer.assign(&Term::var("name"), &name_factor).unwrap();
+        answer.assign(&Term::var("age"), &age_factor).unwrap();
+        answer.assign(&Term::var("active"), &active_factor).unwrap();
 
         // Resolve all values with correct types
-        let name_result =
-            String::try_from(answer.resolve(&Parameter::var("name")).unwrap()).unwrap();
-        let age_result = u32::try_from(answer.resolve(&Parameter::var("age")).unwrap()).unwrap();
-        let active_result =
-            bool::try_from(answer.resolve(&Parameter::var("active")).unwrap()).unwrap();
+        let name_result = String::try_from(answer.resolve(&Term::var("name")).unwrap()).unwrap();
+        let age_result = u32::try_from(answer.resolve(&Term::var("age")).unwrap()).unwrap();
+        let active_result = bool::try_from(answer.resolve(&Term::var("active")).unwrap()).unwrap();
 
         assert_eq!(name_result, "Bob");
         assert_eq!(age_result, 30);
@@ -448,17 +443,16 @@ mod tests {
 
         // Use extend to assign multiple values at once
         let assignments = vec![
-            (Parameter::var("name"), name_factor),
-            (Parameter::var("age"), age_factor),
+            (Term::var("name"), name_factor),
+            (Term::var("age"), age_factor),
         ];
 
         let mut answer = Answer::new();
         answer.extend(assignments).unwrap();
 
         // Verify all values were assigned
-        let name_result =
-            String::try_from(answer.resolve(&Parameter::var("name")).unwrap()).unwrap();
-        let age_result = u32::try_from(answer.resolve(&Parameter::var("age")).unwrap()).unwrap();
+        let name_result = String::try_from(answer.resolve(&Term::var("name")).unwrap()).unwrap();
+        let age_result = u32::try_from(answer.resolve(&Term::var("age")).unwrap()).unwrap();
 
         assert_eq!(name_result, "Charlie");
         assert_eq!(age_result, 35);

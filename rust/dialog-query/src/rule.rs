@@ -22,21 +22,21 @@ pub use when::*;
 /// This macro provides the most concise way to create rule conditions:
 ///
 /// ```rust
-/// use dialog_query::{when, When, Term, Parameter, artifact::Value, the};
+/// use dialog_query::{when, When, Term, Any, artifact::Value, the};
 /// use dialog_query::relation::query::RelationQuery;
 ///
 /// fn example() -> impl When {
 ///     let r1 = RelationQuery::new(
-///         Term::Constant(the!("ns/attr1")),
+///         Term::from(the!("ns/attr1")),
 ///         Term::var("entity"),
-///         Parameter::from("value1".to_string()),
+///         Term::<Any>::constant("value1".to_string()),
 ///         Term::blank(),
 ///         None,
 ///     );
 ///     let r2 = RelationQuery::new(
-///         Term::Constant(the!("ns/attr2")),
+///         Term::from(the!("ns/attr2")),
 ///         Term::var("entity"),
-///         Parameter::var("value2"),
+///         Term::<Any>::var("value2"),
 ///         Term::blank(),
 ///         None,
 ///     );
@@ -56,7 +56,7 @@ mod tests {
     extern crate self as dialog_query;
 
     use super::*;
-    use crate::artifact::{Artifacts, Entity, Type};
+    use crate::artifact::{Artifacts, Entity, Type, Value};
     use crate::attribute::{AttributeDescriptor, Cardinality};
     use crate::concept::application::ConceptQuery;
     use crate::concept::descriptor::ConceptDescriptor;
@@ -68,7 +68,6 @@ mod tests {
     use crate::statement::Statement;
     use crate::term::Term;
     use crate::the;
-    use crate::types::Scalar;
     use crate::{Association, Parameters, Proposition, Query, QueryError, Session, Transaction};
 
     // Manual implementation of Person struct with Concept and Rule traits
@@ -168,8 +167,16 @@ mod tests {
 
         fn into_iter(self) -> Self::IntoIter {
             vec![
-                Association::new(the!("person/name"), self.this.clone(), self.name.as_value()),
-                Association::new(the!("person/age"), self.this.clone(), self.age.as_value()),
+                Association::new(
+                    the!("person/name"),
+                    self.this.clone(),
+                    Value::from(self.name.clone()),
+                ),
+                Association::new(
+                    the!("person/age"),
+                    self.this.clone(),
+                    Value::from(self.age.clone()),
+                ),
             ]
             .into_iter()
         }
@@ -177,17 +184,33 @@ mod tests {
 
     impl Statement for Person {
         fn assert(self, transaction: &mut Transaction) {
-            Association::new(the!("person/name"), self.this.clone(), self.name.as_value())
-                .assert(transaction);
-            Association::new(the!("person/age"), self.this.clone(), self.age.as_value())
-                .assert(transaction);
+            Association::new(
+                the!("person/name"),
+                self.this.clone(),
+                Value::from(self.name.clone()),
+            )
+            .assert(transaction);
+            Association::new(
+                the!("person/age"),
+                self.this.clone(),
+                Value::from(self.age.clone()),
+            )
+            .assert(transaction);
         }
 
         fn retract(self, transaction: &mut Transaction) {
-            Association::new(the!("person/name"), self.this.clone(), self.name.as_value())
-                .retract(transaction);
-            Association::new(the!("person/age"), self.this.clone(), self.age.as_value())
-                .retract(transaction);
+            Association::new(
+                the!("person/name"),
+                self.this.clone(),
+                Value::from(self.name.clone()),
+            )
+            .retract(transaction);
+            Association::new(
+                the!("person/age"),
+                self.this.clone(),
+                Value::from(self.age.clone()),
+            )
+            .retract(transaction);
         }
     }
 
@@ -213,9 +236,9 @@ mod tests {
         fn from(source: PersonMatch) -> Self {
             let mut terms = Self::new();
 
-            terms.insert("this".into(), source.this);
-            terms.insert("name".into(), source.name);
-            terms.insert("age".into(), source.age);
+            terms.insert("this".into(), source.this.into());
+            terms.insert("name".into(), source.name.into());
+            terms.insert("age".into(), source.age.into());
 
             terms
         }

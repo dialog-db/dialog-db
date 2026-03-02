@@ -4,7 +4,7 @@ pub use crate::planner::Plan;
 pub use crate::planner::{Conjunction, Planner};
 pub use crate::premise::Premise;
 pub use crate::{Attribute, Cardinality, Parameters, Proposition, Requirement, Value};
-use crate::{Environment, Parameter, Term, Type};
+use crate::{Environment, Term, Type};
 use std::fmt::Display;
 
 /// Represents a deductive rule that can be applied creating a premise.
@@ -127,9 +127,9 @@ impl From<&ConceptDescriptor> for DeductiveRule {
         for (name, attribute) in concept.with().iter() {
             premises.push(
                 RelationQuery::new(
-                    Term::Constant(attribute.the().clone()),
+                    Term::Constant(crate::artifact::Value::from(attribute.the().clone())),
                     this.clone(),
-                    Parameter::var(name),
+                    Term::var(name),
                     Term::blank(),
                     Some(RelationDescriptor::new(
                         attribute.content_type(),
@@ -178,17 +178,17 @@ mod tests {
         let this = Term::<Entity>::var("this");
         let premises = vec![
             RelationQuery::new(
-                Term::Constant(the!("user/name")),
+                Term::from(the!("user/name")),
                 this.clone(),
-                Parameter::var("name"),
+                Term::var("name"),
                 Term::var("cause"),
                 Some(RelationDescriptor::new(None, Cardinality::One)),
             )
             .into(),
             RelationQuery::new(
-                Term::Constant(the!("user/age")),
+                Term::from(the!("user/age")),
                 this,
-                Parameter::var("age"),
+                Term::var("age"),
                 Term::var("cause"),
                 Some(RelationDescriptor::new(None, Cardinality::One)),
             )
@@ -224,7 +224,7 @@ mod tests {
             RelationQuery::new(
                 Term::var("the"),
                 Term::<Entity>::var("user"),
-                Parameter::var("value"),
+                Term::var("value"),
                 Term::var("cause"),
                 Some(RelationDescriptor::new(None, Cardinality::One)),
             )
@@ -262,7 +262,7 @@ mod tests {
             RelationQuery::new(
                 Term::var("the"),
                 Term::<Entity>::var("user"),
-                Parameter::var("value"),
+                Term::var("value"),
                 Term::var("cause"),
                 None,
             )
@@ -300,9 +300,9 @@ mod tests {
         ]);
         let premises = vec![
             RelationQuery::new(
-                Term::Constant(the!("user/name")),
+                Term::from(the!("user/name")),
                 Term::<Entity>::var("this"),
-                Parameter::var("name"),
+                Term::var("name"),
                 Term::var("cause"),
                 Some(RelationDescriptor::new(None, Cardinality::One)),
             )
@@ -365,9 +365,9 @@ mod tests {
         let this = Term::<Entity>::var("this");
         let premises = vec![
             RelationQuery::new(
-                Term::Constant(the!("user/name")),
+                Term::from(the!("user/name")),
                 this.clone(),
-                Parameter::from("jack".to_string()),
+                Term::constant("jack".to_string()),
                 Term::var("cause"),
                 Some(RelationDescriptor::new(None, Cardinality::One)),
             )
@@ -377,7 +377,7 @@ mod tests {
             RelationQuery::new(
                 Term::var("key"),
                 this,
-                Parameter::var("value"),
+                Term::var("value"),
                 Term::var("cause"),
                 Some(RelationDescriptor::new(None, Cardinality::One)),
             )
@@ -397,9 +397,9 @@ mod tests {
 
         let premises = vec![
             RelationQuery::new(
-                Term::Constant(the!("user/name")),
+                Term::from(the!("user/name")),
                 Term::<Entity>::var("this"),
-                Parameter::var("key_var"),
+                Term::var("key_var"),
                 Term::var("cause"),
                 Some(RelationDescriptor::new(None, Cardinality::One)),
             )
@@ -435,9 +435,9 @@ mod tests {
         let z = Term::<String>::var("z");
         let premises = vec![
             RelationQuery::new(
-                Term::Constant(the!("person/name")),
+                Term::from(the!("person/name")),
                 Term::<Entity>::var("this"),
-                name.clone(),
+                name.clone().into(),
                 Term::var("cause"),
                 Some(RelationDescriptor::new(None, Cardinality::One)),
             )
@@ -472,9 +472,9 @@ mod tests {
         let z = Term::<String>::var("z");
         let premises = vec![
             RelationQuery::new(
-                Term::Constant(the!("person/name")),
+                Term::from(the!("person/name")),
                 Term::<Entity>::var("this"),
-                name.clone(),
+                name.clone().into(),
                 Term::var("cause"),
                 Some(RelationDescriptor::new(None, Cardinality::One)),
             )

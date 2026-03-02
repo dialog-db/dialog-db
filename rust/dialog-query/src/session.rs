@@ -356,9 +356,10 @@ mod tests {
     use crate::relation::query::RelationQuery;
     use crate::selection::Answer;
     use crate::the;
+
     use crate::{
-        Association, AttributeDescriptor, Cardinality, Concept, Parameter, Parameters, Query, Term,
-        Type, concept::descriptor::ConceptDescriptor,
+        Association, AttributeDescriptor, Cardinality, Concept, Parameters, Query, Term, Type,
+        concept::descriptor::ConceptDescriptor,
     };
 
     use super::*;
@@ -425,11 +426,11 @@ mod tests {
             ),
         ]);
 
-        let name_param = Parameter::var("name");
-        let age_param = Parameter::var("age");
+        let name_param = Term::var("name");
+        let age_param = Term::var("age");
         let mut params = Parameters::new();
-        params.insert("name".into(), Parameter::var("name"));
-        params.insert("age".into(), Parameter::var("age"));
+        params.insert("name".into(), Term::var("name"));
+        params.insert("age".into(), Term::var("age"));
 
         // Use new query API directly on application
         let application = person.apply(params)?;
@@ -494,8 +495,8 @@ mod tests {
 
         // Mixed case - valid parameters with some matching attributes (should succeed)
         let mut mixed_params = Parameters::new();
-        mixed_params.insert("name".into(), Parameter::var("person_name")); // This matches
-        mixed_params.insert("age".into(), Parameter::blank()); // This matches but is blank
+        mixed_params.insert("name".into(), Term::var("person_name")); // This matches
+        mixed_params.insert("age".into(), Term::blank()); // This matches but is blank
 
         person.apply(mixed_params)?;
 
@@ -545,11 +546,11 @@ mod tests {
 
         session.transact(vec![alice, bob]).await?;
 
-        let name_param = Parameter::var("name");
-        let age_param = Parameter::var("age");
+        let name_param = Term::var("name");
+        let age_param = Term::var("age");
         let mut params = Parameters::new();
-        params.insert("name".into(), Parameter::var("name"));
-        params.insert("age".into(), Parameter::var("age"));
+        params.insert("name".into(), Term::var("name"));
+        params.insert("age".into(), Term::var("age"));
 
         // Let's test with empty parameters first to see the exact error
         let application = person.apply(params)?;
@@ -637,17 +638,17 @@ mod tests {
             employee_predicate,
             vec![
                 RelationQuery::new(
-                    Term::Constant(the!("stuff/name")),
+                    Term::from(the!("stuff/name")),
                     Term::var("this"),
-                    Parameter::var("name"),
+                    Term::var("name"),
                     Term::blank(),
                     None,
                 )
                 .into(),
                 RelationQuery::new(
-                    Term::Constant(the!("stuff/role")),
+                    Term::from(the!("stuff/role")),
                     Term::var("this"),
-                    Parameter::var("job"),
+                    Term::var("job"),
                     Term::blank(),
                     None,
                 )
@@ -762,9 +763,9 @@ mod tests {
                     role: employee.job,
                 },
                 RelationQuery::new(
-                    Term::Constant(the!("stuff/name")),
+                    Term::from(the!("stuff/name")),
                     employee.this,
-                    employee.name.clone(),
+                    employee.name.clone().into(),
                     Term::blank(),
                     None,
                 ),
@@ -882,9 +883,9 @@ mod tests {
         let rules = session_with_rule.acquire(&adult_conclusion)?;
         let answer = crate::selection::Answer::new();
         let mut terms = Parameters::new();
-        terms.insert("this".into(), Parameter::var("e"));
-        terms.insert("name".into(), Parameter::var("n"));
-        terms.insert("age".into(), Parameter::var("a"));
+        terms.insert("this".into(), Term::var("e"));
+        terms.insert("name".into(), Term::var("n"));
+        terms.insert("age".into(), Term::var("a"));
         let _plan = rules.plan(&terms, &answer);
 
         Ok(())
@@ -1171,17 +1172,17 @@ mod tests {
                 employee.role.is(Role("employee".into())),
                 // employee has a name
                 RelationQuery::new(
-                    Term::Constant(the!("implicit-attr-test/name")),
+                    Term::from(the!("implicit-attr-test/name")),
                     employee.this.clone(),
-                    employee.name.clone(),
+                    employee.name.clone().into(),
                     Term::blank(),
                     None,
                 ),
                 // but does not have role (using ! operator)
                 !RelationQuery::new(
-                    Term::Constant(the!("implicit-attr-test/role")),
+                    Term::from(the!("implicit-attr-test/role")),
                     employee.this.clone(),
-                    Parameter::blank(),
+                    Term::blank(),
                     Term::blank(),
                     None,
                 ),
@@ -1280,9 +1281,9 @@ mod tests {
         let rules = ConceptRules::new(&person);
 
         let mut terms = Parameters::new();
-        terms.insert("this".into(), Parameter::var("e"));
-        terms.insert("name".into(), Parameter::var("n"));
-        terms.insert("age".into(), Parameter::var("a"));
+        terms.insert("this".into(), Term::var("e"));
+        terms.insert("name".into(), Term::var("n"));
+        terms.insert("age".into(), Term::var("a"));
 
         let answer = Answer::new();
         let plan1 = rules.plan(&terms, &answer);
@@ -1302,9 +1303,9 @@ mod tests {
         let rules = ConceptRules::new(&person);
 
         let mut terms = Parameters::new();
-        terms.insert("this".into(), Parameter::var("e"));
-        terms.insert("name".into(), Parameter::var("n"));
-        terms.insert("age".into(), Parameter::var("a"));
+        terms.insert("this".into(), Term::var("e"));
+        terms.insert("name".into(), Term::var("n"));
+        terms.insert("age".into(), Term::var("a"));
 
         // All-free adornment
         let answer_free = Answer::new();
@@ -1314,7 +1315,7 @@ mod tests {
         let mut answer_bound = Answer::new();
         answer_bound
             .merge(Evidence::Parameter {
-                term: &Parameter::var("e"),
+                term: &Term::var("e"),
                 value: &Value::from(Entity::new().unwrap()),
             })
             .unwrap();
@@ -1334,9 +1335,9 @@ mod tests {
         let mut rules = ConceptRules::new(&person);
 
         let mut terms = Parameters::new();
-        terms.insert("this".into(), Parameter::var("e"));
-        terms.insert("name".into(), Parameter::var("n"));
-        terms.insert("age".into(), Parameter::var("a"));
+        terms.insert("this".into(), Term::var("e"));
+        terms.insert("name".into(), Term::var("n"));
+        terms.insert("age".into(), Term::var("a"));
 
         // Warm the cache
         let answer = Answer::new();
@@ -1361,9 +1362,9 @@ mod tests {
 
         let person = person_concept();
         let mut terms = Parameters::new();
-        terms.insert("this".into(), Parameter::var("e"));
-        terms.insert("name".into(), Parameter::var("n"));
-        terms.insert("age".into(), Parameter::var("a"));
+        terms.insert("this".into(), Term::var("e"));
+        terms.insert("name".into(), Term::var("n"));
+        terms.insert("age".into(), Term::var("a"));
 
         let mut registry = RuleRegistry::new();
 
@@ -1397,9 +1398,9 @@ mod tests {
         let mut rules = ConceptRules::new(&person);
 
         let mut terms = Parameters::new();
-        terms.insert("this".into(), Parameter::var("e"));
-        terms.insert("name".into(), Parameter::var("n"));
-        terms.insert("age".into(), Parameter::var("a"));
+        terms.insert("this".into(), Term::var("e"));
+        terms.insert("name".into(), Term::var("n"));
+        terms.insert("age".into(), Term::var("a"));
 
         // Install a rule and warm the cache
         let rule = DeductiveRule::from(&person);
@@ -1427,9 +1428,9 @@ mod tests {
         let rules = ConceptRules::new(&person);
 
         let mut terms = Parameters::new();
-        terms.insert("this".into(), Parameter::var("e"));
-        terms.insert("name".into(), Parameter::var("n"));
-        terms.insert("age".into(), Parameter::var("a"));
+        terms.insert("this".into(), Term::var("e"));
+        terms.insert("name".into(), Term::var("n"));
+        terms.insert("age".into(), Term::var("a"));
 
         // Warm cache on the original
         let answer = Answer::new();
@@ -1454,9 +1455,9 @@ mod tests {
         let rules = ConceptRules::new(&person);
 
         let mut terms = Parameters::new();
-        terms.insert("this".into(), Parameter::var("e"));
-        terms.insert("name".into(), Parameter::var("n"));
-        terms.insert("age".into(), Parameter::var("a"));
+        terms.insert("this".into(), Term::var("e"));
+        terms.insert("name".into(), Term::var("n"));
+        terms.insert("age".into(), Term::var("a"));
 
         // All-free plan
         let answer_free = Answer::new();
@@ -1468,7 +1469,7 @@ mod tests {
         let mut answer_bound = Answer::new();
         answer_bound
             .merge(Evidence::Parameter {
-                term: &Parameter::var("e"),
+                term: &Term::var("e"),
                 value: &Value::from(Entity::new().unwrap()),
             })
             .unwrap();
@@ -1532,10 +1533,10 @@ mod tests {
             .await?;
 
         let person = person_concept();
-        let name_param = Parameter::var("name");
+        let name_param = Term::var("name");
         let mut params = Parameters::new();
-        params.insert("name".into(), Parameter::var("name"));
-        params.insert("age".into(), Parameter::var("age"));
+        params.insert("name".into(), Term::var("name"));
+        params.insert("age".into(), Term::var("age"));
 
         let application = person.apply(params)?;
 
@@ -1615,14 +1616,14 @@ mod tests {
 
         let person = person_concept();
 
-        let name_param = Parameter::var("name");
-        let age_param = Parameter::var("age");
-        let entity_param = Parameter::var("this");
+        let name_param = Term::var("name");
+        let age_param = Term::var("age");
+        let entity_param = Term::var("this");
 
         let mut params = Parameters::new();
-        params.insert("this".into(), Parameter::var("this"));
-        params.insert("name".into(), Parameter::var("name"));
-        params.insert("age".into(), Parameter::var("age"));
+        params.insert("this".into(), Term::var("this"));
+        params.insert("name".into(), Term::var("name"));
+        params.insert("age".into(), Term::var("age"));
 
         let application = person.apply(params)?;
 

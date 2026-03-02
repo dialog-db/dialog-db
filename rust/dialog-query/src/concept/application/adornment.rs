@@ -13,9 +13,9 @@
 //! (Tekle & Liu, 2011).
 
 use crate::environment::Environment;
-use crate::parameter::Parameter;
 use crate::parameters::Parameters;
 use crate::selection::Answer;
+use crate::term::Term;
 
 /// Compact representation of which concept parameters are bound.
 ///
@@ -44,9 +44,9 @@ impl Adornment {
             debug_assert!(i < 64, "Adornment supports at most 64 parameters");
             if let Some(param) = terms.get(key) {
                 let bound = match param {
-                    Parameter::Constant(_) => true,
-                    Parameter::Variable { name: Some(_), .. } => answer.contains(param),
-                    Parameter::Variable { name: None, .. } => false,
+                    Term::Constant(_) => true,
+                    Term::Variable { name: Some(_), .. } => answer.contains(param),
+                    Term::Variable { name: None, .. } => false,
                 };
                 if bound {
                     bits |= 1 << i;
@@ -82,10 +82,11 @@ impl Adornment {
 mod tests {
     use super::*;
     use crate::selection::Evidence;
-    use crate::{Parameter, Value};
+
+    use crate::{Term, Value};
 
     fn bind(answer: &mut Answer, var_name: &str, value: Value) {
-        let param = Parameter::var(var_name);
+        let param = Term::var(var_name);
         answer
             .merge(Evidence::Parameter {
                 term: &param,
@@ -97,8 +98,8 @@ mod tests {
     #[dialog_common::test]
     fn it_marks_all_variables_as_free() {
         let mut terms = Parameters::new();
-        terms.insert("age".into(), Parameter::var("a"));
-        terms.insert("name".into(), Parameter::var("n"));
+        terms.insert("age".into(), Term::var("a"));
+        terms.insert("name".into(), Term::var("n"));
 
         let answer = Answer::new();
         let adornment = Adornment::derive(&terms, &answer);
@@ -109,8 +110,8 @@ mod tests {
     #[dialog_common::test]
     fn it_marks_constants_as_bound() {
         let mut terms = Parameters::new();
-        terms.insert("age".into(), Parameter::from(25u32));
-        terms.insert("name".into(), Parameter::var("n"));
+        terms.insert("age".into(), Term::constant(25u32));
+        terms.insert("name".into(), Term::var("n"));
 
         let answer = Answer::new();
         let adornment = Adornment::derive(&terms, &answer);
@@ -122,8 +123,8 @@ mod tests {
     #[dialog_common::test]
     fn it_marks_answered_variables_as_bound() {
         let mut terms = Parameters::new();
-        terms.insert("age".into(), Parameter::var("a"));
-        terms.insert("name".into(), Parameter::var("n"));
+        terms.insert("age".into(), Term::var("a"));
+        terms.insert("name".into(), Term::var("n"));
 
         let mut answer = Answer::new();
         bind(&mut answer, "n", Value::String("Alice".into()));
@@ -137,8 +138,8 @@ mod tests {
     #[dialog_common::test]
     fn it_marks_blanks_as_free() {
         let mut terms = Parameters::new();
-        terms.insert("age".into(), Parameter::blank());
-        terms.insert("name".into(), Parameter::from("Bob".to_string()));
+        terms.insert("age".into(), Term::blank());
+        terms.insert("name".into(), Term::constant("Bob".to_string()));
 
         let answer = Answer::new();
         let adornment = Adornment::derive(&terms, &answer);
@@ -150,8 +151,8 @@ mod tests {
     #[dialog_common::test]
     fn it_marks_all_as_bound() {
         let mut terms = Parameters::new();
-        terms.insert("age".into(), Parameter::from(25u32));
-        terms.insert("name".into(), Parameter::from("Bob".to_string()));
+        terms.insert("age".into(), Term::constant(25u32));
+        terms.insert("name".into(), Term::constant("Bob".to_string()));
 
         let answer = Answer::new();
         let adornment = Adornment::derive(&terms, &answer);
@@ -162,12 +163,12 @@ mod tests {
     #[dialog_common::test]
     fn it_produces_order_independent_adornments() {
         let mut terms1 = Parameters::new();
-        terms1.insert("name".into(), Parameter::var("n"));
-        terms1.insert("age".into(), Parameter::from(25u32));
+        terms1.insert("name".into(), Term::var("n"));
+        terms1.insert("age".into(), Term::constant(25u32));
 
         let mut terms2 = Parameters::new();
-        terms2.insert("age".into(), Parameter::from(25u32));
-        terms2.insert("name".into(), Parameter::var("n"));
+        terms2.insert("age".into(), Term::constant(25u32));
+        terms2.insert("name".into(), Term::var("n"));
 
         let answer = Answer::new();
         assert_eq!(
@@ -179,9 +180,9 @@ mod tests {
     #[dialog_common::test]
     fn it_round_trips_through_environment() {
         let mut terms = Parameters::new();
-        terms.insert("age".into(), Parameter::var("a"));
-        terms.insert("name".into(), Parameter::from("Bob".to_string()));
-        terms.insert("this".into(), Parameter::var("e"));
+        terms.insert("age".into(), Term::var("a"));
+        terms.insert("name".into(), Term::constant("Bob".to_string()));
+        terms.insert("this".into(), Term::var("e"));
 
         let mut answer = Answer::new();
         bind(&mut answer, "e", Value::String("entity1".into()));
@@ -199,8 +200,8 @@ mod tests {
     #[dialog_common::test]
     fn it_produces_same_adornment_for_same_pattern() {
         let mut terms = Parameters::new();
-        terms.insert("name".into(), Parameter::var("n"));
-        terms.insert("age".into(), Parameter::var("a"));
+        terms.insert("name".into(), Term::var("n"));
+        terms.insert("age".into(), Term::var("a"));
 
         let mut answer1 = Answer::new();
         bind(&mut answer1, "n", Value::String("Alice".into()));
@@ -218,8 +219,8 @@ mod tests {
     #[dialog_common::test]
     fn it_produces_different_adornment_for_different_pattern() {
         let mut terms = Parameters::new();
-        terms.insert("name".into(), Parameter::var("n"));
-        terms.insert("age".into(), Parameter::var("a"));
+        terms.insert("name".into(), Term::var("n"));
+        terms.insert("age".into(), Term::var("a"));
 
         let mut answer1 = Answer::new();
         bind(&mut answer1, "n", Value::String("Alice".into()));
