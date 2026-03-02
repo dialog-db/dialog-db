@@ -867,10 +867,7 @@ mod tests {
         // Query with constant name value - should only return Bob
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Parameter::var("entity"));
-        terms.insert(
-            "name".to_string(),
-            Parameter::from("Bob".to_string()),
-        );
+        terms.insert("name".to_string(), Parameter::from("Bob".to_string()));
         terms.insert("age".to_string(), Parameter::var("age"));
 
         let app = ConceptQuery {
@@ -956,14 +953,8 @@ mod tests {
         // Query with both name and age constants - should only match Alice
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Parameter::var("entity"));
-        terms.insert(
-            "name".to_string(),
-            Parameter::from("Alice".to_string()),
-        );
-        terms.insert(
-            "age".to_string(),
-            Parameter::from(25u32),
-        );
+        terms.insert("name".to_string(), Parameter::from("Alice".to_string()));
+        terms.insert("age".to_string(), Parameter::from(25u32));
 
         let app = ConceptQuery {
             terms,
