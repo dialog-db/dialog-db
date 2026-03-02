@@ -56,7 +56,7 @@ mod tests {
     extern crate self as dialog_query;
 
     use super::*;
-    use crate::artifact::{Artifacts, Entity, Type, Value};
+    use crate::artifact::{Artifacts, Entity, Type};
     use crate::attribute::{AttributeDescriptor, Cardinality};
     use crate::concept::application::ConceptQuery;
     use crate::concept::descriptor::ConceptDescriptor;
@@ -68,7 +68,8 @@ mod tests {
     use crate::term::Term;
     use crate::the;
     use crate::{
-        Association, EvaluationError, Parameters, Proposition, Query, Session, Transaction,
+        DynamicAttributeExpression, EvaluationError, Parameters, Proposition, Query, Session,
+        Transaction,
     };
 
     // Manual implementation of Person struct with Concept and Rule traits
@@ -163,21 +164,17 @@ mod tests {
     }
 
     impl IntoIterator for Person {
-        type Item = Association;
-        type IntoIter = std::vec::IntoIter<Association>;
+        type Item = DynamicAttributeExpression;
+        type IntoIter = std::vec::IntoIter<DynamicAttributeExpression>;
 
         fn into_iter(self) -> Self::IntoIter {
             vec![
-                Association::new(
-                    the!("person/name"),
-                    self.this.clone(),
-                    Value::from(self.name.clone()),
-                ),
-                Association::new(
-                    the!("person/age"),
-                    self.this.clone(),
-                    Value::from(self.age.clone()),
-                ),
+                the!("person/name")
+                    .of(self.this.clone())
+                    .is(self.name.clone()),
+                the!("person/age")
+                    .of(self.this.clone())
+                    .is(self.age.clone()),
             ]
             .into_iter()
         }
@@ -185,33 +182,25 @@ mod tests {
 
     impl Statement for Person {
         fn assert(self, transaction: &mut Transaction) {
-            Association::new(
-                the!("person/name"),
-                self.this.clone(),
-                Value::from(self.name.clone()),
-            )
-            .assert(transaction);
-            Association::new(
-                the!("person/age"),
-                self.this.clone(),
-                Value::from(self.age.clone()),
-            )
-            .assert(transaction);
+            the!("person/name")
+                .of(self.this.clone())
+                .is(self.name.clone())
+                .assert(transaction);
+            the!("person/age")
+                .of(self.this.clone())
+                .is(self.age.clone())
+                .assert(transaction);
         }
 
         fn retract(self, transaction: &mut Transaction) {
-            Association::new(
-                the!("person/name"),
-                self.this.clone(),
-                Value::from(self.name.clone()),
-            )
-            .retract(transaction);
-            Association::new(
-                the!("person/age"),
-                self.this.clone(),
-                Value::from(self.age.clone()),
-            )
-            .retract(transaction);
+            the!("person/name")
+                .of(self.this.clone())
+                .is(self.name.clone())
+                .retract(transaction);
+            the!("person/age")
+                .of(self.this.clone())
+                .is(self.age.clone())
+                .retract(transaction);
         }
     }
 

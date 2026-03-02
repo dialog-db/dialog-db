@@ -529,7 +529,7 @@ mod tests {
     use super::*;
     use crate::query::Output;
     use crate::selection::{Answer, Answers};
-    use crate::{Association, Session, the};
+    use crate::{Session, the};
     use dialog_storage::MemoryStorageBackend;
     use futures_util::stream::once;
 
@@ -544,11 +544,7 @@ mod tests {
         let alice = Entity::new()?;
         let name_attr = the!("person/name");
 
-        let claims = vec![Association {
-            the: name_attr.clone(),
-            of: alice.clone(),
-            is: Value::String("Alice".to_string()),
-        }];
+        let claims = vec![name_attr.clone().of(alice.clone()).is("Alice".to_string())];
 
         let mut session = Session::open(artifacts.clone());
         session.transact(claims).await?;
@@ -598,20 +594,16 @@ mod tests {
         // in separate transactions so both persist in the store.
         let mut session = Session::open(artifacts.clone());
         session
-            .transact(vec![Association {
-                the: name_attr.clone(),
-                of: alice.clone(),
-                is: Value::String("Alice".to_string()),
-            }])
+            .transact(vec![
+                name_attr.clone().of(alice.clone()).is("Alice".to_string()),
+            ])
             .await?;
 
         let mut session = Session::open(artifacts.clone());
         session
-            .transact(vec![Association {
-                the: name_attr.clone(),
-                of: alice.clone(),
-                is: Value::String("Alicia".to_string()),
-            }])
+            .transact(vec![
+                name_attr.clone().of(alice.clone()).is("Alicia".to_string()),
+            ])
             .await?;
 
         // Query with Cardinality::One — should return only one value
@@ -662,11 +654,7 @@ mod tests {
         ($artifacts:expr, $the:expr, $of:expr, $is:expr) => {{
             let mut session = Session::open($artifacts.clone());
             session
-                .transact(vec![Association {
-                    the: $the.clone(),
-                    of: $of.clone(),
-                    is: $is,
-                }])
+                .transact(vec![$the.clone().of($of.clone()).is($is)])
                 .await
                 .unwrap();
         }};
@@ -923,11 +911,7 @@ mod tests {
         let alice = Entity::new()?;
         let name_attr = the!("person/name");
 
-        let claims = vec![Association {
-            the: name_attr.into(),
-            of: alice.clone(),
-            is: Value::String("Alice".to_string()),
-        }];
+        let claims = vec![name_attr.of(alice.clone()).is("Alice".to_string())];
 
         let mut session = Session::open(artifacts.clone());
         session.transact(claims).await?;
@@ -964,11 +948,7 @@ mod tests {
         let alice = Entity::new()?;
         let name_attr = the!("person/name");
 
-        let claims = vec![Association {
-            the: name_attr.clone(),
-            of: alice.clone(),
-            is: Value::String("Alice".to_string()),
-        }];
+        let claims = vec![name_attr.clone().of(alice.clone()).is("Alice".to_string())];
 
         let mut session = Session::open(artifacts.clone());
         session.transact(claims).await?;
@@ -1002,11 +982,7 @@ mod tests {
 
         let alice = Entity::new()?;
 
-        let alice_name = Association {
-            the: the!("user/name"),
-            of: alice.clone(),
-            is: Value::String("Alice".to_string()),
-        };
+        let alice_name = the!("user/name").of(alice.clone()).is("Alice".to_string());
 
         let mut session = Session::open(artifacts.clone());
         session.transact(vec![alice_name.clone()]).await?;
@@ -1058,11 +1034,7 @@ mod tests {
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
-        let claims = vec![Association {
-            the: the!("user/name"),
-            of: alice.clone(),
-            is: Value::String("Alice".to_string()),
-        }];
+        let claims = vec![the!("user/name").of(alice.clone()).is("Alice".to_string())];
 
         let mut session = Session::open(artifacts.clone());
         session.transact(claims).await?;
@@ -1100,16 +1072,8 @@ mod tests {
         let bob = Entity::new()?;
 
         let claims = vec![
-            Association {
-                the: the!("user/name"),
-                of: alice.clone(),
-                is: Value::String("Alice".to_string()),
-            },
-            Association {
-                the: the!("user/name"),
-                of: bob.clone(),
-                is: Value::String("Bob".to_string()),
-            },
+            the!("user/name").of(alice.clone()).is("Alice".to_string()),
+            the!("user/name").of(bob.clone()).is("Bob".to_string()),
         ];
 
         let mut session = Session::open(artifacts.clone());
@@ -1150,11 +1114,7 @@ mod tests {
 
         let alice = Entity::new()?;
 
-        let claims = vec![Association {
-            the: the!("user/name"),
-            of: alice.clone(),
-            is: Value::String("Alice".to_string()),
-        }];
+        let claims = vec![the!("user/name").of(alice.clone()).is("Alice".to_string())];
 
         let mut session = Session::open(artifacts.clone());
         session.transact(claims).await?;

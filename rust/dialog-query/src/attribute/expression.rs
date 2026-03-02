@@ -7,7 +7,7 @@ use crate::relation::query::RelationQuery;
 use crate::statement::{Retraction, Statement};
 use crate::types::Any;
 use crate::types::Scalar;
-use crate::{Association, Cardinality, Entity, Premise, Proposition, Term, Transaction};
+use crate::{Cardinality, Entity, Premise, Proposition, Term, Transaction};
 use std::marker::PhantomData;
 
 /// Cause-position in an [`AttributeExpression`].
@@ -214,19 +214,18 @@ where
 {
     fn assert(self, transaction: &mut Transaction) {
         let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
-        let association =
-            Association::new(desc.the().clone(), self.of, self.is.value().clone().into());
+        let the = desc.the().clone();
+        let value = self.is.value().clone().into();
         if desc.cardinality() == Cardinality::One {
-            transaction.associate_unique(association);
+            transaction.associate_unique(the, self.of, value);
         } else {
-            transaction.associate(association);
+            transaction.associate(the, self.of, value);
         }
     }
 
     fn retract(self, transaction: &mut Transaction) {
         let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
-        Association::new(desc.the().clone(), self.of, self.is.value().clone().into())
-            .retract(transaction);
+        transaction.dissociate(desc.the().clone(), self.of, self.is.value().clone().into());
     }
 }
 
@@ -242,21 +241,23 @@ where
     }
 }
 
-// IntoIterator for concrete → single Association
+// IntoIterator for concrete → single DynamicAttributeExpression
 impl<A> IntoIterator for AttributeExpression<A, Entity, A, Option<Cause>>
 where
     A: Attribute + Descriptor<AttributeDescriptor> + Clone,
 {
-    type Item = Association;
-    type IntoIter = std::iter::Once<Association>;
+    type Item = crate::attribute::DynamicAttributeExpression;
+    type IntoIter = std::iter::Once<crate::attribute::DynamicAttributeExpression>;
 
     fn into_iter(self) -> Self::IntoIter {
         let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
-        std::iter::once(Association::new(
-            desc.the().clone(),
-            self.of,
-            self.is.value().clone().into(),
-        ))
+        std::iter::once(crate::attribute::DynamicAttributeExpression {
+            the: desc.the().clone(),
+            of: self.of,
+            is: self.is.value().clone().into(),
+            cause: None,
+            cardinality: Some(desc.cardinality()),
+        })
     }
 }
 
@@ -463,10 +464,10 @@ mod tests {
         let alice = Entity::new().unwrap();
         let expr = person::Name::of(alice.clone()).is("Alice");
 
-        let associations: Vec<Association> = expr.into_iter().collect();
-        assert_eq!(associations.len(), 1);
-        assert_eq!(associations[0].of, alice);
-        assert_eq!(associations[0].is, Value::String("Alice".into()));
+        let items: Vec<crate::attribute::DynamicAttributeExpression> = expr.into_iter().collect();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].of, alice);
+        assert_eq!(items[0].is, Value::String("Alice".into()));
     }
 
     #[dialog_common::test]

@@ -24,11 +24,9 @@ impl<T> Store for T where T: ArtifactStoreMut + Clone + ConditionalSend {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::artifact::{Artifacts, Entity, Value};
+    use crate::artifact::{Artifacts, Entity};
     use crate::relation::query::RelationQuery;
-    use crate::the;
-
-    use crate::{Association, Session, Term};
+    use crate::{Session, Term, the};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
@@ -41,21 +39,11 @@ mod tests {
         let bob = Entity::new()?;
 
         let claims = vec![
-            Association {
-                the: the!("user/name"),
-                of: alice.clone(),
-                is: Value::String("Alice".to_string()),
-            },
-            Association {
-                the: the!("user/email"),
-                of: alice.clone(),
-                is: Value::String("alice@example.com".to_string()),
-            },
-            Association {
-                the: the!("user/name"),
-                of: bob.clone(),
-                is: Value::String("Bob".to_string()),
-            },
+            the!("user/name").of(alice.clone()).is("Alice".to_string()),
+            the!("user/email")
+                .of(alice.clone())
+                .is("alice@example.com".to_string()),
+            the!("user/name").of(bob.clone()).is("Bob".to_string()),
         ];
 
         let mut session = Session::open(artifacts.clone());
@@ -126,11 +114,7 @@ mod tests {
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         let alice = Entity::new()?;
-        let claims = vec![Association {
-            the: the!("user/name"),
-            of: alice.clone(),
-            is: Value::String("Alice".to_string()),
-        }];
+        let claims = vec![the!("user/name").of(alice.clone()).is("Alice".to_string())];
 
         let mut session = Session::open(artifacts.clone());
         session.transact(claims).await?;
@@ -159,26 +143,10 @@ mod tests {
         let bob = Entity::new()?;
 
         let claims = vec![
-            Association {
-                the: the!("user/name"),
-                of: alice.clone(),
-                is: Value::String("Alice".to_string()),
-            },
-            Association {
-                the: the!("user/role"),
-                of: alice.clone(),
-                is: Value::String("admin".to_string()),
-            },
-            Association {
-                the: the!("user/name"),
-                of: bob.clone(),
-                is: Value::String("Bob".to_string()),
-            },
-            Association {
-                the: the!("user/role"),
-                of: bob.clone(),
-                is: Value::String("user".to_string()),
-            },
+            the!("user/name").of(alice.clone()).is("Alice".to_string()),
+            the!("user/role").of(alice.clone()).is("admin".to_string()),
+            the!("user/name").of(bob.clone()).is("Bob".to_string()),
+            the!("user/role").of(bob.clone()).is("user".to_string()),
         ];
 
         let mut session = Session::open(artifacts.clone());

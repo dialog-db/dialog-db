@@ -264,7 +264,7 @@ mod tests {
         use crate::relation::query::RelationQuery;
         use crate::session::Session;
 
-        use crate::{Association, Cardinality, Proposition, Term, Value, the};
+        use crate::{Cardinality, Proposition, Term, Value, the};
         use dialog_artifacts::{Artifacts, Entity};
         use dialog_storage::MemoryStorageBackend;
 
@@ -277,26 +277,12 @@ mod tests {
 
         session
             .transact(vec![
-                Association {
-                    the: the!("person/name"),
-                    of: alice.clone(),
-                    is: Value::String("Alice".to_string()),
-                },
-                Association {
-                    the: the!("person/age"),
-                    of: alice.clone(),
-                    is: Value::UnsignedInt(25),
-                },
-                Association {
-                    the: the!("person/name"),
-                    of: bob.clone(),
-                    is: Value::String("Bob".to_string()),
-                },
-                Association {
-                    the: the!("person/age"),
-                    of: bob.clone(),
-                    is: Value::UnsignedInt(30),
-                },
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+                the!("person/age").of(alice.clone()).is(25u32),
+                the!("person/name").of(bob.clone()).is("Bob".to_string()),
+                the!("person/age").of(bob.clone()).is(30u32),
             ])
             .await?;
 

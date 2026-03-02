@@ -192,13 +192,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         });
 
-        // Generate Association for IntoIterator implementation
+        // Generate DynamicAttributeExpression for IntoIterator implementation
         instance_relations.push(quote! {
-            dialog_query::Association::new(
-                <#field_type as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().the().clone(),
-                self.this.clone(),
-                dialog_query::Value::from(<#field_type as dialog_query::Attribute>::value(&self.#field_name).clone()),
-            )
+            dialog_query::DynamicAttributeExpression {
+                the: <#field_type as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().the().clone(),
+                of: self.this.clone(),
+                is: dialog_query::Value::from(<#field_type as dialog_query::Attribute>::value(&self.#field_name).clone()),
+                cause: None,
+                cardinality: Some(<#field_type as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().cardinality()),
+            }
         });
     }
 
@@ -390,8 +392,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         // Implement IntoIterator to convert concept into relations
         impl IntoIterator for #struct_name {
-            type Item = dialog_query::Association;
-            type IntoIter = std::vec::IntoIter<dialog_query::Association>;
+            type Item = dialog_query::DynamicAttributeExpression;
+            type IntoIter = std::vec::IntoIter<dialog_query::DynamicAttributeExpression>;
 
             fn into_iter(self) -> Self::IntoIter {
                 vec![
@@ -404,13 +406,13 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl dialog_query::Statement for #struct_name {
             fn assert(self, transaction: &mut dialog_query::Transaction) {
                 #(
-                    #instance_relations.assert(transaction);
+                    dialog_query::Statement::assert(#instance_relations, transaction);
                 )*
             }
 
             fn retract(self, transaction: &mut dialog_query::Transaction) {
                 #(
-                    #instance_relations.retract(transaction);
+                    dialog_query::Statement::retract(#instance_relations, transaction);
                 )*
             }
         }

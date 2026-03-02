@@ -18,8 +18,6 @@ pub mod attribute;
 /// Proposition types for querying the knowledge base.
 pub mod proposition;
 
-/// Entity-attribute-value association triples for writes.
-pub mod association;
 /// Read-side claim type for query results.
 pub mod claim;
 /// Concept definitions for entity-centric pattern matching.
@@ -66,8 +64,10 @@ pub mod term;
 pub mod types;
 
 pub use artifact::{Attribute as ArtifactAttribute, Entity, Type, Value};
-pub use association::Association;
-pub use attribute::{Attribute, AttributeDescriptor, AttributeExpressionBuilder, Cardinality, The};
+pub use attribute::{
+    Attribute, AttributeDescriptor, AttributeExpressionBuilder, Cardinality,
+    DynamicAttributeExpression, The,
+};
 pub use claim::Claim;
 pub use concept::application::{ConceptQuery, ConceptRules};
 pub use concept::descriptor::{ConceptConclusion, ConceptDescriptor};

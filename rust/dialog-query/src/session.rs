@@ -358,7 +358,7 @@ mod tests {
     use crate::the;
 
     use crate::{
-        Association, AttributeDescriptor, Cardinality, Concept, Parameters, Query, Term, Type,
+        AttributeDescriptor, Cardinality, Concept, Parameters, Query, Term, Type,
         concept::descriptor::ConceptDescriptor,
     };
 
@@ -377,31 +377,15 @@ mod tests {
 
         session
             .transact(vec![
-                Association {
-                    the: the!("person/name"),
-                    of: alice.clone(),
-                    is: Value::String("Alice".to_string()),
-                },
-                Association {
-                    the: the!("person/age"),
-                    of: alice.clone(),
-                    is: Value::UnsignedInt(25),
-                },
-                Association {
-                    the: the!("person/name"),
-                    of: bob.clone(),
-                    is: Value::String("Bob".to_string()),
-                },
-                Association {
-                    the: the!("person/age"),
-                    of: bob.clone(),
-                    is: Value::UnsignedInt(30),
-                },
-                Association {
-                    the: the!("person/name"),
-                    of: mallory.clone(),
-                    is: Value::String("Mallory".to_string()),
-                },
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+                the!("person/age").of(alice.clone()).is(25u32),
+                the!("person/name").of(bob.clone()).is("Bob".to_string()),
+                the!("person/age").of(bob.clone()).is(30u32),
+                the!("person/name")
+                    .of(mallory.clone())
+                    .is("Mallory".to_string()),
             ])
             .await?;
 
@@ -1509,26 +1493,12 @@ mod tests {
 
         session
             .transact(vec![
-                Association {
-                    the: the!("person/name"),
-                    of: alice.clone(),
-                    is: Value::String("Alice".into()),
-                },
-                Association {
-                    the: the!("person/age"),
-                    of: alice.clone(),
-                    is: Value::UnsignedInt(30),
-                },
-                Association {
-                    the: the!("person/name"),
-                    of: bob.clone(),
-                    is: Value::String("Bob".into()),
-                },
-                Association {
-                    the: the!("person/age"),
-                    of: bob.clone(),
-                    is: Value::UnsignedInt(25),
-                },
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+                the!("person/age").of(alice.clone()).is(30u32),
+                the!("person/name").of(bob.clone()).is("Bob".to_string()),
+                the!("person/age").of(bob.clone()).is(25u32),
             ])
             .await?;
 
@@ -1591,26 +1561,12 @@ mod tests {
 
         session
             .transact(vec![
-                Association {
-                    the: the!("person/name"),
-                    of: alice.clone(),
-                    is: Value::String("Alice".into()),
-                },
-                Association {
-                    the: the!("person/age"),
-                    of: alice.clone(),
-                    is: Value::UnsignedInt(30),
-                },
-                Association {
-                    the: the!("person/name"),
-                    of: bob.clone(),
-                    is: Value::String("Bob".into()),
-                },
-                Association {
-                    the: the!("person/age"),
-                    of: bob.clone(),
-                    is: Value::UnsignedInt(25),
-                },
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+                the!("person/age").of(alice.clone()).is(30u32),
+                the!("person/name").of(bob.clone()).is("Bob".to_string()),
+                the!("person/age").of(bob.clone()).is(25u32),
             ])
             .await?;
 
