@@ -1,6 +1,6 @@
 # Core Concepts
 
-Dialog organizes information around four simple ideas: **entities**, **attributes**, **values**, and **facts**. If you've used a relational database, you can think of this as a more flexible alternative to tables and rows. If you haven't, don't worry; we'll build up from first principles.
+Dialog organizes information around four simple ideas: **entities**, **attributes**, **values**, and **claims**. If you've used a relational database, you can think of this as a more flexible alternative to tables and rows. If you haven't, don't worry; we'll build up from first principles.
 
 ## Entities
 
@@ -13,7 +13,7 @@ let alice = Entity::new()?;
 let pancakes = Entity::new()?;
 ```
 
-That's it. `alice` and `pancakes` are now entities. They don't "know" that one is a person and the other is a recipe. That meaning comes from the facts you assert about them.
+That's it. `alice` and `pancakes` are now entities. They don't "know" that one is a person and the other is a recipe. That meaning comes from the claims you assert about them.
 
 ## Values
 
@@ -60,15 +60,15 @@ The `Attribute` derive macro does a few things automatically:
 
 We'll cover cardinality in more detail in the [Cardinality chapter](./cardinality.md).
 
-## Facts
+## Claims
 
-A fact combines all three: it says something specific about an entity.
+A claim combines all three: it says something specific about an entity.
 
 ```text
 the Name of <pancakes> is "Pancakes"
 ```
 
-In Dialog's internal representation, a fact has four components:
+In Dialog's internal representation, a claim has four components:
 
 | Field | Meaning | Example |
 |---|---|---|
@@ -77,11 +77,11 @@ In Dialog's internal representation, a fact has four components:
 | `is` | The value (what we're asserting) | `"Pancakes"` |
 | `cause` | Causal reference (provenance) | *(automatic)* |
 
-The `cause` field is managed by Dialog; you don't set it directly. It records *when* and *by whom* the fact was asserted, which is essential for sync (covered in a [later chapter](./sync.md)).
+The `cause` field is managed by Dialog; you don't set it directly. It records *when* and *by whom* the claim was asserted, which is essential for sync (covered in a [later chapter](./sync.md)).
 
-### Facts are immutable
+### Claims are immutable
 
-Once a fact exists, it never changes. If you want to update a recipe's name, you don't modify the existing fact. Instead you **retract** the old fact and **assert** a new one. Dialog keeps both in its history. This append-only model is what makes sync possible: since facts are never mutated, two peers can never have conflicting versions of the same fact.
+Once a claim exists, it never changes. If you want to update a recipe's name, you don't modify the existing claim. Instead you **retract** the old claim and **assert** a new one. Dialog keeps both in its history. This append-only model is what makes sync possible: since claims are never mutated, two peers can never have conflicting versions of the same claim.
 
 ## Putting it together
 
@@ -89,15 +89,15 @@ Here's how these concepts relate in practice:
 
 ```text
 Entity: <recipe-123>
-  ├── recipe/name    = "Pancakes"         (fact 1)
-  ├── recipe/servings = 4                 (fact 2)
-  └── recipe/author  = <user-456>         (fact 3)
+  ├── recipe/name    = "Pancakes"         (claim 1)
+  ├── recipe/servings = 4                 (claim 2)
+  └── recipe/author  = <user-456>         (claim 3)
 
 Entity: <user-456>
-  ├── user/name      = "Alice"            (fact 4)
-  └── user/email     = "alice@example.com" (fact 5)
+  ├── user/name      = "Alice"            (claim 4)
+  └── user/email     = "alice@example.com" (claim 5)
 ```
 
-Notice that there's no "recipe table" or "user table." Entity `<recipe-123>` simply has facts with recipe-related attributes, and `<user-456>` has facts with user-related attributes. The same entity could have attributes from both domains. Dialog doesn't enforce boundaries.
+Notice that there's no "recipe table" or "user table." Entity `<recipe-123>` simply has claims with recipe-related attributes, and `<user-456>` has claims with user-related attributes. The same entity could have attributes from both domains. Dialog doesn't enforce boundaries.
 
-This flexibility is fundamental. Your application gives facts *meaning* by choosing which attributes to query for. In the next section, we'll see how to define attributes and compose them into higher-level structures called concepts.
+This flexibility is fundamental. Your application gives claims *meaning* by choosing which attributes to query for. In the next section, we'll see how to define attributes and compose them into higher-level structures called concepts.

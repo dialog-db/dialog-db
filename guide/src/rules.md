@@ -1,6 +1,6 @@
 # Rules
 
-So far, every query has matched directly against stored facts. Rules let you derive new data from existing data, without storing it. If a concept query is a conjunction (AND), rules add disjunction (OR): multiple alternative ways to derive the same concept.
+So far, every query has matched directly against stored claims. Rules let you derive new data from existing data, without storing it. If a concept query is a conjunction (AND), rules add disjunction (OR): multiple alternative ways to derive the same concept.
 
 ## A motivating example
 
@@ -106,7 +106,7 @@ fn meatless_recipe(recipe: Query<MeatlessRecipe>) -> impl When {
             name: recipe.name.clone(),
             servings: recipe.servings.clone(),
         },
-        // This entity must NOT have a meat-ingredient fact
+        // This entity must NOT have a meat-ingredient claim
         !Query::<MeatIngredient> {
             this: recipe.this.clone(),
             ingredient: Term::var("_"),
@@ -115,7 +115,7 @@ fn meatless_recipe(recipe: Query<MeatlessRecipe>) -> impl When {
 }
 ```
 
-The negated pattern (`!Query::<MeatIngredient>`) succeeds when *no* matching fact exists. This is known as negation-as-failure: the absence of a match counts as success.
+The negated pattern (`!Query::<MeatIngredient>`) succeeds when *no* matching claim exists. This is known as negation-as-failure: the absence of a match counts as success.
 
 There's an important constraint with negation: the variables used in a negated pattern should already be bound by preceding positive premises. In the example above, `recipe.this` is bound by the `Query::<Recipe>` pattern before the negation uses it. If you put the negation first, the engine wouldn't know which entities to check.
 
@@ -134,4 +134,4 @@ Rules are useful when:
 - You need to join data across concepts in a reusable way
 - You want to keep derived logic declarative rather than imperative
 
-Rules are evaluated at query time, so they always reflect the current state of the database. There is no need to update derived data when the underlying facts change.
+Rules are evaluated at query time, so they always reflect the current state of the database. There is no need to update derived data when the underlying claims change.

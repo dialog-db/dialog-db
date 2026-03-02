@@ -83,7 +83,7 @@ The `of(...).is(...)` chain creates an **expression**. Depending on what you pas
 
 We'll see both uses in the coming chapters.
 
-### Asserting facts
+### Asserting claims
 
 When both `of` and `is` are concrete values, the expression is a **statement**, something you can write to the database:
 
@@ -97,9 +97,9 @@ edit.assert(recipe::Servings::of(pancakes.clone()).is(4u32));
 session.commit(edit).await?;
 ```
 
-### Retracting facts
+### Retracting claims
 
-To remove a fact, negate the statement with `!`:
+To remove a claim, negate the statement with `!`:
 
 ```rust
 let mut edit = session.edit();
@@ -107,7 +107,7 @@ edit.assert(!recipe::Name::of(pancakes.clone()).is("Pancakes"));
 session.commit(edit).await?;
 ```
 
-This doesn't delete the fact from history. It marks the fact as retracted in the current state. The full history is preserved for sync and auditing.
+This doesn't delete the claim from history. It marks the claim as retracted in the current state. The full history is preserved for sync and auditing.
 
 ### Querying with patterns
 
@@ -153,4 +153,4 @@ mod recipe {
 }
 ```
 
-Each of these is an independent fact. You can assert any subset of them for an entity; there's no requirement that an entity have all of them. This flexibility is what enables [schema-on-query](./concepts.md), which we'll cover next.
+Each of these is an independent claim. You can assert any subset of them for an entity; there's no requirement that an entity have all of them. This flexibility is what enables [schema-on-query](./concepts.md), which we'll cover next.

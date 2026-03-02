@@ -7,10 +7,10 @@ A named, typed relationship between an entity and a value. Defined as a Rust new
 Whether an attribute allows one value per entity (`one`, the default) or multiple values (`many`). Cardinality one means asserting a new value retracts the old one. Cardinality many means values accumulate.
 
 **Cause**
-The causal reference attached to each fact, recording which peer asserted it and the logical timestamp. Used for sync and conflict resolution.
+The causal reference attached to each claim, recording which peer asserted it and the logical timestamp. Used for sync and conflict resolution.
 
 **Claim**
-The stored representation of a fact in the associative layer. Contains four fields: `the` (attribute), `of` (entity), `is` (value), and `cause` (provenance).
+An atomic statement stored in the associative layer. Contains four fields: `the` (attribute), `of` (entity), `is` (value), and `cause` (provenance). Claims are immutable and content-addressed.
 
 **Concept**
 A group of attributes queried together. Defined as a Rust struct with `#[derive(Concept)]`. A concept query is a conjunction: an entity matches only if it has all the listed attributes.
@@ -22,16 +22,16 @@ A logical AND. In Dialog, the premises of a rule and the attributes of a concept
 A logical OR. In Dialog, installing multiple rules for the same concept creates disjunction: any rule can produce a match.
 
 **Entity**
-A unique identifier for a thing in the database. Entities have no inherent type or structure. Their meaning comes from the facts asserted about them.
+A unique identifier for a thing in the database. Entities have no inherent type or structure. Their meaning comes from the claims asserted about them.
 
 **Fact**
-An atomic statement: "the [attribute] of [entity] is [value]." Facts are immutable and content-addressed.
+See **Claim**. The guide uses "claim" to refer to atomic statements in the associative layer.
 
 **Formula**
 A pure computation integrated into the query planner. Takes bound inputs and produces derived outputs. Defined with `#[derive(Formula)]`.
 
 **Negation (negation-as-failure)**
-A pattern that succeeds when no matching fact exists. Written with `!` before a query pattern. Variables in negated patterns must be bound by preceding positive premises.
+A pattern that succeeds when no matching claim exists. Written with `!` before a query pattern. Variables in negated patterns must be bound by preceding positive premises.
 
 **Premise**
 A condition in a rule. Multiple premises form a conjunction. A premise can be a query pattern, a formula, or a negated pattern.
@@ -40,7 +40,7 @@ A condition in a rule. Multiple premises form a conjunction. A premise can be a 
 Probabilistic B-tree used as Dialog's storage structure. Two trees with the same content have the same structure, enabling efficient diffing for sync.
 
 **Query**
-A pattern with variables and constants that the engine matches against stored facts and derived rules. Returns all bindings that satisfy the pattern.
+A pattern with variables and constants that the engine matches against stored claims and derived rules. Returns all bindings that satisfy the pattern.
 
 **Rule**
 A function that derives a concept from a set of premises. Rules are evaluated at query time and do not store their results. Multiple rules for the same concept create disjunction.

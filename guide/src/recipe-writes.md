@@ -67,7 +67,7 @@ edit.assert(recipe::Tag::of(pancakes.clone()).is("quick"));
 session.commit(edit).await?;
 ```
 
-The `Recipe` concept assertion stores four facts (name, servings, prep_time, author). The tags are separate cardinality-many facts.
+The `Recipe` concept assertion stores four claims (name, servings, prep_time, author). The tags are separate cardinality-many claims.
 
 ## Linking ingredients to the recipe
 
@@ -121,7 +121,7 @@ edit.assert(recipe::Name::of(pancakes.clone()).is("Fluffy Pancakes"));
 session.commit(edit).await?;
 ```
 
-After this, the recipe's name is "Fluffy Pancakes". The old "Pancakes" fact is still in the history but no longer part of the current state.
+After this, the recipe's name is "Fluffy Pancakes". The old "Pancakes" claim is still in the history but no longer part of the current state.
 
 ## Removing a tag
 

@@ -22,7 +22,7 @@ edit.assert(recipe::Name::of(pancakes.clone()).is("Fluffy Pancakes"));
 session.commit(edit).await?;
 ```
 
-After the second assertion, the name of `pancakes` is "Fluffy Pancakes". The fact asserting "Pancakes" has been retracted. (It still exists in the history, but it is no longer part of the current state.)
+After the second assertion, the name of `pancakes` is "Fluffy Pancakes". The claim asserting "Pancakes" has been retracted. (It still exists in the history, but it is no longer part of the current state.)
 
 This is the common case. A recipe has one name, one serving count, one author.
 
@@ -63,11 +63,11 @@ Cardinality becomes especially relevant when multiple peers are editing the same
 2. Peer B, concurrently, sets the name to "Fluffy Pancakes"
 3. They sync
 
-With cardinality one, Dialog's transactor can use the causal references on each fact to determine what happened. Each assertion carries information about which prior facts it was aware of. The transactor uses this to resolve the situation, typically keeping both values temporarily and letting the application decide, or applying last-writer-wins semantics.
+With cardinality one, Dialog's transactor can use the causal references on each claim to determine what happened. Each assertion carries information about which prior claims it was aware of. The transactor uses this to resolve the situation, typically keeping both values temporarily and letting the application decide, or applying last-writer-wins semantics.
 
 With cardinality many, concurrent assertions simply accumulate. Both values are kept because that's the intended semantics of the attribute.
 
-> **Note**: The precise conflict resolution behavior for concurrent cardinality-one writes is an active area of development. The current model uses causal references (the `cause` on each fact) and value-based comparison rather than requiring applications to pass provenance tokens. See the [Sync chapter](./sync.md) for more details.
+> **Note**: The precise conflict resolution behavior for concurrent cardinality-one writes is an active area of development. The current model uses causal references (the `cause` on each claim) and value-based comparison rather than requiring applications to pass provenance tokens. See the [Sync chapter](./sync.md) for more details.
 
 ## Choosing the right cardinality
 
@@ -76,4 +76,4 @@ A reasonable rule of thumb:
 - If the question is "what is the X of this entity?" use cardinality one. (What is the name? What is the serving count?)
 - If the question is "what are the Xs of this entity?" use cardinality many. (What are the tags? What are the ingredients?)
 
-Sometimes the answer isn't obvious. Is an "assignee" singular or plural? Different applications might model it differently. In Dialog, this is a feature rather than a problem: two modules can define the same semantic relation with different cardinalities and both will work against the same underlying facts. The [cardinality model](https://gozala.io/dialog/modeling-cardinality) document discusses this in more detail.
+Sometimes the answer isn't obvious. Is an "assignee" singular or plural? Different applications might model it differently. In Dialog, this is a feature rather than a problem: two modules can define the same semantic relation with different cardinalities and both will work against the same underlying claims. The [cardinality model](https://gozala.io/dialog/modeling-cardinality) document discusses this in more detail.

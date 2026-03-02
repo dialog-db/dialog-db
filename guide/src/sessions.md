@@ -27,7 +27,7 @@ let mut session = Session::open(store);
 // Start a transaction
 let mut edit = session.edit();
 
-// Assert some facts
+// Assert some claims
 edit.assert(recipe::Name::of(pancakes.clone()).is("Pancakes"));
 edit.assert(recipe::Servings::of(pancakes.clone()).is(4u32));
 
@@ -41,13 +41,13 @@ All assertions in a single transaction are committed atomically. Either they all
 
 A transaction supports two operations:
 
-**Assert** adds a fact to the current state:
+**Assert** adds a claim to the current state:
 
 ```rust
 edit.assert(recipe::Name::of(pancakes.clone()).is("Pancakes"));
 ```
 
-**Retract** removes a fact from the current state. You can retract by negating the expression with `!`:
+**Retract** removes a claim from the current state. You can retract by negating the expression with `!`:
 
 ```rust
 edit.assert(!recipe::Name::of(pancakes.clone()).is("Pancakes"));
@@ -63,7 +63,7 @@ edit.retract(Recipe {
 });
 ```
 
-Remember that retraction doesn't delete the fact from history. It marks the fact as no longer part of the current state. The original assertion is preserved in the immutable log.
+Remember that retraction doesn't delete the claim from history. It marks the claim as no longer part of the current state. The original assertion is preserved in the immutable log.
 
 ### Asserting concepts
 

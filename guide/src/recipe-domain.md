@@ -159,4 +159,4 @@ We've defined:
 - 4 concepts providing different views
 - Entity references connecting recipes to ingredients and users
 
-None of this has touched the database yet. These are type-level definitions that tell Dialog how to interpret facts. In the next section, we'll use them to write data.
+None of this has touched the database yet. These are type-level definitions that tell Dialog how to interpret claims. In the next section, we'll use them to write data.

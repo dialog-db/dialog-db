@@ -50,7 +50,7 @@ No migration is needed. No schema conflict arises. Different parts of your appli
 
 ## Asserting concepts
 
-When you assert a concept, Dialog stores one fact per attribute:
+When you assert a concept, Dialog stores one claim per attribute:
 
 ```rust
 let pancakes = Entity::new()?;
@@ -71,7 +71,7 @@ edit.assert(recipe::Name::of(pancakes.clone()).is("Pancakes"));
 edit.assert(recipe::Servings::of(pancakes.clone()).is(4u32));
 ```
 
-The concept form is a convenience. Under the hood, the same individual facts are stored.
+The concept form is a convenience. Under the hood, the same individual claims are stored.
 
 ## Retracting concepts
 

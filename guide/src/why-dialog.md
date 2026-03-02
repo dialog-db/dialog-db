@@ -11,11 +11,11 @@ With a traditional stack, you'd pick a database, build a REST API, add WebSocket
 
 Dialog collapses these layers. Let's see how.
 
-## Facts, not rows
+## Claims, not rows
 
 In a relational database, you'd create a `recipes` table with columns for `name`, `servings`, `author`, etc. If you later want to add a `cuisine` field, you need a migration. If two systems disagree about the schema, you have a problem.
 
-Dialog stores data as individual **facts**. A fact is a simple statement:
+Dialog stores data as individual **claims**. A claim is a simple statement:
 
 ```text
 the name of <recipe-123> is "Pancakes"
@@ -23,7 +23,7 @@ the servings of <recipe-123> is 4
 the author of <recipe-123> is <user-456>
 ```
 
-Each fact stands on its own. There's no table to alter when you want to say something new about a recipe; you just assert another fact. Two applications can say different things about the same entity without conflicting.
+Each claim stands on its own. There's no table to alter when you want to say something new about a recipe; you just assert another claim. Two applications can say different things about the same entity without conflicting.
 
 ## Query-driven structure
 
@@ -44,15 +44,15 @@ This means different parts of your application can define different concepts ove
 
 ## Built-in sync
 
-When you assert a fact in Dialog, it gets an immutable, content-addressed identity and a **causal reference** that establishes "this fact was asserted knowing about these prior facts."
+When you assert a claim in Dialog, it gets an immutable, content-addressed identity and a **causal reference** that establishes "this claim was asserted knowing about these prior claims."
 
-This gives Dialog a built-in sync protocol. Two peers can compare their causal histories and exchange exactly the facts they're each missing. There's no central server required, no conflict resolution protocol to design. The data structure itself enables synchronization.
+This gives Dialog a built-in sync protocol. Two peers can compare their causal histories and exchange exactly the claims they're each missing. There's no central server required, no conflict resolution protocol to design. The data structure itself enables synchronization.
 
 We'll cover sync in detail in a [later chapter](./sync.md). For now, the key insight is: **you don't build sync on top of Dialog; sync is part of what Dialog is.**
 
 ## Derived data
 
-Dialog includes a rule system inspired by Datalog. You can define rules that derive new facts from existing ones:
+Dialog includes a rule system inspired by Datalog. You can define rules that derive new claims from existing ones:
 
 ```rust
 fn vegetarian_recipe(recipe: Query<VegetarianRecipe>) -> impl When {
@@ -70,16 +70,16 @@ fn vegetarian_recipe(recipe: Query<VegetarianRecipe>) -> impl When {
 }
 ```
 
-This rule says: "A `VegetarianRecipe` is any `Recipe` that doesn't have a meat ingredient." You don't need to maintain a separate "vegetarian" flag; the classification is derived whenever the underlying facts change.
+This rule says: "A `VegetarianRecipe` is any `Recipe` that doesn't have a meat ingredient." You don't need to maintain a separate "vegetarian" flag; the classification is derived whenever the underlying claims change.
 
 ## Summary
 
 | Concern | Traditional stack | Dialog |
 |---|---|---|
-| Storage | SQL tables with fixed schema | Immutable facts, schema-on-query |
-| Sync | Bolt-on protocol (CRDTs, WebSockets, etc.) | Built-in via content-addressed facts |
+| Storage | SQL tables with fixed schema | Immutable claims, schema-on-query |
+| Sync | Bolt-on protocol (CRDTs, WebSockets, etc.) | Built-in via content-addressed claims |
 | Derived data | Application code or materialized views | Declarative rules |
-| Offline support | Complex sync queue | Facts merge causally |
+| Offline support | Complex sync queue | Claims merge causally |
 | Schema evolution | Migrations | Additive: assert new attributes |
 
 In the next chapter, we'll look at the core concepts that make this work.

@@ -1,6 +1,6 @@
 # Querying
 
-Querying in Dialog works through pattern matching. You describe a pattern with variables and constants, and the query engine finds all facts that match.
+Querying in Dialog works through pattern matching. You describe a pattern with variables and constants, and the query engine finds all claims that match.
 
 ## Terms: variables and constants
 
@@ -15,7 +15,7 @@ use dialog_query::Term;
 // A variable named "name" - the engine will bind matching values to it
 let name_var: Term<String> = Term::var("name");
 
-// A constant - the engine will only match facts with this exact value
+// A constant - the engine will only match claims with this exact value
 let name_const: Term<String> = Term::from("Pancakes".to_string());
 ```
 

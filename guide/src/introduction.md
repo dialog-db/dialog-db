@@ -1,6 +1,6 @@
 # The Dialog Guide
 
-Dialog is a database for building local-first, collaborative applications. It stores data as immutable facts, lets you query them with pattern matching and rules, and synchronizes across peers automatically.
+Dialog is a database for building local-first, collaborative applications. It stores data as immutable claims, lets you query them with pattern matching and rules, and synchronizes across peers automatically.
 
 If you have ever built an app that needs to:
 
@@ -13,7 +13,7 @@ If you have ever built an app that needs to:
 
 ## What makes Dialog different?
 
-Most databases separate storage from sync. You pick a database, then bolt on a sync layer. Dialog treats sync as a first-class concern. Every fact you store is content-addressed and causally tracked, so two peers can exchange exactly the data they're missing without a central coordinator.
+Most databases separate storage from sync. You pick a database, then bolt on a sync layer. Dialog treats sync as a first-class concern. Every claim you store is content-addressed and causally tracked, so two peers can exchange exactly the data they're missing without a central coordinator.
 
 Dialog also takes a different approach to schema. Instead of defining table schemas up front, you describe **attributes** (individual things you can say about an entity) and compose them into **concepts** at query time. An entity can participate in as many concepts as you like without migration.
 
@@ -27,7 +27,7 @@ We'll also touch on how Dialog can be used from JavaScript/TypeScript, particula
 
 The guide is structured in layers:
 
-1. **Getting Started** introduces the core ideas: what a fact is, how entities and attributes work, and why this model is useful.
+1. **Getting Started** introduces the core ideas: what a claim is, how entities and attributes work, and why this model is useful.
 
 2. **Modeling Data** shows you how to define your domain using Rust types: attributes, concepts, and cardinality.
 
