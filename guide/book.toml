@@ -1,0 +1,10 @@
+[book]
+title = "The Dialog Guide"
+authors = ["Dialog Contributors"]
+language = "en"
+multilingual = false
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/dialog-db/dialog-db"
+additional-css = ["theme/custom.css"]
