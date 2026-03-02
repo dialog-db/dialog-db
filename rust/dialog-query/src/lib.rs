@@ -84,7 +84,6 @@ pub use predicate::*;
 pub use premise::*;
 pub use proposition::Proposition;
 pub use query::{Application, Output, Source, Store};
-pub use relation::RelationDescriptor;
 pub use relation::RelationQuery;
 pub use rule::*;
 pub use schema::*;

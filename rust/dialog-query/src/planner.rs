@@ -188,7 +188,6 @@ mod tests {
 
     #[dialog_common::test]
     fn it_plans_two_fact_applications() {
-        use crate::relation::descriptor::RelationDescriptor;
         use crate::relation::query::RelationQuery;
         use crate::{Cardinality, Proposition, Term};
 
@@ -197,7 +196,7 @@ mod tests {
             Term::var("person"),
             Term::var("name"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(None, Cardinality::One)),
+            Some(Cardinality::One),
         );
 
         let fact2 = RelationQuery::new(
@@ -205,7 +204,7 @@ mod tests {
             Term::var("person"),
             Term::var("age"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(None, Cardinality::One)),
+            Some(Cardinality::One),
         );
 
         let premises = vec![
@@ -227,7 +226,6 @@ mod tests {
 
     #[dialog_common::test]
     fn it_orders_cheaper_premise_first() {
-        use crate::relation::descriptor::RelationDescriptor;
         use crate::relation::query::RelationQuery;
         use crate::{Cardinality, Proposition, Term};
         use dialog_artifacts::Entity;
@@ -237,7 +235,7 @@ mod tests {
             Term::from(Entity::try_from("urn:alice".to_string()).unwrap()),
             Term::var("name"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(None, Cardinality::One)),
+            Some(Cardinality::One),
         );
 
         let fact2 = RelationQuery::new(
@@ -245,7 +243,7 @@ mod tests {
             Term::var("name"),
             Term::var("greeting"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(None, Cardinality::One)),
+            Some(Cardinality::One),
         );
 
         let premises = vec![
@@ -263,7 +261,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_executes_planned_query() -> anyhow::Result<()> {
-        use crate::relation::descriptor::RelationDescriptor;
         use crate::relation::query::RelationQuery;
         use crate::session::Session;
 
@@ -308,7 +305,7 @@ mod tests {
             Term::var("person"),
             Term::var("name"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(None, Cardinality::One)),
+            Some(Cardinality::One),
         );
 
         let fact2 = RelationQuery::new(
@@ -316,7 +313,7 @@ mod tests {
             Term::var("person"),
             Term::var("age"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(None, Cardinality::One)),
+            Some(Cardinality::One),
         );
 
         let premises = vec![
@@ -363,7 +360,6 @@ mod tests {
 
     #[dialog_common::test]
     fn it_restores_cost_when_replanned_to_empty_scope() {
-        use crate::relation::descriptor::RelationDescriptor;
         use crate::relation::query::RelationQuery;
         use crate::schema::{INDEX_SCAN, RANGE_SCAN_COST};
 
@@ -378,7 +374,7 @@ mod tests {
             Term::<Entity>::var("entity"),
             Term::var("hobby"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(None, Cardinality::Many)),
+            Some(Cardinality::Many),
         );
 
         let premises = vec![Premise::Assert(Proposition::Relation(Box::new(hobby)))];

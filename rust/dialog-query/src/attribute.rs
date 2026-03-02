@@ -15,7 +15,6 @@ pub use the::*;
 pub use crate::artifact::{
     Attribute as ArtifactsAttribute, Cause, DialogArtifactsError, Entity, Value,
 };
-pub use crate::relation::descriptor::RelationDescriptor;
 pub use crate::schema::Cardinality;
 pub use crate::types::{Scalar, Type, Typed};
 pub use crate::{Predicate, Premise, Term, The};
