@@ -1,124 +1,199 @@
 //! Type system utilities for dialog-query
 //!
-//! This module contains traits and implementations for bridging between Rust types
-//! and the dialog-artifacts Type system. The main purpose is to provide
-//! compile-time type information that can be used for:
+//! This module provides the bridge between Rust's compile-time type system and
+//! dialog-artifacts' runtime [`Type`] system. The core abstractions are:
 //!
-//! - JSON serialization with type annotations
-//! - Runtime type checking during pattern matching
-//! - Query optimization based on type constraints
-//!
-//! The core insight is that Rust's type system provides static type information
-//! that we can reflect into the dynamic Type enum used by dialog-artifacts.
+//! - [`TypeDescriptor`] — a trait implemented by named ZSTs (like [`Text`],
+//!   [`Boolean`]) that carry a static `TYPE` constant and can report the
+//!   runtime type of a value.
+//! - [`Typed`] — maps a Rust type (e.g. `String`) to its [`TypeDescriptor`]
+//!   (e.g. `Text`). Also implemented by the ZSTs themselves so that
+//!   `Term<String>` and `Term<Text>` are interchangeable.
+//! - [`Scalar`] — concrete types with bidirectional [`Value`] conversion.
+//! - [`Any`] — a descriptor that carries a runtime `Option<Type>`, used for
+//!   type-erased terms (`Term<Any>` replaces the old `Parameter`).
 
 use dialog_common::ConditionalSend;
+use std::fmt;
+use std::hash::Hash;
 
 pub use crate::artifact::{Attribute, Cause, Entity, Type, Value};
 
-/// Trait for types that can provide Type metadata
+/// Trait implemented by type descriptors — named ZSTs that represent a
+/// dialog-artifacts type at the Rust type level.
 ///
-/// This trait bridges between Rust's compile-time type system and dialog-artifacts'
-/// runtime type system. It allows Term<T> to know what Type corresponds
-/// to its type parameter T.
-///
-/// # Key Design Decision
-/// Returns `Option<Type>` rather than `Type` to handle the special
-/// case of `Value` type, which is itself a dynamic type that can hold any value.
-/// For `Value`, we return `None` to indicate "any type".
-///
-/// # Usage
-/// ```rust
-/// use dialog_query::types::Typed;
-/// use dialog_query::artifact::Type;
-///
-/// // For concrete types, bring Typed trait into scope
-/// assert_eq!(<String as Typed>::TYPE, Some(Type::String));
-/// assert_eq!(<u32 as Typed>::TYPE, Some(Type::UnsignedInt));
-/// ```
-pub trait Typed {
-    /// The corresponding runtime Type, or None for dynamically-typed Value
+/// Each descriptor answers two questions:
+/// 1. **What is the static type?** — via `TYPE` (compile-time constant).
+///    `Some(Type::String)` for concrete types, `None` for [`Any`].
+/// 2. **What is the runtime type of a given value?** — via `content_type()`.
+///    For concrete descriptors this always returns `TYPE`. For [`Any`] it
+///    inspects the wrapped `Option<Type>`.
+pub trait TypeDescriptor:
+    Clone + fmt::Debug + Default + PartialEq + Eq + Hash + Send + Sync + 'static
+{
+    /// The dialog-artifacts type, if statically known.
+    /// `None` means "any type" — determined at runtime.
     const TYPE: Option<Type>;
+
+    /// Report the runtime type this descriptor represents.
+    ///
+    /// For concrete descriptors (e.g. [`Text`]) this returns `Self::TYPE`.
+    /// For [`Any`] this returns the wrapped `Option<Type>`.
+    fn content_type(&self) -> Option<Type>;
+
+    /// Reconstruct a descriptor from a runtime type tag.
+    ///
+    /// For concrete descriptors this ignores the input and returns `Self::default()`.
+    /// For [`Any`] this wraps the type tag.
+    fn from_content_type(_type: Option<Type>) -> Self {
+        Self::default()
+    }
 }
 
-/// Macro to implement Typed for primitive types
+/// Maps a Rust type to its [`TypeDescriptor`].
 ///
-/// This macro reduces boilerplate for implementing the trait on standard Rust types.
-/// Each implementation returns Some(Type) for the appropriate variant.
-macro_rules! impl_into_type {
-    ($rust_type:ty, $value_data_type:expr) => {
-        impl Typed for $rust_type {
-            const TYPE: Option<Type> = Some($value_data_type);
+/// For concrete types like `String`, this maps to a named ZST (`Text`).
+/// Each ZST also implements `Typed` mapping to itself, so `Term<String>`
+/// and `Term<Text>` use the same internal representation.
+pub trait Typed {
+    /// The descriptor type that represents this type in the term system.
+    type Descriptor: TypeDescriptor;
+}
+
+// Named ZST descriptors and their TypeDescriptor + Typed implementations.
+// Each descriptor is a zero-sized type that carries type information at the
+// Rust type level, enabling Term<T> to store type metadata without overhead.
+
+macro_rules! define_descriptor {
+    (
+        $(#[$meta:meta])*
+        $name:ident, $variant:expr
+    ) => {
+        $(#[$meta])*
+        #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+        pub struct $name;
+
+        impl TypeDescriptor for $name {
+            const TYPE: Option<Type> = Some($variant);
+
+            fn content_type(&self) -> Option<Type> {
+                Some($variant)
+            }
+        }
+
+        impl Typed for $name {
+            type Descriptor = Self;
         }
     };
 }
 
-// Implement Typed for all supported primitive and dialog-artifacts types
-//
-// These implementations provide the mapping between Rust types and Type variants.
-// Note that all unsigned integer types map to UnsignedInt, and all signed integers map
-// to SignedInt, regardless of their specific bit width.
+define_descriptor!(
+    /// Descriptor for string/text values.
+    Text, Type::String
+);
 
-// String type
-impl_into_type!(String, Type::String);
+define_descriptor!(
+    /// Descriptor for boolean values.
+    Boolean, Type::Boolean
+);
 
-// Boolean type
-impl_into_type!(bool, Type::Boolean);
+define_descriptor!(
+    /// Descriptor for unsigned integer values (`u8`–`u128`, `usize`).
+    UnsignedInteger, Type::UnsignedInt
+);
 
-// Unsigned integer types (all map to UnsignedInt)
-impl_into_type!(usize, Type::UnsignedInt);
-impl_into_type!(u128, Type::UnsignedInt);
-impl_into_type!(u64, Type::UnsignedInt);
-impl_into_type!(u32, Type::UnsignedInt);
-impl_into_type!(u16, Type::UnsignedInt);
-impl_into_type!(u8, Type::UnsignedInt);
+define_descriptor!(
+    /// Descriptor for signed integer values (`i8`–`i128`).
+    SignedInteger, Type::SignedInt
+);
 
-// Signed integer types (all map to SignedInt)
-impl_into_type!(i128, Type::SignedInt);
-impl_into_type!(i64, Type::SignedInt);
-impl_into_type!(i32, Type::SignedInt);
-impl_into_type!(i16, Type::SignedInt);
-impl_into_type!(i8, Type::SignedInt);
+define_descriptor!(
+    /// Descriptor for floating-point values (`f32`, `f64`).
+    Float, Type::Float
+);
 
-// Floating point types (all map to Float)
-impl_into_type!(f64, Type::Float);
-impl_into_type!(f32, Type::Float);
+define_descriptor!(
+    /// Descriptor for binary data (`Vec<u8>`).
+    Bytes, Type::Bytes
+);
 
-// Binary data
-impl_into_type!(Vec<u8>, Type::Bytes);
+define_descriptor!(
+    /// Descriptor for entity references.
+    EntityType, Type::Entity
+);
 
-// Dialog-artifacts specific types
-impl_into_type!(Entity, Type::Entity);
-impl_into_type!(Attribute, Type::Symbol);
-impl_into_type!(crate::attribute::The, Type::Symbol);
+define_descriptor!(
+    /// Descriptor for attribute symbols.
+    Symbol, Type::Symbol
+);
 
-impl_into_type!(Cause, Type::Bytes);
+/// Descriptor for dynamically-typed values — carries an optional runtime
+/// type tag. `Term<Any>` is the unified replacement for the old `Parameter`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Any(pub Option<Type>);
 
-/// `Value` is the dynamic type that can hold any of the other types at runtime.
-/// Returns `None` to indicate "any type" — there is no single static type.
-///
-/// Note: `Value` implements `Typed` (for type metadata) but NOT `Scalar`
-/// (no `var()`/`blank()` constructors). Use `Parameter` for the dynamic layer.
-impl Typed for Value {
+impl TypeDescriptor for Any {
     const TYPE: Option<Type> = None;
+
+    fn content_type(&self) -> Option<Type> {
+        self.0
+    }
+
+    fn from_content_type(typ: Option<Type>) -> Self {
+        Any(typ)
+    }
 }
 
-/// A concrete type that can be used as a term value with bidirectional Value conversion
+impl Typed for Any {
+    type Descriptor = Self;
+}
+
+// Typed implementations for Rust primitive and dialog-artifacts types.
+// Each maps to the appropriate named ZST descriptor.
+
+macro_rules! impl_typed {
+    ($rust_type:ty, $descriptor:ty) => {
+        impl Typed for $rust_type {
+            type Descriptor = $descriptor;
+        }
+    };
+}
+
+impl_typed!(String, Text);
+impl_typed!(bool, Boolean);
+impl_typed!(usize, UnsignedInteger);
+impl_typed!(u128, UnsignedInteger);
+impl_typed!(u64, UnsignedInteger);
+impl_typed!(u32, UnsignedInteger);
+impl_typed!(u16, UnsignedInteger);
+impl_typed!(u8, UnsignedInteger);
+impl_typed!(i128, SignedInteger);
+impl_typed!(i64, SignedInteger);
+impl_typed!(i32, SignedInteger);
+impl_typed!(i16, SignedInteger);
+impl_typed!(i8, SignedInteger);
+impl_typed!(f64, Float);
+impl_typed!(f32, Float);
+impl_typed!(Vec<u8>, Bytes);
+impl_typed!(Entity, EntityType);
+impl_typed!(Attribute, Symbol);
+impl_typed!(crate::attribute::The, Symbol);
+impl_typed!(Cause, Bytes);
+impl_typed!(Value, Any);
+
+/// A concrete type that can be used as a term value with bidirectional Value conversion.
+///
+/// `Scalar` types have a known static [`TypeDescriptor`] (their `Tag` is `()`-like —
+/// a ZST) and can convert to/from [`Value`]. Every `Scalar` type must implement
+/// `Into<Value>` (typically via `From<T> for Value`) for the forward direction.
 pub trait Scalar:
-    Typed + Clone + std::fmt::Debug + 'static + ConditionalSend + TryFrom<Value>
+    Typed + Clone + fmt::Debug + Into<Value> + 'static + ConditionalSend + TryFrom<Value>
 {
-    /// Can be used to convert scalars into boxed value. It is intentionally
-    /// different from `From<Scalar> impl Value` to avoid unintentional
-    /// type erasure.
-    fn as_value(&self) -> Value;
 }
 
 macro_rules! impl_scalar {
     ($($ty:ty),*) => {
-        $(impl Scalar for $ty {
-            fn as_value(&self) -> Value {
-                Value::from(self.to_owned())
-            }
-        })*
+        $(impl Scalar for $ty {})*
     }
 }
 
@@ -138,17 +213,8 @@ impl_scalar!(
     Entity,
     Attribute,
     Vec<u8>,
-    Cause
+    Cause,
+    crate::attribute::The
 );
 
-impl Scalar for crate::attribute::The {
-    fn as_value(&self) -> Value {
-        Value::from(Attribute::from(self))
-    }
-}
-
-impl Scalar for usize {
-    fn as_value(&self) -> Value {
-        Value::UnsignedInt(self.to_owned() as u128)
-    }
-}
+impl Scalar for usize {}

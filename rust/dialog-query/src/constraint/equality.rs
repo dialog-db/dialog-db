@@ -5,9 +5,10 @@
 //! inferred to have the same value.
 
 pub use crate::selection::Evidence;
+use crate::types::Any;
 pub use crate::{
-    Answers, Cardinality, Environment, Field, Parameter, Parameters, QueryError, Requirement,
-    Schema, Term, Value, try_stream,
+    Answers, Cardinality, Environment, Field, Parameters, QueryError, Requirement, Schema, Term,
+    Value, try_stream,
 };
 use std::fmt::Display;
 
@@ -31,21 +32,21 @@ const EQUALITY_COST: usize = 1;
 /// # Example
 /// ```no_run
 /// # use dialog_query::constraint::equality::Equality;
-/// # use dialog_query::Parameter;
+/// # use dialog_query::{Term, types::Any};
 /// // x must equal y
-/// let eq = Equality::new(Parameter::var("x"), Parameter::var("y"));
+/// let eq = Equality::new(Term::<Any>::var("x"), Term::<Any>::var("y"));
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct Equality {
     /// The left-hand parameter of the equality constraint
-    pub this: Parameter,
+    pub this: Term<Any>,
     /// The right-hand parameter of the equality constraint
-    pub is: Parameter,
+    pub is: Term<Any>,
 }
 
 impl Equality {
     /// Creates a new equality constraint between two parameters.
-    pub fn new(this: Parameter, is: Parameter) -> Self {
+    pub fn new(this: Term<Any>, is: Term<Any>) -> Self {
         Self { this, is }
     }
 
@@ -171,15 +172,15 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_passes_when_both_terms_equal() -> Result<(), QueryError> {
-        let constraint = Equality::new(Parameter::var("x"), Parameter::var("y"));
+        let constraint = Equality::new(Term::var("x"), Term::var("y"));
 
         let mut answer = Answer::new();
         answer.merge(Evidence::Parameter {
-            term: &Parameter::var("x"),
+            term: &Term::var("x"),
             value: &Value::from(42),
         })?;
         answer.merge(Evidence::Parameter {
-            term: &Parameter::var("y"),
+            term: &Term::var("y"),
             value: &Value::from(42),
         })?;
 
@@ -188,7 +189,7 @@ mod tests {
 
         assert_eq!(results.len(), 1, "Should have one result");
         assert_eq!(
-            results[0].resolve(&Parameter::var("x"))?,
+            results[0].resolve(&Term::var("x"))?,
             Value::from(42),
             "x should still be 42"
         );
@@ -198,15 +199,15 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_filters_when_terms_differ() -> Result<(), QueryError> {
-        let constraint = Equality::new(Parameter::var("x"), Parameter::var("y"));
+        let constraint = Equality::new(Term::var("x"), Term::var("y"));
 
         let mut answer = Answer::new();
         answer.merge(Evidence::Parameter {
-            term: &Parameter::var("x"),
+            term: &Term::var("x"),
             value: &Value::from(42),
         })?;
         answer.merge(Evidence::Parameter {
-            term: &Parameter::var("y"),
+            term: &Term::var("y"),
             value: &Value::from(99),
         })?;
 
@@ -224,11 +225,11 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_infers_this_from_is() -> Result<(), QueryError> {
-        let constraint = Equality::new(Parameter::var("x"), Parameter::var("y"));
+        let constraint = Equality::new(Term::var("x"), Term::var("y"));
 
         let mut answer = Answer::new();
         answer.merge(Evidence::Parameter {
-            term: &Parameter::var("y"),
+            term: &Term::var("y"),
             value: &Value::from(42),
         })?;
 
@@ -237,7 +238,7 @@ mod tests {
 
         assert_eq!(results.len(), 1, "Should have one result");
         assert_eq!(
-            results[0].resolve(&Parameter::var("x"))?,
+            results[0].resolve(&Term::var("x"))?,
             Value::from(42),
             "x should be inferred as 42"
         );
@@ -247,7 +248,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_estimates_zero_cost_when_bound() {
-        let constraint = Equality::new(Parameter::var("x"), Parameter::var("y"));
+        let constraint = Equality::new(Term::var("x"), Term::var("y"));
 
         let mut env = Environment::new();
         env.add("x");
@@ -261,7 +262,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_estimates_none_when_unbound() {
-        let constraint = Equality::new(Parameter::var("x"), Parameter::var("y"));
+        let constraint = Equality::new(Term::var("x"), Term::var("y"));
         let env = Environment::new();
 
         assert_eq!(

@@ -42,8 +42,6 @@ pub mod error;
 pub mod formula;
 /// Negation support for excluding matching results.
 pub mod negation;
-/// Type-erased parameter for the dynamic planning/evaluation layer.
-pub mod parameter;
 /// Named parameter bindings for rule and formula applications.
 pub mod parameters;
 /// Query planner that compiles premises into execution plans.
@@ -86,7 +84,6 @@ pub use environment::*;
 pub use error::*;
 pub use formula::*;
 pub use negation::*;
-pub use parameter::Parameter;
 pub use parameters::*;
 pub use planner::*;
 pub use predicate::*;
@@ -103,7 +100,7 @@ pub use session::{QuerySession, Session};
 pub use statement::*;
 pub use stream::*;
 pub use term::*;
-pub use types::{Scalar, Typed};
+pub use types::{Any, Scalar, TypeDescriptor, Typed};
 
 pub use async_stream::try_stream;
 pub use dialog_macros::{Attribute, Concept, Formula};

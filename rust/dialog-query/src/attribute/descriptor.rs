@@ -1,12 +1,13 @@
+use crate::Parameters;
 use crate::artifact::{Attribute as ArtifactsAttribute, Entity, Value};
 use crate::attribute::The;
 use crate::error::{SchemaError, TypeError};
-use crate::parameter::Parameter;
 use crate::relation::descriptor::RelationDescriptor;
 use crate::relation::query::RelationQuery;
 use crate::schema::Cardinality;
+use crate::term::Term;
+use crate::types::Any;
 use crate::types::Type;
-use crate::{Parameters, Term};
 
 use base58::ToBase58;
 use serde::{Deserialize, Serialize};
@@ -92,7 +93,7 @@ impl AttributeDescriptor {
 
     /// Checks that the given parameter's type is compatible with this
     /// attribute's content type.
-    pub fn check(&self, parameter: &Parameter) -> Result<(), TypeError> {
+    pub fn check(&self, parameter: &Term<Any>) -> Result<(), TypeError> {
         match (self.content_type(), parameter.content_type()) {
             (None, _) => Ok(()),
             (_, None) => Ok(()),
@@ -101,7 +102,7 @@ impl AttributeDescriptor {
     }
 
     /// Type-checks an optional parameter against this attribute.
-    pub fn conform(&self, parameter: Option<&Parameter>) -> Result<(), TypeError> {
+    pub fn conform(&self, parameter: Option<&Term<Any>>) -> Result<(), TypeError> {
         if let Some(param) = parameter {
             self.check(param)?;
         }
@@ -126,7 +127,7 @@ impl AttributeDescriptor {
         } else {
             Err(TypeError::TypeMismatch {
                 expected: self.content_type().unwrap(), // Safe because we checked Some above
-                actual: Parameter::Constant(value.clone()),
+                actual: Term::Constant(value.clone()),
             })
         }
     }
@@ -163,24 +164,33 @@ impl AttributeDescriptor {
         }
 
         // Get the entity term (this), converting from Parameter to Term<Entity>
-        let of = parameters
-            .get("this")
-            .cloned()
-            .and_then(|p| p.try_into().ok())
-            .unwrap_or(Term::blank());
+        let of = match parameters.get("this").cloned() {
+            Some(Term::Variable { name, .. }) => Term::Variable {
+                name,
+                descriptor: Default::default(),
+            },
+            Some(Term::Constant(value)) => Term::Constant(value),
+            None => Term::blank(),
+        };
 
-        // Get the value parameter (is) — passed directly as Parameter
-        let is = parameters.get("is").cloned().unwrap_or(Parameter::blank());
+        // Get the value parameter (is) -- passed directly as Parameter
+        let is = parameters
+            .get("is")
+            .cloned()
+            .unwrap_or_else(Term::<Any>::blank);
 
         // Get the cause term
-        let cause = parameters
-            .get("cause")
-            .cloned()
-            .and_then(|p| p.try_into().ok())
-            .unwrap_or(Term::blank());
+        let cause = match parameters.get("cause").cloned() {
+            Some(Term::Variable { name, .. }) => Term::Variable {
+                name,
+                descriptor: Default::default(),
+            },
+            Some(Term::Constant(value)) => Term::Constant(value),
+            None => Term::blank(),
+        };
 
         Ok(RelationQuery::new(
-            Term::Constant(self.the().clone()),
+            Term::Constant(Value::from(self.the().clone())),
             of,
             is,
             cause,

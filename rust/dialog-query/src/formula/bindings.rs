@@ -33,7 +33,8 @@ use crate::artifact::TypeError;
 use crate::error::FormulaEvaluationError;
 use crate::formula::query::FormulaQuery;
 use crate::selection::{Answer, Factors};
-use crate::{Parameter, Parameters, Value};
+use crate::term::Term;
+use crate::{Parameters, Value};
 use std::sync::Arc;
 
 /// Parameter-to-value bindings for formula evaluation.
@@ -189,11 +190,11 @@ impl Bindings {
 
         // For constant parameters, verify the computed value matches the constant.
         // Answer::assign treats constants as no-ops, so we must check here.
-        if let Parameter::Constant(expected) = param {
+        if let Term::Constant(expected) = param {
             if expected != value {
                 return Err(FormulaEvaluationError::VariableInconsistency {
                     parameter: key.into(),
-                    actual: Parameter::Constant(value.clone()),
+                    actual: Term::Constant(value.clone()),
                     expected: param.clone(),
                 });
             }
@@ -213,7 +214,7 @@ impl Bindings {
             FormulaEvaluationError::VariableInconsistency {
                 parameter: key.into(),
                 actual: param.clone(),
-                expected: Parameter::Constant(value.clone()),
+                expected: Term::Constant(value.clone()),
             }
         })?;
 
@@ -231,7 +232,7 @@ impl From<TypeError> for FormulaEvaluationError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Parameter, Term};
+    use crate::Term;
 
     // Helper to create a test formula for bindings tests
     fn test_formula() -> crate::formula::query::FormulaQuery {
@@ -253,7 +254,7 @@ mod tests {
         use crate::selection::Answer;
 
         let mut terms = Parameters::new();
-        terms.insert("value".to_string(), Parameter::var("test"));
+        terms.insert("value".to_string(), Term::var("test"));
 
         let match_data = Answer::new()
             .set(Term::var("test"), 42u32)
@@ -293,7 +294,7 @@ mod tests {
         use crate::selection::Answer;
 
         let mut terms = Parameters::new();
-        terms.insert("value".to_string(), Parameter::var("unbound"));
+        terms.insert("value".to_string(), Term::var("unbound"));
 
         let source = Answer::new(); // No bindings
         let formula = test_formula();
@@ -311,8 +312,8 @@ mod tests {
         use crate::selection::Answer;
 
         let mut params = Parameters::new();
-        params.insert("x".to_string(), Parameter::var("input_x"));
-        params.insert("y".to_string(), Parameter::var("input_y"));
+        params.insert("x".to_string(), Term::var("input_x"));
+        params.insert("y".to_string(), Term::var("input_y"));
 
         let match_data = Answer::new()
             .set(Term::var("input_x"), 10u32)
@@ -369,7 +370,7 @@ mod tests {
         };
 
         // This should fail because "test" is already bound to 42
-        let result = answer.assign(&Parameter::var("test"), &conflicting_factor);
+        let result = answer.assign(&Term::var("test"), &conflicting_factor);
         assert!(
             result.is_err(),
             "Answer.assign() should reject conflicting value assignment"
@@ -382,7 +383,7 @@ mod tests {
         use crate::selection::Answer;
 
         let mut terms = Parameters::new();
-        terms.insert("value".to_string(), Parameter::var("test"));
+        terms.insert("value".to_string(), Term::var("test"));
 
         // Create bindings with initial value
         let source = Answer::new()
@@ -424,7 +425,7 @@ mod tests {
 
         // Term is a constant 42 — writing 42 should succeed (consistent)
         let mut terms = Parameters::new();
-        terms.insert("value".to_string(), Term::from(42u32));
+        terms.insert("value".to_string(), Term::from(42u32).into());
 
         let source = Answer::new();
         let formula = test_formula();
@@ -443,7 +444,7 @@ mod tests {
 
         // Term is a constant 99 — writing 8 should fail (inconsistent)
         let mut terms = Parameters::new();
-        terms.insert("value".to_string(), Term::from(99u32));
+        terms.insert("value".to_string(), Term::from(99u32).into());
 
         let source = Answer::new();
         let formula = test_formula();
@@ -468,8 +469,8 @@ mod tests {
         use crate::selection::Answer;
 
         let mut params = Parameters::new();
-        params.insert("x".to_string(), Parameter::var("input_x"));
-        params.insert("y".to_string(), Parameter::var("input_y"));
+        params.insert("x".to_string(), Term::var("input_x"));
+        params.insert("y".to_string(), Term::var("input_y"));
 
         let match_data = Answer::new()
             .set(Term::var("input_x"), 10u32)
@@ -491,7 +492,7 @@ mod tests {
         // Verify we got the answer back
         assert_eq!(
             answer
-                .resolve(&Parameter::var("input_x"))
+                .resolve(&Term::var("input_x"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(10u32)

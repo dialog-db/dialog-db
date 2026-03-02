@@ -398,13 +398,14 @@ mod tests {
     use super::*;
     use crate::formula::Formula;
     use crate::formula::string::Length;
-    use crate::{Environment, Parameter, Parameters, Premise, Term};
+
+    use crate::{Environment, Parameters, Premise, Term};
 
     #[dialog_common::test]
     fn it_creates_candidate_all_derived() {
         let mut params = Parameters::new();
-        params.insert("of".to_string(), Parameter::var("text"));
-        params.insert("is".to_string(), Parameter::var("len"));
+        params.insert("of".to_string(), Term::var("text"));
+        params.insert("is".to_string(), Term::var("len"));
 
         let application = Length::apply(params).unwrap();
         let premise = Premise::from(application);
@@ -416,8 +417,8 @@ mod tests {
     #[dialog_common::test]
     fn it_creates_candidate_with_constant() {
         let mut params = Parameters::new();
-        params.insert("of".to_string(), Parameter::from("hello".to_string()));
-        params.insert("is".to_string(), Parameter::var("len"));
+        params.insert("of".to_string(), Term::constant("hello".to_string()));
+        params.insert("is".to_string(), Term::var("len"));
 
         let application = Length::apply(params).unwrap();
         let premise = Premise::from(application);
@@ -429,8 +430,8 @@ mod tests {
     #[dialog_common::test]
     fn it_transitions_to_viable_on_update() {
         let mut params = Parameters::new();
-        params.insert("of".to_string(), Parameter::var("text"));
-        params.insert("is".to_string(), Parameter::var("len"));
+        params.insert("of".to_string(), Term::var("text"));
+        params.insert("is".to_string(), Term::var("len"));
 
         let application = Length::apply(params).unwrap();
         let premise = Premise::from(application);
@@ -448,8 +449,8 @@ mod tests {
     #[dialog_common::test]
     fn it_reduces_cost_when_derived_bound() {
         let mut params = Parameters::new();
-        params.insert("of".to_string(), Parameter::from("hello".to_string()));
-        params.insert("is".to_string(), Parameter::var("len"));
+        params.insert("of".to_string(), Term::constant("hello".to_string()));
+        params.insert("is".to_string(), Term::var("len"));
 
         let application = Length::apply(params).unwrap();
         let premise = Premise::from(application);
@@ -472,8 +473,8 @@ mod tests {
     #[dialog_common::test]
     fn it_converts_viable_candidate_to_plan() {
         let mut params = Parameters::new();
-        params.insert("of".to_string(), Parameter::from("hello".to_string()));
-        params.insert("is".to_string(), Parameter::var("len"));
+        params.insert("of".to_string(), Term::constant("hello".to_string()));
+        params.insert("is".to_string(), Term::var("len"));
 
         let application = Length::apply(params).unwrap();
         let premise = Premise::from(application);
@@ -488,8 +489,8 @@ mod tests {
     #[dialog_common::test]
     fn it_rejects_blocked_candidate_conversion() {
         let mut params = Parameters::new();
-        params.insert("of".to_string(), Parameter::var("text"));
-        params.insert("is".to_string(), Parameter::var("len"));
+        params.insert("of".to_string(), Term::var("text"));
+        params.insert("is".to_string(), Term::var("len"));
 
         let application = Length::apply(params).unwrap();
         let premise = Premise::from(application);
@@ -551,18 +552,17 @@ mod cost_model_tests {
         CONCEPT_OVERHEAD, INDEX_SCAN, RANGE_READ_COST, RANGE_SCAN_COST, SEGMENT_READ_COST,
     };
     use crate::the;
-    use crate::{
-        AttributeDescriptor, Environment, Parameter, Parameters, Premise, Term, Type, Value,
-    };
+
+    use crate::{AttributeDescriptor, Environment, Parameters, Premise, Term, Type, Value};
 
     #[dialog_common::test]
     fn it_excludes_constants_from_cost() {
         let entity_val: Entity = Entity::new().unwrap();
 
         let app = RelationQuery::new(
-            Term::Constant(the!("user/name")),
-            Term::Constant(entity_val),
-            Parameter::from("test".to_string()),
+            Term::from(the!("user/name")),
+            Term::from(entity_val),
+            Term::constant("test".to_string()),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
@@ -581,9 +581,9 @@ mod cost_model_tests {
     #[dialog_common::test]
     fn it_costs_one_constant_two_variables() {
         let app = RelationQuery::new(
-            Term::Constant(the!("user/name")),
+            Term::from(the!("user/name")),
             Term::<Entity>::var("entity"),
-            Parameter::var("value"),
+            Term::var("value"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
@@ -602,9 +602,9 @@ mod cost_model_tests {
     #[dialog_common::test]
     fn it_reduces_cost_for_env_variables() {
         let app = RelationQuery::new(
-            Term::Constant(the!("user/name")),
+            Term::from(the!("user/name")),
             Term::<Entity>::var("entity"),
-            Parameter::var("value"),
+            Term::var("value"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
@@ -639,9 +639,9 @@ mod cost_model_tests {
     #[dialog_common::test]
     fn it_excludes_initial_env_variables_from_cost() {
         let app = RelationQuery::new(
-            Term::Constant(the!("user/name")),
+            Term::from(the!("user/name")),
             Term::<Entity>::var("entity"),
-            Parameter::var("value"),
+            Term::var("value"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
@@ -661,17 +661,17 @@ mod cost_model_tests {
     #[dialog_common::test]
     fn it_costs_more_for_cardinality_many() {
         let one_app = RelationQuery::new(
-            Term::Constant(the!("user/tags")),
+            Term::from(the!("user/tags")),
             Term::<Entity>::var("entity"),
-            Parameter::var("tag"),
+            Term::var("tag"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
         let many_app = RelationQuery::new(
-            Term::Constant(the!("user/tags")),
+            Term::from(the!("user/tags")),
             Term::<Entity>::var("entity"),
-            Parameter::var("tag"),
+            Term::var("tag"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::Many)),
         );
@@ -707,17 +707,17 @@ mod cost_model_tests {
         let value_val = Value::String("rust".to_string());
 
         let one_app = RelationQuery::new(
-            Term::Constant(the!("user/tags")),
-            Term::Constant(entity_val.clone()),
-            Parameter::Constant(value_val.clone()),
+            Term::from(the!("user/tags")),
+            Term::from(entity_val.clone()),
+            Term::Constant(value_val.clone()),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
         let many_app = RelationQuery::new(
-            Term::Constant(the!("user/tags")),
-            Term::Constant(entity_val),
-            Parameter::Constant(value_val),
+            Term::from(the!("user/tags")),
+            Term::from(entity_val),
+            Term::Constant(value_val),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::Many)),
         );
@@ -740,16 +740,16 @@ mod cost_model_tests {
     #[dialog_common::test]
     fn it_costs_less_for_formula_without_io() {
         let mut formula_params = Parameters::new();
-        formula_params.insert("of".to_string(), Parameter::from("hello".to_string()));
-        formula_params.insert("is".to_string(), Parameter::var("len"));
+        formula_params.insert("of".to_string(), Term::constant("hello".to_string()));
+        formula_params.insert("is".to_string(), Term::var("len"));
 
         let formula_app = Length::apply(formula_params).unwrap();
         let formula_candidate = Candidate::from(Premise::from(formula_app));
 
         let fact_app = RelationQuery::new(
-            Term::Constant(the!("user/name")),
+            Term::from(the!("user/name")),
             Term::<Entity>::var("entity"),
-            Parameter::var("value"),
+            Term::var("value"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
@@ -767,8 +767,8 @@ mod cost_model_tests {
     #[dialog_common::test]
     fn it_costs_more_for_formula_with_fact() {
         let mut formula_params = Parameters::new();
-        formula_params.insert("of".to_string(), Parameter::var("text"));
-        formula_params.insert("is".to_string(), Parameter::var("len"));
+        formula_params.insert("of".to_string(), Term::var("text"));
+        formula_params.insert("is".to_string(), Term::var("len"));
 
         let formula_app = Length::apply(formula_params).unwrap();
         let formula_premise = Premise::from(formula_app);
@@ -783,9 +783,9 @@ mod cost_model_tests {
     #[dialog_common::test]
     fn it_matches_fact_cost_nothing_bound() {
         let fact_app = RelationQuery::new(
-            Term::Constant(the!("user/name")),
+            Term::from(the!("user/name")),
             Term::<Entity>::var("entity"),
-            Parameter::var("value"),
+            Term::var("value"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
@@ -801,8 +801,8 @@ mod cost_model_tests {
         )]);
 
         let mut terms = Parameters::new();
-        terms.insert("this".to_string(), Parameter::var("entity"));
-        terms.insert("name".to_string(), Parameter::var("value"));
+        terms.insert("this".to_string(), Term::var("entity"));
+        terms.insert("name".to_string(), Term::var("value"));
 
         let concept_app = ConceptQuery {
             terms,
@@ -829,9 +829,9 @@ mod cost_model_tests {
     #[dialog_common::test]
     fn it_matches_fact_cost_value_bound() {
         let fact_app = RelationQuery::new(
-            Term::Constant(the!("user/name")),
+            Term::from(the!("user/name")),
             Term::<Entity>::var("entity"),
-            Parameter::var("value"),
+            Term::var("value"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
@@ -847,8 +847,8 @@ mod cost_model_tests {
         )]);
 
         let mut terms = Parameters::new();
-        terms.insert("this".to_string(), Parameter::var("entity"));
-        terms.insert("name".to_string(), Parameter::var("value"));
+        terms.insert("this".to_string(), Term::var("entity"));
+        terms.insert("name".to_string(), Term::var("value"));
 
         let concept_app = ConceptQuery {
             terms,
@@ -868,9 +868,9 @@ mod cost_model_tests {
     #[dialog_common::test]
     fn it_matches_fact_cost_entity_bound() {
         let fact_app = RelationQuery::new(
-            Term::Constant(the!("user/name")),
+            Term::from(the!("user/name")),
             Term::<Entity>::var("entity"),
-            Parameter::var("value"),
+            Term::var("value"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
@@ -886,8 +886,8 @@ mod cost_model_tests {
         )]);
 
         let mut terms = Parameters::new();
-        terms.insert("this".to_string(), Parameter::var("entity"));
-        terms.insert("name".to_string(), Parameter::var("value"));
+        terms.insert("this".to_string(), Term::var("entity"));
+        terms.insert("name".to_string(), Term::var("value"));
 
         let concept_app = ConceptQuery {
             terms,
@@ -907,9 +907,9 @@ mod cost_model_tests {
     #[dialog_common::test]
     fn it_matches_fact_cost_many_nothing_bound() {
         let fact_app = RelationQuery::new(
-            Term::Constant(the!("user/tags")),
+            Term::from(the!("user/tags")),
             Term::<Entity>::var("entity"),
-            Parameter::var("tag"),
+            Term::var("tag"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::Many)),
         );
@@ -924,8 +924,8 @@ mod cost_model_tests {
         let concept = ConceptDescriptor::from([("tags", tag)]);
 
         let mut terms = Parameters::new();
-        terms.insert("this".to_string(), Parameter::var("entity"));
-        terms.insert("tags".to_string(), Parameter::var("tag"));
+        terms.insert("this".to_string(), Term::var("entity"));
+        terms.insert("tags".to_string(), Term::var("tag"));
 
         let concept_app = ConceptQuery {
             terms,
@@ -944,9 +944,9 @@ mod cost_model_tests {
     #[dialog_common::test]
     fn it_matches_fact_cost_many_value_bound() {
         let fact_app = RelationQuery::new(
-            Term::Constant(the!("user/tags")),
+            Term::from(the!("user/tags")),
             Term::<Entity>::var("entity"),
-            Parameter::var("tag"),
+            Term::var("tag"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::Many)),
         );
@@ -961,8 +961,8 @@ mod cost_model_tests {
         let concept = ConceptDescriptor::from([("tags", tag)]);
 
         let mut terms = Parameters::new();
-        terms.insert("this".to_string(), Parameter::var("entity"));
-        terms.insert("tags".to_string(), Parameter::var("tag"));
+        terms.insert("this".to_string(), Term::var("entity"));
+        terms.insert("tags".to_string(), Term::var("tag"));
 
         let concept_app = ConceptQuery {
             terms,
@@ -982,17 +982,17 @@ mod cost_model_tests {
     #[dialog_common::test]
     fn it_accumulates_cost_through_planning() {
         let p1 = RelationQuery::new(
-            Term::Constant(the!("user/name")),
+            Term::from(the!("user/name")),
             Term::<Entity>::var("entity"),
-            Parameter::var("name"),
+            Term::var("name"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
 
         let p2 = RelationQuery::new(
-            Term::Constant(the!("user/age")),
+            Term::from(the!("user/age")),
             Term::<Entity>::var("entity"),
-            Parameter::var("age"),
+            Term::var("age"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
@@ -1026,9 +1026,9 @@ mod cost_model_tests {
     #[dialog_common::test]
     fn debug_update_cost() {
         let app = RelationQuery::new(
-            Term::Constant(the!("user/name")),
+            Term::from(the!("user/name")),
             Term::<Entity>::var("entity"),
-            Parameter::var("value"),
+            Term::var("value"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
@@ -1065,9 +1065,9 @@ mod cost_model_tests {
     #[dialog_common::test]
     fn it_restores_cost_when_variable_leaves_scope() {
         let app = RelationQuery::new(
-            Term::Constant(the!("user/name")),
+            Term::from(the!("user/name")),
             Term::<Entity>::var("entity"),
-            Parameter::var("value"),
+            Term::var("value"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
@@ -1103,9 +1103,9 @@ mod cost_model_tests {
         //   1/3 constraints (just 'the'): INDEX_SCAN = 5000
         //   2/3 constraints (the + of):   RANGE_SCAN_COST = 1000
         let app = RelationQuery::new(
-            Term::Constant(the!("person/hobbies")),
+            Term::from(the!("person/hobbies")),
             Term::<Entity>::var("entity"),
-            Parameter::var("hobby"),
+            Term::var("hobby"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::Many)),
         );

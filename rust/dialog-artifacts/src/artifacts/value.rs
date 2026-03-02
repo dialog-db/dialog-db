@@ -640,6 +640,12 @@ impl From<Attribute> for Value {
     }
 }
 
+impl From<usize> for Value {
+    fn from(value: usize) -> Self {
+        Value::UnsignedInt(value as u128)
+    }
+}
+
 impl From<Cause> for Value {
     fn from(value: Cause) -> Self {
         Value::Bytes(value.to_vec())

@@ -82,7 +82,7 @@ mod tests {
                         the!("person/name"),
                         "The name of the person",
                         Cardinality::One,
-                        <String as Typed>::TYPE,
+                        <<String as Typed>::Descriptor as crate::types::TypeDescriptor>::TYPE,
                     )
                 })
             }

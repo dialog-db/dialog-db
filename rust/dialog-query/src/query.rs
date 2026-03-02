@@ -27,7 +27,8 @@ mod tests {
     use crate::artifact::{Artifacts, Entity, Value};
     use crate::relation::query::RelationQuery;
     use crate::the;
-    use crate::{Association, Parameter, Session, Term};
+
+    use crate::{Association, Session, Term};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
@@ -61,9 +62,9 @@ mod tests {
         session.transact(claims).await?;
 
         let alice_query = RelationQuery::new(
-            Term::Constant(the!("user/name")),
+            Term::from(the!("user/name")),
             alice.clone().into(),
-            Parameter::from("Alice".to_string()),
+            Term::constant("Alice".to_string()),
             Term::blank(),
             None,
         );
@@ -73,9 +74,9 @@ mod tests {
         assert!(result.is_ok());
 
         let all_names_query = RelationQuery::new(
-            Term::Constant(the!("user/name")),
+            Term::from(the!("user/name")),
             Term::blank(),
-            Parameter::blank(),
+            Term::blank(),
             Term::blank(),
             None,
         );
@@ -85,9 +86,9 @@ mod tests {
         assert!(result.is_ok());
 
         let email_query = RelationQuery::new(
-            Term::Constant(the!("user/email")),
+            Term::from(the!("user/email")),
             alice.clone().into(),
-            Parameter::blank(),
+            Term::blank(),
             Term::blank(),
             None,
         );
@@ -105,9 +106,9 @@ mod tests {
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         let variable_query = RelationQuery::new(
-            Term::Constant(the!("user/name")),
+            Term::from(the!("user/name")),
             Term::<Entity>::var("user"),
-            Parameter::var("name"),
+            Term::var("name"),
             Term::blank(),
             None,
         );
@@ -135,9 +136,9 @@ mod tests {
         session.transact(claims).await?;
 
         let fact_selector = RelationQuery::new(
-            Term::Constant(the!("user/name")),
+            Term::from(the!("user/name")),
             alice.clone().into(),
-            Parameter::blank(),
+            Term::blank(),
             Term::blank(),
             None,
         );
@@ -185,9 +186,9 @@ mod tests {
 
         let session = Session::open(artifacts.clone());
         let admin_result = RelationQuery::new(
-            Term::Constant(the!("user/role")),
+            Term::from(the!("user/role")),
             Term::blank(),
-            Parameter::from("admin".to_string()),
+            Term::constant("admin".to_string()),
             Term::blank(),
             None,
         )
@@ -198,9 +199,9 @@ mod tests {
 
         let session = Session::open(artifacts);
         let names_result = RelationQuery::new(
-            Term::Constant(the!("user/name")),
+            Term::from(the!("user/name")),
             Term::blank(),
-            Parameter::blank(),
+            Term::blank(),
             Term::blank(),
             None,
         )

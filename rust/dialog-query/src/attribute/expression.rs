@@ -1,4 +1,4 @@
-use crate::artifact::Cause;
+use crate::artifact::{Cause, Value};
 use crate::attribute::Attribute;
 use crate::attribute::AttributeDescriptor;
 use crate::descriptor::Descriptor;
@@ -6,8 +6,9 @@ use crate::negation::Negation;
 use crate::relation::descriptor::RelationDescriptor;
 use crate::relation::query::RelationQuery;
 use crate::statement::{Retraction, Statement};
+use crate::types::Any;
 use crate::types::Scalar;
-use crate::{Association, Cardinality, Entity, Parameter, Premise, Proposition, Term, Transaction};
+use crate::{Association, Cardinality, Entity, Premise, Proposition, Term, Transaction};
 use std::marker::PhantomData;
 
 /// Cause-position in an [`AttributeExpression`].
@@ -22,14 +23,14 @@ pub trait ExpressionCause {
 
 impl ExpressionCause for Cause {
     fn as_cause_term(&self) -> Term<Cause> {
-        Term::Constant(self.clone())
+        Term::Constant(Value::from(self.clone()))
     }
 }
 
 impl ExpressionCause for Option<Cause> {
     fn as_cause_term(&self) -> Term<Cause> {
         match self {
-            Some(cause) => Term::Constant(cause.clone()),
+            Some(cause) => Term::Constant(Value::from(cause.clone())),
             None => Term::blank(),
         }
     }
@@ -194,12 +195,12 @@ impl<A: Attribute, Of, Is> AttributeExpression<A, Of, Is, Option<Cause>> {
 
 pub(crate) fn relation_query<A: Attribute + Descriptor<AttributeDescriptor>>(
     of: Term<Entity>,
-    is: impl Into<Parameter>,
+    is: Term<Any>,
     cause: Term<Cause>,
 ) -> RelationQuery {
     let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
     RelationQuery::new(
-        Term::Constant(desc.the().clone()),
+        Term::Constant(Value::from(desc.the().clone())),
         of,
         is,
         cause,
@@ -217,7 +218,8 @@ where
 {
     fn assert(self, transaction: &mut Transaction) {
         let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
-        let association = Association::new(desc.the().clone(), self.of, self.is.value().as_value());
+        let association =
+            Association::new(desc.the().clone(), self.of, self.is.value().clone().into());
         if desc.cardinality() == Cardinality::One {
             transaction.associate_unique(association);
         } else {
@@ -227,7 +229,7 @@ where
 
     fn retract(self, transaction: &mut Transaction) {
         let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
-        Association::new(desc.the().clone(), self.of, self.is.value().as_value())
+        Association::new(desc.the().clone(), self.of, self.is.value().clone().into())
             .retract(transaction);
     }
 }
@@ -257,7 +259,7 @@ where
         std::iter::once(Association::new(
             desc.the().clone(),
             self.of,
-            self.is.value().as_value(),
+            self.is.value().clone().into(),
         ))
     }
 }
@@ -270,8 +272,8 @@ where
 {
     fn from(expr: AttributeExpression<A, Entity, A, Because>) -> Self {
         let query = relation_query::<A>(
-            Term::Constant(expr.of),
-            Parameter::Constant(expr.is.value().as_value()),
+            Term::Constant(Value::from(expr.of.clone())),
+            Term::Constant(expr.is.value().clone().into()),
             expr.cause.as_cause_term(),
         );
         Premise::Assert(Proposition::Relation(Box::new(query)))
@@ -286,8 +288,11 @@ where
     Because: ExpressionCause,
 {
     fn from(expr: AttributeExpression<A, Entity, Term<A::Type>, Because>) -> Self {
-        let query =
-            relation_query::<A>(Term::Constant(expr.of), expr.is, expr.cause.as_cause_term());
+        let query = relation_query::<A>(
+            Term::Constant(Value::from(expr.of.clone())),
+            expr.is.into(),
+            expr.cause.as_cause_term(),
+        );
         Premise::Assert(Proposition::Relation(Box::new(query)))
     }
 }
@@ -301,7 +306,7 @@ where
     fn from(expr: AttributeExpression<A, Term<Entity>, A, Because>) -> Self {
         let query = relation_query::<A>(
             expr.of,
-            Parameter::Constant(expr.is.value().as_value()),
+            Term::Constant(expr.is.value().clone().into()),
             expr.cause.as_cause_term(),
         );
         Premise::Assert(Proposition::Relation(Box::new(query)))
@@ -316,7 +321,7 @@ where
     Because: ExpressionCause,
 {
     fn from(expr: AttributeExpression<A, Term<Entity>, Term<A::Type>, Because>) -> Self {
-        let query = relation_query::<A>(expr.of, expr.is, expr.cause.as_cause_term());
+        let query = relation_query::<A>(expr.of, expr.is.into(), expr.cause.as_cause_term());
         Premise::Assert(Proposition::Relation(Box::new(query)))
     }
 }

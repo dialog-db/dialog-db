@@ -2,14 +2,15 @@
 
 use crate::artifact::{DialogArtifactsError, Type, TypeError as ArtifactTypeError, Value};
 pub use crate::environment::Environment;
-use crate::parameter::Parameter;
 pub use crate::proposition::Proposition;
 pub use crate::rule::deductive::DeductiveRule;
+use crate::term::Term;
+use crate::types::Any;
 pub use thiserror::Error;
 
 /// Errors that can occur during query planning and execution
 ///
-/// TODO: Large enum variant - VariableInconsistency contains two Parameter fields
+/// TODO: Large enum variant - VariableInconsistency contains two Term<Any> fields
 /// which are large. Consider boxing these fields or the entire variant to reduce memory usage.
 /// Most error variants are small (24 bytes), so this wastes significant memory.
 #[allow(clippy::large_enum_variant)]
@@ -51,9 +52,9 @@ pub enum QueryError {
         /// The parameter name where the inconsistency was found
         parameter: String,
         /// The actual value bound to the variable
-        actual: Parameter,
+        actual: Term<Any>,
         /// The expected value for the variable
-        expected: Parameter,
+        expected: Term<Any>,
     },
 
     /// A variable appears in both input and output of a formula
@@ -147,8 +148,8 @@ impl From<InconsistencyError> for QueryError {
             InconsistencyError::TypeMismatch { expected, actual } => {
                 QueryError::VariableInconsistency {
                     parameter: "value".to_string(),
-                    expected: Parameter::Constant(expected),
-                    actual: Parameter::Constant(actual),
+                    expected: Term::Constant(expected),
+                    actual: Term::Constant(actual),
                 }
             }
             _ => QueryError::InvalidTerm {
@@ -227,12 +228,12 @@ pub enum FormulaEvaluationError {
     /// # Example
     /// ```no_run
     /// # use dialog_query::formula::math::Sum;
-    /// # use dialog_query::{selection::Answer, Value, Parameter, Parameters, Formula};
+    /// # use dialog_query::{selection::Answer, Value, Term, types::Any, Parameters, Formula};
     /// # use dialog_query::error::SchemaError;
     /// let mut parameters = Parameters::new();
     /// // Missing required "with" parameter!
-    /// parameters.insert("of".to_string(), Parameter::var("x"));
-    /// parameters.insert("is".to_string(), Parameter::var("result"));
+    /// parameters.insert("of".to_string(), Term::<Any>::var("x"));
+    /// parameters.insert("is".to_string(), Term::<Any>::var("result"));
     ///
     /// // This will fail because "with" parameter is required
     /// let result = Sum::apply(parameters);
@@ -252,12 +253,12 @@ pub enum FormulaEvaluationError {
     /// # Example
     /// ```no_run
     /// # use dialog_query::formula::math::Sum;
-    /// # use dialog_query::{selection::Answer, Value, Parameter, Parameters, Formula};
+    /// # use dialog_query::{selection::Answer, Value, Term, types::Any, Parameters, Formula};
     /// # use dialog_query::error::FormulaEvaluationError;
     /// # let mut parameters = Parameters::new();
-    /// # parameters.insert("of".to_string(), Parameter::var("x"));
-    /// # parameters.insert("with".to_string(), Parameter::var("y"));
-    /// # parameters.insert("is".to_string(), Parameter::var("result"));
+    /// # parameters.insert("of".to_string(), Term::<Any>::var("x"));
+    /// # parameters.insert("with".to_string(), Term::<Any>::var("y"));
+    /// # parameters.insert("is".to_string(), Term::<Any>::var("result"));
     /// # let sum = Sum::apply(parameters).unwrap();
     /// let input = Answer::new();
     /// // Variable ?x is not bound!
@@ -269,7 +270,7 @@ pub enum FormulaEvaluationError {
         /// The parameter name that requires a bound variable
         parameter: String,
         /// The unbound parameter
-        term: Parameter,
+        term: Term<Any>,
     },
 
     /// Attempt to write a value that conflicts with an existing binding
@@ -295,9 +296,9 @@ pub enum FormulaEvaluationError {
         /// The parameter where the inconsistency was detected
         parameter: String,
         /// The actual value bound to the variable
-        actual: Parameter,
+        actual: Term<Any>,
         /// The expected value for the variable
-        expected: Parameter,
+        expected: Term<Any>,
     },
 
     /// Type conversion failed when casting a Value to the requested type
@@ -328,14 +329,14 @@ impl From<InconsistencyError> for FormulaEvaluationError {
             InconsistencyError::UnboundVariableError(var) => {
                 FormulaEvaluationError::UnboundVariable {
                     parameter: var.clone(),
-                    term: Parameter::var(&var),
+                    term: Term::var(&var),
                 }
             }
             InconsistencyError::AssignmentError(msg) => {
                 FormulaEvaluationError::VariableInconsistency {
                     parameter: msg,
-                    actual: Parameter::blank(),
-                    expected: Parameter::blank(),
+                    actual: Term::blank(),
+                    expected: Term::blank(),
                 }
             }
             InconsistencyError::UnexpectedType { expected, actual } => {
@@ -347,14 +348,14 @@ impl From<InconsistencyError> for FormulaEvaluationError {
             }
             InconsistencyError::TypeError(msg) => FormulaEvaluationError::VariableInconsistency {
                 parameter: msg,
-                actual: Parameter::blank(),
-                expected: Parameter::blank(),
+                actual: Term::blank(),
+                expected: Term::blank(),
             },
             InconsistencyError::TypeMismatch { expected, actual } => {
                 FormulaEvaluationError::VariableInconsistency {
                     parameter: "value".to_string(),
-                    actual: Parameter::Constant(actual),
-                    expected: Parameter::Constant(expected),
+                    actual: Term::Constant(actual),
+                    expected: Term::Constant(expected),
                 }
             }
             InconsistencyError::UnconstrainedSelector => {
@@ -436,7 +437,7 @@ pub enum PlanError {
         /// The required parameter name
         parameter: String,
         /// The unbound parameter that was passed
-        term: Parameter,
+        term: Term<Any>,
     },
 
     /// A premise application passes an unbound variable into a required parameter
@@ -449,7 +450,7 @@ pub enum PlanError {
         /// The required parameter name
         parameter: String,
         /// The unbound parameter that was passed
-        term: Parameter,
+        term: Term<Any>,
     },
 
     /// A formula application is missing a required cell
@@ -494,7 +495,7 @@ pub enum PlanError {
         /// The cell that received an unbound parameter
         cell: String,
         /// The unbound parameter
-        parameter: Parameter,
+        parameter: Term<Any>,
     },
 
     /// An application was provided with no non-blank parameters
@@ -538,7 +539,7 @@ pub enum TypeError {
         /// The expected type
         expected: Type,
         /// The actual parameter encountered
-        actual: Parameter,
+        actual: Term<Any>,
     },
     /// A required term was not provided
     #[error("Required term is missing")]
@@ -574,7 +575,7 @@ pub enum SchemaError {
         /// The expected type
         expected: Type,
         /// The actual parameter encountered
-        actual: Parameter,
+        actual: Term<Any>,
     },
     /// A required binding was not provided
     #[error("Required binding \"{binding}\" was omitted")]

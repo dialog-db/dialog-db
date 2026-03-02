@@ -28,7 +28,7 @@ pub mod math;
 /// String manipulation formulas (concatenate, length, uppercase, lowercase, like)
 pub mod string;
 
-pub use conversions::{ParseNumber, ToString};
+pub use conversions::{ParseFloat, ParseSignedInteger, ParseUnsignedInteger, ToString};
 pub use logic::{And, Not, Or};
 pub use math::{Difference, Modulo, Product, Quotient, Sum};
 pub use string::{Concatenate, Length, Like, Lowercase, Uppercase};
@@ -126,12 +126,12 @@ pub trait Formula: Predicate + Sized + Clone {
     ///
     /// # Example
     /// ```no_run
-    /// # use dialog_query::{Parameter, Parameters, Formula};
+    /// # use dialog_query::{Term, Any, Parameters, Formula};
     /// # use dialog_query::formula::math::Sum;
     /// let mut terms = Parameters::new();
-    /// terms.insert("of".to_string(), Parameter::var("input1"));
-    /// terms.insert("with".to_string(), Parameter::var("input2"));
-    /// terms.insert("is".to_string(), Parameter::var("output"));
+    /// terms.insert("of".to_string(), Term::<Any>::var("input1"));
+    /// terms.insert("with".to_string(), Term::<Any>::var("input2"));
+    /// terms.insert("is".to_string(), Term::<Any>::var("output"));
     ///
     /// let app = Sum::apply(terms)?;
     /// # Ok::<(), dialog_query::error::SchemaError>(())

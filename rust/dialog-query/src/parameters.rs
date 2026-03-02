@@ -1,4 +1,5 @@
-use crate::Parameter;
+use crate::term::Term;
+use crate::types::Any;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -6,7 +7,7 @@ use std::collections::HashMap;
 ///
 /// Every premise type (relation, concept, formula, constraint) exposes its
 /// inputs and outputs as named parameters. A `Parameters` instance binds
-/// each parameter name to a [`Parameter`] — either a concrete constant
+/// each parameter name to a [`Term<Any>`] — either a concrete constant
 /// or a named variable that will be resolved during query evaluation.
 ///
 /// During planning, the [`Schema`](crate::Schema) is consulted to determine
@@ -14,24 +15,24 @@ use std::collections::HashMap;
 /// information together with the current [`Environment`](crate::Environment)
 /// to decide whether the premise is viable.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct Parameters(HashMap<String, Parameter>);
+pub struct Parameters(HashMap<String, Term<Any>>);
 impl Parameters {
     /// Create a new empty parameter set
     pub fn new() -> Self {
         Self::default()
     }
     /// Returns the parameter associated with the given name, if has one.
-    pub fn get(&self, name: &str) -> Option<&Parameter> {
+    pub fn get(&self, name: &str) -> Option<&Term<Any>> {
         self.0.get(name)
     }
 
     /// Inserts a new parameter binding for the given name.
     /// If the parameter already exists, it will be overwritten.
     ///
-    /// Accepts anything convertible to [`Parameter`], including `Term<T>`
+    /// Accepts anything convertible to [`Term<Any>`], including `Term<T>`
     /// for any `T: Scalar`.
-    pub fn insert(&mut self, name: String, param: impl Into<Parameter>) {
-        self.0.insert(name, param.into());
+    pub fn insert(&mut self, name: String, param: Term<Any>) {
+        self.0.insert(name, param);
     }
 
     /// Checks if a parameter binding exists for the given name.
@@ -40,7 +41,7 @@ impl Parameters {
     }
 
     /// Returns an iterator over all name-parameter pairs in this binding set.
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &Parameter)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Term<Any>)> {
         self.0.iter()
     }
 
@@ -54,14 +55,16 @@ impl Parameters {
 mod tests {
     use super::*;
     use crate::artifact::{Type, Value};
+    use crate::term::Term;
+    use crate::types::Any;
 
     #[dialog_common::test]
     fn it_performs_basic_operations() {
         let mut terms = Parameters::new();
 
-        let name_param = Parameter::Variable {
+        let name_param: Term<Any> = Term::Variable {
             name: Some("name".into()),
-            typ: None,
+            descriptor: Any(None),
         };
         terms.insert("name".to_string(), name_param.clone());
 
@@ -79,20 +82,8 @@ mod tests {
     #[dialog_common::test]
     fn it_serializes_variables_to_json() {
         let mut params = Parameters::new();
-        params.insert(
-            "name".to_string(),
-            Parameter::Variable {
-                name: Some("x".into()),
-                typ: None,
-            },
-        );
-        params.insert(
-            "age".to_string(),
-            Parameter::Variable {
-                name: Some("y".into()),
-                typ: None,
-            },
-        );
+        params.insert("name".to_string(), Term::var("x"));
+        params.insert("age".to_string(), Term::var("y"));
 
         let json = serde_json::to_value(&params).unwrap();
         let obj = json.as_object().unwrap();
@@ -104,8 +95,8 @@ mod tests {
     #[dialog_common::test]
     fn it_serializes_constants_to_json() {
         let mut params = Parameters::new();
-        params.insert("name".to_string(), Parameter::from("Alice".to_string()));
-        params.insert("age".to_string(), Parameter::from(42u32));
+        params.insert("name".to_string(), Term::constant("Alice".to_string()));
+        params.insert("age".to_string(), Term::constant(42u32));
 
         let json = serde_json::to_value(&params).unwrap();
         let obj = json.as_object().unwrap();
@@ -116,14 +107,8 @@ mod tests {
     #[dialog_common::test]
     fn it_serializes_mixed_terms_to_json() {
         let mut params = Parameters::new();
-        params.insert(
-            "this".to_string(),
-            Parameter::Variable {
-                name: Some("person".into()),
-                typ: None,
-            },
-        );
-        params.insert("name".to_string(), Parameter::from("Alice".to_string()));
+        params.insert("this".to_string(), Term::var("person"));
+        params.insert("name".to_string(), Term::constant("Alice".to_string()));
 
         let json = serde_json::to_value(&params).unwrap();
         let obj = json.as_object().unwrap();
@@ -141,16 +126,16 @@ mod tests {
         let params: Parameters = serde_json::from_value(json).unwrap();
         assert_eq!(
             params.get("name"),
-            Some(&Parameter::Variable {
+            Some(&Term::Variable {
                 name: Some("x".into()),
-                typ: None
+                descriptor: Any(None)
             })
         );
         assert_eq!(
             params.get("age"),
-            Some(&Parameter::Variable {
+            Some(&Term::Variable {
                 name: Some("y".into()),
-                typ: None
+                descriptor: Any(None)
             })
         );
     }
@@ -165,11 +150,11 @@ mod tests {
         let params: Parameters = serde_json::from_value(json).unwrap();
         assert_eq!(
             params.get("name"),
-            Some(&Parameter::Constant(Value::from("Alice".to_string())))
+            Some(&Term::Constant(Value::from("Alice".to_string())))
         );
         assert_eq!(
             params.get("active"),
-            Some(&Parameter::Constant(Value::from(true)))
+            Some(&Term::Constant(Value::from(true)))
         );
     }
 
@@ -182,21 +167,15 @@ mod tests {
         let params: Parameters = serde_json::from_value(json).unwrap();
         assert!(params.contains("name"));
         let param = params.get("name").unwrap();
-        assert_eq!(param, &Parameter::blank());
+        assert_eq!(param, &Term::blank());
     }
 
     #[dialog_common::test]
     fn it_round_trips_through_json() {
         let mut original = Parameters::new();
-        original.insert(
-            "this".to_string(),
-            Parameter::Variable {
-                name: Some("entity".into()),
-                typ: None,
-            },
-        );
-        original.insert("name".to_string(), Parameter::from("Alice".to_string()));
-        original.insert("active".to_string(), Parameter::from(true));
+        original.insert("this".to_string(), Term::var("entity"));
+        original.insert("name".to_string(), Term::constant("Alice".to_string()));
+        original.insert("active".to_string(), Term::constant(true));
 
         let json = serde_json::to_value(&original).unwrap();
         let restored: Parameters = serde_json::from_value(json).unwrap();
@@ -211,15 +190,15 @@ mod tests {
         // Integer types are now correctly preserved (the bug is fixed!)
         assert_eq!(
             params.get("count"),
-            Some(&Parameter::Constant(Value::UnsignedInt(42)))
+            Some(&Term::Constant(Value::UnsignedInt(42)))
         );
         assert_eq!(
             params.get("offset"),
-            Some(&Parameter::Constant(Value::SignedInt(-5)))
+            Some(&Term::Constant(Value::SignedInt(-5)))
         );
         assert_eq!(
             params.get("ratio"),
-            Some(&Parameter::Constant(Value::Float(3.14)))
+            Some(&Term::Constant(Value::Float(3.14)))
         );
     }
 
@@ -235,17 +214,14 @@ mod tests {
         use crate::Term;
 
         let mut params = Parameters::new();
-        params.insert(
-            "name".to_string(),
-            Parameter::from(Term::<String>::var("x")),
-        );
+        params.insert("name".to_string(), Term::<String>::var("x").into());
 
         let param = params.get("name").unwrap();
         assert_eq!(
             param,
-            &Parameter::Variable {
+            &Term::Variable {
                 name: Some("x".into()),
-                typ: Some(Type::String)
+                descriptor: Any(Some(Type::String))
             }
         );
     }

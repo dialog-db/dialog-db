@@ -101,7 +101,8 @@ mod tests {
     use crate::artifact::Artifacts;
     use crate::error::QueryError;
     use crate::selection::{Answer, Evidence};
-    use crate::{Parameter, Term, Value};
+    use crate::types::Any;
+    use crate::{Term, Value};
     use dialog_storage::MemoryStorageBackend;
     use futures_util::TryStreamExt;
 
@@ -118,11 +119,11 @@ mod tests {
 
         let mut answer = Answer::new();
         answer.merge(Evidence::Parameter {
-            term: &Parameter::from(&a),
+            term: &Term::<Any>::from(&a),
             value: &Value::from(1),
         })?;
         answer.merge(Evidence::Parameter {
-            term: &Parameter::from(&b),
+            term: &Term::<Any>::from(&b),
             value: &Value::from(2),
         })?;
 
@@ -153,11 +154,11 @@ mod tests {
 
         let mut answer = Answer::new();
         answer.merge(Evidence::Parameter {
-            term: &Parameter::from(&a),
+            term: &Term::<Any>::from(&a),
             value: &Value::from(1),
         })?;
         answer.merge(Evidence::Parameter {
-            term: &Parameter::from(&b),
+            term: &Term::<Any>::from(&b),
             value: &Value::from(1),
         })?;
 

@@ -6,8 +6,9 @@ use crate::attribute::expression::{
 use crate::descriptor::Descriptor;
 use crate::query::{Application, Source};
 use crate::selection::{Answer, Answers};
+use crate::types::Any;
 use crate::types::Scalar;
-use crate::{Entity, Parameter, Premise, Proposition, QueryError, Term, Value};
+use crate::{Entity, Premise, Proposition, QueryError, Term, Value};
 
 /// A typed attribute query with named fields for entity and value.
 ///
@@ -59,13 +60,13 @@ where
     type Conclusion = AttributeStatement<A>;
 
     fn evaluate<S: Source, M: Answers>(self, answers: M, source: &S) -> impl Answers {
-        let query = relation_query::<A>(self.of, self.is.clone(), Term::blank());
+        let query = relation_query::<A>(self.of, self.is.clone().into(), Term::blank());
         query.evaluate(answers, source)
     }
 
     fn realize(&self, input: Answer) -> Result<Self::Conclusion, QueryError> {
         let of_term = &self.of;
-        let is_param = Parameter::from(&self.is);
+        let is_param = Term::<Any>::from(&self.is);
         let entity: Entity = input.get(of_term)?;
         let value: Value = input.resolve(&is_param)?;
         let typed_value = A::Type::try_from(value).map_err(|_| {
@@ -87,7 +88,7 @@ where
 {
     fn from(expr: AttributeExpression<A, Entity, Term<A::Type>, Because>) -> Self {
         AttributeQuery {
-            of: Term::Constant(expr.of),
+            of: Term::Constant(Value::from(expr.of.clone())),
             is: expr.is,
         }
     }
@@ -116,7 +117,7 @@ where
     fn from(expr: AttributeExpression<A, Term<Entity>, A, Because>) -> Self {
         AttributeQuery {
             of: expr.of,
-            is: Term::Constant(expr.is.value().clone()),
+            is: Term::Constant(expr.is.value().clone().into()),
         }
     }
 }
@@ -127,7 +128,7 @@ where
     A::Type: Scalar,
 {
     fn from(query: AttributeQuery<A>) -> Self {
-        let relation = relation_query::<A>(query.of, query.is, Term::blank());
+        let relation = relation_query::<A>(query.of, query.is.into(), Term::blank());
         Premise::Assert(Proposition::Relation(Box::new(relation)))
     }
 }

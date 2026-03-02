@@ -3,10 +3,11 @@ use std::sync::Arc;
 
 use crate::artifact::{Type, TypeError, Value};
 use crate::error::{InconsistencyError, QueryError};
-use crate::parameter::Parameter;
 use crate::relation::query::RelationQuery;
+use crate::term::Term;
+use crate::types::Any;
 use crate::types::Typed;
-use crate::{Claim, Term, types::Scalar};
+use crate::{Claim, types::Scalar};
 
 use super::{Answers, Evidence, Factor, Factors, Selector};
 
@@ -89,12 +90,12 @@ impl Answer {
         // Try to extract from a named variable conclusion first
         // This gives us the full relation with all its components
         if let Term::Variable { name: Some(_), .. } = application.of()
-            && let Some(factors) = self.resolve_factors(&Parameter::from(application.of()))
+            && let Some(factors) = self.resolve_factors(&Term::<Any>::from(application.of()))
         {
             return Ok(Claim::from(factors));
         }
 
-        if let Parameter::Variable { name: Some(_), .. } = application.is()
+        if let Term::Variable { name: Some(_), .. } = application.is()
             && let Some(factors) = self.resolve_factors(application.is())
         {
             return Ok(Claim::from(factors));
@@ -120,7 +121,7 @@ impl Answer {
                 let application = Arc::new(application.to_owned());
 
                 self.assign(
-                    &Parameter::from(application.the()),
+                    &Term::<Any>::from(application.the()),
                     &Factor::Selected {
                         selector: Selector::The,
                         application: application.clone(),
@@ -128,7 +129,7 @@ impl Answer {
                     },
                 )?;
                 self.assign(
-                    &Parameter::from(application.of()),
+                    &Term::<Any>::from(application.of()),
                     &Factor::Selected {
                         selector: Selector::Of,
                         application: application.clone(),
@@ -144,7 +145,7 @@ impl Answer {
                     },
                 )?;
                 self.assign(
-                    &Parameter::from(application.cause()),
+                    &Term::<Any>::from(application.cause()),
                     &Factor::Selected {
                         selector: Selector::Cause,
                         application,
@@ -177,9 +178,9 @@ impl Answer {
     }
 
     /// Look up the factors bound to a named variable parameter.
-    pub fn lookup(&self, param: &Parameter) -> Option<&Factors> {
+    pub fn lookup(&self, param: &Term<Any>) -> Option<&Factors> {
         match param {
-            Parameter::Variable {
+            Term::Variable {
                 name: Some(key), ..
             } => self.conclusions.get(key),
             _ => None,
@@ -187,9 +188,9 @@ impl Answer {
     }
 
     /// Assign a parameter to a factor.
-    pub fn assign(&mut self, param: &Parameter, factor: &Factor) -> Result<(), InconsistencyError> {
+    pub fn assign(&mut self, param: &Term<Any>, factor: &Factor) -> Result<(), InconsistencyError> {
         match param {
-            Parameter::Variable {
+            Term::Variable {
                 name: Some(name), ..
             } => {
                 if let Some(factors) = self.conclusions.get_mut(name) {
@@ -216,14 +217,14 @@ impl Answer {
                     Ok(())
                 }
             }
-            Parameter::Variable { name: None, .. } | Parameter::Constant(_) => Ok(()),
+            Term::Variable { name: None, .. } | Term::Constant(_) => Ok(()),
         }
     }
 
     /// Extends this answer by assigning multiple parameter-factor pairs.
     pub fn extend<I>(&mut self, assignments: I) -> Result<(), InconsistencyError>
     where
-        I: IntoIterator<Item = (Parameter, Factor)>,
+        I: IntoIterator<Item = (Term<Any>, Factor)>,
     {
         for (param, factor) in assignments {
             self.assign(&param, &factor)?;
@@ -232,20 +233,20 @@ impl Answer {
     }
 
     /// Returns true if the parameter is bound in this answer.
-    pub fn contains(&self, param: &Parameter) -> bool {
+    pub fn contains(&self, param: &Term<Any>) -> bool {
         match param {
-            Parameter::Variable {
+            Term::Variable {
                 name: Some(key), ..
             } => self.conclusions.contains_key(key),
-            Parameter::Variable { name: None, .. } => false,
-            Parameter::Constant(_) => true,
+            Term::Variable { name: None, .. } => false,
+            Term::Constant(_) => true,
         }
     }
 
     /// Resolves factors that were assigned to the given parameter.
-    pub fn resolve_factors(&self, param: &Parameter) -> Option<&Factors> {
+    pub fn resolve_factors(&self, param: &Term<Any>) -> Option<&Factors> {
         match param {
-            Parameter::Variable {
+            Term::Variable {
                 name: Some(name), ..
             } => self.conclusions.get(name),
             _ => None,
@@ -258,9 +259,9 @@ impl Answer {
     /// For constants, returns the constant value.
     ///
     /// Returns an error if the variable is not bound.
-    pub fn resolve(&self, param: &Parameter) -> Result<Value, InconsistencyError> {
+    pub fn resolve(&self, param: &Term<Any>) -> Result<Value, InconsistencyError> {
         match param {
-            Parameter::Variable {
+            Term::Variable {
                 name: Some(key), ..
             } => {
                 if let Some(factors) = self.conclusions.get(key) {
@@ -269,10 +270,10 @@ impl Answer {
                     Err(InconsistencyError::UnboundVariableError(key.clone()))
                 }
             }
-            Parameter::Variable { name: None, .. } => {
+            Term::Variable { name: None, .. } => {
                 Err(InconsistencyError::UnboundVariableError("_".into()))
             }
-            Parameter::Constant(value) => Ok(value.clone()),
+            Term::Constant(value) => Ok(value.clone()),
         }
     }
 
@@ -285,7 +286,7 @@ impl Answer {
                     if let Some(factors) = self.conclusions.get(key) {
                         let value = factors.content();
                         if let Ok(converted) = T::try_from(value) {
-                            Term::Constant(converted)
+                            Term::Constant(converted.into())
                         } else {
                             term.clone()
                         }
@@ -302,13 +303,13 @@ impl Answer {
 
     /// Resolve a variable parameter into a constant parameter if this answer
     /// has a binding for it. Otherwise, return the original parameter.
-    pub fn resolve_parameter(&self, param: &Parameter) -> Parameter {
+    pub fn resolve_parameter(&self, param: &Term<Any>) -> Term<Any> {
         match param {
-            Parameter::Variable {
+            Term::Variable {
                 name: Some(key), ..
             } => {
                 if let Some(factors) = self.conclusions.get(key) {
-                    Parameter::Constant(factors.content().clone())
+                    Term::Constant(factors.content().clone())
                 } else {
                     param.clone()
                 }
@@ -325,7 +326,7 @@ impl Answer {
         let factor = Factor::Parameter {
             value: value.into(),
         };
-        self.assign(&Parameter::from(&term), &factor)?;
+        self.assign(&Term::<Any>::from(&term), &factor)?;
         Ok(self)
     }
 
@@ -333,14 +334,15 @@ impl Answer {
     pub fn get<T>(&self, term: &Term<T>) -> Result<T, InconsistencyError>
     where
         T: Typed + Clone + 'static,
-        Parameter: for<'a> From<&'a Term<T>>,
+        Term<Any>: for<'a> From<&'a Term<T>>,
         T: std::convert::TryFrom<Value>,
     {
-        let value = self.resolve(&Parameter::from(term))?;
+        let value = self.resolve(&Term::<Any>::from(term))?;
         let value_type = value.data_type();
         T::try_from(value).map_err(|_| {
             InconsistencyError::TypeConversion(TypeError::TypeMismatch(
-                T::TYPE.unwrap_or(Type::Bytes),
+                <<T as Typed>::Descriptor as crate::types::TypeDescriptor>::TYPE
+                    .unwrap_or(Type::Bytes),
                 value_type,
             ))
         })

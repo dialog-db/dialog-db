@@ -12,9 +12,7 @@ use crate::planner::Disjunction;
 use crate::schema::CONCEPT_OVERHEAD;
 use crate::selection::Answers;
 use crate::selection::{Answer, Evidence};
-use crate::{
-    Cardinality, Environment, Parameter, Parameters, QueryError, Schema, Source, try_stream,
-};
+use crate::{Cardinality, Environment, Parameters, QueryError, Schema, Source, Term, try_stream};
 use std::fmt::Display;
 
 /// Extract an Answer with parameter names from an Answer with user variable names
@@ -26,9 +24,9 @@ fn extract_parameters(source: &Answer, terms: &Parameters) -> Result<Answer, Inc
 
     for (param_name, user_param) in terms.iter() {
         match user_param {
-            Parameter::Variable { name: Some(_), .. } => {
+            Term::Variable { name: Some(_), .. } => {
                 // For named variables, map from user variable to parameter variable
-                let param = Parameter::var(param_name);
+                let param = Term::var(param_name);
                 if let Some(factors) = source.lookup(user_param) {
                     answer.merge(Evidence::Parameter {
                         term: &param,
@@ -36,15 +34,15 @@ fn extract_parameters(source: &Answer, terms: &Parameters) -> Result<Answer, Inc
                     })?;
                 }
             }
-            Parameter::Constant(value) => {
+            Term::Constant(value) => {
                 // For constants, directly bind the parameter variable to the constant value
-                let param = Parameter::var(param_name);
+                let param = Term::var(param_name);
                 answer.merge(Evidence::Parameter {
                     term: &param,
                     value,
                 })?;
             }
-            Parameter::Variable { name: None, .. } => {}
+            Term::Variable { name: None, .. } => {}
         }
     }
 
@@ -66,12 +64,12 @@ fn merge_parameters(
     // merge it into base under the user variable name
     for (param_name, user_param) in terms.iter() {
         // Skip constants - they were input parameters, not results to merge back
-        if matches!(user_param, Parameter::Constant(_)) {
+        if matches!(user_param, Term::Constant(_)) {
             continue;
         }
 
         // Try to get the factors for the parameter name from result
-        let param = Parameter::var(param_name);
+        let param = Term::var(param_name);
         if let Some(factors) = result.lookup(&param) {
             // Merge all factors under the user's variable name, preserving provenance
             for factor in factors.evidence() {
@@ -293,9 +291,10 @@ mod tests {
     use crate::relation::query::RelationQuery;
     use crate::selection::Answer;
     use crate::the;
+
     use crate::{
-        Association, AttributeDescriptor, Cardinality, DeductiveRule, Negation, Parameter,
-        Parameters, Premise, Proposition, Session, Term, Type, Value,
+        Association, AttributeDescriptor, Cardinality, DeductiveRule, Negation, Parameters,
+        Premise, Proposition, Session, Term, Type, Value,
     };
 
     // Note: Async tests are commented out due to Rust recursion limit issues in test compilation
@@ -363,9 +362,9 @@ mod tests {
         ]);
 
         let mut terms = Parameters::new();
-        terms.insert("this".to_string(), Parameter::var("person"));
-        terms.insert("name".to_string(), Parameter::var("name"));
-        terms.insert("age".to_string(), Parameter::var("age"));
+        terms.insert("this".to_string(), Term::var("person"));
+        terms.insert("name".to_string(), Term::var("name"));
+        terms.insert("age".to_string(), Term::var("age"));
 
         let application = ConceptQuery {
             terms,
@@ -381,8 +380,8 @@ mod tests {
         // Should find both Alice and Bob with their name and age
         assert_eq!(selection.len(), 2, "Should find 2 people");
 
-        let name_param = Parameter::var("name");
-        let age_param = Parameter::var("age");
+        let name_param = Term::var("name");
+        let age_param = Term::var("age");
 
         let mut found_alice = false;
         let mut found_bob = false;
@@ -460,9 +459,9 @@ mod tests {
         ]);
 
         let mut terms = Parameters::new();
-        terms.insert("this".to_string(), Parameter::var("person"));
-        terms.insert("name".to_string(), Parameter::var("name"));
-        terms.insert("age".to_string(), Parameter::var("age"));
+        terms.insert("this".to_string(), Term::var("person"));
+        terms.insert("name".to_string(), Term::var("name"));
+        terms.insert("age".to_string(), Term::var("age"));
 
         let application = ConceptQuery {
             terms,
@@ -471,7 +470,7 @@ mod tests {
 
         // Create evaluation context with bound entity in the answer
         let mut answer = Answer::new();
-        let person_param = Parameter::var("person");
+        let person_param = Term::var("person");
         answer.merge(Evidence::Parameter {
             term: &person_param,
             value: &Value::from(alice),
@@ -562,8 +561,8 @@ mod tests {
         ]);
 
         let mut terms = Parameters::new();
-        terms.insert("name".to_string(), Parameter::var("person_name"));
-        terms.insert("age".to_string(), Parameter::var("person_age"));
+        terms.insert("name".to_string(), Term::var("person_name"));
+        terms.insert("age".to_string(), Term::var("person_age"));
 
         let concept_app = ConceptQuery {
             terms,
@@ -617,9 +616,9 @@ mod tests {
     #[dialog_common::test]
     fn it_constructs_premises() {
         let relation = RelationQuery::new(
-            Term::Constant(the!("person/name")),
+            Term::from(the!("person/name")),
             Term::var("person"),
-            Parameter::from("Alice".to_string()),
+            Term::constant("Alice".to_string()),
             Term::blank(),
             None,
         );
@@ -679,9 +678,9 @@ mod tests {
     fn it_handles_application_variants() {
         // Test Relation application
         let relation = RelationQuery::new(
-            Term::Constant(the!("test/attr")),
+            Term::from(the!("test/attr")),
             Term::blank(),
-            Parameter::blank(),
+            Term::blank(),
             Term::blank(),
             None,
         );
@@ -696,7 +695,7 @@ mod tests {
 
         // Test other variants exist
         let mut terms = Parameters::new();
-        terms.insert("test".to_string(), Parameter::var("test_var"));
+        terms.insert("test".to_string(), Term::var("test_var"));
         let concept_app = Proposition::Concept(ConceptQuery {
             terms,
             predicate: ConceptDescriptor::from([(
@@ -721,9 +720,9 @@ mod tests {
     #[dialog_common::test]
     fn it_constructs_negation() {
         let relation = RelationQuery::new(
-            Term::Constant(the!("test/attr")),
+            Term::from(the!("test/attr")),
             Term::blank(),
-            Parameter::blank(),
+            Term::blank(),
             Term::blank(),
             None,
         );
@@ -780,9 +779,9 @@ mod tests {
         let mut terms = Parameters::new();
         terms.insert(
             "this".to_string(),
-            Parameter::Constant(Value::Entity(alice.clone())),
+            Term::Constant(Value::Entity(alice.clone())),
         );
-        terms.insert("name".to_string(), Parameter::var("name"));
+        terms.insert("name".to_string(), Term::var("name"));
 
         let app = ConceptQuery {
             terms,
@@ -799,7 +798,7 @@ mod tests {
             "Should find only Alice, not both people"
         );
         assert_eq!(
-            selection[0].resolve(&Parameter::var("name"))?,
+            selection[0].resolve(&Term::var("name"))?,
             Value::String("Alice".to_string())
         );
 
@@ -866,9 +865,9 @@ mod tests {
 
         // Query with constant name value - should only return Bob
         let mut terms = Parameters::new();
-        terms.insert("this".to_string(), Parameter::var("entity"));
-        terms.insert("name".to_string(), Parameter::from("Bob".to_string()));
-        terms.insert("age".to_string(), Parameter::var("age"));
+        terms.insert("this".to_string(), Term::var("entity"));
+        terms.insert("name".to_string(), Term::constant("Bob".to_string()));
+        terms.insert("age".to_string(), Term::var("age"));
 
         let app = ConceptQuery {
             terms,
@@ -881,11 +880,11 @@ mod tests {
 
         assert_eq!(selection.len(), 1, "Should find only Bob");
         assert_eq!(
-            selection[0].resolve(&Parameter::var("entity"))?,
+            selection[0].resolve(&Term::var("entity"))?,
             Value::Entity(bob.clone())
         );
         assert_eq!(
-            selection[0].resolve(&Parameter::var("age"))?,
+            selection[0].resolve(&Term::var("age"))?,
             Value::UnsignedInt(30)
         );
 
@@ -952,9 +951,9 @@ mod tests {
 
         // Query with both name and age constants - should only match Alice
         let mut terms = Parameters::new();
-        terms.insert("this".to_string(), Parameter::var("entity"));
-        terms.insert("name".to_string(), Parameter::from("Alice".to_string()));
-        terms.insert("age".to_string(), Parameter::from(25u32));
+        terms.insert("this".to_string(), Term::var("entity"));
+        terms.insert("name".to_string(), Term::constant("Alice".to_string()));
+        terms.insert("age".to_string(), Term::constant(25u32));
 
         let app = ConceptQuery {
             terms,
@@ -971,7 +970,7 @@ mod tests {
             "Should find only Alice with exact name and age match"
         );
         assert_eq!(
-            selection[0].resolve(&Parameter::var("entity"))?,
+            selection[0].resolve(&Term::var("entity"))?,
             Value::Entity(alice.clone())
         );
 

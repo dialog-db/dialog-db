@@ -12,9 +12,10 @@ pub use crate::query::Output;
 use crate::relation::descriptor::RelationDescriptor;
 use crate::schema::SEGMENT_READ_COST;
 use crate::selection::{Answer, Answers, Evidence};
+use crate::types::Any;
 use crate::{
-    Entity, Field, Parameter, Parameters, Premise, QueryError, Requirement, Schema, Source, Term,
-    Type, Value, try_stream,
+    Entity, Field, Parameters, Premise, QueryError, Requirement, Schema, Source, Term, Type, Value,
+    try_stream,
 };
 use dialog_artifacts::{Artifact, Cause};
 use futures_util::future::Either;
@@ -100,7 +101,7 @@ pub struct RelationQuery {
     /// The entity
     of: Term<Entity>,
     /// The value
-    is: Parameter,
+    is: Term<Any>,
     /// The cause/provenance
     cause: Term<Cause>,
     /// Type and cardinality metadata, when the attribute is known.
@@ -113,11 +114,10 @@ impl RelationQuery {
     pub fn new(
         the: Term<The>,
         of: Term<Entity>,
-        is: impl Into<Parameter>,
+        is: Term<Any>,
         cause: Term<Cause>,
         relation: Option<RelationDescriptor>,
     ) -> Self {
-        let is = is.into();
         Self {
             the,
             of,
@@ -138,7 +138,7 @@ impl RelationQuery {
     }
 
     /// Get the 'is' (value) parameter.
-    pub fn is(&self) -> &Parameter {
+    pub fn is(&self) -> &Term<Any> {
         &self.is
     }
 
@@ -174,8 +174,11 @@ impl RelationQuery {
     /// Map `Term<The>` to `Term<Attribute>`.
     pub fn attribute(&self) -> Term<Attribute> {
         match &self.the {
-            Term::Constant(the) => Term::Constant(Attribute::from(the)),
-            Term::Variable { name, .. } => Term::Variable { name: name.clone() },
+            Term::Constant(value) => Term::Constant(value.clone()),
+            Term::Variable { name, .. } => Term::Variable {
+                name: name.clone(),
+                descriptor: Default::default(),
+            },
         }
     }
 
@@ -241,8 +244,8 @@ impl RelationQuery {
     pub fn parameters(&self) -> Parameters {
         let mut params = Parameters::new();
 
-        params.insert("the".to_string(), Parameter::from(&self.the));
-        params.insert("of".to_string(), Parameter::from(&self.of));
+        params.insert("the".to_string(), Term::<Any>::from(&self.the));
+        params.insert("of".to_string(), Term::<Any>::from(&self.of));
         params.insert("is".to_string(), self.is.clone());
         params
     }
@@ -393,25 +396,28 @@ impl RelationQuery {
         let the_term = match &self.the {
             Term::Variable { name: None, .. } => Term::Variable {
                 name: Some("__the".to_string()),
+                descriptor: Default::default(),
             },
             term => term.clone(),
         };
         let of_term = match &self.of {
             Term::Variable { name: None, .. } => Term::Variable {
                 name: Some("__of".to_string()),
+                descriptor: Default::default(),
             },
             term => term.clone(),
         };
         let is_param = match &self.is {
-            Parameter::Variable { name: None, .. } => Parameter::Variable {
+            Term::Variable { name: None, .. } => Term::Variable {
                 name: Some("__is".to_string()),
-                typ: None,
+                descriptor: Any(None),
             },
             param => param.clone(),
         };
 
         let the: The = match &the_term {
-            Term::Constant(t) => t.clone(),
+            Term::Constant(t) => The::try_from(t.clone())
+                .map_err(|_| QueryError::FactStore("Could not convert value to The".to_string()))?,
             _ => source.get(&the_term)?,
         };
 
@@ -451,7 +457,9 @@ impl TryFrom<&RelationQuery> for ArtifactSelector<Constrained> {
         let mut selector: Option<ArtifactSelector<Constrained>> = None;
 
         if let Term::Constant(the) = &from.the {
-            let attr = Attribute::from(the);
+            let attr = Attribute::try_from(the.clone()).map_err(|_| {
+                QueryError::FactStore("Could not convert value to Attribute".to_string())
+            })?;
             selector = Some(match selector {
                 None => ArtifactSelector::new().the(attr),
                 Some(s) => s.the(attr),
@@ -460,22 +468,25 @@ impl TryFrom<&RelationQuery> for ArtifactSelector<Constrained> {
 
         match &from.of {
             Term::Constant(of) => {
+                let entity = Entity::try_from(of.clone()).map_err(|_| {
+                    QueryError::FactStore("Could not convert value to Entity".to_string())
+                })?;
                 selector = Some(match selector {
-                    None => ArtifactSelector::new().of(of.to_owned()),
-                    Some(s) => s.of(of.to_owned()),
+                    None => ArtifactSelector::new().of(entity.clone()),
+                    Some(s) => s.of(entity),
                 });
             }
             Term::Variable { .. } => {}
         }
 
         match &from.is {
-            Parameter::Constant(value) => {
+            Term::Constant(value) => {
                 selector = Some(match selector {
                     None => ArtifactSelector::new().is(value.clone()),
                     Some(s) => s.is(value.clone()),
                 });
             }
-            Parameter::Variable { .. } => {}
+            Term::Variable { .. } => {}
         }
 
         selector.ok_or_else(|| QueryError::EmptySelector {
@@ -551,9 +562,9 @@ mod tests {
         session.transact(claims).await?;
 
         let rel_app = RelationQuery::new(
-            Term::Constant(the!("person/name")),
+            Term::from(the!("person/name")),
             Term::var("person"),
-            Parameter::var("name"),
+            Term::var("name"),
             Term::var("cause"),
             Some(RelationDescriptor::new(
                 Some(Type::String),
@@ -571,11 +582,11 @@ mod tests {
 
         let answer = &results[0];
 
-        assert!(answer.contains(&Parameter::var("person")));
-        assert!(answer.contains(&Parameter::var("name")));
+        assert!(answer.contains(&Term::var("person")));
+        assert!(answer.contains(&Term::var("name")));
 
         let person_id: Entity = answer.get(&Term::var("person"))?;
-        let name_value: Value = answer.resolve(&Parameter::var("name"))?;
+        let name_value: Value = answer.resolve(&Term::var("name"))?;
 
         assert_eq!(person_id, alice);
         assert_eq!(name_value, Value::String("Alice".to_string()));
@@ -616,9 +627,9 @@ mod tests {
 
         // Query with Cardinality::One — should return only one value
         let rel_app = RelationQuery::new(
-            Term::Constant(the!("person/name")),
+            Term::from(the!("person/name")),
             Term::var("person"),
-            Parameter::var("name"),
+            Term::var("name"),
             Term::var("cause"),
             Some(RelationDescriptor::new(
                 Some(Type::String),
@@ -638,9 +649,9 @@ mod tests {
 
         // Query with Cardinality::Many — should return both values
         let rel_app_many = RelationQuery::new(
-            Term::Constant(the!("person/name")),
+            Term::from(the!("person/name")),
             Term::var("person"),
-            Parameter::var("name"),
+            Term::var("name"),
             Term::var("cause"),
             Some(RelationDescriptor::new(
                 Some(Type::String),
@@ -699,8 +710,8 @@ mod tests {
         // Entity is known → EAV scan, attribute is variable
         let rel_app = RelationQuery::new(
             Term::var("the"),
-            Term::Constant(alice.clone()),
-            Parameter::var("value"),
+            Term::from(alice.clone()),
+            Term::var("value"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
@@ -754,9 +765,9 @@ mod tests {
 
         // Attribute is known, entity is variable → AEV scan
         let rel_app = RelationQuery::new(
-            Term::Constant(the!("person/name")),
+            Term::from(the!("person/name")),
             Term::var("person"),
-            Parameter::var("name"),
+            Term::var("name"),
             Term::var("cause"),
             Some(RelationDescriptor::new(
                 Some(Type::String),
@@ -806,9 +817,9 @@ mod tests {
         // Determine the expected winner: query with attribute known to get the
         // winner from AEV, then verify the VAE lookup matches.
         let aev_app = RelationQuery::new(
-            Term::Constant(the!("person/name")),
+            Term::from(the!("person/name")),
             Term::var("person"),
-            Parameter::var("name"),
+            Term::var("name"),
             Term::var("cause"),
             Some(RelationDescriptor::new(
                 Some(Type::String),
@@ -825,7 +836,7 @@ mod tests {
         let vae_app = RelationQuery::new(
             Term::var("the"),
             Term::var("person"),
-            Parameter::Constant(expected_winner_value.clone()),
+            Term::Constant(expected_winner_value.clone()),
             Term::var("cause"),
             Some(RelationDescriptor::new(
                 Some(Type::String),
@@ -855,7 +866,7 @@ mod tests {
         let vae_loser_app = RelationQuery::new(
             Term::var("the"),
             Term::var("person"),
-            Parameter::Constant(losing_value),
+            Term::Constant(losing_value),
             Term::var("cause"),
             Some(RelationDescriptor::new(
                 Some(Type::String),
@@ -893,8 +904,8 @@ mod tests {
         // EAV path (entity known)
         let eav_app = RelationQuery::new(
             Term::var("the"),
-            Term::Constant(alice.clone()),
-            Parameter::var("name"),
+            Term::from(alice.clone()),
+            Term::var("name"),
             Term::var("cause"),
             Some(RelationDescriptor::new(None, Cardinality::One)),
         );
@@ -910,9 +921,9 @@ mod tests {
 
         // AEV path (attribute known)
         let aev_app = RelationQuery::new(
-            Term::Constant(the!("person/name")),
+            Term::from(the!("person/name")),
             Term::var("person"),
-            Parameter::var("name"),
+            Term::var("name"),
             Term::var("cause"),
             Some(RelationDescriptor::new(
                 Some(Type::String),
@@ -954,15 +965,15 @@ mod tests {
         session.transact(claims).await?;
 
         let rel_app = RelationQuery::new(
-            Term::Constant(the!("person/name")),
+            Term::from(the!("person/name")),
             Term::var("person"),
-            Parameter::var("name"),
+            Term::var("name"),
             Term::var("cause"),
             None,
         );
 
         // Verify the term
-        assert_eq!(rel_app.the(), &Term::Constant(the!("person/name")));
+        assert_eq!(rel_app.the(), &Term::from(the!("person/name")));
 
         let session = Session::open(artifacts);
         let results = rel_app.perform(&session).try_vec().await?;
@@ -995,9 +1006,9 @@ mod tests {
         session.transact(claims).await?;
 
         let rel_app = RelationQuery::new(
-            Term::Constant(the!("person/name")),
+            Term::from(the!("person/name")),
             Term::var("person"),
-            Parameter::var("name"),
+            Term::var("name"),
             Term::var("cause"),
             Some(RelationDescriptor::new(
                 Some(Type::String),
@@ -1036,9 +1047,9 @@ mod tests {
         session.transact(vec![alice_name.clone()]).await?;
 
         let query_constant = RelationQuery::new(
-            Term::Constant(the!("user/name")),
+            Term::from(the!("user/name")),
             alice.clone().into(),
-            Parameter::blank(),
+            Term::blank(),
             Term::blank(),
             None,
         );
@@ -1056,9 +1067,9 @@ mod tests {
         session.transact([!alice_name]).await?;
 
         let query2 = RelationQuery::new(
-            Term::Constant(the!("user/name")),
+            Term::from(the!("user/name")),
             alice.clone().into(),
-            Parameter::blank(),
+            Term::blank(),
             Term::blank(),
             None,
         );
@@ -1092,9 +1103,9 @@ mod tests {
         session.transact(claims).await?;
 
         let mixed_query = RelationQuery::new(
-            Term::Constant(the!("user/name")),
+            Term::from(the!("user/name")),
             alice.clone().into(),
-            Parameter::blank(),
+            Term::blank(),
             Term::blank(),
             None,
         );
@@ -1140,9 +1151,9 @@ mod tests {
         session.transact(claims).await?;
 
         let query = RelationQuery::new(
-            Term::Constant(the!("user/name")),
+            Term::from(the!("user/name")),
             Term::blank(),
-            Parameter::blank(),
+            Term::blank(),
             Term::blank(),
             None,
         );
@@ -1184,9 +1195,9 @@ mod tests {
         session.transact(claims).await?;
 
         let query = RelationQuery::new(
-            Term::Constant(the!("user/name")),
+            Term::from(the!("user/name")),
             alice.clone().into(),
-            Parameter::from("Alice".to_string()),
+            Term::constant("Alice".to_string()),
             Term::blank(),
             None,
         );
