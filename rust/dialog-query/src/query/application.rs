@@ -1,7 +1,7 @@
 use async_stream::try_stream;
 use dialog_common::ConditionalSend;
 
-use crate::error::QueryError;
+use crate::error::EvaluationError;
 use crate::selection;
 use crate::selection::Answer;
 
@@ -31,7 +31,7 @@ pub trait Application: Clone + ConditionalSend + 'static {
     ) -> impl selection::Answers;
 
     /// Convert an answer into a concrete result value.
-    fn realize(&self, input: selection::Answer) -> Result<Self::Conclusion, QueryError>;
+    fn realize(&self, input: selection::Answer) -> Result<Self::Conclusion, EvaluationError>;
 
     /// Execute this query against a source, returning a stream of typed results.
     fn perform<S: Source>(self, source: &S) -> impl Output<Self::Conclusion>

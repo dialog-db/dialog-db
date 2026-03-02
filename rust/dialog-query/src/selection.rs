@@ -18,7 +18,7 @@ mod tests {
     use crate::Claim;
     use crate::Term;
     use crate::artifact::{Attribute, Entity, Value};
-    use crate::error::InconsistencyError;
+    use crate::error::EvaluationError;
 
     use std::sync::Arc;
 
@@ -134,7 +134,7 @@ mod tests {
         // Resolve it using the type-safe method
         let result = answer
             .resolve(&name_param)
-            .and_then(|v| String::try_from(v).map_err(InconsistencyError::TypeConversion));
+            .and_then(|v| String::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Alice");
     }
@@ -160,7 +160,7 @@ mod tests {
         // Resolve it using the type-safe method
         let result = answer
             .resolve(&age_param)
-            .and_then(|v| u32::try_from(v).map_err(InconsistencyError::TypeConversion));
+            .and_then(|v| u32::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 25);
     }
@@ -186,7 +186,7 @@ mod tests {
         // Resolve it using the type-safe method
         let result = answer
             .resolve(&score_param)
-            .and_then(|v| i32::try_from(v).map_err(InconsistencyError::TypeConversion));
+            .and_then(|v| i32::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), -10);
     }
@@ -212,7 +212,7 @@ mod tests {
         // Resolve it using the type-safe method
         let result = answer
             .resolve(&active_param)
-            .and_then(|v| bool::try_from(v).map_err(InconsistencyError::TypeConversion));
+            .and_then(|v| bool::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_ok());
         assert!(result.unwrap());
     }
@@ -239,7 +239,7 @@ mod tests {
         // Resolve it using the type-safe method
         let result = answer
             .resolve(&entity_param)
-            .and_then(|v| Entity::try_from(v).map_err(InconsistencyError::TypeConversion));
+            .and_then(|v| Entity::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), entity_value);
     }
@@ -252,7 +252,7 @@ mod tests {
         // Resolve constant directly
         let result = answer
             .resolve(&constant_param)
-            .and_then(|v| String::try_from(v).map_err(InconsistencyError::TypeConversion));
+            .and_then(|v| String::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "constant_value");
     }
@@ -265,13 +265,13 @@ mod tests {
         // Try to resolve unbound variable (should fail)
         let result = answer
             .resolve(&name_param)
-            .and_then(|v| String::try_from(v).map_err(InconsistencyError::TypeConversion));
+            .and_then(|v| String::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_err());
         match result.unwrap_err() {
-            InconsistencyError::UnboundVariableError(var) => {
-                assert_eq!(var, "name");
+            EvaluationError::UnboundVariable { variable_name } => {
+                assert_eq!(variable_name, "name");
             }
-            _ => panic!("Expected UnboundVariableError"),
+            _ => panic!("Expected UnboundVariable"),
         }
     }
 
@@ -283,11 +283,11 @@ mod tests {
         // Try to resolve blank variable (should fail)
         let result = answer
             .resolve(&blank_param)
-            .and_then(|v| String::try_from(v).map_err(InconsistencyError::TypeConversion));
+            .and_then(|v| String::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_err());
         match result.unwrap_err() {
-            InconsistencyError::UnboundVariableError(_) => {} // Expected
-            _ => panic!("Expected UnboundVariableError"),
+            EvaluationError::UnboundVariable { .. } => {} // Expected
+            _ => panic!("Expected UnboundVariable"),
         }
     }
 
@@ -312,11 +312,11 @@ mod tests {
         // Try to resolve it as a u32 (should fail)
         let result = answer
             .resolve(&name_param)
-            .and_then(|v| u32::try_from(v).map_err(InconsistencyError::TypeConversion));
+            .and_then(|v| u32::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_err());
         match result.unwrap_err() {
-            InconsistencyError::TypeConversion(_) => {} // Expected
-            _ => panic!("Expected TypeConversion error"),
+            EvaluationError::TypeMismatch { .. } => {} // Expected
+            _ => panic!("Expected TypeMismatch error"),
         }
     }
 

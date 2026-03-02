@@ -14,8 +14,8 @@ use crate::schema::SEGMENT_READ_COST;
 use crate::selection::{Answer, Answers, Evidence};
 use crate::types::Any;
 use crate::{
-    Entity, Field, Parameters, Premise, QueryError, Requirement, Schema, Source, Term, Type, Value,
-    try_stream,
+    Entity, EvaluationError, Field, Parameters, Premise, Requirement, Schema, Source, Term, Type,
+    Value, try_stream,
 };
 use dialog_artifacts::{Artifact, Cause};
 use futures_util::future::Either;
@@ -392,7 +392,7 @@ impl RelationQuery {
     }
 
     /// Construct a Claim from the given answer by resolving all terms.
-    pub fn realize(&self, source: Answer) -> Result<Claim, QueryError> {
+    pub fn realize(&self, source: Answer) -> Result<Claim, EvaluationError> {
         let the_term = match &self.the {
             Term::Variable { name: None, .. } => Term::Variable {
                 name: Some("__the".to_string()),
@@ -416,8 +416,9 @@ impl RelationQuery {
         };
 
         let the: The = match &the_term {
-            Term::Constant(t) => The::try_from(t.clone())
-                .map_err(|_| QueryError::FactStore("Could not convert value to The".to_string()))?,
+            Term::Constant(t) => The::try_from(t.clone()).map_err(|_| {
+                EvaluationError::Store("Could not convert value to The".to_string())
+            })?,
             _ => source.get(&the_term)?,
         };
 
@@ -445,20 +446,20 @@ impl Application for RelationQuery {
         self.evaluate_with_provenance(source.clone(), answers)
     }
 
-    fn realize(&self, input: Answer) -> Result<Claim, QueryError> {
+    fn realize(&self, input: Answer) -> Result<Claim, EvaluationError> {
         input.realize(self)
     }
 }
 
 impl TryFrom<&RelationQuery> for ArtifactSelector<Constrained> {
-    type Error = QueryError;
+    type Error = EvaluationError;
 
     fn try_from(from: &RelationQuery) -> Result<Self, Self::Error> {
         let mut selector: Option<ArtifactSelector<Constrained>> = None;
 
         if let Term::Constant(the) = &from.the {
             let attr = Attribute::try_from(the.clone()).map_err(|_| {
-                QueryError::FactStore("Could not convert value to Attribute".to_string())
+                EvaluationError::Store("Could not convert value to Attribute".to_string())
             })?;
             selector = Some(match selector {
                 None => ArtifactSelector::new().the(attr),
@@ -469,7 +470,7 @@ impl TryFrom<&RelationQuery> for ArtifactSelector<Constrained> {
         match &from.of {
             Term::Constant(of) => {
                 let entity = Entity::try_from(of.clone()).map_err(|_| {
-                    QueryError::FactStore("Could not convert value to Entity".to_string())
+                    EvaluationError::Store("Could not convert value to Entity".to_string())
                 })?;
                 selector = Some(match selector {
                     None => ArtifactSelector::new().of(entity.clone()),
@@ -489,7 +490,7 @@ impl TryFrom<&RelationQuery> for ArtifactSelector<Constrained> {
             Term::Variable { .. } => {}
         }
 
-        selector.ok_or_else(|| QueryError::EmptySelector {
+        selector.ok_or_else(|| EvaluationError::EmptySelector {
             message: "At least one field must be constrained".to_string(),
         })
     }

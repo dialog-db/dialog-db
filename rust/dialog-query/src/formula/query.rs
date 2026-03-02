@@ -1,4 +1,4 @@
-use crate::error::{FormulaEvaluationError, QueryError};
+use crate::error::EvaluationError;
 use crate::formula::bindings::Bindings;
 use crate::formula::cell::Cells;
 use crate::selection::{Answer, Answers};
@@ -34,7 +34,7 @@ pub struct FormulaQuery {
     pub cost: usize,
 
     /// Function pointer to the formula's computation logic
-    pub compute: fn(&mut Bindings) -> Result<Vec<Answer>, FormulaEvaluationError>,
+    pub compute: fn(&mut Bindings) -> Result<Vec<Answer>, EvaluationError>,
 }
 
 impl PartialEq for FormulaQuery {
@@ -50,7 +50,7 @@ impl PartialEq for FormulaQuery {
 
 impl FormulaQuery {
     /// Computes answers using this formula
-    pub fn derive(&self, input: Answer) -> Result<Vec<Answer>, FormulaEvaluationError> {
+    pub fn derive(&self, input: Answer) -> Result<Vec<Answer>, EvaluationError> {
         // Create Arc from self for bindings - this is a cheap pointer clone, not cloning the whole struct
         let formula = Arc::new(self.clone());
         let mut bindings = Bindings::new(formula, input, self.parameters.clone());
@@ -74,8 +74,8 @@ impl FormulaQuery {
         self.parameters.clone()
     }
 
-    /// Expand this formula with the given answer, mapping errors to QueryError
-    pub fn expand(&self, answer: Answer) -> Result<Vec<Answer>, QueryError> {
+    /// Expand this formula with the given answer, mapping errors to EvaluationError
+    pub fn expand(&self, answer: Answer) -> Result<Vec<Answer>, EvaluationError> {
         let compute = self.compute;
         let formula = Arc::new(self.clone());
         let mut bindings = Bindings::new(formula, answer, self.parameters.clone());
@@ -83,22 +83,8 @@ impl FormulaQuery {
         // Map results and omit inconsistent answers
         match expansion {
             Ok(output) => Ok(output),
-            Err(e) => match e {
-                FormulaEvaluationError::VariableInconsistency { .. } => Ok(vec![]),
-                FormulaEvaluationError::RequiredParameter { parameter } => {
-                    Err(QueryError::RequiredFormulaParamater { parameter })
-                }
-                FormulaEvaluationError::UnboundVariable { parameter, .. } => {
-                    Err(QueryError::UnboundVariable {
-                        variable_name: parameter,
-                    })
-                }
-                FormulaEvaluationError::TypeMismatch { expected, actual } => {
-                    Err(QueryError::InvalidTerm {
-                        message: format!("Type mismatch: expected {}, got {}", expected, actual),
-                    })
-                }
-            },
+            Err(EvaluationError::Conflict { .. }) => Ok(vec![]),
+            Err(e) => Err(e),
         }
     }
 

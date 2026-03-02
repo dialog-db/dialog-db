@@ -1,7 +1,7 @@
 pub use crate::concept::application::ConceptQuery;
 use crate::constraint::Constraint;
 pub use crate::error::AnalyzerError;
-pub use crate::error::{PlanError, QueryResult};
+pub use crate::error::QueryResult;
 pub use crate::formula::query::FormulaQuery;
 pub use crate::premise::{Negation, Premise};
 pub use crate::relation::query::RelationQuery;

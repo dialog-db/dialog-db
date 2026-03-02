@@ -7,8 +7,8 @@
 pub use crate::selection::Evidence;
 use crate::types::Any;
 pub use crate::{
-    Answers, Cardinality, Environment, Field, Parameters, QueryError, Requirement, Schema, Term,
-    Value, try_stream,
+    Answers, Cardinality, Environment, EvaluationError, Field, Parameters, Requirement, Schema,
+    Term, Value, try_stream,
 };
 use std::fmt::Display;
 
@@ -148,7 +148,7 @@ impl Equality {
                     // Case 4: Neither term is bound - cannot evaluate
                     // Raise a constraint violation error
                     (Err(_), Err(_)) => {
-                        Err(QueryError::ConstraintViolation {
+                        Err(EvaluationError::ConstraintViolation {
                             constraint: format!("{} == {}", this, is)
                         })?;
                     }
@@ -171,7 +171,7 @@ mod tests {
     use futures_util::TryStreamExt;
 
     #[dialog_common::test]
-    async fn it_passes_when_both_terms_equal() -> Result<(), QueryError> {
+    async fn it_passes_when_both_terms_equal() -> Result<(), EvaluationError> {
         let constraint = Equality::new(Term::var("x"), Term::var("y"));
 
         let mut answer = Answer::new();
@@ -198,7 +198,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_filters_when_terms_differ() -> Result<(), QueryError> {
+    async fn it_filters_when_terms_differ() -> Result<(), EvaluationError> {
         let constraint = Equality::new(Term::var("x"), Term::var("y"));
 
         let mut answer = Answer::new();
@@ -224,7 +224,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_infers_this_from_is() -> Result<(), QueryError> {
+    async fn it_infers_this_from_is() -> Result<(), EvaluationError> {
         let constraint = Equality::new(Term::var("x"), Term::var("y"));
 
         let mut answer = Answer::new();

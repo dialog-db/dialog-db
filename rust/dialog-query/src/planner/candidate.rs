@@ -1,5 +1,5 @@
 use super::Plan;
-use crate::error::CompileError;
+use crate::error::TypeError;
 use crate::{Environment, Parameters, Premise, Requirement, Schema};
 use std::collections::HashSet;
 
@@ -367,7 +367,7 @@ impl From<&Plan> for Candidate {
 }
 
 impl TryFrom<Candidate> for Plan {
-    type Error = CompileError;
+    type Error = TypeError;
 
     fn try_from(candidate: Candidate) -> Result<Self, Self::Error> {
         match candidate {
@@ -387,7 +387,7 @@ impl TryFrom<Candidate> for Plan {
                 })
             }
             Candidate::Blocked { requires, .. } => {
-                Err(CompileError::RequiredBindings { required: requires })
+                Err(TypeError::RequiredBindings { required: requires })
             }
         }
     }

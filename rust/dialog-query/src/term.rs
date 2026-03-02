@@ -15,7 +15,7 @@ use std::fmt;
 
 use crate::artifact::{Attribute as ArtifactAttribute, Entity, Type, Value};
 use crate::constraint::{Constraint, Equality};
-use crate::error::SyntaxError;
+use crate::error::TypeError;
 use crate::proposition::Proposition;
 use crate::types::{Any, Scalar, TypeDescriptor, Typed};
 use crate::{Attribute, Premise};
@@ -270,24 +270,24 @@ impl From<&str> for Term<String> {
 }
 
 impl TryFrom<String> for Term<ArtifactAttribute> {
-    type Error = SyntaxError;
+    type Error = TypeError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         value
             .parse::<ArtifactAttribute>()
             .map(|a| Term::Constant(Value::from(a)))
-            .map_err(|_| SyntaxError::InvalidAttributeSyntax { actual: value })
+            .map_err(|_| TypeError::InvalidAttributeSyntax { actual: value })
     }
 }
 
 impl TryFrom<&str> for Term<ArtifactAttribute> {
-    type Error = SyntaxError;
+    type Error = TypeError;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         value
             .parse::<ArtifactAttribute>()
             .map(|a| Term::Constant(Value::from(a)))
-            .map_err(|_| SyntaxError::InvalidAttributeSyntax {
+            .map_err(|_| TypeError::InvalidAttributeSyntax {
                 actual: value.into(),
             })
     }

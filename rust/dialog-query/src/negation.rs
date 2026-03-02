@@ -99,7 +99,7 @@ impl Display for Negation {
 mod tests {
     use crate::Session;
     use crate::artifact::Artifacts;
-    use crate::error::QueryError;
+    use crate::error::EvaluationError;
     use crate::selection::{Answer, Evidence};
     use crate::types::Any;
     use crate::{Term, Value};
@@ -107,7 +107,7 @@ mod tests {
     use futures_util::TryStreamExt;
 
     #[dialog_common::test]
-    async fn it_passes_answer_when_negated_equality_not_satisfied() -> Result<(), QueryError> {
+    async fn it_passes_answer_when_negated_equality_not_satisfied() -> Result<(), EvaluationError> {
         let backend = MemoryStorageBackend::default();
         let store = Artifacts::anonymous(backend).await.unwrap();
         let session = Session::open(store);
@@ -142,7 +142,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_filters_answer_when_negated_equality_satisfied() -> Result<(), QueryError> {
+    async fn it_filters_answer_when_negated_equality_satisfied() -> Result<(), EvaluationError> {
         let backend = MemoryStorageBackend::default();
         let store = Artifacts::anonymous(backend).await.unwrap();
         let session = Session::open(store);

@@ -11,7 +11,7 @@ pub mod transaction;
 
 pub use rule_registry::*;
 
-use crate::QueryError;
+use crate::EvaluationError;
 pub use crate::artifact::{
     Artifact, ArtifactSelector, ArtifactStore, ConditionalSend, ConditionalSync, Constrained,
     DialogArtifactsError,
@@ -81,7 +81,7 @@ impl<S: Store> Session<S> {
     }
 
     /// Register a new rule into the session
-    pub fn register(mut self, rule: DeductiveRule) -> Result<Self, QueryError> {
+    pub fn register(mut self, rule: DeductiveRule) -> Result<Self, EvaluationError> {
         self.rules.register(rule)?;
         Ok(self)
     }
@@ -107,7 +107,7 @@ impl<S: Store> Session<S> {
     ///
     /// let session = session.install(person_rule)?;
     /// ```
-    pub fn install<M, W>(self, rule: impl Fn(M) -> W) -> Result<Self, QueryError>
+    pub fn install<M, W>(self, rule: impl Fn(M) -> W) -> Result<Self, EvaluationError>
     where
         M: Application + Default + Into<ConceptDescriptor>,
         W: When,
@@ -117,7 +117,7 @@ impl<S: Store> Session<S> {
         let when = rule(query).into_premises();
         let premises = when.into_vec();
         let rule =
-            DeductiveRuleImpl::new(concept, premises).map_err(|e| QueryError::PlanningError {
+            DeductiveRuleImpl::new(concept, premises).map_err(|e| EvaluationError::Planning {
                 message: e.to_string(),
             })?;
         self.register(rule)
@@ -277,14 +277,14 @@ impl<S: ArtifactStore> QuerySession<S> {
     /// ```no_run
     /// # use dialog_query::{QuerySession, DeductiveRule};
     /// # use dialog_query::session::ArtifactStore;
-    /// # fn example(artifacts: impl ArtifactStore, adult_rule: DeductiveRule, senior_rule: DeductiveRule) -> Result<(), dialog_query::QueryError> {
+    /// # fn example(artifacts: impl ArtifactStore, adult_rule: DeductiveRule, senior_rule: DeductiveRule) -> Result<(), dialog_query::EvaluationError> {
     /// let query_session = QuerySession::new(artifacts)
     ///     .install(adult_rule)?
     ///     .install(senior_rule)?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn install(mut self, rule: DeductiveRule) -> Result<Self, QueryError> {
+    pub fn install(mut self, rule: DeductiveRule) -> Result<Self, EvaluationError> {
         self.rules.register(rule)?;
         Ok(self)
     }
@@ -304,7 +304,7 @@ impl<S: ArtifactStore + Clone + Send + Sync + 'static> From<S> for QuerySession<
 
 /// Implement Source trait for QuerySession to provide rule resolution capabilities
 impl<S: ArtifactStore + Clone + Send + Sync + 'static> Source for QuerySession<S> {
-    fn acquire(&self, predicate: &ConceptDescriptor) -> Result<ConceptRules, QueryError> {
+    fn acquire(&self, predicate: &ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
         self.rules.acquire(predicate)
     }
 }
@@ -326,7 +326,7 @@ impl<S: ArtifactStore> ArtifactStore for QuerySession<S> {
 /// This implementation allows Session to be used directly with the Query trait
 /// while providing access to both stored artifacts and registered rules.
 impl<S: Store + ConditionalSend + ConditionalSync + 'static> Source for Session<S> {
-    fn acquire(&self, predicate: &ConceptDescriptor) -> Result<ConceptRules, QueryError> {
+    fn acquire(&self, predicate: &ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
         self.rules.acquire(predicate)
     }
 }

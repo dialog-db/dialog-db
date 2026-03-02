@@ -7,19 +7,20 @@ pub use rules::ConceptRules;
 
 use crate::attribute::AttributeDescriptor;
 use crate::concept::descriptor::ConceptDescriptor;
-use crate::error::InconsistencyError;
 use crate::planner::Disjunction;
 use crate::schema::CONCEPT_OVERHEAD;
 use crate::selection::Answers;
 use crate::selection::{Answer, Evidence};
-use crate::{Cardinality, Environment, Parameters, QueryError, Schema, Source, Term, try_stream};
+use crate::{
+    Cardinality, Environment, EvaluationError, Parameters, Schema, Source, Term, try_stream,
+};
 use std::fmt::Display;
 
 /// Extract an Answer with parameter names from an Answer with user variable names
 ///
 /// This maps values from user-specified variable names to internal parameter names
 /// for scoped evaluation. All factors are copied with their original provenance.
-fn extract_parameters(source: &Answer, terms: &Parameters) -> Result<Answer, InconsistencyError> {
+fn extract_parameters(source: &Answer, terms: &Parameters) -> Result<Answer, EvaluationError> {
     let mut answer = Answer::new();
 
     for (param_name, user_param) in terms.iter() {
@@ -57,7 +58,7 @@ fn merge_parameters(
     base: &Answer,
     result: &Answer,
     terms: &Parameters,
-) -> Result<Answer, InconsistencyError> {
+) -> Result<Answer, EvaluationError> {
     let mut merged = base.clone();
 
     // Map through parameters: for each parameter, if it exists in result,
@@ -257,7 +258,7 @@ impl ConceptQuery {
                 // Extract answer with parameter names for scoped evaluation
                 // Maps user variable names → internal parameter names
                 let initial_answer = extract_parameters(&input, &app.terms)
-                    .map_err(|e| QueryError::FactStore(e.to_string()))?;
+                    .map_err(|e| EvaluationError::Store(e.to_string()))?;
                 let single_answers = initial_answer.seed();
 
                 // Merge results back, mapping parameter names → user variable names
@@ -265,7 +266,7 @@ impl ConceptQuery {
                 for await result in Disjunction::clone(plan).evaluate(single_answers, &source) {
                     let result_answer = result?;
                     let merged = merge_parameters(&input, &result_answer, &app.terms)
-                        .map_err(|e| QueryError::FactStore(e.to_string()))?;
+                        .map_err(|e| EvaluationError::Store(e.to_string()))?;
                     yield merged;
                 }
             }
@@ -635,8 +636,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_produces_expected_error_types() {
-        use crate::QueryError;
-        use crate::error::{AnalyzerError, PlanError};
+        use crate::error::{AnalyzerError, TypeError};
 
         // Test AnalyzerError creation
         let predicate = ConceptDescriptor::from(vec![(
@@ -650,10 +650,10 @@ mod tests {
             parameter: "test_param".to_string(),
         };
 
-        // Test conversion to PlanError
-        let plan_error: PlanError = analyzer_error.into();
-        match &plan_error {
-            PlanError::UnusedParameter { rule: r, parameter } => {
+        // Test conversion to TypeError
+        let type_error: TypeError = analyzer_error.into();
+        match &type_error {
+            TypeError::UnusedParameter { rule: r, parameter } => {
                 // Operator is now a computed URI
                 assert!(
                     r.conclusion().this().to_string().starts_with("concept:"),
@@ -662,15 +662,6 @@ mod tests {
                 assert_eq!(parameter, "test_param");
             }
             _ => panic!("Expected UnusedParameter variant"),
-        }
-
-        // Test conversion to QueryError
-        let query_error: QueryError = plan_error.into();
-        match query_error {
-            QueryError::PlanningError { .. } => {
-                // Expected
-            }
-            _ => panic!("Expected PlanningError variant"),
         }
     }
 
