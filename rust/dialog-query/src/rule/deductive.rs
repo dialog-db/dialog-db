@@ -115,7 +115,6 @@ impl Display for DeductiveRule {
 impl From<&ConceptDescriptor> for DeductiveRule {
     fn from(concept: &ConceptDescriptor) -> Self {
         use crate::artifact::Entity;
-        use crate::relation::descriptor::RelationDescriptor;
         use crate::relation::query::RelationQuery;
 
         let mut premises = Vec::new();
@@ -128,10 +127,7 @@ impl From<&ConceptDescriptor> for DeductiveRule {
                     this.clone(),
                     Term::var(name),
                     Term::blank(),
-                    Some(RelationDescriptor::new(
-                        attribute.content_type(),
-                        attribute.cardinality(),
-                    )),
+                    Some(attribute.cardinality()),
                 )
                 .into(),
             );
@@ -146,7 +142,6 @@ mod tests {
     use super::*;
     use crate::artifact::{Entity, Type};
     use crate::attribute::AttributeDescriptor;
-    use crate::relation::descriptor::RelationDescriptor;
     use crate::relation::query::RelationQuery;
     use crate::the;
 
@@ -179,7 +174,7 @@ mod tests {
                 this.clone(),
                 Term::var("name"),
                 Term::var("cause"),
-                Some(RelationDescriptor::new(None, Cardinality::One)),
+                Some(Cardinality::One),
             )
             .into(),
             RelationQuery::new(
@@ -187,7 +182,7 @@ mod tests {
                 this,
                 Term::var("age"),
                 Term::var("cause"),
-                Some(RelationDescriptor::new(None, Cardinality::One)),
+                Some(Cardinality::One),
             )
             .into(),
         ];
@@ -223,7 +218,7 @@ mod tests {
                 Term::<Entity>::var("user"),
                 Term::var("value"),
                 Term::var("cause"),
-                Some(RelationDescriptor::new(None, Cardinality::One)),
+                Some(Cardinality::One),
             )
             .into(),
         ];
@@ -301,7 +296,7 @@ mod tests {
                 Term::<Entity>::var("this"),
                 Term::var("name"),
                 Term::var("cause"),
-                Some(RelationDescriptor::new(None, Cardinality::One)),
+                Some(Cardinality::One),
             )
             .into(),
         ];
@@ -366,7 +361,7 @@ mod tests {
                 this.clone(),
                 Term::constant("jack".to_string()),
                 Term::var("cause"),
-                Some(RelationDescriptor::new(None, Cardinality::One)),
+                Some(Cardinality::One),
             )
             .into(),
             // Use ?key as the the variable
@@ -376,7 +371,7 @@ mod tests {
                 this,
                 Term::var("value"),
                 Term::var("cause"),
-                Some(RelationDescriptor::new(None, Cardinality::One)),
+                Some(Cardinality::One),
             )
             .into(),
         ];
@@ -398,7 +393,7 @@ mod tests {
                 Term::<Entity>::var("this"),
                 Term::var("key_var"),
                 Term::var("cause"),
-                Some(RelationDescriptor::new(None, Cardinality::One)),
+                Some(Cardinality::One),
             )
             .into(),
         ];
@@ -415,7 +410,6 @@ mod tests {
 
     #[dialog_common::test]
     fn it_rejects_negated_constraint_with_unbound_variable() {
-        use crate::relation::descriptor::RelationDescriptor;
         use crate::relation::query::RelationQuery;
 
         let conclusion = ConceptDescriptor::from(vec![(
@@ -436,7 +430,7 @@ mod tests {
                 Term::<Entity>::var("this"),
                 name.clone().into(),
                 Term::var("cause"),
-                Some(RelationDescriptor::new(None, Cardinality::One)),
+                Some(Cardinality::One),
             )
             .into(),
             // ?z is never bound by any premise — should fail to compile
@@ -452,7 +446,6 @@ mod tests {
 
     #[dialog_common::test]
     fn it_rejects_negated_constraint_with_unbound_variable_on_left() {
-        use crate::relation::descriptor::RelationDescriptor;
         use crate::relation::query::RelationQuery;
 
         let conclusion = ConceptDescriptor::from(vec![(
@@ -473,7 +466,7 @@ mod tests {
                 Term::<Entity>::var("this"),
                 name.clone().into(),
                 Term::var("cause"),
-                Some(RelationDescriptor::new(None, Cardinality::One)),
+                Some(Cardinality::One),
             )
             .into(),
             // flipped: ?z (unbound) on the left, ?name (bound) on the right

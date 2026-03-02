@@ -546,7 +546,6 @@ mod cost_model_tests {
     use crate::formula::Formula;
     use crate::formula::string::Length;
     use crate::proposition::Proposition;
-    use crate::relation::descriptor::RelationDescriptor;
     use crate::relation::query::RelationQuery;
     use crate::schema::{
         CONCEPT_OVERHEAD, INDEX_SCAN, RANGE_READ_COST, RANGE_SCAN_COST, SEGMENT_READ_COST,
@@ -564,7 +563,7 @@ mod cost_model_tests {
             Term::from(entity_val),
             Term::constant("test".to_string()),
             Term::var("cause"),
-            Some(RelationDescriptor::new(None, Cardinality::One)),
+            Some(Cardinality::One),
         );
         let premise = Premise::Assert(Proposition::Relation(Box::new(app)));
         let candidate = Candidate::from(premise);
@@ -585,7 +584,7 @@ mod cost_model_tests {
             Term::<Entity>::var("entity"),
             Term::var("value"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(None, Cardinality::One)),
+            Some(Cardinality::One),
         );
         let premise = Premise::Assert(Proposition::Relation(Box::new(app)));
         let candidate = Candidate::from(premise);
@@ -606,7 +605,7 @@ mod cost_model_tests {
             Term::<Entity>::var("entity"),
             Term::var("value"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(None, Cardinality::One)),
+            Some(Cardinality::One),
         );
         let premise = Premise::Assert(Proposition::Relation(Box::new(app)));
 
@@ -643,7 +642,7 @@ mod cost_model_tests {
             Term::<Entity>::var("entity"),
             Term::var("value"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(None, Cardinality::One)),
+            Some(Cardinality::One),
         );
 
         let mut env = Environment::new();
@@ -665,7 +664,7 @@ mod cost_model_tests {
             Term::<Entity>::var("entity"),
             Term::var("tag"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(None, Cardinality::One)),
+            Some(Cardinality::One),
         );
 
         let many_app = RelationQuery::new(
@@ -673,7 +672,7 @@ mod cost_model_tests {
             Term::<Entity>::var("entity"),
             Term::var("tag"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(None, Cardinality::Many)),
+            Some(Cardinality::Many),
         );
 
         let one_candidate =
@@ -711,7 +710,7 @@ mod cost_model_tests {
             Term::from(entity_val.clone()),
             Term::Constant(value_val.clone()),
             Term::var("cause"),
-            Some(RelationDescriptor::new(None, Cardinality::One)),
+            Some(Cardinality::One),
         );
 
         let many_app = RelationQuery::new(
@@ -719,7 +718,7 @@ mod cost_model_tests {
             Term::from(entity_val),
             Term::Constant(value_val),
             Term::var("cause"),
-            Some(RelationDescriptor::new(None, Cardinality::Many)),
+            Some(Cardinality::Many),
         );
 
         let one_candidate =
@@ -751,7 +750,7 @@ mod cost_model_tests {
             Term::<Entity>::var("entity"),
             Term::var("value"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(None, Cardinality::One)),
+            Some(Cardinality::One),
         );
         let fact_candidate =
             Candidate::from(Premise::Assert(Proposition::Relation(Box::new(fact_app))));
@@ -787,7 +786,7 @@ mod cost_model_tests {
             Term::<Entity>::var("entity"),
             Term::var("value"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(None, Cardinality::One)),
+            Some(Cardinality::One),
         );
 
         let concept = ConceptDescriptor::from([(
@@ -833,7 +832,7 @@ mod cost_model_tests {
             Term::<Entity>::var("entity"),
             Term::var("value"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(None, Cardinality::One)),
+            Some(Cardinality::One),
         );
 
         let concept = ConceptDescriptor::from([(
@@ -872,7 +871,7 @@ mod cost_model_tests {
             Term::<Entity>::var("entity"),
             Term::var("value"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(None, Cardinality::One)),
+            Some(Cardinality::One),
         );
 
         let concept = ConceptDescriptor::from([(
@@ -911,7 +910,7 @@ mod cost_model_tests {
             Term::<Entity>::var("entity"),
             Term::var("tag"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(None, Cardinality::Many)),
+            Some(Cardinality::Many),
         );
 
         let tag = AttributeDescriptor::new(
@@ -948,7 +947,7 @@ mod cost_model_tests {
             Term::<Entity>::var("entity"),
             Term::var("tag"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(None, Cardinality::Many)),
+            Some(Cardinality::Many),
         );
 
         let tag = AttributeDescriptor::new(
@@ -986,7 +985,7 @@ mod cost_model_tests {
             Term::<Entity>::var("entity"),
             Term::var("name"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(None, Cardinality::One)),
+            Some(Cardinality::One),
         );
 
         let p2 = RelationQuery::new(
@@ -994,7 +993,7 @@ mod cost_model_tests {
             Term::<Entity>::var("entity"),
             Term::var("age"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(None, Cardinality::One)),
+            Some(Cardinality::One),
         );
 
         let a1 = Candidate::from(Premise::Assert(Proposition::Relation(Box::new(p1))));
@@ -1030,7 +1029,7 @@ mod cost_model_tests {
             Term::<Entity>::var("entity"),
             Term::var("value"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(None, Cardinality::One)),
+            Some(Cardinality::One),
         );
 
         let schema = app.schema();
@@ -1069,7 +1068,7 @@ mod cost_model_tests {
             Term::<Entity>::var("entity"),
             Term::var("value"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(None, Cardinality::One)),
+            Some(Cardinality::One),
         );
         let premise = Premise::Assert(Proposition::Relation(Box::new(app)));
         let mut candidate = Candidate::from(premise);
@@ -1107,7 +1106,7 @@ mod cost_model_tests {
             Term::<Entity>::var("entity"),
             Term::var("hobby"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(None, Cardinality::Many)),
+            Some(Cardinality::Many),
         );
         let premise = Premise::Assert(Proposition::Relation(Box::new(app)));
         let mut candidate = Candidate::from(premise);

@@ -9,7 +9,6 @@ use crate::negation::Negation;
 pub use crate::proposition::Proposition;
 use crate::query::Application;
 pub use crate::query::Output;
-use crate::relation::descriptor::RelationDescriptor;
 use crate::schema::SEGMENT_READ_COST;
 use crate::selection::{Answer, Answers, Evidence};
 use crate::types::Any;
@@ -92,8 +91,8 @@ fn verify_winner<S: Source>(source: S, selector: RelationQuery, input: Answer) -
 /// by the results.
 ///
 /// The `the` field is a [`Term<The>`] representing the relation identifier
-/// (e.g., `"person/name"`). The optional [`RelationDescriptor`] provides
-/// type and cardinality metadata used by the cost estimator during planning.
+/// (e.g., `"person/name"`). The optional cardinality metadata is used by
+/// the cost estimator during planning.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RelationQuery {
     /// The relation identifier (e.g., "person/name")
@@ -104,9 +103,9 @@ pub struct RelationQuery {
     is: Term<Any>,
     /// The cause/provenance
     cause: Term<Cause>,
-    /// Type and cardinality metadata, when the attribute is known.
-    /// None when the is a variable.
-    relation: Option<RelationDescriptor>,
+    /// Cardinality metadata, when the attribute is known.
+    /// None when the attribute is a variable; defaults to `Many`.
+    cardinality: Option<Cardinality>,
 }
 
 impl RelationQuery {
@@ -116,14 +115,14 @@ impl RelationQuery {
         of: Term<Entity>,
         is: Term<Any>,
         cause: Term<Cause>,
-        relation: Option<RelationDescriptor>,
+        cardinality: Option<Cardinality>,
     ) -> Self {
         Self {
             the,
             of,
             is,
             cause,
-            relation,
+            cardinality,
         }
     }
 
@@ -147,11 +146,6 @@ impl RelationQuery {
         &self.cause
     }
 
-    /// Get the relation descriptor, if known.
-    pub fn relation(&self) -> Option<&RelationDescriptor> {
-        self.relation.as_ref()
-    }
-
     /// Resolve an artifact into a `Claim`.
     pub fn resolve(&self, artifact: &Artifact) -> Claim {
         Claim {
@@ -162,13 +156,10 @@ impl RelationQuery {
         }
     }
 
-    /// Get the cardinality, defaulting to `Cardinality::Many` if the relation
-    /// descriptor is not set (unknown relations are assumed to have many values).
+    /// Get the cardinality, defaulting to `Cardinality::Many` if not set
+    /// (unknown relations are assumed to have many values).
     pub fn cardinality(&self) -> Cardinality {
-        self.relation
-            .as_ref()
-            .map(|r| r.cardinality)
-            .unwrap_or(Cardinality::Many)
+        self.cardinality.unwrap_or(Cardinality::Many)
     }
 
     /// Map `Term<The>` to `Term<Attribute>`.
@@ -264,7 +255,7 @@ impl RelationQuery {
             of,
             is,
             cause,
-            relation: self.relation.clone(),
+            cardinality: self.cardinality,
         }
     }
 
@@ -567,10 +558,7 @@ mod tests {
             Term::var("person"),
             Term::var("name"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(
-                Some(Type::String),
-                Cardinality::Many,
-            )),
+            Some(Cardinality::Many),
         );
 
         let session = Session::open(artifacts);
@@ -632,10 +620,7 @@ mod tests {
             Term::var("person"),
             Term::var("name"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(
-                Some(Type::String),
-                Cardinality::One,
-            )),
+            Some(Cardinality::One),
         );
 
         let session = Session::open(artifacts.clone());
@@ -654,10 +639,7 @@ mod tests {
             Term::var("person"),
             Term::var("name"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(
-                Some(Type::String),
-                Cardinality::Many,
-            )),
+            Some(Cardinality::Many),
         );
 
         let session = Session::open(artifacts);
@@ -714,7 +696,7 @@ mod tests {
             Term::from(alice.clone()),
             Term::var("value"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(None, Cardinality::One)),
+            Some(Cardinality::One),
         );
 
         let session = Session::open(artifacts);
@@ -770,10 +752,7 @@ mod tests {
             Term::var("person"),
             Term::var("name"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(
-                Some(Type::String),
-                Cardinality::One,
-            )),
+            Some(Cardinality::One),
         );
 
         let session = Session::open(artifacts);
@@ -822,10 +801,7 @@ mod tests {
             Term::var("person"),
             Term::var("name"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(
-                Some(Type::String),
-                Cardinality::One,
-            )),
+            Some(Cardinality::One),
         );
 
         let session = Session::open(artifacts.clone());
@@ -839,10 +815,7 @@ mod tests {
             Term::var("person"),
             Term::Constant(expected_winner_value.clone()),
             Term::var("cause"),
-            Some(RelationDescriptor::new(
-                Some(Type::String),
-                Cardinality::One,
-            )),
+            Some(Cardinality::One),
         );
 
         let session = Session::open(artifacts.clone());
@@ -869,10 +842,7 @@ mod tests {
             Term::var("person"),
             Term::Constant(losing_value),
             Term::var("cause"),
-            Some(RelationDescriptor::new(
-                Some(Type::String),
-                Cardinality::One,
-            )),
+            Some(Cardinality::One),
         );
 
         let session = Session::open(artifacts);
@@ -908,7 +878,7 @@ mod tests {
             Term::from(alice.clone()),
             Term::var("name"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(None, Cardinality::One)),
+            Some(Cardinality::One),
         );
 
         let session = Session::open(artifacts.clone());
@@ -926,10 +896,7 @@ mod tests {
             Term::var("person"),
             Term::var("name"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(
-                Some(Type::String),
-                Cardinality::One,
-            )),
+            Some(Cardinality::One),
         );
 
         let session = Session::open(artifacts.clone());
@@ -1011,10 +978,7 @@ mod tests {
             Term::var("person"),
             Term::var("name"),
             Term::var("cause"),
-            Some(RelationDescriptor::new(
-                Some(Type::String),
-                Cardinality::Many,
-            )),
+            Some(Cardinality::Many),
         );
 
         let session = Session::open(artifacts);

@@ -3,7 +3,6 @@ use crate::attribute::Attribute;
 use crate::attribute::AttributeDescriptor;
 use crate::descriptor::Descriptor;
 use crate::negation::Negation;
-use crate::relation::descriptor::RelationDescriptor;
 use crate::relation::query::RelationQuery;
 use crate::statement::{Retraction, Statement};
 use crate::types::Any;
@@ -204,10 +203,7 @@ pub(crate) fn relation_query<A: Attribute + Descriptor<AttributeDescriptor>>(
         of,
         is,
         cause,
-        Some(RelationDescriptor::new(
-            desc.content_type(),
-            desc.cardinality(),
-        )),
+        Some(desc.cardinality()),
     )
 }
 

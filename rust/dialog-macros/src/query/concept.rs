@@ -187,10 +187,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     terms.this.clone(),
                     value_param,
                     dialog_query::Term::blank(),
-                    Some(dialog_query::RelationDescriptor::new(
-                        <<<#field_type as dialog_query::Attribute>::Type as dialog_query::Typed>::Descriptor as dialog_query::TypeDescriptor>::TYPE,
-                        <#field_type as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().cardinality(),
-                    )),
+                    Some(<#field_type as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().cardinality()),
                 )
             }
         });

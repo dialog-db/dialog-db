@@ -2,7 +2,6 @@ use crate::Parameters;
 use crate::artifact::{Attribute as ArtifactsAttribute, Entity, Value};
 use crate::attribute::The;
 use crate::error::{FieldTypeError, TypeError};
-use crate::relation::descriptor::RelationDescriptor;
 use crate::relation::query::RelationQuery;
 use crate::schema::Cardinality;
 use crate::term::Term;
@@ -194,10 +193,7 @@ impl AttributeDescriptor {
             of,
             is,
             cause,
-            Some(RelationDescriptor::new(
-                self.content_type(),
-                self.cardinality(),
-            )),
+            Some(self.cardinality()),
         ))
     }
 
