@@ -13,8 +13,8 @@ use crate::statement::Retraction;
 use crate::term::Term;
 use crate::types::Scalar;
 use crate::{
-    Association, Cardinality, Entity, EvaluationError, Field, Parameters, Proposition, Requirement,
-    Schema, Statement, Transaction, Type, Value,
+    Cardinality, Entity, EvaluationError, Field, Parameters, Proposition, Requirement, Schema,
+    Statement, Transaction, Type, Value,
 };
 
 use base58::ToBase58;
@@ -296,20 +296,12 @@ impl ConceptStatement {
 impl Statement for ConceptStatement {
     fn assert(self, transaction: &mut Transaction) {
         for attribution in self.with {
-            transaction.associate(Association::new(
-                attribution.the.into(),
-                self.this.clone(),
-                attribution.is,
-            ));
+            transaction.associate(attribution.the.into(), self.this.clone(), attribution.is);
         }
     }
     fn retract(self, transaction: &mut Transaction) {
         for attribution in self.with {
-            transaction.dissociate(Association::new(
-                attribution.the.into(),
-                self.this.clone(),
-                attribution.is,
-            ));
+            transaction.dissociate(attribution.the.into(), self.this.clone(), attribution.is);
         }
     }
 }

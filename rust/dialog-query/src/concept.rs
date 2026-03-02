@@ -7,7 +7,7 @@ pub use application::ConceptQuery;
 pub use descriptor::ConceptDescriptor;
 
 #[cfg(test)]
-use crate::Association;
+use crate::DynamicAttributeExpression;
 pub use crate::predicate::Predicate;
 #[cfg(test)]
 use crate::query::Output;
@@ -119,7 +119,9 @@ mod tests {
     use crate::term::Term;
     use crate::the;
     use crate::types::Any;
-    use crate::{Answer, Cardinality, Concept, EvaluationError, Session, Statement, Transaction};
+    use crate::{
+        Answer, Cardinality, Concept, EvaluationError, Session, Statement, The, Transaction,
+    };
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
@@ -211,21 +213,17 @@ mod tests {
     }
 
     impl IntoIterator for Person {
-        type Item = Association;
-        type IntoIter = std::vec::IntoIter<Association>;
+        type Item = DynamicAttributeExpression;
+        type IntoIter = std::vec::IntoIter<DynamicAttributeExpression>;
 
         fn into_iter(self) -> Self::IntoIter {
             vec![
-                Association::new(
-                    "person/name".parse().expect("Failed to parse attribute"),
-                    self.this.clone(),
-                    Value::from(self.name.clone()),
-                ),
-                Association::new(
-                    "person/age".parse().expect("Failed to parse attribute"),
-                    self.this.clone(),
-                    Value::from(self.age.clone()),
-                ),
+                the!("person/name")
+                    .of(self.this.clone())
+                    .is(self.name.clone()),
+                the!("person/age")
+                    .of(self.this.clone())
+                    .is(self.age.clone()),
             ]
             .into_iter()
         }
@@ -233,31 +231,19 @@ mod tests {
 
     impl Statement for Person {
         fn assert(self, transaction: &mut Transaction) {
-            transaction.associate(Association {
-                the: "person/name".parse().expect("Failed to parse attribute"),
-                of: self.this.clone(),
-                is: Value::from(self.name.clone()),
-            });
+            let name_the = the!("person/name");
+            let age_the = the!("person/age");
 
-            transaction.associate(Association {
-                the: "person/age".parse().expect("Failed to parse attribute"),
-                of: self.this.clone(),
-                is: Value::from(self.age.clone()),
-            });
+            transaction.associate(name_the, self.this.clone(), Value::from(self.name.clone()));
+            transaction.associate(age_the, self.this.clone(), Value::from(self.age.clone()));
         }
 
         fn retract(self, transaction: &mut Transaction) {
-            transaction.dissociate(Association {
-                the: "person/name".parse().expect("Failed to parse attribute"),
-                of: self.this.clone(),
-                is: Value::from(self.name.clone()),
-            });
+            let name_the = the!("person/name");
+            let age_the = the!("person/age");
 
-            transaction.dissociate(Association {
-                the: "person/age".parse().expect("Failed to parse attribute"),
-                of: self.this.clone(),
-                is: Value::from(self.age.clone()),
-            });
+            transaction.dissociate(name_the, self.this.clone(), Value::from(self.name.clone()));
+            transaction.dissociate(age_the, self.this.clone(), Value::from(self.age.clone()));
         }
     }
 
@@ -559,11 +545,11 @@ mod tests {
         let alice = Entity::new()?;
 
         // Create minimal test data
-        let claims = vec![Association {
-            the: the!("person/name"),
-            of: alice.clone(),
-            is: Value::String("Alice".to_string()),
-        }];
+        let claims = vec![
+            the!("person/name")
+                .of(alice.clone())
+                .is("Alice".to_string()),
+        ];
 
         let mut session = Session::open(artifacts.clone());
         session.transact(claims).await?;
@@ -628,16 +614,16 @@ mod tests {
                 name: employee::Name("Bob".to_string()),
                 role: employee::Role("janitor".to_string()),
             })
-            .assert(Association {
-                the: the!("employee/name"),
-                of: mallory.clone(),
-                is: Value::String("Mallory".to_string()),
-            })
-            .assert(Association {
-                the: the!("employee/role"),
-                of: mallory.clone(),
-                is: Value::String("Hacker".to_string()),
-            });
+            .assert(
+                the!("employee/name")
+                    .of(mallory.clone())
+                    .is("Mallory".to_string()),
+            )
+            .assert(
+                the!("employee/role")
+                    .of(mallory.clone())
+                    .is("Hacker".to_string()),
+            );
 
         session.commit(transaction).await?;
 
@@ -786,11 +772,7 @@ mod tests {
 
         // Assert a relation
         let mut session = Session::open(artifacts.clone());
-        let name_relation = Association {
-            the: name_attr.clone(),
-            of: alice.clone(),
-            is: Value::String("Alice".to_string()),
-        };
+        let name_relation = name_attr.clone().of(alice.clone()).is("Alice".to_string());
 
         session.transact(vec![name_relation.clone()]).await?;
 

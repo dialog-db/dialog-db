@@ -1,6 +1,13 @@
 use crate::artifact::Attribute as ArtifactsAttribute;
+use crate::artifact::{Cause, Entity, Value};
 use crate::error::{InvalidIdentifier, OwnedInvalidIdentifier};
+use crate::relation::query::RelationQuery;
+use crate::schema::Cardinality;
+use crate::statement::{Retraction, Statement};
+use crate::term::Term;
+use crate::{Premise, Proposition, Transaction};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::ops::Not;
 
 /// Maximum length in bytes for a relation identifier (`"domain/name"`).
 pub const MAX_RELATION_LENGTH: usize = 64;
@@ -131,6 +138,112 @@ impl The {
             .expect("The always contains '/'");
         let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
         std::str::from_utf8(&bytes[slash + 1..end]).expect("name is valid UTF-8")
+    }
+
+    /// Begin building a dynamic attribute expression for this attribute and
+    /// the given entity. Chain with [`.is()`](DynamicAttributeBuilder::is)
+    /// to complete the expression.
+    ///
+    /// ```
+    /// use dialog_query::the;
+    /// use dialog_query::artifact::Entity;
+    ///
+    /// let alice = Entity::try_from("urn:alice".to_string()).unwrap();
+    /// let expr = the!("employee/name").of(alice.clone()).is("Alice".to_string());
+    /// ```
+    pub fn of(self, entity: impl Into<Entity>) -> DynamicAttributeBuilder {
+        DynamicAttributeBuilder {
+            the: self,
+            of: entity.into(),
+        }
+    }
+}
+
+/// Intermediate builder produced by [`The::of`]. Call [`.is()`](Self::is)
+/// to supply the value and obtain a [`DynamicAttributeExpression`].
+pub struct DynamicAttributeBuilder {
+    the: The,
+    of: Entity,
+}
+
+impl DynamicAttributeBuilder {
+    /// Complete the expression with a value, producing a [`DynamicAttributeExpression`].
+    pub fn is(self, value: impl Into<Value>) -> DynamicAttributeExpression {
+        DynamicAttributeExpression {
+            the: self.the,
+            of: self.of,
+            is: value.into(),
+            cause: None,
+            cardinality: None,
+        }
+    }
+}
+
+/// A fully concrete dynamic attribute expression (no typed attribute marker).
+///
+/// Produced by `the!("domain/name").of(entity).is(value)`. Implements
+/// [`Statement`] for assert/retract and converts [`Into<Premise>`] for queries.
+#[derive(Debug, Clone)]
+pub struct DynamicAttributeExpression {
+    /// The attribute (predicate).
+    pub the: The,
+    /// The entity (subject).
+    pub of: Entity,
+    /// The value (object).
+    pub is: Value,
+    /// Provenance/cause for this expression.
+    pub cause: Option<Cause>,
+    /// Optional cardinality override. When `Some(Cardinality::One)`,
+    /// `assert` uses `associate_unique`.
+    pub cardinality: Option<Cardinality>,
+}
+
+impl DynamicAttributeExpression {
+    /// Set the cardinality for this expression.
+    pub fn cardinality(mut self, cardinality: Cardinality) -> Self {
+        self.cardinality = Some(cardinality);
+        self
+    }
+}
+
+impl Statement for DynamicAttributeExpression {
+    fn assert(self, transaction: &mut Transaction) {
+        match self.cardinality {
+            Some(Cardinality::One) => {
+                transaction.associate_unique(self.the, self.of, self.is);
+            }
+            _ => {
+                transaction.associate(self.the, self.of, self.is);
+            }
+        }
+    }
+
+    fn retract(self, transaction: &mut Transaction) {
+        transaction.dissociate(self.the, self.of, self.is);
+    }
+}
+
+impl Not for DynamicAttributeExpression {
+    type Output = Retraction<Self>;
+
+    fn not(self) -> Self::Output {
+        self.revert()
+    }
+}
+
+impl From<DynamicAttributeExpression> for Premise {
+    fn from(expr: DynamicAttributeExpression) -> Self {
+        let query = RelationQuery::new(
+            Term::Constant(Value::from(expr.the)),
+            Term::Constant(Value::from(expr.of)),
+            Term::Constant(expr.is),
+            match expr.cause {
+                Some(c) => Term::Constant(Value::from(c)),
+                None => Term::blank(),
+            },
+            expr.cardinality,
+        );
+        Premise::Assert(Proposition::Relation(Box::new(query)))
     }
 }
 

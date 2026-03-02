@@ -12,8 +12,7 @@ pub use edit::*;
 pub use stream::*;
 
 use crate::Statement;
-use crate::artifact::{Artifact, Entity, Instruction};
-use crate::association::{Association, Attribute};
+use crate::artifact::{Artifact, Attribute, Entity, Instruction, Value};
 use crate::attribute::The;
 use std::collections::HashMap;
 
@@ -55,32 +54,20 @@ impl Transaction {
 
     /// Assert a relation (entity-attribute-value triple).
     /// Multiple assertions for the same `(entity, attribute)` accumulate.
-    pub fn associate(&mut self, association: Association) -> &mut Self {
-        self.insert(
-            association.the,
-            association.of,
-            Change::Assert(association.is),
-        )
+    pub fn associate(&mut self, the: The, of: Entity, is: Value) -> &mut Self {
+        self.insert(the, of, Change::Assert(is))
     }
 
     /// Retract an association (entity-attribute-value triple).
-    pub fn dissociate(&mut self, association: Association) -> &mut Self {
-        self.insert(
-            association.the,
-            association.of,
-            Change::Retract(association.is),
-        )
+    pub fn dissociate(&mut self, the: The, of: Entity, is: Value) -> &mut Self {
+        self.insert(the, of, Change::Retract(is))
     }
 
     /// Assert with `Cardinality::One` semantics: if the same
     /// `(entity, attribute)` pair was already asserted in this transaction,
     /// the previous value is replaced.
-    pub fn associate_unique(&mut self, association: Association) -> &mut Self {
-        self.replace(
-            association.the,
-            association.of,
-            Change::Assert(association.is),
-        )
+    pub fn associate_unique(&mut self, the: The, of: Entity, is: Value) -> &mut Self {
+        self.replace(the, of, Change::Assert(is))
     }
 
     /// Add a change operation for an entity-attribute pair, accumulating with
@@ -184,7 +171,6 @@ impl Edit for Transaction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Association;
     use crate::artifact::{Entity, Value};
     use crate::the;
 
@@ -193,12 +179,11 @@ mod tests {
         let mut transaction = Transaction::new();
         let alice = Entity::new()?;
 
-        // Test basic assert
-        transaction.associate(Association {
-            the: the!("user/name"),
-            of: alice.clone(),
-            is: Value::String("Alice".to_string()),
-        });
+        transaction.associate(
+            the!("user/name"),
+            alice.clone(),
+            Value::String("Alice".to_string()),
+        );
 
         // Check transaction state
         assert!(!transaction.is_empty());
@@ -217,17 +202,9 @@ mod tests {
         let first_value = Value::String("Alice".to_string());
         let second_value = Value::String("Alice Smith".to_string());
 
-        transaction.associate(Association {
-            the: the!("user/name"),
-            of: alice.clone(),
-            is: first_value.clone(),
-        });
+        transaction.associate(the!("user/name"), alice.clone(), first_value.clone());
 
-        transaction.associate(Association {
-            the: the!("user/name"),
-            of: alice.clone(),
-            is: second_value.clone(),
-        });
+        transaction.associate(the!("user/name"), alice.clone(), second_value.clone());
 
         // Both values should be present as separate instructions
         let instructions = transaction.into_instructions();
@@ -254,17 +231,9 @@ mod tests {
         let first_value = Value::String("Alice".to_string());
         let second_value = Value::String("Alice Smith".to_string());
 
-        transaction.associate_unique(Association {
-            the: the!("user/name"),
-            of: alice.clone(),
-            is: first_value.clone(),
-        });
+        transaction.associate_unique(the!("user/name"), alice.clone(), first_value.clone());
 
-        transaction.associate_unique(Association {
-            the: the!("user/name"),
-            of: alice.clone(),
-            is: second_value.clone(),
-        });
+        transaction.associate_unique(the!("user/name"), alice.clone(), second_value.clone());
 
         // Only the last value should survive
         let instructions = transaction.into_instructions();
@@ -287,19 +256,14 @@ mod tests {
     fn it_preserves_other_attributes_on_unique() -> anyhow::Result<()> {
         let mut transaction = Transaction::new();
         let alice = Entity::new()?;
-        transaction.associate_unique(Association {
-            the: the!("user/name"),
-            of: alice.clone(),
-            is: Value::String("Alice".to_string()),
-        });
+        transaction.associate_unique(
+            the!("user/name"),
+            alice.clone(),
+            Value::String("Alice".to_string()),
+        );
 
-        transaction.associate_unique(Association {
-            the: the!("user/age"),
-            of: alice.clone(),
-            is: Value::SignedInt(30),
-        });
+        transaction.associate_unique(the!("user/age"), alice.clone(), Value::SignedInt(30));
 
-        // Two different attributes — both should be present
         let instructions = transaction.into_instructions();
         assert_eq!(instructions.len(), 2);
 
@@ -312,19 +276,10 @@ mod tests {
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        transaction.associate(Association {
-            the: the!("user/name"),
-            of: alice,
-            is: Value::String("Alice".to_string()),
-        });
+        transaction.associate(the!("user/name"), alice, Value::String("Alice".to_string()));
 
-        transaction.associate(Association {
-            the: the!("user/name"),
-            of: bob,
-            is: Value::String("Bob".to_string()),
-        });
+        transaction.associate(the!("user/name"), bob, Value::String("Bob".to_string()));
 
-        // Test IntoIterator implementation
         let instructions: Vec<_> = transaction.into_iter().collect();
         assert_eq!(instructions.len(), 2);
 
@@ -339,17 +294,9 @@ mod tests {
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        transaction.associate(Association {
-            the: the!("user/name"),
-            of: alice,
-            is: Value::String("Alice".to_string()),
-        });
+        transaction.associate(the!("user/name"), alice, Value::String("Alice".to_string()));
 
-        transaction.associate(Association {
-            the: the!("user/name"),
-            of: bob,
-            is: Value::String("Bob".to_string()),
-        });
+        transaction.associate(the!("user/name"), bob, Value::String("Bob".to_string()));
 
         // Test streaming the transaction
         let mut stream: TransactionStream = transaction.into();

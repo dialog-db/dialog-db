@@ -10,7 +10,7 @@ pub use expression::{
     AttributeBuilder, AttributeExpression, AttributeExpressionBuilder, AttributeStatement,
 };
 pub use query::AttributeQuery;
-pub use the::*;
+pub use the::{DynamicAttributeExpression, *};
 
 pub use crate::artifact::{
     Attribute as ArtifactsAttribute, Cause, DialogArtifactsError, Entity, Value,
