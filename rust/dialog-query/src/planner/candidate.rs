@@ -740,10 +740,7 @@ mod cost_model_tests {
     #[dialog_common::test]
     fn it_costs_less_for_formula_without_io() {
         let mut formula_params = Parameters::new();
-        formula_params.insert(
-            "of".to_string(),
-            Parameter::from("hello".to_string()),
-        );
+        formula_params.insert("of".to_string(), Parameter::from("hello".to_string()));
         formula_params.insert("is".to_string(), Parameter::var("len"));
 
         let formula_app = Length::apply(formula_params).unwrap();

@@ -104,10 +104,7 @@ mod tests {
     #[dialog_common::test]
     fn it_serializes_constants_to_json() {
         let mut params = Parameters::new();
-        params.insert(
-            "name".to_string(),
-            Parameter::from("Alice".to_string()),
-        );
+        params.insert("name".to_string(), Parameter::from("Alice".to_string()));
         params.insert("age".to_string(), Parameter::from(42u32));
 
         let json = serde_json::to_value(&params).unwrap();
@@ -126,10 +123,7 @@ mod tests {
                 typ: None,
             },
         );
-        params.insert(
-            "name".to_string(),
-            Parameter::from("Alice".to_string()),
-        );
+        params.insert("name".to_string(), Parameter::from("Alice".to_string()));
 
         let json = serde_json::to_value(&params).unwrap();
         let obj = json.as_object().unwrap();
@@ -201,10 +195,7 @@ mod tests {
                 typ: None,
             },
         );
-        original.insert(
-            "name".to_string(),
-            Parameter::from("Alice".to_string()),
-        );
+        original.insert("name".to_string(), Parameter::from("Alice".to_string()));
         original.insert("active".to_string(), Parameter::from(true));
 
         let json = serde_json::to_value(&original).unwrap();

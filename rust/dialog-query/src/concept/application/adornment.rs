@@ -138,10 +138,7 @@ mod tests {
     fn it_marks_blanks_as_free() {
         let mut terms = Parameters::new();
         terms.insert("age".into(), Parameter::blank());
-        terms.insert(
-            "name".into(),
-            Parameter::from("Bob".to_string()),
-        );
+        terms.insert("name".into(), Parameter::from("Bob".to_string()));
 
         let answer = Answer::new();
         let adornment = Adornment::derive(&terms, &answer);
@@ -154,10 +151,7 @@ mod tests {
     fn it_marks_all_as_bound() {
         let mut terms = Parameters::new();
         terms.insert("age".into(), Parameter::from(25u32));
-        terms.insert(
-            "name".into(),
-            Parameter::from("Bob".to_string()),
-        );
+        terms.insert("name".into(), Parameter::from("Bob".to_string()));
 
         let answer = Answer::new();
         let adornment = Adornment::derive(&terms, &answer);
@@ -186,10 +180,7 @@ mod tests {
     fn it_round_trips_through_environment() {
         let mut terms = Parameters::new();
         terms.insert("age".into(), Parameter::var("a"));
-        terms.insert(
-            "name".into(),
-            Parameter::from("Bob".to_string()),
-        );
+        terms.insert("name".into(), Parameter::from("Bob".to_string()));
         terms.insert("this".into(), Parameter::var("e"));
 
         let mut answer = Answer::new();
