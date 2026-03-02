@@ -1,5 +1,5 @@
 pub use crate::concept::descriptor::ConceptDescriptor;
-use crate::error::{CompileError, SchemaError};
+use crate::error::TypeError;
 pub use crate::planner::Plan;
 pub use crate::planner::{Conjunction, Planner};
 pub use crate::premise::Premise;
@@ -19,10 +19,7 @@ pub struct DeductiveRule {
 }
 impl DeductiveRule {
     /// Create a new uncompiled rule from a conclusion and premises
-    pub fn new(
-        conclusion: ConceptDescriptor,
-        premises: Vec<Premise>,
-    ) -> Result<Self, CompileError> {
+    pub fn new(conclusion: ConceptDescriptor, premises: Vec<Premise>) -> Result<Self, TypeError> {
         // Convert premises to an intermediate form, then compile
         let uncompiled = UncompiledDeductiveRule {
             conclusion,
@@ -56,7 +53,7 @@ impl DeductiveRule {
     /// Creates a rule application by binding the provided terms to this rule's parameters.
     /// Validates that all required parameters are provided and returns an error if the
     /// application would be invalid.
-    pub fn apply(&self, parameters: Parameters) -> Result<Proposition, SchemaError> {
+    pub fn apply(&self, parameters: Parameters) -> Result<Proposition, TypeError> {
         self.conclusion.apply(parameters)
     }
 }
@@ -69,7 +66,7 @@ pub struct UncompiledDeductiveRule {
 
 impl UncompiledDeductiveRule {
     /// Compiles the rule by planning premise execution order and validating bindings.
-    pub fn compile(self) -> Result<DeductiveRule, CompileError> {
+    pub fn compile(self) -> Result<DeductiveRule, TypeError> {
         // We attempt to plan the order of premises in a scope where none of the
         // rule parameters are bound in order to identify most optimal execution
         // order in such scenario or to discover that some premise in the rule
@@ -87,8 +84,8 @@ impl UncompiledDeductiveRule {
                     conclusion: self.conclusion.clone(),
                     join: join.clone(),
                 };
-                Err(CompileError::UnboundVariable {
-                    rule: temp_rule,
+                Err(TypeError::UnboundVariable {
+                    rule: Box::new(temp_rule),
                     variable: name.to_string(),
                 })?;
             }
@@ -310,7 +307,7 @@ mod tests {
         ];
         let result = DeductiveRule::new(conclusion, premises);
         assert!(result.is_err());
-        if let Err(CompileError::UnboundVariable { variable, .. }) = result {
+        if let Err(TypeError::UnboundVariable { variable, .. }) = result {
             assert_eq!(variable, "age", "Should report 'age' as unbound");
         }
     }
@@ -411,7 +408,7 @@ mod tests {
             result.is_err(),
             "Should fail when variable name doesn't match parameter name"
         );
-        if let Err(CompileError::UnboundVariable { variable, .. }) = result {
+        if let Err(TypeError::UnboundVariable { variable, .. }) = result {
             assert_eq!(variable, "key", "Should report 'key' as unbound");
         }
     }

@@ -6,14 +6,14 @@ use crate::Predicate;
 use crate::attribute::{AttributeDescriptor, Attribution};
 use crate::concept::application::ConceptQuery;
 use crate::concept::{Concept, Conclusion};
-use crate::error::SchemaError;
+use crate::error::TypeError;
 use crate::query::{Application, Source};
 use crate::selection::{Answer, Answers};
 use crate::statement::Retraction;
 use crate::term::Term;
 use crate::types::Scalar;
 use crate::{
-    Association, Cardinality, Entity, Field, Parameters, Proposition, QueryError, Requirement,
+    Association, Cardinality, Entity, EvaluationError, Field, Parameters, Proposition, Requirement,
     Schema, Statement, Transaction, Type, Value,
 };
 
@@ -67,7 +67,7 @@ impl ConceptDescriptor {
     }
 
     /// Validates the provided parameters against the schema of the attributes.
-    pub fn conform(&self, parameters: Parameters) -> Result<Parameters, SchemaError> {
+    pub fn conform(&self, parameters: Parameters) -> Result<Parameters, TypeError> {
         for (name, attribute) in self.with().iter() {
             attribute
                 .conform(parameters.get(name))
@@ -127,7 +127,7 @@ impl ConceptDescriptor {
     }
 
     /// Creates a query application for this concept descriptor.
-    pub fn apply(&self, parameters: Parameters) -> Result<Proposition, SchemaError> {
+    pub fn apply(&self, parameters: Parameters) -> Result<Proposition, TypeError> {
         Ok(Proposition::Concept(ConceptQuery {
             terms: self.conform(parameters)?,
             predicate: self.clone(),
@@ -135,7 +135,7 @@ impl ConceptDescriptor {
     }
 
     /// Validates a model against this descriptor's schema and creates an instance.
-    fn conform_model(&self, model: Model) -> Result<ConceptStatement, SchemaError> {
+    fn conform_model(&self, model: Model) -> Result<ConceptStatement, TypeError> {
         let mut relations = vec![];
         for (name, attribute) in self.with().iter() {
             if let Some(value) = model.attributes.get(name) {
@@ -144,7 +144,7 @@ impl ConceptDescriptor {
                     .map_err(|e| e.at(name.to_string()))?;
                 relations.push(relation);
             } else {
-                return Err(SchemaError::OmittedRequirement {
+                return Err(TypeError::OmittedRequirement {
                     binding: name.into(),
                 });
             }
@@ -355,7 +355,7 @@ impl<'a> Builder<'a> {
     }
 
     /// Builds and validates the concept instance.
-    pub fn build(self) -> Result<ConceptStatement, SchemaError> {
+    pub fn build(self) -> Result<ConceptStatement, TypeError> {
         self.predicate.conform_model(self.model)
     }
 }
@@ -379,14 +379,14 @@ impl ConceptConclusion {
     }
 
     /// Look up a field value by its concept field name (e.g. "name", "age").
-    pub fn get<T>(&self, field: &str) -> Result<T, QueryError>
+    pub fn get<T>(&self, field: &str) -> Result<T, EvaluationError>
     where
         T: Scalar + std::convert::TryFrom<Value>,
     {
         let param = self
             .terms
             .get(field)
-            .ok_or_else(|| QueryError::UnboundVariable {
+            .ok_or_else(|| EvaluationError::UnboundVariable {
                 variable_name: field.to_string(),
             })?;
         match param {
@@ -394,14 +394,14 @@ impl ConceptConclusion {
                 name: Some(name), ..
             } => {
                 let typed_term: Term<T> = Term::var(name.clone());
-                self.answer.get(&typed_term).map_err(QueryError::from)
+                self.answer.get(&typed_term)
             }
             Term::Constant(value) => {
-                T::try_from(value.clone()).map_err(|_| QueryError::UnboundVariable {
+                T::try_from(value.clone()).map_err(|_| EvaluationError::UnboundVariable {
                     variable_name: field.to_string(),
                 })
             }
-            Term::Variable { name: None, .. } => Err(QueryError::UnboundVariable {
+            Term::Variable { name: None, .. } => Err(EvaluationError::UnboundVariable {
                 variable_name: field.to_string(),
             }),
         }
@@ -438,13 +438,13 @@ impl Application for ConceptQuery {
         ConceptQuery::evaluate(self, answers, source)
     }
 
-    fn realize(&self, source: Answer) -> Result<Self::Conclusion, QueryError> {
-        let this_param = self
-            .terms
-            .get("this")
-            .ok_or_else(|| QueryError::UnboundVariable {
-                variable_name: "this".to_string(),
-            })?;
+    fn realize(&self, source: Answer) -> Result<Self::Conclusion, EvaluationError> {
+        let this_param =
+            self.terms
+                .get("this")
+                .ok_or_else(|| EvaluationError::UnboundVariable {
+                    variable_name: "this".to_string(),
+                })?;
         let entity: Entity = match this_param {
             Term::Variable {
                 name: Some(name), ..
@@ -455,13 +455,13 @@ impl Application for ConceptQuery {
             Term::Constant(value) => match value {
                 Value::Entity(e) => e.clone(),
                 _ => {
-                    return Err(QueryError::UnboundVariable {
+                    return Err(EvaluationError::UnboundVariable {
                         variable_name: "this".to_string(),
                     });
                 }
             },
             Term::Variable { name: None, .. } => {
-                return Err(QueryError::UnboundVariable {
+                return Err(EvaluationError::UnboundVariable {
                     variable_name: "this".to_string(),
                 });
             }

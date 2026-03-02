@@ -2,7 +2,7 @@ use async_stream::try_stream;
 use dialog_common::ConditionalSend;
 
 use super::Answer;
-use crate::error::QueryError;
+use crate::error::EvaluationError;
 
 /// Re-exported stream traits for working with answer streams.
 pub use futures_util::stream::{Stream, TryStream};
@@ -18,12 +18,14 @@ pub use futures_util::stream::{Stream, TryStream};
 /// Combinators like [`try_flat_map`](Answers::try_flat_map),
 /// [`expand`](Answers::expand), and [`try_expand`](Answers::try_expand)
 /// make it easy to transform answer streams within premise implementations.
-pub trait Answers: Stream<Item = Result<Answer, QueryError>> + 'static + ConditionalSend {
+pub trait Answers:
+    Stream<Item = Result<Answer, EvaluationError>> + 'static + ConditionalSend
+{
     /// Collect all answers into a Vec, propagating any errors
     #[allow(async_fn_in_trait)]
     fn try_vec(
         self,
-    ) -> impl std::future::Future<Output = Result<Vec<Answer>, QueryError>> + ConditionalSend
+    ) -> impl std::future::Future<Output = Result<Vec<Answer>, EvaluationError>> + ConditionalSend
     where
         Self: Sized,
     {
@@ -77,12 +79,15 @@ pub trait Answers: Stream<Item = Result<Answer, QueryError>> + 'static + Conditi
     }
 }
 
-impl<S> Answers for S where S: Stream<Item = Result<Answer, QueryError>> + 'static + ConditionalSend {}
+impl<S> Answers for S where
+    S: Stream<Item = Result<Answer, EvaluationError>> + 'static + ConditionalSend
+{
+}
 
 /// Expands an answer into multiple answers, potentially returning an error.
 pub trait AnswersTryExpand: ConditionalSend + 'static {
     /// Attempt to expand a single answer into zero or more answers.
-    fn try_expand(&self, item: Answer) -> Result<Vec<Answer>, QueryError>;
+    fn try_expand(&self, item: Answer) -> Result<Vec<Answer>, EvaluationError>;
 }
 
 /// Expands an answer into multiple answers infallibly.
@@ -91,10 +96,10 @@ pub trait AnswersExpand: ConditionalSend + 'static {
     fn expand(&self, item: Answer) -> Vec<Answer>;
 }
 
-impl<F: Fn(Answer) -> Result<Vec<Answer>, QueryError> + ConditionalSend + 'static> AnswersTryExpand
-    for F
+impl<F: Fn(Answer) -> Result<Vec<Answer>, EvaluationError> + ConditionalSend + 'static>
+    AnswersTryExpand for F
 {
-    fn try_expand(&self, answer: Answer) -> Result<Vec<Answer>, QueryError> {
+    fn try_expand(&self, answer: Answer) -> Result<Vec<Answer>, EvaluationError> {
         self(answer)
     }
 }

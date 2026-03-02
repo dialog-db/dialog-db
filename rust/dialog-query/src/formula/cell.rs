@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::Display;
 
-use crate::error::{SchemaError, TypeError};
+use crate::error::{FieldTypeError, TypeError};
 use crate::term::Term;
 use crate::types::Any;
 use crate::{Parameters, Requirement, Schema, Type};
@@ -93,7 +93,7 @@ impl Cell {
     }
 
     /// Type checks that the provided parameter matches this cell's content type.
-    pub fn check(&self, param: &Term<Any>) -> Result<(), TypeError> {
+    pub fn check(&self, param: &Term<Any>) -> Result<(), FieldTypeError> {
         // First we type check the input to ensure it matches cell's content type
         match (self.content_type(), param.content_type()) {
             // if expected is any (has no type) it checks
@@ -107,9 +107,9 @@ impl Cell {
                 if Some(*expected) == actual {
                     Ok(())
                 } else {
-                    Err(TypeError::TypeMismatch {
+                    Err(FieldTypeError::TypeMismatch {
                         expected: *expected,
-                        actual: param.clone(),
+                        actual: Box::new(param.clone()),
                     })
                 }
             }
@@ -117,7 +117,7 @@ impl Cell {
     }
 
     /// Validates that a parameter conforms to this cell's type and requirement constraints.
-    pub fn conform(&self, param: Option<&Term<Any>>) -> Result<(), TypeError> {
+    pub fn conform(&self, param: Option<&Term<Any>>) -> Result<(), FieldTypeError> {
         // We check that cell type matches term type.
         if let Some(param) = param {
             self.check(param)?;
@@ -128,8 +128,8 @@ impl Cell {
             match param {
                 Some(Term::Constant(_)) => Ok(()),
                 Some(Term::Variable { name: Some(_), .. }) => Ok(()),
-                Some(Term::Variable { name: None, .. }) => Err(TypeError::BlankRequirement),
-                None => Err(TypeError::OmittedRequirement),
+                Some(Term::Variable { name: None, .. }) => Err(FieldTypeError::BlankRequirement),
+                None => Err(FieldTypeError::OmittedRequirement),
             }?;
         };
 
@@ -230,7 +230,7 @@ impl Cells {
     }
 
     /// Conforms the provided parameters conform to the schema of the cells.
-    pub fn conform(&self, parameters: Parameters) -> Result<Parameters, SchemaError> {
+    pub fn conform(&self, parameters: Parameters) -> Result<Parameters, TypeError> {
         for (name, cell) in self.iter() {
             cell.conform(parameters.get(name))
                 .map_err(|e| e.at(name.into()))?;

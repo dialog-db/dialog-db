@@ -8,7 +8,7 @@ pub use conjunction::*;
 pub use disjunction::*;
 pub use plan::*;
 
-use crate::error::CompileError;
+use crate::error::TypeError;
 use crate::{Environment, Premise};
 
 /// State machine that greedily selects the cheapest viable premise at each
@@ -44,7 +44,7 @@ impl Planner {
     /// Repeatedly selects the cheapest viable candidate until all premises
     /// have been planned. Returns an error if any premise has unsatisfiable
     /// prerequisites.
-    pub fn plan(mut self, scope: &Environment) -> Result<Conjunction, CompileError> {
+    pub fn plan(mut self, scope: &Environment) -> Result<Conjunction, TypeError> {
         let env = scope.clone();
         let mut bound = scope.clone();
         let mut steps = vec![];
@@ -73,9 +73,9 @@ impl Planner {
     }
 
     /// Helper to create a planning error from failed candidates.
-    fn fail(candidates: &[Candidate]) -> Result<Plan, CompileError> {
+    fn fail(candidates: &[Candidate]) -> Result<Plan, TypeError> {
         if candidates.is_empty() {
-            return Err(CompileError::RequiredBindings {
+            return Err(TypeError::RequiredBindings {
                 required: Environment::new(),
             });
         }
@@ -84,7 +84,7 @@ impl Planner {
             if let Candidate::Blocked { requires, .. } = candidate
                 && !requires.is_empty()
             {
-                return Err(CompileError::RequiredBindings {
+                return Err(TypeError::RequiredBindings {
                     required: requires.clone(),
                 });
             }
@@ -103,7 +103,7 @@ impl Planner {
 
     /// Selects and returns the best premise to execute next based on cost.
     /// Updates the planner state by removing the selected premise from candidates.
-    fn top(&mut self, env: &Environment) -> Result<Plan, CompileError> {
+    fn top(&mut self, env: &Environment) -> Result<Plan, TypeError> {
         match self {
             Planner::Idle { premises } => {
                 let mut candidates = vec![];

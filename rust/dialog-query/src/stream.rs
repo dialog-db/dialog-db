@@ -4,7 +4,7 @@ pub use futures_core::{Future, TryStream};
 pub use futures_util::{TryStreamExt, stream_select};
 use tokio::sync::mpsc::unbounded_channel;
 
-use crate::QueryError;
+use crate::EvaluationError;
 
 /// A fallible stream that is `Send` on native targets and `!Send` on WASM.
 ///
@@ -12,11 +12,11 @@ use crate::QueryError;
 /// that the same query evaluation code works in both multi-threaded native
 /// runtimes and single-threaded WASM environments.
 pub trait SendStream<T>:
-    TryStream<Ok = T, Error = QueryError, Item = Result<T, QueryError>> + ConditionalSend
+    TryStream<Ok = T, Error = EvaluationError, Item = Result<T, EvaluationError>> + ConditionalSend
 {
 }
 impl<S, T> SendStream<T> for S where
-    S: TryStream<Ok = T, Error = QueryError, Item = Result<T, QueryError>>
+    S: TryStream<Ok = T, Error = EvaluationError, Item = Result<T, EvaluationError>>
         + 'static
         + ConditionalSend
 {
@@ -39,7 +39,6 @@ where
 
 type PinnedSendStream<T> = std::pin::Pin<Box<dyn SendStream<T>>>;
 
-#[allow(clippy::type_complexity)]
 /// Split a stream into two independent streams that each receive a clone of every item
 pub fn fork_stream<S, T>(input: S) -> (PinnedSendStream<T>, PinnedSendStream<T>)
 where

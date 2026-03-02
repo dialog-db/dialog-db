@@ -301,7 +301,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 application.evaluate(answers)
             }
 
-            fn realize(&self, source: dialog_query::Answer) -> std::result::Result<Self::Conclusion, dialog_query::QueryError> {
+            fn realize(&self, source: dialog_query::Answer) -> std::result::Result<Self::Conclusion, dialog_query::EvaluationError> {
                 Ok(#struct_name {
                     #(#realize_fields),*
                 })
@@ -340,7 +340,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
 
         impl ::std::convert::TryFrom<&mut dialog_query::Bindings> for #input_name {
-            type Error = dialog_query::FormulaEvaluationError;
+            type Error = dialog_query::EvaluationError;
 
             fn try_from(bindings: &mut dialog_query::Bindings) -> ::std::result::Result<Self, Self::Error> {
                 Ok(#input_name {
@@ -372,7 +372,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 #struct_name::derive(input)
             }
 
-            fn write(&self, bindings: &mut dialog_query::Bindings) -> ::std::result::Result<(), dialog_query::FormulaEvaluationError> {
+            fn write(&self, bindings: &mut dialog_query::Bindings) -> ::std::result::Result<(), dialog_query::EvaluationError> {
                 #(#write_statements)*
                 ::std::result::Result::Ok(())
             }

@@ -119,7 +119,7 @@ mod tests {
     use crate::term::Term;
     use crate::the;
     use crate::types::Any;
-    use crate::{Answer, Cardinality, Concept, QueryError, Session, Statement, Transaction};
+    use crate::{Answer, Cardinality, Concept, EvaluationError, Session, Statement, Transaction};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
@@ -270,7 +270,7 @@ mod tests {
     // Implement TryFrom<selection::Answer> for Person
     // This extracts values from the answer by field name
     impl TryFrom<Answer> for Person {
-        type Error = crate::error::InconsistencyError;
+        type Error = crate::error::EvaluationError;
 
         fn try_from(input: Answer) -> Result<Self, Self::Error> {
             Ok(Person {
@@ -324,7 +324,10 @@ mod tests {
             application.evaluate(answers, source)
         }
 
-        fn realize(&self, source: Answer) -> std::result::Result<Self::Conclusion, QueryError> {
+        fn realize(
+            &self,
+            source: Answer,
+        ) -> std::result::Result<Self::Conclusion, EvaluationError> {
             Ok(Person {
                 this: source.get(&self.this)?,
                 name: source.get(&self.name)?,

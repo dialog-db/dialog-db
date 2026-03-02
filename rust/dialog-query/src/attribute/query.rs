@@ -8,7 +8,7 @@ use crate::query::{Application, Source};
 use crate::selection::{Answer, Answers};
 use crate::types::Any;
 use crate::types::Scalar;
-use crate::{Entity, Premise, Proposition, QueryError, Term, Value};
+use crate::{Entity, EvaluationError, Premise, Proposition, Term, Value};
 
 /// A typed attribute query with named fields for entity and value.
 ///
@@ -64,13 +64,13 @@ where
         query.evaluate(answers, source)
     }
 
-    fn realize(&self, input: Answer) -> Result<Self::Conclusion, QueryError> {
+    fn realize(&self, input: Answer) -> Result<Self::Conclusion, EvaluationError> {
         let of_term = &self.of;
         let is_param = Term::<Any>::from(&self.is);
         let entity: Entity = input.get(of_term)?;
         let value: Value = input.resolve(&is_param)?;
         let typed_value = A::Type::try_from(value).map_err(|_| {
-            crate::error::InconsistencyError::TypeError(format!(
+            EvaluationError::Store(format!(
                 "cannot convert value to {}",
                 std::any::type_name::<A::Type>()
             ))

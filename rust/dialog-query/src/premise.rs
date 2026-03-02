@@ -9,7 +9,7 @@ pub use super::negation::Negation;
 use crate::Source;
 use crate::constraint::Constraint;
 use crate::environment::Environment;
-pub use crate::error::{AnalyzerError, PlanError, QueryResult};
+pub use crate::error::{AnalyzerError, QueryResult};
 use crate::formula::query::FormulaQuery;
 use crate::proposition::Proposition;
 use crate::selection::{Answer, Answers};

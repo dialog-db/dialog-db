@@ -270,7 +270,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 application.evaluate(answers, source)
             }
 
-            fn realize(&self, source: dialog_query::Answer) -> std::result::Result<Self::Conclusion, dialog_query::QueryError> {
+            fn realize(&self, source: dialog_query::Answer) -> std::result::Result<Self::Conclusion, dialog_query::EvaluationError> {
                 Ok(#struct_name {
                     this: source.get(&self.this)?,
                     #(#field_names: #field_types(source.get(&self.#field_names)?)),*

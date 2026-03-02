@@ -34,7 +34,7 @@ pub use math::{Difference, Modulo, Product, Quotient, Sum};
 pub use string::{Concatenate, Length, Like, Lowercase, Uppercase};
 
 use crate::Predicate;
-use crate::error::{FormulaEvaluationError, SchemaError};
+use crate::error::{EvaluationError, TypeError};
 use crate::selection::Answer;
 use crate::{Parameters, Schema};
 
@@ -93,7 +93,7 @@ pub trait Formula: Predicate + Sized + Clone {
     /// 3. Returns the Answer with Factor::Derived provenance
     ///
     /// This default implementation should work for most formulas.
-    fn compute(bindings: &mut Bindings) -> Result<Vec<Answer>, FormulaEvaluationError> {
+    fn compute(bindings: &mut Bindings) -> Result<Vec<Answer>, EvaluationError> {
         let mut answers = Vec::new();
         let input: Self::Input = bindings.try_into()?;
         for output in Self::derive(input) {
@@ -113,7 +113,7 @@ pub trait Formula: Predicate + Sized + Clone {
     ///
     /// This method is called for each output instance produced by `derive`
     /// to write the computed values back to the bindings.
-    fn write(&self, bindings: &mut Bindings) -> Result<(), FormulaEvaluationError>;
+    fn write(&self, bindings: &mut Bindings) -> Result<(), EvaluationError>;
 
     /// Create a formula application with term bindings
     ///
@@ -134,9 +134,9 @@ pub trait Formula: Predicate + Sized + Clone {
     /// terms.insert("is".to_string(), Term::<Any>::var("output"));
     ///
     /// let app = Sum::apply(terms)?;
-    /// # Ok::<(), dialog_query::error::SchemaError>(())
+    /// # Ok::<(), dialog_query::error::TypeError>(())
     /// ```
-    fn apply(terms: Parameters) -> Result<FormulaQuery, SchemaError> {
+    fn apply(terms: Parameters) -> Result<FormulaQuery, TypeError> {
         let cells = Self::cells();
 
         Ok(FormulaQuery {
@@ -150,5 +150,5 @@ pub trait Formula: Predicate + Sized + Clone {
 }
 
 /// Trait alias for types that can be constructed from a [`Bindings`] as formula input.
-pub trait In: for<'a> TryFrom<&'a mut Bindings, Error = FormulaEvaluationError> {}
-impl<T: for<'a> TryFrom<&'a mut Bindings, Error = FormulaEvaluationError>> In for T {}
+pub trait In: for<'a> TryFrom<&'a mut Bindings, Error = EvaluationError> {}
+impl<T: for<'a> TryFrom<&'a mut Bindings, Error = EvaluationError>> In for T {}

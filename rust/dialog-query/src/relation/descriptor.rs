@@ -1,5 +1,5 @@
 pub use crate::artifact::{Attribute, Cause};
-pub use crate::error::SchemaError;
+pub use crate::error::TypeError;
 pub use crate::relation::query::RelationQuery;
 use crate::{Cardinality, Type};
 pub use crate::{Parameters, Term};

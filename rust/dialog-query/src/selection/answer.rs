@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::artifact::{Type, TypeError, Value};
-use crate::error::{InconsistencyError, QueryError};
+use crate::artifact::{Type, Value};
+use crate::error::EvaluationError;
 use crate::relation::query::RelationQuery;
 use crate::term::Term;
 use crate::types::Any;
@@ -66,14 +66,16 @@ impl Answer {
         &mut self,
         application: &RelationQuery,
         fact: Arc<Claim>,
-    ) -> Result<(), InconsistencyError> {
+    ) -> Result<(), EvaluationError> {
         // Check if this application already has a different fact
         if let Some(existing_fact) = self.facts.get(application) {
             if !Arc::ptr_eq(existing_fact, &fact) {
-                return Err(InconsistencyError::AssignmentError(format!(
-                    "RelationQuery {:?} already mapped to a different fact",
-                    application
-                )));
+                return Err(EvaluationError::Assignment {
+                    reason: format!(
+                        "RelationQuery {:?} already mapped to a different fact",
+                        application
+                    ),
+                });
             }
             // Same fact - this is fine (idempotent)
         } else {
@@ -86,7 +88,7 @@ impl Answer {
     /// Realize a relation from a RelationQuery.
     /// First tries to extract from named variable conclusions.
     /// Falls back to looking up the application in the recorded applications.
-    pub fn realize(&self, application: &RelationQuery) -> Result<Claim, QueryError> {
+    pub fn realize(&self, application: &RelationQuery) -> Result<Claim, EvaluationError> {
         // Try to extract from a named variable conclusion first
         // This gives us the full relation with all its components
         if let Term::Variable { name: Some(_), .. } = application.of()
@@ -106,13 +108,13 @@ impl Answer {
             return Ok(relation.as_ref().clone());
         }
 
-        Err(QueryError::FactStore(
+        Err(EvaluationError::Store(
             "Could not realize relation from answer - application not found".to_string(),
         ))
     }
 
     /// Merge evidence into this answer, recording facts and binding variables.
-    pub fn merge(&mut self, evidence: Evidence<'_>) -> Result<(), InconsistencyError> {
+    pub fn merge(&mut self, evidence: Evidence<'_>) -> Result<(), EvaluationError> {
         match evidence {
             Evidence::Relation { application, fact } => {
                 let fact = Arc::new(fact.to_owned());
@@ -188,19 +190,21 @@ impl Answer {
     }
 
     /// Assign a parameter to a factor.
-    pub fn assign(&mut self, param: &Term<Any>, factor: &Factor) -> Result<(), InconsistencyError> {
+    pub fn assign(&mut self, param: &Term<Any>, factor: &Factor) -> Result<(), EvaluationError> {
         match param {
             Term::Variable {
                 name: Some(name), ..
             } => {
                 if let Some(factors) = self.conclusions.get_mut(name) {
                     if factors.content() != factor.content() {
-                        Err(InconsistencyError::AssignmentError(format!(
-                            "Can not set {:?} to {:?} because it is already set to {:?}.",
-                            name,
-                            factor.content(),
-                            factors.content()
-                        )))
+                        Err(EvaluationError::Assignment {
+                            reason: format!(
+                                "Can not set {:?} to {:?} because it is already set to {:?}.",
+                                name,
+                                factor.content(),
+                                factors.content()
+                            ),
+                        })
                     } else {
                         factors.add(factor.clone());
                         if let Factor::Selected {
@@ -222,7 +226,7 @@ impl Answer {
     }
 
     /// Extends this answer by assigning multiple parameter-factor pairs.
-    pub fn extend<I>(&mut self, assignments: I) -> Result<(), InconsistencyError>
+    pub fn extend<I>(&mut self, assignments: I) -> Result<(), EvaluationError>
     where
         I: IntoIterator<Item = (Term<Any>, Factor)>,
     {
@@ -259,7 +263,7 @@ impl Answer {
     /// For constants, returns the constant value.
     ///
     /// Returns an error if the variable is not bound.
-    pub fn resolve(&self, param: &Term<Any>) -> Result<Value, InconsistencyError> {
+    pub fn resolve(&self, param: &Term<Any>) -> Result<Value, EvaluationError> {
         match param {
             Term::Variable {
                 name: Some(key), ..
@@ -267,12 +271,14 @@ impl Answer {
                 if let Some(factors) = self.conclusions.get(key) {
                     Ok(factors.content().clone())
                 } else {
-                    Err(InconsistencyError::UnboundVariableError(key.clone()))
+                    Err(EvaluationError::UnboundVariable {
+                        variable_name: key.clone(),
+                    })
                 }
             }
-            Term::Variable { name: None, .. } => {
-                Err(InconsistencyError::UnboundVariableError("_".into()))
-            }
+            Term::Variable { name: None, .. } => Err(EvaluationError::UnboundVariable {
+                variable_name: "_".into(),
+            }),
             Term::Constant(value) => Ok(value.clone()),
         }
     }
@@ -319,7 +325,7 @@ impl Answer {
     }
 
     /// Set a variable to a value without provenance tracking.
-    pub fn set<T: Scalar>(mut self, term: Term<T>, value: T) -> Result<Self, InconsistencyError>
+    pub fn set<T: Scalar>(mut self, term: Term<T>, value: T) -> Result<Self, EvaluationError>
     where
         Value: From<T>,
     {
@@ -331,7 +337,7 @@ impl Answer {
     }
 
     /// Get a typed value from this answer.
-    pub fn get<T>(&self, term: &Term<T>) -> Result<T, InconsistencyError>
+    pub fn get<T>(&self, term: &Term<T>) -> Result<T, EvaluationError>
     where
         T: Typed + Clone + 'static,
         Term<Any>: for<'a> From<&'a Term<T>>,
@@ -339,12 +345,10 @@ impl Answer {
     {
         let value = self.resolve(&Term::<Any>::from(term))?;
         let value_type = value.data_type();
-        T::try_from(value).map_err(|_| {
-            InconsistencyError::TypeConversion(TypeError::TypeMismatch(
-                <<T as Typed>::Descriptor as crate::types::TypeDescriptor>::TYPE
-                    .unwrap_or(Type::Bytes),
-                value_type,
-            ))
+        T::try_from(value).map_err(|_| EvaluationError::TypeMismatch {
+            expected: <<T as Typed>::Descriptor as crate::types::TypeDescriptor>::TYPE
+                .unwrap_or(Type::Bytes),
+            actual: value_type,
         })
     }
 }

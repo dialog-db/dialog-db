@@ -1,5 +1,5 @@
 use crate::Entity;
-use crate::QueryError;
+use crate::EvaluationError;
 use crate::concept::application::ConceptRules;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::rule::deductive::DeductiveRule;
@@ -30,11 +30,11 @@ impl RuleRegistry {
 
     /// Register a deductive rule, deduplicating by equality.
     /// Invalidates cached plans for the affected concept entity.
-    pub fn register(&mut self, rule: DeductiveRule) -> Result<(), QueryError> {
+    pub fn register(&mut self, rule: DeductiveRule) -> Result<(), EvaluationError> {
         let entity = rule.conclusion().this();
         self.rules
             .write()
-            .map_err(|e| QueryError::FactStore(e.to_string()))?
+            .map_err(|e| EvaluationError::Store(e.to_string()))?
             .entry(entity)
             .or_insert_with(|| ConceptRules::new(rule.conclusion()))
             .install(rule);
@@ -44,12 +44,12 @@ impl RuleRegistry {
     /// Acquire rules for the given concept. Creates the default rule from
     /// the predicate's attributes on first access — so this always returns
     /// a ConceptRules regardless of whether any rules were explicitly installed.
-    pub fn acquire(&self, predicate: &ConceptDescriptor) -> Result<ConceptRules, QueryError> {
+    pub fn acquire(&self, predicate: &ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
         let entity = predicate.this();
         Ok(self
             .rules
             .write()
-            .map_err(|e| QueryError::FactStore(e.to_string()))?
+            .map_err(|e| EvaluationError::Store(e.to_string()))?
             .entry(entity)
             .or_insert_with(|| ConceptRules::new(predicate))
             .clone())

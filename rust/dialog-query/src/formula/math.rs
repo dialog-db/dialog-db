@@ -128,7 +128,7 @@ impl Modulo {
 #[cfg(test)]
 mod tests {
     use crate::Term;
-    use crate::error::FormulaEvaluationError;
+    use crate::error::EvaluationError;
     use crate::formula::math::*;
     use crate::*;
 
@@ -201,7 +201,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            FormulaEvaluationError::UnboundVariable { .. }
+            EvaluationError::UnboundFormulaVariable { .. }
         ));
         Ok(())
     }

@@ -61,14 +61,15 @@ mod tests {
     use crate::concept::application::ConceptQuery;
     use crate::concept::descriptor::ConceptDescriptor;
     use crate::concept::{Concept, Conclusion};
-    use crate::error::InconsistencyError;
     use crate::predicate::Predicate;
     use crate::premise::Premise;
     use crate::selection::Answer;
     use crate::statement::Statement;
     use crate::term::Term;
     use crate::the;
-    use crate::{Association, Parameters, Proposition, Query, QueryError, Session, Transaction};
+    use crate::{
+        Association, EvaluationError, Parameters, Proposition, Query, Session, Transaction,
+    };
 
     // Manual implementation of Person struct with Concept and Rule traits
     // This serves as a template for what the derive macro should generate
@@ -221,7 +222,7 @@ mod tests {
     }
 
     impl TryFrom<Answer> for Person {
-        type Error = InconsistencyError;
+        type Error = EvaluationError;
 
         fn try_from(source: Answer) -> Result<Self, Self::Error> {
             Ok(Person {
@@ -256,7 +257,7 @@ mod tests {
             application.evaluate(answers, source)
         }
 
-        fn realize(&self, source: Answer) -> Result<Self::Conclusion, QueryError> {
+        fn realize(&self, source: Answer) -> Result<Self::Conclusion, EvaluationError> {
             Ok(Person {
                 this: source.get(&self.this)?,
                 name: source.get(&self.name)?,

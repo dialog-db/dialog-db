@@ -1,5 +1,5 @@
 use super::{Plan, Planner};
-use crate::error::CompileError;
+use crate::error::TypeError;
 use crate::selection::Answers;
 use crate::{Environment, Source};
 use core::pin::Pin;
@@ -36,7 +36,7 @@ impl Conjunction {
     /// for optimal execution given the new bindings. This is used when a
     /// rule's premises need to be re-evaluated with different known bindings
     /// (e.g. adornment-based optimization in concepts).
-    pub fn plan(&self, scope: &Environment) -> Result<Self, CompileError> {
+    pub fn plan(&self, scope: &Environment) -> Result<Self, TypeError> {
         let premises: Vec<_> = self.steps.iter().map(|step| step.premise.clone()).collect();
         Planner::from(premises).plan(scope)
     }

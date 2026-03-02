@@ -30,7 +30,7 @@
 //! ```
 
 use crate::artifact::TypeError;
-use crate::error::FormulaEvaluationError;
+use crate::error::EvaluationError;
 use crate::formula::query::FormulaQuery;
 use crate::selection::{Answer, Factors};
 use crate::term::Term;
@@ -103,18 +103,18 @@ impl Bindings {
     pub fn read<T: TryFrom<Value, Error = TypeError>>(
         &mut self,
         key: &str,
-    ) -> Result<T, FormulaEvaluationError> {
+    ) -> Result<T, EvaluationError> {
         Ok(T::try_from(self.resolve(key)?)?)
     }
 
     /// Resolve a parameter to its Value, tracking the read for provenance
-    pub fn resolve(&mut self, key: &str) -> Result<Value, FormulaEvaluationError> {
-        let param =
-            self.terms
-                .get(key)
-                .ok_or_else(|| FormulaEvaluationError::RequiredParameter {
-                    parameter: key.into(),
-                })?;
+    pub fn resolve(&mut self, key: &str) -> Result<Value, EvaluationError> {
+        let param = self
+            .terms
+            .get(key)
+            .ok_or_else(|| EvaluationError::MissingParameter {
+                parameter: key.into(),
+            })?;
 
         // Track what we read for provenance
         if let Some(factors) = self.source.resolve_factors(param) {
@@ -125,8 +125,8 @@ impl Bindings {
         let value =
             self.source
                 .resolve(param)
-                .map_err(|_| FormulaEvaluationError::UnboundVariable {
-                    term: param.clone(),
+                .map_err(|_| EvaluationError::UnboundFormulaVariable {
+                    term: Box::new(param.clone()),
                     parameter: key.into(),
                 })?;
 
@@ -177,25 +177,25 @@ impl Bindings {
     /// * `Ok(())` - Value written successfully
     /// * `Err(RequiredParameter)` - If key is not in terms mapping
     /// * `Err(VariableInconsistency)` - If assignment conflicts with existing value
-    pub fn write(&mut self, key: &str, value: &Value) -> Result<(), FormulaEvaluationError> {
+    pub fn write(&mut self, key: &str, value: &Value) -> Result<(), EvaluationError> {
         use crate::selection::Factor;
 
         // Fail if parameter not in terms (don't silently ignore)
-        let param =
-            self.terms
-                .get(key)
-                .ok_or_else(|| FormulaEvaluationError::RequiredParameter {
-                    parameter: key.into(),
-                })?;
+        let param = self
+            .terms
+            .get(key)
+            .ok_or_else(|| EvaluationError::MissingParameter {
+                parameter: key.into(),
+            })?;
 
         // For constant parameters, verify the computed value matches the constant.
         // Answer::assign treats constants as no-ops, so we must check here.
         if let Term::Constant(expected) = param {
             if expected != value {
-                return Err(FormulaEvaluationError::VariableInconsistency {
+                return Err(EvaluationError::Conflict {
                     parameter: key.into(),
-                    actual: Term::Constant(value.clone()),
-                    expected: param.clone(),
+                    actual: Box::new(Term::Constant(value.clone())),
+                    expected: Box::new(param.clone()),
                 });
             }
             // Constant matches — nothing to write to the answer
@@ -210,22 +210,15 @@ impl Bindings {
         };
 
         // Assign to the answer - this will fail if there's a conflicting value
-        self.source.assign(param, &factor).map_err(|_| {
-            FormulaEvaluationError::VariableInconsistency {
+        self.source
+            .assign(param, &factor)
+            .map_err(|_| EvaluationError::Conflict {
                 parameter: key.into(),
-                actual: param.clone(),
-                expected: Term::Constant(value.clone()),
-            }
-        })?;
+                actual: Box::new(param.clone()),
+                expected: Box::new(Term::Constant(value.clone())),
+            })?;
 
         Ok(())
-    }
-}
-
-impl From<TypeError> for FormulaEvaluationError {
-    fn from(error: TypeError) -> Self {
-        let TypeError::TypeMismatch(expected, actual) = error;
-        FormulaEvaluationError::TypeMismatch { expected, actual }
     }
 }
 
@@ -285,7 +278,7 @@ mod tests {
         let result = bindings.read::<u32>("missing");
         assert!(matches!(
             result,
-            Err(FormulaEvaluationError::RequiredParameter { .. })
+            Err(EvaluationError::MissingParameter { .. })
         ));
     }
 
@@ -303,7 +296,7 @@ mod tests {
         let result = bindings.read::<u32>("value");
         assert!(matches!(
             result,
-            Err(FormulaEvaluationError::UnboundVariable { .. })
+            Err(EvaluationError::UnboundFormulaVariable { .. })
         ));
     }
 
@@ -456,10 +449,7 @@ mod tests {
             "Writing a value that conflicts with the constant should fail"
         );
         assert!(
-            matches!(
-                result.unwrap_err(),
-                FormulaEvaluationError::VariableInconsistency { .. }
-            ),
+            matches!(result.unwrap_err(), EvaluationError::Conflict { .. }),
             "Should be a VariableInconsistency error"
         );
     }

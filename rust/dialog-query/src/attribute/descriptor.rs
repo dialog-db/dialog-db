@@ -1,7 +1,7 @@
 use crate::Parameters;
 use crate::artifact::{Attribute as ArtifactsAttribute, Entity, Value};
 use crate::attribute::The;
-use crate::error::{SchemaError, TypeError};
+use crate::error::{FieldTypeError, TypeError};
 use crate::relation::descriptor::RelationDescriptor;
 use crate::relation::query::RelationQuery;
 use crate::schema::Cardinality;
@@ -93,7 +93,7 @@ impl AttributeDescriptor {
 
     /// Checks that the given parameter's type is compatible with this
     /// attribute's content type.
-    pub fn check(&self, parameter: &Term<Any>) -> Result<(), TypeError> {
+    pub fn check(&self, parameter: &Term<Any>) -> Result<(), FieldTypeError> {
         match (self.content_type(), parameter.content_type()) {
             (None, _) => Ok(()),
             (_, None) => Ok(()),
@@ -102,7 +102,7 @@ impl AttributeDescriptor {
     }
 
     /// Type-checks an optional parameter against this attribute.
-    pub fn conform(&self, parameter: Option<&Term<Any>>) -> Result<(), TypeError> {
+    pub fn conform(&self, parameter: Option<&Term<Any>>) -> Result<(), FieldTypeError> {
         if let Some(param) = parameter {
             self.check(param)?;
         }
@@ -112,7 +112,7 @@ impl AttributeDescriptor {
     /// Validates a concrete [`Value`] against this attribute's content type and
     /// produces an [`Attribution`] — a validated (attribute, value, cardinality)
     /// triple ready for storage.
-    pub fn resolve(&self, value: Value) -> Result<Attribution, TypeError> {
+    pub fn resolve(&self, value: Value) -> Result<Attribution, FieldTypeError> {
         let type_matches = match self.content_type() {
             Some(expected) => value.data_type() == expected,
             None => true,
@@ -125,9 +125,9 @@ impl AttributeDescriptor {
                 cardinality: self.cardinality(),
             })
         } else {
-            Err(TypeError::TypeMismatch {
+            Err(FieldTypeError::TypeMismatch {
                 expected: self.content_type().unwrap(), // Safe because we checked Some above
-                actual: Term::Constant(value.clone()),
+                actual: Box::new(Term::Constant(value.clone())),
             })
         }
     }
@@ -146,7 +146,7 @@ impl AttributeDescriptor {
 
     /// Builds a [`RelationQuery`] from named parameters, type-checking each
     /// binding against this attribute's schema.
-    pub fn apply(&self, parameters: Parameters) -> Result<RelationQuery, SchemaError> {
+    pub fn apply(&self, parameters: Parameters) -> Result<RelationQuery, TypeError> {
         // Check that type of the `is` parameter matches the attribute's data type
         self.conform(parameters.get("is"))
             .map_err(|e| e.at("is".to_string()))?;
@@ -156,10 +156,10 @@ impl AttributeDescriptor {
             && let Some(actual) = this.content_type()
             && actual != Type::Entity
         {
-            return Err(SchemaError::TypeError {
+            return Err(TypeError::TypeMismatch {
                 binding: "this".to_string(),
                 expected: Type::Entity,
-                actual: this.clone(),
+                actual: Box::new(this.clone()),
             });
         }
 
