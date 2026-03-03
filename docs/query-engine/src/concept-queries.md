@@ -61,9 +61,9 @@ This creates a fresh answer scoped to the concept's parameters. For example:
 User query:  PersonMatch { this: ?employee, name: ?n }
 Parameters:  { "this": var("employee"), "name": var("n") }
 
-If incoming answer has: { ?employee -> alice, ?n -> "Alice" }
+If incoming answer has: { ?employee → alice, ?n → "Alice" }
 
-Extracted answer: { ?this -> alice, ?name -> "Alice" }
+Extracted answer: { ?this → alice, ?name → "Alice" }
                     ^ internal names    ^ from user bindings
 ```
 
@@ -76,10 +76,10 @@ The extracted answer is used as the seed for evaluating the concept's plan
 (a `Disjunction` of `Conjunction`s):
 
 ```
-Extracted answer -> Rule 1 plan -> answers
-                    Rule 2 plan -> answers
-                    ...
-                    (all merged via disjunction)
+Extracted answer → Rule 1 plan → answers
+                   Rule 2 plan → answers
+                   ...
+                   (all merged via disjunction)
 ```
 
 Each rule's `Conjunction` executes its premises in the planned order, expanding
@@ -97,8 +97,8 @@ fn merge_parameters(base: &Answer, result: &Answer, terms: &Parameters) -> Answe
 This reintegrates the concept's results into the outer query's answer:
 
 ```
-Rule result:    { ?this -> alice, ?name -> "Alice", ?role -> "Engineer" }
-Merged back:    { ?employee -> alice, ?n -> "Alice", ?role_var -> "Engineer" }
+Rule result:    { ?this → alice, ?name → "Alice", ?role → "Engineer" }
+Merged back:    { ?employee → alice, ?n → "Alice", ?role_var → "Engineer" }
                   ^ restored to user names
 ```
 
@@ -155,7 +155,7 @@ nested evaluation:
 
 ```
 Employee(?e, ?name, ?dept) :-
-    Person(?e, ?name, ?role),          <- nested concept query
+    Person(?e, ?name, ?role),          ← nested concept query
     (department/member, ?dept, ?e).
 ```
 

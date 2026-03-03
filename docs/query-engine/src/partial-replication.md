@@ -18,23 +18,23 @@ transparently.
 
 ```
 Query evaluation
-    |
-    v
+    │
+    ▼
 tree.stream_range(start..end)
-    |
-    v  traverse branch node
-    |
-    v  load child by hash
+    │
+    ▼  traverse branch node
+    │
+    ▼  load child by hash
 storage.read(hash)
-    |
-    +-- Local cache hit -> return immediately
-    |
-    +-- Cache miss -> fetch from remote
-        |
-        v
+    │
+    ├── Local cache hit → return immediately
+    │
+    └── Cache miss → fetch from remote
+        │
+        ▼
     Remote blob store (S3, R2, peer)
-        |
-        v
+        │
+        ▼
     Store locally + return
 ```
 
@@ -63,19 +63,19 @@ This means replication is driven by **query access patterns**:
 The storage system uses composable backends:
 
 ```
-+-------------------------+
-|  Cache Backend          |  In-memory LRU for hot nodes
-+-------------------------+
-|  Compression Backend    |  Compress/decompress on the fly
-+-------------------------+
-|  Journal Backend        |  Write-ahead log for durability
-+-------------------------+
-|  Primary Backend        |  Filesystem or IndexedDB
-+-------------------------+
-|  Transfer Backend       |  Fetch from remote on cache miss
-+-------------------------+
-|  Remote Backend         |  S3, R2, or peer connection
-+-------------------------+
+┌─────────────────────────┐
+│  Cache Backend          │  In-memory LRU for hot nodes
+├─────────────────────────┤
+│  Compression Backend    │  Compress/decompress on the fly
+├─────────────────────────┤
+│  Journal Backend        │  Write-ahead log for durability
+├─────────────────────────┤
+│  Primary Backend        │  Filesystem or IndexedDB
+├─────────────────────────┤
+│  Transfer Backend       │  Fetch from remote on cache miss
+├─────────────────────────┤
+│  Remote Backend         │  S3, R2, or peer connection
+└─────────────────────────┘
 ```
 
 Each layer implements `ContentAddressedStorage`:

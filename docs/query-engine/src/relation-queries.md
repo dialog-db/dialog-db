@@ -32,9 +32,9 @@ For each incoming answer in the stream:
    attribute, entity, and value.
 
 3. **Choose index**: The store picks the index based on what's constrained:
-   - Entity known -> **EAV** index (scan by entity, then attribute)
-   - Attribute known (entity unknown) -> **AEV** index (scan by attribute)
-   - Value known (entity and attribute unknown) -> **VAE** index (scan by
+   - Entity known → **EAV** index (scan by entity, then attribute)
+   - Attribute known (entity unknown) → **AEV** index (scan by attribute)
+   - Value known (entity and attribute unknown) → **VAE** index (scan by
      value)
 
 4. **Scan claims**: Iterate over matching claims from the chosen index.

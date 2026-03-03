@@ -77,12 +77,12 @@ same effect through **re-planning**:
 
 ```
 Original plan (nothing bound):
-  1. Scan person/name -> bind ?person, ?name     [cost: 1000]
-  2. Look up person/age -> bind ?age              [cost: 100]
+  1. Scan person/name → bind ?person, ?name     [cost: 1000]
+  2. Look up person/age → bind ?age              [cost: 100]
 
 Re-planned with name bound:
-  1. Look up person/name with name=Alice -> bind ?person  [cost: 100]
-  2. Look up person/age -> bind ?age                       [cost: 100]
+  1. Look up person/name with name=Alice → bind ?person  [cost: 100]
+  2. Look up person/age → bind ?age                       [cost: 100]
 ```
 
 The planner pushes the bound parameter's constraint into the first step, same
@@ -96,8 +96,8 @@ plan is compiled and cached. Subsequent queries with the same adornment reuse
 the cached plan.
 
 ```
-Magic sets: transform program -> evaluate
-Dialog:     query arrives -> derive adornment -> check cache -> compile if miss -> evaluate
+Magic sets: transform program → evaluate
+Dialog:     query arrives → derive adornment → check cache → compile if miss → evaluate
 ```
 
 ## Where Dialog Differs

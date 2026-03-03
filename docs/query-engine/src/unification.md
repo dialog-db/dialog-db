@@ -29,11 +29,11 @@ smaller) stream of answers:
 
 ```
 Empty answer
-    |
-    v
-+----------+    +----------+    +----------+
-| Premise 1 |--->| Premise 2 |--->| Premise 3 |---> Results
-+----------+    +----------+    +----------+
+    │
+    ▼
+┌──────────┐    ┌──────────┐    ┌──────────┐
+│ Premise 1 ├───►│ Premise 2 ├───►│ Premise 3 ├───► Results
+└──────────┘    └──────────┘    └──────────┘
 ```
 
 Each premise acts as a filter-and-expander:
@@ -58,13 +58,13 @@ When a premise finds a match, it clones the incoming answer and merges new
 bindings into it:
 
 ```
-Incoming answer: { ?person -> Entity(alice) }
-                        |
+Incoming answer: { ?person → Entity(alice) }
+                        │
 Premise: (person/age, ?person, ?age)
 Matched claim: (person/age, alice, 30)
-                        |
-                        v
-Expanded answer: { ?person -> Entity(alice), ?age -> 30 }
+                        │
+                        ▼
+Expanded answer: { ?person → Entity(alice), ?age → 30 }
 ```
 
 If the premise matches multiple claims, each match produces a separate
@@ -72,14 +72,14 @@ expanded answer:
 
 ```
 Incoming: { }  (empty)
-                |
+                │
 Premise: (person/name, ?p, ?name)
-Matches: alice->"Alice", bob->"Bob"
-                |
-          +-----+-----+
-          v           v
-{ ?p->alice,       { ?p->bob,
-  ?name->"Alice" }   ?name->"Bob" }
+Matches: alice→"Alice", bob→"Bob"
+                │
+          ┌─────┴─────┐
+          ▼           ▼
+{ ?p→alice,        { ?p→bob,
+  ?name→"Alice" }    ?name→"Bob" }
 ```
 
 ## How Answers Get Eliminated
@@ -92,12 +92,12 @@ If a premise tries to bind a variable to a value different from its existing
 binding, the answer is discarded:
 
 ```
-Incoming: { ?person -> Entity(alice) }
-                    |
+Incoming: { ?person → Entity(alice) }
+                    │
 Premise: (person/city, ?person, "NYC")
 No claim: (person/city, alice, "NYC")
-                    |
-                    v
+                    │
+                    ▼
               (eliminated, no match)
 ```
 
@@ -127,14 +127,14 @@ match, the answer is eliminated. If it produces *no* matches, the answer
 passes through unchanged:
 
 ```
-Incoming: { ?person -> alice }
-                |
+Incoming: { ?person → alice }
+                │
 Unless: (person/retired, ?person, true)
-                |
-    +-----------+-----------+
-    | Match found           | No match
-    v                       v
-(eliminated)         { ?person -> alice }
+                │
+    ┌───────────┴───────────┐
+    │ Match found           │ No match
+    ▼                       ▼
+(eliminated)         { ?person → alice }
                      (passes through)
 ```
 

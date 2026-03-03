@@ -6,25 +6,25 @@ engine reaches into the storage layer to find matching claims.
 ## The Storage Stack
 
 ```
-+-----------------------------------------------------+
-|  Query Engine (dialog-query)                        |
-|  RelationQuery -> ArtifactSelector -> select()      |
-+------------------------+----------------------------+
-                         |
-+------------------------v----------------------------+
-|  Artifacts (dialog-artifacts)                       |
-|  Index management, claim storage, selector routing  |
-+------------------------+----------------------------+
-                         |
-+------------------------v----------------------------+
-|  Prolly Tree (dialog-prolly-tree)                   |
-|  Content-addressed B-tree with range queries        |
-+------------------------+----------------------------+
-                         |
-+------------------------v----------------------------+
-|  Storage Backend (dialog-storage)                   |
-|  Memory, filesystem, S3, IndexedDB                  |
-+-----------------------------------------------------+
+┌─────────────────────────────────────────────────────┐
+│  Query Engine (dialog-query)                        │
+│  RelationQuery → ArtifactSelector → select()        │
+└────────────────────────┬────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────┐
+│  Artifacts (dialog-artifacts)                       │
+│  Index management, claim storage, selector routing  │
+└────────────────────────┬────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────┐
+│  Prolly Tree (dialog-prolly-tree)                   │
+│  Content-addressed B-tree with range queries        │
+└────────────────────────┬────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────┐
+│  Storage Backend (dialog-storage)                   │
+│  Memory, filesystem, S3, IndexedDB                  │
+└─────────────────────────────────────────────────────┘
 ```
 
 ## The Prolly Tree
@@ -59,7 +59,7 @@ without explicit rebalancing:
 Every node (branch or segment) is serialized and stored by its Blake3 hash:
 
 ```
-Node -> serialize (CBOR) -> hash (Blake3) -> store(hash, bytes)
+Node → serialize (CBOR) → hash (Blake3) → store(hash, bytes)
 ```
 
 This means:
@@ -81,10 +81,10 @@ All claims are stored in a single prolly tree using a **162-byte composite
 key**:
 
 ```
-+-----+----------+-------------+-----------+-----------------+
-| Tag | Entity   | Attribute   | ValueType | ValueReference  |
-| 1B  | 64B      | 64B         | 1B        | 32B             |
-+-----+----------+-------------+-----------+-----------------+
+┌─────┬──────────┬─────────────┬───────────┬─────────────────┐
+│ Tag │ Entity   │ Attribute   │ ValueType │ ValueReference  │
+│ 1B  │ 64B      │ 64B         │ 1B        │ 32B             │
+└─────┴──────────┴─────────────┴───────────┴─────────────────┘
 ```
 
 - **Tag** (1 byte): Identifies the index variant (EAV, AEV, VAE)
@@ -98,7 +98,7 @@ key**:
 The same claim is stored **three times** in the tree, each under a different
 key layout. The tag byte determines the sort order:
 
-### EAV Index (Entity -> Attribute -> Value)
+### EAV Index (Entity → Attribute → Value)
 
 ```
 Key: [EAV_TAG, Entity, Attribute, ValueType, ValueRef]
@@ -109,7 +109,7 @@ Optimized for: "What properties does entity X have?"
 Claims for the same entity are contiguous. Within an entity, claims are sorted
 by attribute, then by value.
 
-### AEV Index (Attribute -> Entity -> Value)
+### AEV Index (Attribute → Entity → Value)
 
 ```
 Key: [AEV_TAG, Attribute, Entity, ValueType, ValueRef]
@@ -121,7 +121,7 @@ Claims for the same attribute are contiguous. This is the most common access
 pattern for queries like `(person/name, ?person, ?name)` where only the
 attribute is known.
 
-### VAE Index (Value -> Attribute -> Entity)
+### VAE Index (Value → Attribute → Entity)
 
 ```
 Key: [VAE_TAG, ValueRef, Attribute, Entity, ...]
@@ -140,11 +140,11 @@ in the selector:
 ```rust
 fn select(&self, selector: ArtifactSelector<Constrained>) -> impl Stream {
     if selector.entity().is_some() {
-        Self::scan_eav(...)      // Entity known -> use EAV
+        Self::scan_eav(...)      // Entity known → use EAV
     } else if selector.attribute().is_some() {
-        Self::scan_aev(...)      // Attribute known -> use AEV
+        Self::scan_aev(...)      // Attribute known → use AEV
     } else {
-        Self::scan_vae(...)      // Only value known -> use VAE
+        Self::scan_vae(...)      // Only value known → use VAE
     }
 }
 ```

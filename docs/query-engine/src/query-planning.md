@@ -9,14 +9,14 @@ use that variable. The planner's job is to find a cheap ordering.
 The `Planner` is a two-state machine defined in `dialog-query/src/planner.rs`:
 
 ```
-         +------------------------------+
-         |  Idle { premises: Vec }      |
-         +-------------+----------------+
-                       |  first call to top()
-                       v
-         +------------------------------+
-         |  Active { candidates: Vec }  |<--- subsequent top() calls
-         +------------------------------+     update candidates in-place
+         ┌──────────────────────────────┐
+         │  Idle { premises: Vec }      │
+         └──────────┬───────────────────┘
+                    │  first call to top()
+                    ▼
+         ┌──────────────────────────────┐
+         │  Active { candidates: Vec }  │◄─── subsequent top() calls
+         └──────────────────────────────┘     update candidates in-place
 ```
 
 - **Idle**: Holds raw, unanalyzed premises. On the first call to `top()`,
@@ -27,19 +27,19 @@ The `Planner` is a two-state machine defined in `dialog-query/src/planner.rs`:
 ## The Planning Algorithm
 
 ```
-plan(premises, outer_scope) -> Conjunction:
+plan(premises, outer_scope) → Conjunction:
 
-    bound <- clone(outer_scope)
-    steps <- []
-    cost  <- 0
+    bound ← clone(outer_scope)
+    steps ← []
+    cost  ← 0
 
     while premises remain:
-        step <- top(bound)          // pick cheapest viable candidate
-        cost <- cost + step.cost
-        bound <- bound | step.binds // new variables flow into scope
+        step ← top(bound)          // pick cheapest viable candidate
+        cost ← cost + step.cost
+        bound ← bound ∪ step.binds // new variables flow into scope
         steps.push(step)
 
-    binds <- bound \ outer_scope    // variables new to this plan
+    binds ← bound \ outer_scope    // variables new to this plan
     return Conjunction { steps, cost, binds, env: outer_scope }
 ```
 
@@ -116,12 +116,12 @@ candidates are updated via `candidate.update(&new_scope)`:
 
 ```
 For each parameter in schema:
-  if param entered scope    -> move from requires/binds to env
-  if param left scope       -> move from env back to requires/binds
+  if param entered scope    → move from requires/binds to env
+  if param left scope       → move from env back to requires/binds
   (supports both growth and replanning)
 
 Re-estimate cost with updated env.
-If requires is now empty -> transition Blocked to Viable.
+If requires is now empty → transition Blocked → Viable.
 ```
 
 This is bidirectional: the update handles both the normal case (scope grows as
@@ -162,7 +162,7 @@ pub struct Conjunction {
 During evaluation, each step receives the output of the previous step:
 
 ```
-seed answer -> Step 1 -> answers -> Step 2 -> answers -> ... -> final answers
+seed answer → Step 1 → answers → Step 2 → answers → ... → final answers
 ```
 
 Each step acts as a filter-and-expander: it takes each incoming answer,
@@ -174,7 +174,7 @@ new bindings.
 A conjunction can be re-planned against a different scope:
 
 ```rust
-conjunction.plan(&new_scope) -> new Conjunction
+conjunction.plan(&new_scope) → new Conjunction
 ```
 
 This extracts the premises from the existing steps, creates a new `Planner`,

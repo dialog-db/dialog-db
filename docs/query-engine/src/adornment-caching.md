@@ -38,16 +38,16 @@ the concept is queried. This determines which premises should run first:
 
 ```
 Adornment 0b001 (name bound):
-  -> Plan: look up person/name first (cheap, name is constrained)
-  -> Then: look up person/role (entity now bound from step 1)
+  → Plan: look up person/name first (cheap, name is constrained)
+  → Then: look up person/role (entity now bound from step 1)
 
 Adornment 0b100 (this bound):
-  -> Plan: look up person/name first (cheap, entity is constrained)
-  -> Then: look up person/role (entity already bound)
+  → Plan: look up person/name first (cheap, entity is constrained)
+  → Then: look up person/role (entity already bound)
 
 Adornment 0b000 (nothing bound):
-  -> Plan: scan person/name (expensive, no constraints)
-  -> Then: look up person/role (entity now bound)
+  → Plan: scan person/name (expensive, no constraints)
+  → Then: look up person/role (entity now bound)
 ```
 
 Each adornment produces a different optimal plan. The adornment serves as the
@@ -79,9 +79,9 @@ concept_rules.plan(terms, answer):
 
   1. Derive adornment from terms and answer
   2. Read lock: check cache for this adornment
-     |-- Hit -> return cached Arc<Disjunction>
-     +-- Miss -> continue to step 3
-  3. Convert adornment -> Environment
+     ├── Hit → return cached Arc<Disjunction>
+     └── Miss → continue to step 3
+  3. Convert adornment → Environment
   4. Re-plan all rules (implicit + installed) for this environment
   5. Combine plans into Disjunction
   6. Write lock: insert into cache

@@ -250,21 +250,21 @@ The pipeline from schema definition to executable query:
 
 ```
 Rust macros / JSON notation
-       |
-       v
+       │
+       ▼
 AttributeDescriptor / ConceptDescriptor / FormulaQuery
-       |
-       v
+       │
+       ▼
 Premise (Assert or Unless)
-       |
-       v
+       │
+       ▼
 Proposition (Relation, Concept, Formula, or Constraint)
-       |
-       v
-Planner -> Conjunction (ordered execution plan)
-       |
-       v
-Evaluation -> Stream<Answer>
+       │
+       ▼
+Planner → Conjunction (ordered execution plan)
+       │
+       ▼
+Evaluation → Stream<Answer>
 ```
 
 The next chapter covers how query patterns are assembled from these
