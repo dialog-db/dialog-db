@@ -1,5 +1,5 @@
 {
-  description = "Tonk";
+  description = "Dialog";
 
   inputs = {
     crane.url = "github:ipetkov/crane";
