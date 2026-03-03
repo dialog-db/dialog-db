@@ -642,9 +642,6 @@ mod tests {
     use super::*;
     use dialog_s3_credentials::s3::Credentials as S3Credentials;
 
-    // #[cfg(all(feature = "helpers", feature = "integration-tests"))]
-    // use helpers::*;
-
     const TEST_SUBJECT: &str = "did:key:zTestSubject";
 
     #[allow(dead_code)]

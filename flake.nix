@@ -61,9 +61,7 @@
         );
 
         inherit (rustHelpers)
-          buildCrate
           buildWasmCrate
-          buildTrunkCrate
           buildTestArchive
           cargoChecks
           rustToolchain
@@ -87,7 +85,6 @@
             "WASM_BINDGEN_TEST_TIMEOUT" = "180";
           }
           // lib.optionalAttrs stdenv.isLinux {
-            "PUPPETEER_EXECUTABLE_PATH" = "${chromium}/bin/chromium-asdsad";
             "CHROME" = "${chromium}/bin/chromium";
             "CHROMEDRIVER" = "${chromedriver}/bin/chromedriver";
           };
@@ -151,9 +148,7 @@
             pname = "dialog-artifacts-web-tests";
             version = "0.1.0";
             src = ./typescript/dialog-artifacts-web-tests/.;
-            # npmDepsHash = "sha256-o0NiimFWGXf8xQlsmQ+L+B11RqNStu7TVo5iw1GU5sU=";
             npmDepsHash = "sha256-sMaPwgasaObNZPeGGKynj8DL/V5AXNWU82AOBOp530g=";
-            # npmDepsHash = lib.fakeHash;
 
             buildInputs = [
               dialog-artifacts-web
@@ -164,8 +159,6 @@
 
             env = {
               "CHROME_PATH" = "${chromium}/bin/chromium";
-              # "PUPPETEER_SKIP_DOWNLOAD" = "true";
-              "PUPPETEER_EXECUTABLE_PATH" = "${chromium}/bin/chromium-asdsad";
             };
 
             buildPhase = ''
