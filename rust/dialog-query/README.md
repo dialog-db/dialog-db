@@ -52,6 +52,24 @@ mod employee {
 
 > Note: cardinality affects whether an existing value is retracted when a new one is asserted — cardinality one implies replacement, cardinality many accumulates. This is not yet fully implemented.
 
+### Ad-hoc Attributes
+
+For quick prototyping or one-off queries, the `the!` macro provides a dynamic path that bypasses the typed attribute system. The attribute is identified by a `"domain/name"` string literal, validated at compile time:
+
+```rs
+use dialog_query::the;
+
+let alice = Entity::new()?;
+
+// Assert without a predefined attribute type
+let mut edit = session.edit();
+edit.assert(the!("employee/name").of(alice.clone()).is("Alice".to_string()));
+edit.assert(the!("employee/role").of(alice.clone()).is("cryptographer".to_string()));
+session.commit(edit).await?;
+```
+
+Dynamic expressions are always concrete (no `Term` variables) and untyped (values are `Value`, not a specific Rust type). They are good fit for dynamic exploration. Typed attributes are better fit for all other uses cases as they provide compile-time type safety and richer metadata (cardinality, description).
+
 ### Concepts
 
 A concept groups related attributes into a struct, providing a higher-level view of an entity — similar to a relation in relational databases, but applied at query time rather than write time (schema-on-query). Any entity can have attributes from multiple concepts without migration.
@@ -96,17 +114,22 @@ let query = Query::<employee::Name> {
 };
 ```
 
-The expression syntax can also produce premises for use in rules:
+The expression syntax can also produce premises for use in rules. The same methods works with both concrete values and `Term` variables. Type system determines what operations are valid based on the argument types:
 
 ```rs
 // As a premise (both terms)
 let premise: Premise = employee::Name::of(Term::var("entity"))
-    .matches(Term::var("name"))
+    .is(Term::var("name"))
     .into();
 
-// As a premise (concrete entity)
+// As a premise (concrete entity, variable value)
 let premise: Premise = employee::Name::of(alice.clone())
-    .matches(Term::var("name"))
+    .is(Term::var("name"))
+    .into();
+
+// As a premise (concrete entity, concrete value) — also usable as a statement
+let premise: Premise = employee::Name::of(alice.clone())
+    .is("Alice")
     .into();
 ```
 
@@ -128,7 +151,7 @@ let results = pattern.perform(&session).try_vec().await?;
 
 ### Attributes
 
-The `Attribute::of(...).is(...)` expression syntax is used for writes. When both the entity and value are concrete, the expression implements `Statement`:
+The same `Attribute::of(...).is(...)` syntax used for queries also works for writes, but only when both the entity and value are concrete (not `Term` variables), the expression implements `Statement`:
 
 ```rs
 let mut session = Session::open(artifacts);
@@ -140,9 +163,9 @@ edit.assert(employee::Role::of(alice.clone()).is("cryptographer"));
 
 session.commit(edit).await?;
 
-// Retract a single attribute using ! (Not)
+// Retract a single attribute
 let mut edit = session.edit();
-edit.assert(!employee::Name::of(alice).is("Alice"));
+employee::Name::of(alice).is("Alice").retract(&mut edit);
 session.commit(edit).await?;
 ```
 

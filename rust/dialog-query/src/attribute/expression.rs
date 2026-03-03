@@ -4,7 +4,7 @@ use crate::attribute::AttributeDescriptor;
 use crate::descriptor::Descriptor;
 use crate::negation::Negation;
 use crate::relation::query::RelationQuery;
-use crate::statement::{Retraction, Statement};
+use crate::statement::Statement;
 use crate::types::Any;
 use crate::types::Scalar;
 use crate::{Cardinality, Entity, Premise, Proposition, Term, Transaction};
@@ -49,7 +49,6 @@ pub trait AttributeExpressionBuilder: Attribute {
     /// Start building an expression for this attribute on a given entity.
     ///
     /// The entity can be either a concrete [`Entity`] or a [`Term<Entity>`].
-    /// Call `.is(value)` for concrete values or `.matches(term)` for query terms.
     fn of<Of>(entity: Of) -> AttributeBuilder<Self, Of>
     where
         Term<Entity>: From<Of>,
@@ -60,8 +59,8 @@ pub trait AttributeExpressionBuilder: Attribute {
 
 /// Intermediate builder produced by [`AttributeExpressionBuilder::of`].
 ///
-/// Holds the entity (or entity term) and waits for `.is(value)` or
-/// `.matches(term)` to produce an [`AttributeExpression`].
+/// Holds the entity (or entity term) and waits for [`.is()`](Self::is) to
+/// produce an [`AttributeExpression`].
 pub struct AttributeBuilder<A: Attribute, Of>
 where
     Term<Entity>: From<Of>,
@@ -82,43 +81,39 @@ where
         }
     }
 
-    /// Set a concrete value, producing a statement-capable expression.
+    /// Set the value for this attribute expression.
     ///
-    /// Accepts anything that converts into the attribute type:
-    /// ```no_run
-    /// # use dialog_query::{Attribute, Entity};
-    /// # #[derive(Attribute, Clone)] struct Name(pub String);
-    /// # let alice = Entity::new().unwrap();
-    /// Name::of(alice).is("Alice");
-    /// ```
-    pub fn is(self, value: impl Into<A>) -> AttributeExpression<A, Of, A> {
-        AttributeExpression {
-            of: self.of,
-            is: value.into(),
-            cause: None,
-            _marker: PhantomData,
-        }
-    }
-
-    /// Set a query term, producing a query-capable expression.
+    /// Accepts **both** concrete values and query terms — the `Is` type
+    /// parameter is preserved unevaluated in the resulting
+    /// [`AttributeExpression`]. Downstream trait impls then impose
+    /// additional constraints based on how the expression is used:
     ///
-    /// Accepts anything that converts into `Term<A::Type>`:
+    /// - **Statement** (assert/retract): requires `Is: Into<A>`, so only
+    ///   concrete values (e.g. `"Alice"`) are accepted.
+    /// - **Query** (into [`Premise`]): requires `Is: IntoValueTerm<A>`,
+    ///   so both concrete values and [`Term`] variables work.
+    ///
+    /// The `Into<Term<A::Type>>` bound here provides *construction-time*
+    /// type safety — e.g. passing an `i32` for a `String` attribute is a
+    /// compile error — without eagerly converting the value, which would
+    /// erase the distinction between concrete and term values.
+    ///
+    /// # Examples
+    ///
     /// ```no_run
     /// # use dialog_query::{Attribute, Entity, Term};
     /// # #[derive(Attribute, Clone)] struct Name(pub String);
     /// # let alice = Entity::new().unwrap();
-    /// Name::of(alice).matches(Term::<String>::var("name"));
+    /// // Concrete value can be used as statement or query:
+    /// Name::of(alice.clone()).is("Alice");
+    ///
+    /// // Term variable query only:
+    /// Name::of(Term::var("e")).is(Term::var("name"));
     /// ```
-    pub fn matches(
-        self,
-        term: impl Into<Term<A::Type>>,
-    ) -> AttributeExpression<A, Of, Term<A::Type>>
-    where
-        A::Type: Scalar,
-    {
+    pub fn is<Is: Into<Term<A::Type>>>(self, value: Is) -> AttributeExpression<A, Of, Is> {
         AttributeExpression {
             of: self.of,
-            is: term.into(),
+            is: value,
             cause: None,
             _marker: PhantomData,
         }
@@ -132,10 +127,19 @@ pub type AttributeStatement<A> = AttributeExpression<A, Entity, A>;
 
 /// A typed expression binding an attribute to an entity and a value.
 ///
-/// Generic over:
+/// The `Is` type parameter uses **deferred conversion**: the raw value
+/// passed to [`.is()`](AttributeBuilder::is) is stored as-is. This lets
+/// downstream trait impls impose their own constraints:
+///
+/// - [`Statement`] requires `Is: Into<A>` — only concrete values.
+/// - [`From<...> for Premise`] requires `Is: IntoValueTerm<A>` — concrete
+///   values or [`Term`] variables.
+///
+/// # Type Parameters
+///
 /// - `A` — the attribute type
 /// - `Of` — entity position (`Entity` or `Term<Entity>`)
-/// - `Is` — value position (`A` for concrete, `Term<A::Type>` for queries)
+/// - `Is` — value position (deferred; e.g. `&str`, `A`, `Term<A::Type>`)
 /// - `Because` — cause position (`Option<Cause>` or `Term<Cause>`)
 ///
 /// # Examples
@@ -148,12 +152,12 @@ pub type AttributeStatement<A> = AttributeExpression<A, Entity, A>;
 ///
 /// let alice = Entity::new().unwrap();
 ///
-/// // Concrete: implements Statement
+/// // Concrete: implements Statement (assert/retract)
 /// let expr = Name::of(alice.clone()).is("Alice");
 ///
-/// // Query: converts into Premise via .matches()
-/// let premise: dialog_query::Premise = Name::of(Term::<Entity>::var("e"))
-///     .matches(Term::<String>::var("v"))
+/// // Query: converts into Premise
+/// let premise: dialog_query::Premise = Name::of(Term::var("e"))
+///     .is(Term::<String>::var("v"))
 ///     .into();
 /// ```
 pub struct AttributeExpression<A: Attribute, Of, Is, Because: ExpressionCause = Option<Cause>> {
@@ -207,15 +211,17 @@ pub(crate) fn relation_query<A: Attribute + Descriptor<AttributeDescriptor>>(
     )
 }
 
-// Statement impl: Entity + A (concrete value), Option<Cause>
-impl<A> Statement for AttributeExpression<A, Entity, A, Option<Cause>>
+// Statement: requires Is: Into<A>, so only concrete values are accepted.
+impl<A, Is> Statement for AttributeExpression<A, Entity, Is, Option<Cause>>
 where
     A: Attribute + Descriptor<AttributeDescriptor> + Clone,
+    Is: Into<A>,
 {
     fn assert(self, transaction: &mut Transaction) {
         let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
         let the = desc.the().clone();
-        let value = self.is.value().clone().into();
+        let attr: A = self.is.into();
+        let value = attr.value().clone().into();
         if desc.cardinality() == Cardinality::One {
             transaction.associate_unique(the, self.of, value);
         } else {
@@ -225,159 +231,65 @@ where
 
     fn retract(self, transaction: &mut Transaction) {
         let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
-        transaction.dissociate(desc.the().clone(), self.of, self.is.value().clone().into());
-    }
-}
-
-// Not for concrete (Entity, A) → Retraction
-impl<A> std::ops::Not for AttributeExpression<A, Entity, A, Option<Cause>>
-where
-    A: Attribute + Descriptor<AttributeDescriptor> + Clone,
-{
-    type Output = Retraction<Self>;
-
-    fn not(self) -> Self::Output {
-        self.revert()
+        let attr: A = self.is.into();
+        transaction.dissociate(desc.the().clone(), self.of, attr.value().clone().into());
     }
 }
 
 // IntoIterator for concrete → single DynamicAttributeExpression
-impl<A> IntoIterator for AttributeExpression<A, Entity, A, Option<Cause>>
+impl<A, Is> IntoIterator for AttributeExpression<A, Entity, Is, Option<Cause>>
 where
     A: Attribute + Descriptor<AttributeDescriptor> + Clone,
+    Is: Into<A>,
 {
     type Item = crate::attribute::DynamicAttributeExpression;
     type IntoIter = std::iter::Once<crate::attribute::DynamicAttributeExpression>;
 
     fn into_iter(self) -> Self::IntoIter {
         let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
+        let attr: A = self.is.into();
         std::iter::once(crate::attribute::DynamicAttributeExpression {
             the: desc.the().clone(),
             of: self.of,
-            is: self.is.value().clone().into(),
+            is: attr.value().clone().into(),
             cause: None,
             cardinality: Some(desc.cardinality()),
         })
     }
 }
 
-// Into<Premise> — (Entity, A): concrete entity, concrete value
-impl<A, Because> From<AttributeExpression<A, Entity, A, Because>> for Premise
+// Into<Premise>: requires Of: Into<Term<Entity>> and Is: Into<Term<A::Type>>.
+// The Into<Term<A::Type>> bound is already guaranteed by .is(), so any value
+// that was accepted at construction time can be used as a query.
+// The Term<A::Type> is then widened to Term<Any> for the underlying RelationQuery.
+impl<A, Of, Is, Because> From<AttributeExpression<A, Of, Is, Because>> for Premise
 where
     A: Attribute + Descriptor<AttributeDescriptor> + Clone,
+    A::Type: Scalar,
+    Of: Into<Term<Entity>>,
+    Is: Into<Term<A::Type>>,
     Because: ExpressionCause,
 {
-    fn from(expr: AttributeExpression<A, Entity, A, Because>) -> Self {
+    fn from(expression: AttributeExpression<A, Of, Is, Because>) -> Self {
+        let value: Term<A::Type> = expression.is.into();
         let query = relation_query::<A>(
-            Term::Constant(Value::from(expr.of.clone())),
-            Term::Constant(expr.is.value().clone().into()),
-            expr.cause.as_cause_term(),
+            expression.of.into(),
+            value.into(),
+            expression.cause.as_cause_term(),
         );
         Premise::Assert(Proposition::Relation(Box::new(query)))
     }
 }
 
-// Into<Premise> — (Entity, Term<A::Type>): concrete entity, term value
-impl<A, Because> From<AttributeExpression<A, Entity, Term<A::Type>, Because>> for Premise
+// Not for query expressions → Premise::Unless
+// Uses the same bounds as From<...> for Premise to build the inner
+// proposition, then wraps it in Unless for negation.
+impl<A, Of, Is, Because> std::ops::Not for AttributeExpression<A, Of, Is, Because>
 where
     A: Attribute + Descriptor<AttributeDescriptor> + Clone,
     A::Type: Scalar,
-    Because: ExpressionCause,
-{
-    fn from(expr: AttributeExpression<A, Entity, Term<A::Type>, Because>) -> Self {
-        let query = relation_query::<A>(
-            Term::Constant(Value::from(expr.of.clone())),
-            expr.is.into(),
-            expr.cause.as_cause_term(),
-        );
-        Premise::Assert(Proposition::Relation(Box::new(query)))
-    }
-}
-
-// Into<Premise> — (Term<Entity>, A): term entity, concrete value
-impl<A, Because> From<AttributeExpression<A, Term<Entity>, A, Because>> for Premise
-where
-    A: Attribute + Descriptor<AttributeDescriptor> + Clone,
-    Because: ExpressionCause,
-{
-    fn from(expr: AttributeExpression<A, Term<Entity>, A, Because>) -> Self {
-        let query = relation_query::<A>(
-            expr.of,
-            Term::Constant(expr.is.value().clone().into()),
-            expr.cause.as_cause_term(),
-        );
-        Premise::Assert(Proposition::Relation(Box::new(query)))
-    }
-}
-
-// Into<Premise> — (Term<Entity>, Term<A::Type>): both terms
-impl<A, Because> From<AttributeExpression<A, Term<Entity>, Term<A::Type>, Because>> for Premise
-where
-    A: Attribute + Descriptor<AttributeDescriptor> + Clone,
-    A::Type: Scalar,
-    Because: ExpressionCause,
-{
-    fn from(expr: AttributeExpression<A, Term<Entity>, Term<A::Type>, Because>) -> Self {
-        let query = relation_query::<A>(expr.of, expr.is.into(), expr.cause.as_cause_term());
-        Premise::Assert(Proposition::Relation(Box::new(query)))
-    }
-}
-
-// Retraction<(Entity, A)> → Premise::Unless
-impl<A> From<Retraction<AttributeExpression<A, Entity, A, Option<Cause>>>> for Premise
-where
-    A: Attribute + Descriptor<AttributeDescriptor> + Clone,
-{
-    fn from(retraction: Retraction<AttributeExpression<A, Entity, A, Option<Cause>>>) -> Self {
-        let expr = !retraction; // unwrap via Not
-        let premise: Premise = expr.into();
-        match premise {
-            Premise::Assert(prop) => Premise::Unless(Negation::not(prop)),
-            other => other,
-        }
-    }
-}
-
-// Not for (Entity, Term) → Premise::Unless
-impl<A, Because> std::ops::Not for AttributeExpression<A, Entity, Term<A::Type>, Because>
-where
-    A: Attribute + Descriptor<AttributeDescriptor> + Clone,
-    A::Type: Scalar,
-    Because: ExpressionCause,
-{
-    type Output = Premise;
-
-    fn not(self) -> Self::Output {
-        let premise: Premise = self.into();
-        match premise {
-            Premise::Assert(prop) => Premise::Unless(Negation::not(prop)),
-            other => other,
-        }
-    }
-}
-
-// Not for (Term<Entity>, A) → Premise::Unless
-impl<A, Because> std::ops::Not for AttributeExpression<A, Term<Entity>, A, Because>
-where
-    A: Attribute + Descriptor<AttributeDescriptor> + Clone,
-    Because: ExpressionCause,
-{
-    type Output = Premise;
-
-    fn not(self) -> Self::Output {
-        let premise: Premise = self.into();
-        match premise {
-            Premise::Assert(prop) => Premise::Unless(Negation::not(prop)),
-            other => other,
-        }
-    }
-}
-
-// Not for (Term<Entity>, Term<A::Type>) → Premise::Unless
-impl<A, Because> std::ops::Not for AttributeExpression<A, Term<Entity>, Term<A::Type>, Because>
-where
-    A: Attribute + Descriptor<AttributeDescriptor> + Clone,
-    A::Type: Scalar,
+    Of: Into<Term<Entity>>,
+    Is: Into<Term<A::Type>>,
     Because: ExpressionCause,
 {
     type Output = Premise;
@@ -395,10 +307,8 @@ where
 mod tests {
     use super::*;
     use crate::artifact::Value;
-    use crate::attribute::Attribute;
     use crate::premise::Premise;
     use crate::proposition::Proposition;
-    use crate::session::transaction::Edit;
     use crate::statement::Statement;
 
     mod person {
@@ -409,72 +319,69 @@ mod tests {
         pub struct Name(pub String);
     }
 
-    #[dialog_common::test]
-    fn it_creates_concrete_expression() {
-        let alice = Entity::new().unwrap();
-        let expr = person::Name::of(alice.clone()).is("Alice");
-
-        assert_eq!(expr.of, alice);
-        assert_eq!(expr.is.value(), "Alice");
-    }
+    // -- Statement tests: .is() with concrete values --
 
     #[dialog_common::test]
-    fn it_asserts_concrete_expression() {
+    fn it_asserts_with_str() {
         let alice = Entity::new().unwrap();
-        let expr = person::Name::of(alice).is("Alice");
+        let statement = person::Name::of(alice).is("Alice");
 
         let mut transaction = Transaction::new();
-        expr.assert(&mut transaction);
+        statement.assert(&mut transaction);
         assert!(!transaction.is_empty());
     }
 
     #[dialog_common::test]
     fn it_asserts_with_attribute_value() {
         let alice = Entity::new().unwrap();
-        let expr = person::Name::of(alice).is(person::Name("Alice".into()));
+        let statement = person::Name::of(alice).is(person::Name("Alice".into()));
 
         let mut transaction = Transaction::new();
-        expr.assert(&mut transaction);
+        statement.assert(&mut transaction);
         assert!(!transaction.is_empty());
     }
 
     #[dialog_common::test]
-    fn it_retracts_concrete_expression() {
+    fn it_retracts_with_str() {
         let alice = Entity::new().unwrap();
-        let expr = person::Name::of(alice).is("Alice");
+        let statement = person::Name::of(alice).is("Alice");
 
         let mut transaction = Transaction::new();
-        expr.retract(&mut transaction);
+        statement.retract(&mut transaction);
         assert!(!transaction.is_empty());
     }
 
     #[dialog_common::test]
     fn it_negates_concrete_expression() {
+        // !expr now produces Premise::Unless (query-level negation),
+        // not Retraction. For statement-level retraction, use .retract() directly.
         let alice = Entity::new().unwrap();
-        let expr = person::Name::of(alice).is("Alice");
-        let retraction = !expr;
+        let premise = !person::Name::of(alice).is("Alice");
 
-        let mut transaction = Transaction::new();
-        retraction.merge(&mut transaction);
-        assert!(!transaction.is_empty());
+        match premise {
+            Premise::Unless(_) => {}
+            _ => panic!("Expected Unless premise"),
+        }
     }
 
     #[dialog_common::test]
     fn it_iterates_concrete_expression() {
         let alice = Entity::new().unwrap();
-        let expr = person::Name::of(alice.clone()).is("Alice");
+        let statement = person::Name::of(alice.clone()).is("Alice");
 
-        let items: Vec<crate::attribute::DynamicAttributeExpression> = expr.into_iter().collect();
+        let items: Vec<crate::attribute::DynamicAttributeExpression> =
+            statement.into_iter().collect();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].of, alice);
         assert_eq!(items[0].is, Value::String("Alice".into()));
     }
 
+    // -- Query tests: .is() with Term variables --
+
     #[dialog_common::test]
-    fn it_converts_both_terms_to_premise() {
-        let premise: Premise = person::Name::of(Term::<Entity>::var("e"))
-            .matches(Term::<String>::var("v"))
-            .into();
+    fn it_queries_with_both_terms() {
+        // Both entity and value are variables — query only.
+        let premise: Premise = person::Name::of(Term::var("e")).is(Term::var("v")).into();
 
         match premise {
             Premise::Assert(Proposition::Relation(query)) => {
@@ -487,11 +394,10 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn it_converts_entity_constant_value_term_to_premise() {
+    fn it_queries_with_concrete_entity_and_term_value() {
+        // Concrete entity, variable value — query only.
         let alice = Entity::new().unwrap();
-        let premise: Premise = person::Name::of(alice.clone())
-            .matches(Term::<String>::var("v"))
-            .into();
+        let premise: Premise = person::Name::of(alice).is(Term::<String>::var("v")).into();
 
         match premise {
             Premise::Assert(Proposition::Relation(query)) => {
@@ -504,10 +410,13 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn it_converts_entity_term_value_constant_to_premise() {
-        let premise: Premise = person::Name::of(Term::<Entity>::var("e"))
-            .is("Alice")
-            .into();
+    fn it_queries_with_term_entity_and_concrete_value() {
+        // Variable entity, concrete value — query via .is(&str).
+        // &str: IntoValueTerm<Name> because &str: Into<Term<String>>
+        // which satisfies the IntoValueTerm blanket for Term<A::Type>.
+        // Wait — &str is not Term<A::Type>. We need an IntoValueTerm
+        // impl for raw values too. Let's verify this works via Into<Premise>.
+        let premise: Premise = person::Name::of(Term::var("e")).is("Alice").into();
 
         match premise {
             Premise::Assert(Proposition::Relation(query)) => {
@@ -520,7 +429,8 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn it_converts_both_concrete_to_premise() {
+    fn it_queries_with_both_concrete() {
+        // Both concrete — works as both statement and query.
         let alice = Entity::new().unwrap();
         let premise: Premise = person::Name::of(alice).is("Alice").into();
 
@@ -534,10 +444,12 @@ mod tests {
         }
     }
 
+    // -- Negation tests --
+
     #[dialog_common::test]
-    fn it_negates_query_expression() {
+    fn it_negates_term_value_expression() {
         let alice = Entity::new().unwrap();
-        let premise = !person::Name::of(alice).matches(Term::<String>::var("v"));
+        let premise = !person::Name::of(alice).is(Term::<String>::var("v"));
 
         match premise {
             Premise::Unless(_) => {}
@@ -547,13 +459,15 @@ mod tests {
 
     #[dialog_common::test]
     fn it_negates_both_terms_expression() {
-        let premise = !person::Name::of(Term::<Entity>::var("e")).matches(Term::<String>::var("v"));
+        let premise = !person::Name::of(Term::var("e")).is(Term::<String>::var("v"));
 
         match premise {
             Premise::Unless(_) => {}
             _ => panic!("Expected Unless premise"),
         }
     }
+
+    // -- Cause tests --
 
     #[dialog_common::test]
     fn it_attaches_concrete_cause() {
@@ -571,9 +485,9 @@ mod tests {
 
     #[dialog_common::test]
     fn it_attaches_term_cause() {
-        let premise: Premise = person::Name::of(Term::<Entity>::var("e"))
-            .matches(Term::<String>::var("v"))
-            .cause(Term::<Cause>::var("c"))
+        let premise: Premise = person::Name::of(Term::var("e"))
+            .is(Term::<String>::var("v"))
+            .cause(Term::var("c"))
             .into();
 
         match premise {
@@ -584,6 +498,47 @@ mod tests {
             _ => panic!("Expected Relation premise"),
         }
     }
+
+    // -- Deferred inference tests --
+    // These validate that .is() defers conversion, allowing the same
+    // expression to be used as a statement OR a query depending on context.
+
+    #[dialog_common::test]
+    fn it_uses_same_is_for_statement_and_query() {
+        let alice = Entity::new().unwrap();
+
+        // The same .is("Alice") expression works for both:
+
+        // As a statement (assert):
+        let expr = person::Name::of(alice.clone()).is("Alice");
+        let mut transaction = Transaction::new();
+        expr.assert(&mut transaction);
+        assert!(!transaction.is_empty());
+
+        // As a query (into Premise):
+        let expression = person::Name::of(alice).is("Alice");
+        let premise: Premise = expression.into();
+        assert!(matches!(premise, Premise::Assert(Proposition::Relation(_))));
+    }
+
+    #[dialog_common::test]
+    fn it_rejects_term_as_statement() {
+        // This test documents that Term::var("v") cannot be used as a
+        // statement — the code below should NOT compile. We verify the
+        // positive path (Term works as query) and rely on the type system
+        // to prevent the negative path.
+        let alice = Entity::new().unwrap();
+        let expression = person::Name::of(alice).is(Term::<String>::var("v"));
+
+        // This compiles — Term works as query:
+        let _premise: Premise = expression.into();
+
+        // This would NOT compile — Term<String> does not impl Into<Name>:
+        // let expr = person::Name::of(alice).is(Term::<String>::var("v"));
+        // expr.assert(&mut transaction);
+    }
+
+    // -- Integration test --
 
     #[dialog_common::test]
     async fn it_roundtrips_assert_and_query() -> anyhow::Result<()> {
@@ -597,15 +552,15 @@ mod tests {
 
         let alice = Entity::new()?;
 
-        // Assert via expression — .is() with &str
+        // Assert via .is() with concrete &str
         let mut session = Session::open(store.clone());
         session
             .transact(person::Name::of(alice.clone()).is("Alice"))
             .await?;
 
-        // Query via expression — .matches() with Term
+        // Query via .is() with Term variable
         let premise: Premise = person::Name::of(alice.clone())
-            .matches(Term::<String>::var("name"))
+            .is(Term::<String>::var("name"))
             .into();
 
         let prop = match premise {
@@ -621,7 +576,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
 
-        // Retract via expression
+        // Retract via .is() with concrete &str
         let mut session = Session::open(store.clone());
         session
             .transact(person::Name::of(alice.clone()).is("Alice"))
