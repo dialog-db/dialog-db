@@ -1,0 +1,12 @@
+[book]
+title = "Dialog Query Engine Internals"
+authors = ["Dialog DB Contributors"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+default-theme = "light"
+git-repository-url = "https://github.com/dialog-db/dialog-db"
