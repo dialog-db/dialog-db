@@ -33,10 +33,11 @@ pub use logic::{And, Not, Or};
 pub use math::{Difference, Modulo, Product, Quotient, Sum};
 pub use string::{Concatenate, Length, Like, Lowercase, Uppercase};
 
+use crate::Parameters;
 use crate::Predicate;
+use crate::Schema;
 use crate::error::{EvaluationError, TypeError};
 use crate::selection::Answer;
-use crate::{Parameters, Schema};
 
 /// Core trait for implementing formulas in the query system
 ///
@@ -72,8 +73,6 @@ pub trait Formula: Predicate + Sized + Clone {
     fn cost() -> usize;
     /// Returns the static cell definitions for this formula's parameters.
     fn cells() -> &'static Cells;
-    /// Returns the operator name identifying this formula.
-    fn operator() -> &'static str;
 
     /// Returns the schema derived from this formula's cell definitions.
     fn schema() -> Schema {
@@ -105,6 +104,12 @@ pub trait Formula: Predicate + Sized + Clone {
         Ok(answers)
     }
 
+    /// Create a formula application from raw parameters.
+    ///
+    /// Validates parameters against the formula's cell definitions,
+    /// then constructs the typed application struct.
+    fn apply(terms: Parameters) -> Result<<Self as Predicate>::Application, TypeError>;
+
     /// This method contains actual logic for deriving an output from provided
     /// inputs.
     fn derive(input: Self::Input) -> Vec<Self>;
@@ -114,39 +119,6 @@ pub trait Formula: Predicate + Sized + Clone {
     /// This method is called for each output instance produced by `derive`
     /// to write the computed values back to the bindings.
     fn write(&self, bindings: &mut Bindings) -> Result<(), EvaluationError>;
-
-    /// Create a formula application with term bindings
-    ///
-    /// This method binds the formula to specific term mappings, creating
-    /// a non-generic [`FormulaQuery`] that can be evaluated over streams of matches
-    /// and integrated with the deductive rule system.
-    ///
-    /// # Arguments
-    /// * `terms` - Mapping from formula parameter names to query terms
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use dialog_query::{Term, Any, Parameters, Formula};
-    /// # use dialog_query::formula::math::Sum;
-    /// let mut terms = Parameters::new();
-    /// terms.insert("of".to_string(), Term::<Any>::var("input1"));
-    /// terms.insert("with".to_string(), Term::<Any>::var("input2"));
-    /// terms.insert("is".to_string(), Term::<Any>::var("output"));
-    ///
-    /// let app = Sum::apply(terms)?;
-    /// # Ok::<(), dialog_query::error::TypeError>(())
-    /// ```
-    fn apply(terms: Parameters) -> Result<FormulaQuery, TypeError> {
-        let cells = Self::cells();
-
-        Ok(FormulaQuery {
-            name: Self::operator(),
-            cells,
-            cost: Self::cost(),
-            parameters: cells.conform(terms)?,
-            compute: |bindings| Self::compute(bindings),
-        })
-    }
 }
 
 /// Trait alias for types that can be constructed from a [`Bindings`] as formula input.

@@ -76,6 +76,7 @@ impl Not {
 mod tests {
     use super::*;
 
+    use crate::formula::query::FormulaQuery;
     use crate::{Formula, Parameters, Term, selection::Answer};
 
     #[dialog_common::test]
@@ -91,7 +92,7 @@ mod tests {
             .set(Term::var("b"), true)
             .unwrap();
 
-        let app = And::apply(terms)?;
+        let app: FormulaQuery = And::apply(terms)?.into();
         let results = app.derive(input).expect("And formula failed");
 
         assert_eq!(results.len(), 1);
@@ -119,7 +120,7 @@ mod tests {
             .set(Term::var("b"), false)
             .unwrap();
 
-        let app = And::apply(terms)?;
+        let app: FormulaQuery = And::apply(terms)?.into();
         let results = app.derive(input).expect("And formula failed");
 
         assert_eq!(results.len(), 1);
@@ -147,7 +148,7 @@ mod tests {
             .set(Term::var("b"), false)
             .unwrap();
 
-        let app = And::apply(terms)?;
+        let app: FormulaQuery = And::apply(terms)?.into();
         let results = app.derive(input).expect("And formula failed");
 
         assert_eq!(results.len(), 1);
@@ -175,7 +176,7 @@ mod tests {
             .set(Term::var("b"), false)
             .unwrap();
 
-        let app = Or::apply(terms)?;
+        let app: FormulaQuery = Or::apply(terms)?.into();
         let results = app.derive(input).expect("Or formula failed");
 
         assert_eq!(results.len(), 1);
@@ -203,7 +204,7 @@ mod tests {
             .set(Term::var("b"), false)
             .unwrap();
 
-        let app = Or::apply(terms)?;
+        let app: FormulaQuery = Or::apply(terms)?.into();
         let results = app.derive(input).expect("Or formula failed");
 
         assert_eq!(results.len(), 1);
@@ -226,7 +227,7 @@ mod tests {
 
         let input = Answer::new().set(Term::var("bool"), true).unwrap();
 
-        let app = Not::apply(terms)?;
+        let app: FormulaQuery = Not::apply(terms)?.into();
         let results = app.derive(input).expect("Not formula failed");
 
         assert_eq!(results.len(), 1);
@@ -249,7 +250,7 @@ mod tests {
 
         let input = Answer::new().set(Term::var("bool"), false).unwrap();
 
-        let app = Not::apply(terms)?;
+        let app: FormulaQuery = Not::apply(terms)?.into();
 
         let results = app.derive(input).expect("Not formula failed");
 
@@ -279,7 +280,7 @@ mod tests {
             .set(Term::var("b"), false)
             .unwrap();
 
-        let and_app = And::apply(and_terms)?;
+        let and_app: FormulaQuery = And::apply(and_terms)?.into();
         let and_results = and_app.derive(input).expect("And formula failed");
         let and_result = &and_results[0];
 
@@ -288,7 +289,7 @@ mod tests {
         not_terms.insert("value".to_string(), Term::var("and_result"));
         not_terms.insert("is".to_string(), Term::var("final_result"));
 
-        let not_app = Not::apply(not_terms)?;
+        let not_app: FormulaQuery = Not::apply(not_terms)?.into();
         let not_results = not_app
             .derive(and_result.clone())
             .expect("Not formula failed");
@@ -313,7 +314,7 @@ mod tests {
         and_terms.insert("right".to_string(), Term::var("b"));
         and_terms.insert("is".to_string(), Term::var("and_result"));
 
-        let and_formula = And::apply(and_terms)?;
+        let and_formula: FormulaQuery = And::apply(and_terms)?.into();
 
         let and_input = Answer::new()
             .set(Term::var("a"), true)
@@ -334,7 +335,7 @@ mod tests {
         or_terms.insert("right".to_string(), Term::var("y"));
         or_terms.insert("is".to_string(), Term::var("or_result"));
 
-        let or_formula = Or::apply(or_terms)?;
+        let or_formula: FormulaQuery = Or::apply(or_terms)?.into();
 
         let or_input = Answer::new()
             .set(Term::var("x"), false)
@@ -354,7 +355,7 @@ mod tests {
         not_terms.insert("value".to_string(), Term::var("input"));
         not_terms.insert("is".to_string(), Term::var("not_result"));
 
-        let not_formula = Not::apply(not_terms)?;
+        let not_formula: FormulaQuery = Not::apply(not_terms)?.into();
 
         let not_input = Answer::new().set(Term::var("input"), true).unwrap();
 

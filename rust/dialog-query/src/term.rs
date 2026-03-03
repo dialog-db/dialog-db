@@ -408,6 +408,32 @@ impl Term<Any> {
     pub fn constant<T: Scalar>(value: T) -> Self {
         Term::Constant(value.into())
     }
+
+    /// Narrow a `Term<Any>` to a concrete `Term<T>`.
+    ///
+    /// Both variables and constants are validated: if the term carries a known
+    /// type (via the `Any` descriptor or the constant's value) and `T` has a
+    /// statically known type, they must match. Returns
+    /// [`FieldTypeError::TypeMismatch`] on incompatible types.
+    pub fn narrow<T: Typed>(self) -> Result<Term<T>, crate::error::FieldTypeError> {
+        let target = <<T as Typed>::Descriptor as TypeDescriptor>::TYPE;
+        let source = self.content_type();
+        if let (Some(expected), Some(actual)) = (target, source)
+            && expected != actual
+        {
+            return Err(crate::error::FieldTypeError::TypeMismatch {
+                expected,
+                actual: Box::new(self),
+            });
+        }
+        Ok(match self {
+            Term::Variable { name, .. } => Term::Variable {
+                name,
+                descriptor: Default::default(),
+            },
+            Term::Constant(v) => Term::Constant(v),
+        })
+    }
 }
 
 /// Convert a `Term<Value>` into a `Term<Any>`.
@@ -917,5 +943,100 @@ mod tests {
         assert_eq!(constant.name(), None);
         assert_eq!(constant.content_type(), Some(Type::UnsignedInt));
         assert_eq!(constant.as_constant(), Some(&Value::UnsignedInt(42)));
+    }
+
+    #[test]
+    fn it_narrows_variable_to_typed() {
+        let var = Term::<Any>::var("x");
+        let narrowed: Term<u32> = var.narrow().unwrap();
+        assert_eq!(narrowed.name(), Some("x"));
+    }
+
+    #[test]
+    fn it_narrows_blank_to_typed() {
+        let blank = Term::<Any>::blank();
+        let narrowed: Term<String> = blank.narrow().unwrap();
+        assert!(narrowed.is_blank());
+    }
+
+    #[test]
+    fn it_narrows_compatible_constant() {
+        let term = Term::<Any>::Constant(Value::String("hello".into()));
+        let narrowed: Term<String> = term.narrow().unwrap();
+        assert_eq!(narrowed.as_constant(), Some(&Value::String("hello".into())));
+    }
+
+    #[test]
+    fn it_narrows_constant_to_any() {
+        let term = Term::<Any>::Constant(Value::String("hello".into()));
+        let narrowed: Term<Any> = term.narrow().unwrap();
+        assert_eq!(narrowed.as_constant(), Some(&Value::String("hello".into())));
+    }
+
+    #[test]
+    fn it_rejects_incompatible_narrow() {
+        let term = Term::<Any>::Constant(Value::String("hello".into()));
+        let result: Result<Term<u32>, _> = term.narrow();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            crate::error::FieldTypeError::TypeMismatch { expected, .. } => {
+                assert_eq!(expected, Type::UnsignedInt);
+            }
+            other => panic!("Expected TypeMismatch, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn it_rejects_int_narrowed_to_string() {
+        let term = Term::<Any>::Constant(Value::UnsignedInt(42));
+        let result: Result<Term<String>, _> = term.narrow();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn it_narrows_unsigned_int_constant() {
+        let term = Term::<Any>::Constant(Value::UnsignedInt(42));
+        let narrowed: Term<u32> = term.narrow().unwrap();
+        assert_eq!(narrowed.as_constant(), Some(&Value::UnsignedInt(42)));
+    }
+
+    #[test]
+    fn it_narrows_bool_constant() {
+        let term = Term::<Any>::Constant(Value::Boolean(true));
+        let narrowed: Term<bool> = term.narrow().unwrap();
+        assert_eq!(narrowed.as_constant(), Some(&Value::Boolean(true)));
+    }
+
+    #[test]
+    fn it_rejects_bool_narrowed_to_int() {
+        let term = Term::<Any>::Constant(Value::Boolean(true));
+        let result: Result<Term<u32>, _> = term.narrow();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn it_rejects_typed_variable_narrowed_to_wrong_type() {
+        let int_var: Term<u32> = Term::var("before");
+        let any: Term<Any> = int_var.into();
+        assert_eq!(any.content_type(), Some(Type::UnsignedInt));
+        let result: Result<Term<String>, _> = any.narrow();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn it_narrows_typed_variable_to_same_type() {
+        let int_var: Term<u32> = Term::var("x");
+        let any: Term<Any> = int_var.into();
+        let narrowed: Term<u32> = any.narrow().unwrap();
+        assert_eq!(narrowed.name(), Some("x"));
+    }
+
+    #[test]
+    fn it_narrows_untyped_variable_to_any_type() {
+        let var = Term::<Any>::var("x");
+        assert_eq!(var.content_type(), None);
+        let narrowed: Term<String> = var.narrow().unwrap();
+        assert_eq!(narrowed.name(), Some("x"));
     }
 }
