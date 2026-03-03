@@ -1,21 +1,14 @@
 # Why Dialog?
 
-Let's start with a familiar scenario. You're building a collaborative app, say a recipe book that a household shares. You need to:
+You're building a collaborative app — say a recipe book that a household shares. You need to store recipes, let people edit from their own devices, keep everything in sync offline, and derive views like "all vegetarian recipes."
 
-- Store recipes with their ingredients and instructions
-- Let family members add and edit recipes from their own devices
-- Keep everything in sync, even when someone edits offline
-- Derive useful views like "all vegetarian recipes" or "recipes I can make with what's in the fridge"
-
-With a traditional stack, you'd pick a database, build a REST API, add WebSocket notifications for real-time updates, bolt on a conflict resolution strategy, and set up a sync protocol. Each of these is a separate concern with its own complexity.
-
-Dialog collapses these layers. Let's see how.
+Traditionally, each of those is a separate system: database, REST API, WebSockets, conflict resolution, sync protocol. Dialog collapses these into one.
 
 ## Claims, not rows
 
-In a relational database, you'd create a `recipes` table with columns for `name`, `servings`, `author`, etc. If you later want to add a `cuisine` field, you need a migration. If two systems disagree about the schema, you have a problem.
+A relational database needs a `recipes` table with fixed columns. Adding a field means a migration. Schema disagreements mean trouble.
 
-Dialog stores data as individual **claims**. A claim is a simple statement:
+Dialog stores data as individual **claims**:
 
 ```text
 the name of <recipe-123> is "Pancakes"
@@ -23,11 +16,11 @@ the servings of <recipe-123> is 4
 the author of <recipe-123> is <user-456>
 ```
 
-Each claim stands on its own. There's no table to alter when you want to say something new about a recipe; you just assert another claim. Two applications can say different things about the same entity without conflicting.
+Each claim stands on its own. No table to alter — just assert another claim.
 
 ## Query-driven structure
 
-Instead of enforcing a schema at write time ("every row in this table must have these columns"), Dialog applies structure at query time. You define a **concept**, a group of attributes you're interested in, and query for entities that have all of them:
+Dialog applies structure at query time, not write time. A **concept** selects the attributes you care about:
 
 ```rust
 #[derive(Concept)]
@@ -38,21 +31,17 @@ struct Recipe {
 }
 ```
 
-This says: "Find me entities that have both a `name` and a `servings`." If an entity only has a name, it won't match this query. If it has name, servings, and a hundred other attributes, it still matches. The extra attributes are simply not part of this view.
-
-This means different parts of your application can define different concepts over the same entities, and they'll all work without stepping on each other.
+Entities that have both `name` and `servings` match. Missing one? No match. Have a hundred extra attributes? Still matches — they're just not part of this view.
 
 ## Built-in sync
 
-When you assert a claim in Dialog, it gets an immutable, content-addressed identity and a **causal reference** that establishes "this claim was asserted knowing about these prior claims."
+Every claim gets an immutable, content-addressed identity and a **causal reference**. Two peers compare causal histories and exchange exactly the claims they're each missing. No central server, no sync protocol to design.
 
-This gives Dialog a built-in sync protocol. Two peers can compare their causal histories and exchange exactly the claims they're each missing. There's no central server required, no conflict resolution protocol to design. The data structure itself enables synchronization.
-
-We'll cover sync in detail in a [later chapter](./sync.md). For now, the key insight is: **you don't build sync on top of Dialog; sync is part of what Dialog is.**
+**You don't build sync on top of Dialog; sync is part of what Dialog is.**
 
 ## Derived data
 
-Dialog includes a rule system inspired by Datalog. You can define rules that derive new claims from existing ones:
+Rules derive new claims from existing ones, inspired by Datalog:
 
 ```rust
 fn vegetarian_recipe(recipe: Query<VegetarianRecipe>) -> impl When {
@@ -62,7 +51,6 @@ fn vegetarian_recipe(recipe: Query<VegetarianRecipe>) -> impl When {
             name: recipe.name.clone(),
             servings: recipe.servings.clone(),
         },
-        // No meat ingredients
         !Query::<HasMeatIngredient> {
             this: recipe.this.clone(),
         },
@@ -70,7 +58,7 @@ fn vegetarian_recipe(recipe: Query<VegetarianRecipe>) -> impl When {
 }
 ```
 
-This rule says: "A `VegetarianRecipe` is any `Recipe` that doesn't have a meat ingredient." You don't need to maintain a separate "vegetarian" flag; the classification is derived whenever the underlying claims change.
+No "vegetarian" flag to maintain — the classification is derived whenever the underlying claims change.
 
 ## Summary
 
@@ -81,5 +69,3 @@ This rule says: "A `VegetarianRecipe` is any `Recipe` that doesn't have a meat i
 | Derived data | Application code or materialized views | Declarative rules |
 | Offline support | Complex sync queue | Claims merge causally |
 | Schema evolution | Migrations | Additive: assert new attributes |
-
-In the next chapter, we'll look at the core concepts that make this work.

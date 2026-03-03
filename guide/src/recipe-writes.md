@@ -9,7 +9,7 @@ First, open a session with a store:
 ```rust
 use dialog_query::{Entity, Session};
 
-let mut session = Session::open(store);
+let mut session = Session::open(source);
 ```
 
 ## Creating a user

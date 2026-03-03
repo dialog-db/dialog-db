@@ -1,25 +1,19 @@
 # Querying
 
-Querying in Dialog works through pattern matching. You describe a pattern with variables and constants, and the query engine finds all claims that match.
+Querying works through pattern matching. Describe a pattern with variables and constants; the engine finds all matching claims.
 
-## Terms: variables and constants
+## Terms
 
-The building block of patterns is `Term<T>`. A term is either:
-
-- A **variable**: a named placeholder that the engine will try to fill in
-- A **constant**: a concrete value that the engine must match exactly
+A `Term<T>` is either a **variable** (placeholder the engine binds) or a **constant** (must match exactly):
 
 ```rust
 use dialog_query::Term;
 
-// A variable named "name" - the engine will bind matching values to it
 let name_var: Term<String> = Term::var("name");
-
-// A constant - the engine will only match claims with this exact value
 let name_const: Term<String> = Term::from("Pancakes".to_string());
 ```
 
-Variables with the same name are **unified**: if two patterns both use `Term::var("x")`, the engine will only return results where both positions have the same value. This is how you join data across multiple patterns.
+Variables with the same name are **unified**: `Term::var("x")` in two patterns means both positions must have the same value. This is how joins work.
 
 ## Querying a single attribute
 
@@ -124,33 +118,17 @@ fn recipe_with_author(result: Query<RecipeWithAuthor>) -> impl When {
 
 The variable `"author_entity"` appears in both patterns. The engine will only return results where the recipe's `author` attribute points to an entity that also has a `user/name`. This is a join, expressed through shared variables rather than SQL's JOIN syntax.
 
-## How the query planner works
-
-When you run a query, Dialog's planner converts your pattern into an execution plan. It considers:
-
-1. **Which variables are already bound?** Constants and variables bound by earlier patterns constrain the search.
-2. **Which indexes are available?** Dialog maintains EAV (entity-attribute-value) and AVE (attribute-value-entity) indexes, so lookups by entity or by value are both efficient.
-3. **What ordering minimizes work?** The planner picks the order that produces the fewest intermediate results.
-
-You don't need to think about this in most cases. The planner handles optimization automatically. But it's useful to know that Dialog isn't doing a brute-force scan. Patterns with constants are generally cheaper than patterns with all variables, because constants let the engine use indexes directly.
-
 ## Async iteration
 
-Query results are returned as async streams. The simplest way to consume them is `try_vec()`, which collects everything into a `Vec`:
+Results are async streams. Collect with `try_vec()` or iterate:
 
 ```rust
 let results = query.perform(&session).try_vec().await?;
-```
 
-For large result sets, you can iterate with the stream directly:
-
-```rust
+// Or stream:
 use futures::TryStreamExt;
-
 let mut stream = query.perform(&session);
 while let Some(result) = stream.try_next().await? {
     // process each result
 }
 ```
-
-In the next chapter, we'll see how rules extend querying with derived data.

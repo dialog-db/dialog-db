@@ -1,16 +1,12 @@
 # Rules
 
-So far, every query has matched directly against stored claims. Rules let you derive new data from existing data, without storing it. If a concept query is a conjunction (AND), rules add disjunction (OR): multiple alternative ways to derive the same concept.
+Rules derive new data from existing data without storing it. If concept queries are conjunction (AND), rules add disjunction (OR): multiple ways to derive the same concept.
 
-## A motivating example
-
-Suppose you have two different sources of recipe data. Some recipes were entered by users (as `UserRecipe` concepts), and others were imported from a cookbook (as `ImportedRecipe` concepts). You want to query all recipes uniformly, regardless of their source.
-
-Without rules, you'd have to query both sources separately and merge the results in your application code. With rules, you define how each source maps to a common `Recipe` concept, and Dialog handles the rest.
+**Example**: Some recipes come from users (`UserRecipe`), others from imports (`ImportedRecipe`). Rules let you query both through a common `Recipe` concept.
 
 ## Defining a rule
 
-A rule is a function that takes a query pattern for the *conclusion* (what you want to derive) and returns the *premises* (what must be true for the conclusion to hold).
+A rule takes a query pattern for the *conclusion* and returns *premises* (what must hold).
 
 ```rust
 use dialog_query::{Query, When};
@@ -26,8 +22,6 @@ fn recipe_from_user_recipe(recipe: Query<Recipe>) -> impl When {
 }
 ```
 
-This says: "A `Recipe` can be derived from any `UserRecipe` by mapping their shared attributes."
-
 And another rule for imported recipes:
 
 ```rust
@@ -42,23 +36,21 @@ fn recipe_from_import(recipe: Query<Recipe>) -> impl When {
 }
 ```
 
-Notice that the imported recipe uses `title` instead of `name` and `yield_count` instead of `servings`. The rule maps them to the corresponding `Recipe` fields through shared variables.
+The imported recipe uses `title` and `yield_count` instead of `name` and `servings`. The rule maps them through shared variables.
 
 ## Installing rules
 
-Rules are installed on a session:
-
 ```rust
-let session = Session::open(store)
+let session = Session::open(source)
     .install(recipe_from_user_recipe)?
     .install(recipe_from_import)?;
 ```
 
-Now any `Query::<Recipe>` against this session will find results from both sources. The rules are evaluated at query time, not stored in the database.
+Now `Query::<Recipe>` finds results from both sources. Rules are evaluated at query time, not stored.
 
 ## Multiple premises
 
-A rule can have multiple premises that must all be satisfied. They form a conjunction:
+Premises form a conjunction — all must hold:
 
 ```rust
 fn authored_recipe(recipe: Query<AuthoredRecipe>) -> impl When {
@@ -79,20 +71,15 @@ fn authored_recipe(recipe: Query<AuthoredRecipe>) -> impl When {
 }
 ```
 
-This derives `AuthoredRecipe` only when a recipe exists, a user exists, and the recipe's `author` attribute points to that user. All three premises must hold.
-
 ## Disjunction through multiple rules
 
-Each individual rule's premises are ANDed together. But installing multiple rules for the same concept creates OR behavior:
+Each rule's premises are ANDed. Installing multiple rules for the same concept creates OR:
 
 ```rust
-// A recipe comes from user input OR from an import
-let session = Session::open(store)
+let session = Session::open(source)
     .install(recipe_from_user_recipe)?    // OR
     .install(recipe_from_import)?;        // OR
 ```
-
-A `Query::<Recipe>` returns results matching *any* of the installed rules. This is Dialog's form of logical disjunction.
 
 ## Negation
 
@@ -115,23 +102,12 @@ fn meatless_recipe(recipe: Query<MeatlessRecipe>) -> impl When {
 }
 ```
 
-The negated pattern (`!Query::<MeatIngredient>`) succeeds when *no* matching claim exists. This is known as negation-as-failure: the absence of a match counts as success.
+`!Query::<MeatIngredient>` succeeds when *no* matching claim exists (negation-as-failure).
 
-There's an important constraint with negation: the variables used in a negated pattern should already be bound by preceding positive premises. In the example above, `recipe.this` is bound by the `Query::<Recipe>` pattern before the negation uses it. If you put the negation first, the engine wouldn't know which entities to check.
+**Constraint**: variables in negated patterns must already be bound by preceding positive premises. Above, `recipe.this` is bound by `Query::<Recipe>` before the negation uses it.
 
-## Rules are composable
+## Composability
 
-Rules can reference concepts that are themselves derived by other rules. If you have a rule that derives `VegetarianRecipe` from `MeatlessRecipe`, and another that derives `MeatlessRecipe` from `Recipe`, Dialog will chain them automatically.
+Rules can reference concepts derived by other rules. Dialog chains them automatically — you can build layers of derived data and the query planner handles execution.
 
-This composability is what makes rules powerful for larger applications. You can build up layers of derived data, each layer using the one below it, and the query planner handles the execution.
-
-## When to use rules
-
-Rules are useful when:
-
-- You have multiple sources of data that should be queryable through a common interface
-- You want to derive classifications or groupings (vegetarian, quick, easy) from raw attributes
-- You need to join data across concepts in a reusable way
-- You want to keep derived logic declarative rather than imperative
-
-Rules are evaluated at query time, so they always reflect the current state of the database. There is no need to update derived data when the underlying claims change.
+Rules are evaluated at query time, so they always reflect the current state. No need to update derived data when underlying claims change.

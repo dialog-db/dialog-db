@@ -49,10 +49,10 @@ A function that derives a concept from a set of premises. Rules are evaluated at
 The string identifier for an attribute in `"domain/name"` format (e.g., `"recipe/name"`). Derived from the Rust module and struct name.
 
 **Session**
-The entry point for interacting with Dialog. Wraps a store and a set of installed rules. Supports both querying and writing through transactions.
+The entry point for interacting with Dialog. Wraps a source and a set of installed rules. Supports both querying and writing through transactions.
 
-**Store**
-The backing storage that a session operates against. Implements the `Store` trait.
+**Source**
+The backing storage that a session operates against. Implements the `Source` trait.
 
 **Term**
 A value in a query pattern. Either a variable (`Term::var("x")`) that the engine binds, or a constant (`Term::from(value)`) that must match exactly. Variables with the same name are unified.

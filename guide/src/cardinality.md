@@ -57,17 +57,15 @@ edit.assert(!recipe::Tag::of(pancakes.clone()).is("sweet"));
 
 ## Cardinality and sync
 
-Cardinality becomes especially relevant when multiple peers are editing the same entity concurrently. Consider this scenario:
+Cardinality determines how Dialog resolves concurrent writes from multiple peers. Consider:
 
 1. Peer A sets the name of a recipe to "Pancakes"
 2. Peer B, concurrently, sets the name to "Fluffy Pancakes"
 3. They sync
 
-With cardinality one, Dialog's transactor can use the causal references on each claim to determine what happened. Each assertion carries information about which prior claims it was aware of. The transactor uses this to resolve the situation, typically keeping both values temporarily and letting the application decide, or applying last-writer-wins semantics.
+If you query through **cardinality one**, Dialog resolves the conflict via last-writer-wins and returns a single value. If you query through **cardinality many**, you get all values — both "Pancakes" and "Fluffy Pancakes." The application can choose which view it needs: the resolved value or the full set of concurrent writes.
 
-With cardinality many, concurrent assertions simply accumulate. Both values are kept because that's the intended semantics of the attribute.
-
-> **Note**: The precise conflict resolution behavior for concurrent cardinality-one writes is an active area of development. The current model uses causal references (the `cause` on each claim) and value-based comparison rather than requiring applications to pass provenance tokens. See the [Sync chapter](./sync.md) for more details.
+See the [Sync chapter](./sync.md) for more on conflict resolution.
 
 ## Choosing the right cardinality
 
