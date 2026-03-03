@@ -219,6 +219,8 @@ mod invocation_conformance {
 
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         use wasm_bindgen_test::wasm_bindgen_test;
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_service_worker);
 
         fn try_parse_invocation(
             entry: &serde_json::Value,

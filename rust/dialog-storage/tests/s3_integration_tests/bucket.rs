@@ -18,6 +18,7 @@ pub fn unique(base: &str) -> String {
 /// Uses `option_env!` instead of `env!` so that `cargo check --tests --all-features`
 /// doesn't fail when the R2S3_* environment variables aren't set at compile time.
 pub fn open() -> Bucket<Session> {
+    #![allow(clippy::option_env_unwrap)]
     let address = Address::new(
         option_env!("R2S3_ENDPOINT").expect("R2S3_ENDPOINT not set"),
         option_env!("R2S3_REGION").expect("R2S3_REGION not set"),

@@ -1,191 +1,124 @@
 {
-  description = "Staging";
+  description = "Dialog";
 
   inputs = {
+    crane.url = "github:ipetkov/crane";
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    rust-overlay.url = "github:oxalica/rust-overlay";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    nix-filter.url = "github:numtide/nix-filter";
   };
 
   outputs =
-    { nixpkgs
-    , flake-utils
-    , rust-overlay
-    , ...
+    {
+      self,
+      crane,
+      nixpkgs,
+      flake-utils,
+      rust-overlay,
+      nix-filter,
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
-        overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs {
-          inherit system overlays;
+          inherit system;
+          overlays = [
+            (import rust-overlay)
+          ];
         };
+        filter = nix-filter.lib;
 
-        rustToolchain =
-          toolchain:
-          let
-            rustToolchain = pkgs.rust-bin.${toolchain}.latest.default.override {
-              targets = [
-                "wasm32-wasip1"
-                "wasm32-unknown-unknown"
-                "aarch64-unknown-linux-gnu"
-              ];
-            };
-          in
-          if builtins.hasAttr toolchain pkgs.rust-bin then
-            rustToolchain
-          else
-            throw "Unsupported Rust toolchain: ${toolchain}";
-
-        wasm-bindgen-cli =
+        commonBuildInputs =
           with pkgs;
-          rustPlatform.buildRustPackage rec {
-            pname = "wasm-bindgen-cli";
-            version = "0.2.108";
-            buildInputs = [
-              rust-bin.stable.latest.default
-            ]
-            ++ lib.optionals stdenv.isDarwin [
-              apple-sdk
-            ];
-
-            src = fetchCrate {
-              inherit pname version;
-              sha256 = "sha256-UsuxILm1G6PkmVw0I/JF12CRltAfCJQFOaT4hFwvR8E=";
-            };
-
-            cargoHash = "sha256-iqQiWbsKlLBiJFeqIYiXo3cqxGLSjNM8SOWXGM9u43E=";
-          };
-
-        common-build-inputs =
-          toolchain:
-            with pkgs;
-            let
-              rust-toolchain = rustToolchain toolchain;
-            in
-            with pkgs;
-            [
-              binaryen
-              gnused
-              pkg-config
-              protobuf
-              rust-toolchain
-              trunk
-              wasm-bindgen-cli
-              wasm-pack
-            ]
-            ++ lib.optionals stdenv.isDarwin [
-              apple-sdk
-            ];
-
-        common-dev-tools = with pkgs; [
-          cargo-nextest
-          playwright-test
-          nodejs
-        ];
-
-        interactive-dev-tools =
-          with pkgs;
-          common-dev-tools
-          ++ [
-            static-web-server
-            leptosfmt
-            cargo-generate
+          [
+            binaryen
+            gnused
+            pkg-config
+            protobuf
+            trunk
+            wasm-bindgen-cli
+            wasm-pack
           ]
-          ++ lib.optionals stdenv.isLinux [
+          ++ lib.optional stdenv.isLinux [
             chromium
             chromedriver
-            playwright-driver
+          ]
+          ++ lib.optional stdenv.isDarwin [
+            apple-sdk
           ];
 
-        dialog-artifacts-web =
-          let
+        # Import rust helpers
+        rustHelpers = (
+          import ./nix/rust.nix {
+            inherit pkgs filter crane;
+            buildInputs = commonBuildInputs;
+            workspaceRoot = ./.;
+          }
+        );
 
-            rust-toolchain = rustToolchain ("stable");
+        inherit (rustHelpers)
+          buildWasmCrate
+          buildTestArchive
+          cargoChecks
+          rustToolchain
+          wasm-bindgen-cli
+          ;
 
-            rust-platform = pkgs.makeRustPlatform {
-              cargo = rust-toolchain;
-              rustc = rust-toolchain;
-            };
-          in
-          rust-platform.buildRustPackage {
-            name = "dialog-artifacts";
-            src = ./.;
-            doCheck = false;
-            env = {
-              RUST_BACKTRACE = "full";
-            };
-            buildPhase = ''
-              # NOTE: wasm-pack currently requires a writable $HOME
-              # directory to be set
-              # SEE: https://github.com/rustwasm/wasm-pack/issues/1318#issuecomment-1713377536
-              export HOME=`pwd`
+        developmentBuildInputs =
+          with pkgs;
+          (
+            commonBuildInputs
+            ++ [
+              nodejs
+              cargo-nextest
+              rustToolchain
+            ]
+          );
 
-              wasm-pack build --release --scope dialog-db --target web --weak-refs -m no-install ./rust/dialog-artifacts
-            '';
-            installPhase = ''
-              mkdir -p $out/@dialog-db
-              cp -r ./rust/dialog-artifacts/pkg $out/@dialog-db/dialog-artifacts
-              rm $out/@dialog-db/dialog-artifacts/.gitignore
-            '';
-
-            nativeBuildInputs = common-build-inputs "stable";
-            cargoLock = {
-              lockFile = ./Cargo.lock;
-            };
+        developmentEnvVars =
+          with pkgs;
+          {
+            "WASM_BINDGEN_TEST_TIMEOUT" = "180";
+          }
+          // lib.optionalAttrs stdenv.isLinux {
+            "CHROME" = "${chromium}/bin/chromium";
+            "CHROMEDRIVER" = "${chromedriver}/bin/chromedriver";
           };
 
+        dialog-artifacts-web = buildWasmCrate {
+          pname = "dialog-artifacts";
 
-        dialog-artifacts-web-tests = with pkgs;
-          buildNpmPackage {
-            pname = "dialog-artifacts-web-tests";
-            version = "0.1.0";
-            src = ./typescript/dialog-artifacts-web-tests/.;
-            npmDepsHash = "sha256-o0NiimFWGXf8xQlsmQ+L+B11RqNStu7TVo5iw1GU5sU=";
+          buildPhase = ''
+            # NOTE: wasm-pack currently requires a writable $HOME
+            # directory to be set
+            # SEE: https://github.com/rustwasm/wasm-pack/issues/1318#issuecomment-1713377536
+            export HOME=`pwd`
 
-            buildInputs = [
-              dialog-artifacts-web
-              dialog-experimental
-            ];
+            wasm-pack build --release --scope dialog-db --target web --weak-refs -m no-install ./rust/dialog-artifacts
+          '';
 
-            nativeBuildInputs = common-build-inputs "stable" ++ [
-              chromium
-            ];
+          installPhase = ''
+            mkdir -p $out/@dialog-db
+            cp -r ./rust/dialog-artifacts/pkg $out/@dialog-db/dialog-artifacts
+            rm $out/@dialog-db/dialog-artifacts/.gitignore
+          '';
+        };
 
-            env = {
-              CHROME_PATH = "${chromium}/bin/chromium";
-            };
-
-            buildPhase = ''
-              cp -r ${dialog-artifacts-web}/@dialog-db/dialog-artifacts ./dialog-artifacts
-            '';
-
-            checkPhase = ''
-              npm test
-            '';
-
-            # TODO: Can't seem to get headless tests to run under chroot
-            doCheck = false;
-          };
-
-        dialog-experimental = with pkgs;
+        dialog-experimental =
+          with pkgs;
           buildNpmPackage {
             pname = "@dialog-db/experimental";
             version = "0.1.0";
 
             src = ./typescript/dialog-experimental/.;
-
-            # npmDepsHash = lib.fakeHash;
             npmDepsHash = "sha256-qcnrYVltgUUXWQRFT9TzYfHOcdUswfEI/j6WkZ41HmU=";
 
-            nativeBuildInputs = common-build-inputs "stable" ++ [
-              playwright-driver
-            ];
-
+            nativeBuildInputs = developmentBuildInputs;
             env = {
-              PLAYWRIGHT_BROWSERS_PATH = playwright-driver.browsers;
-              PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = true;
-              PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = true;
               npm_config_loglevel = "verbose";
             };
 
@@ -206,57 +139,215 @@
                 ./test $out/@dialog-db/experimental
             '';
 
-            checkPhase = ''
-              npm test
-            '';
-
-            # TODO: Can't seem to get headless tests to run under chroot
             doCheck = false;
           };
 
-        npm-packages = with pkgs; stdenv.mkDerivation {
-          pname = "npm_packages";
-          version = "0.1.0";
-          buildInputs = [
-            dialog-artifacts-web
-            dialog-experimental
-          ];
-          src = ./.;
-          buildPhase = "";
-          installPhase = ''
-            mkdir -p $out/@dialog-db
-            cp -r ${dialog-artifacts-web}/@dialog-db/dialog-artifacts $out/@dialog-db
-            cp -r ${dialog-experimental}/@dialog-db/experimental $out/@dialog-db
-          '';
+        dialog-artifacts-web-tests =
+          with pkgs;
+          buildNpmPackage {
+            pname = "dialog-artifacts-web-tests";
+            version = "0.1.0";
+            src = ./typescript/dialog-artifacts-web-tests/.;
+            npmDepsHash = "sha256-sMaPwgasaObNZPeGGKynj8DL/V5AXNWU82AOBOp530g=";
+
+            buildInputs = [
+              dialog-artifacts-web
+              dialog-experimental
+            ];
+
+            nativeBuildInputs = developmentBuildInputs;
+
+            env = {
+              "CHROME_PATH" = "${chromium}/bin/chromium";
+            };
+
+            buildPhase = ''
+              cp -r ${dialog-artifacts-web}/@dialog-db/dialog-artifacts ./dialog-artifacts
+            '';
+
+            installPhase = ''
+              mkdir -p "$out/"
+              cp -r ./* "$out/"
+            '';
+
+            doCheck = false;
+          };
+
+        dialog-npm-packages =
+          with pkgs;
+          stdenv.mkDerivation {
+            pname = "dialog_npm_packages";
+            version = "0.1.0";
+            buildInputs = [
+              dialog-artifacts-web
+              dialog-experimental
+            ];
+            src = ./.;
+            buildPhase = "";
+            installPhase = ''
+              mkdir -p $out/@dialog-db
+              cp -r ${dialog-artifacts-web}/@dialog-db/dialog-artifacts $out/@dialog-db
+              cp -r ${dialog-experimental}/@dialog-db/experimental $out/@dialog-db
+            '';
+          };
+
+        # Import menu helpers (e.g., colorful shell commands)
+        menuHelpers = (
+          import ./nix/menu.nix {
+            inherit pkgs;
+          }
+        );
+
+        inherit (menuHelpers) makeMenu makeDevShellHook menuTestCommand;
+
+        commands = {
+          "lint" = {
+            description = "Lint the full source tree";
+            command = "nix flake check";
+          };
+
+          "test:all" = {
+            description = "Run the full test suite (all configurations, grab a coffee)";
+            command = ''
+              test:native:debug
+              test:native:release
+              test:web:debug
+              test:web:release
+              test:native:ucan
+              test:web:ucan
+              test:cross:integration
+              test:npm
+            '';
+
+          };
+
+          "test:native:debug" = menuTestCommand {
+            description = "Unit and integration tests (${system}, debug)";
+            package = "tests-native-debug";
+          };
+
+          "test:native:release" = menuTestCommand {
+            description = "Unit and integration tests (${system}, release)";
+            package = "tests-native-release";
+          };
+
+          "test:web:debug" = menuTestCommand {
+            description = "Unit and integration tests (wasm32-unknown-unknown, debug)";
+            package = "tests-web-debug";
+          };
+
+          "test:web:release" = menuTestCommand {
+            description = "Unit and integration tests (wasm32-unknown-unknown, release)";
+            package = "tests-web-debug";
+          };
+
+          "test:native:ucan" = menuTestCommand {
+            description = "UCAN-specific tests (${system}, debug)";
+            package = "tests-native-ucan";
+          };
+
+          "test:web:ucan" = menuTestCommand {
+            description = "UCAN-specific tests (wasm32-unknown-unknown, debug)";
+            package = "tests-web-ucan";
+          };
+
+          "test:cross:integration" = menuTestCommand {
+            description = "Cross-target integration tests (${system} + wasm32-unknown-unknown, debug)";
+            package = "tests-cross-integration";
+          };
+
+          "test:npm" = {
+            description = "JavaScript unit tests for NPM packages";
+            command = ''
+              echo "PUPPETEER_EXECUTABLE_PATH=$PUPPETEER_EXECUTABLE_PATH"
+              # echo "PUPPETEER_SKIP_DOWNLOAD=$PUPPETEER_SKIP_DOWNLOAD"
+
+              nix build .#dialog-artifacts-web-tests
+              TEST_DIR=$(mktemp -d);
+
+              cp -r ./result/* "$TEST_DIR"
+              chmod -R 755 "$TEST_DIR"
+              pushd "$TEST_DIR"
+
+              npm ci
+              npm test
+            '';
+          };
         };
 
+        menu = makeMenu commands;
       in
       {
-        devShells = {
-          default =
-            with pkgs;
-            mkShell {
-              buildInputs = common-build-inputs "stable" ++ interactive-dev-tools;
+        test = commonBuildInputs;
 
-              shellHook = ''
-                export PATH=$PATH:./node_modules/.bin
-                export CHROMEDRIVER="${chromedriver}/bin/chromedriver"
-                export WASM_BINDGEN_TEST_TIMEOUT=180
-                export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1
-                export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1;
-                export PLAYWRIGHT_BROWSERS_PATH=${playwright-driver.browsers}
-              '';
-            };
-        };
+        packages = {
+          inherit
+            dialog-artifacts-web
+            dialog-artifacts-web-tests
+            dialog-experimental
+            dialog-npm-packages
+            ;
 
-        checks = {
-          inherit dialog-experimental dialog-artifacts-web-tests;
-        };
-
-        packages =
-          {
-            inherit dialog-artifacts-web dialog-experimental npm-packages;
+          tests-native-debug = buildTestArchive {
+            name = "native-debug";
+            args = "--features s3,s3-list,integration-tests";
           };
+
+          tests-native-release = buildTestArchive {
+            name = "native-release";
+            args = "--release --features s3,s3-list,integration-tests";
+          };
+
+          tests-web-debug = buildTestArchive {
+            name = "web-debug";
+            target = "wasm32-unknown-unknown";
+            args = "--features s3,s3-list";
+          };
+
+          tests-web-release = buildTestArchive {
+            name = "web-debug";
+            target = "wasm32-unknown-unknown";
+            args = "--features s3,s3-list --release";
+          };
+
+          tests-native-ucan = buildTestArchive {
+            name = "native-ucan";
+            args = "--features ucan";
+          };
+
+          tests-web-ucan = buildTestArchive {
+            name = "web-ucan";
+            target = "wasm32-unknown-unknown";
+            args = "--features ucan";
+          };
+
+          tests-cross-integration = buildTestArchive {
+            name = "cross-integration";
+            args = "--features s3,s3-list,web-integration-tests";
+          };
+        };
+
+        checks = cargoChecks // {
+          # Other checks here...
+        };
+
+        devShells = with pkgs; {
+          default = mkShell {
+            env = developmentEnvVars;
+            nativeBuildInputs = menu.commands ++ developmentBuildInputs;
+            shellHook = makeDevShellHook menu;
+          };
+        };
       }
     );
+
+  nixConfig = {
+    extra-substituters = [
+      "https://tonk-ops.cachix.org"
+    ];
+    extra-trusted-public-keys = [
+      "tonk-ops.cachix.org-1:gMKFoFyM4aGZLazSU7msgKpEa1kEZ9nulJnld8em+1A="
+    ];
+  };
+
 }

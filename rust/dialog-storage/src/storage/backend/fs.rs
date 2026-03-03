@@ -395,7 +395,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_returns_none_for_non_existent_key() -> Result<()> {
-        let (mut backend, _tempdir) = make_backend().await?;
+        let (backend, _tempdir) = make_backend().await?;
 
         let result = backend.get(&"missing".to_string()).await?;
         assert!(result.is_none());

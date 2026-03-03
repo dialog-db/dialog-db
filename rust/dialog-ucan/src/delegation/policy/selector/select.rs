@@ -268,7 +268,7 @@ mod tests {
             #[test_log::test]
             fn test_identity(data in arb::<InternalIpld>()) {
                 let selector = Select::<InternalIpld>::from_str(".")?;
-                prop_assert!(eq_with_float_nans_and_infinities(&selector.get(&data.clone().into())?.into(), &data));
+                prop_assert!(eq_with_float_nans_and_infinities(&selector.get(&data.clone().into())?, &data));
             }
         }
 

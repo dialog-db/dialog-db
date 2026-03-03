@@ -7,3 +7,5 @@ result
 typescript/dialog-experimental/src/artifacts
 typescript/*/dist/
 typescript/dialog-artifacts-web-tests/dialog-artifacts
+
+do_not_track

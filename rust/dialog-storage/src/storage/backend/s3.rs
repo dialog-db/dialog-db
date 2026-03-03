@@ -641,8 +641,6 @@ where
 mod tests {
     use super::*;
     use dialog_s3_credentials::s3::Credentials as S3Credentials;
-    #[cfg(all(feature = "helpers", feature = "integration-tests"))]
-    use helpers::*;
 
     const TEST_SUBJECT: &str = "did:key:zTestSubject";
 
@@ -665,7 +663,7 @@ mod tests {
         use super::*;
 
         #[allow(dead_code)]
-        fn create_test_bucket(env: &helpers::PublicS3Address) -> S3<helpers::Session> {
+        fn create_test_bucket(env: &PublicS3Address) -> S3<helpers::Session> {
             let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
             let s3_creds = S3Credentials::public(address)
                 .unwrap()
@@ -674,9 +672,7 @@ mod tests {
         }
 
         #[dialog_common::test]
-        async fn it_performs_storage_get_and_set(
-            env: helpers::PublicS3Address,
-        ) -> anyhow::Result<()> {
+        async fn it_performs_storage_get_and_set(env: PublicS3Address) -> anyhow::Result<()> {
             let mut bucket = create_test_bucket(&env);
 
             // Create a storage Set capability
@@ -688,8 +684,8 @@ mod tests {
                 .attenuate(storage::Storage)
                 .attenuate(storage::Store::new("test"))
                 .invoke(storage::Set {
-                    key: key.clone().into(),
-                    value: value.clone().into(),
+                    key: key.clone(),
+                    value: value.clone(),
                 })
                 .perform(&mut bucket)
                 .await?;
@@ -698,21 +694,17 @@ mod tests {
             let result = Subject::from(test_subject())
                 .attenuate(storage::Storage)
                 .attenuate(storage::Store::new("test"))
-                .invoke(storage::Get {
-                    key: key.clone().into(),
-                })
+                .invoke(storage::Get { key: key.clone() })
                 .perform(&mut bucket)
                 .await?;
 
-            assert_eq!(result, Some(value.into()));
+            assert_eq!(result, Some(value));
 
             Ok(())
         }
 
         #[dialog_common::test]
-        async fn it_performs_archive_get_and_put(
-            env: helpers::PublicS3Address,
-        ) -> anyhow::Result<()> {
+        async fn it_performs_archive_get_and_put(env: PublicS3Address) -> anyhow::Result<()> {
             let mut bucket = create_test_bucket(&env);
 
             // Create content and compute its digest
@@ -725,7 +717,7 @@ mod tests {
                 .attenuate(archive::Catalog::new("test"))
                 .invoke(archive::Put {
                     digest: digest.clone(),
-                    content: content.clone().into(),
+                    content: content.clone(),
                 })
                 .perform(&mut bucket)
                 .await?;
@@ -740,7 +732,7 @@ mod tests {
                 .perform(&mut bucket)
                 .await?;
 
-            assert_eq!(result, Some(content.into()));
+            assert_eq!(result, Some(content));
 
             Ok(())
         }
@@ -801,7 +793,7 @@ mod tests {
                 .attenuate(archive::Catalog::new("blobs"))
                 .invoke(archive::Put {
                     digest: digest.clone(),
-                    content: content.clone().into(),
+                    content: content.clone(),
                 })
                 .perform(&mut bucket)
                 .await;
@@ -822,7 +814,7 @@ mod tests {
                 .perform(&mut bucket)
                 .await?;
 
-            assert_eq!(result, Some(content.into()));
+            assert_eq!(result, Some(content));
 
             Ok(())
         }
@@ -1391,8 +1383,8 @@ mod tests {
                 .attenuate(storage::Storage)
                 .attenuate(storage::Store::new(store_name))
                 .invoke(storage::Set {
-                    key: key.clone().into(),
-                    value: value.clone().into(),
+                    key: key.clone(),
+                    value: value.clone(),
                 })
                 .perform(&mut bucket)
                 .await?;
@@ -1401,20 +1393,16 @@ mod tests {
             let result = Subject::from(subject_did.clone())
                 .attenuate(storage::Storage)
                 .attenuate(storage::Store::new(store_name))
-                .invoke(storage::Get {
-                    key: key.clone().into(),
-                })
+                .invoke(storage::Get { key: key.clone() })
                 .perform(&mut bucket)
                 .await?;
-            assert_eq!(result, Some(value.into()));
+            assert_eq!(result, Some(value));
 
             // Delete the value
             Subject::from(subject_did.clone())
                 .attenuate(storage::Storage)
                 .attenuate(storage::Store::new(store_name))
-                .invoke(storage::Delete {
-                    key: key.clone().into(),
-                })
+                .invoke(storage::Delete { key: key.clone() })
                 .perform(&mut bucket)
                 .await?;
 
@@ -1422,9 +1410,7 @@ mod tests {
             let result = Subject::from(subject_did)
                 .attenuate(storage::Storage)
                 .attenuate(storage::Store::new(store_name))
-                .invoke(storage::Get {
-                    key: key.clone().into(),
-                })
+                .invoke(storage::Get { key: key.clone() })
                 .perform(&mut bucket)
                 .await?;
             assert_eq!(result, None);
