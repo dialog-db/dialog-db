@@ -227,19 +227,15 @@ mod tests {
     use super::*;
     use crate::Term;
 
-    // Helper to create a test formula for bindings tests
+    // Helper to create a test formula for bindings tests.
+    // Uses a simple Sum formula with default terms as a stand-in.
     fn test_formula() -> crate::formula::query::FormulaQuery {
-        use std::sync::OnceLock;
-        static EMPTY_CELLS: OnceLock<crate::formula::cell::Cells> = OnceLock::new();
-        let cells = EMPTY_CELLS.get_or_init(crate::formula::cell::Cells::new);
-
-        crate::formula::query::FormulaQuery {
-            name: "test",
-            compute: |_| Ok(vec![]),
-            cost: 0,
-            parameters: crate::Parameters::new(),
-            cells,
-        }
+        use crate::formula::math;
+        crate::formula::query::FormulaQuery::Sum(crate::Query::<math::Sum> {
+            of: crate::Term::var("_unused_of"),
+            with: crate::Term::var("_unused_with"),
+            is: crate::Term::var("_unused_is"),
+        })
     }
 
     #[dialog_common::test]
@@ -346,20 +342,10 @@ mod tests {
         let mut answer = match_data;
 
         // Try to assign a conflicting value
-        use std::sync::OnceLock;
-        static EMPTY_CELLS: OnceLock<crate::formula::cell::Cells> = OnceLock::new();
-        let cells = EMPTY_CELLS.get_or_init(crate::formula::cell::Cells::new);
-
         let conflicting_factor = Factor::Derived {
             value: Value::UnsignedInt(100),
             from: HashMap::new(),
-            formula: Arc::new(crate::formula::query::FormulaQuery {
-                name: "test",
-                compute: |_| Ok(vec![]),
-                cost: 0,
-                parameters: crate::Parameters::new(),
-                cells,
-            }),
+            formula: Arc::new(test_formula()),
         };
 
         // This should fail because "test" is already bound to 42

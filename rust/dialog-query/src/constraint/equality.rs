@@ -36,7 +36,7 @@ const EQUALITY_COST: usize = 1;
 /// // x must equal y
 /// let eq = Equality::new(Term::<Any>::var("x"), Term::<Any>::var("y"));
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Equality {
     /// The left-hand parameter of the equality constraint
     pub this: Term<Any>,

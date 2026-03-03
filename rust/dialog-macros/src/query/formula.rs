@@ -74,9 +74,7 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Data, DeriveInput, Fields, parse_macro_input};
 
-use super::helpers::{
-    extract_doc_comments, parse_derived_attribute, to_snake_case, type_to_value_data_type,
-};
+use super::helpers::{extract_doc_comments, parse_derived_attribute, type_to_value_data_type};
 
 pub fn derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -144,15 +142,11 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
     // Generate type names
     let input_name = syn::Ident::new(&format!("{}Input", struct_name), struct_name.span());
-    let match_name = syn::Ident::new(&format!("{}Match", struct_name), struct_name.span());
+    let match_name = syn::Ident::new(&format!("{}Query", struct_name), struct_name.span());
     let cells_name = syn::Ident::new(
         &format!("{}_CELLS", struct_name.to_string().to_uppercase()),
         struct_name.span(),
     );
-
-    // Generate operator name (snake_case)
-    let operator_name = to_snake_case(&struct_name.to_string());
-    let operator_lit = syn::LitStr::new(&operator_name, proc_macro2::Span::call_site());
 
     // Generate Input struct fields (only non-derived fields)
     let input_struct_fields: Vec<_> = input_fields
@@ -251,133 +245,135 @@ pub fn derive(input: TokenStream) -> TokenStream {
         .collect();
 
     let expanded = quote! {
-        /// Input structure for #struct_name formula
-        ///
-        /// Contains only the required (non-derived) fields that must be provided
-        /// to compute the formula.
-        #[derive(Debug, Clone)]
-        pub struct #input_name {
-            #(#input_struct_fields),*
-        }
+            /// Input structure for #struct_name formula
+            ///
+            /// Contains only the required (non-derived) fields that must be provided
+            /// to compute the formula.
+            #[derive(Debug, Clone)]
+            pub struct #input_name {
+                #(#input_struct_fields),*
+            }
 
-        /// Match pattern for #struct_name formula.
-        ///
-        /// Contains all fields (both input and derived) as Term<T> for pattern matching.
-        #[derive(Debug, Clone)]
-        pub struct #match_name {
-            #(#match_struct_fields),*
-        }
+            /// Query pattern for #struct_name formula.
+            ///
+            /// Contains all fields (both input and derived) as Term<T> for pattern matching.
+            #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+            pub struct #match_name {
+                #(#match_struct_fields),*
+            }
 
-        /// Static storage for formula cells
-        static #cells_name: ::std::sync::OnceLock<dialog_query::Cells> = ::std::sync::OnceLock::new();
+            /// Static storage for formula cells
+            static #cells_name: ::std::sync::OnceLock<dialog_query::Cells> = ::std::sync::OnceLock::new();
 
-        impl dialog_query::Predicate for #struct_name {
-            type Conclusion = #struct_name;
-            type Application = #match_name;
-            type Descriptor = dialog_query::Entity;
-        }
+            impl dialog_query::Predicate for #struct_name {
+                type Conclusion = #struct_name;
+                type Application = #match_name;
+                type Descriptor = dialog_query::Entity;
+            }
 
-        impl From<#match_name> for dialog_query::FormulaQuery {
-            fn from(value: #match_name) -> Self {
-                dialog_query::FormulaQuery {
-                    name: <#struct_name as dialog_query::Formula>::operator(),
-                    cells: <#struct_name as dialog_query::Formula>::cells(),
-                    cost: <#struct_name as dialog_query::Formula>::cost(),
-                    parameters: value.into(),
-                    compute: |bindings| <#struct_name as dialog_query::Formula>::compute(bindings),
+            impl dialog_query::Application for #match_name
+    {
+                type Conclusion = #struct_name;
+
+                fn evaluate<S: dialog_query::Source, M: dialog_query::Answers>(
+                    self,
+                    answers: M,
+                    _source: &S,
+                ) -> impl dialog_query::Answers {
+                    let formula: dialog_query::FormulaQuery = self.into();
+                    formula.evaluate(answers)
+                }
+
+                fn realize(&self, source: dialog_query::Answer) -> std::result::Result<Self::Conclusion, dialog_query::EvaluationError> {
+                    Ok(#struct_name {
+                        #(#realize_fields),*
+                    })
                 }
             }
-        }
 
-        impl dialog_query::Application for #match_name {
-            type Conclusion = #struct_name;
-
-            fn evaluate<S: dialog_query::Source, M: dialog_query::Answers>(
-                self,
-                answers: M,
-                _source: &S,
-            ) -> impl dialog_query::Answers {
-                let application: dialog_query::FormulaQuery = self.into();
-                application.evaluate(answers)
+            impl ::std::convert::From<#match_name> for dialog_query::Parameters {
+                fn from(terms: #match_name) -> Self {
+                    let mut parameters = Self::new();
+                    #(parameters.insert(#all_field_name_lits.into(), dialog_query::Term::<dialog_query::types::Any>::from(terms.#all_field_names));)*
+                    parameters
+                }
             }
 
-            fn realize(&self, source: dialog_query::Answer) -> std::result::Result<Self::Conclusion, dialog_query::EvaluationError> {
-                Ok(#struct_name {
-                    #(#realize_fields),*
-                })
-            }
-        }
-
-        impl ::std::convert::From<#match_name> for dialog_query::Parameters {
-            fn from(terms: #match_name) -> Self {
-                let mut parameters = Self::new();
-                #(parameters.insert(#all_field_name_lits.into(), dialog_query::Term::<dialog_query::types::Any>::from(terms.#all_field_names));)*
-                parameters
-            }
-        }
-
-        impl From<#match_name> for dialog_query::Premise {
-            fn from(source: #match_name) -> Self {
-                let app: dialog_query::FormulaQuery = source.into();
-                dialog_query::Premise::Assert(dialog_query::Proposition::Formula(app))
-            }
-        }
-
-        impl From<#match_name> for dialog_query::Proposition {
-            fn from(source: #match_name) -> Self {
-                let app: dialog_query::FormulaQuery = source.into();
-                dialog_query::Proposition::Formula(app)
-            }
-        }
-
-        impl ::std::ops::Not for #match_name {
-            type Output = dialog_query::Premise;
-
-            fn not(self) -> Self::Output {
-                let application: dialog_query::Proposition = self.into();
-                dialog_query::Premise::Unless(dialog_query::Negation(application))
-            }
-        }
-
-        impl ::std::convert::TryFrom<&mut dialog_query::Bindings> for #input_name {
-            type Error = dialog_query::EvaluationError;
-
-            fn try_from(bindings: &mut dialog_query::Bindings) -> ::std::result::Result<Self, Self::Error> {
-                Ok(#input_name {
-                    #(#input_field_names: bindings.resolve(#input_field_name_lits)?.try_into()?),*
-                })
-            }
-        }
-
-        impl dialog_query::Formula for #struct_name {
-            type Input = #input_name;
-
-            fn operator() -> &'static str {
-                #operator_lit
+            impl From<#match_name> for dialog_query::Premise
+    {
+                fn from(source: #match_name) -> Self {
+                    let formula: dialog_query::FormulaQuery = source.into();
+                    dialog_query::Premise::Assert(dialog_query::Proposition::from(formula))
+                }
             }
 
-            fn cells() -> &'static dialog_query::Cells {
-                #cells_name.get_or_init(|| {
-                    dialog_query::Cells::define(|builder| {
-                        #(#cell_definitions)*
+            impl From<#match_name> for dialog_query::Proposition
+    {
+                fn from(source: #match_name) -> Self {
+                    let formula: dialog_query::FormulaQuery = source.into();
+                    dialog_query::Proposition::from(formula)
+                }
+            }
+
+            impl ::std::ops::Not for #match_name
+    {
+                type Output = dialog_query::Premise;
+
+                fn not(self) -> Self::Output {
+                    let proposition: dialog_query::Proposition = self.into();
+                    dialog_query::Premise::Unless(dialog_query::Negation(proposition))
+                }
+            }
+
+            impl ::std::convert::TryFrom<&mut dialog_query::Bindings> for #input_name {
+                type Error = dialog_query::EvaluationError;
+
+                fn try_from(bindings: &mut dialog_query::Bindings) -> ::std::result::Result<Self, Self::Error> {
+                    Ok(#input_name {
+                        #(#input_field_names: bindings.resolve(#input_field_name_lits)?.try_into()?),*
                     })
-                })
+                }
             }
 
-            fn cost() -> usize {
-                #total_cost
-            }
+            impl dialog_query::Formula for #struct_name {
+                type Input = #input_name;
 
-            fn derive(input: Self::Input) -> ::std::vec::Vec<Self> {
-                #struct_name::derive(input)
-            }
+                fn cells() -> &'static dialog_query::Cells {
+                    #cells_name.get_or_init(|| {
+                        dialog_query::Cells::define(|builder| {
+                            #(#cell_definitions)*
+                        })
+                    })
+                }
 
-            fn write(&self, bindings: &mut dialog_query::Bindings) -> ::std::result::Result<(), dialog_query::EvaluationError> {
-                #(#write_statements)*
-                ::std::result::Result::Ok(())
+                fn cost() -> usize {
+                    #total_cost
+                }
+
+                fn apply(terms: dialog_query::Parameters) -> ::std::result::Result<#match_name, dialog_query::error::TypeError> {
+                    let cells = <#struct_name as dialog_query::Formula>::cells();
+                    let conformed = cells.conform(terms)?;
+                    ::std::result::Result::Ok(#match_name {
+                        #(#all_field_names: conformed
+                            .get(#all_field_name_lits)
+                            .cloned()
+                            .unwrap_or_else(|| dialog_query::Term::<dialog_query::types::Any>::blank())
+                            .narrow()
+                            .map_err(|e| e.at(#all_field_name_lits.into()))?
+                        ),*
+                    })
+                }
+
+                fn derive(input: Self::Input) -> ::std::vec::Vec<Self> {
+                    #struct_name::derive(input)
+                }
+
+                fn write(&self, bindings: &mut dialog_query::Bindings) -> ::std::result::Result<(), dialog_query::EvaluationError> {
+                    #(#write_statements)*
+                    ::std::result::Result::Ok(())
+                }
             }
-        }
-    };
+        };
 
     TokenStream::from(expanded)
 }

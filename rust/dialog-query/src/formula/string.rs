@@ -194,6 +194,7 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 mod tests {
     use super::*;
 
+    use crate::formula::query::FormulaQuery;
     use crate::{Parameters, Query, Term, selection::Answer};
 
     #[dialog_common::test]
@@ -209,7 +210,7 @@ mod tests {
             .set(Term::var("y"), " World".to_string())
             .unwrap();
 
-        let app = Concatenate::apply(terms).expect("apply should work");
+        let app: FormulaQuery = Concatenate::apply(terms).expect("apply should work").into();
         let results = app.derive(input).expect("Concatenate failed");
 
         assert_eq!(results.len(), 1);
@@ -233,7 +234,7 @@ mod tests {
             .set(Term::var("text"), "Hello".to_string())
             .unwrap();
 
-        let app = Length::apply(terms).expect("apply should work");
+        let app: FormulaQuery = Length::apply(terms).expect("apply should work").into();
         let results = app.derive(input).expect("Length failed");
 
         assert_eq!(results.len(), 1);
@@ -257,7 +258,7 @@ mod tests {
             .set(Term::var("text"), "hello world".to_string())
             .unwrap();
 
-        let app = Uppercase::apply(terms).expect("apply should work");
+        let app: FormulaQuery = Uppercase::apply(terms).expect("apply should work").into();
         let results = app.derive(input).expect("Uppercase failed");
 
         assert_eq!(results.len(), 1);
@@ -281,7 +282,7 @@ mod tests {
             .set(Term::var("text"), "HELLO WORLD".to_string())
             .unwrap();
 
-        let app = Lowercase::apply(terms).expect("apply should work");
+        let app: FormulaQuery = Lowercase::apply(terms).expect("apply should work").into();
         let results = app.derive(input).expect("Lowercase failed");
 
         assert_eq!(results.len(), 1);
@@ -305,7 +306,7 @@ mod tests {
             .set(Term::var("text"), "".to_string())
             .unwrap();
 
-        let app = Length::apply(terms).expect("apply should work");
+        let app: FormulaQuery = Length::apply(terms).expect("apply should work").into();
         let results = app.derive(input).expect("Length of empty string failed");
 
         assert_eq!(results.len(), 1);
@@ -332,7 +333,7 @@ mod tests {
             .set(Term::var("y"), "World".to_string())
             .unwrap();
 
-        let app = Concatenate::apply(terms).expect("apply should work");
+        let app: FormulaQuery = Concatenate::apply(terms).expect("apply should work").into();
         let results = app
             .derive(input)
             .expect("Concatenate with empty string failed");
@@ -356,7 +357,7 @@ mod tests {
         concat_terms.insert("second".to_string(), Term::var("lname"));
         concat_terms.insert("is".to_string(), Term::var("full_name"));
 
-        let concat_formula = Concatenate::apply(concat_terms)?;
+        let concat_formula: FormulaQuery = Concatenate::apply(concat_terms)?.into();
 
         let concat_input = Answer::new()
             .set(Term::var("fname"), "John".to_string())
@@ -378,7 +379,7 @@ mod tests {
         length_terms.insert("of".to_string(), Term::var("text"));
         length_terms.insert("is".to_string(), Term::var("length"));
 
-        let length_formula = Length::apply(length_terms)?;
+        let length_formula: FormulaQuery = Length::apply(length_terms)?.into();
 
         let length_input = Answer::new()
             .set(Term::var("text"), "Hello World".to_string())
@@ -396,7 +397,7 @@ mod tests {
         upper_terms.insert("of".to_string(), Term::var("input"));
         upper_terms.insert("is".to_string(), Term::var("output"));
 
-        let upper_formula = Uppercase::apply(upper_terms)?;
+        let upper_formula: FormulaQuery = Uppercase::apply(upper_terms)?.into();
 
         let upper_input = Answer::new()
             .set(Term::var("input"), "hello world".to_string())
@@ -425,7 +426,7 @@ mod tests {
             .set(Term::var("p"), "hello".to_string())
             .unwrap();
 
-        let app = Like::apply(terms).expect("apply should work");
+        let app: FormulaQuery = Like::apply(terms).expect("apply should work").into();
         let results = app.derive(input).expect("Like failed");
         assert_eq!(results.len(), 1);
         assert_eq!(
@@ -444,7 +445,7 @@ mod tests {
         terms.insert("pattern".to_string(), Term::var("p"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let app = Like::apply(terms).expect("apply should work");
+        let app: FormulaQuery = Like::apply(terms).expect("apply should work").into();
 
         // Prefix match
         let input = Answer::new()
@@ -490,7 +491,7 @@ mod tests {
         terms.insert("pattern".to_string(), Term::var("p"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let app = Like::apply(terms).expect("apply should work");
+        let app: FormulaQuery = Like::apply(terms).expect("apply should work").into();
 
         // Single char match
         let input = Answer::new()
@@ -518,7 +519,7 @@ mod tests {
         terms.insert("pattern".to_string(), Term::var("p"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let app = Like::apply(terms).expect("apply should work");
+        let app: FormulaQuery = Like::apply(terms).expect("apply should work").into();
 
         // Escaped star matches literal *
         let input = Answer::new()
@@ -546,7 +547,7 @@ mod tests {
         terms.insert("pattern".to_string(), Term::var("p"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let app = Like::apply(terms).expect("apply should work");
+        let app: FormulaQuery = Like::apply(terms).expect("apply should work").into();
 
         let input = Answer::new()
             .set(Term::var("t"), "anything".to_string())

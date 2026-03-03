@@ -17,13 +17,15 @@ use std::fmt::Display;
 /// Constraints express relationships that variables must satisfy. They support
 /// bidirectional inference when possible, meaning if one term is bound, the other
 /// can often be inferred from the constraint.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "assert", content = "where")]
 pub enum Constraint {
     /// Equality constraint between two terms.
     ///
     /// Enforces that both terms must have equal values. Supports bidirectional
     /// inference: if one term is bound, the other will be inferred to have the
     /// same value.
+    #[serde(rename = "==")]
     Equality(Equality),
 }
 

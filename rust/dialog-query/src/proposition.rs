@@ -1,4 +1,5 @@
 pub use crate::concept::application::ConceptQuery;
+use crate::concept::descriptor::ConceptDescriptor;
 use crate::constraint::Constraint;
 pub use crate::error::AnalyzerError;
 pub use crate::error::QueryResult;
@@ -8,6 +9,9 @@ pub use crate::relation::query::RelationQuery;
 use crate::selection::Answers;
 pub use crate::{Environment, Parameters, Schema, Source};
 use futures_util::future::Either;
+use serde::de;
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use std::fmt::Display;
 
 /// A knowledge-base query embedded inside a [`Premise::When`](crate::Premise::When).
@@ -116,3 +120,61 @@ impl From<Constraint> for Proposition {
         Proposition::Constraint(constraint)
     }
 }
+
+impl Serialize for Proposition {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Proposition::Concept(cq) => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("assert", &cq.predicate)?;
+                map.serialize_entry("where", &cq.terms)?;
+                map.end()
+            }
+            Proposition::Formula(fq) => fq.serialize(serializer),
+            Proposition::Constraint(c) => c.serialize(serializer),
+            Proposition::Relation(_) => Err(serde::ser::Error::custom(
+                "Relation propositions cannot be serialized in formal notation",
+            )),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Proposition {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Deserialize into a raw JSON value first so we can peek at the "assert" field
+        let raw: serde_json::Value = serde_json::Value::deserialize(deserializer)?;
+
+        let assert_val = raw
+            .get("assert")
+            .ok_or_else(|| de::Error::missing_field("assert"))?;
+
+        match assert_val {
+            // Object → concept descriptor
+            serde_json::Value::Object(_) => {
+                let predicate: ConceptDescriptor =
+                    serde_json::from_value(assert_val.clone()).map_err(de::Error::custom)?;
+                let terms: Parameters = raw
+                    .get("where")
+                    .ok_or_else(|| de::Error::missing_field("where"))
+                    .and_then(|v| serde_json::from_value(v.clone()).map_err(de::Error::custom))?;
+                Ok(Proposition::Concept(ConceptQuery { predicate, terms }))
+            }
+            // String "==" → Constraint
+            serde_json::Value::String(name) if name == "==" => {
+                let constraint: Constraint =
+                    serde_json::from_value(raw).map_err(de::Error::custom)?;
+                Ok(Proposition::Constraint(constraint))
+            }
+            // Other string → FormulaQuery
+            serde_json::Value::String(_) => {
+                let fq: FormulaQuery = serde_json::from_value(raw).map_err(de::Error::custom)?;
+                Ok(Proposition::Formula(fq))
+            }
+            _ => Err(de::Error::custom(
+                "\"assert\" must be a concept object or a formula/constraint name string",
+            )),
+        }
+    }
+}
+
+// Serde tests for Proposition are in formula::query::tests

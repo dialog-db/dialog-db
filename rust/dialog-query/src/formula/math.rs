@@ -130,6 +130,7 @@ mod tests {
     use crate::Term;
     use crate::error::EvaluationError;
     use crate::formula::math::*;
+    use crate::formula::query::FormulaQuery;
     use crate::*;
 
     #[dialog_common::test]
@@ -148,7 +149,7 @@ mod tests {
             .expect("Failed to set y");
 
         // Create formula application
-        let app = Sum::apply(terms)?;
+        let app: FormulaQuery = Sum::apply(terms)?.into();
 
         // Expand the formula
         let results = app.derive(input).expect("Formula expansion failed");
@@ -195,7 +196,7 @@ mod tests {
             .set(Term::var("x"), 5u32)
             .expect("Failed to set x");
 
-        let app = Sum::apply(terms)?;
+        let app: FormulaQuery = Sum::apply(terms)?.into();
         let result = app.derive(input);
 
         assert!(result.is_err());
@@ -214,7 +215,7 @@ mod tests {
         terms.insert("with".to_string(), Term::var("b"));
         terms.insert("is".to_string(), Term::var("sum"));
 
-        let app = Sum::apply(terms)?;
+        let app: FormulaQuery = Sum::apply(terms)?.into();
 
         // Test first input: 2 + 3 = 5
         let input1 = Answer::new()
@@ -315,7 +316,7 @@ mod tests {
             .set(Term::var("y"), 3u32)
             .unwrap();
 
-        let app = Difference::apply(terms)?;
+        let app: FormulaQuery = Difference::apply(terms)?.into();
         let results = app.derive(input).expect("Difference failed");
 
         assert_eq!(results.len(), 1);
@@ -343,7 +344,7 @@ mod tests {
             .set(Term::var("y"), 10u32)
             .unwrap();
 
-        let app = Difference::apply(terms)?;
+        let app: FormulaQuery = Difference::apply(terms)?.into();
         let results = app
             .derive(input)
             .expect("Difference underflow should be handled");
@@ -374,7 +375,7 @@ mod tests {
             .set(Term::var("y"), 7u32)
             .unwrap();
 
-        let app = Product::apply(terms)?;
+        let app: FormulaQuery = Product::apply(terms)?.into();
         let results = app.derive(input).expect("Product failed");
 
         assert_eq!(results.len(), 1);
@@ -402,7 +403,7 @@ mod tests {
             .set(Term::var("y"), 3u32)
             .unwrap();
 
-        let app = Quotient::apply(terms)?;
+        let app: FormulaQuery = Quotient::apply(terms)?.into();
         let results = app.derive(input).expect("Quotient failed");
 
         assert_eq!(results.len(), 1);
@@ -431,7 +432,7 @@ mod tests {
             .set(Term::var("y"), 0u32)
             .unwrap();
 
-        let app = Quotient::apply(terms)?;
+        let app: FormulaQuery = Quotient::apply(terms)?.into();
         let results = app
             .derive(input)
             .expect("Division by zero should be handled");
@@ -454,7 +455,7 @@ mod tests {
             .set(Term::var("y"), 5u32)
             .unwrap();
 
-        let app = Modulo::apply(terms)?;
+        let app: FormulaQuery = Modulo::apply(terms)?.into();
         let results = app.derive(input).expect("Modulo failed");
 
         assert_eq!(results.len(), 1);
@@ -482,7 +483,7 @@ mod tests {
             .set(Term::var("y"), 0u32)
             .unwrap();
 
-        let app = Modulo::apply(terms)?;
+        let app: FormulaQuery = Modulo::apply(terms)?.into();
         let results = app.derive(input).expect("Modulo by zero should be handled");
 
         // Should return empty Vec for modulo by zero
@@ -498,7 +499,7 @@ mod tests {
         sum_terms.insert("with".to_string(), Term::var("y"));
         sum_terms.insert("is".to_string(), Term::var("sum_result"));
 
-        let sum_formula = Sum::apply(sum_terms)?;
+        let sum_formula: FormulaQuery = Sum::apply(sum_terms)?.into();
 
         let sum_input = Answer::new()
             .set(Term::var("x"), 10u32)
@@ -519,7 +520,7 @@ mod tests {
         diff_terms.insert("subtract".to_string(), Term::var("b"));
         diff_terms.insert("is".to_string(), Term::var("diff_result"));
 
-        let diff_formula = Difference::apply(diff_terms)?;
+        let diff_formula: FormulaQuery = Difference::apply(diff_terms)?.into();
 
         let diff_input = Answer::new()
             .set(Term::var("a"), 20u32)
@@ -540,7 +541,7 @@ mod tests {
         prod_terms.insert("times".to_string(), Term::var("q"));
         prod_terms.insert("is".to_string(), Term::var("product"));
 
-        let product_formula = Product::apply(prod_terms)?;
+        let product_formula: FormulaQuery = Product::apply(prod_terms)?.into();
 
         let prod_input = Answer::new()
             .set(Term::var("p"), 6u32)
@@ -567,7 +568,7 @@ mod tests {
         parse_terms.insert("text".to_string(), Term::var("str_input"));
         parse_terms.insert("is".to_string(), Term::var("parsed_num"));
 
-        let parse_formula = ParseUnsignedInteger::apply(parse_terms)?;
+        let parse_formula: FormulaQuery = ParseUnsignedInteger::apply(parse_terms)?.into();
 
         let parse_input = Answer::new()
             .set(Term::var("str_input"), "10".to_string())
@@ -583,7 +584,7 @@ mod tests {
         sum_terms.insert("with".to_string(), Term::var("addend"));
         sum_terms.insert("is".to_string(), Term::var("final_sum"));
 
-        let sum_formula = Sum::apply(sum_terms)?;
+        let sum_formula: FormulaQuery = Sum::apply(sum_terms)?.into();
 
         let sum_input = intermediate_result
             .clone()
@@ -602,7 +603,7 @@ mod tests {
         to_string_terms.insert("value".to_string(), Term::var("final_sum"));
         to_string_terms.insert("is".to_string(), Term::var("final_string"));
 
-        let to_string_formula = ToString::apply(to_string_terms)?;
+        let to_string_formula: FormulaQuery = ToString::apply(to_string_terms)?.into();
 
         let string_results = to_string_formula.derive(final_results[0].clone())?;
         assert_eq!(string_results.len(), 1);
@@ -616,34 +617,16 @@ mod tests {
         Ok(())
     }
 
-    #[derive(Debug, Clone, crate::Formula)]
-    pub struct TestSum {
-        pub of: u32,
-        pub with: u32,
-        #[derived]
-        pub is: u32,
-    }
-
-    impl TestSum {
-        pub fn derive(input: crate::formula::Input<Self>) -> Vec<Self> {
-            vec![TestSum {
-                of: input.of,
-                with: input.with,
-                is: input.of + input.with,
-            }]
-        }
-    }
-
     #[dialog_common::test]
     fn it_generates_input_struct() {
-        let input = crate::formula::Input::<TestSum> { of: 5, with: 3 };
+        let input = crate::formula::Input::<Sum> { of: 5, with: 3 };
         assert_eq!(input.of, 5);
         assert_eq!(input.with, 3);
     }
 
     #[dialog_common::test]
     fn it_generates_match_struct() {
-        let match_pattern = crate::Query::<TestSum> {
+        let match_pattern = crate::Query::<Sum> {
             of: Term::var("x"),
             with: Term::var("y"),
             is: Term::var("result"),
@@ -911,7 +894,7 @@ mod tests {
         quotient_terms.insert("by".to_string(), Term::var("divisor"));
         quotient_terms.insert("is".to_string(), Term::var("quotient"));
 
-        let quotient_formula = Quotient::apply(quotient_terms)?;
+        let quotient_formula: FormulaQuery = Quotient::apply(quotient_terms)?.into();
 
         let division_by_zero_input = Answer::new()
             .set(Term::var("dividend"), 10u32)
@@ -928,7 +911,7 @@ mod tests {
         modulo_terms.insert("by".to_string(), Term::var("divisor"));
         modulo_terms.insert("is".to_string(), Term::var("remainder"));
 
-        let modulo_formula = Modulo::apply(modulo_terms)?;
+        let modulo_formula: FormulaQuery = Modulo::apply(modulo_terms)?.into();
 
         let modulo_by_zero_input = Answer::new()
             .set(Term::var("dividend"), 17u32)
