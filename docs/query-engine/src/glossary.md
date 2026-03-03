@@ -2,7 +2,7 @@
 
 **Adornment**
 A compact `u64` bitfield encoding which of a concept's parameters are bound
-vs. free. Used as a cache key for pre-planned execution strategies. Inspired
+vs free. Used as a cache key for pre-planned execution strategies. Inspired
 by the magic set transformation from deductive databases.
 
 **Answer**
@@ -28,8 +28,7 @@ evaluation. Tracks which inputs were read for provenance.
 
 **Blank (variable)**
 An anonymous variable (`Term::Variable { name: None, .. }`) that matches
-anything but does not participate in joins across premises. Useful as a
-wildcard.
+anything but does not participate in joins across premises. Used as a wildcard.
 
 **Candidate**
 A premise under consideration by the query planner. Can be `Viable` (ready to
@@ -50,7 +49,7 @@ entire group. Used in `RelationQuery` schemas to express that any of
 
 **Claim**
 An immutable `(the, of, is, cause)` tuple stored in the database. The
-fundamental unit of information. Claims are never modified — new claims may
+fundamental unit of information. Claims are never modified; new claims may
 succeed previous ones.
 
 **Concept**
@@ -148,7 +147,7 @@ Whether a parameter must be externally bound (`Required`) or can be derived
 (`Optional`). Parameters in the same choice group form `Required(Some(group))`.
 
 **Schema**
-Metadata describing a premise's parameters — their types, cardinalities, and
+Metadata describing a premise's parameters: their types, cardinalities, and
 requirements. Used by the planner to classify parameters as prerequisites or
 products.
 
@@ -157,8 +156,8 @@ Records which component of a matched claim (`The`, `Of`, `Is`, `Cause`)
 contributed a particular binding.
 
 **Session**
-The primary entry point for interacting with the database. Combines a store
-with a rule registry, supporting both reads and writes.
+The entry point for interacting with the database. Combines a store with a
+rule registry, supporting both reads and writes.
 
 **Source**
 A read-only trait for accessing facts and rules. Implemented by `Session` and

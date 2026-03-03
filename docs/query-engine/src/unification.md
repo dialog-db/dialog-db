@@ -2,7 +2,6 @@
 
 This chapter explains how variable bindings accumulate during query evaluation,
 how new matches expand the answer set, and how conflicts eliminate answers.
-This is the core mechanism that makes Datalog-style pattern matching work.
 
 ## What Is an Answer?
 
@@ -17,30 +16,30 @@ pub struct Answer {
 }
 ```
 
-- **`conclusions`** — Named variable bindings. Each variable maps to a
+- **`conclusions`**: Named variable bindings. Each variable maps to a
   `Factors` value that records both the bound value and its provenance.
-- **`facts`** — Tracks which claims were matched by which relation queries,
+- **`facts`**: Tracks which claims were matched by which relation queries,
   enabling change detection and incremental re-evaluation.
 
 ## The Evaluation Pipeline
 
-Query evaluation is a **pipeline of premises**, where each premise receives a
+Query evaluation is a pipeline of premises, where each premise receives a
 stream of answers from the previous one and produces a (possibly larger or
 smaller) stream of answers:
 
 ```
 Empty answer
-    │
-    ▼
-┌──────────┐    ┌──────────┐    ┌──────────┐
-│ Premise 1 │───▶│ Premise 2 │───▶│ Premise 3 │───▶ Results
-└──────────┘    └──────────┘    └──────────┘
+    |
+    v
++----------+    +----------+    +----------+
+| Premise 1 |--->| Premise 2 |--->| Premise 3 |---> Results
++----------+    +----------+    +----------+
 ```
 
-Each premise acts as a **filter-and-expander**:
+Each premise acts as a filter-and-expander:
 - For each incoming answer, it produces **zero or more** expanded answers
-- An answer with **zero** expansions is eliminated (filtered out)
-- An answer with **multiple** expansions is multiplied (one copy per match)
+- Zero expansions means the answer is eliminated (filtered out)
+- Multiple expansions means the answer is multiplied (one copy per match)
 
 This is implemented via the `Answers` trait (a `Stream` of `Result<Answer>`):
 
@@ -55,17 +54,17 @@ pub trait Answers:
 
 ## How Answers Expand
 
-When a premise finds a match, it **clones the incoming answer and merges new
-bindings into it**:
+When a premise finds a match, it clones the incoming answer and merges new
+bindings into it:
 
 ```
-Incoming answer: { ?person → Entity(alice) }
-                        │
+Incoming answer: { ?person -> Entity(alice) }
+                        |
 Premise: (person/age, ?person, ?age)
 Matched claim: (person/age, alice, 30)
-                        │
-                        ▼
-Expanded answer: { ?person → Entity(alice), ?age → 30 }
+                        |
+                        v
+Expanded answer: { ?person -> Entity(alice), ?age -> 30 }
 ```
 
 If the premise matches multiple claims, each match produces a separate
@@ -73,14 +72,14 @@ expanded answer:
 
 ```
 Incoming: { }  (empty)
-                │
+                |
 Premise: (person/name, ?p, ?name)
-Matches: alice→"Alice", bob→"Bob"
-                │
-          ┌─────┴─────┐
-          ▼           ▼
-{ ?p→alice,       { ?p→bob,
-  ?name→"Alice" }   ?name→"Bob" }
+Matches: alice->"Alice", bob->"Bob"
+                |
+          +-----+-----+
+          v           v
+{ ?p->alice,       { ?p->bob,
+  ?name->"Alice" }   ?name->"Bob" }
 ```
 
 ## How Answers Get Eliminated
@@ -89,21 +88,21 @@ Answers are eliminated in three ways:
 
 ### 1. Unification Failure
 
-If a premise tries to bind a variable to a value **different from its existing
-binding**, the answer is discarded:
+If a premise tries to bind a variable to a value different from its existing
+binding, the answer is discarded:
 
 ```
-Incoming: { ?person → Entity(alice) }
-                    │
+Incoming: { ?person -> Entity(alice) }
+                    |
 Premise: (person/city, ?person, "NYC")
 No claim: (person/city, alice, "NYC")
-                    │
-                    ▼
-              (eliminated — no match)
+                    |
+                    v
+              (eliminated, no match)
 ```
 
 Even if there *is* a claim `(person/city, alice, "Boston")`, it won't match
-because `"Boston" ≠ "NYC"`.
+because `"Boston" != "NYC"`.
 
 When `Answer::assign()` detects a conflict, it returns an error:
 
@@ -118,7 +117,7 @@ This error is caught by the evaluation pipeline and the answer is dropped.
 ### 2. No Matches
 
 If a relation query finds no matching claims for the given constraints, the
-incoming answer simply produces no expanded answers — it's filtered out by the
+incoming answer simply produces no expanded answers. It's filtered out by the
 flat-map.
 
 ### 3. Negation
@@ -128,32 +127,32 @@ match, the answer is eliminated. If it produces *no* matches, the answer
 passes through unchanged:
 
 ```
-Incoming: { ?person → alice }
-                │
+Incoming: { ?person -> alice }
+                |
 Unless: (person/retired, ?person, true)
-                │
-    ┌───────────┴───────────┐
-    │ Match found           │ No match
-    ▼                       ▼
-(eliminated)         { ?person → alice }
+                |
+    +-----------+-----------+
+    | Match found           | No match
+    v                       v
+(eliminated)         { ?person -> alice }
                      (passes through)
 ```
 
 ## Evidence and Provenance
 
-Every binding in an answer carries **provenance** — a record of how the value
-was obtained. This is tracked through the `Factor` enum:
+Every binding in an answer carries provenance, a record of how the value was
+obtained. This is tracked through the `Factor` enum:
 
 ```rust
 pub enum Factor {
     Selected {
-        selector: Selector,           // which component: The, Of, Is, or Cause
+        selector: Selector,
         application: Arc<RelationQuery>,
         fact: Arc<Claim>,
     },
     Derived {
         value: Value,
-        from: HashMap<String, Factors>,  // input factors
+        from: HashMap<String, Factors>,
         formula: Arc<FormulaQuery>,
     },
     Parameter {
@@ -162,11 +161,11 @@ pub enum Factor {
 }
 ```
 
-- **`Selected`** — The value came from a specific claim matched by a specific
+- **`Selected`**: The value came from a specific claim matched by a specific
   relation query.
-- **`Derived`** — The value was computed by a formula, with references to the
+- **`Derived`**: The value was computed by a formula, with references to the
   input factors used.
-- **`Parameter`** — The value was provided externally as a query parameter.
+- **`Parameter`**: The value was provided externally as a query parameter.
 
 ### Factors (Multi-Evidence)
 
@@ -181,7 +180,7 @@ pub struct Factors {
 ```
 
 If a second premise binds `?name` to `"Alice"` when it's already bound to
-`"Alice"`, the new factor is added as an **alternate** — confirming the binding
+`"Alice"`, the new factor is added as an **alternate**, confirming the binding
 from a different source. If it tries to bind `?name` to `"Bob"`, that's a
 unification failure and the answer is eliminated.
 
@@ -218,9 +217,9 @@ variable.
 Unification is the process of combining variable bindings across premises. It
 operates through a simple rule:
 
-> **A variable can be bound to at most one value per answer. If two premises
+> A variable can be bound to at most one value per answer. If two premises
 > bind the same variable to the same value, the bindings are consolidated. If
-> they bind it to different values, the answer is eliminated.**
+> they bind it to different values, the answer is eliminated.
 
 This is what makes joins work without explicit join syntax. Consider:
 
@@ -230,7 +229,7 @@ Premise 2: (person/age,  ?person, ?age)
 ```
 
 The shared variable `?person` acts as a join key. When premise 1 binds
-`?person` to `Entity(alice)`, premise 2 must also match `Entity(alice)` — any
+`?person` to `Entity(alice)`, premise 2 must also match `Entity(alice)`. Any
 claim with a different entity would fail unification.
 
 ### Comparison with Traditional Datalog
@@ -245,9 +244,9 @@ query evaluation works similarly:
 4. If a variable is already bound, check that the value matches (unify)
 5. Failed matches return null and are filtered out
 
-Dialog follows the same logic, but adds **provenance tracking** (factors) and
-**streaming evaluation** (answers flow through an async pipeline rather than
-being collected eagerly).
+Dialog follows the same logic, but adds provenance tracking (factors) and
+streaming evaluation (answers flow through an async pipeline rather than being
+collected eagerly).
 
 ## The Selector
 
@@ -263,8 +262,7 @@ pub enum Selector {
 }
 ```
 
-This enables precise tracking of which part of which claim produced each
-variable binding.
+This enables tracing any value back to the part of the claim that produced it.
 
 ## Seeding Evaluation
 
@@ -274,8 +272,8 @@ Every query starts with a single empty answer, called the **seed**:
 Answer::new().seed()  // Stream containing one empty answer
 ```
 
-This seed flows into the first premise, which expands it into concrete
-answers. Each subsequent premise further refines or expands those answers.
+This seed flows into the first premise, which expands it into concrete answers.
+Each subsequent premise further refines or expands those answers.
 
 If the seed were absent, no answers would flow through the pipeline and the
 query would produce no results.

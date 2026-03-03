@@ -1,8 +1,8 @@
 # Concept Queries
 
-A `ConceptQuery` matches entities that satisfy a concept — a named collection
-of attributes. Under the hood, it expands into multiple relation queries (one
-per attribute), coordinated by the planner and cached by adornment.
+A `ConceptQuery` matches entities that satisfy a concept, a named collection of
+attributes. Under the hood, it expands into multiple relation queries (one per
+attribute), coordinated by the planner and cached by adornment.
 
 ## Structure
 
@@ -13,14 +13,14 @@ pub struct ConceptQuery {
 }
 ```
 
-- **`terms`** — Maps parameter names (`this`, `name`, `role`, ...) to user
+- **`terms`**: Maps parameter names (`this`, `name`, `role`, ...) to user
   terms (constants, variables, or blanks).
-- **`predicate`** — The concept descriptor, listing required attributes with
+- **`predicate`**: The concept descriptor, listing required attributes with
   their types and cardinalities.
 
 ## Evaluation Flow
 
-Concept evaluation is the most complex part of the query engine. Here's the
+Concept evaluation is the most involved part of the query engine. Here's the
 step-by-step flow:
 
 ### 1. Acquire Rules
@@ -61,10 +61,10 @@ This creates a fresh answer scoped to the concept's parameters. For example:
 User query:  PersonMatch { this: ?employee, name: ?n }
 Parameters:  { "this": var("employee"), "name": var("n") }
 
-If incoming answer has: { ?employee → alice, ?n → "Alice" }
+If incoming answer has: { ?employee -> alice, ?n -> "Alice" }
 
-Extracted answer: { ?this → alice, ?name → "Alice" }
-                    ↑ internal names    ↑ from user bindings
+Extracted answer: { ?this -> alice, ?name -> "Alice" }
+                    ^ internal names    ^ from user bindings
 ```
 
 This scoping prevents variable name collisions between the outer query and the
@@ -76,10 +76,10 @@ The extracted answer is used as the seed for evaluating the concept's plan
 (a `Disjunction` of `Conjunction`s):
 
 ```
-Extracted answer → Rule 1 plan → answers
-                   Rule 2 plan → answers
-                   ...
-                   (all merged via disjunction)
+Extracted answer -> Rule 1 plan -> answers
+                    Rule 2 plan -> answers
+                    ...
+                    (all merged via disjunction)
 ```
 
 Each rule's `Conjunction` executes its premises in the planned order, expanding
@@ -97,9 +97,9 @@ fn merge_parameters(base: &Answer, result: &Answer, terms: &Parameters) -> Answe
 This reintegrates the concept's results into the outer query's answer:
 
 ```
-Rule result:    { ?this → alice, ?name → "Alice", ?role → "Engineer" }
-Merged back:    { ?employee → alice, ?n → "Alice", ?role_var → "Engineer" }
-                  ↑ restored to user names
+Rule result:    { ?this -> alice, ?name -> "Alice", ?role -> "Engineer" }
+Merged back:    { ?employee -> alice, ?n -> "Alice", ?role_var -> "Engineer" }
+                  ^ restored to user names
 ```
 
 ### 6. Yield Answers
@@ -108,7 +108,7 @@ The merged answers flow to the next premise in the outer query.
 
 ## Lazy Rule Loading
 
-Concept rules are loaded **on demand**. The `Source::acquire()` method:
+Concept rules are loaded on demand. The `Source::acquire()` method:
 
 1. Checks the `RuleRegistry` for installed rules
 2. Always includes the implicit rule (direct attribute lookup)
@@ -155,7 +155,7 @@ nested evaluation:
 
 ```
 Employee(?e, ?name, ?dept) :-
-    Person(?e, ?name, ?role),          ← nested concept query
+    Person(?e, ?name, ?role),          <- nested concept query
     (department/member, ?dept, ?e).
 ```
 
@@ -191,7 +191,5 @@ pub fn estimate(&self, env: &Environment) -> Option<usize> {
 }
 ```
 
-The `CONCEPT_OVERHEAD` (1,000) reflects the potential cost of:
-- Looking up rules in the registry
-- Checking the adornment cache
-- Evaluating deductive rules (if any)
+The `CONCEPT_OVERHEAD` (1,000) reflects the cost of looking up rules in the
+registry, checking the adornment cache, and evaluating deductive rules (if any).

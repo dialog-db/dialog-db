@@ -23,14 +23,14 @@ pub struct FormulaQuery {
 
 For each incoming answer:
 
-1. **Create bindings** — Wrap the answer in a `Bindings` struct that provides
+1. **Create bindings**: Wrap the answer in a `Bindings` struct that provides
    controlled read/write access:
 
    ```rust
    let mut bindings = Bindings::new(formula, answer, parameters);
    ```
 
-2. **Call compute** — The formula's compute function reads inputs and writes
+2. **Call compute**: The formula's compute function reads inputs and writes
    outputs through the bindings API:
 
    ```rust
@@ -40,7 +40,7 @@ For each incoming answer:
    bindings.write("is", &Value::from(len))?;      // write output
    ```
 
-3. **Produce answers** — Each write creates a `Factor::Derived` with full
+3. **Produce answers**: Each write creates a `Factor::Derived` with full
    provenance (which inputs were read, which formula computed the result).
 
 ### The Bindings API
@@ -56,11 +56,11 @@ pub struct Bindings {
 }
 ```
 
-**`read<T>(name)`** — Look up a parameter by name, resolve its term in the
+**`read<T>(name)`**: Look up a parameter by name, resolve its term in the
 answer, and convert to the requested Rust type. Tracks which factors were
 read for provenance.
 
-**`write(name, value)`** — Bind an output parameter to a computed value. If
+**`write(name, value)`**: Bind an output parameter to a computed value. If
 the parameter's term is a constant, verifies that the computed value matches
 (otherwise it's a conflict and the answer is eliminated). Creates a
 `Factor::Derived` that references the read factors.
@@ -78,8 +78,8 @@ match expansion {
 }
 ```
 
-Conflicts are treated as unification failures — the answer is silently
-eliminated, just as when a relation query doesn't match.
+Conflicts are treated as unification failures. The answer is silently
+eliminated, same as when a relation query doesn't match.
 
 ### Provenance Chain
 
@@ -127,8 +127,8 @@ and output cells (derived):
 ### Cost
 
 Formula cost is the sum of `#[derived(cost = N)]` annotations on output
-fields. Since formulas involve no I/O, their cost is always much lower than
-relation queries, ensuring they're scheduled after their inputs are bound.
+fields. Since formulas involve no I/O, their cost is always lower than
+relation queries, so they're scheduled after their inputs are bound.
 
 ## Negation
 
@@ -153,10 +153,10 @@ pub enum Premise {
 let mut output = proposition.evaluate(answer.seed(), source);
 
 if let Ok(Some(_)) = output.try_next().await {
-    // Pattern matched — DISCARD this answer
+    // Pattern matched, DISCARD this answer
     continue;
 }
-// Pattern did NOT match — KEEP this answer
+// Pattern did NOT match, KEEP this answer
 yield answer;
 ```
 
@@ -170,7 +170,7 @@ Key properties:
   negation check is deterministic.
 
 - **Safety.** Because negated premises require bound variables and don't
-  produce bindings, they're always scheduled at the end of the plan — after
+  produce bindings, they're always scheduled at the end of the plan, after
   all positive premises have run. This is the standard stratified negation
   approach from Datalog.
 
@@ -216,8 +216,8 @@ let y = Term::<String>::var("y");
 let constraint = x.is(y);  // ?x == ?y
 ```
 
-Constraints are similar to formulas but even simpler — they just check that
-two already-bound variables have the same value. Like negation, they require
-their operands to be bound and don't produce new bindings.
+Constraints are similar to formulas but simpler. They just check that two
+already-bound variables have the same value. Like negation, they require their
+operands to be bound and don't produce new bindings.
 
 Negated constraints (`!x.is(y)`) check that two variables are **not** equal.

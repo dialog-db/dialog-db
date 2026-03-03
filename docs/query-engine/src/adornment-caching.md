@@ -33,21 +33,21 @@ pattern always produce the same adornment.
 
 ## How Adornments Drive Planning
 
-The adornment captures the **calling pattern** — which variables are known when
+The adornment captures the **calling pattern**, which variables are known when
 the concept is queried. This determines which premises should run first:
 
 ```
 Adornment 0b001 (name bound):
-  → Plan: look up person/name first (cheap, name is constrained)
-  → Then: look up person/role (entity now bound from step 1)
+  -> Plan: look up person/name first (cheap, name is constrained)
+  -> Then: look up person/role (entity now bound from step 1)
 
 Adornment 0b100 (this bound):
-  → Plan: look up person/name first (cheap, entity is constrained)
-  → Then: look up person/role (entity already bound)
+  -> Plan: look up person/name first (cheap, entity is constrained)
+  -> Then: look up person/role (entity already bound)
 
 Adornment 0b000 (nothing bound):
-  → Plan: scan person/name (expensive, no constraints)
-  → Then: look up person/role (entity now bound)
+  -> Plan: scan person/name (expensive, no constraints)
+  -> Then: look up person/role (entity now bound)
 ```
 
 Each adornment produces a different optimal plan. The adornment serves as the
@@ -65,11 +65,11 @@ pub struct ConceptRules {
 }
 ```
 
-- **`implicit`** — The default rule that fetches all attributes directly from
+- **`implicit`**: The default rule that fetches all attributes directly from
   the store. Every concept has one.
-- **`installed`** — User-defined deductive rules registered via
+- **`installed`**: User-defined deductive rules registered via
   `session.rule::<Concept>(...)`.
-- **`plans`** — A read-write locked cache mapping adornments to compiled
+- **`plans`**: A read-write locked cache mapping adornments to compiled
   disjunctions.
 
 ### Cache Lookup Flow
@@ -79,16 +79,16 @@ concept_rules.plan(terms, answer):
 
   1. Derive adornment from terms and answer
   2. Read lock: check cache for this adornment
-     ├── Hit → return cached Arc<Disjunction>
-     └── Miss → continue to step 3
-  3. Convert adornment → Environment
+     |-- Hit -> return cached Arc<Disjunction>
+     +-- Miss -> continue to step 3
+  3. Convert adornment -> Environment
   4. Re-plan all rules (implicit + installed) for this environment
   5. Combine plans into Disjunction
   6. Write lock: insert into cache
   7. Return Arc<Disjunction>
 ```
 
-Most queries hit the cache at step 2 with only a read lock — no contention.
+Most queries hit the cache at step 2 with only a read lock.
 
 ## Disjunctions
 
@@ -126,8 +126,8 @@ The `conjunction.plan(&scope)` method:
 3. Runs the planning algorithm with the new scope
 4. Returns a new `Conjunction` with potentially different ordering and costs
 
-This means a rule compiled with no bound variables can be efficiently
-re-optimized when called with specific bindings.
+This means a rule compiled with no bound variables can be re-optimized when
+called with specific bindings.
 
 ## Cache Invalidation
 
@@ -158,16 +158,15 @@ Dialog's approach is similar but simplified for its current scope:
 - Plan re-optimization serves the same role as generating specialized rules
 - The plan cache serves the same role as tabling/memoization
 
-The key difference is that Dialog currently handles **non-recursive** rules
-only. For non-recursive rules, magic sets reduce to pushing selections into
-joins — which is exactly what the planner does when given a richer environment.
+The difference is that Dialog currently handles **non-recursive** rules only.
+For non-recursive rules, magic sets reduce to pushing selections into joins,
+which is what the planner does when given a richer environment.
 
 The adornment infrastructure also positions Dialog for future support of
 **recursive rules** (fixpoint evaluation), where adornments would serve as
 cache keys for tabling (Tekle & Liu, 2011).
 
-See the [Relation to Magic Sets](./magic-sets.md) chapter for a deeper
-comparison.
+See the [Relation to Magic Sets](./magic-sets.md) chapter for more.
 
 ## Worked Example
 
@@ -198,4 +197,4 @@ let q2 = EmployeeMatch {
 
 Each of these queries produces a different adornment, hitting the cache or
 triggering a re-plan. Once planned, subsequent queries with the same binding
-pattern reuse the cached plan instantly.
+pattern reuse the cached plan.

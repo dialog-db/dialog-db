@@ -9,14 +9,14 @@ use that variable. The planner's job is to find a cheap ordering.
 The `Planner` is a two-state machine defined in `dialog-query/src/planner.rs`:
 
 ```
-         ┌──────────────────────────────┐
-         │  Idle { premises: Vec }      │
-         └──────────┬───────────────────┘
-                    │  first call to top()
-                    ▼
-         ┌──────────────────────────────┐
-         │  Active { candidates: Vec }  │◄─── subsequent top() calls
-         └──────────────────────────────┘     update candidates in-place
+         +------------------------------+
+         |  Idle { premises: Vec }      |
+         +-------------+----------------+
+                       |  first call to top()
+                       v
+         +------------------------------+
+         |  Active { candidates: Vec }  |<--- subsequent top() calls
+         +------------------------------+     update candidates in-place
 ```
 
 - **Idle**: Holds raw, unanalyzed premises. On the first call to `top()`,
@@ -27,25 +27,24 @@ The `Planner` is a two-state machine defined in `dialog-query/src/planner.rs`:
 ## The Planning Algorithm
 
 ```
-plan(premises, outer_scope) → Conjunction:
+plan(premises, outer_scope) -> Conjunction:
 
-    bound ← clone(outer_scope)
-    steps ← []
-    cost  ← 0
+    bound <- clone(outer_scope)
+    steps <- []
+    cost  <- 0
 
     while premises remain:
-        step ← top(bound)          // pick cheapest viable candidate
-        cost ← cost + step.cost
-        bound ← bound ∪ step.binds // new variables flow into scope
+        step <- top(bound)          // pick cheapest viable candidate
+        cost <- cost + step.cost
+        bound <- bound | step.binds // new variables flow into scope
         steps.push(step)
 
-    binds ← bound \ outer_scope    // variables new to this plan
+    binds <- bound \ outer_scope    // variables new to this plan
     return Conjunction { steps, cost, binds, env: outer_scope }
 ```
 
-The key insight is that **each selected step enriches the environment**,
-potentially reducing the cost of remaining candidates and unblocking previously
-blocked ones.
+Each selected step enriches the environment, potentially reducing the cost of
+remaining candidates and unblocking previously blocked ones.
 
 ## Candidates
 
@@ -53,7 +52,7 @@ A `Candidate` wraps a premise with planning metadata. It has two states:
 
 ### Viable
 
-All prerequisites are satisfied — the premise can execute now.
+All prerequisites are satisfied. The premise can execute now.
 
 ```rust
 Candidate::Viable {
@@ -90,15 +89,15 @@ When a `Candidate` is created from a premise:
    bindings).
 
 2. For each parameter, check its `Requirement` from the schema:
-   - **`Required(None)`** — must be externally bound. If the parameter is a
+   - **`Required(None)`**: must be externally bound. If the parameter is a
      variable not in the environment, add it to `requires`.
-   - **`Required(Some(group))`** — part of a choice group. If *any* member of
+   - **`Required(Some(group))`**: part of a choice group. If *any* member of
      the group is bound (constant or in env), the whole group is satisfied.
      Otherwise, add to `requires`.
-   - **`Optional`** — can be derived. If unbound, add to `binds` (this premise
+   - **`Optional`**: can be derived. If unbound, add to `binds` (this premise
      will produce it).
 
-3. If `requires` is empty → `Viable`. Otherwise → `Blocked`.
+3. If `requires` is empty, the candidate is `Viable`. Otherwise `Blocked`.
 
 ### Choice Groups
 
@@ -107,8 +106,8 @@ For a `RelationQuery`, the `(the, of, is)` parameters form a choice group:
 if any one of them is bound, the others become outputs rather than
 prerequisites.
 
-This is because the store maintains multiple indexes (EAV, AEV, VAE) — knowing
-any one component is enough to constrain the scan.
+This works because the store maintains multiple indexes (EAV, AEV, VAE).
+Knowing any one component is enough to constrain the scan.
 
 ### Incremental Updates
 
@@ -117,16 +116,16 @@ candidates are updated via `candidate.update(&new_scope)`:
 
 ```
 For each parameter in schema:
-  if param entered scope    → move from requires/binds to env
-  if param left scope       → move from env back to requires/binds
+  if param entered scope    -> move from requires/binds to env
+  if param left scope       -> move from env back to requires/binds
   (supports both growth and replanning)
 
 Re-estimate cost with updated env.
-If requires is now empty → transition Blocked → Viable.
+If requires is now empty -> transition Blocked to Viable.
 ```
 
-This is **bidirectional**: the update handles both the normal case (scope
-grows as the planner proceeds) and the replanning case (scope differs when
+This is bidirectional: the update handles both the normal case (scope grows as
+the planner proceeds) and the replanning case (scope differs when
 re-optimizing a cached plan for a new adornment).
 
 ## Plans
@@ -142,11 +141,12 @@ pub struct Plan {
 }
 ```
 
-Plans drop the cached schema and params — they're not needed during execution.
+Plans drop the cached schema and params since they're not needed during
+execution.
 
 ## Conjunctions
 
-A `Conjunction` is the complete, ordered execution plan:
+A `Conjunction` is the complete ordered execution plan:
 
 ```rust
 pub struct Conjunction {
@@ -162,7 +162,7 @@ pub struct Conjunction {
 During evaluation, each step receives the output of the previous step:
 
 ```
-seed answer → Step 1 → answers → Step 2 → answers → ... → final answers
+seed answer -> Step 1 -> answers -> Step 2 -> answers -> ... -> final answers
 ```
 
 Each step acts as a filter-and-expander: it takes each incoming answer,
@@ -174,30 +174,29 @@ new bindings.
 A conjunction can be re-planned against a different scope:
 
 ```rust
-conjunction.plan(&new_scope) → new Conjunction
+conjunction.plan(&new_scope) -> new Conjunction
 ```
 
 This extracts the premises from the existing steps, creates a new `Planner`,
 and runs the planning algorithm with the new scope. The result may have a
 different step order and different costs. This is used by the adornment
-caching system (covered in the [Adornment Caching](./adornment-caching.md)
-chapter).
+caching system (covered in [Adornment Caching](./adornment-caching.md)).
 
 ## Worked Example
 
 Consider three premises for querying people with their cities and ages:
 
 ```
-P1: (person/name, ?person, ?name)     — 1 constant, 2 variables
-P2: (person/city, ?person, "NYC")     — 2 constants, 1 variable
-P3: (person/age,  ?person, ?age)      — 1 constant, 2 variables
+P1: (person/name, ?person, ?name)     - 1 constant, 2 variables
+P2: (person/city, ?person, "NYC")     - 2 constants, 1 variable
+P3: (person/age,  ?person, ?age)      - 1 constant, 2 variables
 ```
 
 ### Planning in Empty Scope
 
 | Step | Candidates | Chosen | Why |
 |------|-----------|--------|-----|
-| 1 | P1: 1000, P2: 100, P3: 1000 | **P2** (cost 100) | 2 constants → direct lookup |
+| 1 | P1: 1000, P2: 100, P3: 1000 | **P2** (cost 100) | 2 constants, direct lookup |
 | 2 | P1: 100, P3: 100 | **P1** (cost 100) | `?person` now bound from P2 |
 | 3 | P3: 100 | **P3** (cost 100) | `?person` still bound |
 

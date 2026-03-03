@@ -25,9 +25,9 @@ There are three kinds of terms:
 | **Blank variable** | `Term::blank()` | Matches anything; does **not** participate in joins |
 | **Constant** | `Term::from(42u32)` | Must match exactly; constrains the query |
 
-The crucial property: **when the same named variable appears in multiple
-premises, it must bind to the same value in all of them**. This is how Dialog
-implements joins — through shared variable names, not explicit join syntax.
+When the same named variable appears in multiple premises, it must bind to the
+same value in all of them. This is how Dialog implements joins, through shared
+variable names rather than explicit join syntax.
 
 ## Relation Queries
 
@@ -75,7 +75,7 @@ let query = PersonMatch {
 This finds all entities with `person/name = "Alice"` and a `person/role`
 attribute, binding the entity to `?person` and the role to `?role`.
 
-Internally, a `ConceptQuery` expands into multiple `RelationQuery` steps — one
+Internally, a `ConceptQuery` expands into multiple `RelationQuery` steps, one
 per attribute. The planner decides their order.
 
 ## Composing Premises
@@ -134,7 +134,7 @@ let premises = vec![
 ];
 ```
 
-The variable `?person` appears in all three premises — it must bind to the
+The variable `?person` appears in all three premises, so it must bind to the
 same entity across all of them. The planner will choose which premise to
 execute first based on cost.
 
@@ -150,7 +150,7 @@ session.rule::<Person>(
 ```
 
 Rules are registered with the session and evaluated lazily when the concept is
-queried. Multiple rules for the same concept form a **disjunction** (OR) — an
+queried. Multiple rules for the same concept form a **disjunction** (OR): an
 entity matches the concept if it satisfies any one of the rules.
 
 ### JSON Notation for Queries
@@ -187,7 +187,7 @@ conciseness.
 
 ## Parameters
 
-Each premise advertises its parameters through a `Parameters` map — a
+Each premise advertises its parameters through a `Parameters` map, a
 `HashMap<String, Term<Any>>` that names each position in the pattern:
 
 | Premise type | Parameters |

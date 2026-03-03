@@ -1,9 +1,9 @@
 # Partial Replication
 
 Dialog is a local-first database. The query engine operates as if all data
-were available locally, but the storage layer transparently fetches missing
-data on demand. This chapter explains how partial replication works and how
-query evaluation drives it.
+were available locally, but the storage layer fetches missing data on demand.
+This chapter explains how partial replication works and how query evaluation
+drives it.
 
 ## The Abstraction
 
@@ -11,30 +11,30 @@ From the query engine's perspective, the prolly tree is a local data
 structure. It calls `tree.stream_range(start..end)` and gets back a stream of
 entries. The query engine has no knowledge of replication.
 
-But in practice, the tree may be **sparse** — some nodes exist locally while
+But in practice, the tree may be **sparse**: some nodes exist locally while
 others exist only on a remote peer or blob store. When the tree traversal
 reaches a node that isn't in local storage, the storage backend fetches it
 transparently.
 
 ```
 Query evaluation
-    │
-    ▼
+    |
+    v
 tree.stream_range(start..end)
-    │
-    ▼ traverse branch node
-    │
-    ▼ load child by hash
+    |
+    v  traverse branch node
+    |
+    v  load child by hash
 storage.read(hash)
-    │
-    ├── Local cache hit → return immediately
-    │
-    └── Cache miss → fetch from remote
-        │
-        ▼
+    |
+    +-- Local cache hit -> return immediately
+    |
+    +-- Cache miss -> fetch from remote
+        |
+        v
     Remote blob store (S3, R2, peer)
-        │
-        ▼
+        |
+        v
     Store locally + return
 ```
 
@@ -63,19 +63,19 @@ This means replication is driven by **query access patterns**:
 The storage system uses composable backends:
 
 ```
-┌─────────────────────────┐
-│  Cache Backend          │  In-memory LRU for hot nodes
-├─────────────────────────┤
-│  Compression Backend    │  Compress/decompress on the fly
-├─────────────────────────┤
-│  Journal Backend        │  Write-ahead log for durability
-├─────────────────────────┤
-│  Primary Backend        │  Filesystem or IndexedDB
-├─────────────────────────┤
-│  Transfer Backend       │  Fetch from remote on cache miss
-├─────────────────────────┤
-│  Remote Backend         │  S3, R2, or peer connection
-└─────────────────────────┘
++-------------------------+
+|  Cache Backend          |  In-memory LRU for hot nodes
++-------------------------+
+|  Compression Backend    |  Compress/decompress on the fly
++-------------------------+
+|  Journal Backend        |  Write-ahead log for durability
++-------------------------+
+|  Primary Backend        |  Filesystem or IndexedDB
++-------------------------+
+|  Transfer Backend       |  Fetch from remote on cache miss
++-------------------------+
+|  Remote Backend         |  S3, R2, or peer connection
++-------------------------+
 ```
 
 Each layer implements `ContentAddressedStorage`:
@@ -108,7 +108,7 @@ impl Tree {
 ### The Algorithm
 
 1. **Start with roots**: Compare the two trees' root hashes. If equal, they're
-   identical — no sync needed.
+   identical, no sync needed.
 
 2. **Expand differences**: Where hashes differ, load both sides and compare
    children. Matching children (same hash) are skipped entirely.
@@ -120,7 +120,7 @@ impl Tree {
 
 ### Sparse Trees
 
-The differential algorithm uses `SparseTree` — a lazy representation that
+The differential algorithm uses `SparseTree`, a lazy representation that
 starts with just root references and expands nodes on demand:
 
 ```rust
@@ -144,7 +144,7 @@ The composite key layout (EAV, AEV, VAE) interacts with replication in an
 important way:
 
 - **EAV keys** group claims by entity. Replicating all data for one entity
-  means fetching a contiguous range of tree nodes — likely just one or two
+  means fetching a contiguous range of tree nodes, likely just one or two
   segments.
 
 - **AEV keys** group claims by attribute. Querying one attribute type across
@@ -165,17 +165,16 @@ I/O:
    fewer nodes than a full attribute scan.
 
 3. **The planner doesn't optimize for replication**: Cost estimation reflects
-   tree traversal complexity, not network latency. This is intentional — the
+   tree traversal complexity, not network latency. This is intentional. The
    planner produces a good logical order, and the storage layer handles the
    physical I/O.
 
-4. **Background sync reduces first-query cost**: Applications can
-   pre-populate the local cache by syncing specific subtrees before queries
-   arrive.
+4. **Background sync reduces first-query cost**: Applications can pre-populate
+   the local cache by syncing specific subtrees before queries arrive.
 
 ## Convergence
 
 Because the prolly tree is deterministic (same data = same structure) and
 content-addressed (same content = same hash), all replicas that receive the
-same set of claims converge to the same tree. This is a key property for the
-CRDT-based conflict resolution model described in the architecture overview.
+same set of claims converge to the same tree. This is a property needed by the
+CRDT-based conflict resolution model.

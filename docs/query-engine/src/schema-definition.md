@@ -1,7 +1,7 @@
 # Defining the Schema
 
-Dialog queries operate on claims — `(the, of, is, cause)` tuples — but users
-don't typically write raw tuples. Instead, they define domain models using
+Dialog queries operate on claims, `(the, of, is, cause)` tuples, but users
+don't typically write raw tuples. Instead they define domain models using
 **attributes**, **concepts**, and **formulas**, either through Rust derive
 macros or through a JSON notation. This chapter explains both paths.
 
@@ -120,14 +120,14 @@ Concrete Rust types map to zero-sized type (ZST) descriptors:
 | `Vec<u8>` | `Bytes`           | `Type::Bytes`  |
 | `Entity`  | `EntityType`      | `Type::Entity` |
 
-The special `Any(Option<Type>)` descriptor carries an optional runtime type
+The `Any(Option<Type>)` descriptor carries an optional runtime type
 tag, allowing dynamic typing. All typed terms can be widened into `Term<Any>`
 while preserving their type information.
 
 ## Concepts
 
-A **concept** groups attributes that share an entity — similar to a table in a
-relational database but defined at query time rather than write time.
+A **concept** groups attributes that share an entity. Think of it like a table
+in a relational database, but defined at query time rather than write time.
 
 ### Rust: `#[derive(Concept)]`
 
@@ -202,7 +202,7 @@ Blake3 hashing. The resulting hash becomes the concept's entity ID:
 ## Formulas
 
 A **formula** is a pure computation that reads bound variables and writes
-derived values, without accessing the store.
+derived values without accessing the store.
 
 ### Rust: `#[derive(Formula)]`
 
@@ -233,7 +233,7 @@ The macro generates:
 2. **A match struct** with all fields as `Term`s.
 3. **A `Formula` trait impl** including `cells()` (parameter schema), `derive()`
    (computation), and `write()` (output binding).
-4. **Conversion to `FormulaQuery`** — a type-erased representation that the
+4. **Conversion to `FormulaQuery`**, a type-erased representation that the
    planner and evaluator work with.
 
 ### Built-in Formulas
@@ -250,21 +250,21 @@ The pipeline from schema definition to executable query:
 
 ```
 Rust macros / JSON notation
-       │
-       ▼
+       |
+       v
 AttributeDescriptor / ConceptDescriptor / FormulaQuery
-       │
-       ▼
+       |
+       v
 Premise (Assert or Unless)
-       │
-       ▼
+       |
+       v
 Proposition (Relation, Concept, Formula, or Constraint)
-       │
-       ▼
-Planner → Conjunction (ordered execution plan)
-       │
-       ▼
-Evaluation → Stream<Answer>
+       |
+       v
+Planner -> Conjunction (ordered execution plan)
+       |
+       v
+Evaluation -> Stream<Answer>
 ```
 
 The next chapter covers how query patterns are assembled from these

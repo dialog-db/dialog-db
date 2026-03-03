@@ -16,33 +16,32 @@ pub struct RelationQuery {
 }
 ```
 
-Each position is a `Term` — either a constant that constrains the match or a
+Each position is a `Term`, either a constant that constrains the match or a
 variable that captures the matched value.
 
 ## Evaluation Flow
 
 For each incoming answer in the stream:
 
-1. **Resolve variables** — Check if any of the query's variable terms are
+1. **Resolve variables**: Check if any of the query's variable terms are
    already bound in the incoming answer. If `?person` is bound to
    `Entity(alice)`, the `of` position becomes a constant constraint.
 
-2. **Build selector** — Convert the resolved terms into an `ArtifactSelector`
+2. **Build selector**: Convert the resolved terms into an `ArtifactSelector`
    that the store understands. The selector specifies constraints on
    attribute, entity, and value.
 
-3. **Choose index** — The store picks the best index based on what's
-   constrained:
-   - Entity known → **EAV** index (scan by entity, then attribute)
-   - Attribute known (entity unknown) → **AEV** index (scan by attribute)
-   - Value known (entity and attribute unknown) → **VAE** index (scan by
+3. **Choose index**: The store picks the index based on what's constrained:
+   - Entity known -> **EAV** index (scan by entity, then attribute)
+   - Attribute known (entity unknown) -> **AEV** index (scan by attribute)
+   - Value known (entity and attribute unknown) -> **VAE** index (scan by
      value)
 
-4. **Scan claims** — Iterate over matching claims from the chosen index.
+4. **Scan claims**: Iterate over matching claims from the chosen index.
 
-5. **Handle cardinality** — Filter claims based on cardinality.
+5. **Handle cardinality**: Filter claims based on cardinality.
 
-6. **Produce answers** — For each matching claim, clone the incoming answer
+6. **Produce answers**: For each matching claim, clone the incoming answer
    and merge `Evidence::Relation` to bind the claim's components to their
    corresponding variables.
 
@@ -66,7 +65,7 @@ The evaluator uses a sliding window to track the current group and picks the
 winner within each group before yielding.
 
 **VAE scan** (only value known):
-Claims for different `(attribute, entity)` groups are **not** contiguous.
+Claims for different `(attribute, entity)` groups are not contiguous.
 The evaluator produces candidates and performs a secondary EAV lookup for each
 to verify that the candidate is actually the current winner. This secondary
 lookup adds `SEGMENT_READ_COST` to the base cost, which is why VAE queries
@@ -99,23 +98,21 @@ pub fn estimate(&self, env: &Environment) -> Option<usize> {
 
 A `RelationQuery` advertises a schema with four fields in a single choice
 group. The choice group means that binding *any one* of `(the, of, is)` is
-sufficient — the query can always execute with at least one constraint.
+sufficient:
 
 ```
-┌─────────────────────────────────────────────────┐
-│ Schema for RelationQuery                        │
-│                                                 │
-│  "the"   Required(Group A)  — attribute         │
-│  "of"    Required(Group A)  — entity            │
-│  "is"    Required(Group A)  — value             │
-│  "cause" Optional           — provenance        │
-│                                                 │
-│  Group A: satisfied if any member is bound       │
-└─────────────────────────────────────────────────┘
+Schema for RelationQuery:
+
+  "the"   Required(Group A)   attribute
+  "of"    Required(Group A)   entity
+  "is"    Required(Group A)   value
+  "cause" Optional            provenance
+
+  Group A: satisfied if any member is bound
 ```
 
-This means a relation query is **never blocked** by the planner — it can
-always execute, though with varying cost depending on how much is bound.
+This means a relation query is never blocked by the planner. It can always
+execute, though with varying cost depending on how much is bound.
 
 ## Example
 
@@ -128,7 +125,7 @@ let all_names = RelationQuery::new(
     Term::blank(),                     // cause: don't care
     Some(Cardinality::One),
 );
-// Cost: RANGE_SCAN_COST (1,000) — one constraint, needs AEV scan
+// Cost: RANGE_SCAN_COST (1,000), one constraint, needs AEV scan
 
 // Find Alice's name
 let alice_name = RelationQuery::new(
@@ -138,5 +135,5 @@ let alice_name = RelationQuery::new(
     Term::blank(),
     Some(Cardinality::One),
 );
-// Cost: SEGMENT_READ_COST (100) — two constraints, direct EAV lookup
+// Cost: SEGMENT_READ_COST (100), two constraints, direct EAV lookup
 ```

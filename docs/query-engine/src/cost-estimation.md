@@ -1,7 +1,7 @@
 # Cost Estimation
 
 The planner needs a way to compare premises. Each premise type provides an
-`estimate(env) → Option<usize>` method that returns a cost reflecting the
+`estimate(env) -> Option<usize>` method that returns a cost reflecting the
 expected I/O effort, given which variables are currently bound.
 
 ## Cost Constants
@@ -16,8 +16,8 @@ Defined in `dialog-query/src/schema.rs`:
 | `INDEX_SCAN` | 5,000 | Broad scan with minimal constraints |
 | `CONCEPT_OVERHEAD` | 1,000 | Added cost for rule evaluation in concepts |
 
-These are relative values chosen to establish the right ordering — they don't
-correspond to wall-clock time. The important property is:
+These are relative values chosen to establish ordering, not wall-clock time.
+The important property is:
 
 ```
 SEGMENT_READ < RANGE_READ < RANGE_SCAN < INDEX_SCAN
@@ -39,19 +39,19 @@ An attribute with `Cardinality::One` stores at most one value per
 | 3 (the + of + is) | 100 | EAV | Direct segment lookup |
 | 2 (e.g., the + of) | 100 | EAV | Narrow range within one segment |
 | 1 (e.g., the only) | 1,000 | AEV | Scan all entities for this attribute |
-| 0 | unbound | — | Rejected by planner |
+| 0 | unbound | n/a | Rejected by planner |
 
 ### Cardinality::Many
 
 An attribute with `Cardinality::Many` can store multiple values per entity.
-The cost is higher because more data must be examined.
+Cost is higher because more data must be examined.
 
 | Bound terms | Cost | Index used | Explanation |
 |-------------|------|-----------|-------------|
 | 3 (the + of + is) | 200 | EAV | Range read (multiple values possible) |
 | 2 (e.g., the + of) | 1,000 | EAV | Range scan over values |
 | 1 (e.g., the only) | 5,000 | AEV | Scan all entities and values |
-| 0 | unbound | — | Rejected by planner |
+| 0 | unbound | n/a | Rejected by planner |
 
 ### VAE Penalty
 
@@ -71,8 +71,8 @@ The cost is estimated by simulating this expansion:
    scan to discover entities) and add the costs of the remaining attribute
    lookups as if the entity were bound.
 
-In both cases, `CONCEPT_OVERHEAD` is added to reflect the potential cost of
-rule evaluation:
+In both cases, `CONCEPT_OVERHEAD` is added to reflect the cost of rule
+evaluation:
 
 ```
 concept_cost = sum(attribute_costs) + CONCEPT_OVERHEAD
@@ -80,10 +80,10 @@ concept_cost = sum(attribute_costs) + CONCEPT_OVERHEAD
 
 ## Formula Costs
 
-Formulas are pure computations — no I/O. Their cost is a small fixed value
+Formulas are pure computations, no I/O. Their cost is a small fixed value
 declared in the `#[derived(cost = N)]` annotation. This ensures formulas are
-always cheaper than I/O operations and are naturally scheduled after the
-premises that bind their inputs.
+cheaper than I/O operations and are scheduled after the premises that bind
+their inputs.
 
 Since formulas typically require all input parameters to be bound, they start
 as `Blocked` candidates and only become `Viable` after earlier premises bind
@@ -91,13 +91,13 @@ their inputs.
 
 ## Constraint Costs
 
-Constraints (equality checks between terms) have zero cost — they only filter
-existing answers without I/O. However, they require both operands to be bound,
-so they're scheduled after the premises that produce those bindings.
+Constraints (equality checks between terms) have zero cost since they only
+filter existing answers without I/O. However, they require both operands to be
+bound, so they're scheduled after the premises that produce those bindings.
 
 ## Schema and Requirements
 
-Each premise advertises a `Schema` — a map of parameter names to `Field`
+Each premise advertises a `Schema`, a map of parameter names to `Field`
 descriptors:
 
 ```rust
@@ -121,7 +121,7 @@ pub enum Requirement {
 
 A `Group` ties parameters together: if any member of the group is bound, the
 whole group is satisfied. For a `RelationQuery`, the `(the, of, is)` parameters
-share a choice group — knowing any one of them is enough to constrain the
+share a choice group since knowing any one of them is enough to constrain the
 query.
 
 ## How Cost Drives Planning
@@ -129,7 +129,7 @@ query.
 The planner's greedy algorithm always picks the cheapest viable candidate. This
 produces good orderings because:
 
-1. **Constants-first**: Premises with more constants have lower costs and are
+1. **Constants first**: Premises with more constants have lower costs and are
    selected early, binding variables for later premises.
 
 2. **Cascade effect**: Each bound variable reduces the cost of subsequent
@@ -137,12 +137,11 @@ produces good orderings because:
    with two.
 
 3. **Formulas last**: Since formulas require bound inputs and have low cost,
-   they naturally schedule after the I/O premises that produce their inputs.
+   they schedule after the I/O premises that produce their inputs.
 
 4. **Negation last**: Negated premises (`Unless`) require all their variables
-   to be bound and don't produce new bindings, so they're naturally scheduled
-   at the end.
+   to be bound and don't produce new bindings, so they schedule at the end.
 
 This greedy approach doesn't guarantee the globally optimal ordering, but it
-works well in practice because the cost function correctly captures the
-essential tradeoff: **more constraints = cheaper I/O**.
+works well in practice because the cost function captures the right tradeoff:
+more constraints means cheaper I/O.
