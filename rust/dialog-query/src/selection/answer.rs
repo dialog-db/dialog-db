@@ -9,19 +9,16 @@ use crate::types::Any;
 use crate::types::Typed;
 use crate::{Claim, types::Scalar};
 
-use super::{Answers, Evidence, Factor, Factors, Selector};
+use super::Answers;
 
 /// A single result row produced during query evaluation.
 ///
 /// An `Answer` accumulates variable bindings as premises are evaluated in
-/// sequence. Each binding is backed by one or more [`Factors`] that record
-/// *how* the value was obtained — whether it was selected from a stored
-/// fact, derived by a formula, or provided as a query parameter.
+/// sequence. Each binding maps a variable name to its resolved [`Value`].
 ///
-/// In addition to named bindings (`conclusions`), an `Answer` tracks the
-/// raw [`Claim`] facts matched by each [`RelationQuery`]. This
-/// allows downstream code to reconstruct the full provenance chain for any
-/// value in the result.
+/// In addition to named bindings, an `Answer` tracks the raw [`Claim`]
+/// facts matched by each [`RelationQuery`]. This allows downstream code
+/// to reconstruct the matched facts for any relation in the result.
 ///
 /// Answers flow through the evaluation pipeline as a stream
 /// ([`Answers`](super::Answers)): each premise receives the stream,
@@ -29,13 +26,11 @@ use super::{Answers, Evidence, Factor, Factors, Selector};
 /// passes them to the next premise.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Answer {
-    /// Conclusions: named variable bindings where we've concluded values from facts.
-    /// Maps variable names to their values with provenance (which facts support this binding).
-    conclusions: HashMap<String, Factors>,
-    /// Applications: maps RelationQuery to the fact it matched.
+    /// Named variable bindings: maps variable names to their resolved values.
+    bindings: HashMap<String, Value>,
+    /// Maps RelationQuery to the claim it matched.
     /// This allows us to realize facts even when the application had only constants/blanks.
-    /// The facts stored here represent all facts that contributed to this answer.
-    facts: HashMap<RelationQuery, Arc<Claim>>,
+    claims: HashMap<RelationQuery, Arc<Claim>>,
 }
 
 impl Answer {
@@ -49,63 +44,38 @@ impl Answer {
         futures_util::stream::once(async { Ok(self) })
     }
 
-    /// Get all tracked relations from the applications.
-    pub fn facts(&self) -> impl Iterator<Item = &Arc<Claim>> {
-        self.facts.values()
-    }
-
-    /// Get all conclusions (named variable bindings).
-    pub fn conclusions(&self) -> impl Iterator<Item = (&String, &Factors)> {
-        self.conclusions.iter()
+    /// Get all tracked claims from the relation queries.
+    pub fn claims(&self) -> impl Iterator<Item = &Arc<Claim>> {
+        self.claims.values()
     }
 
     /// Record that a RelationQuery matched a specific claim.
-    /// Returns an error if the same application already mapped to a different fact,
-    /// which would indicate an inconsistency (shouldn't happen in practice, but we check).
+    /// Returns an error if the same application already mapped to a different claim.
     pub fn record(
         &mut self,
         application: &RelationQuery,
-        fact: Arc<Claim>,
+        claim: Arc<Claim>,
     ) -> Result<(), EvaluationError> {
-        // Check if this application already has a different fact
-        if let Some(existing_fact) = self.facts.get(application) {
-            if !Arc::ptr_eq(existing_fact, &fact) {
+        if let Some(existing) = self.claims.get(application) {
+            if !Arc::ptr_eq(existing, &claim) {
                 return Err(EvaluationError::Assignment {
                     reason: format!(
-                        "RelationQuery {:?} already mapped to a different fact",
+                        "RelationQuery {:?} already mapped to a different claim",
                         application
                     ),
                 });
             }
-            // Same fact - this is fine (idempotent)
         } else {
-            // New mapping
-            self.facts.insert(application.clone(), fact);
+            self.claims.insert(application.clone(), claim);
         }
         Ok(())
     }
 
     /// Realize a relation from a RelationQuery.
-    /// First tries to extract from named variable conclusions.
-    /// Falls back to looking up the application in the recorded applications.
+    /// Looks up the application in the recorded claims.
     pub fn realize(&self, application: &RelationQuery) -> Result<Claim, EvaluationError> {
-        // Try to extract from a named variable conclusion first
-        // This gives us the full relation with all its components
-        if let Term::Variable { name: Some(_), .. } = application.of()
-            && let Some(factors) = self.resolve_factors(&Term::<Any>::from(application.of()))
-        {
-            return Ok(Claim::from(factors));
-        }
-
-        if let Term::Variable { name: Some(_), .. } = application.is()
-            && let Some(factors) = self.resolve_factors(application.is())
-        {
-            return Ok(Claim::from(factors));
-        }
-
-        // No named variables - look up by application
-        if let Some(relation) = self.facts.get(application) {
-            return Ok(relation.as_ref().clone());
+        if let Some(claim) = self.claims.get(application) {
+            return Ok(claim.as_ref().clone());
         }
 
         Err(EvaluationError::Store(
@@ -113,111 +83,64 @@ impl Answer {
         ))
     }
 
-    /// Merge evidence into this answer, recording facts and binding variables.
-    pub fn merge(&mut self, evidence: Evidence<'_>) -> Result<(), EvaluationError> {
-        match evidence {
-            Evidence::Relation { application, fact } => {
-                let fact = Arc::new(fact.to_owned());
-                self.record(application, fact.clone())?;
+    /// Merge a relation query result into this answer, recording the claim
+    /// and binding the/of/is/cause values from it.
+    pub fn merge_relation(
+        &mut self,
+        application: &RelationQuery,
+        claim: &Claim,
+    ) -> Result<(), EvaluationError> {
+        let claim = Arc::new(claim.to_owned());
+        self.record(application, claim.clone())?;
 
-                let application = Arc::new(application.to_owned());
+        self.bind(
+            &Term::<Any>::from(application.the()),
+            Value::Symbol(claim.the()),
+        )?;
+        self.bind(
+            &Term::<Any>::from(application.of()),
+            Value::Entity(claim.of().clone()),
+        )?;
+        self.bind(application.is(), claim.is().clone())?;
+        self.bind(
+            &Term::<Any>::from(application.cause()),
+            Value::Bytes(claim.cause().clone().0.into()),
+        )?;
 
-                self.assign(
-                    &Term::<Any>::from(application.the()),
-                    &Factor::Selected {
-                        selector: Selector::The,
-                        application: application.clone(),
-                        fact: fact.clone(),
-                    },
-                )?;
-                self.assign(
-                    &Term::<Any>::from(application.of()),
-                    &Factor::Selected {
-                        selector: Selector::Of,
-                        application: application.clone(),
-                        fact: fact.clone(),
-                    },
-                )?;
-                self.assign(
-                    application.is(),
-                    &Factor::Selected {
-                        selector: Selector::Is,
-                        application: application.clone(),
-                        fact: fact.clone(),
-                    },
-                )?;
-                self.assign(
-                    &Term::<Any>::from(application.cause()),
-                    &Factor::Selected {
-                        selector: Selector::Cause,
-                        application,
-                        fact,
-                    },
-                )?;
-
-                Ok(())
-            }
-            Evidence::Parameter { term, value } => self.assign(
-                term,
-                &Factor::Parameter {
-                    value: value.clone(),
-                },
-            ),
-            Evidence::Derived {
-                term,
-                from,
-                value,
-                formula,
-            } => self.assign(
-                term,
-                &Factor::Derived {
-                    value: *value,
-                    from,
-                    formula: Arc::new(formula.to_owned()),
-                },
-            ),
-        }
+        Ok(())
     }
 
-    /// Look up the factors bound to a named variable parameter.
-    pub fn lookup(&self, param: &Term<Any>) -> Option<&Factors> {
+    /// Look up the value bound to a named variable.
+    pub fn lookup(&self, param: &Term<Any>) -> Option<&Value> {
         match param {
             Term::Variable {
                 name: Some(key), ..
-            } => self.conclusions.get(key),
+            } => self.bindings.get(key),
             _ => None,
         }
     }
 
-    /// Assign a parameter to a factor.
-    pub fn assign(&mut self, param: &Term<Any>, factor: &Factor) -> Result<(), EvaluationError> {
+    /// Bind a term to a value. For named variables, stores the value in
+    /// the bindings map; checks consistency if already bound. Constants
+    /// and blanks are no-ops.
+    pub fn bind(&mut self, param: &Term<Any>, value: Value) -> Result<(), EvaluationError> {
         match param {
             Term::Variable {
                 name: Some(name), ..
             } => {
-                if let Some(factors) = self.conclusions.get_mut(name) {
-                    if factors.content() != factor.content() {
+                if let Some(existing) = self.bindings.get(name) {
+                    if *existing != value {
                         Err(EvaluationError::Assignment {
                             reason: format!(
                                 "Can not set {:?} to {:?} because it is already set to {:?}.",
-                                name,
-                                factor.content(),
-                                factors.content()
+                                name, value, existing
                             ),
                         })
                     } else {
-                        factors.add(factor.clone());
-                        if let Factor::Selected {
-                            application, fact, ..
-                        } = factor
-                        {
-                            self.record(application.as_ref(), fact.clone())?;
-                        }
                         Ok(())
                     }
                 } else {
-                    self.conclusions
-                        .insert(name.into(), Factors::new(factor.clone()));
+                    self.bindings.insert(name.into(), value);
                     Ok(())
                 }
             }
@@ -225,13 +148,13 @@ impl Answer {
         }
     }
 
-    /// Extends this answer by assigning multiple parameter-factor pairs.
+    /// Extends this answer by binding multiple term-value pairs.
     pub fn extend<I>(&mut self, assignments: I) -> Result<(), EvaluationError>
     where
-        I: IntoIterator<Item = (Term<Any>, Factor)>,
+        I: IntoIterator<Item = (Term<Any>, Value)>,
     {
-        for (param, factor) in assignments {
-            self.assign(&param, &factor)?;
+        for (param, value) in assignments {
+            self.bind(&param, value)?;
         }
         Ok(())
     }
@@ -241,19 +164,9 @@ impl Answer {
         match param {
             Term::Variable {
                 name: Some(key), ..
-            } => self.conclusions.contains_key(key),
+            } => self.bindings.contains_key(key),
             Term::Variable { name: None, .. } => false,
             Term::Constant(_) => true,
-        }
-    }
-
-    /// Resolves factors that were assigned to the given parameter.
-    pub fn resolve_factors(&self, param: &Term<Any>) -> Option<&Factors> {
-        match param {
-            Term::Variable {
-                name: Some(name), ..
-            } => self.conclusions.get(name),
-            _ => None,
         }
     }
 
@@ -268,8 +181,8 @@ impl Answer {
             Term::Variable {
                 name: Some(key), ..
             } => {
-                if let Some(factors) = self.conclusions.get(key) {
-                    Ok(factors.content().clone())
+                if let Some(value) = self.bindings.get(key) {
+                    Ok(value.clone())
                 } else {
                     Err(EvaluationError::UnboundVariable {
                         variable_name: key.clone(),
@@ -289,9 +202,8 @@ impl Answer {
         match term {
             Term::Variable { name, .. } => {
                 if let Some(key) = name {
-                    if let Some(factors) = self.conclusions.get(key) {
-                        let value = factors.content();
-                        if let Ok(converted) = T::try_from(value) {
+                    if let Some(value) = self.bindings.get(key) {
+                        if let Ok(converted) = T::try_from(value.clone()) {
                             Term::Constant(converted.into())
                         } else {
                             term.clone()
@@ -314,8 +226,8 @@ impl Answer {
             Term::Variable {
                 name: Some(key), ..
             } => {
-                if let Some(factors) = self.conclusions.get(key) {
-                    Term::Constant(factors.content().clone())
+                if let Some(value) = self.bindings.get(key) {
+                    Term::Constant(value.clone())
                 } else {
                     param.clone()
                 }
@@ -324,15 +236,12 @@ impl Answer {
         }
     }
 
-    /// Set a variable to a value without provenance tracking.
+    /// Set a variable to a value.
     pub fn set<T: Scalar>(mut self, term: Term<T>, value: T) -> Result<Self, EvaluationError>
     where
         Value: From<T>,
     {
-        let factor = Factor::Parameter {
-            value: value.into(),
-        };
-        self.assign(&Term::<Any>::from(&term), &factor)?;
+        self.bind(&Term::<Any>::from(&term), value.into())?;
         Ok(self)
     }
 

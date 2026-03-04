@@ -1285,7 +1285,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_caches_different_plans_per_adornment() {
-        use crate::selection::{Answer, Evidence};
+        use crate::selection::Answer;
 
         let person = person_concept();
         let rules = ConceptRules::new(&person);
@@ -1295,17 +1295,12 @@ mod tests {
         terms.insert("name".into(), Term::var("n"));
         terms.insert("age".into(), Term::var("a"));
 
-        // All-free adornment
         let answer_free = Answer::new();
         let plan_free = rules.plan(&terms, &answer_free);
 
-        // Entity-bound adornment (bind "e" in the answer)
         let mut answer_bound = Answer::new();
         answer_bound
-            .merge(Evidence::Parameter {
-                term: &Term::var("e"),
-                value: &Value::from(Entity::new().unwrap()),
-            })
+            .bind(&Term::var("e"), Value::from(Entity::new().unwrap()))
             .unwrap();
         let plan_bound = rules.plan(&terms, &answer_bound);
 
@@ -1437,7 +1432,7 @@ mod tests {
     #[dialog_common::test]
     fn it_produces_cheaper_plan_with_bound_entity() {
         use crate::concept::application::adornment::Adornment;
-        use crate::selection::{Answer, Evidence};
+        use crate::selection::Answer;
 
         let person = person_concept();
         let rules = ConceptRules::new(&person);
@@ -1447,19 +1442,14 @@ mod tests {
         terms.insert("name".into(), Term::var("n"));
         terms.insert("age".into(), Term::var("a"));
 
-        // All-free plan
         let answer_free = Answer::new();
         let adornment_free = Adornment::derive(&terms, &answer_free);
         let env_free = adornment_free.into_environment(&terms);
         let free_plan = rules.plan(&terms, &answer_free);
 
-        // Entity-bound plan
         let mut answer_bound = Answer::new();
         answer_bound
-            .merge(Evidence::Parameter {
-                term: &Term::var("e"),
-                value: &Value::from(Entity::new().unwrap()),
-            })
+            .bind(&Term::var("e"), Value::from(Entity::new().unwrap()))
             .unwrap();
         let adornment_bound = Adornment::derive(&terms, &answer_bound);
         let env_bound = adornment_bound.into_environment(&terms);
@@ -1552,12 +1542,9 @@ mod tests {
     #[dialog_common::test]
     async fn it_produces_correct_results_from_cached_plan_with_bound_entity() -> anyhow::Result<()>
     {
-        use crate::selection::{Answer, Evidence};
+        use crate::selection::Answer;
         use dialog_storage::MemoryStorageBackend;
 
-        // Verify that a plan cached with a bound entity still produces
-        // correct results — the "pushing selections into joins" step from
-        // magic set optimization must not break correctness.
         let backend = MemoryStorageBackend::default();
         let store = Artifacts::anonymous(backend).await?;
         let mut session = Session::open(store);
@@ -1591,12 +1578,8 @@ mod tests {
 
         let application = person.apply(params)?;
 
-        // Evaluate with alice bound in the initial answer
         let mut answer = Answer::new();
-        answer.merge(Evidence::Parameter {
-            term: &entity_param,
-            value: &Value::from(alice.clone()),
-        })?;
+        answer.bind(&entity_param, Value::from(alice.clone()))?;
 
         let answers = answer.seed();
 

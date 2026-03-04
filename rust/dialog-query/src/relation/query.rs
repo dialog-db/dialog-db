@@ -10,7 +10,7 @@ pub use crate::proposition::Proposition;
 use crate::query::Application;
 pub use crate::query::Output;
 use crate::schema::SEGMENT_READ_COST;
-use crate::selection::{Answer, Answers, Evidence};
+use crate::selection::{Answer, Answers};
 use crate::types::Any;
 use crate::{
     Entity, EvaluationError, Field, Parameters, Premise, Requirement, Schema, Source, Term, Type,
@@ -295,10 +295,7 @@ impl RelationQuery {
                     let relation = selector.resolve(&artifact);
 
                     let mut answer = input.clone();
-                    answer.merge(Evidence::Relation {
-                        application: &selector,
-                        fact: &relation,
-                    })?;
+                    answer.merge_relation(&selector, &relation)?;
                     yield answer;
                 }
             }
@@ -357,12 +354,9 @@ impl RelationQuery {
                         candidate = Some(pick_winner(candidate.unwrap(), artifact));
                     } else {
                         if let Some(winner) = candidate.take() {
-                            let fact = selector.resolve(&winner);
+                            let claim = selector.resolve(&winner);
                             let mut answer = input.clone();
-                            answer.merge(Evidence::Relation {
-                                application: &selector,
-                                fact: &fact,
-                            })?;
+                            answer.merge_relation(&selector, &claim)?;
                             yield answer;
                         }
                         candidate = Some(artifact);
@@ -370,12 +364,9 @@ impl RelationQuery {
                 }
 
                 if let Some(winner) = candidate.take() {
-                    let fact = selector.resolve(&winner);
+                    let claim = selector.resolve(&winner);
                     let mut answer = input.clone();
-                    answer.merge(Evidence::Relation {
-                        application: &selector,
-                        fact: &fact,
-                    })?;
+                    answer.merge_relation(&selector, &claim)?;
                     yield answer;
                 }
             }

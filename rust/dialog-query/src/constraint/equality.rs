@@ -4,7 +4,6 @@
 //! Supports bidirectional inference: if one term is bound, the other will be
 //! inferred to have the same value.
 
-pub use crate::selection::Evidence;
 use crate::types::Any;
 pub use crate::{
     Answers, Cardinality, Environment, EvaluationError, Field, Parameters, Requirement, Schema,
@@ -124,25 +123,15 @@ impl Equality {
                         // Otherwise filter out this answer (no yield)
                     }
                     // Case 2: Only "is" is bound - infer "this" from "is"
-                    // Add the inferred binding to the answer
                     (Err(_), Ok(is_val)) => {
                         let mut answer = input.clone();
-                        answer.merge(Evidence::Parameter {
-                            term: &this,
-                            value: &is_val,
-                        })?;
-
+                        answer.bind(&this, is_val)?;
                         yield answer;
                     }
                     // Case 3: Only "this" is bound - infer "is" from "this"
-                    // Add the inferred binding to the answer
                     (Ok(this_val), Err(_)) => {
                         let mut answer = input.clone();
-                        answer.merge(Evidence::Parameter {
-                            term: &is,
-                            value: &this_val,
-                        })?;
-
+                        answer.bind(&is, this_val)?;
                         yield answer;
                     }
                     // Case 4: Neither term is bound - cannot evaluate
@@ -175,14 +164,8 @@ mod tests {
         let constraint = Equality::new(Term::var("x"), Term::var("y"));
 
         let mut answer = Answer::new();
-        answer.merge(Evidence::Parameter {
-            term: &Term::var("x"),
-            value: &Value::from(42),
-        })?;
-        answer.merge(Evidence::Parameter {
-            term: &Term::var("y"),
-            value: &Value::from(42),
-        })?;
+        answer.bind(&Term::var("x"), Value::from(42))?;
+        answer.bind(&Term::var("y"), Value::from(42))?;
 
         let answers = futures_util::stream::iter(vec![Ok(answer.clone())]);
         let results: Vec<Answer> = constraint.evaluate(answers).try_collect().await?;
@@ -202,14 +185,8 @@ mod tests {
         let constraint = Equality::new(Term::var("x"), Term::var("y"));
 
         let mut answer = Answer::new();
-        answer.merge(Evidence::Parameter {
-            term: &Term::var("x"),
-            value: &Value::from(42),
-        })?;
-        answer.merge(Evidence::Parameter {
-            term: &Term::var("y"),
-            value: &Value::from(99),
-        })?;
+        answer.bind(&Term::var("x"), Value::from(42))?;
+        answer.bind(&Term::var("y"), Value::from(99))?;
 
         let answers = futures_util::stream::iter(vec![Ok(answer.clone())]);
         let results: Vec<Answer> = constraint.evaluate(answers).try_collect().await?;
@@ -228,10 +205,7 @@ mod tests {
         let constraint = Equality::new(Term::var("x"), Term::var("y"));
 
         let mut answer = Answer::new();
-        answer.merge(Evidence::Parameter {
-            term: &Term::var("y"),
-            value: &Value::from(42),
-        })?;
+        answer.bind(&Term::var("y"), Value::from(42))?;
 
         let answers = futures_util::stream::iter(vec![Ok(answer.clone())]);
         let results: Vec<Answer> = constraint.evaluate(answers).try_collect().await?;
