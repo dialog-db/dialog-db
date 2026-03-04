@@ -12,7 +12,7 @@ pub use edit::*;
 pub use stream::*;
 
 use crate::Statement;
-use crate::artifact::{Artifact, Attribute, Entity, Instruction, Value};
+use crate::artifact::{Artifact, ArtifactsAttribute, Entity, Instruction, Value};
 use crate::attribute::The;
 use std::collections::HashMap;
 use std::vec::IntoIter;
@@ -115,7 +115,7 @@ impl Transaction {
 
         for (entity, attributes) in self.changes {
             for (the, operations) in attributes {
-                let attribute: Attribute = the.into();
+                let attribute: ArtifactsAttribute = the.into();
                 for operation in operations {
                     let instruction = match operation {
                         Change::Assert(value) => Instruction::Assert(Artifact {

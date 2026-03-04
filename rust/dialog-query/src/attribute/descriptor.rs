@@ -1,5 +1,5 @@
 use crate::Parameters;
-use crate::artifact::{Attribute as ArtifactsAttribute, Entity, Value};
+use crate::artifact::{ArtifactsAttribute, Entity, Value};
 use crate::attribute::The;
 use crate::error::{FieldTypeError, TypeError};
 use crate::relation::query::RelationQuery;

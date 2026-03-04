@@ -1,8 +1,8 @@
 use std::fmt;
 use std::str::{self, FromStr};
 
-use crate::artifact::Attribute as ArtifactsAttribute;
-use crate::artifact::{Entity, TypeError, Value};
+use crate::artifact::ArtifactsAttribute;
+use crate::artifact::{ArtifactTypeError, Entity, Value};
 use crate::attribute::expression::dynamic::DynamicAttributeExpressionBuilder;
 use crate::error::{InvalidIdentifier, OwnedInvalidIdentifier};
 use crate::term::Term;
@@ -246,7 +246,7 @@ impl From<ArtifactsAttribute> for The {
 }
 
 impl TryFrom<Value> for The {
-    type Error = TypeError;
+    type Error = ArtifactTypeError;
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         let attr = ArtifactsAttribute::try_from(value)?;

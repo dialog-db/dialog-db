@@ -17,7 +17,7 @@ use dialog_common::ConditionalSend;
 use std::fmt;
 use std::hash::Hash;
 
-pub use crate::artifact::{Attribute, Cause, Entity, Type, Value};
+pub use crate::artifact::{ArtifactsAttribute, Cause, Entity, Type, Value};
 use crate::attribute::The;
 
 /// Trait implemented by type descriptors — named ZSTs that represent a
@@ -182,7 +182,7 @@ impl_typed!(f64, Float);
 impl_typed!(f32, Float);
 impl_typed!(Vec<u8>, Bytes);
 impl_typed!(Entity, EntityType);
-impl_typed!(Attribute, Symbol);
+impl_typed!(ArtifactsAttribute, Symbol);
 impl_typed!(The, Symbol);
 impl_typed!(Cause, Bytes);
 impl_typed!(Value, Any);
@@ -217,7 +217,7 @@ impl_scalar!(
     f32,
     f64,
     Entity,
-    Attribute,
+    ArtifactsAttribute,
     Vec<u8>,
     Cause,
     The

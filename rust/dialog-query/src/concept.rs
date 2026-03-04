@@ -114,7 +114,7 @@ mod tests {
     use super::*;
     use crate::Query;
     use crate::artifact::{
-        ArtifactSelector, ArtifactStore, Artifacts, Attribute as ArtifactAttribute, Type, Value,
+        ArtifactSelector, ArtifactStore, Artifacts, ArtifactsAttribute, Type, Value,
     };
     use crate::attribute::{Attribute as _, AttributeDescriptor};
     use crate::error::EvaluationError;
@@ -696,8 +696,8 @@ mod tests {
         use futures_util::TryStreamExt;
 
         let session = Session::open(artifacts.clone());
-        let name_attr: ArtifactAttribute = "person/name".parse()?;
-        let age_attr: ArtifactAttribute = "person/age".parse()?;
+        let name_attr: ArtifactsAttribute = "person/name".parse()?;
+        let age_attr: ArtifactsAttribute = "person/age".parse()?;
 
         let name_facts: Vec<_> = session
             .select(

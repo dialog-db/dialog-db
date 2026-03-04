@@ -72,11 +72,8 @@ pub mod term;
 /// Type system utilities bridging Rust types to dialog-artifacts types.
 pub mod types;
 
-pub use artifact::{Attribute as ArtifactAttribute, Entity, Type, Value};
-pub use attribute::{
-    Attribute, AttributeDescriptor, AttributeStatement, Cardinality, DynamicAttributeExpression,
-    StaticAttributeExpressionBuilder, The,
-};
+pub use artifact::*;
+pub use attribute::*;
 pub use claim::Claim;
 pub use concept::application::{ConceptQuery, ConceptRules};
 pub use concept::descriptor::{ConceptConclusion, ConceptDescriptor};
@@ -91,18 +88,17 @@ pub use parameters::*;
 pub use planner::*;
 pub use predicate::*;
 pub use premise::*;
-pub use proposition::Proposition;
-pub use query::{Application, Output, Source, Store};
-pub use relation::RelationQuery;
+pub use proposition::*;
+pub use query::*;
+pub use relation::*;
 pub use rule::*;
 pub use schema::*;
 pub use selection::*;
-pub use session::transaction::{Edit, Transaction};
-pub use session::{QuerySession, Session};
+pub use session::*;
 pub use statement::*;
 pub use stream::*;
 pub use term::*;
-pub use types::{Any, Scalar, TypeDescriptor, Typed};
+pub use types::*;
 
 pub use async_stream::try_stream;
 pub use dialog_macros::{Attribute, Concept, Formula};

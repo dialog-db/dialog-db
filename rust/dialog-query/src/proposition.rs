@@ -7,7 +7,7 @@ pub use crate::error::AnalyzerError;
 pub use crate::error::QueryResult;
 pub use crate::formula::query::FormulaQuery;
 pub use crate::premise::{Negation, Premise};
-pub use crate::relation::query::RelationQuery;
+use crate::relation::query::RelationQuery;
 use crate::selection::Selection;
 pub use crate::{Environment, Parameters, Schema, Source};
 use futures_util::future::Either;

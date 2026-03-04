@@ -1,14 +1,12 @@
 use crate::Cardinality;
 use crate::Claim;
-pub use crate::artifact::Attribute;
-pub use crate::artifact::{ArtifactSelector, Constrained};
+use crate::artifact::{ArtifactSelector, ArtifactsAttribute, Constrained};
 use crate::attribute::The;
 use crate::environment::Environment;
-pub use crate::error::{AnalyzerError, QueryResult};
 use crate::negation::Negation;
-pub use crate::proposition::Proposition;
+use crate::proposition::Proposition;
 use crate::query::Application;
-pub use crate::query::Output;
+use crate::query::Output;
 use crate::schema::SEGMENT_READ_COST;
 use crate::selection::{Match, Selection};
 use crate::types::{Any, Record};
@@ -58,7 +56,7 @@ fn pick_winner(current: Artifact, challenger: Artifact) -> Artifact {
 fn verify_winner<S: Source>(source: S, selector: RelationQuery, input: Match) -> impl Selection {
     try_stream! {
         let attribute_term = selector.attribute();
-        let attribute: Attribute = Attribute::try_from(input.lookup(&Term::from(&attribute_term))?)?;
+        let attribute = ArtifactsAttribute::try_from(input.lookup(&Term::from(&attribute_term))?)?;
         let entity: Entity = Entity::try_from(input.lookup(&Term::from(selector.of()))?)?;
         let candidate_value: Value = input.lookup(selector.is())?;
         let candidate_cause: Cause = Cause::try_from(input.lookup(&Term::from(selector.cause()))?)?;
@@ -180,8 +178,8 @@ impl RelationQuery {
         self.cardinality.unwrap_or(Cardinality::Many)
     }
 
-    /// Map `Term<The>` to `Term<Attribute>`.
-    pub fn attribute(&self) -> Term<Attribute> {
+    /// Map `Term<The>` to `Term<ArtifactsAttribute>`.
+    pub fn attribute(&self) -> Term<ArtifactsAttribute> {
         match &self.the {
             Term::Constant(value) => Term::Constant(value.clone()),
             Term::Variable {
@@ -419,12 +417,12 @@ impl TryFrom<&RelationQuery> for ArtifactSelector<Constrained> {
         let mut selector: Option<ArtifactSelector<Constrained>> = None;
 
         if let Term::Constant(the) = &from.the {
-            let attr = Attribute::try_from(the.clone()).map_err(|_| {
+            let relation = ArtifactsAttribute::try_from(the.clone()).map_err(|_| {
                 EvaluationError::Store("Could not convert value to Attribute".to_string())
             })?;
             selector = Some(match selector {
-                None => ArtifactSelector::new().the(attr),
-                Some(s) => s.the(attr),
+                None => ArtifactSelector::new().the(relation),
+                Some(s) => s.the(relation),
             });
         }
 
@@ -667,11 +665,11 @@ mod tests {
 
         let name_results: Vec<_> = results
             .iter()
-            .filter(|f| f.the() == Attribute::from(&name_attr))
+            .filter(|f| f.the() == ArtifactsAttribute::from(&name_attr))
             .collect();
         let age_results: Vec<_> = results
             .iter()
-            .filter(|f| f.the() == Attribute::from(&age_attr))
+            .filter(|f| f.the() == ArtifactsAttribute::from(&age_attr))
             .collect();
 
         assert_eq!(name_results.len(), 1, "Should have exactly one name result");
@@ -840,7 +838,7 @@ mod tests {
         let eav_results = eav_app.perform(&session).try_vec().await?;
         let eav_name_results: Vec<_> = eav_results
             .iter()
-            .filter(|f| f.the() == Attribute::from(&name_attr))
+            .filter(|f| f.the() == ArtifactsAttribute::from(&name_attr))
             .collect();
         assert_eq!(eav_name_results.len(), 1);
         let eav_winner = eav_name_results[0].is().clone();
@@ -933,7 +931,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let fact = &results[0];
-        assert_eq!(fact.the(), Attribute::from(name_attr));
+        assert_eq!(fact.the(), ArtifactsAttribute::from(name_attr));
         assert_eq!(fact.of(), &alice);
         assert_eq!(fact.is(), &Value::String("Alice".to_string()));
 

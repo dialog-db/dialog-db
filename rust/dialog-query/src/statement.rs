@@ -1,4 +1,4 @@
-pub use crate::artifact::{Artifact, Attribute, Instruction};
+pub use crate::artifact::{Artifact, Instruction};
 pub use crate::error::TransactionError;
 pub use crate::session::transaction::{Edit, Transaction};
 use std::ops::Not;

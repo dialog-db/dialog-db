@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::Environment;
 use crate::Premise;
-use crate::artifact::{Attribute as ArtifactAttribute, Entity, Type, Value};
+use crate::artifact::{ArtifactsAttribute, Entity, Type, Value};
 use crate::attribute::The;
 use crate::constraint::{Constraint, Equality};
 use crate::error::{FieldTypeError, TypeError};
@@ -272,8 +272,8 @@ where
     }
 }
 
-impl From<ArtifactAttribute> for Term<ArtifactAttribute> {
-    fn from(attr: ArtifactAttribute) -> Self {
+impl From<ArtifactsAttribute> for Term<ArtifactsAttribute> {
+    fn from(attr: ArtifactsAttribute) -> Self {
         Term::Constant(Value::from(attr))
     }
 }
@@ -302,23 +302,23 @@ impl From<&str> for Term<String> {
     }
 }
 
-impl TryFrom<String> for Term<ArtifactAttribute> {
+impl TryFrom<String> for Term<ArtifactsAttribute> {
     type Error = TypeError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         value
-            .parse::<ArtifactAttribute>()
+            .parse::<ArtifactsAttribute>()
             .map(|a| Term::Constant(Value::from(a)))
             .map_err(|_| TypeError::InvalidAttributeSyntax { actual: value })
     }
 }
 
-impl TryFrom<&str> for Term<ArtifactAttribute> {
+impl TryFrom<&str> for Term<ArtifactsAttribute> {
     type Error = TypeError;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         value
-            .parse::<ArtifactAttribute>()
+            .parse::<ArtifactsAttribute>()
             .map(|a| Term::Constant(Value::from(a)))
             .map_err(|_| TypeError::InvalidAttributeSyntax {
                 actual: value.into(),

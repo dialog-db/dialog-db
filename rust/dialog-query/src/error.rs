@@ -4,7 +4,7 @@ use std::convert::Infallible;
 use std::error;
 use std::fmt;
 
-use crate::artifact::{DialogArtifactsError, Type, TypeError as ArtifactTypeError, Value};
+use crate::artifact::{ArtifactTypeError, DialogArtifactsError, Type, Value};
 pub use crate::environment::Environment;
 pub use crate::proposition::Proposition;
 pub use crate::rule::deductive::DeductiveRule;

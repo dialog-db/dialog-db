@@ -1,6 +1,6 @@
 //! Read-side claim type representing a stored EAV datum.
 
-pub use crate::artifact::{Artifact, Attribute, Cause, Entity, Value};
+pub use crate::artifact::{Artifact, ArtifactsAttribute, Cause, Entity, Value};
 use crate::attribute::The;
 use serde::{Deserialize, Serialize};
 
@@ -22,8 +22,8 @@ pub struct Claim {
 
 impl Claim {
     /// Get the attribute for this claim
-    pub fn the(&self) -> Attribute {
-        Attribute::from(&self.the)
+    pub fn the(&self) -> ArtifactsAttribute {
+        ArtifactsAttribute::from(&self.the)
     }
 
     /// Get the domain of this claim's attribute
