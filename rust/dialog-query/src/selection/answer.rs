@@ -1,12 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::artifact::{Type, Value};
+use crate::artifact::Value;
 use crate::error::EvaluationError;
 use crate::relation::query::RelationQuery;
 use crate::term::Term;
 use crate::types::Any;
-use crate::types::Typed;
 use crate::{Claim, types::Scalar};
 
 use super::Answers;
@@ -49,28 +48,6 @@ impl Answer {
         self.claims.values()
     }
 
-    /// Record that a RelationQuery matched a specific claim.
-    /// Returns an error if the same application already mapped to a different claim.
-    pub fn record(
-        &mut self,
-        application: &RelationQuery,
-        claim: Arc<Claim>,
-    ) -> Result<(), EvaluationError> {
-        if let Some(existing) = self.claims.get(application) {
-            if !Arc::ptr_eq(existing, &claim) {
-                return Err(EvaluationError::Assignment {
-                    reason: format!(
-                        "RelationQuery {:?} already mapped to a different claim",
-                        application
-                    ),
-                });
-            }
-        } else {
-            self.claims.insert(application.clone(), claim);
-        }
-        Ok(())
-    }
-
     /// Realize a relation from a RelationQuery.
     /// Looks up the application in the recorded claims.
     pub fn realize(&self, application: &RelationQuery) -> Result<Claim, EvaluationError> {
@@ -91,7 +68,18 @@ impl Answer {
         claim: &Claim,
     ) -> Result<(), EvaluationError> {
         let claim = Arc::new(claim.to_owned());
-        self.record(application, claim.clone())?;
+        if let Some(existing) = self.claims.get(application) {
+            if !Arc::ptr_eq(existing, &claim) {
+                return Err(EvaluationError::Assignment {
+                    reason: format!(
+                        "RelationQuery {:?} already mapped to a different claim",
+                        application
+                    ),
+                });
+            }
+        } else {
+            self.claims.insert(application.clone(), claim.clone());
+        }
 
         self.bind(
             &Term::<Any>::from(application.the()),
@@ -205,21 +193,5 @@ impl Answer {
     {
         self.bind(&Term::<Any>::from(&term), value.into())?;
         Ok(self)
-    }
-
-    /// Get a typed value from this answer.
-    pub fn get<T>(&self, term: &Term<T>) -> Result<T, EvaluationError>
-    where
-        T: Typed + Clone + 'static,
-        Term<Any>: for<'a> From<&'a Term<T>>,
-        T: std::convert::TryFrom<Value>,
-    {
-        let value = self.resolve(&Term::<Any>::from(term))?;
-        let value_type = value.data_type();
-        T::try_from(value).map_err(|_| EvaluationError::TypeMismatch {
-            expected: <<T as Typed>::Descriptor as crate::types::TypeDescriptor>::TYPE
-                .unwrap_or(Type::Bytes),
-            actual: value_type,
-        })
     }
 }

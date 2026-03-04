@@ -234,12 +234,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
         .collect();
 
     // Generate per-field realize expressions.
-    // Each field uses `source.get(&self.field)?` which resolves and type-converts.
+    // Each field resolves the term to a Value, then converts to the field type.
     let realize_fields: Vec<_> = all_fields
         .iter()
-        .map(|(name, _ty, _, _, _)| {
+        .map(|(name, ty, _, _, _)| {
             quote! {
-                #name: source.get(&self.#name)?
+                #name: #ty::try_from(source.resolve(&dialog_query::Term::from(&self.#name))?)?
             }
         })
         .collect();

@@ -368,9 +368,7 @@ mod tests {
         let concat_results = concat_formula.derive(concat_input)?;
         assert_eq!(concat_results.len(), 1);
         assert_eq!(
-            concat_results[0]
-                .get::<String>(&Term::var("full_name"))
-                .ok(),
+            String::try_from(concat_results[0].resolve(&Term::var("full_name")).unwrap()).ok(),
             Some("John Doe".to_string())
         );
 
@@ -388,7 +386,7 @@ mod tests {
         let length_results = length_formula.derive(length_input)?;
         assert_eq!(length_results.len(), 1);
         assert_eq!(
-            length_results[0].get::<u32>(&Term::var("length")).ok(),
+            u32::try_from(length_results[0].resolve(&Term::var("length")).unwrap()).ok(),
             Some(11)
         );
 
@@ -406,7 +404,7 @@ mod tests {
         let upper_results = upper_formula.derive(upper_input)?;
         assert_eq!(upper_results.len(), 1);
         assert_eq!(
-            upper_results[0].get::<String>(&Term::var("output")).ok(),
+            String::try_from(upper_results[0].resolve(&Term::var("output")).unwrap()).ok(),
             Some("HELLO WORLD".to_string())
         );
 

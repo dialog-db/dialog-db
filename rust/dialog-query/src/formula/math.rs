@@ -510,7 +510,7 @@ mod tests {
         let sum_results = sum_formula.derive(sum_input)?;
         assert_eq!(sum_results.len(), 1);
         assert_eq!(
-            sum_results[0].get::<u32>(&Term::var("sum_result")).ok(),
+            u32::try_from(sum_results[0].resolve(&Term::var("sum_result")).unwrap()).ok(),
             Some(15)
         );
 
@@ -531,7 +531,7 @@ mod tests {
         let diff_results = diff_formula.derive(diff_input)?;
         assert_eq!(diff_results.len(), 1);
         assert_eq!(
-            diff_results[0].get::<u32>(&Term::var("diff_result")).ok(),
+            u32::try_from(diff_results[0].resolve(&Term::var("diff_result")).unwrap()).ok(),
             Some(12)
         );
 
@@ -552,7 +552,7 @@ mod tests {
         let prod_results = product_formula.derive(prod_input)?;
         assert_eq!(prod_results.len(), 1);
         assert_eq!(
-            prod_results[0].get::<u32>(&Term::var("product")).ok(),
+            u32::try_from(prod_results[0].resolve(&Term::var("product")).unwrap()).ok(),
             Some(42)
         );
 
@@ -594,7 +594,7 @@ mod tests {
         let final_results = sum_formula.derive(sum_input)?;
         assert_eq!(final_results.len(), 1);
         assert_eq!(
-            final_results[0].get::<u32>(&Term::var("final_sum")).ok(),
+            u32::try_from(final_results[0].resolve(&Term::var("final_sum")).unwrap()).ok(),
             Some(15)
         );
 
@@ -608,9 +608,12 @@ mod tests {
         let string_results = to_string_formula.derive(final_results[0].clone())?;
         assert_eq!(string_results.len(), 1);
         assert_eq!(
-            string_results[0]
-                .get::<String>(&Term::var("final_string"))
-                .ok(),
+            String::try_from(
+                string_results[0]
+                    .resolve(&Term::var("final_string"))
+                    .unwrap()
+            )
+            .ok(),
             Some("15".to_string())
         );
 

@@ -237,5 +237,4 @@ mod tests {
         assert_eq!(age_result, 30);
         assert!(active_result);
     }
-
 }

@@ -56,10 +56,10 @@ fn pick_winner(current: Artifact, challenger: Artifact) -> Artifact {
 fn verify_winner<S: Source>(source: S, selector: RelationQuery, input: Answer) -> impl Answers {
     try_stream! {
         let attribute_term = selector.attribute();
-        let attribute: Attribute = input.get(&attribute_term)?;
-        let entity: Entity = input.get(selector.of())?;
+        let attribute: Attribute = Attribute::try_from(input.resolve(&Term::from(&attribute_term))?)?;
+        let entity: Entity = Entity::try_from(input.resolve(&Term::from(selector.of()))?)?;
         let candidate_value: Value = input.resolve(selector.is())?;
-        let candidate_cause: Cause = input.get(selector.cause())?;
+        let candidate_cause: Cause = Cause::try_from(input.resolve(&Term::from(selector.cause()))?)?;
 
         let verification_selector = ArtifactSelector::new()
             .the(attribute)
@@ -404,12 +404,12 @@ impl RelationQuery {
             Term::Constant(t) => The::try_from(t.clone()).map_err(|_| {
                 EvaluationError::Store("Could not convert value to The".to_string())
             })?,
-            _ => source.get(&the_term)?,
+            _ => The::try_from(source.resolve(&Term::from(&the_term))?)?,
         };
 
         Ok(Claim {
             the,
-            of: source.get(&of_term)?,
+            of: Entity::try_from(source.resolve(&Term::from(&of_term))?)?,
             is: source.resolve(&is_param)?,
             cause: Cause([0; 32]),
         })
@@ -564,7 +564,7 @@ mod tests {
         assert!(answer.contains(&Term::var("person")));
         assert!(answer.contains(&Term::var("name")));
 
-        let person_id: Entity = answer.get(&Term::var("person"))?;
+        let person_id: Entity = Entity::try_from(answer.resolve(&Term::var("person"))?)?;
         let name_value: Value = answer.resolve(&Term::var("name"))?;
 
         assert_eq!(person_id, alice);

@@ -325,7 +325,7 @@ mod tests {
         let and_results = and_formula.derive(and_input)?;
         assert_eq!(and_results.len(), 1);
         assert_eq!(
-            and_results[0].get::<bool>(&Term::var("and_result")).ok(),
+            bool::try_from(and_results[0].resolve(&Term::var("and_result")).unwrap()).ok(),
             Some(true)
         );
 
@@ -346,7 +346,7 @@ mod tests {
         let or_results = or_formula.derive(or_input)?;
         assert_eq!(or_results.len(), 1);
         assert_eq!(
-            or_results[0].get::<bool>(&Term::var("or_result")).ok(),
+            bool::try_from(or_results[0].resolve(&Term::var("or_result")).unwrap()).ok(),
             Some(true)
         );
 
@@ -362,7 +362,7 @@ mod tests {
         let not_results = not_formula.derive(not_input)?;
         assert_eq!(not_results.len(), 1);
         assert_eq!(
-            not_results[0].get::<bool>(&Term::var("not_result")).ok(),
+            bool::try_from(not_results[0].resolve(&Term::var("not_result")).unwrap()).ok(),
             Some(false)
         );
 
