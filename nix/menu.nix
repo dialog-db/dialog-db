@@ -122,7 +122,35 @@ let
       export -f showMenu
     '';
 
+  # On macOS, chromium/chromedriver are not available in nixpkgs
+  # (https://github.com/NixOS/nixpkgs/issues/247855), so we detect
+  # them from the system PATH and point the user to install them if missing.
+  darwinBrowserCheck = ''
+    if [ -z "''${CHROME:-}" ]; then
+      CHROME_DEFAULT="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+      if [ -x "$CHROME_DEFAULT" ]; then
+        export CHROME="$CHROME_DEFAULT"
+      else
+        echo "Error: Chrome not found. Install Google Chrome or set the CHROME env var." >&2
+        exit 1
+      fi
+    fi
+
+    if [ -z "''${CHROMEDRIVER:-}" ]; then
+      CHROMEDRIVER_PATH="$(command -v chromedriver 2>/dev/null || true)"
+      if [ -n "$CHROMEDRIVER_PATH" ]; then
+        export CHROMEDRIVER="$CHROMEDRIVER_PATH"
+      else
+        echo "Error: chromedriver not found in PATH." >&2
+        echo "Install it with: brew install --cask chromedriver" >&2
+        exit 1
+      fi
+    fi
+  '';
+
   makeMenuTestCommand = package: ''
+    ${if pkgs.stdenv.isDarwin then darwinBrowserCheck else ""}
+
     nix build .#${package}
 
     TESTS_PATH=$(nix eval .#${package}.outPath --raw)
