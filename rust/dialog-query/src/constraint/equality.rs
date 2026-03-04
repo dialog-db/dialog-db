@@ -113,7 +113,7 @@ impl Equality {
             for await each in answers {
                 let input = each?;
 
-                match (input.resolve(&this), input.resolve(&is)) {
+                match (input.lookup(&this), input.lookup(&is)) {
                     // Case 1: Both terms are bound - verify they are equal
                     // Only pass through the answer if the values match
                     (Ok(this_val), Ok(is_val)) => {
@@ -172,7 +172,7 @@ mod tests {
 
         assert_eq!(results.len(), 1, "Should have one result");
         assert_eq!(
-            results[0].resolve(&Term::var("x"))?,
+            results[0].lookup(&Term::var("x"))?,
             Value::from(42),
             "x should still be 42"
         );
@@ -212,7 +212,7 @@ mod tests {
 
         assert_eq!(results.len(), 1, "Should have one result");
         assert_eq!(
-            results[0].resolve(&Term::var("x"))?,
+            results[0].lookup(&Term::var("x"))?,
             Value::from(42),
             "x should be inferred as 42"
         );

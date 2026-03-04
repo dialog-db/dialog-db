@@ -11,7 +11,7 @@ use crate::query::Application;
 pub use crate::query::Output;
 use crate::schema::SEGMENT_READ_COST;
 use crate::selection::{Answer, Answers};
-use crate::types::Any;
+use crate::types::{Any, Record};
 use crate::{
     Entity, EvaluationError, Field, Parameters, Premise, Requirement, Schema, Source, Term, Type,
     Value, try_stream,
@@ -56,10 +56,10 @@ fn pick_winner(current: Artifact, challenger: Artifact) -> Artifact {
 fn verify_winner<S: Source>(source: S, selector: RelationQuery, input: Answer) -> impl Answers {
     try_stream! {
         let attribute_term = selector.attribute();
-        let attribute: Attribute = Attribute::try_from(input.resolve(&Term::from(&attribute_term))?)?;
-        let entity: Entity = Entity::try_from(input.resolve(&Term::from(selector.of()))?)?;
-        let candidate_value: Value = input.resolve(selector.is())?;
-        let candidate_cause: Cause = Cause::try_from(input.resolve(&Term::from(selector.cause()))?)?;
+        let attribute: Attribute = Attribute::try_from(input.lookup(&Term::from(&attribute_term))?)?;
+        let entity: Entity = Entity::try_from(input.lookup(&Term::from(selector.of()))?)?;
+        let candidate_value: Value = input.lookup(selector.is())?;
+        let candidate_cause: Cause = Cause::try_from(input.lookup(&Term::from(selector.cause()))?)?;
 
         let verification_selector = ArtifactSelector::new()
             .the(attribute)
@@ -103,6 +103,13 @@ pub struct RelationQuery {
     is: Term<Any>,
     /// The cause/provenance
     cause: Term<Cause>,
+    /// Internal handle for claim storage. Automatically assigned a unique
+    /// variable name so it can key into the answer's claim map. Not exposed
+    /// in schema, parameters, or cost estimation.
+    // TODO: Once Value::Record supports the RecordFormat trait proposed in
+    // https://github.com/dialog-db/dialog-db/pull/221 this can bind a
+    // Value::Record directly, eliminating the separate claims map on Answer.
+    source: Term<Record>,
     /// Cardinality metadata, when the attribute is known.
     /// None when the attribute is a variable; defaults to `Many`.
     cardinality: Option<Cardinality>,
@@ -122,6 +129,7 @@ impl RelationQuery {
             of,
             is,
             cause,
+            source: Term::<Record>::unique(),
             cardinality,
         }
     }
@@ -146,14 +154,25 @@ impl RelationQuery {
         &self.cause
     }
 
-    /// Resolve an artifact into a `Claim`.
-    pub fn resolve(&self, artifact: &Artifact) -> Claim {
-        Claim {
-            the: The::from(artifact.the.clone()),
-            of: artifact.of.clone(),
-            is: artifact.is.clone(),
-            cause: artifact.cause.clone().unwrap_or(Cause([0; 32])),
-        }
+    /// Merge a matched artifact into an answer: store the claim and bind
+    /// the/of/is/cause values to the corresponding terms.
+    fn merge(&self, answer: &mut Answer, artifact: &Artifact) -> Result<(), EvaluationError> {
+        let claim = Claim::from(artifact);
+        answer.cite(&self.source, &claim)?;
+        answer.bind(
+            &Term::<Any>::from(&self.the),
+            Value::Symbol(claim.the()),
+        )?;
+        answer.bind(
+            &Term::<Any>::from(&self.of),
+            Value::Entity(claim.of().clone()),
+        )?;
+        answer.bind(&self.is, claim.is().clone())?;
+        answer.bind(
+            &Term::<Any>::from(&self.cause),
+            Value::Bytes(claim.cause().clone().0.into()),
+        )?;
+        Ok(())
     }
 
     /// Get the cardinality, defaulting to `Cardinality::Many` if not set
@@ -245,19 +264,20 @@ impl RelationQuery {
 impl RelationQuery {
     /// Resolves variables from the given answer.
     pub fn resolve_from_answer(&self, source: &Answer) -> Self {
-        let the = source.resolve_term(&self.the);
-        let of = source.resolve_term(&self.of);
-        let is = match source.resolve(&self.is) {
+        let the = self.the.resolve(source);
+        let of = self.of.resolve(source);
+        let is = match source.lookup(&self.is) {
             Ok(value) => Term::Constant(value),
             Err(_) => self.is.clone(),
         };
-        let cause = source.resolve_term(&self.cause);
+        let cause = self.cause.resolve(source);
 
         Self {
             the,
             of,
             is,
             cause,
+            source: self.source.clone(),
             cardinality: self.cardinality,
         }
     }
@@ -295,10 +315,8 @@ impl RelationQuery {
 
                 for await artifact in source.select((&selection).try_into()?) {
                     let artifact = artifact?;
-                    let relation = selector.resolve(&artifact);
-
                     let mut answer = input.clone();
-                    answer.merge_relation(&selector, &relation)?;
+                    selector.merge(&mut answer, &artifact)?;
                     yield answer;
                 }
             }
@@ -357,9 +375,8 @@ impl RelationQuery {
                         candidate = Some(pick_winner(candidate.unwrap(), artifact));
                     } else {
                         if let Some(winner) = candidate.take() {
-                            let claim = selector.resolve(&winner);
                             let mut answer = input.clone();
-                            answer.merge_relation(&selector, &claim)?;
+                            selector.merge(&mut answer, &winner)?;
                             yield answer;
                         }
                         candidate = Some(artifact);
@@ -367,52 +384,12 @@ impl RelationQuery {
                 }
 
                 if let Some(winner) = candidate.take() {
-                    let claim = selector.resolve(&winner);
                     let mut answer = input.clone();
-                    answer.merge_relation(&selector, &claim)?;
+                    selector.merge(&mut answer, &winner)?;
                     yield answer;
                 }
             }
         }
-    }
-
-    /// Construct a Claim from the given answer by resolving all terms.
-    pub fn realize(&self, source: Answer) -> Result<Claim, EvaluationError> {
-        let the_term = match &self.the {
-            Term::Variable { name: None, .. } => Term::Variable {
-                name: Some("__the".to_string()),
-                descriptor: Default::default(),
-            },
-            term => term.clone(),
-        };
-        let of_term = match &self.of {
-            Term::Variable { name: None, .. } => Term::Variable {
-                name: Some("__of".to_string()),
-                descriptor: Default::default(),
-            },
-            term => term.clone(),
-        };
-        let is_param = match &self.is {
-            Term::Variable { name: None, .. } => Term::Variable {
-                name: Some("__is".to_string()),
-                descriptor: Any(None),
-            },
-            param => param.clone(),
-        };
-
-        let the: The = match &the_term {
-            Term::Constant(t) => The::try_from(t.clone()).map_err(|_| {
-                EvaluationError::Store("Could not convert value to The".to_string())
-            })?,
-            _ => The::try_from(source.resolve(&Term::from(&the_term))?)?,
-        };
-
-        Ok(Claim {
-            the,
-            of: Entity::try_from(source.resolve(&Term::from(&of_term))?)?,
-            is: source.resolve(&is_param)?,
-            cause: Cause([0; 32]),
-        })
     }
 
     /// Execute this relation application, returning a stream of relations.
@@ -432,7 +409,7 @@ impl Application for RelationQuery {
     }
 
     fn realize(&self, input: Answer) -> Result<Claim, EvaluationError> {
-        input.realize(self)
+        input.prove(&self.source)
     }
 }
 
@@ -564,8 +541,8 @@ mod tests {
         assert!(answer.contains(&Term::var("person")));
         assert!(answer.contains(&Term::var("name")));
 
-        let person_id: Entity = Entity::try_from(answer.resolve(&Term::var("person"))?)?;
-        let name_value: Value = answer.resolve(&Term::var("name"))?;
+        let person_id: Entity = Entity::try_from(answer.lookup(&Term::var("person"))?)?;
+        let name_value: Value = answer.lookup(&Term::var("name"))?;
 
         assert_eq!(person_id, alice);
         assert_eq!(name_value, Value::String("Alice".to_string()));

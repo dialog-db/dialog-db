@@ -63,7 +63,7 @@ impl Bindings {
             })?;
 
         self.source
-            .resolve(param)
+            .lookup(param)
             .map_err(|_| EvaluationError::UnboundFormulaVariable {
                 term: Box::new(param.clone()),
                 parameter: key.into(),

@@ -163,14 +163,14 @@ mod tests {
         // Check that x and y are preserved
         assert_eq!(
             output
-                .resolve(&Term::var("x"))
+                .lookup(&Term::var("x"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(5)
         );
         assert_eq!(
             output
-                .resolve(&Term::var("y"))
+                .lookup(&Term::var("y"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(3)
@@ -179,7 +179,7 @@ mod tests {
         // Check that result is computed correctly
         assert_eq!(
             output
-                .resolve(&Term::var("result"))
+                .lookup(&Term::var("result"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(8)
@@ -230,21 +230,21 @@ mod tests {
         let result1 = &results1[0];
         assert_eq!(
             result1
-                .resolve(&Term::var("a"))
+                .lookup(&Term::var("a"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(2)
         );
         assert_eq!(
             result1
-                .resolve(&Term::var("b"))
+                .lookup(&Term::var("b"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(3)
         );
         assert_eq!(
             result1
-                .resolve(&Term::var("sum"))
+                .lookup(&Term::var("sum"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(5)
@@ -260,21 +260,21 @@ mod tests {
         let result2 = &results2[0];
         assert_eq!(
             result2
-                .resolve(&Term::var("a"))
+                .lookup(&Term::var("a"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(10)
         );
         assert_eq!(
             result2
-                .resolve(&Term::var("b"))
+                .lookup(&Term::var("b"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(15)
         );
         assert_eq!(
             result2
-                .resolve(&Term::var("sum"))
+                .lookup(&Term::var("sum"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(25)
@@ -320,7 +320,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::var("result"))
+                .lookup(&Term::var("result"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(7)
@@ -349,7 +349,7 @@ mod tests {
         // Should saturate at 0
         assert_eq!(
             result
-                .resolve(&Term::var("result"))
+                .lookup(&Term::var("result"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(0)
@@ -375,7 +375,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::var("result"))
+                .lookup(&Term::var("result"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(42)
@@ -401,7 +401,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::var("result"))
+                .lookup(&Term::var("result"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(5)
@@ -448,7 +448,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::var("result"))
+                .lookup(&Term::var("result"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(2)
@@ -492,7 +492,7 @@ mod tests {
         let sum_results = sum_formula.derive(sum_input)?;
         assert_eq!(sum_results.len(), 1);
         assert_eq!(
-            u32::try_from(sum_results[0].resolve(&Term::var("sum_result")).unwrap()).ok(),
+            u32::try_from(sum_results[0].lookup(&Term::var("sum_result")).unwrap()).ok(),
             Some(15)
         );
 
@@ -511,7 +511,7 @@ mod tests {
         let diff_results = diff_formula.derive(diff_input)?;
         assert_eq!(diff_results.len(), 1);
         assert_eq!(
-            u32::try_from(diff_results[0].resolve(&Term::var("diff_result")).unwrap()).ok(),
+            u32::try_from(diff_results[0].lookup(&Term::var("diff_result")).unwrap()).ok(),
             Some(12)
         );
 
@@ -530,7 +530,7 @@ mod tests {
         let prod_results = product_formula.derive(prod_input)?;
         assert_eq!(prod_results.len(), 1);
         assert_eq!(
-            u32::try_from(prod_results[0].resolve(&Term::var("product")).unwrap()).ok(),
+            u32::try_from(prod_results[0].lookup(&Term::var("product")).unwrap()).ok(),
             Some(42)
         );
 
@@ -571,7 +571,7 @@ mod tests {
         let final_results = sum_formula.derive(sum_input)?;
         assert_eq!(final_results.len(), 1);
         assert_eq!(
-            u32::try_from(final_results[0].resolve(&Term::var("final_sum")).unwrap()).ok(),
+            u32::try_from(final_results[0].lookup(&Term::var("final_sum")).unwrap()).ok(),
             Some(15)
         );
 
@@ -587,7 +587,7 @@ mod tests {
         assert_eq!(
             String::try_from(
                 string_results[0]
-                    .resolve(&Term::var("final_string"))
+                    .lookup(&Term::var("final_string"))
                     .unwrap()
             )
             .ok(),

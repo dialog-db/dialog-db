@@ -127,6 +127,11 @@ define_descriptor!(
     Symbol, Type::Symbol
 );
 
+define_descriptor!(
+    /// Descriptor for opaque record values.
+    Record, Type::Record
+);
+
 /// Descriptor for dynamically-typed values — carries an optional runtime
 /// type tag. `Term<Any>` is the unified replacement for the old `Parameter`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]

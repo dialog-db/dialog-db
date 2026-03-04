@@ -27,7 +27,7 @@ fn extract_parameters(source: &Answer, terms: &Parameters) -> Result<Answer, Eva
         match user_param {
             Term::Variable { name: Some(_), .. } => {
                 let param = Term::var(param_name);
-                if let Ok(value) = source.resolve(user_param) {
+                if let Ok(value) = source.lookup(user_param) {
                     answer.bind(&param, value)?;
                 }
             }
@@ -59,7 +59,7 @@ fn merge_parameters(
         }
 
         let param = Term::var(param_name);
-        if let Ok(value) = result.resolve(&param) {
+        if let Ok(value) = result.lookup(&param) {
             merged.bind(user_param, value)?;
         }
     }
@@ -361,8 +361,8 @@ mod tests {
         let mut found_bob = false;
 
         for match_result in selection.iter() {
-            let name = match_result.resolve(&name_param)?;
-            let age = match_result.resolve(&age_param)?;
+            let name = match_result.lookup(&name_param)?;
+            let age = match_result.lookup(&age_param)?;
 
             match name {
                 Value::String(n) if n == "Alice" => {
@@ -749,7 +749,7 @@ mod tests {
             "Should find only Alice, not both people"
         );
         assert_eq!(
-            selection[0].resolve(&Term::var("name"))?,
+            selection[0].lookup(&Term::var("name"))?,
             Value::String("Alice".to_string())
         );
 
@@ -819,11 +819,11 @@ mod tests {
 
         assert_eq!(selection.len(), 1, "Should find only Bob");
         assert_eq!(
-            selection[0].resolve(&Term::var("entity"))?,
+            selection[0].lookup(&Term::var("entity"))?,
             Value::Entity(bob.clone())
         );
         assert_eq!(
-            selection[0].resolve(&Term::var("age"))?,
+            selection[0].lookup(&Term::var("age"))?,
             Value::UnsignedInt(30)
         );
 
@@ -897,7 +897,7 @@ mod tests {
             "Should find only Alice with exact name and age match"
         );
         assert_eq!(
-            selection[0].resolve(&Term::var("entity"))?,
+            selection[0].lookup(&Term::var("entity"))?,
             Value::Entity(alice.clone())
         );
 

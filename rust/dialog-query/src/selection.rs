@@ -62,7 +62,7 @@ mod tests {
             .unwrap();
 
         let result = answer
-            .resolve(&name_param)
+            .lookup(&name_param)
             .and_then(|v| String::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Alice");
@@ -76,7 +76,7 @@ mod tests {
         answer.bind(&age_param, Value::UnsignedInt(25)).unwrap();
 
         let result = answer
-            .resolve(&age_param)
+            .lookup(&age_param)
             .and_then(|v| u32::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 25);
@@ -90,7 +90,7 @@ mod tests {
         answer.bind(&score_param, Value::SignedInt(-10)).unwrap();
 
         let result = answer
-            .resolve(&score_param)
+            .lookup(&score_param)
             .and_then(|v| i32::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), -10);
@@ -104,7 +104,7 @@ mod tests {
         answer.bind(&active_param, Value::Boolean(true)).unwrap();
 
         let result = answer
-            .resolve(&active_param)
+            .lookup(&active_param)
             .and_then(|v| bool::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_ok());
         assert!(result.unwrap());
@@ -121,7 +121,7 @@ mod tests {
             .unwrap();
 
         let result = answer
-            .resolve(&entity_param)
+            .lookup(&entity_param)
             .and_then(|v| Entity::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), entity_value);
@@ -133,7 +133,7 @@ mod tests {
         let constant_param = Term::constant("constant_value".to_string());
 
         let result = answer
-            .resolve(&constant_param)
+            .lookup(&constant_param)
             .and_then(|v| String::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "constant_value");
@@ -145,7 +145,7 @@ mod tests {
         let name_param = Term::var("name");
 
         let result = answer
-            .resolve(&name_param)
+            .lookup(&name_param)
             .and_then(|v| String::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -162,7 +162,7 @@ mod tests {
         let blank_param = Term::blank();
 
         let result = answer
-            .resolve(&blank_param)
+            .lookup(&blank_param)
             .and_then(|v| String::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -181,7 +181,7 @@ mod tests {
             .unwrap();
 
         let result = answer
-            .resolve(&name_param)
+            .lookup(&name_param)
             .and_then(|v| u32::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -200,7 +200,7 @@ mod tests {
         answer.bind(&name_term, value.clone()).unwrap();
         answer.bind(&name_term, value.clone()).unwrap();
 
-        assert_eq!(answer.resolve(&name_term).unwrap(), value);
+        assert_eq!(answer.lookup(&name_term).unwrap(), value);
     }
 
     #[dialog_common::test]
@@ -229,9 +229,9 @@ mod tests {
             .bind(&Term::var("active"), Value::Boolean(true))
             .unwrap();
 
-        let name_result = String::try_from(answer.resolve(&Term::var("name")).unwrap()).unwrap();
-        let age_result = u32::try_from(answer.resolve(&Term::var("age")).unwrap()).unwrap();
-        let active_result = bool::try_from(answer.resolve(&Term::var("active")).unwrap()).unwrap();
+        let name_result = String::try_from(answer.lookup(&Term::var("name")).unwrap()).unwrap();
+        let age_result = u32::try_from(answer.lookup(&Term::var("age")).unwrap()).unwrap();
+        let active_result = bool::try_from(answer.lookup(&Term::var("active")).unwrap()).unwrap();
 
         assert_eq!(name_result, "Bob");
         assert_eq!(age_result, 30);

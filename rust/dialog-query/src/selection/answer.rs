@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use crate::artifact::Value;
 use crate::error::EvaluationError;
-use crate::relation::query::RelationQuery;
 use crate::term::Term;
 use crate::types::Any;
-use crate::{Claim, types::Scalar};
+use crate::types::Record;
+use crate::Claim;
 
 use super::Answers;
 
@@ -14,10 +14,6 @@ use super::Answers;
 ///
 /// An `Answer` accumulates variable bindings as premises are evaluated in
 /// sequence. Each binding maps a variable name to its resolved [`Value`].
-///
-/// In addition to named bindings, an `Answer` tracks the raw [`Claim`]
-/// facts matched by each [`RelationQuery`]. This allows downstream code
-/// to reconstruct the matched facts for any relation in the result.
 ///
 /// Answers flow through the evaluation pipeline as a stream
 /// ([`Answers`](super::Answers)): each premise receives the stream,
@@ -27,9 +23,10 @@ use super::Answers;
 pub struct Answer {
     /// Named variable bindings: maps variable names to their resolved values.
     bindings: HashMap<String, Value>,
-    /// Maps RelationQuery to the claim it matched.
-    /// This allows us to realize facts even when the application had only constants/blanks.
-    claims: HashMap<RelationQuery, Arc<Claim>>,
+    // TODO: Once Value::Record supports the RecordFormat trait proposed in
+    // https://github.com/dialog-db/dialog-db/pull/221 claims can be stored
+    // directly as Value::Record in bindings, eliminating this separate map.
+    claims: HashMap<String, Arc<Claim>>,
 }
 
 impl Answer {
@@ -43,57 +40,42 @@ impl Answer {
         futures_util::stream::once(async { Ok(self) })
     }
 
-    /// Get all tracked claims from the relation queries.
-    pub fn claims(&self) -> impl Iterator<Item = &Arc<Claim>> {
-        self.claims.values()
-    }
+    /// Provide evidence for the given term: look up the claim it cites.
+    pub fn prove(&self, term: &Term<Record>) -> Result<Claim, EvaluationError> {
+        let key = match term {
+            Term::Variable {
+                name: Some(name), ..
+            } => name,
+            _ => {
+                return Err(EvaluationError::Store(
+                    "Cannot look up claim with a non-variable term".to_string(),
+                ))
+            }
+        };
 
-    /// Realize a relation from a RelationQuery.
-    /// Looks up the application in the recorded claims.
-    pub fn realize(&self, application: &RelationQuery) -> Result<Claim, EvaluationError> {
-        if let Some(claim) = self.claims.get(application) {
-            return Ok(claim.as_ref().clone());
+        if let Some(claim) = self.claims.get(key) {
+            Ok(claim.as_ref().clone())
+        } else {
+            Err(EvaluationError::Store(format!(
+                "No claim found for term {:?}",
+                key
+            )))
         }
-
-        Err(EvaluationError::Store(
-            "Could not realize relation from answer - application not found".to_string(),
-        ))
     }
 
-    /// Merge a relation query result into this answer, recording the claim
-    /// and binding the/of/is/cause values from it.
-    pub fn merge_relation(
+    /// Cite a claim as evidence for the given term.
+    pub fn cite(
         &mut self,
-        application: &RelationQuery,
+        term: &Term<Record>,
         claim: &Claim,
     ) -> Result<(), EvaluationError> {
-        let claim = Arc::new(claim.to_owned());
-        if let Some(existing) = self.claims.get(application) {
-            if !Arc::ptr_eq(existing, &claim) {
-                return Err(EvaluationError::Assignment {
-                    reason: format!(
-                        "RelationQuery {:?} already mapped to a different claim",
-                        application
-                    ),
-                });
-            }
-        } else {
-            self.claims.insert(application.clone(), claim.clone());
+        if let Term::Variable {
+            name: Some(name), ..
+        } = term
+        {
+            self.claims
+                .insert(name.clone(), Arc::new(claim.to_owned()));
         }
-
-        self.bind(
-            &Term::<Any>::from(application.the()),
-            Value::Symbol(claim.the()),
-        )?;
-        self.bind(
-            &Term::<Any>::from(application.of()),
-            Value::Entity(claim.of().clone()),
-        )?;
-        self.bind(application.is(), claim.is().clone())?;
-        self.bind(
-            &Term::<Any>::from(application.cause()),
-            Value::Bytes(claim.cause().clone().0.into()),
-        )?;
 
         Ok(())
     }
@@ -137,13 +119,11 @@ impl Answer {
         }
     }
 
-    /// Resolve a parameter to its Value.
+    /// Look up the value bound to a term.
     ///
-    /// For variables, looks up the binding and returns the raw Value.
-    /// For constants, returns the constant value.
-    ///
-    /// Returns an error if the variable is not bound.
-    pub fn resolve(&self, term: &Term<Any>) -> Result<Value, EvaluationError> {
+    /// For variables, looks up the binding. For constants, returns the
+    /// constant value. Returns an error if the variable is not bound.
+    pub fn lookup(&self, term: &Term<Any>) -> Result<Value, EvaluationError> {
         match term {
             Term::Variable {
                 name: Some(key), ..
@@ -163,26 +143,4 @@ impl Answer {
         }
     }
 
-    /// Resolve a variable term into a constant term if this answer has a
-    /// binding for it. Otherwise, return the original term.
-    pub fn resolve_term<T: Scalar>(&self, term: &Term<T>) -> Term<T> {
-        match term {
-            Term::Variable { name, .. } => {
-                if let Some(key) = name {
-                    if let Some(value) = self.bindings.get(key) {
-                        if let Ok(converted) = T::try_from(value.clone()) {
-                            Term::Constant(converted.into())
-                        } else {
-                            term.clone()
-                        }
-                    } else {
-                        term.clone()
-                    }
-                } else {
-                    term.clone()
-                }
-            }
-            Term::Constant(_) => term.clone(),
-        }
-    }
 }

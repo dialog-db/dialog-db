@@ -97,7 +97,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::var("result"))
+                .lookup(&Term::var("result"))
                 .ok()
                 .and_then(|v| bool::try_from(v).ok()),
             Some(true)
@@ -123,7 +123,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::var("result"))
+                .lookup(&Term::var("result"))
                 .ok()
                 .and_then(|v| bool::try_from(v).ok()),
             Some(false)
@@ -149,7 +149,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::var("result"))
+                .lookup(&Term::var("result"))
                 .ok()
                 .and_then(|v| bool::try_from(v).ok()),
             Some(false)
@@ -175,7 +175,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::var("result"))
+                .lookup(&Term::var("result"))
                 .ok()
                 .and_then(|v| bool::try_from(v).ok()),
             Some(true)
@@ -201,7 +201,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::var("result"))
+                .lookup(&Term::var("result"))
                 .ok()
                 .and_then(|v| bool::try_from(v).ok()),
             Some(false)
@@ -225,7 +225,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::var("result"))
+                .lookup(&Term::var("result"))
                 .ok()
                 .and_then(|v| bool::try_from(v).ok()),
             Some(false)
@@ -250,7 +250,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::var("result"))
+                .lookup(&Term::var("result"))
                 .ok()
                 .and_then(|v| bool::try_from(v).ok()),
             Some(true)
@@ -288,7 +288,7 @@ mod tests {
         let final_result = &not_results[0];
         assert_eq!(
             final_result
-                .resolve(&Term::var("final_result"))
+                .lookup(&Term::var("final_result"))
                 .ok()
                 .and_then(|v| bool::try_from(v).ok()),
             Some(true)
@@ -313,7 +313,7 @@ mod tests {
         let and_results = and_formula.derive(and_input)?;
         assert_eq!(and_results.len(), 1);
         assert_eq!(
-            bool::try_from(and_results[0].resolve(&Term::var("and_result")).unwrap()).ok(),
+            bool::try_from(and_results[0].lookup(&Term::var("and_result")).unwrap()).ok(),
             Some(true)
         );
 
@@ -332,7 +332,7 @@ mod tests {
         let or_results = or_formula.derive(or_input)?;
         assert_eq!(or_results.len(), 1);
         assert_eq!(
-            bool::try_from(or_results[0].resolve(&Term::var("or_result")).unwrap()).ok(),
+            bool::try_from(or_results[0].lookup(&Term::var("or_result")).unwrap()).ok(),
             Some(true)
         );
 
@@ -349,7 +349,7 @@ mod tests {
         let not_results = not_formula.derive(not_input)?;
         assert_eq!(not_results.len(), 1);
         assert_eq!(
-            bool::try_from(not_results[0].resolve(&Term::var("not_result")).unwrap()).ok(),
+            bool::try_from(not_results[0].lookup(&Term::var("not_result")).unwrap()).ok(),
             Some(false)
         );
 

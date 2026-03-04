@@ -434,8 +434,8 @@ mod tests {
         let mut found_bob = false;
 
         for match_result in selection.iter() {
-            let person_name = match_result.resolve(&name_param)?;
-            let person_age = match_result.resolve(&age_param)?;
+            let person_name = match_result.lookup(&name_param)?;
+            let person_age = match_result.lookup(&age_param)?;
 
             match person_name {
                 Value::String(name_str) if name_str == "Alice" => {
@@ -554,8 +554,8 @@ mod tests {
         let mut found_bob = false;
 
         for match_result in selection.iter() {
-            let person_name = match_result.resolve(&name_param)?;
-            let person_age = match_result.resolve(&age_param)?;
+            let person_name = match_result.lookup(&name_param)?;
+            let person_age = match_result.lookup(&age_param)?;
 
             match person_name {
                 Value::String(name_str) if name_str == "Alice" => {
@@ -1524,11 +1524,11 @@ mod tests {
         // Both runs should produce the same names
         let names1: std::collections::HashSet<_> = results1
             .iter()
-            .map(|r| r.resolve(&name_param).unwrap())
+            .map(|r| r.lookup(&name_param).unwrap())
             .collect();
         let names2: std::collections::HashSet<_> = results2
             .iter()
-            .map(|r| r.resolve(&name_param).unwrap())
+            .map(|r| r.lookup(&name_param).unwrap())
             .collect();
 
         assert_eq!(
@@ -1589,12 +1589,12 @@ mod tests {
 
         assert_eq!(results.len(), 1, "Should find exactly one person (Alice)");
         assert_eq!(
-            results[0].resolve(&name_param)?,
+            results[0].lookup(&name_param)?,
             Value::String("Alice".into()),
             "Should resolve to Alice"
         );
         assert_eq!(
-            results[0].resolve(&age_param)?,
+            results[0].lookup(&age_param)?,
             Value::UnsignedInt(30),
             "Should have Alice's age"
         );

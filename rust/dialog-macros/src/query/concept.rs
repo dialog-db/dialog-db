@@ -270,8 +270,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
             fn realize(&self, source: dialog_query::Answer) -> std::result::Result<Self::Conclusion, dialog_query::EvaluationError> {
                 Ok(#struct_name {
-                    this: dialog_query::Entity::try_from(source.resolve(&dialog_query::Term::from(&self.this))?)?,
-                    #(#field_names: #field_types(source.resolve(&dialog_query::Term::from(&self.#field_names))?.try_into()?)),*
+                    this: dialog_query::Entity::try_from(source.lookup(&dialog_query::Term::from(&self.this))?)?,
+                    #(#field_names: #field_types(source.lookup(&dialog_query::Term::from(&self.#field_names))?.try_into()?)),*
                 })
             }
         }

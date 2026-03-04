@@ -258,12 +258,12 @@ mod tests {
         fn try_from(input: Answer) -> Result<Self, Self::Error> {
             Ok(Person {
                 this: Entity::try_from(
-                    input.resolve(&Term::from(&<Self as Concept>::Term::this()))?,
+                    input.lookup(&Term::from(&<Self as Concept>::Term::this()))?,
                 )?,
                 name: String::try_from(
-                    input.resolve(&Term::from(&<Self as Concept>::Term::name()))?,
+                    input.lookup(&Term::from(&<Self as Concept>::Term::name()))?,
                 )?,
-                age: u32::try_from(input.resolve(&Term::from(&<Self as Concept>::Term::age()))?)?,
+                age: u32::try_from(input.lookup(&Term::from(&<Self as Concept>::Term::age()))?)?,
             })
         }
     }
@@ -316,9 +316,9 @@ mod tests {
             source: Answer,
         ) -> std::result::Result<Self::Conclusion, EvaluationError> {
             Ok(Person {
-                this: Entity::try_from(source.resolve(&Term::from(&self.this))?)?,
-                name: String::try_from(source.resolve(&Term::from(&self.name))?)?,
-                age: u32::try_from(source.resolve(&Term::from(&self.age))?)?,
+                this: Entity::try_from(source.lookup(&Term::from(&self.this))?)?,
+                name: String::try_from(source.lookup(&Term::from(&self.name))?)?,
+                age: u32::try_from(source.lookup(&Term::from(&self.age))?)?,
             })
         }
     }

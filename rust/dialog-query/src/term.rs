@@ -12,6 +12,7 @@
 //! `Term<Any>` is the unified replacement for the old `Parameter` type.
 
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::Premise;
 use crate::artifact::{Attribute as ArtifactAttribute, Entity, Type, Value};
@@ -20,6 +21,8 @@ use crate::error::TypeError;
 use crate::proposition::Proposition;
 use crate::types::{Any, Scalar, TypeDescriptor, Typed};
 use std::hash::Hash;
+
+static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Either a concrete value or a named variable placeholder.
 ///
@@ -96,6 +99,23 @@ where
             Term::Variable { .. } => None,
         }
     }
+
+    /// Resolve this term against an answer. If the term is a variable
+    /// bound in the answer, returns a constant term with the bound value.
+    /// Otherwise returns the term unchanged.
+    pub fn resolve(&self, answer: &crate::selection::Answer) -> Self {
+        let term: Term<Any> = self.clone().into();
+        match answer.lookup(&term) {
+            Ok(value) => {
+                if let Ok(converted) = T::try_from(value) {
+                    Term::Constant(converted.into())
+                } else {
+                    self.clone()
+                }
+            }
+            Err(_) => self.clone(),
+        }
+    }
 }
 
 /// Methods available on all `Term<T>` regardless of `T`.
@@ -117,6 +137,15 @@ impl<T: Typed> Term<T> {
     /// conjuncts.
     pub fn blank() -> Self {
         Self::default()
+    }
+
+    /// Create a uniquely-named variable.
+    ///
+    /// Like a named variable, it participates in bindings, but the name is
+    /// auto-generated so it won't collide with user-chosen names.
+    pub fn unique() -> Self {
+        let id = UNIQUE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        Self::var(format!("__{id}"))
     }
 
     /// Check if this term is a variable (named or unnamed)

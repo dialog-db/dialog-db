@@ -66,8 +66,8 @@ where
     fn realize(&self, input: Answer) -> Result<Self::Conclusion, EvaluationError> {
         let of_term = &self.of;
         let is_param = Term::<Any>::from(&self.is);
-        let entity: Entity = Entity::try_from(input.resolve(&Term::from(of_term))?)?;
-        let value: Value = input.resolve(&is_param)?;
+        let entity: Entity = Entity::try_from(input.lookup(&Term::from(of_term))?)?;
+        let value: Value = input.lookup(&is_param)?;
         let typed_value = A::Type::try_from(value).map_err(|_| {
             EvaluationError::Store(format!(
                 "cannot convert value to {}",

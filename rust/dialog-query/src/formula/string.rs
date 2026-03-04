@@ -219,7 +219,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::var("result"))
+                .lookup(&Term::var("result"))
                 .ok()
                 .and_then(|v| String::try_from(v).ok()),
             Some("Hello World".to_string())
@@ -244,7 +244,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::var("len"))
+                .lookup(&Term::var("len"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(5)
@@ -269,7 +269,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::var("upper"))
+                .lookup(&Term::var("upper"))
                 .ok()
                 .and_then(|v| String::try_from(v).ok()),
             Some("HELLO WORLD".to_string())
@@ -294,7 +294,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::var("lower"))
+                .lookup(&Term::var("lower"))
                 .ok()
                 .and_then(|v| String::try_from(v).ok()),
             Some("hello world".to_string())
@@ -319,7 +319,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::var("len"))
+                .lookup(&Term::var("len"))
                 .ok()
                 .and_then(|v| u32::try_from(v).ok()),
             Some(0)
@@ -348,7 +348,7 @@ mod tests {
         let result = &results[0];
         assert_eq!(
             result
-                .resolve(&Term::var("result"))
+                .lookup(&Term::var("result"))
                 .ok()
                 .and_then(|v| String::try_from(v).ok()),
             Some("World".to_string())
@@ -376,7 +376,7 @@ mod tests {
         let concat_results = concat_formula.derive(concat_input)?;
         assert_eq!(concat_results.len(), 1);
         assert_eq!(
-            String::try_from(concat_results[0].resolve(&Term::var("full_name")).unwrap()).ok(),
+            String::try_from(concat_results[0].lookup(&Term::var("full_name")).unwrap()).ok(),
             Some("John Doe".to_string())
         );
 
@@ -395,7 +395,7 @@ mod tests {
         let length_results = length_formula.derive(length_input)?;
         assert_eq!(length_results.len(), 1);
         assert_eq!(
-            u32::try_from(length_results[0].resolve(&Term::var("length")).unwrap()).ok(),
+            u32::try_from(length_results[0].lookup(&Term::var("length")).unwrap()).ok(),
             Some(11)
         );
 
@@ -414,7 +414,7 @@ mod tests {
         let upper_results = upper_formula.derive(upper_input)?;
         assert_eq!(upper_results.len(), 1);
         assert_eq!(
-            String::try_from(upper_results[0].resolve(&Term::var("output")).unwrap()).ok(),
+            String::try_from(upper_results[0].lookup(&Term::var("output")).unwrap()).ok(),
             Some("HELLO WORLD".to_string())
         );
 
@@ -441,7 +441,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(
             results[0]
-                .resolve(&Term::var("result"))
+                .lookup(&Term::var("result"))
                 .ok()
                 .and_then(|v| String::try_from(v).ok()),
             Some("hello".to_string())

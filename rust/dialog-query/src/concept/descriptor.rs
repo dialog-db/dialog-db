@@ -386,7 +386,7 @@ impl ConceptConclusion {
                 name: Some(name), ..
             } => {
                 let typed_term: Term<T> = Term::var(name.clone());
-                T::try_from(self.answer.resolve(&Term::from(&typed_term))?).map_err(|_| {
+                T::try_from(self.answer.lookup(&Term::from(&typed_term))?).map_err(|_| {
                     EvaluationError::UnboundVariable {
                         variable_name: field.to_string(),
                     }
@@ -446,7 +446,7 @@ impl Application for ConceptQuery {
                 name: Some(name), ..
             } => {
                 let typed_term: Term<Entity> = Term::var(name.clone());
-                Entity::try_from(source.resolve(&Term::from(&typed_term))?)?
+                Entity::try_from(source.lookup(&Term::from(&typed_term))?)?
             }
             Term::Constant(value) => match value {
                 Value::Entity(e) => e.clone(),
