@@ -43,11 +43,11 @@
             wasm-bindgen-cli
             wasm-pack
           ]
-          ++ lib.optional stdenv.isLinux [
+          ++ lib.optionals stdenv.isLinux [
             chromium
             chromedriver
           ]
-          ++ lib.optional stdenv.isDarwin [
+          ++ lib.optionals stdenv.isDarwin [
             apple-sdk
           ];
 
@@ -87,6 +87,13 @@
           // lib.optionalAttrs stdenv.isLinux {
             "CHROME" = "${chromium}/bin/chromium";
             "CHROMEDRIVER" = "${chromedriver}/bin/chromedriver";
+            "CHROME_PATH" = "${chromium}/bin/chromium";
+          }
+          # Chromium is not packaged for darwin in nixpkgs
+          # (https://github.com/NixOS/nixpkgs/issues/247855),
+          # so we fall back to the default system Chrome install path.
+          // lib.optionalAttrs stdenv.isDarwin {
+            "CHROME_PATH" = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
           };
 
         dialog-artifacts-web = buildWasmCrate {
@@ -157,8 +164,10 @@
 
             nativeBuildInputs = developmentBuildInputs;
 
+            # Skip Puppeteer's Chrome download during npm ci in the Nix sandbox.
+            # At test runtime, CHROME_PATH is provided by developmentEnvVars.
             env = {
-              "CHROME_PATH" = "${chromium}/bin/chromium";
+              "PUPPETEER_SKIP_DOWNLOAD" = "true";
             };
 
             buildPhase = ''
@@ -259,8 +268,9 @@
           "test:npm" = {
             description = "JavaScript unit tests for NPM packages";
             command = ''
-              echo "PUPPETEER_EXECUTABLE_PATH=$PUPPETEER_EXECUTABLE_PATH"
-              # echo "PUPPETEER_SKIP_DOWNLOAD=$PUPPETEER_SKIP_DOWNLOAD"
+              # Skip Puppeteer's Chrome download during npm ci; tests use
+              # the browser specified by CHROME_PATH instead.
+              export PUPPETEER_SKIP_DOWNLOAD=true
 
               nix build .#dialog-artifacts-web-tests
               TEST_DIR=$(mktemp -d);
