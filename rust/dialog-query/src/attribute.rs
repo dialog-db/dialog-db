@@ -3,14 +3,15 @@ mod descriptor;
 pub mod expression;
 /// Typed attribute queries wrapping [`RelationQuery`](crate::relation::query::RelationQuery).
 pub mod query;
+/// Type-erased concrete attribute statement.
+pub mod statement;
 mod the;
 
 pub use descriptor::*;
-pub use expression::{
-    AttributeBuilder, AttributeExpression, AttributeExpressionBuilder, AttributeStatement,
-};
-pub use query::AttributeQuery;
-pub use the::{DynamicAttributeExpression, *};
+pub use expression::*;
+pub use query::*;
+pub use statement::*;
+pub use the::*;
 
 pub use crate::artifact::{
     Attribute as ArtifactsAttribute, Cause, DialogArtifactsError, Entity, Value,
@@ -30,7 +31,7 @@ pub use crate::{Predicate, Premise, Term, The};
 /// a set of attributes that together describe an entity type.
 ///
 /// For schema metadata, see [`Descriptor<AttributeDescriptor>`](crate::Descriptor).
-/// For the fluent `::of()` expression builder, see [`AttributeExpressionBuilder`].
+/// For the fluent `::of()` expression builder, see [`StaticAttributeExpressionBuilder`].
 pub trait Attribute: Predicate + Sized {
     /// The Rust scalar type of this attribute's values.
     type Type: Scalar;
@@ -49,7 +50,7 @@ mod tests {
     mod person {
         use crate::Cardinality;
         use crate::attribute::AttributeDescriptor;
-        use crate::attribute::expression::AttributeStatement;
+        use crate::attribute::expression::typed::StaticAttributeStatement;
         use crate::attribute::query::AttributeQuery;
         use crate::descriptor::Descriptor;
         use crate::the;
@@ -59,7 +60,7 @@ mod tests {
         pub struct Name(pub String);
 
         impl crate::Predicate for Name {
-            type Conclusion = AttributeStatement<Self>;
+            type Conclusion = StaticAttributeStatement<Self>;
             type Application = AttributeQuery<Self>;
             type Descriptor = AttributeDescriptor;
         }
@@ -87,11 +88,17 @@ mod tests {
             }
         }
 
-        impl crate::attribute::expression::AttributeExpressionBuilder for Name {}
+        impl crate::attribute::StaticAttributeExpressionBuilder for Name {}
 
         impl From<String> for Name {
             fn from(value: String) -> Self {
                 Self(value)
+            }
+        }
+
+        impl From<Name> for crate::Term<String> {
+            fn from(attr: Name) -> Self {
+                crate::Term::Constant(<String as Into<crate::artifact::Value>>::into(attr.0))
             }
         }
     }
@@ -100,12 +107,9 @@ mod tests {
     fn it_derives_person_name() {
         use crate::descriptor::Descriptor;
         let _name = person::Name("hello".into());
-        // Basic test that Attribute trait is implemented
         assert_eq!(person::Name::descriptor().domain(), "person");
         assert_eq!(person::Name::descriptor().name(), "name");
     }
-
-    // Tests from attribute_derive_test.rs
 
     mod employee_derive {
         use crate::Attribute;
@@ -247,240 +251,6 @@ mod tests {
         assert_eq!(field.value(), "value");
     }
 
-    // Tests from attribute_identifier_test.rs
-
-    mod employee_ident {
-        use crate::Attribute;
-
-        #[derive(Attribute, Clone)]
-        pub struct Name(pub String);
-
-        #[derive(Attribute, Clone)]
-        pub struct Salary(pub u32);
-
-        #[derive(Attribute, Clone)]
-        pub struct Job(pub String);
-    }
-
-    mod person_ident {
-        use crate::Attribute;
-
-        #[derive(Attribute, Clone)]
-        pub struct Name(pub String);
-    }
-
-    #[dialog_common::test]
-    fn it_produces_stable_hash() {
-        let hash1 = employee_ident::Name::descriptor().hash();
-        let hash2 = employee_ident::Name::descriptor().hash();
-
-        assert_eq!(
-            hash1, hash2,
-            "Same attribute should produce identical hashes"
-        );
-    }
-
-    #[dialog_common::test]
-    fn it_hashes_differently_for_different_attributes() {
-        let name_hash = employee_ident::Name::descriptor().hash();
-        let salary_hash = employee_ident::Salary::descriptor().hash();
-        let job_hash = employee_ident::Job::descriptor().hash();
-
-        assert_ne!(
-            name_hash, salary_hash,
-            "Name and Salary should have different hashes"
-        );
-        assert_ne!(
-            name_hash, job_hash,
-            "Name and Job should have different hashes"
-        );
-        assert_ne!(
-            salary_hash, job_hash,
-            "Salary and Job should have different hashes"
-        );
-    }
-
-    #[dialog_common::test]
-    fn it_hashes_differently_for_different_domains() {
-        let employee_name_hash = employee_ident::Name::descriptor().hash();
-        let person_name_hash = person_ident::Name::descriptor().hash();
-
-        assert_ne!(
-            employee_name_hash, person_name_hash,
-            "employee::Name and person::Name should have different hashes"
-        );
-    }
-
-    #[dialog_common::test]
-    fn it_formats_uri() {
-        let uri = employee_ident::Name::descriptor().to_uri();
-
-        assert!(
-            uri.starts_with("the:"),
-            "URI should start with 'the:' prefix"
-        );
-        // base58 encoding of 32 bytes is typically 43-44 characters
-        assert!(uri.len() > 4, "URI should have content after 'the:' prefix");
-    }
-
-    #[dialog_common::test]
-    fn it_round_trips_uri() {
-        let uri = employee_ident::Name::descriptor().to_uri();
-        let parsed_hash = AttributeDescriptor::parse_uri(&uri);
-
-        assert!(parsed_hash.is_some(), "Should be able to parse valid URI");
-        assert_eq!(
-            parsed_hash.unwrap(),
-            employee_ident::Name::descriptor().hash(),
-            "Parsed hash should match original hash"
-        );
-    }
-
-    #[dialog_common::test]
-    fn it_rejects_invalid_uri() {
-        assert!(
-            AttributeDescriptor::parse_uri("invalid").is_none(),
-            "Should fail to parse URI without 'the:' prefix"
-        );
-
-        assert!(
-            AttributeDescriptor::parse_uri("the:invalid").is_none(),
-            "Should fail to parse URI with invalid hash"
-        );
-
-        assert!(
-            AttributeDescriptor::parse_uri("concept:abcd").is_none(),
-            "Should fail to parse URI with wrong prefix"
-        );
-    }
-
-    #[dialog_common::test]
-    fn it_produces_stable_schema_hash() {
-        let schema_hash = employee_ident::Name::descriptor().hash();
-        let trait_hash = employee_ident::Name::descriptor().hash();
-
-        assert_eq!(
-            schema_hash, trait_hash,
-            "Schema hash and trait hash should match"
-        );
-    }
-
-    #[dialog_common::test]
-    fn it_encodes_to_cbor() {
-        let cbor1 = employee_ident::Name::descriptor().to_cbor_bytes();
-        let cbor2 = employee_ident::Name::descriptor().to_cbor_bytes();
-
-        assert_eq!(cbor1, cbor2, "CBOR encoding should be deterministic");
-        assert!(!cbor1.is_empty(), "CBOR encoding should not be empty");
-    }
-
-    #[dialog_common::test]
-    fn it_excludes_description_from_hash() {
-        let attr1 = AttributeDescriptor::new(
-            the!("user/email"),
-            "Primary email address",
-            Cardinality::One,
-            Some(Type::String),
-        );
-
-        let attr2 = AttributeDescriptor::new(
-            the!("user/email"),
-            "User's email for notifications",
-            Cardinality::One,
-            Some(Type::String),
-        );
-
-        assert_eq!(
-            attr1.hash(),
-            attr2.hash(),
-            "Attributes with different descriptions should have the same hash"
-        );
-
-        assert_eq!(
-            attr1.to_uri(),
-            attr2.to_uri(),
-            "Attributes with different descriptions should have the same URI"
-        );
-    }
-
-    // Tests from attribute_into_term_test.rs
-
-    mod employee_term {
-        use crate::Attribute;
-
-        #[derive(Attribute, Clone)]
-        pub struct Name(pub String);
-
-        #[derive(Attribute, Clone)]
-        pub struct Job(pub String);
-
-        #[derive(Attribute, Clone)]
-        pub struct Salary(pub u32);
-    }
-
-    #[dialog_common::test]
-    fn it_converts_into_term() {
-        let name = employee_term::Name("Alice".into());
-        let name_term: Term<String> = name.into();
-        assert!(name_term.is_constant());
-
-        let job = employee_term::Job("Engineer".into());
-        let job_term: Term<String> = job.into();
-        assert!(job_term.is_constant());
-
-        let salary = employee_term::Salary(65000);
-        let salary_term: Term<u32> = salary.into();
-        assert!(salary_term.is_constant());
-    }
-
-    #[dialog_common::test]
-    fn it_creates_from_method() {
-        let name = employee_term::Name::from("Alice");
-        assert_eq!(name.value(), "Alice");
-
-        let job = employee_term::Job::from("Engineer");
-        assert_eq!(job.value(), "Engineer");
-
-        let salary = employee_term::Salary::from(65000u32);
-        assert_eq!(*salary.value(), 65000);
-
-        let name_term: Term<String> = employee_term::Name::from("Bob").into();
-        assert!(name_term.is_constant());
-    }
-
-    #[dialog_common::test]
-    fn it_uses_into_in_match_construction() {
-        use crate::{Concept, Entity, Query, Term};
-
-        #[derive(Concept, Debug, Clone)]
-        pub struct Employee {
-            pub this: Entity,
-            pub name: employee_term::Name,
-            pub job: employee_term::Job,
-            pub salary: employee_term::Salary,
-        }
-
-        let pattern = Query::<Employee> {
-            this: Term::var("e"),
-            name: Term::var("name"),
-            salary: Term::var("salary"),
-            job: employee_term::Job("Engineer".into()).into(),
-        };
-
-        assert!(pattern.job.is_constant());
-
-        let pattern2 = Query::<Employee> {
-            this: Term::var("e"),
-            name: Term::var("name"),
-            salary: Term::var("salary"),
-            job: employee_term::Job::from("Engineer").into(),
-        };
-
-        assert!(pattern2.job.is_constant());
-    }
-
-    // Tests from attribute_domain_test.rs
-
     mod account_name {
         use crate::Attribute;
 
@@ -600,8 +370,6 @@ mod tests {
         assert_eq!(name.value(), "John Doe");
     }
 
-    // Tests from attribute_naming_test.rs
-
     mod test_pascal {
         use crate::Attribute;
 
@@ -643,5 +411,232 @@ mod tests {
         let schema = &test_pascal::UserName::descriptor();
         assert_eq!(schema.name(), "user-name");
         assert_eq!(schema.cardinality(), Cardinality::One);
+    }
+
+    mod employee_ident {
+        use crate::Attribute;
+
+        #[derive(Attribute, Clone)]
+        pub struct Name(pub String);
+
+        #[derive(Attribute, Clone)]
+        pub struct Salary(pub u32);
+
+        #[derive(Attribute, Clone)]
+        pub struct Job(pub String);
+    }
+
+    mod person_ident {
+        use crate::Attribute;
+
+        #[derive(Attribute, Clone)]
+        pub struct Name(pub String);
+    }
+
+    #[dialog_common::test]
+    fn it_produces_stable_hash() {
+        let hash1 = employee_ident::Name::descriptor().hash();
+        let hash2 = employee_ident::Name::descriptor().hash();
+
+        assert_eq!(
+            hash1, hash2,
+            "Same attribute should produce identical hashes"
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_hashes_differently_for_different_attributes() {
+        let name_hash = employee_ident::Name::descriptor().hash();
+        let salary_hash = employee_ident::Salary::descriptor().hash();
+        let job_hash = employee_ident::Job::descriptor().hash();
+
+        assert_ne!(
+            name_hash, salary_hash,
+            "Name and Salary should have different hashes"
+        );
+        assert_ne!(
+            name_hash, job_hash,
+            "Name and Job should have different hashes"
+        );
+        assert_ne!(
+            salary_hash, job_hash,
+            "Salary and Job should have different hashes"
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_hashes_differently_for_different_domains() {
+        let employee_name_hash = employee_ident::Name::descriptor().hash();
+        let person_name_hash = person_ident::Name::descriptor().hash();
+
+        assert_ne!(
+            employee_name_hash, person_name_hash,
+            "employee::Name and person::Name should have different hashes"
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_formats_uri() {
+        let uri = employee_ident::Name::descriptor().to_uri();
+
+        assert!(
+            uri.starts_with("the:"),
+            "URI should start with 'the:' prefix"
+        );
+        assert!(uri.len() > 4, "URI should have content after 'the:' prefix");
+    }
+
+    #[dialog_common::test]
+    fn it_round_trips_uri() {
+        let uri = employee_ident::Name::descriptor().to_uri();
+        let parsed_hash = AttributeDescriptor::parse_uri(&uri);
+
+        assert!(parsed_hash.is_some(), "Should be able to parse valid URI");
+        assert_eq!(
+            parsed_hash.unwrap(),
+            employee_ident::Name::descriptor().hash(),
+            "Parsed hash should match original hash"
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_rejects_invalid_uri() {
+        assert!(
+            AttributeDescriptor::parse_uri("invalid").is_none(),
+            "Should fail to parse URI without 'the:' prefix"
+        );
+
+        assert!(
+            AttributeDescriptor::parse_uri("the:invalid").is_none(),
+            "Should fail to parse URI with invalid hash"
+        );
+
+        assert!(
+            AttributeDescriptor::parse_uri("concept:abcd").is_none(),
+            "Should fail to parse URI with wrong prefix"
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_produces_stable_schema_hash() {
+        let schema_hash = employee_ident::Name::descriptor().hash();
+        let trait_hash = employee_ident::Name::descriptor().hash();
+
+        assert_eq!(
+            schema_hash, trait_hash,
+            "Schema hash and trait hash should match"
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_encodes_to_cbor() {
+        let cbor1 = employee_ident::Name::descriptor().to_cbor_bytes();
+        let cbor2 = employee_ident::Name::descriptor().to_cbor_bytes();
+
+        assert_eq!(cbor1, cbor2, "CBOR encoding should be deterministic");
+        assert!(!cbor1.is_empty(), "CBOR encoding should not be empty");
+    }
+
+    #[dialog_common::test]
+    fn it_excludes_description_from_hash() {
+        let attr1 = AttributeDescriptor::new(
+            the!("user/email"),
+            "Primary email address",
+            Cardinality::One,
+            Some(Type::String),
+        );
+
+        let attr2 = AttributeDescriptor::new(
+            the!("user/email"),
+            "User's email for notifications",
+            Cardinality::One,
+            Some(Type::String),
+        );
+
+        assert_eq!(
+            attr1.hash(),
+            attr2.hash(),
+            "Attributes with different descriptions should have the same hash"
+        );
+
+        assert_eq!(
+            attr1.to_uri(),
+            attr2.to_uri(),
+            "Attributes with different descriptions should have the same URI"
+        );
+    }
+
+    mod employee_term {
+        use crate::Attribute;
+
+        #[derive(Attribute, Clone)]
+        pub struct Name(pub String);
+
+        #[derive(Attribute, Clone)]
+        pub struct Job(pub String);
+
+        #[derive(Attribute, Clone)]
+        pub struct Salary(pub u32);
+    }
+
+    #[dialog_common::test]
+    fn it_converts_into_term() {
+        let name = employee_term::Name("Alice".into());
+        let name_term: Term<String> = name.into();
+        assert!(name_term.is_constant());
+
+        let job = employee_term::Job("Engineer".into());
+        let job_term: Term<String> = job.into();
+        assert!(job_term.is_constant());
+
+        let salary = employee_term::Salary(65000);
+        let salary_term: Term<u32> = salary.into();
+        assert!(salary_term.is_constant());
+    }
+
+    #[dialog_common::test]
+    fn it_creates_from_method() {
+        let name = employee_term::Name::from("Alice");
+        assert_eq!(name.value(), "Alice");
+
+        let job = employee_term::Job::from("Engineer");
+        assert_eq!(job.value(), "Engineer");
+
+        let salary = employee_term::Salary::from(65000u32);
+        assert_eq!(*salary.value(), 65000);
+
+        let name_term: Term<String> = employee_term::Name::from("Bob").into();
+        assert!(name_term.is_constant());
+    }
+
+    #[dialog_common::test]
+    fn it_uses_into_in_match_construction() {
+        use crate::{Concept, Entity, Query, Term};
+
+        #[derive(Concept, Debug, Clone)]
+        pub struct Employee {
+            pub this: Entity,
+            pub name: employee_term::Name,
+            pub job: employee_term::Job,
+            pub salary: employee_term::Salary,
+        }
+
+        let pattern = Query::<Employee> {
+            this: Term::var("e"),
+            name: Term::var("name"),
+            salary: Term::var("salary"),
+            job: employee_term::Job("Engineer".into()).into(),
+        };
+
+        assert!(pattern.job.is_constant());
+
+        let pattern2 = Query::<Employee> {
+            this: Term::var("e"),
+            name: Term::var("name"),
+            salary: Term::var("salary"),
+            job: employee_term::Job::from("Engineer").into(),
+        };
+
+        assert!(pattern2.job.is_constant());
     }
 }

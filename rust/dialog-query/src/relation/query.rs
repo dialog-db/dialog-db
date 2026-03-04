@@ -653,10 +653,9 @@ mod tests {
     macro_rules! assert_relation {
         ($artifacts:expr, $the:expr, $of:expr, $is:expr) => {{
             let mut session = Session::open($artifacts.clone());
-            session
-                .transact(vec![$the.clone().of($of.clone()).is($is)])
-                .await
-                .unwrap();
+            let mut tx = session.edit();
+            tx.assert($the.clone().of($of.clone()).is($is));
+            session.commit(tx).await.unwrap();
         }};
     }
 
@@ -673,10 +672,10 @@ mod tests {
         let age_attr = the!("person/age");
 
         // Two conflicting values for person/name of alice
-        assert_relation!(artifacts, name_attr, alice, Value::String("Alice".into()));
-        assert_relation!(artifacts, name_attr, alice, Value::String("Alicia".into()));
+        assert_relation!(artifacts, name_attr, alice, "Alice".to_string());
+        assert_relation!(artifacts, name_attr, alice, "Alicia".to_string());
         // One value for person/age of alice
-        assert_relation!(artifacts, age_attr, alice, Value::SignedInt(30));
+        assert_relation!(artifacts, age_attr, alice, 30i64);
 
         // Entity is known → EAV scan, attribute is variable
         let rel_app = RelationQuery::new(
@@ -727,12 +726,12 @@ mod tests {
         let name_attr = the!("person/name");
 
         // Two conflicting values for alice's name
-        assert_relation!(artifacts, name_attr, alice, Value::String("Alice".into()));
-        assert_relation!(artifacts, name_attr, alice, Value::String("Alicia".into()));
+        assert_relation!(artifacts, name_attr, alice, "Alice".to_string());
+        assert_relation!(artifacts, name_attr, alice, "Alicia".to_string());
 
         // Two conflicting values for bob's name
-        assert_relation!(artifacts, name_attr, bob, Value::String("Bob".into()));
-        assert_relation!(artifacts, name_attr, bob, Value::String("Robert".into()));
+        assert_relation!(artifacts, name_attr, bob, "Bob".to_string());
+        assert_relation!(artifacts, name_attr, bob, "Robert".to_string());
 
         // Attribute is known, entity is variable → AEV scan
         let rel_app = RelationQuery::new(
@@ -779,8 +778,8 @@ mod tests {
         let name_attr = the!("person/name");
 
         // Two conflicting values for alice's name
-        assert_relation!(artifacts, name_attr, alice, Value::String("Alice".into()));
-        assert_relation!(artifacts, name_attr, alice, Value::String("Alicia".into()));
+        assert_relation!(artifacts, name_attr, alice, "Alice".to_string());
+        assert_relation!(artifacts, name_attr, alice, "Alicia".to_string());
 
         // Determine the expected winner: query with attribute known to get the
         // winner from AEV, then verify the VAE lookup matches.
@@ -857,8 +856,8 @@ mod tests {
         let alice = Entity::new()?;
         let name_attr = the!("person/name");
 
-        assert_relation!(artifacts, name_attr, alice, Value::String("Alice".into()));
-        assert_relation!(artifacts, name_attr, alice, Value::String("Alicia".into()));
+        assert_relation!(artifacts, name_attr, alice, "Alice".to_string());
+        assert_relation!(artifacts, name_attr, alice, "Alicia".to_string());
 
         // EAV path (entity known)
         let eav_app = RelationQuery::new(
@@ -975,14 +974,19 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_retracts_facts() -> anyhow::Result<()> {
+        use crate::Statement;
         use crate::artifact::Artifacts;
+        use crate::attribute::AttributeStatement;
 
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         let alice = Entity::new()?;
 
-        let alice_name = the!("user/name").of(alice.clone()).is("Alice".to_string());
+        let alice_name: AttributeStatement = the!("user/name")
+            .of(alice.clone())
+            .is("Alice".to_string())
+            .into();
 
         let mut session = Session::open(artifacts.clone());
         session.transact(vec![alice_name.clone()]).await?;
@@ -1005,7 +1009,7 @@ mod tests {
         assert_eq!(results[0].is(), &Value::String("Alice".to_string()));
 
         let mut session = Session::open(artifacts.clone());
-        session.transact([!alice_name]).await?;
+        session.transact([alice_name.revert()]).await?;
 
         let query2 = RelationQuery::new(
             Term::from(the!("user/name")),

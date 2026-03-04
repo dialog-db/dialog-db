@@ -13,12 +13,12 @@
 
 use std::fmt;
 
+use crate::Premise;
 use crate::artifact::{Attribute as ArtifactAttribute, Entity, Type, Value};
 use crate::constraint::{Constraint, Equality};
 use crate::error::TypeError;
 use crate::proposition::Proposition;
 use crate::types::{Any, Scalar, TypeDescriptor, Typed};
-use crate::{Attribute, Premise};
 use std::hash::Hash;
 
 /// Either a concrete value or a named variable placeholder.
@@ -335,15 +335,22 @@ impl From<Vec<u8>> for Term<Vec<u8>> {
     }
 }
 
-/// Convert an Attribute to a Term of its inner type
-impl<A: Attribute> From<A> for Term<A::Type>
-where
-    A::Type: Scalar,
-{
-    fn from(attr: A) -> Self {
-        Term::Constant(attr.value().clone().into())
-    }
-}
+// NOTE: There is no blanket `impl<A: Attribute> From<A> for Term<A::Type>` here.
+//
+// Such a blanket would be natural (any attribute can become a constant term of
+// its inner type), but it prevents adding `impl<T: Scalar> From<T> for Term<Any>`
+// because the compiler cannot prove that no `Attribute` type is also `Scalar`
+// with `A::Type = Any`. Rust's coherence checker is conservative about associated
+// types in blanket impls.
+//
+// Instead, the `#[derive(Attribute)]` macro generates a per-type impl:
+//
+//     impl From<Name> for Term<String> { ... }
+//
+// This achieves the same effect for all derived attributes while keeping
+// `Term<Any>` free for the `Scalar` blanket below, which is needed by the
+// dynamic attribute API (`the!("a/b").of(entity).is(value)`) to bridge
+// concrete values to the `Into<Term<Any>>` bound required by `Into<Premise>`.
 
 /// Support for converting Term references to owned Terms
 impl<T: Typed + Clone> From<&Term<T>> for Term<T> {
@@ -433,6 +440,17 @@ impl Term<Any> {
             },
             Term::Constant(v) => Term::Constant(v),
         })
+    }
+}
+
+/// Convert a raw [`Value`] into a constant `Term<Value>`.
+///
+/// This enables the dynamic attribute API (`the!("a/b").of(entity).is(value)`)
+/// to accept `Value` directly — satisfying the `.is()` bound
+/// `V: Typed + Into<Value>, Is: Into<Term<V>>` with `V = Value`.
+impl From<Value> for Term<Value> {
+    fn from(value: Value) -> Self {
+        Term::Constant(value)
     }
 }
 

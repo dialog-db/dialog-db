@@ -375,19 +375,23 @@ mod tests {
         let bob = Entity::new()?;
         let mallory = Entity::new()?;
 
-        session
-            .transact(vec![
+        {
+            let mut tx = session.edit();
+            tx.assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alice".to_string()),
-                the!("person/age").of(alice.clone()).is(25u32),
-                the!("person/name").of(bob.clone()).is("Bob".to_string()),
-                the!("person/age").of(bob.clone()).is(30u32),
+            )
+            .assert(the!("person/age").of(alice.clone()).is(25u32))
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .assert(the!("person/age").of(bob.clone()).is(30u32))
+            .assert(
                 the!("person/name")
                     .of(mallory.clone())
                     .is("Mallory".to_string()),
-            ])
-            .await?;
+            );
+            session.commit(tx).await?;
+        }
 
         let person = ConceptDescriptor::from([
             (
@@ -1491,16 +1495,18 @@ mod tests {
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        session
-            .transact(vec![
+        {
+            let mut tx = session.edit();
+            tx.assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alice".to_string()),
-                the!("person/age").of(alice.clone()).is(30u32),
-                the!("person/name").of(bob.clone()).is("Bob".to_string()),
-                the!("person/age").of(bob.clone()).is(25u32),
-            ])
-            .await?;
+            )
+            .assert(the!("person/age").of(alice.clone()).is(30u32))
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .assert(the!("person/age").of(bob.clone()).is(25u32));
+            session.commit(tx).await?;
+        }
 
         let person = person_concept();
         let name_param = Term::var("name");
@@ -1559,16 +1565,18 @@ mod tests {
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        session
-            .transact(vec![
+        {
+            let mut tx = session.edit();
+            tx.assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alice".to_string()),
-                the!("person/age").of(alice.clone()).is(30u32),
-                the!("person/name").of(bob.clone()).is("Bob".to_string()),
-                the!("person/age").of(bob.clone()).is(25u32),
-            ])
-            .await?;
+            )
+            .assert(the!("person/age").of(alice.clone()).is(30u32))
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .assert(the!("person/age").of(bob.clone()).is(25u32));
+            session.commit(tx).await?;
+        }
 
         let person = person_concept();
 

@@ -65,8 +65,8 @@ pub mod types;
 
 pub use artifact::{Attribute as ArtifactAttribute, Entity, Type, Value};
 pub use attribute::{
-    Attribute, AttributeDescriptor, AttributeExpressionBuilder, Cardinality,
-    DynamicAttributeExpression, The,
+    Attribute, AttributeDescriptor, AttributeStatement, Cardinality, DynamicAttributeExpression,
+    StaticAttributeExpressionBuilder, The,
 };
 pub use claim::Claim;
 pub use concept::application::{ConceptQuery, ConceptRules};

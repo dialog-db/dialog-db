@@ -68,8 +68,7 @@ mod tests {
     use crate::term::Term;
     use crate::the;
     use crate::{
-        DynamicAttributeExpression, EvaluationError, Parameters, Proposition, Query, Session,
-        Transaction,
+        AttributeStatement, EvaluationError, Parameters, Proposition, Query, Session, Transaction,
     };
 
     // Manual implementation of Person struct with Concept and Rule traits
@@ -164,17 +163,19 @@ mod tests {
     }
 
     impl IntoIterator for Person {
-        type Item = DynamicAttributeExpression;
-        type IntoIter = std::vec::IntoIter<DynamicAttributeExpression>;
+        type Item = AttributeStatement;
+        type IntoIter = std::vec::IntoIter<AttributeStatement>;
 
         fn into_iter(self) -> Self::IntoIter {
             vec![
                 the!("person/name")
                     .of(self.this.clone())
-                    .is(self.name.clone()),
+                    .is(self.name.clone())
+                    .into(),
                 the!("person/age")
                     .of(self.this.clone())
-                    .is(self.age.clone()),
+                    .is(self.age.clone())
+                    .into(),
             ]
             .into_iter()
         }

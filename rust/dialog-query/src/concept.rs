@@ -7,7 +7,7 @@ pub use application::ConceptQuery;
 pub use descriptor::ConceptDescriptor;
 
 #[cfg(test)]
-use crate::DynamicAttributeExpression;
+use crate::AttributeStatement;
 pub use crate::predicate::Predicate;
 #[cfg(test)]
 use crate::query::Output;
@@ -119,9 +119,7 @@ mod tests {
     use crate::term::Term;
     use crate::the;
     use crate::types::Any;
-    use crate::{
-        Answer, Cardinality, Concept, EvaluationError, Session, Statement, The, Transaction,
-    };
+    use crate::{Answer, Cardinality, Concept, EvaluationError, Session, Statement, Transaction};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
@@ -213,17 +211,19 @@ mod tests {
     }
 
     impl IntoIterator for Person {
-        type Item = DynamicAttributeExpression;
-        type IntoIter = std::vec::IntoIter<DynamicAttributeExpression>;
+        type Item = AttributeStatement;
+        type IntoIter = std::vec::IntoIter<AttributeStatement>;
 
         fn into_iter(self) -> Self::IntoIter {
             vec![
                 the!("person/name")
                     .of(self.this.clone())
-                    .is(self.name.clone()),
+                    .is(self.name.clone())
+                    .into(),
                 the!("person/age")
                     .of(self.this.clone())
-                    .is(self.age.clone()),
+                    .is(self.age.clone())
+                    .into(),
             ]
             .into_iter()
         }
@@ -772,7 +772,11 @@ mod tests {
 
         // Assert a relation
         let mut session = Session::open(artifacts.clone());
-        let name_relation = name_attr.clone().of(alice.clone()).is("Alice".to_string());
+        let name_relation: AttributeStatement = name_attr
+            .clone()
+            .of(alice.clone())
+            .is("Alice".to_string())
+            .into();
 
         session.transact(vec![name_relation.clone()]).await?;
 
@@ -790,9 +794,10 @@ mod tests {
             .await?;
         assert_eq!(facts.len(), 1, "Should have name relation");
 
-        // Retract using ! operator
+        // Retract using .revert() — produces a Retraction<AttributeStatement>
+        // which calls retract() when merged into the transaction.
         let mut session = Session::open(artifacts.clone());
-        session.transact(vec![!name_relation]).await?;
+        session.transact(vec![name_relation.revert()]).await?;
 
         // Verify relation has been retracted
         let session = Session::open(artifacts.clone());

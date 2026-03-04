@@ -6,7 +6,7 @@ use std::ops::Not;
 /// A domain-level write operation that can be asserted or retracted.
 ///
 /// `Statement` is the high-level write API. Types like [`Association`],
-/// [`AttributeStatement<A>`](crate::attribute::expression::AttributeStatement), and user-defined concept structs
+/// [`StaticAttributeStatement<A>`](crate::attribute::expression::typed::StaticAttributeStatement), and user-defined concept structs
 /// implement this trait. Asserting a statement adds facts to the knowledge
 /// base; retracting it removes them. The [`Retraction`] wrapper inverts the
 /// direction — asserting a `Retraction<S>` retracts the inner statement.

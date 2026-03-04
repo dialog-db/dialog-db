@@ -1,8 +1,7 @@
 use crate::attribute::Attribute;
 use crate::attribute::AttributeDescriptor;
-use crate::attribute::expression::{
-    AttributeExpression, AttributeStatement, ExpressionCause, relation_query,
-};
+use crate::attribute::expression::typed::{StaticAttributeExpression, StaticAttributeStatement};
+use crate::attribute::expression::{ExpressionCause, relation_query};
 use crate::descriptor::Descriptor;
 use crate::query::{Application, Source};
 use crate::selection::{Answer, Answers};
@@ -12,9 +11,9 @@ use crate::{Entity, EvaluationError, Premise, Proposition, Term, Value};
 
 /// A typed attribute query with named fields for entity and value.
 ///
-/// Created from an [`AttributeExpression`] when the value position is a
+/// Created from a [`StaticAttributeExpression`] when the value position is a
 /// [`Term`]. Implements [`Application`] to execute queries and materialize
-/// results into [`AttributeStatement<A>`].
+/// results into [`StaticAttributeStatement<A>`].
 ///
 /// # Examples
 ///
@@ -57,7 +56,7 @@ where
     A: From<A::Type>,
     A::Type: Scalar + TryFrom<Value>,
 {
-    type Conclusion = AttributeStatement<A>;
+    type Conclusion = StaticAttributeStatement<A>;
 
     fn evaluate<S: Source, M: Answers>(self, answers: M, source: &S) -> impl Answers {
         let query = relation_query::<A>(self.of, self.is.clone().into(), Term::blank());
@@ -76,17 +75,21 @@ where
             ))
         })?;
 
-        Ok(AttributeExpression::statement(entity, A::from(typed_value)))
+        Ok(StaticAttributeExpression::statement(
+            entity,
+            A::from(typed_value),
+        ))
     }
 }
 
-impl<A, Because> From<AttributeExpression<A, Entity, Term<A::Type>, Because>> for AttributeQuery<A>
+impl<A, Because> From<StaticAttributeExpression<A, Entity, Term<A::Type>, Because>>
+    for AttributeQuery<A>
 where
     A: Attribute + Descriptor<AttributeDescriptor> + Clone,
     A::Type: Scalar,
     Because: ExpressionCause,
 {
-    fn from(expr: AttributeExpression<A, Entity, Term<A::Type>, Because>) -> Self {
+    fn from(expr: StaticAttributeExpression<A, Entity, Term<A::Type>, Because>) -> Self {
         AttributeQuery {
             of: Term::Constant(Value::from(expr.of.clone())),
             is: expr.is,
@@ -94,14 +97,14 @@ where
     }
 }
 
-impl<A, Because> From<AttributeExpression<A, Term<Entity>, Term<A::Type>, Because>>
+impl<A, Because> From<StaticAttributeExpression<A, Term<Entity>, Term<A::Type>, Because>>
     for AttributeQuery<A>
 where
     A: Attribute + Descriptor<AttributeDescriptor> + Clone,
     A::Type: Scalar,
     Because: ExpressionCause,
 {
-    fn from(expr: AttributeExpression<A, Term<Entity>, Term<A::Type>, Because>) -> Self {
+    fn from(expr: StaticAttributeExpression<A, Term<Entity>, Term<A::Type>, Because>) -> Self {
         AttributeQuery {
             of: expr.of,
             is: expr.is,
@@ -109,12 +112,12 @@ where
     }
 }
 
-impl<A, Because> From<AttributeExpression<A, Term<Entity>, A, Because>> for AttributeQuery<A>
+impl<A, Because> From<StaticAttributeExpression<A, Term<Entity>, A, Because>> for AttributeQuery<A>
 where
     A: Attribute + Descriptor<AttributeDescriptor> + Clone,
     Because: ExpressionCause,
 {
-    fn from(expr: AttributeExpression<A, Term<Entity>, A, Because>) -> Self {
+    fn from(expr: StaticAttributeExpression<A, Term<Entity>, A, Because>) -> Self {
         AttributeQuery {
             of: expr.of,
             is: Term::Constant(expr.is.value().clone().into()),

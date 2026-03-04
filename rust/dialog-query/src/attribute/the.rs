@@ -1,13 +1,9 @@
 use crate::artifact::Attribute as ArtifactsAttribute;
-use crate::artifact::{Cause, Entity, Value};
+use crate::artifact::Entity;
+use crate::attribute::expression::dynamic::DynamicAttributeExpressionBuilder;
 use crate::error::{InvalidIdentifier, OwnedInvalidIdentifier};
-use crate::relation::query::RelationQuery;
-use crate::schema::Cardinality;
-use crate::statement::{Retraction, Statement};
 use crate::term::Term;
-use crate::{Premise, Proposition, Transaction};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::ops::Not;
 
 /// Maximum length in bytes for a relation identifier (`"domain/name"`).
 pub const MAX_RELATION_LENGTH: usize = 64;
@@ -144,106 +140,54 @@ impl The {
     /// the given entity. Chain with [`.is()`](DynamicAttributeBuilder::is)
     /// to complete the expression.
     ///
+    /// The entity can be either a concrete [`Entity`] or a [`Term<Entity>`]:
+    ///
     /// ```
     /// use dialog_query::the;
     /// use dialog_query::artifact::Entity;
     ///
     /// let alice = Entity::try_from("urn:alice".to_string()).unwrap();
+    ///
+    /// // Concrete entity — usable as statement or query
     /// let expr = the!("employee/name").of(alice.clone()).is("Alice".to_string());
     /// ```
-    pub fn of(self, entity: impl Into<Entity>) -> DynamicAttributeBuilder {
-        DynamicAttributeBuilder {
+    pub fn of<Of>(self, entity: Of) -> DynamicAttributeExpressionBuilder<Self, Of>
+    where
+        Term<Entity>: From<Of>,
+    {
+        DynamicAttributeExpressionBuilder {
             the: self,
-            of: entity.into(),
+            of: entity,
         }
     }
 }
 
-/// Intermediate builder produced by [`The::of`]. Call [`.is()`](Self::is)
-/// to supply the value and obtain a [`DynamicAttributeExpression`].
-pub struct DynamicAttributeBuilder {
-    the: The,
-    of: Entity,
-}
-
-impl DynamicAttributeBuilder {
-    /// Complete the expression with a value, producing a [`DynamicAttributeExpression`].
-    pub fn is(self, value: impl Into<Value>) -> DynamicAttributeExpression {
-        DynamicAttributeExpression {
-            the: self.the,
-            of: self.of,
-            is: value.into(),
-            cause: None,
-            cardinality: None,
+impl Term<The> {
+    /// Begin building a dynamic attribute expression with a variable
+    /// attribute. Use this to discover all relations for an entity.
+    ///
+    /// ```
+    /// use dialog_query::{Term, Premise};
+    /// use dialog_query::attribute::The;
+    /// use dialog_query::artifact::Entity;
+    ///
+    /// let alice = Entity::try_from("urn:alice".to_string()).unwrap();
+    /// let bob = Entity::try_from("urn:bob".to_string()).unwrap();
+    ///
+    /// // Find all relations between alice and bob
+    /// let premise: Premise = Term::<The>::var("relation")
+    ///     .of(alice)
+    ///     .is(bob)
+    ///     .into();
+    /// ```
+    pub fn of<Of>(self, entity: Of) -> DynamicAttributeExpressionBuilder<Self, Of>
+    where
+        Term<Entity>: From<Of>,
+    {
+        DynamicAttributeExpressionBuilder {
+            the: self,
+            of: entity,
         }
-    }
-}
-
-/// A fully concrete dynamic attribute expression (no typed attribute marker).
-///
-/// Produced by `the!("domain/name").of(entity).is(value)`. Implements
-/// [`Statement`] for assert/retract and converts [`Into<Premise>`] for queries.
-#[derive(Debug, Clone)]
-pub struct DynamicAttributeExpression {
-    /// The attribute (predicate).
-    pub the: The,
-    /// The entity (subject).
-    pub of: Entity,
-    /// The value (object).
-    pub is: Value,
-    /// Provenance/cause for this expression.
-    pub cause: Option<Cause>,
-    /// Optional cardinality override. When `Some(Cardinality::One)`,
-    /// `assert` uses `associate_unique`.
-    pub cardinality: Option<Cardinality>,
-}
-
-impl DynamicAttributeExpression {
-    /// Set the cardinality for this expression.
-    pub fn cardinality(mut self, cardinality: Cardinality) -> Self {
-        self.cardinality = Some(cardinality);
-        self
-    }
-}
-
-impl Statement for DynamicAttributeExpression {
-    fn assert(self, transaction: &mut Transaction) {
-        match self.cardinality {
-            Some(Cardinality::One) => {
-                transaction.associate_unique(self.the, self.of, self.is);
-            }
-            _ => {
-                transaction.associate(self.the, self.of, self.is);
-            }
-        }
-    }
-
-    fn retract(self, transaction: &mut Transaction) {
-        transaction.dissociate(self.the, self.of, self.is);
-    }
-}
-
-impl Not for DynamicAttributeExpression {
-    type Output = Retraction<Self>;
-
-    fn not(self) -> Self::Output {
-        self.revert()
-    }
-}
-
-impl From<DynamicAttributeExpression> for Premise {
-    fn from(expr: DynamicAttributeExpression) -> Self {
-        let query = RelationQuery::new(
-            Term::Constant(Value::from(expr.the)),
-            Term::Constant(Value::from(expr.of)),
-            Term::Constant(expr.is),
-            match expr.cause {
-                Some(c) => Term::Constant(Value::from(c)),
-                None => Term::blank(),
-            },
-            expr.cardinality,
-        );
-        Premise::Assert(Proposition::Relation(Box::new(query)))
     }
 }
 
@@ -367,8 +311,6 @@ mod tests {
         s.parse()
     }
 
-    // Valid relations
-
     #[dialog_common::test]
     fn it_parses_simple_relation() {
         let the = parse("person/name").unwrap();
@@ -431,7 +373,6 @@ mod tests {
 
     #[dialog_common::test]
     fn it_accepts_max_length_relation() {
-        // 64 bytes exactly: 31-char domain + '/' + 32-char name
         let domain = "a".repeat(31);
         let name = "b".repeat(32);
         let relation = format!("{domain}/{name}");
@@ -452,8 +393,6 @@ mod tests {
         let the = The::from(attr);
         assert_eq!(the.to_string(), "person/name");
     }
-
-    // Invalid relations
 
     #[dialog_common::test]
     fn it_rejects_missing_slash() {
