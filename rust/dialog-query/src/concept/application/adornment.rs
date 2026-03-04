@@ -14,7 +14,7 @@
 
 use crate::environment::Environment;
 use crate::parameters::Parameters;
-use crate::selection::Answer;
+use crate::selection::Match;
 use crate::term::Term;
 
 /// Compact representation of which concept parameters are bound.
@@ -29,13 +29,13 @@ use crate::term::Term;
 pub struct Adornment(u64);
 
 impl Adornment {
-    /// Derive an adornment from a concept's terms and the current answer.
+    /// Derive an adornment from a concept's terms and the current match.
     ///
     /// Parameters are sorted alphabetically by name for determinism.
     /// A parameter is "bound" if:
     /// - Its term is a `Constant`
-    /// - Its term is a named `Variable` that the answer contains
-    pub fn derive(terms: &Parameters, answer: &Answer) -> Self {
+    /// - Its term is a named `Variable` that the match contains
+    pub fn derive(terms: &Parameters, matched: &Match) -> Self {
         let mut sorted_keys: Vec<&String> = terms.keys().collect();
         sorted_keys.sort();
 
@@ -45,7 +45,7 @@ impl Adornment {
             if let Some(param) = terms.get(key) {
                 let bound = match param {
                     Term::Constant(_) => true,
-                    Term::Variable { name: Some(_), .. } => answer.contains(param),
+                    Term::Variable { name: Some(_), .. } => matched.contains(param),
                     Term::Variable { name: None, .. } => false,
                 };
                 if bound {
@@ -83,9 +83,9 @@ mod tests {
     use super::*;
     use crate::{Term, Value};
 
-    fn bind(answer: &mut Answer, var_name: &str, value: Value) {
+    fn bind(frame: &mut Match, var_name: &str, value: Value) {
         let param = Term::var(var_name);
-        answer.bind(&param, value).unwrap();
+        frame.bind(&param, value).unwrap();
     }
 
     #[dialog_common::test]
@@ -94,8 +94,8 @@ mod tests {
         terms.insert("age".into(), Term::var("a"));
         terms.insert("name".into(), Term::var("n"));
 
-        let answer = Answer::new();
-        let adornment = Adornment::derive(&terms, &answer);
+        let frame = Match::new();
+        let adornment = Adornment::derive(&terms, &frame);
 
         assert_eq!(adornment, Adornment(0));
     }
@@ -106,25 +106,25 @@ mod tests {
         terms.insert("age".into(), Term::constant(25u32));
         terms.insert("name".into(), Term::var("n"));
 
-        let answer = Answer::new();
-        let adornment = Adornment::derive(&terms, &answer);
+        let candidate = Match::new();
+        let adornment = Adornment::derive(&terms, &candidate);
 
         // "age" sorts first → bit 0 (bound), "name" → bit 1 (free)
         assert_eq!(adornment, Adornment(0b01));
     }
 
     #[dialog_common::test]
-    fn it_marks_answered_variables_as_bound() {
+    fn it_marks_matched_variables_as_bound() {
         let mut terms = Parameters::new();
         terms.insert("age".into(), Term::var("a"));
         terms.insert("name".into(), Term::var("n"));
 
-        let mut answer = Answer::new();
-        bind(&mut answer, "n", Value::String("Alice".into()));
+        let mut frame = Match::new();
+        bind(&mut frame, "n", Value::String("Alice".into()));
 
-        let adornment = Adornment::derive(&terms, &answer);
+        let adornment = Adornment::derive(&terms, &frame);
 
-        // "age" = bit 0 (free), "name" = bit 1 (bound via answer)
+        // "age" = bit 0 (free), "name" = bit 1 (bound via match)
         assert_eq!(adornment, Adornment(0b10));
     }
 
@@ -134,8 +134,8 @@ mod tests {
         terms.insert("age".into(), Term::blank());
         terms.insert("name".into(), Term::constant("Bob".to_string()));
 
-        let answer = Answer::new();
-        let adornment = Adornment::derive(&terms, &answer);
+        let frame = Match::new();
+        let adornment = Adornment::derive(&terms, &frame);
 
         // "age" = bit 0 (blank = free), "name" = bit 1 (constant = bound)
         assert_eq!(adornment, Adornment(0b10));
@@ -147,8 +147,8 @@ mod tests {
         terms.insert("age".into(), Term::constant(25u32));
         terms.insert("name".into(), Term::constant("Bob".to_string()));
 
-        let answer = Answer::new();
-        let adornment = Adornment::derive(&terms, &answer);
+        let frame = Match::new();
+        let adornment = Adornment::derive(&terms, &frame);
 
         assert_eq!(adornment, Adornment(0b11));
     }
@@ -163,10 +163,10 @@ mod tests {
         terms2.insert("age".into(), Term::constant(25u32));
         terms2.insert("name".into(), Term::var("n"));
 
-        let answer = Answer::new();
+        let frame = Match::new();
         assert_eq!(
-            Adornment::derive(&terms1, &answer),
-            Adornment::derive(&terms2, &answer)
+            Adornment::derive(&terms1, &frame),
+            Adornment::derive(&terms2, &frame)
         );
     }
 
@@ -177,10 +177,10 @@ mod tests {
         terms.insert("name".into(), Term::constant("Bob".to_string()));
         terms.insert("this".into(), Term::var("e"));
 
-        let mut answer = Answer::new();
-        bind(&mut answer, "e", Value::String("entity1".into()));
+        let mut frame = Match::new();
+        bind(&mut frame, "e", Value::String("entity1".into()));
 
-        let adornment = Adornment::derive(&terms, &answer);
+        let adornment = Adornment::derive(&terms, &frame);
         let env = adornment.into_environment(&terms);
 
         // "name" is a constant — Environment.add ignores constants
@@ -196,15 +196,15 @@ mod tests {
         terms.insert("name".into(), Term::var("n"));
         terms.insert("age".into(), Term::var("a"));
 
-        let mut answer1 = Answer::new();
-        bind(&mut answer1, "n", Value::String("Alice".into()));
+        let mut first = Match::new();
+        bind(&mut first, "n", Value::String("Alice".into()));
 
-        let mut answer2 = Answer::new();
-        bind(&mut answer2, "n", Value::String("Bob".into()));
+        let mut second = Match::new();
+        bind(&mut second, "n", Value::String("Bob".into()));
 
         assert_eq!(
-            Adornment::derive(&terms, &answer1),
-            Adornment::derive(&terms, &answer2),
+            Adornment::derive(&terms, &first),
+            Adornment::derive(&terms, &second),
             "Same binding pattern should produce same adornment"
         );
     }
@@ -215,15 +215,15 @@ mod tests {
         terms.insert("name".into(), Term::var("n"));
         terms.insert("age".into(), Term::var("a"));
 
-        let mut answer1 = Answer::new();
-        bind(&mut answer1, "n", Value::String("Alice".into()));
+        let mut first = Match::new();
+        bind(&mut first, "n", Value::String("Alice".into()));
 
-        let mut answer2 = Answer::new();
-        bind(&mut answer2, "a", Value::UnsignedInt(25));
+        let mut second = Match::new();
+        bind(&mut second, "a", Value::UnsignedInt(25));
 
         assert_ne!(
-            Adornment::derive(&terms, &answer1),
-            Adornment::derive(&terms, &answer2),
+            Adornment::derive(&terms, &first),
+            Adornment::derive(&terms, &second),
             "Different binding patterns should produce different adornments"
         );
     }

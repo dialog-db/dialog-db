@@ -122,7 +122,7 @@ pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///     type Term = EmployeeTerms;
 /// }
 ///
-/// // Application trait — reconstructs Employee from query answers
+/// // Application trait — reconstructs Employee from query match
 /// # trait Application { type Conclusion; }
 /// impl Application for EmployeeQuery {
 ///     type Conclusion = Employee;

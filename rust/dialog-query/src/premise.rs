@@ -12,7 +12,7 @@ use crate::environment::Environment;
 pub use crate::error::{AnalyzerError, QueryResult};
 use crate::formula::query::FormulaQuery;
 use crate::proposition::Proposition;
-use crate::selection::{Answer, Answers};
+use crate::selection::{Match, Selection};
 use crate::{Parameters, Schema};
 use futures_util::future::Either;
 use std::fmt::Display;
@@ -23,13 +23,13 @@ use std::fmt::Display;
 /// planning each premise is wrapped in an [`Candidate`](crate::Candidate)
 /// to determine whether it can execute given the current variable bindings.
 /// At execution time, premises are evaluated in the order chosen by the
-/// planner: each premise receives the stream of [`Answer`](crate::selection::Answer)s
+/// planner: each premise receives the stream of [`Match`](crate::selection::Match)s
 /// produced so far and extends it with new bindings.
 ///
 /// There are two kinds of premise:
 /// - `When` — queries the knowledge base or applies a constraint via a
 ///   [`Proposition`] (fact, concept, formula, or constraint).
-/// - `Unless` — a [`Negation`] that *excludes* answers matching a pattern.
+/// - `Unless` — a [`Negation`] that *excludes* matches matching a pattern.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Premise {
     /// A positive premise that queries the knowledge base or applies a constraint.
@@ -64,17 +64,17 @@ impl Premise {
         }
     }
 
-    /// Evaluate this premise with the given answers and source
-    pub fn evaluate<S: Source, M: Answers>(self, answers: M, source: &S) -> impl Answers {
+    /// Evaluate this premise with the given selection and source
+    pub fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
         match self {
-            Premise::Assert(application) => Either::Left(application.evaluate(answers, source)),
-            Premise::Unless(negation) => Either::Right(negation.evaluate(answers, source)),
+            Premise::Assert(application) => Either::Left(application.evaluate(selection, source)),
+            Premise::Unless(negation) => Either::Right(negation.evaluate(selection, source)),
         }
     }
 
     /// Execute this premise against the given store
-    pub fn perform<S: Source>(self, store: &S) -> impl Answers {
-        self.evaluate(Answer::new().seed(), store)
+    pub fn perform<S: Source>(self, store: &S) -> impl Selection {
+        self.evaluate(Match::new().seed(), store)
     }
 }
 

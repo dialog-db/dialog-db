@@ -1,4 +1,4 @@
-use crate::selection::Answers;
+use crate::selection::Selection;
 use crate::{Environment, Premise, Source};
 
 /// A finalized, ready-to-execute premise produced by the query planner.
@@ -39,8 +39,8 @@ impl Plan {
         &self.env
     }
 
-    /// Evaluate this plan with the given answers and source
-    pub fn evaluate<S: Source, M: Answers>(self, answers: M, source: &S) -> impl Answers {
-        self.premise.evaluate(answers, source)
+    /// Evaluate this plan with the given selection and source
+    pub fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
+        self.premise.evaluate(selection, source)
     }
 }

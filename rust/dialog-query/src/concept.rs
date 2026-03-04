@@ -55,7 +55,7 @@ where
 }
 
 /// A materialized concept — a concrete record whose fields have been
-/// resolved from a query [`Answer`].
+/// resolved from a query [`Match`].
 ///
 /// Every concept struct carries a `this: Entity` field that identifies the
 /// entity it describes. This trait surfaces that field, serving two purposes:
@@ -119,7 +119,7 @@ mod tests {
     use crate::term::Term;
     use crate::the;
     use crate::types::Any;
-    use crate::{Answer, Cardinality, Concept, EvaluationError, Session, Statement, Transaction};
+    use crate::{Cardinality, Concept, EvaluationError, Match, Session, Statement, Transaction};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
@@ -250,12 +250,12 @@ mod tests {
         type Descriptor = ConceptDescriptor;
     }
 
-    // Implement TryFrom<selection::Answer> for Person
-    // This extracts values from the answer by field name
-    impl TryFrom<Answer> for Person {
+    // Implement TryFrom<selection::Match> for Person
+    // This extracts values from the match by field name
+    impl TryFrom<Match> for Person {
         type Error = crate::error::EvaluationError;
 
-        fn try_from(input: Answer) -> Result<Self, Self::Error> {
+        fn try_from(input: Match) -> Result<Self, Self::Error> {
             Ok(Person {
                 this: Entity::try_from(
                     input.lookup(&Term::from(&<Self as Concept>::Term::this()))?,
@@ -302,19 +302,16 @@ mod tests {
     impl crate::query::Application for PersonMatch {
         type Conclusion = Person;
 
-        fn evaluate<S: crate::query::Source, M: crate::selection::Answers>(
+        fn evaluate<S: crate::query::Source, M: crate::selection::Selection>(
             self,
-            answers: M,
+            selection: M,
             source: &S,
-        ) -> impl crate::selection::Answers {
+        ) -> impl crate::selection::Selection {
             let application: ConceptQuery = self.into();
-            application.evaluate(answers, source)
+            application.evaluate(selection, source)
         }
 
-        fn realize(
-            &self,
-            source: Answer,
-        ) -> std::result::Result<Self::Conclusion, EvaluationError> {
+        fn realize(&self, source: Match) -> std::result::Result<Self::Conclusion, EvaluationError> {
             Ok(Person {
                 this: Entity::try_from(source.lookup(&Term::from(&self.this))?)?,
                 name: String::try_from(source.lookup(&Term::from(&self.name))?)?,

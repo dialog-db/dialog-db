@@ -63,7 +63,7 @@ mod tests {
     use crate::concept::{Concept, Conclusion};
     use crate::predicate::Predicate;
     use crate::premise::Premise;
-    use crate::selection::Answer;
+    use crate::selection::Match;
     use crate::statement::Statement;
     use crate::term::Term;
     use crate::the;
@@ -208,10 +208,10 @@ mod tests {
         type Descriptor = ConceptDescriptor;
     }
 
-    impl TryFrom<Answer> for Person {
+    impl TryFrom<Match> for Person {
         type Error = EvaluationError;
 
-        fn try_from(source: Answer) -> Result<Self, Self::Error> {
+        fn try_from(source: Match) -> Result<Self, Self::Error> {
             Ok(Person {
                 this: Entity::try_from(source.lookup(&Term::from(&PersonTerms::this()))?)?,
                 name: String::try_from(source.lookup(&Term::from(&PersonTerms::name()))?)?,
@@ -235,16 +235,16 @@ mod tests {
     impl crate::query::Application for PersonMatch {
         type Conclusion = Person;
 
-        fn evaluate<S: crate::query::Source, M: crate::selection::Answers>(
+        fn evaluate<S: crate::query::Source, M: crate::selection::Selection>(
             self,
-            answers: M,
+            selection: M,
             source: &S,
-        ) -> impl crate::selection::Answers {
+        ) -> impl crate::selection::Selection {
             let application: ConceptQuery = self.into();
-            application.evaluate(answers, source)
+            application.evaluate(selection, source)
         }
 
-        fn realize(&self, source: Answer) -> Result<Self::Conclusion, EvaluationError> {
+        fn realize(&self, source: Match) -> Result<Self::Conclusion, EvaluationError> {
             Ok(Person {
                 this: Entity::try_from(source.lookup(&Term::from(&self.this))?)?,
                 name: String::try_from(source.lookup(&Term::from(&self.name))?)?,

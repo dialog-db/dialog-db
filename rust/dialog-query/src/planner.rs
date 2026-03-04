@@ -183,7 +183,7 @@ impl From<&Vec<Plan>> for Planner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::selection::Answer;
+    use crate::selection::Match;
     use crate::the;
 
     #[dialog_common::test]
@@ -311,7 +311,7 @@ mod tests {
         let plan = Planner::from(premises).plan(&Environment::new())?;
 
         let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            plan.evaluate(Answer::new().seed(), &session),
+            plan.evaluate(Match::new().seed(), &session),
         )
         .await?;
 

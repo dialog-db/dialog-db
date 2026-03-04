@@ -1,6 +1,6 @@
 use super::{Plan, Planner};
 use crate::error::TypeError;
-use crate::selection::Answers;
+use crate::selection::Selection;
 use crate::{Environment, Source};
 use core::pin::Pin;
 
@@ -9,7 +9,7 @@ use core::pin::Pin;
 /// A `Conjunction` is the main execution plan for a conjunction of premises.
 /// The planner orders the steps so that each step's prerequisites are
 /// satisfied by the bindings produced by earlier steps. At evaluation time,
-/// the join feeds an initial [`Answer`](crate::selection::Answer) stream
+/// the join feeds an initial [`Match`](crate::selection::Match) stream
 /// through each step in order, progressively binding more variables.
 ///
 /// The `cost` field is the sum of all step costs and is used when comparing
@@ -47,10 +47,14 @@ impl Conjunction {
     /// Returns `Pin<Box<...>>` because each step's output type depends on the
     /// previous step. Boxing erases the nesting from the type and keeps each
     /// step at pointer size on the stack.
-    pub fn evaluate<S: Source, M: Answers>(self, answers: M, source: &S) -> Pin<Box<dyn Answers>> {
+    pub fn evaluate<S: Source, M: Selection>(
+        self,
+        selection: M,
+        source: &S,
+    ) -> Pin<Box<dyn Selection>> {
         self.steps.into_iter().fold(
-            Box::pin(answers) as Pin<Box<dyn Answers>>,
-            |answers, step| Box::pin(step.evaluate(answers, source)),
+            Box::pin(selection) as Pin<Box<dyn Selection>>,
+            |selection, plan| Box::pin(plan.evaluate(selection, source)),
         )
     }
 }

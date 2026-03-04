@@ -9,48 +9,48 @@ use crate::attribute::AttributeDescriptor;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::planner::Disjunction;
 use crate::schema::CONCEPT_OVERHEAD;
-use crate::selection::Answer;
-use crate::selection::Answers;
+use crate::selection::Match;
+use crate::selection::Selection;
 use crate::{
     Cardinality, Environment, EvaluationError, Parameters, Schema, Source, Term, try_stream,
 };
 use std::fmt::Display;
 
-/// Extract an Answer with parameter names from an Answer with user variable names
+/// Extract a Match with parameter names from a Match with user variable names
 ///
 /// This maps values from user-specified variable names to internal parameter names
 /// for scoped evaluation. All factors are copied with their original provenance.
-fn extract_parameters(source: &Answer, terms: &Parameters) -> Result<Answer, EvaluationError> {
-    let mut answer = Answer::new();
+fn extract_parameters(source: &Match, terms: &Parameters) -> Result<Match, EvaluationError> {
+    let mut matched = Match::new();
 
     for (param_name, user_param) in terms.iter() {
         match user_param {
             Term::Variable { name: Some(_), .. } => {
                 let param = Term::var(param_name);
                 if let Ok(value) = source.lookup(user_param) {
-                    answer.bind(&param, value)?;
+                    matched.bind(&param, value)?;
                 }
             }
             Term::Constant(value) => {
                 let param = Term::var(param_name);
-                answer.bind(&param, value.clone())?;
+                matched.bind(&param, value.clone())?;
             }
             Term::Variable { name: None, .. } => {}
         }
     }
 
-    Ok(answer)
+    Ok(matched)
 }
 
-/// Merge an Answer with parameter names back into an Answer with user variable names
+/// Merge a Match with parameter names back into a Match with user variable names
 ///
 /// This maps values from internal parameter names back to user-specified variable names
 /// after evaluation. All factors are copied with their original provenance.
 fn merge_parameters(
-    base: &Answer,
-    result: &Answer,
+    base: &Match,
+    result: &Match,
     terms: &Parameters,
-) -> Result<Answer, EvaluationError> {
+) -> Result<Match, EvaluationError> {
     let mut merged = base.clone();
 
     for (param_name, user_param) in terms.iter() {
@@ -213,26 +213,26 @@ impl ConceptQuery {
     }
 
     /// Evaluates this concept application within the given context, producing
-    /// a stream of answers.
+    /// a selection stream.
     ///
     /// Rather than threading a scope through the entire evaluation pipeline,
-    /// we derive the binding pattern (adornment) from the first answer and
+    /// we derive the binding pattern (adornment) from the first match and
     /// use it to obtain a specialized, cached execution plan. This is the
     /// key insight from magic set optimization applied locally: the adornment
     /// is computed at the point of use from what's actually bound, rather
     /// than carried globally through every evaluation step.
-    pub fn evaluate<S: Source, M: Answers>(self, answers: M, source: &S) -> impl Answers {
+    pub fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
         let app = self;
         let source = source.clone();
 
         try_stream! {
             let mut plan = None;
 
-            for await each in answers {
+            for await each in selection {
                 let input = each?;
 
-                // Derive the binding pattern from the first answer and cache the
-                // plan. All answers in the selection share the same binding pattern
+                // Derive the binding pattern from the first match and cache the
+                // plan. All matches in the selection share the same binding pattern
                 // (same variables bound), only the values differ.
                 if plan.is_none() {
                     let rules = source.acquire(&app.predicate)?;
@@ -240,17 +240,17 @@ impl ConceptQuery {
                 }
                 let plan = plan.as_ref().unwrap();
 
-                // Extract answer with parameter names for scoped evaluation
+                // Extract match with parameter names for scoped evaluation
                 // Maps user variable names → internal parameter names
-                let initial_answer = extract_parameters(&input, &app.terms)
+                let initial_match = extract_parameters(&input, &app.terms)
                     .map_err(|e| EvaluationError::Store(e.to_string()))?;
-                let single_answers = initial_answer.seed();
+                let seed = initial_match.seed();
 
                 // Merge results back, mapping parameter names → user variable names
                 // All factors are copied with their original provenance
-                for await result in Disjunction::clone(plan).evaluate(single_answers, &source) {
-                    let result_answer = result?;
-                    let merged = merge_parameters(&input, &result_answer, &app.terms)
+                for await result in Disjunction::clone(plan).evaluate(seed, &source) {
+                    let result_match = result?;
+                    let merged = merge_parameters(&input, &result_match, &app.terms)
                         .map_err(|e| EvaluationError::Store(e.to_string()))?;
                     yield merged;
                 }
@@ -275,7 +275,7 @@ mod tests {
     use super::*;
     use crate::concept::descriptor::ConceptDescriptor;
     use crate::relation::query::RelationQuery;
-    use crate::selection::Answer;
+    use crate::selection::Match;
     use crate::the;
 
     use crate::{
@@ -347,7 +347,7 @@ mod tests {
 
         // Execute the query
         let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            application.evaluate(Answer::new().seed(), &session),
+            application.evaluate(Match::new().seed(), &session),
         )
         .await?;
 
@@ -438,15 +438,15 @@ mod tests {
             predicate: concept,
         };
 
-        // Create evaluation context with bound entity in the answer
-        let mut answer = Answer::new();
+        // Create evaluation context with bound entity in the match
+        let mut input = Match::new();
         let person_param = Term::var("person");
-        answer.bind(&person_param, Value::from(alice))?;
+        input.bind(&person_param, Value::from(alice))?;
 
-        let answers = answer.seed();
-
-        // Execute with bound entity via answer
-        futures_util::TryStreamExt::try_collect::<Vec<_>>(application.evaluate(answers, &session))
+        // Execute with bound entity via match
+        application
+            .evaluate(input.seed(), &session)
+            .try_vec()
             .await?;
 
         Ok(())
@@ -739,7 +739,7 @@ mod tests {
             predicate: concept,
         };
         let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            app.evaluate(Answer::new().seed(), &session),
+            app.evaluate(Match::new().seed(), &session),
         )
         .await?;
 
@@ -813,7 +813,7 @@ mod tests {
             predicate: concept,
         };
         let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            app.evaluate(Answer::new().seed(), &session),
+            app.evaluate(Match::new().seed(), &session),
         )
         .await?;
 
@@ -887,7 +887,7 @@ mod tests {
             predicate: concept,
         };
         let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            app.evaluate(Answer::new().seed(), &session),
+            app.evaluate(Match::new().seed(), &session),
         )
         .await?;
 

@@ -7,7 +7,7 @@
 use crate::artifact::TypeError;
 use crate::error::EvaluationError;
 use crate::formula::query::FormulaQuery;
-use crate::selection::Answer;
+use crate::selection::Match;
 use crate::term::Term;
 use crate::{Parameters, Value};
 use std::sync::Arc;
@@ -18,16 +18,10 @@ use std::sync::Arc;
 /// the actual terms used in the evaluation context.
 #[derive(Debug, Clone)]
 pub struct Bindings {
-    /// The current answer containing variable bindings
-    ///
-    /// NOTE: Public for compatibility with existing formula implementations.
-    /// Use `source()` accessor method instead where possible.
-    pub source: Answer,
+    /// The current match containing variable bindings.
+    pub source: Match,
 
-    /// Mapping from parameter names to query terms
-    ///
-    /// NOTE: Public for compatibility with existing formula implementations.
-    /// Use `terms()` accessor method instead where possible.
+    /// Mapping from parameter names to query terms.
     pub terms: Parameters,
 
     /// The formula application these bindings belong to (kept for identity only)
@@ -37,7 +31,7 @@ pub struct Bindings {
 
 impl Bindings {
     /// Create new bindings for formula evaluation
-    pub fn new(formula: Arc<FormulaQuery>, source: impl Into<Answer>, terms: Parameters) -> Self {
+    pub fn new(formula: Arc<FormulaQuery>, source: impl Into<Match>, terms: Parameters) -> Self {
         Self {
             source: source.into(),
             terms,
@@ -70,8 +64,8 @@ impl Bindings {
             })
     }
 
-    /// Get an immutable reference to the source answer
-    pub fn source(&self) -> &Answer {
+    /// Get an immutable reference to the source match
+    pub fn source(&self) -> &Match {
         &self.source
     }
 
@@ -82,7 +76,7 @@ impl Bindings {
 
     /// Write a value to the bindings
     ///
-    /// Binds the value to the parameter's term in the answer.
+    /// Binds the value to the parameter's term in the match.
     /// Fails if the parameter key is not in the terms mapping
     /// or if the assignment conflicts with an existing value.
     pub fn write(&mut self, key: &str, value: &Value) -> Result<(), EvaluationError> {
@@ -94,7 +88,7 @@ impl Bindings {
             })?;
 
         // For constant parameters, verify the computed value matches the constant.
-        // Answer::bind treats constants as no-ops, so we must check here.
+        // Match::bind treats constants as no-ops, so we must check here.
         if let Term::Constant(expected) = param {
             if expected != value {
                 return Err(EvaluationError::Conflict {
@@ -134,12 +128,12 @@ mod tests {
 
     #[dialog_common::test]
     fn it_reads_bound_values() {
-        use crate::selection::Answer;
+        use crate::selection::Match;
 
         let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::var("test"));
 
-        let mut source = Answer::new();
+        let mut source = Match::new();
         source
             .bind(&Term::var("test"), 42u32.into())
             .expect("Failed to create test match");
@@ -153,10 +147,10 @@ mod tests {
 
     #[dialog_common::test]
     fn it_errors_on_missing_parameter() {
-        use crate::selection::Answer;
+        use crate::selection::Match;
 
         let terms = Parameters::new();
-        let source = Answer::new();
+        let source = Match::new();
         let formula = test_formula();
         let mut bindings = Bindings::new(Arc::new(formula), source, terms);
 
@@ -169,12 +163,12 @@ mod tests {
 
     #[dialog_common::test]
     fn it_errors_on_unbound_variable() {
-        use crate::selection::Answer;
+        use crate::selection::Match;
 
         let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::var("unbound"));
 
-        let source = Answer::new();
+        let source = Match::new();
         let formula = test_formula();
         let mut bindings = Bindings::new(Arc::new(formula), source, terms);
 
@@ -187,28 +181,28 @@ mod tests {
 
     #[dialog_common::test]
     fn it_rejects_conflicting_assignment() {
-        use crate::selection::Answer;
+        use crate::selection::Match;
 
-        let mut answer = Answer::new();
-        answer
+        let mut input = Match::new();
+        input
             .bind(&Term::var("test"), 42u32.into())
             .expect("bind should succeed");
 
-        let result = answer.bind(&Term::var("test"), Value::UnsignedInt(100));
+        let result = input.bind(&Term::var("test"), Value::UnsignedInt(100));
         assert!(
             result.is_err(),
-            "Answer.bind() should reject conflicting value assignment"
+            "Match.bind() should reject conflicting value assignment"
         );
     }
 
     #[dialog_common::test]
     fn it_rejects_conflicting_write_value() {
-        use crate::selection::Answer;
+        use crate::selection::Match;
 
         let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::var("test"));
 
-        let mut source = Answer::new();
+        let mut source = Match::new();
         source
             .bind(&Term::var("test"), 42u32.into())
             .expect("Failed to create test match");
@@ -235,12 +229,12 @@ mod tests {
 
     #[dialog_common::test]
     fn it_accepts_matching_constant_write() {
-        use crate::selection::Answer;
+        use crate::selection::Match;
 
         let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::from(42u32).into());
 
-        let source = Answer::new();
+        let source = Match::new();
         let formula = test_formula();
         let mut bindings = Bindings::new(Arc::new(formula), source, terms);
 
@@ -253,12 +247,12 @@ mod tests {
 
     #[dialog_common::test]
     fn it_rejects_mismatched_constant_write() {
-        use crate::selection::Answer;
+        use crate::selection::Match;
 
         let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::from(99u32).into());
 
-        let source = Answer::new();
+        let source = Match::new();
         let formula = test_formula();
         let mut bindings = Bindings::new(Arc::new(formula), source, terms);
 

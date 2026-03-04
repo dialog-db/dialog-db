@@ -8,7 +8,7 @@ use crate::concept::application::ConceptQuery;
 use crate::concept::{Concept, Conclusion};
 use crate::error::TypeError;
 use crate::query::{Application, Source};
-use crate::selection::{Answer, Answers};
+use crate::selection::{Match, Selection};
 use crate::statement::Retraction;
 use crate::term::Term;
 use crate::types::Scalar;
@@ -356,12 +356,12 @@ impl<'a> Builder<'a> {
 ///
 /// Field values are accessed by the term bindings from the query.
 /// The `terms` map provides the mapping from field names to variable terms
-/// used in the answer.
+/// used in the match.
 #[derive(Debug, Clone)]
 pub struct ConceptConclusion {
     this: Entity,
     terms: Parameters,
-    answer: Answer,
+    source: Match,
 }
 
 impl ConceptConclusion {
@@ -386,7 +386,7 @@ impl ConceptConclusion {
                 name: Some(name), ..
             } => {
                 let typed_term: Term<T> = Term::var(name.clone());
-                T::try_from(self.answer.lookup(&Term::from(&typed_term))?).map_err(|_| {
+                T::try_from(self.source.lookup(&Term::from(&typed_term))?).map_err(|_| {
                     EvaluationError::UnboundVariable {
                         variable_name: field.to_string(),
                     }
@@ -403,9 +403,9 @@ impl ConceptConclusion {
         }
     }
 
-    /// Returns a reference to the raw answer.
-    pub fn answer(&self) -> &Answer {
-        &self.answer
+    /// Returns a reference to the raw match.
+    pub fn source(&self) -> &Match {
+        &self.source
     }
 }
 
@@ -430,11 +430,11 @@ impl From<ConceptQuery> for ConceptDescriptor {
 impl Application for ConceptQuery {
     type Conclusion = ConceptConclusion;
 
-    fn evaluate<S: Source, M: Answers>(self, answers: M, source: &S) -> impl Answers {
-        ConceptQuery::evaluate(self, answers, source)
+    fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
+        ConceptQuery::evaluate(self, selection, source)
     }
 
-    fn realize(&self, source: Answer) -> Result<Self::Conclusion, EvaluationError> {
+    fn realize(&self, source: Match) -> Result<Self::Conclusion, EvaluationError> {
         let this_param =
             self.terms
                 .get("this")
@@ -465,7 +465,7 @@ impl Application for ConceptQuery {
         Ok(ConceptConclusion {
             this: entity,
             terms: self.terms.clone(),
-            answer: source,
+            source,
         })
     }
 }

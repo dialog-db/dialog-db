@@ -48,7 +48,7 @@
 //! }
 //!
 //! // -- Match trait impl --
-//! // PersonMatch::realize(answer) reconstructs a Person from query results.
+//! // PersonMatch::realize(candidate) reconstructs a Person from query results.
 //! // PersonMatch::query(source) runs the query and streams Person instances.
 //!
 //! // -- Instance trait impl --
@@ -259,16 +259,16 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl dialog_query::Application for #match_name {
             type Conclusion = #struct_name;
 
-            fn evaluate<S: dialog_query::Source, M: dialog_query::Answers>(
+            fn evaluate<S: dialog_query::Source, M: dialog_query::Selection>(
                 self,
-                answers: M,
+                selection: M,
                 source: &S,
-            ) -> impl dialog_query::Answers {
+            ) -> impl dialog_query::Selection {
                 let application: dialog_query::ConceptQuery = self.into();
-                application.evaluate(answers, source)
+                application.evaluate(selection, source)
             }
 
-            fn realize(&self, source: dialog_query::Answer) -> std::result::Result<Self::Conclusion, dialog_query::EvaluationError> {
+            fn realize(&self, source: dialog_query::Match) -> std::result::Result<Self::Conclusion, dialog_query::EvaluationError> {
                 Ok(#struct_name {
                     this: dialog_query::Entity::try_from(source.lookup(&dialog_query::Term::from(&self.this))?)?,
                     #(#field_names: #field_types(source.lookup(&dialog_query::Term::from(&self.#field_names))?.try_into()?)),*

@@ -354,7 +354,7 @@ mod tests {
     use crate::artifact::{Artifacts, Entity, Value};
     use crate::query::{Output, Source};
     use crate::relation::query::RelationQuery;
-    use crate::selection::Answer;
+    use crate::selection::Match;
     use crate::the;
 
     use crate::{
@@ -424,7 +424,7 @@ mod tests {
         let application = person.apply(params)?;
 
         let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            application.evaluate(Answer::new().seed(), &session),
+            application.evaluate(Match::new().seed(), &session),
         )
         .await?;
         assert_eq!(selection.len(), 2); // Should find just Alice and Bob
@@ -544,7 +544,7 @@ mod tests {
         let application = person.apply(params)?;
 
         let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            application.evaluate(Answer::new().seed(), &session),
+            application.evaluate(Match::new().seed(), &session),
         )
         .await?;
         assert_eq!(selection.len(), 2); // Should find just Alice and Bob
@@ -869,12 +869,12 @@ mod tests {
 
         // Verify resolve returns ConceptRules that can plan
         let rules = session_with_rule.acquire(&adult_conclusion)?;
-        let answer = crate::selection::Answer::new();
+        let candidate = crate::selection::Match::new();
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("e"));
         terms.insert("name".into(), Term::var("n"));
         terms.insert("age".into(), Term::var("a"));
-        let _plan = rules.plan(&terms, &answer);
+        let _plan = rules.plan(&terms, &candidate);
 
         Ok(())
     }
@@ -1263,7 +1263,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_caches_plans_by_adornment() {
-        use crate::selection::Answer;
+        use crate::selection::Match;
 
         let person = person_concept();
         let rules = ConceptRules::new(&person);
@@ -1273,9 +1273,9 @@ mod tests {
         terms.insert("name".into(), Term::var("n"));
         terms.insert("age".into(), Term::var("a"));
 
-        let answer = Answer::new();
-        let plan1 = rules.plan(&terms, &answer);
-        let plan2 = rules.plan(&terms, &answer);
+        let candidate = Match::new();
+        let plan1 = rules.plan(&terms, &candidate);
+        let plan2 = rules.plan(&terms, &candidate);
 
         assert!(
             Arc::ptr_eq(&plan1, &plan2),
@@ -1285,7 +1285,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_caches_different_plans_per_adornment() {
-        use crate::selection::Answer;
+        use crate::selection::Match;
 
         let person = person_concept();
         let rules = ConceptRules::new(&person);
@@ -1295,14 +1295,14 @@ mod tests {
         terms.insert("name".into(), Term::var("n"));
         terms.insert("age".into(), Term::var("a"));
 
-        let answer_free = Answer::new();
-        let plan_free = rules.plan(&terms, &answer_free);
+        let free = Match::new();
+        let plan_free = rules.plan(&terms, &free);
 
-        let mut answer_bound = Answer::new();
-        answer_bound
+        let mut bound = Match::new();
+        bound
             .bind(&Term::var("e"), Value::from(Entity::new().unwrap()))
             .unwrap();
-        let plan_bound = rules.plan(&terms, &answer_bound);
+        let plan_bound = rules.plan(&terms, &bound);
 
         assert!(
             !Arc::ptr_eq(&plan_free, &plan_bound),
@@ -1312,7 +1312,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_invalidates_cache_on_rule_install() {
-        use crate::selection::Answer;
+        use crate::selection::Match;
 
         let person = person_concept();
         let mut rules = ConceptRules::new(&person);
@@ -1323,15 +1323,15 @@ mod tests {
         terms.insert("age".into(), Term::var("a"));
 
         // Warm the cache
-        let answer = Answer::new();
-        let plan_before = rules.plan(&terms, &answer);
+        let candidate = Match::new();
+        let plan_before = rules.plan(&terms, &candidate);
 
         // Install a rule for the same concept
         let rule = DeductiveRule::from(&person);
         rules.install(rule);
 
         // Cache should be invalidated — new plan must be computed
-        let plan_after = rules.plan(&terms, &answer);
+        let plan_after = rules.plan(&terms, &candidate);
 
         assert!(
             !Arc::ptr_eq(&plan_before, &plan_after),
@@ -1341,7 +1341,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_preserves_cache_for_unrelated_rules() {
-        use crate::selection::Answer;
+        use crate::selection::Match;
 
         let person = person_concept();
         let mut terms = Parameters::new();
@@ -1352,9 +1352,9 @@ mod tests {
         let mut registry = RuleRegistry::new();
 
         // Warm the cache for the person concept via resolve
-        let answer = Answer::new();
+        let candidate = Match::new();
         let person_rules = registry.acquire(&person).unwrap();
-        let plan_before = person_rules.plan(&terms, &answer);
+        let plan_before = person_rules.plan(&terms, &candidate);
 
         // Install a rule for a DIFFERENT concept entity
         let unrelated = ConceptDescriptor::from([(
@@ -1365,7 +1365,7 @@ mod tests {
         registry.register(rule).unwrap();
 
         // Person's cache should be untouched (same ConceptRules, shared Arc)
-        let plan_after = person_rules.plan(&terms, &answer);
+        let plan_after = person_rules.plan(&terms, &candidate);
 
         assert!(
             Arc::ptr_eq(&plan_before, &plan_after),
@@ -1375,7 +1375,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_preserves_cache_for_duplicate_rules() {
-        use crate::selection::Answer;
+        use crate::selection::Match;
 
         let person = person_concept();
         let mut rules = ConceptRules::new(&person);
@@ -1388,14 +1388,14 @@ mod tests {
         // Install a rule and warm the cache
         let rule = DeductiveRule::from(&person);
         rules.install(rule.clone());
-        let answer = Answer::new();
-        let plan_before = rules.plan(&terms, &answer);
+        let candidate = Match::new();
+        let plan_before = rules.plan(&terms, &candidate);
 
         // Re-install the exact same rule (duplicate)
         rules.install(rule);
 
         // Cache should NOT be invalidated — the rule was already present
-        let plan_after = rules.plan(&terms, &answer);
+        let plan_after = rules.plan(&terms, &candidate);
 
         assert!(
             Arc::ptr_eq(&plan_before, &plan_after),
@@ -1405,7 +1405,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_shares_cache_across_clones() {
-        use crate::selection::Answer;
+        use crate::selection::Match;
 
         let person = person_concept();
         let rules = ConceptRules::new(&person);
@@ -1416,12 +1416,12 @@ mod tests {
         terms.insert("age".into(), Term::var("a"));
 
         // Warm cache on the original
-        let answer = Answer::new();
-        let plan_original = rules.plan(&terms, &answer);
+        let candidate = Match::new();
+        let plan_original = rules.plan(&terms, &candidate);
 
         // Clone the ConceptRules — the cache is shared via Arc
         let cloned = rules.clone();
-        let plan_cloned = cloned.plan(&terms, &answer);
+        let plan_cloned = cloned.plan(&terms, &candidate);
 
         assert!(
             Arc::ptr_eq(&plan_original, &plan_cloned),
@@ -1432,7 +1432,7 @@ mod tests {
     #[dialog_common::test]
     fn it_produces_cheaper_plan_with_bound_entity() {
         use crate::concept::application::adornment::Adornment;
-        use crate::selection::Answer;
+        use crate::selection::Match;
 
         let person = person_concept();
         let rules = ConceptRules::new(&person);
@@ -1442,18 +1442,18 @@ mod tests {
         terms.insert("name".into(), Term::var("n"));
         terms.insert("age".into(), Term::var("a"));
 
-        let answer_free = Answer::new();
-        let adornment_free = Adornment::derive(&terms, &answer_free);
+        let free = Match::new();
+        let adornment_free = Adornment::derive(&terms, &free);
         let env_free = adornment_free.into_environment(&terms);
-        let free_plan = rules.plan(&terms, &answer_free);
+        let free_plan = rules.plan(&terms, &free);
 
-        let mut answer_bound = Answer::new();
-        answer_bound
+        let mut bound = Match::new();
+        bound
             .bind(&Term::var("e"), Value::from(Entity::new().unwrap()))
             .unwrap();
-        let adornment_bound = Adornment::derive(&terms, &answer_bound);
+        let adornment_bound = Adornment::derive(&terms, &bound);
         let env_bound = adornment_bound.into_environment(&terms);
-        let bound_plan = rules.plan(&terms, &answer_bound);
+        let bound_plan = rules.plan(&terms, &bound);
 
         // The entity-bound environment should contain "e"
         assert!(
@@ -1508,13 +1508,13 @@ mod tests {
 
         // First query — plan is computed and cached
         let results1: Vec<_> = futures_util::TryStreamExt::try_collect(
-            application.clone().evaluate(Answer::new().seed(), &session),
+            application.clone().evaluate(Match::new().seed(), &session),
         )
         .await?;
 
         // Second query — plan is reused from cache
         let results2: Vec<_> = futures_util::TryStreamExt::try_collect(
-            application.evaluate(Answer::new().seed(), &session),
+            application.evaluate(Match::new().seed(), &session),
         )
         .await?;
 
@@ -1542,7 +1542,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_produces_correct_results_from_cached_plan_with_bound_entity() -> anyhow::Result<()>
     {
-        use crate::selection::Answer;
+        use crate::selection::Match;
         use dialog_storage::MemoryStorageBackend;
 
         let backend = MemoryStorageBackend::default();
@@ -1578,14 +1578,13 @@ mod tests {
 
         let application = person.apply(params)?;
 
-        let mut answer = Answer::new();
-        answer.bind(&entity_param, Value::from(alice.clone()))?;
+        let mut candidate = Match::new();
+        candidate.bind(&entity_param, Value::from(alice.clone()))?;
 
-        let answers = answer.seed();
-
-        let results: Vec<_> =
-            futures_util::TryStreamExt::try_collect(application.evaluate(answers, &session))
-                .await?;
+        let results = application
+            .evaluate(candidate.seed(), &session)
+            .try_vec()
+            .await?;
 
         assert_eq!(results.len(), 1, "Should find exactly one person (Alice)");
         assert_eq!(

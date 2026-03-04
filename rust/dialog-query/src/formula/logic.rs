@@ -77,7 +77,7 @@ mod tests {
     use super::*;
 
     use crate::formula::query::FormulaQuery;
-    use crate::{Formula, Parameters, Term, selection::Answer};
+    use crate::{Formula, Parameters, Term, selection::Match};
 
     #[dialog_common::test]
     fn it_ands_true_with_true() -> anyhow::Result<()> {
@@ -86,7 +86,7 @@ mod tests {
         terms.insert("right".to_string(), Term::var("b"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input.bind(&Term::var("a"), true.into()).unwrap();
         input.bind(&Term::var("b"), true.into()).unwrap();
 
@@ -112,7 +112,7 @@ mod tests {
         terms.insert("right".to_string(), Term::var("b"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input.bind(&Term::var("a"), true.into()).unwrap();
         input.bind(&Term::var("b"), false.into()).unwrap();
 
@@ -138,7 +138,7 @@ mod tests {
         terms.insert("right".to_string(), Term::var("b"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input.bind(&Term::var("a"), false.into()).unwrap();
         input.bind(&Term::var("b"), false.into()).unwrap();
 
@@ -164,7 +164,7 @@ mod tests {
         terms.insert("right".to_string(), Term::var("b"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input.bind(&Term::var("a"), true.into()).unwrap();
         input.bind(&Term::var("b"), false.into()).unwrap();
 
@@ -190,7 +190,7 @@ mod tests {
         terms.insert("right".to_string(), Term::var("b"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input.bind(&Term::var("a"), false.into()).unwrap();
         input.bind(&Term::var("b"), false.into()).unwrap();
 
@@ -215,7 +215,7 @@ mod tests {
         terms.insert("value".to_string(), Term::var("bool"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input.bind(&Term::var("bool"), true.into()).unwrap();
 
         let app: FormulaQuery = Not::apply(terms)?.into();
@@ -239,7 +239,7 @@ mod tests {
         terms.insert("value".to_string(), Term::var("bool"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input.bind(&Term::var("bool"), false.into()).unwrap();
 
         let app: FormulaQuery = Not::apply(terms)?.into();
@@ -266,7 +266,7 @@ mod tests {
         and_terms.insert("right".to_string(), Term::var("b"));
         and_terms.insert("is".to_string(), Term::var("and_result"));
 
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input.bind(&Term::var("a"), true.into()).unwrap();
         input.bind(&Term::var("b"), false.into()).unwrap();
 
@@ -306,7 +306,7 @@ mod tests {
 
         let and_formula: FormulaQuery = And::apply(and_terms)?.into();
 
-        let mut and_input = Answer::new();
+        let mut and_input = Match::new();
         and_input.bind(&Term::var("a"), true.into()).unwrap();
         and_input.bind(&Term::var("b"), true.into()).unwrap();
 
@@ -325,7 +325,7 @@ mod tests {
 
         let or_formula: FormulaQuery = Or::apply(or_terms)?.into();
 
-        let mut or_input = Answer::new();
+        let mut or_input = Match::new();
         or_input.bind(&Term::var("x"), false.into()).unwrap();
         or_input.bind(&Term::var("y"), true.into()).unwrap();
 
@@ -343,7 +343,7 @@ mod tests {
 
         let not_formula: FormulaQuery = Not::apply(not_terms)?.into();
 
-        let mut not_input = Answer::new();
+        let mut not_input = Match::new();
         not_input.bind(&Term::var("input"), true.into()).unwrap();
 
         let not_results = not_formula.derive(not_input)?;

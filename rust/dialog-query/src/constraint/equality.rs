@@ -6,7 +6,7 @@
 
 use crate::types::Any;
 pub use crate::{
-    Answers, Cardinality, Environment, EvaluationError, Field, Parameters, Requirement, Schema,
+    Cardinality, Environment, EvaluationError, Field, Parameters, Requirement, Schema, Selection,
     Term, Value, try_stream,
 };
 use std::fmt::Display;
@@ -19,7 +19,7 @@ const EQUALITY_COST: usize = 1;
 /// This constraint ensures that two terms must have equal values during query evaluation.
 /// It implements three key behaviors:
 ///
-/// 1. **Filtering**: When both terms are already bound, the constraint filters out answers
+/// 1. **Filtering**: When both terms are already bound, the constraint filters out selection
 ///    where the values don't match.
 ///
 /// 2. **Bidirectional Inference**: When only one term is bound, the constraint infers the
@@ -96,43 +96,43 @@ impl Equality {
         params
     }
 
-    /// Evaluates the constraint against the current selection of answers.
+    /// Evaluates the constraint against the current selection of matches.
     ///
-    /// This method processes each answer in the input selection and:
-    /// - **Filters** answers where both terms are bound but have different values
+    /// This method processes each match in the input selection and:
+    /// - **Filters** matches where both terms are bound but have different values
     /// - **Infers** missing bindings when one term is bound and the other isn't
     /// - **Errors** when neither term is bound (ConstraintViolation)
     ///
     /// # Returns
-    /// A stream of answers that satisfy the constraint, with any necessary
+    /// A stream of matches that satisfy the constraint, with any necessary
     /// variable bindings added through inference.
-    pub fn evaluate<M: Answers>(self, answers: M) -> impl Answers {
+    pub fn evaluate<M: Selection>(self, selection: M) -> impl Selection {
         let this = self.this;
         let is = self.is;
         try_stream! {
-            for await each in answers {
-                let input = each?;
+            for await candidate in selection {
+                let base = candidate?;
 
-                match (input.lookup(&this), input.lookup(&is)) {
+                match (base.lookup(&this), base.lookup(&is)) {
                     // Case 1: Both terms are bound - verify they are equal
-                    // Only pass through the answer if the values match
+                    // Only pass through the match if the values are equal
                     (Ok(this_val), Ok(is_val)) => {
                         if this_val == is_val {
-                            yield input;
+                            yield base;
                         }
-                        // Otherwise filter out this answer (no yield)
+                        // Otherwise filter out this match (no yield)
                     }
                     // Case 2: Only "is" is bound - infer "this" from "is"
                     (Err(_), Ok(is_val)) => {
-                        let mut answer = input.clone();
-                        answer.bind(&this, is_val)?;
-                        yield answer;
+                        let mut extension = base.clone();
+                        extension.bind(&this, is_val)?;
+                        yield extension;
                     }
                     // Case 3: Only "this" is bound - infer "is" from "this"
                     (Ok(this_val), Err(_)) => {
-                        let mut answer = input.clone();
-                        answer.bind(&is, this_val)?;
-                        yield answer;
+                        let mut extension = base.clone();
+                        extension.bind(&is, this_val)?;
+                        yield extension;
                     }
                     // Case 4: Neither term is bound - cannot evaluate
                     // Raise a constraint violation error
@@ -156,19 +156,18 @@ impl Display for Equality {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::selection::Answer;
+    use crate::selection::Match;
     use futures_util::TryStreamExt;
 
     #[dialog_common::test]
     async fn it_passes_when_both_terms_equal() -> Result<(), EvaluationError> {
         let constraint = Equality::new(Term::var("x"), Term::var("y"));
 
-        let mut answer = Answer::new();
-        answer.bind(&Term::var("x"), Value::from(42))?;
-        answer.bind(&Term::var("y"), Value::from(42))?;
+        let mut candidate = Match::new();
+        candidate.bind(&Term::var("x"), Value::from(42))?;
+        candidate.bind(&Term::var("y"), Value::from(42))?;
 
-        let answers = futures_util::stream::iter(vec![Ok(answer.clone())]);
-        let results: Vec<Answer> = constraint.evaluate(answers).try_collect().await?;
+        let results: Vec<Match> = constraint.evaluate(candidate.seed()).try_collect().await?;
 
         assert_eq!(results.len(), 1, "Should have one result");
         assert_eq!(
@@ -184,12 +183,11 @@ mod tests {
     async fn it_filters_when_terms_differ() -> Result<(), EvaluationError> {
         let constraint = Equality::new(Term::var("x"), Term::var("y"));
 
-        let mut answer = Answer::new();
-        answer.bind(&Term::var("x"), Value::from(42))?;
-        answer.bind(&Term::var("y"), Value::from(99))?;
+        let mut candidate = Match::new();
+        candidate.bind(&Term::var("x"), Value::from(42))?;
+        candidate.bind(&Term::var("y"), Value::from(99))?;
 
-        let answers = futures_util::stream::iter(vec![Ok(answer.clone())]);
-        let results: Vec<Answer> = constraint.evaluate(answers).try_collect().await?;
+        let results: Vec<Match> = constraint.evaluate(candidate.seed()).try_collect().await?;
 
         assert_eq!(
             results.len(),
@@ -204,11 +202,10 @@ mod tests {
     async fn it_infers_this_from_is() -> Result<(), EvaluationError> {
         let constraint = Equality::new(Term::var("x"), Term::var("y"));
 
-        let mut answer = Answer::new();
-        answer.bind(&Term::var("y"), Value::from(42))?;
+        let mut candidate = Match::new();
+        candidate.bind(&Term::var("y"), Value::from(42))?;
 
-        let answers = futures_util::stream::iter(vec![Ok(answer.clone())]);
-        let results: Vec<Answer> = constraint.evaluate(answers).try_collect().await?;
+        let results: Vec<Match> = constraint.evaluate(candidate.seed()).try_collect().await?;
 
         assert_eq!(results.len(), 1, "Should have one result");
         assert_eq!(

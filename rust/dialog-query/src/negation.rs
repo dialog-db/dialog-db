@@ -1,5 +1,5 @@
 use super::proposition::Proposition;
-use crate::selection::Answers;
+use crate::selection::Selection;
 use crate::{Environment, Parameters, Requirement, Schema, Source, try_stream};
 pub use futures_util::{TryStreamExt, stream};
 use std::fmt::Display;
@@ -10,9 +10,9 @@ pub const NEGATION_OVERHEAD: usize = 100;
 /// A negated proposition used inside [`Premise::Unless`](crate::Premise::Unless).
 ///
 /// During query evaluation a `Negation` acts as a filter: for each incoming
-/// [`Answer`](crate::selection::Answer), the wrapped [`Proposition`] is
-/// evaluated. If it produces *any* results the answer is discarded; if it
-/// produces *no* results the answer passes through unchanged.
+/// [`Match`](crate::selection::Match), the wrapped [`Proposition`] is
+/// evaluated. If it produces *any* results the match is discarded; if it
+/// produces *no* results the match passes through unchanged.
 ///
 /// Negations never bind new variables — they only constrain existing ones.
 /// The planner accounts for this by never adding a negation's parameters to
@@ -66,15 +66,14 @@ impl Negation {
         schema
     }
 
-    /// Evaluate this negation, yielding answers that do NOT match the inner application
-    pub fn evaluate<S: Source, M: Answers>(self, answers: M, source: &S) -> impl Answers {
+    /// Evaluate this negation, yielding matches that do NOT match the inner application
+    pub fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
         let application = self.0;
         let source = source.clone();
         try_stream! {
-            for await each in answers {
-                let answer = each?;
-                let not = answer.clone();
-                let output = application.clone().evaluate(not.seed(), &source);
+            for await candidate in selection {
+                let base = candidate?;
+                let output = application.clone().evaluate(base.clone().seed(), &source);
 
                 tokio::pin!(output);
 
@@ -82,7 +81,7 @@ impl Negation {
                     continue;
                 }
 
-                yield answer;
+                yield base;
             }
         }
     }
@@ -100,43 +99,43 @@ mod tests {
     use crate::Session;
     use crate::artifact::Artifacts;
     use crate::error::EvaluationError;
-    use crate::selection::Answer;
+    use crate::selection::Match;
     use crate::types::Any;
     use crate::{Term, Value};
     use dialog_storage::MemoryStorageBackend;
     use futures_util::TryStreamExt;
 
     #[dialog_common::test]
-    async fn it_passes_answer_when_negated_equality_not_satisfied() -> Result<(), EvaluationError> {
+    async fn it_passes_match_when_negated_equality_not_satisfied() -> Result<(), EvaluationError> {
         let backend = MemoryStorageBackend::default();
         let store = Artifacts::anonymous(backend).await.unwrap();
         let session = Session::open(store);
 
-        // a=1, b=2 → equality finds no match → negation keeps the answer
+        // a=1, b=2 → equality finds no match → negation keeps the match
         let a = Term::<String>::var("a");
         let b = Term::<String>::var("b");
         let premise = !a.clone().is(b.clone());
 
-        let mut answer = Answer::new();
-        answer.bind(&Term::<Any>::from(&a), Value::from(1))?;
-        answer.bind(&Term::<Any>::from(&b), Value::from(2))?;
+        let mut input = Match::new();
+        input.bind(&Term::<Any>::from(&a), Value::from(1))?;
+        input.bind(&Term::<Any>::from(&b), Value::from(2))?;
 
-        let results: Vec<Answer> = premise
-            .evaluate(answer.seed(), &session)
+        let results: Vec<Match> = premise
+            .evaluate(input.seed(), &session)
             .try_collect()
             .await?;
 
         assert_eq!(
             results.len(),
             1,
-            "Answer where a != b should pass through negated equality"
+            "Match where a != b should pass through negated equality"
         );
 
         Ok(())
     }
 
     #[dialog_common::test]
-    async fn it_filters_answer_when_negated_equality_satisfied() -> Result<(), EvaluationError> {
+    async fn it_filters_match_when_negated_equality_satisfied() -> Result<(), EvaluationError> {
         let backend = MemoryStorageBackend::default();
         let store = Artifacts::anonymous(backend).await.unwrap();
         let session = Session::open(store);
@@ -145,19 +144,19 @@ mod tests {
         let b = Term::<String>::var("b");
         let premise = !a.clone().is(b.clone());
 
-        let mut answer = Answer::new();
-        answer.bind(&Term::<Any>::from(&a), Value::from(1))?;
-        answer.bind(&Term::<Any>::from(&b), Value::from(1))?;
+        let mut input = Match::new();
+        input.bind(&Term::<Any>::from(&a), Value::from(1))?;
+        input.bind(&Term::<Any>::from(&b), Value::from(1))?;
 
-        let results: Vec<Answer> = premise
-            .evaluate(answer.seed(), &session)
+        let results: Vec<Match> = premise
+            .evaluate(input.seed(), &session)
             .try_collect()
             .await?;
 
         assert_eq!(
             results.len(),
             0,
-            "Answer where a == b should be filtered out by negated equality"
+            "Match where a == b should be filtered out by negated equality"
         );
 
         Ok(())

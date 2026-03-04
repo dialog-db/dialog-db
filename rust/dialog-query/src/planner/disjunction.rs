@@ -1,4 +1,4 @@
-use crate::selection::Answers;
+use crate::selection::Selection;
 use crate::stream::{fork_stream, stream_select};
 use crate::{Source, try_stream};
 use core::pin::Pin;
@@ -9,7 +9,7 @@ use super::Conjunction;
 ///
 /// When a concept has multiple deductive rules, each rule body produces a
 /// separate `Conjunction`. A `Disjunction` combines them so that evaluation runs all
-/// alternatives concurrently and yields the union of their answers. This
+/// alternatives concurrently and yields the union of their matches. This
 /// is the disjunction counterpart to `Conjunction`'s conjunction.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum Disjunction {
@@ -44,12 +44,16 @@ impl Disjunction {
     /// Returns `Pin<Box<...>>` because Disjunction is recursive — Or holds a
     /// `Box<Disjunction>` whose evaluate calls back into this method. Boxing
     /// keeps each alternative at pointer size on the stack.
-    pub fn evaluate<S: Source, M: Answers>(self, answers: M, source: &S) -> Pin<Box<dyn Answers>> {
+    pub fn evaluate<S: Source, M: Selection>(
+        self,
+        selection: M,
+        source: &S,
+    ) -> Pin<Box<dyn Selection>> {
         match self {
             Self::Empty => Box::pin(futures_util::stream::empty()),
-            Self::Solo(join) => Box::pin(join.evaluate(answers, source)),
-            Self::Duet(left, right) => Self::merge(Self::Solo(left), right, answers, source),
-            Self::Or(left, right) => Self::merge(*left, right, answers, source),
+            Self::Solo(join) => Box::pin(join.evaluate(selection, source)),
+            Self::Duet(left, right) => Self::merge(Self::Solo(left), right, selection, source),
+            Self::Or(left, right) => Self::merge(*left, right, selection, source),
         }
     }
 }
@@ -63,15 +67,15 @@ impl FromIterator<Conjunction> for Disjunction {
 
 impl Disjunction {
     /// Disjunction the input stream and merge two alternative evaluations.
-    fn merge<S: Source, M: Answers>(
+    fn merge<S: Source, M: Selection>(
         left: Disjunction,
         right: Conjunction,
-        answers: M,
+        selection: M,
         source: &S,
-    ) -> Pin<Box<dyn Answers>> {
+    ) -> Pin<Box<dyn Selection>> {
         let source = source.clone();
         Box::pin(try_stream! {
-            let (left_input, right_input) = fork_stream(answers);
+            let (left_input, right_input) = fork_stream(selection);
 
             let left_output = left.evaluate(left_input, &source);
             let right_output = right.evaluate(right_input, &source);

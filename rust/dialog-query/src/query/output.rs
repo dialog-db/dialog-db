@@ -4,8 +4,8 @@ pub use futures_util::stream::{Stream, StreamExt, TryStream};
 
 /// A fallible, asynchronous stream of typed query results.
 ///
-/// This is the consumer-facing counterpart to [`Answers`](crate::selection::Answers).
-/// Where `Answers` carries raw [`Answer`](crate::selection::Answer) rows,
+/// This is the consumer-facing counterpart to [`Selection`](crate::selection::Selection).
+/// Where `Selection` carries raw [`Match`](crate::selection::Match) rows,
 /// `Output<T>` carries fully realized `T` values (e.g. a concept conclusion
 /// struct). It is produced by [`Application::perform`](crate::query::Application::perform).
 pub trait Output<T: ConditionalSend>:

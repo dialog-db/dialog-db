@@ -8,7 +8,7 @@ pub mod equality;
 
 pub use equality::Equality;
 
-use crate::selection::Answers;
+use crate::selection::Selection;
 use crate::{Environment, Parameters, Schema};
 use std::fmt::Display;
 
@@ -56,19 +56,19 @@ impl Constraint {
         }
     }
 
-    /// Evaluates the constraint against the current selection of answers.
+    /// Evaluates the constraint against the current selection of matches.
     ///
-    /// This method processes each answer in the input selection and:
-    /// - **Filters** answers where constraints are violated
+    /// This method processes each match in the input selection and:
+    /// - **Filters** matches where constraints are violated
     /// - **Infers** missing bindings when possible
     /// - **Errors** when constraints cannot be evaluated
     ///
     /// # Returns
-    /// A stream of answers that satisfy the constraint, with any necessary
+    /// A stream of matches that satisfy the constraint, with any necessary
     /// variable bindings added through inference.
-    pub fn evaluate<M: Answers>(self, answers: M) -> impl Answers {
+    pub fn evaluate<M: Selection>(self, selection: M) -> impl Selection {
         match self {
-            Constraint::Equality(constraint) => constraint.evaluate(answers),
+            Constraint::Equality(constraint) => constraint.evaluate(selection),
         }
     }
 }

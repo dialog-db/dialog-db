@@ -10,7 +10,7 @@ pub use crate::proposition::Proposition;
 use crate::query::Application;
 pub use crate::query::Output;
 use crate::schema::SEGMENT_READ_COST;
-use crate::selection::{Answer, Answers};
+use crate::selection::{Match, Selection};
 use crate::types::{Any, Record};
 use crate::{
     Entity, EvaluationError, Field, Parameters, Premise, Requirement, Schema, Source, Term, Type,
@@ -52,8 +52,8 @@ fn pick_winner(current: Artifact, challenger: Artifact) -> Artifact {
 /// When only the value is known (VAE scan), groups aren't contiguous, so each
 /// candidate from `evaluate_cardinality_many` is verified by a secondary
 /// `(attribute, entity)` range scan to find the true winner. Yields the
-/// answer only if the candidate matches the winner.
-fn verify_winner<S: Source>(source: S, selector: RelationQuery, input: Answer) -> impl Answers {
+/// match only if the candidate matches the winner.
+fn verify_winner<S: Source>(source: S, selector: RelationQuery, input: Match) -> impl Selection {
     try_stream! {
         let attribute_term = selector.attribute();
         let attribute: Attribute = Attribute::try_from(input.lookup(&Term::from(&attribute_term))?)?;
@@ -104,11 +104,11 @@ pub struct RelationQuery {
     /// The cause/provenance
     cause: Term<Cause>,
     /// Internal handle for claim storage. Automatically assigned a unique
-    /// variable name so it can key into the answer's claim map. Not exposed
+    /// variable name so it can key into the match's claim map. Not exposed
     /// in schema, parameters, or cost estimation.
     // TODO: Once Value::Record supports the RecordFormat trait proposed in
     // https://github.com/dialog-db/dialog-db/pull/221 this can bind a
-    // Value::Record directly, eliminating the separate claims map on Answer.
+    // Value::Record directly, eliminating the separate claims map on Match.
     source: Term<Record>,
     /// Cardinality metadata, when the attribute is known.
     /// None when the attribute is a variable; defaults to `Many`.
@@ -154,21 +154,18 @@ impl RelationQuery {
         &self.cause
     }
 
-    /// Merge a matched artifact into an answer: store the claim and bind
+    /// Merge a matched artifact into a match: store the claim and bind
     /// the/of/is/cause values to the corresponding terms.
-    fn merge(&self, answer: &mut Answer, artifact: &Artifact) -> Result<(), EvaluationError> {
+    fn merge(&self, candidate: &mut Match, artifact: &Artifact) -> Result<(), EvaluationError> {
         let claim = Claim::from(artifact);
-        answer.cite(&self.source, &claim)?;
-        answer.bind(
-            &Term::<Any>::from(&self.the),
-            Value::Symbol(claim.the()),
-        )?;
-        answer.bind(
+        candidate.cite(&self.source, &claim)?;
+        candidate.bind(&Term::<Any>::from(&self.the), Value::Symbol(claim.the()))?;
+        candidate.bind(
             &Term::<Any>::from(&self.of),
             Value::Entity(claim.of().clone()),
         )?;
-        answer.bind(&self.is, claim.is().clone())?;
-        answer.bind(
+        candidate.bind(&self.is, claim.is().clone())?;
+        candidate.bind(
             &Term::<Any>::from(&self.cause),
             Value::Bytes(claim.cause().clone().0.into()),
         )?;
@@ -262,8 +259,8 @@ impl RelationQuery {
 }
 
 impl RelationQuery {
-    /// Resolves variables from the given answer.
-    pub fn resolve_from_answer(&self, source: &Answer) -> Self {
+    /// Resolves variables from the given match.
+    pub fn resolve_from_match(&self, source: &Match) -> Self {
         let the = self.the.resolve(source);
         let of = self.of.resolve(source);
         let is = match source.lookup(&self.is) {
@@ -289,35 +286,35 @@ impl RelationQuery {
     /// For `Cardinality::One`, only the winning artifact per `(attribute, entity)`
     /// pair is yielded. The strategy depends on which index the storage layer
     /// uses — see [`Self::evaluate_cardinality_one`].
-    pub fn evaluate_with_provenance<S: Source, M: Answers>(
+    pub fn evaluate_with_provenance<S: Source, M: Selection>(
         self,
         source: S,
-        answers: M,
-    ) -> impl Answers {
+        selection: M,
+    ) -> impl Selection {
         if self.cardinality() == Cardinality::One {
-            Either::Left(self.evaluate_cardinality_one(source, answers))
+            Either::Left(self.evaluate_cardinality_one(source, selection))
         } else {
-            Either::Right(self.evaluate_cardinality_many(source, answers))
+            Either::Right(self.evaluate_cardinality_many(source, selection))
         }
     }
 
     /// Evaluate yielding all matching artifacts.
-    fn evaluate_cardinality_many<S: Source, M: Answers>(
+    fn evaluate_cardinality_many<S: Source, M: Selection>(
         self,
         source: S,
-        answers: M,
-    ) -> impl Answers {
+        selection: M,
+    ) -> impl Selection {
         let selector = self;
         try_stream! {
-            for await each in answers {
-                let input = each?;
-                let selection = selector.resolve_from_answer(&input);
+            for await candidate in selection {
+                let base = candidate?;
+                let selection = selector.resolve_from_match(&base);
 
                 for await artifact in source.select((&selection).try_into()?) {
                     let artifact = artifact?;
-                    let mut answer = input.clone();
-                    selector.merge(&mut answer, &artifact)?;
-                    yield answer;
+                    let mut extension = base.clone();
+                    selector.merge(&mut extension, &artifact)?;
+                    yield extension;
                 }
             }
         }
@@ -333,19 +330,19 @@ impl RelationQuery {
     ///   `evaluate_cardinality_many` to produce candidates, then flat-maps
     ///   each through a winner verification that does a secondary
     ///   `(attribute, entity)` range scan.
-    fn evaluate_cardinality_one<S: Source, M: Answers>(
+    fn evaluate_cardinality_one<S: Source, M: Selection>(
         self,
         source: S,
-        answers: M,
-    ) -> impl Answers {
+        selection: M,
+    ) -> impl Selection {
         let entity_known = matches!(&self.of, Term::Constant(_));
         let attribute_known = matches!(&self.the, Term::Constant(_));
 
         if entity_known || attribute_known {
-            Either::Left(self.select_winners(source, answers))
+            Either::Left(self.select_winners(source, selection))
         } else {
             let selector = self.clone();
-            let candidates = self.evaluate_cardinality_many(source.clone(), answers);
+            let candidates = self.evaluate_cardinality_many(source.clone(), selection);
             Either::Right(
                 candidates.try_flat_map(move |input| {
                     verify_winner(source.clone(), selector.clone(), input)
@@ -356,12 +353,12 @@ impl RelationQuery {
 
     /// EAV/AEV scan: results are grouped by `(attribute, entity)`.
     /// Buffer the winning candidate and yield when the group changes.
-    fn select_winners<S: Source, M: Answers>(self, source: S, answers: M) -> impl Answers {
+    fn select_winners<S: Source, M: Selection>(self, source: S, selection: M) -> impl Selection {
         let selector = self;
         try_stream! {
-            for await each in answers {
-                let input = each?;
-                let selection = selector.resolve_from_answer(&input);
+            for await each in selection {
+                let base = each?;
+                let selection = selector.resolve_from_match(&base);
                 let mut candidate: Option<Artifact> = None;
 
                 for await artifact in source.select((&selection).try_into()?) {
@@ -375,18 +372,18 @@ impl RelationQuery {
                         candidate = Some(pick_winner(candidate.unwrap(), artifact));
                     } else {
                         if let Some(winner) = candidate.take() {
-                            let mut answer = input.clone();
-                            selector.merge(&mut answer, &winner)?;
-                            yield answer;
+                            let mut extension = base.clone();
+                            selector.merge(&mut extension, &winner)?;
+                            yield extension;
                         }
                         candidate = Some(artifact);
                     }
                 }
 
                 if let Some(winner) = candidate.take() {
-                    let mut answer = input.clone();
-                    selector.merge(&mut answer, &winner)?;
-                    yield answer;
+                    let mut extension = base.clone();
+                    selector.merge(&mut extension, &winner)?;
+                    yield extension;
                 }
             }
         }
@@ -404,11 +401,11 @@ impl RelationQuery {
 impl Application for RelationQuery {
     type Conclusion = Claim;
 
-    fn evaluate<S: Source, M: Answers>(self, answers: M, source: &S) -> impl Answers {
-        self.evaluate_with_provenance(source.clone(), answers)
+    fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
+        self.evaluate_with_provenance(source.clone(), selection)
     }
 
-    fn realize(&self, input: Answer) -> Result<Claim, EvaluationError> {
+    fn realize(&self, input: Match) -> Result<Claim, EvaluationError> {
         input.prove(&self.source)
     }
 }
@@ -499,10 +496,9 @@ impl From<&RelationQuery> for Premise {
 mod tests {
     use super::*;
     use crate::query::Output;
-    use crate::selection::{Answer, Answers};
+    use crate::selection::{Match, Selection};
     use crate::{Session, the};
     use dialog_storage::MemoryStorageBackend;
-    use futures_util::stream::once;
 
     #[dialog_common::test]
     async fn it_evaluates_relation_with_provenance() -> anyhow::Result<()> {
@@ -529,20 +525,19 @@ mod tests {
         );
 
         let session = Session::open(artifacts);
-        let initial_answer = once(async move { Ok(Answer::new()) });
-        let answers = rel_app.evaluate_with_provenance(session, initial_answer);
+        let selection = rel_app.evaluate_with_provenance(session, Match::new().seed());
 
-        let results = Answers::try_vec(answers).await?;
+        let results = Selection::try_vec(selection).await?;
 
         assert_eq!(results.len(), 1);
 
-        let answer = &results[0];
+        let candidate = &results[0];
 
-        assert!(answer.contains(&Term::var("person")));
-        assert!(answer.contains(&Term::var("name")));
+        assert!(candidate.contains(&Term::var("person")));
+        assert!(candidate.contains(&Term::var("name")));
 
-        let person_id: Entity = Entity::try_from(answer.lookup(&Term::var("person"))?)?;
-        let name_value: Value = answer.lookup(&Term::var("name"))?;
+        let person_id: Entity = Entity::try_from(candidate.lookup(&Term::var("person"))?)?;
+        let name_value: Value = candidate.lookup(&Term::var("name"))?;
 
         assert_eq!(person_id, alice);
         assert_eq!(name_value, Value::String("Alice".to_string()));

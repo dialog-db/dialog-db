@@ -5,7 +5,7 @@ use crate::formula::conversions::{self, ParseFloat, ParseSignedInteger, ParseUns
 use crate::formula::logic::{And, Not, Or};
 use crate::formula::math::{Difference, Modulo, Product, Quotient, Sum};
 use crate::formula::string::{Concatenate, Length, Like, Lowercase, Uppercase};
-use crate::selection::{Answer, Answers};
+use crate::selection::{Match, Selection};
 use crate::{Environment, Formula, Parameters, Query, Schema, try_stream};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
@@ -48,7 +48,7 @@ macro_rules! define_formulas {
             }
 
             /// Runs the formula's compute logic against the given bindings.
-            fn compute(&self, bindings: &mut Bindings) -> Result<Vec<Answer>, EvaluationError> {
+            fn compute(&self, bindings: &mut Bindings) -> Result<Vec<Match>, EvaluationError> {
                 match self { $( Self::$variant(_) => <$ty>::compute(bindings), )* }
             }
 
@@ -104,19 +104,19 @@ impl FormulaQuery {
         Some(self.cost())
     }
 
-    /// Computes answers using this formula
-    pub fn derive(&self, input: Answer) -> Result<Vec<Answer>, EvaluationError> {
+    /// Computes matches using this formula
+    pub fn derive(&self, input: Match) -> Result<Vec<Match>, EvaluationError> {
         let formula = Arc::new(self.clone());
         let parameters = self.parameters();
         let mut bindings = Bindings::new(formula, input, parameters);
         self.compute(&mut bindings)
     }
 
-    /// Expand this formula with the given answer, swallowing conflicts
-    pub fn expand(&self, answer: Answer) -> Result<Vec<Answer>, EvaluationError> {
+    /// Expand this formula with the given match, swallowing conflicts
+    pub fn expand(&self, matched: Match) -> Result<Vec<Match>, EvaluationError> {
         let formula = Arc::new(self.clone());
         let parameters = self.parameters();
-        let mut bindings = Bindings::new(formula, answer, parameters);
+        let mut bindings = Bindings::new(formula, matched, parameters);
         match self.compute(&mut bindings) {
             Ok(output) => Ok(output),
             Err(EvaluationError::Conflict { .. }) => Ok(vec![]),
@@ -124,13 +124,13 @@ impl FormulaQuery {
         }
     }
 
-    /// Evaluate this formula against the given answers stream
-    pub fn evaluate<M: Answers>(self, answers: M) -> impl Answers {
+    /// Evaluate this formula against the given selection stream
+    pub fn evaluate<M: Selection>(self, selection: M) -> impl Selection {
         let formula = self;
         try_stream! {
-            for await each in answers {
-                for answer in formula.expand(each?)? {
-                    yield answer;
+            for await candidate in selection {
+                for extension in formula.expand(candidate?)? {
+                    yield extension;
                 }
             }
         }

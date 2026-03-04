@@ -50,7 +50,7 @@ pub mod relation;
 pub mod rule;
 /// Schema system for describing parameter signatures.
 pub mod schema;
-/// Selection and answer types for query results.
+/// Selection and match types for query results.
 pub mod selection;
 /// Database sessions for querying and committing changes.
 pub mod session;

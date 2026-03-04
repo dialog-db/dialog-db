@@ -1,26 +1,27 @@
+use futures_util::stream::once;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::Claim;
 use crate::artifact::Value;
 use crate::error::EvaluationError;
 use crate::term::Term;
 use crate::types::Any;
 use crate::types::Record;
-use crate::Claim;
 
-use super::Answers;
+use super::Selection;
 
 /// A single result row produced during query evaluation.
 ///
-/// An `Answer` accumulates variable bindings as premises are evaluated in
+/// A `Match` accumulates variable bindings as premises are evaluated in
 /// sequence. Each binding maps a variable name to its resolved [`Value`].
 ///
-/// Answers flow through the evaluation pipeline as a stream
-/// ([`Answers`](super::Answers)): each premise receives the stream,
-/// potentially expands each answer into zero or more new answers, and
+/// Matches flow through the evaluation pipeline as a stream
+/// ([`Selection`](super::Selection)): each premise receives the stream,
+/// potentially expands each match into zero or more new matches, and
 /// passes them to the next premise.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
-pub struct Answer {
+pub struct Match {
     /// Named variable bindings: maps variable names to their resolved values.
     bindings: HashMap<String, Value>,
     // TODO: Once Value::Record supports the RecordFormat trait proposed in
@@ -29,15 +30,15 @@ pub struct Answer {
     claims: HashMap<String, Arc<Claim>>,
 }
 
-impl Answer {
-    /// Create new empty answer.
+impl Match {
+    /// Create new empty match.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Wrap this answer into a single-element `Answers` stream.
-    pub fn seed(self) -> impl Answers {
-        futures_util::stream::once(async { Ok(self) })
+    /// Wrap this match into a single-element `Selection` stream.
+    pub fn seed(self) -> impl Selection {
+        once(async { Ok(self) })
     }
 
     /// Provide evidence for the given term: look up the claim it cites.
@@ -49,7 +50,7 @@ impl Answer {
             _ => {
                 return Err(EvaluationError::Store(
                     "Cannot look up claim with a non-variable term".to_string(),
-                ))
+                ));
             }
         };
 
@@ -64,17 +65,12 @@ impl Answer {
     }
 
     /// Cite a claim as evidence for the given term.
-    pub fn cite(
-        &mut self,
-        term: &Term<Record>,
-        claim: &Claim,
-    ) -> Result<(), EvaluationError> {
+    pub fn cite(&mut self, term: &Term<Record>, claim: &Claim) -> Result<(), EvaluationError> {
         if let Term::Variable {
             name: Some(name), ..
         } = term
         {
-            self.claims
-                .insert(name.clone(), Arc::new(claim.to_owned()));
+            self.claims.insert(name.clone(), Arc::new(claim.to_owned()));
         }
 
         Ok(())
@@ -108,7 +104,7 @@ impl Answer {
         }
     }
 
-    /// Returns true if the parameter is bound in this answer.
+    /// Returns true if the parameter is bound in this match.
     pub fn contains(&self, term: &Term<Any>) -> bool {
         match term {
             Term::Variable {
@@ -142,5 +138,4 @@ impl Answer {
             Term::Constant(value) => Ok(value.clone()),
         }
     }
-
 }

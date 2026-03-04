@@ -464,9 +464,9 @@ mod tests {
             _ => panic!("Expected Assert"),
         };
 
-        use crate::selection::Answer;
+        use crate::selection::Match;
         let results = prop
-            .evaluate(Answer::new().seed(), &Session::open(store.clone()))
+            .evaluate(Match::new().seed(), &Session::open(store.clone()))
             .try_collect::<Vec<_>>()
             .await?;
 

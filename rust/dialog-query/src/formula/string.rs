@@ -195,7 +195,7 @@ mod tests {
     use super::*;
 
     use crate::formula::query::FormulaQuery;
-    use crate::{Parameters, Query, Term, selection::Answer};
+    use crate::{Parameters, Query, Term, selection::Match};
 
     #[dialog_common::test]
     fn it_concatenates_strings() {
@@ -204,7 +204,7 @@ mod tests {
         terms.insert("second".to_string(), Term::var("y"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input
             .bind(&Term::var("x"), "Hello".to_string().into())
             .unwrap();
@@ -232,7 +232,7 @@ mod tests {
         terms.insert("of".to_string(), Term::var("text"));
         terms.insert("is".to_string(), Term::var("len"));
 
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input
             .bind(&Term::var("text"), "Hello".to_string().into())
             .unwrap();
@@ -257,7 +257,7 @@ mod tests {
         terms.insert("of".to_string(), Term::var("text"));
         terms.insert("is".to_string(), Term::var("upper"));
 
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input
             .bind(&Term::var("text"), "hello world".to_string().into())
             .unwrap();
@@ -282,7 +282,7 @@ mod tests {
         terms.insert("of".to_string(), Term::var("text"));
         terms.insert("is".to_string(), Term::var("lower"));
 
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input
             .bind(&Term::var("text"), "HELLO WORLD".to_string().into())
             .unwrap();
@@ -307,7 +307,7 @@ mod tests {
         terms.insert("of".to_string(), Term::var("text"));
         terms.insert("is".to_string(), Term::var("len"));
 
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input
             .bind(&Term::var("text"), "".to_string().into())
             .unwrap();
@@ -333,7 +333,7 @@ mod tests {
         terms.insert("second".to_string(), Term::var("y"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input.bind(&Term::var("x"), "".to_string().into()).unwrap();
         input
             .bind(&Term::var("y"), "World".to_string().into())
@@ -365,7 +365,7 @@ mod tests {
 
         let concat_formula: FormulaQuery = Concatenate::apply(concat_terms)?.into();
 
-        let mut concat_input = Answer::new();
+        let mut concat_input = Match::new();
         concat_input
             .bind(&Term::var("fname"), "John".to_string().into())
             .unwrap();
@@ -387,7 +387,7 @@ mod tests {
 
         let length_formula: FormulaQuery = Length::apply(length_terms)?.into();
 
-        let mut length_input = Answer::new();
+        let mut length_input = Match::new();
         length_input
             .bind(&Term::var("text"), "Hello World".to_string().into())
             .unwrap();
@@ -406,7 +406,7 @@ mod tests {
 
         let upper_formula: FormulaQuery = Uppercase::apply(upper_terms)?.into();
 
-        let mut upper_input = Answer::new();
+        let mut upper_input = Match::new();
         upper_input
             .bind(&Term::var("input"), "hello world".to_string().into())
             .unwrap();
@@ -428,7 +428,7 @@ mod tests {
         terms.insert("pattern".to_string(), Term::var("p"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input
             .bind(&Term::var("t"), "hello".to_string().into())
             .unwrap();
@@ -458,7 +458,7 @@ mod tests {
         let app: FormulaQuery = Like::apply(terms).expect("apply should work").into();
 
         // Prefix match
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input
             .bind(&Term::var("t"), "hello world".to_string().into())
             .unwrap();
@@ -469,7 +469,7 @@ mod tests {
         assert_eq!(results.len(), 1);
 
         // Suffix match
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input
             .bind(&Term::var("t"), "hello world".to_string().into())
             .unwrap();
@@ -480,7 +480,7 @@ mod tests {
         assert_eq!(results.len(), 1);
 
         // Contains match
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input
             .bind(&Term::var("t"), "hello world".to_string().into())
             .unwrap();
@@ -491,7 +491,7 @@ mod tests {
         assert_eq!(results.len(), 1);
 
         // No match
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input
             .bind(&Term::var("t"), "hello world".to_string().into())
             .unwrap();
@@ -512,7 +512,7 @@ mod tests {
         let app: FormulaQuery = Like::apply(terms).expect("apply should work").into();
 
         // Single char match
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input
             .bind(&Term::var("t"), "cat".to_string().into())
             .unwrap();
@@ -523,7 +523,7 @@ mod tests {
         assert_eq!(results.len(), 1);
 
         // Too few chars
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input
             .bind(&Term::var("t"), "ct".to_string().into())
             .unwrap();
@@ -544,7 +544,7 @@ mod tests {
         let app: FormulaQuery = Like::apply(terms).expect("apply should work").into();
 
         // Escaped star matches literal *
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input
             .bind(&Term::var("t"), "a*b".to_string().into())
             .unwrap();
@@ -555,7 +555,7 @@ mod tests {
         assert_eq!(results.len(), 1);
 
         // Without escape, * is a wildcard
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input
             .bind(&Term::var("t"), "aXYZb".to_string().into())
             .unwrap();
@@ -575,7 +575,7 @@ mod tests {
 
         let app: FormulaQuery = Like::apply(terms).expect("apply should work").into();
 
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input
             .bind(&Term::var("t"), "anything".to_string().into())
             .unwrap();

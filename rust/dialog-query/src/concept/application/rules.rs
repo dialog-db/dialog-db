@@ -9,7 +9,7 @@ use crate::DeductiveRule;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::parameters::Parameters;
 use crate::planner::Disjunction;
-use crate::selection::Answer;
+use crate::selection::Match;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -46,8 +46,8 @@ impl ConceptRules {
     }
 
     /// Get or compute a cached plan for the given binding pattern.
-    pub fn plan(&self, terms: &Parameters, answer: &Answer) -> Arc<Disjunction> {
-        let adornment = Adornment::derive(terms, answer);
+    pub fn plan(&self, terms: &Parameters, matched: &Match) -> Arc<Disjunction> {
+        let adornment = Adornment::derive(terms, matched);
 
         // Fast path: read lock
         if let Some(plan) = self.plans.read().unwrap().get(&adornment) {

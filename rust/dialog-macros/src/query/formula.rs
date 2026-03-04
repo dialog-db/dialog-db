@@ -275,16 +275,16 @@ pub fn derive(input: TokenStream) -> TokenStream {
     {
                 type Conclusion = #struct_name;
 
-                fn evaluate<S: dialog_query::Source, M: dialog_query::Answers>(
+                fn evaluate<S: dialog_query::Source, M: dialog_query::Selection>(
                     self,
-                    answers: M,
+                    selection: M,
                     _source: &S,
-                ) -> impl dialog_query::Answers {
+                ) -> impl dialog_query::Selection {
                     let formula: dialog_query::FormulaQuery = self.into();
-                    formula.evaluate(answers)
+                    formula.evaluate(selection)
                 }
 
-                fn realize(&self, source: dialog_query::Answer) -> std::result::Result<Self::Conclusion, dialog_query::EvaluationError> {
+                fn realize(&self, source: dialog_query::Match) -> std::result::Result<Self::Conclusion, dialog_query::EvaluationError> {
                     Ok(#struct_name {
                         #(#realize_fields),*
                     })

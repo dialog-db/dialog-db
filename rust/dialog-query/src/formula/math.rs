@@ -132,6 +132,7 @@ mod tests {
     use crate::formula::math::*;
     use crate::formula::query::FormulaQuery;
     use crate::*;
+    use futures_util::TryStreamExt;
 
     #[dialog_common::test]
     fn it_sums_two_values() -> anyhow::Result<()> {
@@ -142,7 +143,7 @@ mod tests {
         terms.insert("is".to_string(), Term::var("result"));
 
         // Create input match with x=5, y=3
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input
             .bind(&Term::var("x"), 5u32.into())
             .expect("Failed to set x");
@@ -194,7 +195,7 @@ mod tests {
         terms.insert("with".to_string(), Term::var("missing"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input
             .bind(&Term::var("x"), 5u32.into())
             .expect("Failed to set x");
@@ -221,7 +222,7 @@ mod tests {
         let app: FormulaQuery = Sum::apply(terms)?.into();
 
         // Test first input: 2 + 3 = 5
-        let mut input1 = Answer::new();
+        let mut input1 = Match::new();
         input1.bind(&Term::var("a"), 2u32.into()).unwrap();
         input1.bind(&Term::var("b"), 3u32.into()).unwrap();
 
@@ -251,7 +252,7 @@ mod tests {
         );
 
         // Test second input: 10 + 15 = 25
-        let mut input2 = Answer::new();
+        let mut input2 = Match::new();
         input2.bind(&Term::var("a"), 10u32.into()).unwrap();
         input2.bind(&Term::var("b"), 15u32.into()).unwrap();
 
@@ -309,7 +310,7 @@ mod tests {
         terms.insert("subtract".to_string(), Term::var("y"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input.bind(&Term::var("x"), 10u32.into()).unwrap();
         input.bind(&Term::var("y"), 3u32.into()).unwrap();
 
@@ -335,7 +336,7 @@ mod tests {
         terms.insert("subtract".to_string(), Term::var("y"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input.bind(&Term::var("x"), 3u32.into()).unwrap();
         input.bind(&Term::var("y"), 10u32.into()).unwrap();
 
@@ -364,7 +365,7 @@ mod tests {
         terms.insert("times".to_string(), Term::var("y"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input.bind(&Term::var("x"), 6u32.into()).unwrap();
         input.bind(&Term::var("y"), 7u32.into()).unwrap();
 
@@ -390,7 +391,7 @@ mod tests {
         terms.insert("by".to_string(), Term::var("y"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input.bind(&Term::var("x"), 15u32.into()).unwrap();
         input.bind(&Term::var("y"), 3u32.into()).unwrap();
 
@@ -416,7 +417,7 @@ mod tests {
         terms.insert("by".to_string(), Term::var("y"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input.bind(&Term::var("x"), 15u32.into()).unwrap();
         input.bind(&Term::var("y"), 0u32.into()).unwrap();
 
@@ -437,7 +438,7 @@ mod tests {
         terms.insert("by".to_string(), Term::var("y"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input.bind(&Term::var("x"), 17u32.into()).unwrap();
         input.bind(&Term::var("y"), 5u32.into()).unwrap();
 
@@ -463,7 +464,7 @@ mod tests {
         terms.insert("by".to_string(), Term::var("y"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input.bind(&Term::var("x"), 17u32.into()).unwrap();
         input.bind(&Term::var("y"), 0u32.into()).unwrap();
 
@@ -485,7 +486,7 @@ mod tests {
 
         let sum_formula: FormulaQuery = Sum::apply(sum_terms)?.into();
 
-        let mut sum_input = Answer::new();
+        let mut sum_input = Match::new();
         sum_input.bind(&Term::var("x"), 10u32.into()).unwrap();
         sum_input.bind(&Term::var("y"), 5u32.into()).unwrap();
 
@@ -504,7 +505,7 @@ mod tests {
 
         let diff_formula: FormulaQuery = Difference::apply(diff_terms)?.into();
 
-        let mut diff_input = Answer::new();
+        let mut diff_input = Match::new();
         diff_input.bind(&Term::var("a"), 20u32.into()).unwrap();
         diff_input.bind(&Term::var("b"), 8u32.into()).unwrap();
 
@@ -523,7 +524,7 @@ mod tests {
 
         let product_formula: FormulaQuery = Product::apply(prod_terms)?.into();
 
-        let mut prod_input = Answer::new();
+        let mut prod_input = Match::new();
         prod_input.bind(&Term::var("p"), 6u32.into()).unwrap();
         prod_input.bind(&Term::var("q"), 7u32.into()).unwrap();
 
@@ -548,7 +549,7 @@ mod tests {
 
         let parse_formula: FormulaQuery = ParseUnsignedInteger::apply(parse_terms)?.into();
 
-        let mut parse_input = Answer::new();
+        let mut parse_input = Match::new();
         parse_input
             .bind(&Term::var("str_input"), "10".to_string().into())
             .unwrap();
@@ -633,31 +634,22 @@ mod tests {
         let artifacts = Artifacts::anonymous(storage).await?;
         let session = Session::open(artifacts);
 
-        // perform = evaluate(new_context) -> realize for each answer
+        // perform = evaluate(new_context) -> realize for each match
         // But first we need to seed the context with input values.
-        // Since perform starts from an empty Answer, the formula will fail
+        // Since perform starts from an empty Match, the formula will fail
         // because input variables x and y are unbound.
         // So we use evaluate with a pre-seeded context instead.
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input.bind(&Term::var("x"), 5u32.into())?;
         input.bind(&Term::var("y"), 3u32.into())?;
 
-        let input_answers = input.seed();
-
         let query_copy = query.clone();
-        let answers: Vec<Answer> = {
-            use futures_util::TryStreamExt;
-            query
-                .evaluate(input_answers, &session)
-                .try_collect()
-                .await?
-        };
+        let matches: Vec<Match> = query.evaluate(input.seed(), &session).try_collect().await?;
 
-        assert_eq!(answers.len(), 1);
-        let answer = &answers[0];
+        assert_eq!(matches.len(), 1);
 
         // Now test realize — should reconstruct the Sum proof struct
-        let proof = query_copy.realize(answer.clone())?;
+        let proof = query_copy.realize(matches[0].clone())?;
         assert_eq!(proof.of, 5);
         assert_eq!(proof.with, 3);
         assert_eq!(proof.is, 8);
@@ -682,21 +674,14 @@ mod tests {
         let artifacts = Artifacts::anonymous(storage).await?;
         let session = Session::open(artifacts);
 
-        // Constants are already bound — empty starting Answer should work
-        let input = Answer::new();
-        let input_answers = input.seed();
+        // Constants are already bound — empty starting Match should work
+        let input = Match::new();
 
         let query_copy = query.clone();
-        let answers: Vec<Answer> = {
-            use futures_util::TryStreamExt;
-            query
-                .evaluate(input_answers, &session)
-                .try_collect()
-                .await?
-        };
+        let selection: Vec<Match> = { query.evaluate(input.seed(), &session).try_collect().await? };
 
-        assert_eq!(answers.len(), 1);
-        let proof = query_copy.realize(answers[0].clone())?;
+        assert_eq!(selection.len(), 1);
+        let proof = query_copy.realize(selection[0].clone())?;
         assert_eq!(proof.of, 5);
         assert_eq!(proof.with, 3);
         assert_eq!(proof.is, 8);
@@ -721,24 +706,16 @@ mod tests {
         let artifacts = Artifacts::anonymous(storage).await?;
         let session = Session::open(artifacts);
 
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input.bind(&Term::var("x"), 5u32.into())?;
         input.bind(&Term::var("y"), 3u32.into())?;
 
-        let input_answers = input.seed();
-
         let query_copy = query.clone();
-        let answers: Vec<Answer> = {
-            use futures_util::TryStreamExt;
-            query
-                .evaluate(input_answers, &session)
-                .try_collect()
-                .await?
-        };
+        let matches: Vec<Match> = query.evaluate(input.seed(), &session).try_collect().await?;
 
         // Should succeed — the formula computes 8, and the constant 8 is consistent
-        assert_eq!(answers.len(), 1);
-        let proof = query_copy.realize(answers[0].clone())?;
+        assert_eq!(matches.len(), 1);
+        let proof = query_copy.realize(matches[0].clone())?;
         assert_eq!(proof.of, 5);
         assert_eq!(proof.with, 3);
         assert_eq!(proof.is, 8);
@@ -763,24 +740,16 @@ mod tests {
         let artifacts = Artifacts::anonymous(storage).await?;
         let session = Session::open(artifacts);
 
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input.bind(&Term::var("x"), 5u32.into())?;
         input.bind(&Term::var("y"), 3u32.into())?;
 
-        let input_answers = input.seed();
-
-        let answers: Vec<Answer> = {
-            use futures_util::TryStreamExt;
-            query
-                .evaluate(input_answers, &session)
-                .try_collect()
-                .await?
-        };
+        let selection: Vec<Match> = query.evaluate(input.seed(), &session).try_collect().await?;
 
         // The formula computes 8 but "is" is constant 99 — inconsistency
         // should filter this out (0 results)
         assert_eq!(
-            answers.len(),
+            selection.len(),
             0,
             "Inconsistent constant should produce no results"
         );
@@ -805,22 +774,14 @@ mod tests {
         let artifacts = Artifacts::anonymous(storage).await?;
         let session = Session::open(artifacts);
 
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input.bind(&Term::var("y"), 7u32.into())?;
 
-        let input_answers = input.seed();
-
         let query_copy = query.clone();
-        let answers: Vec<Answer> = {
-            use futures_util::TryStreamExt;
-            query
-                .evaluate(input_answers, &session)
-                .try_collect()
-                .await?
-        };
+        let selection: Vec<Match> = query.evaluate(input.seed(), &session).try_collect().await?;
 
-        assert_eq!(answers.len(), 1);
-        let proof = query_copy.realize(answers[0].clone())?;
+        assert_eq!(selection.len(), 1);
+        let proof = query_copy.realize(selection[0].clone())?;
         assert_eq!(proof.of, 10);
         assert_eq!(proof.with, 7);
         assert_eq!(proof.is, 17);
@@ -845,22 +806,14 @@ mod tests {
         let artifacts = Artifacts::anonymous(storage).await?;
         let session = Session::open(artifacts);
 
-        let mut input = Answer::new();
+        let mut input = Match::new();
         input.bind(&Term::var("x"), 4u32.into())?;
 
-        let input_answers = input.seed();
-
         let query_copy = query.clone();
-        let answers: Vec<Answer> = {
-            use futures_util::TryStreamExt;
-            query
-                .evaluate(input_answers, &session)
-                .try_collect()
-                .await?
-        };
+        let matches: Vec<Match> = query.evaluate(input.seed(), &session).try_collect().await?;
 
-        assert_eq!(answers.len(), 1);
-        let proof = query_copy.realize(answers[0].clone())?;
+        assert_eq!(matches.len(), 1);
+        let proof = query_copy.realize(matches[0].clone())?;
         assert_eq!(proof.of, 4);
         assert_eq!(proof.with, 4);
         assert_eq!(proof.is, 8);
@@ -878,7 +831,7 @@ mod tests {
 
         let quotient_formula: FormulaQuery = Quotient::apply(quotient_terms)?.into();
 
-        let mut division_by_zero_input = Answer::new();
+        let mut division_by_zero_input = Match::new();
         division_by_zero_input
             .bind(&Term::var("dividend"), 10u32.into())
             .unwrap();
@@ -897,7 +850,7 @@ mod tests {
 
         let modulo_formula: FormulaQuery = Modulo::apply(modulo_terms)?.into();
 
-        let mut modulo_by_zero_input = Answer::new();
+        let mut modulo_by_zero_input = Match::new();
         modulo_by_zero_input
             .bind(&Term::var("dividend"), 17u32.into())
             .unwrap();

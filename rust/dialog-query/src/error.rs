@@ -234,7 +234,7 @@ impl FieldTypeError {
 /// Errors that occur during query execution at runtime.
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum EvaluationError {
-    /// A named variable has no binding in the current answer.
+    /// A named variable has no binding in the current match.
     #[error("Unbound variable {variable_name:?}")]
     UnboundVariable {
         /// Name of the unbound variable.

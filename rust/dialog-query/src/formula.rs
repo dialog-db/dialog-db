@@ -37,7 +37,7 @@ use crate::Parameters;
 use crate::Predicate;
 use crate::Schema;
 use crate::error::{EvaluationError, TypeError};
-use crate::selection::Answer;
+use crate::selection::Match;
 
 /// Core trait for implementing formulas in the query system
 ///
@@ -84,24 +84,24 @@ pub trait Formula: Predicate + Sized + Clone {
         Self::cells().keys()
     }
 
-    /// Convert derived outputs to Answer instances with proper provenance
+    /// Convert derived outputs to Match instances with proper provenance
     ///
     /// This method orchestrates the full formula evaluation:
     /// 1. Calls `derive` to compute outputs
     /// 2. For each output, calls `write` to add values to bindings
-    /// 3. Returns the Answer with the derived values bound
+    /// 3. Returns the Match with the derived values bound
     ///
     /// This default implementation should work for most formulas.
-    fn compute(bindings: &mut Bindings) -> Result<Vec<Answer>, EvaluationError> {
-        let mut answers = Vec::new();
+    fn compute(bindings: &mut Bindings) -> Result<Vec<Match>, EvaluationError> {
+        let mut results = Vec::new();
         let input: Self::Input = bindings.try_into()?;
         for output in Self::derive(input) {
             let mut bindings = bindings.clone();
             output.write(&mut bindings)?;
-            answers.push(bindings.source);
+            results.push(bindings.source);
         }
 
-        Ok(answers)
+        Ok(results)
     }
 
     /// Create a formula application from raw parameters.

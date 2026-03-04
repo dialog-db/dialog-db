@@ -110,7 +110,7 @@ impl ParseFloat {
 mod tests {
     use super::*;
     use crate::query::{Application, Output};
-    use crate::selection::Answer;
+    use crate::selection::Match;
     use crate::{Entity, Query, Session, Term, artifact::Artifacts};
     use dialog_storage::MemoryStorageBackend;
     use futures_util::TryStreamExt;
@@ -211,13 +211,16 @@ mod tests {
             value: Term::var("input"),
             is: Term::var("result"),
         };
-        let mut input = Answer::new();
-        input.bind(&Term::var("input"), 42u32.into())?;
+        let mut candidate = Match::new();
+        candidate.bind(&Term::var("input"), 42u32.into())?;
         let query_copy = query.clone();
-        let answers: Vec<Answer> = query.evaluate(input.seed(), &session).try_collect().await?;
+        let matches: Vec<Match> = query
+            .evaluate(candidate.seed(), &session)
+            .try_collect()
+            .await?;
 
-        assert_eq!(answers.len(), 1);
-        let proof = query_copy.realize(answers[0].clone())?;
+        assert_eq!(matches.len(), 1);
+        let proof = query_copy.realize(matches[0].clone())?;
         assert_eq!(proof.is, "42");
         Ok(())
     }

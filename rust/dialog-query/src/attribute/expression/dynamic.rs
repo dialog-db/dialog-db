@@ -386,7 +386,7 @@ mod tests {
     async fn it_roundtrips_assert_and_query() -> anyhow::Result<()> {
         use crate::Session;
         use crate::artifact::Artifacts;
-        use crate::selection::Answer;
+        use crate::selection::Match;
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
 
@@ -417,7 +417,7 @@ mod tests {
         };
 
         let results = prop
-            .evaluate(Answer::new().seed(), &Session::open(store.clone()))
+            .evaluate(Match::new().seed(), &Session::open(store.clone()))
             .try_collect::<Vec<_>>()
             .await?;
 
@@ -430,7 +430,7 @@ mod tests {
     async fn it_finds_all_relations_between_entities() -> anyhow::Result<()> {
         use crate::Session;
         use crate::artifact::Artifacts;
-        use crate::selection::Answer;
+        use crate::selection::Match;
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
 
@@ -462,7 +462,7 @@ mod tests {
         };
 
         let results = prop
-            .evaluate(Answer::new().seed(), &Session::open(store.clone()))
+            .evaluate(Match::new().seed(), &Session::open(store.clone()))
             .try_collect::<Vec<_>>()
             .await?;
 

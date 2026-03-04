@@ -6,7 +6,7 @@ pub use crate::error::QueryResult;
 pub use crate::formula::query::FormulaQuery;
 pub use crate::premise::{Negation, Premise};
 pub use crate::relation::query::RelationQuery;
-use crate::selection::Answers;
+use crate::selection::Selection;
 pub use crate::{Environment, Parameters, Schema, Source};
 use futures_util::future::Either;
 use serde::de;
@@ -50,19 +50,19 @@ impl Proposition {
         }
     }
 
-    /// Evaluate this application against the given context, producing answers
-    pub fn evaluate<S: Source, M: Answers>(self, answers: M, source: &S) -> impl Answers {
+    /// Evaluate this application against the given context, producing a selection stream
+    pub fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
         match self {
             Proposition::Relation(application) => Either::Left(Either::Left(Either::Left(
-                application.evaluate_with_provenance(source.clone(), answers),
+                application.evaluate_with_provenance(source.clone(), selection),
             ))),
             Proposition::Concept(application) => Either::Left(Either::Left(Either::Right(
-                application.evaluate(answers, source),
+                application.evaluate(selection, source),
             ))),
             Proposition::Formula(application) => {
-                Either::Left(Either::Right(application.evaluate(answers)))
+                Either::Left(Either::Right(application.evaluate(selection)))
             }
-            Proposition::Constraint(constraint) => Either::Right(constraint.evaluate(answers)),
+            Proposition::Constraint(constraint) => Either::Right(constraint.evaluate(selection)),
         }
     }
 

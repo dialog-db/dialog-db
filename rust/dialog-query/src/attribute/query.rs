@@ -4,7 +4,7 @@ use crate::attribute::expression::typed::{StaticAttributeExpression, StaticAttri
 use crate::attribute::expression::{ExpressionCause, relation_query};
 use crate::descriptor::Descriptor;
 use crate::query::{Application, Source};
-use crate::selection::{Answer, Answers};
+use crate::selection::{Match, Selection};
 use crate::types::Any;
 use crate::types::Scalar;
 use crate::{Entity, EvaluationError, Premise, Proposition, Term, Value};
@@ -58,12 +58,12 @@ where
 {
     type Conclusion = StaticAttributeStatement<A>;
 
-    fn evaluate<S: Source, M: Answers>(self, answers: M, source: &S) -> impl Answers {
+    fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
         let query = relation_query::<A>(self.of, self.is.clone().into(), Term::blank());
-        query.evaluate(answers, source)
+        query.evaluate(selection, source)
     }
 
-    fn realize(&self, input: Answer) -> Result<Self::Conclusion, EvaluationError> {
+    fn realize(&self, input: Match) -> Result<Self::Conclusion, EvaluationError> {
         let of_term = &self.of;
         let is_param = Term::<Any>::from(&self.is);
         let entity: Entity = Entity::try_from(input.lookup(&Term::from(of_term))?)?;

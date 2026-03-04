@@ -100,12 +100,12 @@ where
         }
     }
 
-    /// Resolve this term against an answer. If the term is a variable
-    /// bound in the answer, returns a constant term with the bound value.
+    /// Resolve this term against a match. If the term is a variable
+    /// bound in the match, returns a constant term with the bound value.
     /// Otherwise returns the term unchanged.
-    pub fn resolve(&self, answer: &crate::selection::Answer) -> Self {
+    pub fn resolve(&self, source: &crate::selection::Match) -> Self {
         let term: Term<Any> = self.clone().into();
-        match answer.lookup(&term) {
+        match source.lookup(&term) {
             Ok(value) => {
                 if let Ok(converted) = T::try_from(value) {
                     Term::Constant(converted.into())
