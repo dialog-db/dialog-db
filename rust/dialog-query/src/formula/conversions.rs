@@ -191,13 +191,13 @@ mod tests {
         let session = Session::open(artifacts);
 
         let query = Query::<ToString> {
-            value: Term::from(3.14f64).into(),
+            value: Term::from(3.15f64).into(),
             is: Term::var("result"),
         };
         let results = query.perform(&session).try_vec().await?;
 
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].is, "3.14");
+        assert_eq!(results[0].is, "3.15");
         Ok(())
     }
 
@@ -312,13 +312,13 @@ mod tests {
         let session = Session::open(artifacts);
 
         let query = Query::<ParseFloat> {
-            text: Term::from("3.14".to_string()),
+            text: Term::from("3.15".to_string()),
             is: Term::var("num"),
         };
         let results = query.perform(&session).try_vec().await?;
 
         assert_eq!(results.len(), 1);
-        assert!((results[0].is - 3.14).abs() < f64::EPSILON);
+        assert!((results[0].is - 3.15).abs() < f64::EPSILON);
         Ok(())
     }
 

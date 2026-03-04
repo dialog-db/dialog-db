@@ -220,10 +220,7 @@ mod tests {
                     .of(self.this.clone())
                     .is(self.name.clone())
                     .into(),
-                the!("person/age")
-                    .of(self.this.clone())
-                    .is(self.age.clone())
-                    .into(),
+                the!("person/age").of(self.this.clone()).is(self.age).into(),
             ]
             .into_iter()
         }
@@ -234,16 +231,16 @@ mod tests {
             let name_the = the!("person/name");
             let age_the = the!("person/age");
 
-            transaction.associate(name_the, self.this.clone(), Value::from(self.name.clone()));
-            transaction.associate(age_the, self.this.clone(), Value::from(self.age.clone()));
+            transaction.associate(name_the, self.this.clone(), Value::from(self.name));
+            transaction.associate(age_the, self.this.clone(), Value::from(self.age));
         }
 
         fn retract(self, transaction: &mut Transaction) {
             let name_the = the!("person/name");
             let age_the = the!("person/age");
 
-            transaction.dissociate(name_the, self.this.clone(), Value::from(self.name.clone()));
-            transaction.dissociate(age_the, self.this.clone(), Value::from(self.age.clone()));
+            transaction.dissociate(name_the, self.this.clone(), Value::from(self.name));
+            transaction.dissociate(age_the, self.this.clone(), Value::from(self.age));
         }
     }
 

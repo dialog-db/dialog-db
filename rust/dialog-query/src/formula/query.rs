@@ -182,8 +182,8 @@ mod tests {
         let deser_params = deserialized.parameters();
         for field in expected_fields {
             assert_eq!(
-                orig_params.get(*field).and_then(|t| t.name()),
-                deser_params.get(*field).and_then(|t| t.name()),
+                orig_params.get(field).and_then(|t| t.name()),
+                deser_params.get(field).and_then(|t| t.name()),
                 "variable names should match for field \"{}\"",
                 field
             );

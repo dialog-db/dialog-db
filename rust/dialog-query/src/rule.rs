@@ -172,10 +172,7 @@ mod tests {
                     .of(self.this.clone())
                     .is(self.name.clone())
                     .into(),
-                the!("person/age")
-                    .of(self.this.clone())
-                    .is(self.age.clone())
-                    .into(),
+                the!("person/age").of(self.this.clone()).is(self.age).into(),
             ]
             .into_iter()
         }
@@ -189,7 +186,7 @@ mod tests {
                 .assert(transaction);
             the!("person/age")
                 .of(self.this.clone())
-                .is(self.age.clone())
+                .is(self.age)
                 .assert(transaction);
         }
 
@@ -200,7 +197,7 @@ mod tests {
                 .retract(transaction);
             the!("person/age")
                 .of(self.this.clone())
-                .is(self.age.clone())
+                .is(self.age)
                 .retract(transaction);
         }
     }

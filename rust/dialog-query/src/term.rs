@@ -887,9 +887,9 @@ mod tests {
 
     #[dialog_common::test]
     fn it_preserves_floats() {
-        let json = serde_json::json!(3.14);
+        let json = serde_json::json!(3.15);
         let param: Term<Any> = serde_json::from_value(json).unwrap();
-        assert_eq!(param, Term::Constant(Value::Float(3.14)));
+        assert_eq!(param, Term::Constant(Value::Float(3.15)));
     }
 
     #[dialog_common::test]

@@ -184,7 +184,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_preserves_json_integer_types() {
-        let json = serde_json::json!({"count": 42, "offset": -5, "ratio": 3.14});
+        let json = serde_json::json!({"count": 42, "offset": -5, "ratio": 3.15});
         let params: Parameters = serde_json::from_value(json).unwrap();
 
         // Integer types are now correctly preserved (the bug is fixed!)
@@ -198,7 +198,7 @@ mod tests {
         );
         assert_eq!(
             params.get("ratio"),
-            Some(&Term::Constant(Value::Float(3.14)))
+            Some(&Term::Constant(Value::Float(3.15)))
         );
     }
 
