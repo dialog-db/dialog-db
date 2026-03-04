@@ -14,6 +14,7 @@ ucan = ["dep:ipld-core", "dep:dialog-ucan"]
 [dependencies]
 convert_case = { workspace = true }
 dialog-common = { workspace = true }
+dialog-macros = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 async-trait = { workspace = true }
 thiserror = { workspace = true }

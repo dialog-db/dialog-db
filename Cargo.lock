@@ -782,6 +782,7 @@ dependencies = [
  "async-trait",
  "convert_case",
  "dialog-common",
+ "dialog-macros",
  "dialog-ucan",
  "dialog-varsig",
  "ipld-core",

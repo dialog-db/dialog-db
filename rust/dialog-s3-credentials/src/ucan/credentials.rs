@@ -76,6 +76,18 @@ pub struct Credentials {
     audience: Did,
 }
 
+impl std::hash::Hash for Credentials {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.endpoint.hash(state);
+        self.audience.hash(state);
+        // DelegationChain equality is based on proof_cids; hash the serialized bytes
+        // as a stable representation.
+        if let Ok(bytes) = self.delegation.to_bytes() {
+            bytes.hash(state);
+        }
+    }
+}
+
 impl Credentials {
     pub fn new(endpoint: String, delegation: DelegationChain) -> Self {
         Self {
