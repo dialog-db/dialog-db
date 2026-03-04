@@ -86,11 +86,9 @@ mod tests {
         terms.insert("right".to_string(), Term::var("b"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let input = Answer::new()
-            .set(Term::var("a"), true)
-            .unwrap()
-            .set(Term::var("b"), true)
-            .unwrap();
+        let mut input = Answer::new();
+        input.bind(&Term::var("a"), true.into()).unwrap();
+        input.bind(&Term::var("b"), true.into()).unwrap();
 
         let app: FormulaQuery = And::apply(terms)?.into();
         let results = app.derive(input).expect("And formula failed");
@@ -114,11 +112,9 @@ mod tests {
         terms.insert("right".to_string(), Term::var("b"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let input = Answer::new()
-            .set(Term::var("a"), true)
-            .unwrap()
-            .set(Term::var("b"), false)
-            .unwrap();
+        let mut input = Answer::new();
+        input.bind(&Term::var("a"), true.into()).unwrap();
+        input.bind(&Term::var("b"), false.into()).unwrap();
 
         let app: FormulaQuery = And::apply(terms)?.into();
         let results = app.derive(input).expect("And formula failed");
@@ -142,11 +138,9 @@ mod tests {
         terms.insert("right".to_string(), Term::var("b"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let input = Answer::new()
-            .set(Term::var("a"), false)
-            .unwrap()
-            .set(Term::var("b"), false)
-            .unwrap();
+        let mut input = Answer::new();
+        input.bind(&Term::var("a"), false.into()).unwrap();
+        input.bind(&Term::var("b"), false.into()).unwrap();
 
         let app: FormulaQuery = And::apply(terms)?.into();
         let results = app.derive(input).expect("And formula failed");
@@ -170,11 +164,9 @@ mod tests {
         terms.insert("right".to_string(), Term::var("b"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let input = Answer::new()
-            .set(Term::var("a"), true)
-            .unwrap()
-            .set(Term::var("b"), false)
-            .unwrap();
+        let mut input = Answer::new();
+        input.bind(&Term::var("a"), true.into()).unwrap();
+        input.bind(&Term::var("b"), false.into()).unwrap();
 
         let app: FormulaQuery = Or::apply(terms)?.into();
         let results = app.derive(input).expect("Or formula failed");
@@ -198,11 +190,9 @@ mod tests {
         terms.insert("right".to_string(), Term::var("b"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let input = Answer::new()
-            .set(Term::var("a"), false)
-            .unwrap()
-            .set(Term::var("b"), false)
-            .unwrap();
+        let mut input = Answer::new();
+        input.bind(&Term::var("a"), false.into()).unwrap();
+        input.bind(&Term::var("b"), false.into()).unwrap();
 
         let app: FormulaQuery = Or::apply(terms)?.into();
         let results = app.derive(input).expect("Or formula failed");
@@ -225,7 +215,8 @@ mod tests {
         terms.insert("value".to_string(), Term::var("bool"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let input = Answer::new().set(Term::var("bool"), true).unwrap();
+        let mut input = Answer::new();
+        input.bind(&Term::var("bool"), true.into()).unwrap();
 
         let app: FormulaQuery = Not::apply(terms)?.into();
         let results = app.derive(input).expect("Not formula failed");
@@ -248,7 +239,8 @@ mod tests {
         terms.insert("value".to_string(), Term::var("bool"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let input = Answer::new().set(Term::var("bool"), false).unwrap();
+        let mut input = Answer::new();
+        input.bind(&Term::var("bool"), false.into()).unwrap();
 
         let app: FormulaQuery = Not::apply(terms)?.into();
 
@@ -274,11 +266,9 @@ mod tests {
         and_terms.insert("right".to_string(), Term::var("b"));
         and_terms.insert("is".to_string(), Term::var("and_result"));
 
-        let input = Answer::new()
-            .set(Term::var("a"), true)
-            .unwrap()
-            .set(Term::var("b"), false)
-            .unwrap();
+        let mut input = Answer::new();
+        input.bind(&Term::var("a"), true.into()).unwrap();
+        input.bind(&Term::var("b"), false.into()).unwrap();
 
         let and_app: FormulaQuery = And::apply(and_terms)?.into();
         let and_results = and_app.derive(input).expect("And formula failed");
@@ -316,11 +306,9 @@ mod tests {
 
         let and_formula: FormulaQuery = And::apply(and_terms)?.into();
 
-        let and_input = Answer::new()
-            .set(Term::var("a"), true)
-            .unwrap()
-            .set(Term::var("b"), true)
-            .unwrap();
+        let mut and_input = Answer::new();
+        and_input.bind(&Term::var("a"), true.into()).unwrap();
+        and_input.bind(&Term::var("b"), true.into()).unwrap();
 
         let and_results = and_formula.derive(and_input)?;
         assert_eq!(and_results.len(), 1);
@@ -337,11 +325,9 @@ mod tests {
 
         let or_formula: FormulaQuery = Or::apply(or_terms)?.into();
 
-        let or_input = Answer::new()
-            .set(Term::var("x"), false)
-            .unwrap()
-            .set(Term::var("y"), true)
-            .unwrap();
+        let mut or_input = Answer::new();
+        or_input.bind(&Term::var("x"), false.into()).unwrap();
+        or_input.bind(&Term::var("y"), true.into()).unwrap();
 
         let or_results = or_formula.derive(or_input)?;
         assert_eq!(or_results.len(), 1);
@@ -357,7 +343,8 @@ mod tests {
 
         let not_formula: FormulaQuery = Not::apply(not_terms)?.into();
 
-        let not_input = Answer::new().set(Term::var("input"), true).unwrap();
+        let mut not_input = Answer::new();
+        not_input.bind(&Term::var("input"), true.into()).unwrap();
 
         let not_results = not_formula.derive(not_input)?;
         assert_eq!(not_results.len(), 1);

@@ -101,8 +101,8 @@ impl Answer {
     /// Bind a term to a value. For named variables, stores the value in
     /// the bindings map; checks consistency if already bound. Constants
     /// and blanks are no-ops.
-    pub fn bind(&mut self, param: &Term<Any>, value: Value) -> Result<(), EvaluationError> {
-        match param {
+    pub fn bind(&mut self, term: &Term<Any>, value: Value) -> Result<(), EvaluationError> {
+        match term {
             Term::Variable {
                 name: Some(name), ..
             } => {
@@ -127,8 +127,8 @@ impl Answer {
     }
 
     /// Returns true if the parameter is bound in this answer.
-    pub fn contains(&self, param: &Term<Any>) -> bool {
-        match param {
+    pub fn contains(&self, term: &Term<Any>) -> bool {
+        match term {
             Term::Variable {
                 name: Some(key), ..
             } => self.bindings.contains_key(key),
@@ -143,8 +143,8 @@ impl Answer {
     /// For constants, returns the constant value.
     ///
     /// Returns an error if the variable is not bound.
-    pub fn resolve(&self, param: &Term<Any>) -> Result<Value, EvaluationError> {
-        match param {
+    pub fn resolve(&self, term: &Term<Any>) -> Result<Value, EvaluationError> {
+        match term {
             Term::Variable {
                 name: Some(key), ..
             } => {
@@ -184,14 +184,5 @@ impl Answer {
             }
             Term::Constant(_) => term.clone(),
         }
-    }
-
-    /// Set a variable to a value.
-    pub fn set<T: Scalar>(mut self, term: Term<T>, value: T) -> Result<Self, EvaluationError>
-    where
-        Value: From<T>,
-    {
-        self.bind(&Term::<Any>::from(&term), value.into())?;
-        Ok(self)
     }
 }

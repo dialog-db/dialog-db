@@ -142,10 +142,12 @@ mod tests {
         terms.insert("is".to_string(), Term::var("result"));
 
         // Create input match with x=5, y=3
-        let input = Answer::new()
-            .set(Term::var("x"), 5u32)
-            .expect("Failed to set x")
-            .set(Term::var("y"), 3u32)
+        let mut input = Answer::new();
+        input
+            .bind(&Term::var("x"), 5u32.into())
+            .expect("Failed to set x");
+        input
+            .bind(&Term::var("y"), 3u32.into())
             .expect("Failed to set y");
 
         // Create formula application
@@ -192,8 +194,9 @@ mod tests {
         terms.insert("with".to_string(), Term::var("missing"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let input = Answer::new()
-            .set(Term::var("x"), 5u32)
+        let mut input = Answer::new();
+        input
+            .bind(&Term::var("x"), 5u32.into())
             .expect("Failed to set x");
 
         let app: FormulaQuery = Sum::apply(terms)?.into();
@@ -218,11 +221,9 @@ mod tests {
         let app: FormulaQuery = Sum::apply(terms)?.into();
 
         // Test first input: 2 + 3 = 5
-        let input1 = Answer::new()
-            .set(Term::var("a"), 2u32)
-            .unwrap()
-            .set(Term::var("b"), 3u32)
-            .unwrap();
+        let mut input1 = Answer::new();
+        input1.bind(&Term::var("a"), 2u32.into()).unwrap();
+        input1.bind(&Term::var("b"), 3u32.into()).unwrap();
 
         let results1 = app.derive(input1).expect("First expansion failed");
         assert_eq!(results1.len(), 1);
@@ -250,11 +251,9 @@ mod tests {
         );
 
         // Test second input: 10 + 15 = 25
-        let input2 = Answer::new()
-            .set(Term::var("a"), 10u32)
-            .unwrap()
-            .set(Term::var("b"), 15u32)
-            .unwrap();
+        let mut input2 = Answer::new();
+        input2.bind(&Term::var("a"), 10u32.into()).unwrap();
+        input2.bind(&Term::var("b"), 15u32.into()).unwrap();
 
         let results2 = app.derive(input2).expect("Second expansion failed");
         assert_eq!(results2.len(), 1);
@@ -310,11 +309,9 @@ mod tests {
         terms.insert("subtract".to_string(), Term::var("y"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let input = Answer::new()
-            .set(Term::var("x"), 10u32)
-            .unwrap()
-            .set(Term::var("y"), 3u32)
-            .unwrap();
+        let mut input = Answer::new();
+        input.bind(&Term::var("x"), 10u32.into()).unwrap();
+        input.bind(&Term::var("y"), 3u32.into()).unwrap();
 
         let app: FormulaQuery = Difference::apply(terms)?.into();
         let results = app.derive(input).expect("Difference failed");
@@ -338,11 +335,9 @@ mod tests {
         terms.insert("subtract".to_string(), Term::var("y"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let input = Answer::new()
-            .set(Term::var("x"), 3u32)
-            .unwrap()
-            .set(Term::var("y"), 10u32)
-            .unwrap();
+        let mut input = Answer::new();
+        input.bind(&Term::var("x"), 3u32.into()).unwrap();
+        input.bind(&Term::var("y"), 10u32.into()).unwrap();
 
         let app: FormulaQuery = Difference::apply(terms)?.into();
         let results = app
@@ -369,11 +364,9 @@ mod tests {
         terms.insert("times".to_string(), Term::var("y"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let input = Answer::new()
-            .set(Term::var("x"), 6u32)
-            .unwrap()
-            .set(Term::var("y"), 7u32)
-            .unwrap();
+        let mut input = Answer::new();
+        input.bind(&Term::var("x"), 6u32.into()).unwrap();
+        input.bind(&Term::var("y"), 7u32.into()).unwrap();
 
         let app: FormulaQuery = Product::apply(terms)?.into();
         let results = app.derive(input).expect("Product failed");
@@ -397,11 +390,9 @@ mod tests {
         terms.insert("by".to_string(), Term::var("y"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let input = Answer::new()
-            .set(Term::var("x"), 15u32)
-            .unwrap()
-            .set(Term::var("y"), 3u32)
-            .unwrap();
+        let mut input = Answer::new();
+        input.bind(&Term::var("x"), 15u32.into()).unwrap();
+        input.bind(&Term::var("y"), 3u32.into()).unwrap();
 
         let app: FormulaQuery = Quotient::apply(terms)?.into();
         let results = app.derive(input).expect("Quotient failed");
@@ -425,12 +416,9 @@ mod tests {
         terms.insert("by".to_string(), Term::var("y"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let x = Term::var("x");
-        let input = Answer::new()
-            .set(x, 15u32)
-            .unwrap()
-            .set(Term::var("y"), 0u32)
-            .unwrap();
+        let mut input = Answer::new();
+        input.bind(&Term::var("x"), 15u32.into()).unwrap();
+        input.bind(&Term::var("y"), 0u32.into()).unwrap();
 
         let app: FormulaQuery = Quotient::apply(terms)?.into();
         let results = app
@@ -449,11 +437,9 @@ mod tests {
         terms.insert("by".to_string(), Term::var("y"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let input = Answer::new()
-            .set(Term::var("x"), 17u32)
-            .unwrap()
-            .set(Term::var("y"), 5u32)
-            .unwrap();
+        let mut input = Answer::new();
+        input.bind(&Term::var("x"), 17u32.into()).unwrap();
+        input.bind(&Term::var("y"), 5u32.into()).unwrap();
 
         let app: FormulaQuery = Modulo::apply(terms)?.into();
         let results = app.derive(input).expect("Modulo failed");
@@ -477,11 +463,9 @@ mod tests {
         terms.insert("by".to_string(), Term::var("y"));
         terms.insert("is".to_string(), Term::var("result"));
 
-        let input = Answer::new()
-            .set(Term::var("x"), 17u32)
-            .unwrap()
-            .set(Term::var("y"), 0u32)
-            .unwrap();
+        let mut input = Answer::new();
+        input.bind(&Term::var("x"), 17u32.into()).unwrap();
+        input.bind(&Term::var("y"), 0u32.into()).unwrap();
 
         let app: FormulaQuery = Modulo::apply(terms)?.into();
         let results = app.derive(input).expect("Modulo by zero should be handled");
@@ -501,11 +485,9 @@ mod tests {
 
         let sum_formula: FormulaQuery = Sum::apply(sum_terms)?.into();
 
-        let sum_input = Answer::new()
-            .set(Term::var("x"), 10u32)
-            .unwrap()
-            .set(Term::var("y"), 5u32)
-            .unwrap();
+        let mut sum_input = Answer::new();
+        sum_input.bind(&Term::var("x"), 10u32.into()).unwrap();
+        sum_input.bind(&Term::var("y"), 5u32.into()).unwrap();
 
         let sum_results = sum_formula.derive(sum_input)?;
         assert_eq!(sum_results.len(), 1);
@@ -522,11 +504,9 @@ mod tests {
 
         let diff_formula: FormulaQuery = Difference::apply(diff_terms)?.into();
 
-        let diff_input = Answer::new()
-            .set(Term::var("a"), 20u32)
-            .unwrap()
-            .set(Term::var("b"), 8u32)
-            .unwrap();
+        let mut diff_input = Answer::new();
+        diff_input.bind(&Term::var("a"), 20u32.into()).unwrap();
+        diff_input.bind(&Term::var("b"), 8u32.into()).unwrap();
 
         let diff_results = diff_formula.derive(diff_input)?;
         assert_eq!(diff_results.len(), 1);
@@ -543,11 +523,9 @@ mod tests {
 
         let product_formula: FormulaQuery = Product::apply(prod_terms)?.into();
 
-        let prod_input = Answer::new()
-            .set(Term::var("p"), 6u32)
-            .unwrap()
-            .set(Term::var("q"), 7u32)
-            .unwrap();
+        let mut prod_input = Answer::new();
+        prod_input.bind(&Term::var("p"), 6u32.into()).unwrap();
+        prod_input.bind(&Term::var("q"), 7u32.into()).unwrap();
 
         let prod_results = product_formula.derive(prod_input)?;
         assert_eq!(prod_results.len(), 1);
@@ -570,8 +548,9 @@ mod tests {
 
         let parse_formula: FormulaQuery = ParseUnsignedInteger::apply(parse_terms)?.into();
 
-        let parse_input = Answer::new()
-            .set(Term::var("str_input"), "10".to_string())
+        let mut parse_input = Answer::new();
+        parse_input
+            .bind(&Term::var("str_input"), "10".to_string().into())
             .unwrap();
 
         let parsed_results = parse_formula.derive(parse_input)?;
@@ -586,10 +565,8 @@ mod tests {
 
         let sum_formula: FormulaQuery = Sum::apply(sum_terms)?.into();
 
-        let sum_input = intermediate_result
-            .clone()
-            .set(Term::var("addend"), 5u32)
-            .unwrap();
+        let mut sum_input = intermediate_result.clone();
+        sum_input.bind(&Term::var("addend"), 5u32.into()).unwrap();
 
         let final_results = sum_formula.derive(sum_input)?;
         assert_eq!(final_results.len(), 1);
@@ -656,14 +633,14 @@ mod tests {
         let artifacts = Artifacts::anonymous(storage).await?;
         let session = Session::open(artifacts);
 
-        // perform = evaluate(new_context) → realize for each answer
+        // perform = evaluate(new_context) -> realize for each answer
         // But first we need to seed the context with input values.
         // Since perform starts from an empty Answer, the formula will fail
         // because input variables x and y are unbound.
         // So we use evaluate with a pre-seeded context instead.
-        let input = Answer::new()
-            .set(Term::var("x"), 5u32)?
-            .set(Term::var("y"), 3u32)?;
+        let mut input = Answer::new();
+        input.bind(&Term::var("x"), 5u32.into())?;
+        input.bind(&Term::var("y"), 3u32.into())?;
 
         let input_answers = input.seed();
 
@@ -744,9 +721,9 @@ mod tests {
         let artifacts = Artifacts::anonymous(storage).await?;
         let session = Session::open(artifacts);
 
-        let input = Answer::new()
-            .set(Term::var("x"), 5u32)?
-            .set(Term::var("y"), 3u32)?;
+        let mut input = Answer::new();
+        input.bind(&Term::var("x"), 5u32.into())?;
+        input.bind(&Term::var("y"), 3u32.into())?;
 
         let input_answers = input.seed();
 
@@ -786,9 +763,9 @@ mod tests {
         let artifacts = Artifacts::anonymous(storage).await?;
         let session = Session::open(artifacts);
 
-        let input = Answer::new()
-            .set(Term::var("x"), 5u32)?
-            .set(Term::var("y"), 3u32)?;
+        let mut input = Answer::new();
+        input.bind(&Term::var("x"), 5u32.into())?;
+        input.bind(&Term::var("y"), 3u32.into())?;
 
         let input_answers = input.seed();
 
@@ -828,7 +805,8 @@ mod tests {
         let artifacts = Artifacts::anonymous(storage).await?;
         let session = Session::open(artifacts);
 
-        let input = Answer::new().set(Term::var("y"), 7u32)?;
+        let mut input = Answer::new();
+        input.bind(&Term::var("y"), 7u32.into())?;
 
         let input_answers = input.seed();
 
@@ -867,7 +845,8 @@ mod tests {
         let artifacts = Artifacts::anonymous(storage).await?;
         let session = Session::open(artifacts);
 
-        let input = Answer::new().set(Term::var("x"), 4u32)?;
+        let mut input = Answer::new();
+        input.bind(&Term::var("x"), 4u32.into())?;
 
         let input_answers = input.seed();
 
@@ -899,10 +878,12 @@ mod tests {
 
         let quotient_formula: FormulaQuery = Quotient::apply(quotient_terms)?.into();
 
-        let division_by_zero_input = Answer::new()
-            .set(Term::var("dividend"), 10u32)
-            .unwrap()
-            .set(Term::var("divisor"), 0u32)
+        let mut division_by_zero_input = Answer::new();
+        division_by_zero_input
+            .bind(&Term::var("dividend"), 10u32.into())
+            .unwrap();
+        division_by_zero_input
+            .bind(&Term::var("divisor"), 0u32.into())
             .unwrap();
 
         let quotient_results = quotient_formula.derive(division_by_zero_input)?;
@@ -916,10 +897,12 @@ mod tests {
 
         let modulo_formula: FormulaQuery = Modulo::apply(modulo_terms)?.into();
 
-        let modulo_by_zero_input = Answer::new()
-            .set(Term::var("dividend"), 17u32)
-            .unwrap()
-            .set(Term::var("divisor"), 0u32)
+        let mut modulo_by_zero_input = Answer::new();
+        modulo_by_zero_input
+            .bind(&Term::var("dividend"), 17u32.into())
+            .unwrap();
+        modulo_by_zero_input
+            .bind(&Term::var("divisor"), 0u32.into())
             .unwrap();
 
         let modulo_results = modulo_formula.derive(modulo_by_zero_input)?;

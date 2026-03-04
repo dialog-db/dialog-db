@@ -139,8 +139,9 @@ mod tests {
         let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::var("test"));
 
-        let source = Answer::new()
-            .set(Term::var("test"), 42u32)
+        let mut source = Answer::new();
+        source
+            .bind(&Term::var("test"), 42u32.into())
             .expect("Failed to create test match");
 
         let formula = test_formula();
@@ -188,9 +189,10 @@ mod tests {
     fn it_rejects_conflicting_assignment() {
         use crate::selection::Answer;
 
-        let mut answer = Answer::new()
-            .set(Term::var("test"), 42u32)
-            .expect("set should succeed");
+        let mut answer = Answer::new();
+        answer
+            .bind(&Term::var("test"), 42u32.into())
+            .expect("bind should succeed");
 
         let result = answer.bind(&Term::var("test"), Value::UnsignedInt(100));
         assert!(
@@ -206,8 +208,9 @@ mod tests {
         let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::var("test"));
 
-        let source = Answer::new()
-            .set(Term::var("test"), 42u32)
+        let mut source = Answer::new();
+        source
+            .bind(&Term::var("test"), 42u32.into())
             .expect("Failed to create test match");
 
         let formula = test_formula();

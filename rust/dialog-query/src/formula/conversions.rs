@@ -211,7 +211,8 @@ mod tests {
             value: Term::var("input"),
             is: Term::var("result"),
         };
-        let input = Answer::new().set(Term::var("input"), 42u32)?;
+        let mut input = Answer::new();
+        input.bind(&Term::var("input"), 42u32.into())?;
         let query_copy = query.clone();
         let answers: Vec<Answer> = query.evaluate(input.seed(), &session).try_collect().await?;
 
