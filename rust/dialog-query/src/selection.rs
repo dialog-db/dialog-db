@@ -238,20 +238,4 @@ mod tests {
         assert!(active_result);
     }
 
-    #[dialog_common::test]
-    fn it_extends_with_multiple_bindings() {
-        let assignments = vec![
-            (Term::var("name"), Value::String("Charlie".to_string())),
-            (Term::var("age"), Value::UnsignedInt(35)),
-        ];
-
-        let mut answer = Answer::new();
-        answer.extend(assignments).unwrap();
-
-        let name_result = String::try_from(answer.resolve(&Term::var("name")).unwrap()).unwrap();
-        let age_result = u32::try_from(answer.resolve(&Term::var("age")).unwrap()).unwrap();
-
-        assert_eq!(name_result, "Charlie");
-        assert_eq!(age_result, 35);
-    }
 }

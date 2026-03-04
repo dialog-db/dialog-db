@@ -27,8 +27,8 @@ fn extract_parameters(source: &Answer, terms: &Parameters) -> Result<Answer, Eva
         match user_param {
             Term::Variable { name: Some(_), .. } => {
                 let param = Term::var(param_name);
-                if let Some(value) = source.lookup(user_param) {
-                    answer.bind(&param, value.clone())?;
+                if let Ok(value) = source.resolve(user_param) {
+                    answer.bind(&param, value)?;
                 }
             }
             Term::Constant(value) => {
@@ -59,8 +59,8 @@ fn merge_parameters(
         }
 
         let param = Term::var(param_name);
-        if let Some(value) = result.lookup(&param) {
-            merged.bind(user_param, value.clone())?;
+        if let Ok(value) = result.resolve(&param) {
+            merged.bind(user_param, value)?;
         }
     }
 

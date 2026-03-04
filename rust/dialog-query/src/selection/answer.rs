@@ -110,16 +110,6 @@ impl Answer {
         Ok(())
     }
 
-    /// Look up the value bound to a named variable.
-    pub fn lookup(&self, param: &Term<Any>) -> Option<&Value> {
-        match param {
-            Term::Variable {
-                name: Some(key), ..
-            } => self.bindings.get(key),
-            _ => None,
-        }
-    }
-
     /// Bind a term to a value. For named variables, stores the value in
     /// the bindings map; checks consistency if already bound. Constants
     /// and blanks are no-ops.
@@ -146,17 +136,6 @@ impl Answer {
             }
             Term::Variable { name: None, .. } | Term::Constant(_) => Ok(()),
         }
-    }
-
-    /// Extends this answer by binding multiple term-value pairs.
-    pub fn extend<I>(&mut self, assignments: I) -> Result<(), EvaluationError>
-    where
-        I: IntoIterator<Item = (Term<Any>, Value)>,
-    {
-        for (param, value) in assignments {
-            self.bind(&param, value)?;
-        }
-        Ok(())
     }
 
     /// Returns true if the parameter is bound in this answer.
@@ -216,23 +195,6 @@ impl Answer {
                 }
             }
             Term::Constant(_) => term.clone(),
-        }
-    }
-
-    /// Resolve a variable parameter into a constant parameter if this answer
-    /// has a binding for it. Otherwise, return the original parameter.
-    pub fn resolve_parameter(&self, param: &Term<Any>) -> Term<Any> {
-        match param {
-            Term::Variable {
-                name: Some(key), ..
-            } => {
-                if let Some(value) = self.bindings.get(key) {
-                    Term::Constant(value.clone())
-                } else {
-                    param.clone()
-                }
-            }
-            _ => param.clone(),
         }
     }
 

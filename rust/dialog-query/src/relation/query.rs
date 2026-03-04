@@ -247,7 +247,10 @@ impl RelationQuery {
     pub fn resolve_from_answer(&self, source: &Answer) -> Self {
         let the = source.resolve_term(&self.the);
         let of = source.resolve_term(&self.of);
-        let is = source.resolve_parameter(&self.is);
+        let is = match source.resolve(&self.is) {
+            Ok(value) => Term::Constant(value),
+            Err(_) => self.is.clone(),
+        };
         let cause = source.resolve_term(&self.cause);
 
         Self {
