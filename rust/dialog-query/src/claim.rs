@@ -22,8 +22,8 @@ pub struct Claim {
 
 impl Claim {
     /// Get the attribute for this claim
-    pub fn the(&self) -> ArtifactsAttribute {
-        ArtifactsAttribute::from(&self.the)
+    pub fn the(&self) -> &The {
+        &self.the
     }
 
     /// Get the domain of this claim's attribute

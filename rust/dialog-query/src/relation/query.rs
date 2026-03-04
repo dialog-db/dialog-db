@@ -159,7 +159,7 @@ impl RelationQuery {
     fn merge(&self, candidate: &mut Match, artifact: &Artifact) -> Result<(), EvaluationError> {
         let claim = Claim::from(artifact);
         candidate.cite(&self.source, &claim)?;
-        candidate.bind(&Term::<Any>::from(&self.the), Value::Symbol(claim.the()))?;
+        candidate.bind(&Term::<Any>::from(&self.the), Value::from(claim.the()))?;
         candidate.bind(
             &Term::<Any>::from(&self.of),
             Value::Entity(claim.of().clone()),
@@ -663,14 +663,8 @@ mod tests {
             results.len()
         );
 
-        let name_results: Vec<_> = results
-            .iter()
-            .filter(|f| f.the() == ArtifactsAttribute::from(&name_attr))
-            .collect();
-        let age_results: Vec<_> = results
-            .iter()
-            .filter(|f| f.the() == ArtifactsAttribute::from(&age_attr))
-            .collect();
+        let name_results: Vec<_> = results.iter().filter(|f| *f.the() == name_attr).collect();
+        let age_results: Vec<_> = results.iter().filter(|f| *f.the() == age_attr).collect();
 
         assert_eq!(name_results.len(), 1, "Should have exactly one name result");
         assert_eq!(age_results.len(), 1, "Should have exactly one age result");
@@ -838,7 +832,7 @@ mod tests {
         let eav_results = eav_app.perform(&session).try_vec().await?;
         let eav_name_results: Vec<_> = eav_results
             .iter()
-            .filter(|f| f.the() == ArtifactsAttribute::from(&name_attr))
+            .filter(|f| *f.the() == name_attr)
             .collect();
         assert_eq!(eav_name_results.len(), 1);
         let eav_winner = eav_name_results[0].is().clone();
@@ -931,7 +925,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let fact = &results[0];
-        assert_eq!(fact.the(), ArtifactsAttribute::from(name_attr));
+        assert_eq!(fact.the(), &name_attr);
         assert_eq!(fact.of(), &alice);
         assert_eq!(fact.is(), &Value::String("Alice".to_string()));
 
