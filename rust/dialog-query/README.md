@@ -1,31 +1,91 @@
 # dialog-query
 
-Datalog-inspired query engine for Dialog-DB. Operates over an Entity-Attribute-Value fact store with typed pattern matching, deductive rules, and built-in formulas.
+Datalog-inspired query engine for Dialog. Operates over the associative model's claim store, providing typed pattern matching, deductive rules, and built-in formulas.
 
 ## Information Model
 
-### Facts
+### Associative
 
-All data in Dialog-DB is represented as atomic, immutable facts — equivalent to semantic triples in [RDF] and [datoms][datom] in Datomic. A fact takes the form `{the, of, is, cause}`, corresponding to natural language: _the_ **role** _of_ **alice** _is_ **"cryptographer"**.
+Stores and replicates information as an immutable, append-only history of claims. There is no schema enforced at this level.
+
+#### Claims
+
+A statement is a set of `{the, of, is}` associations. A concept conclusion is a statement that decomposes into the attribute statements it is comprised of, each corresponding to a single association. When statements are asserted, new associations are stored as claims with an added `cause` logical timestamp. When retracted, matching claims are evicted.
+
+A claim takes the form `{the, of, is, cause}`, corresponding to natural language: _the_ **role** _of_ **alice** _is_ **"cryptographer"**.
 
 ```
 { the: "employee/role", of: alice, is: "cryptographer", cause }
 ```
 
-- **Entity** (`of`) — the subject, represented as a URI
-- **Attribute** (`the`) — something that can be said about an entity, a `/`-delimited name like `employee/role`
-- **Value** (`is`) — a concrete value (string, number, boolean, bytes, etc.)
-- **Cause** — causal reference establishing partial order between facts
+- **Entity** (`of`) - the subject of the claim
+- **Relation** (`the`) - categorizes the claim by the kind of association being established, in `domain/name` format (e.g. `employee/role`)
+- **Value** (`is`) - the value being linked through the relation (string, number, boolean, bytes, entity, etc.)
+- **Cause** - provenance describing who produced the claim and when, establishing causal order
 
-Facts are immutable and content-addressed. Asserting and retracting facts produces new database revisions rather than mutating existing state. An entity's state is the set of all facts about it — there is no schema enforced at the storage layer.
+Claims are immutable and content-addressed. An entity's state is the set of all claims about it.
 
-### Attributes
+#### Relations
 
-An attribute describes a relation between an entity and a value. Attributes are often referenced in `namespace/name` format (e.g. `employee/name`), where the first component is the **namespace** and the rest is the **name** — but in practice the value type and cardinality are also part of the identity. `employee/name` typed as `String` and `employee/name` typed as `Bytes` are distinct attributes that can coexist without conflict.
+Relations categorize claims by the kind of association being established. A relation is comprised of a **domain** (scoping it to a specific problem area) and a **name** (identifying the specific association within that domain), denoted as `domain/name`.
 
-An attribute is defined as a newtype wrapping a value type. The **namespace** is derived from the enclosing module name (underscores become hyphens), and the **name** from the struct name (converted to kebab-case). The namespace can be overridden with `#[domain(...)]`.
+The `the!` macro produces a relation from a `"domain/name"` string literal, validated at compile time. You can construct statements from relations directly, skipping the semantic model:
 
-Doc comments on the struct are captured as the attribute's description.
+```rs
+use dialog_query::the;
+
+let alice = Entity::new()?;
+
+// Assert statements using relations directly
+let mut edit = session.edit();
+edit.assert(
+    the!("employee/name")
+        .of(alice.clone())
+        .is("Alice")
+);
+edit.assert(
+    the!("employee/role")
+        .of(alice.clone())
+        .is("cryptographer")
+);
+session.commit(edit).await?;
+```
+
+Dynamic expressions support both concrete values and `Term` variables for querying:
+
+```rs
+// Query with a variable value
+let premise: Premise = the!("employee/name")
+    .of(alice.clone())
+    .is(Term::<String>::var("name"))
+    .into();
+
+// Query with a variable entity
+let premise: Premise = the!("employee/name")
+    .of(Term::var("entity"))
+    .is("Alice".to_string())
+    .into();
+```
+
+It is possible to use `Term::<The>` to discover all relations for an entity:
+
+```rs
+// Find all relations between alice and bob
+let premise: Premise = Term::<The>::var("relation")
+    .of(alice.clone())
+    .is(bob.clone())
+    .into();
+```
+
+### Semantic
+
+Provides modeling primitives for describing a domain: attributes, concepts, rules, and formulas. Statements made here are decomposed into claims in the associative model.
+
+#### Attributes
+
+An attribute is a relation elevated with domain-specific invariants. It extends the `domain/name` identifier with a value type and cardinality, specifying what kind of values the association admits and how many.
+
+An attribute is defined as a newtype wrapping a value type. The **domain** is derived from the enclosing module name (underscores become hyphens), and the **name** from the struct name (converted to kebab-case). The domain can be overridden with `#[domain(...)]`.
 
 ```rs
 mod employee {
@@ -39,7 +99,7 @@ mod employee {
 }
 ```
 
-By default an attribute has **cardinality one** — an entity has at most one value for it. Use `#[cardinality(many)]` when an entity can have multiple values:
+By default an attribute has **cardinality one**, an entity has at most one value for it. Use `#[cardinality(many)]` when an entity can have multiple values:
 
 ```rs
 mod employee {
@@ -50,108 +110,9 @@ mod employee {
 }
 ```
 
-> Note: cardinality affects whether an existing value is retracted when a new one is asserted — cardinality one implies replacement, cardinality many accumulates. This is not yet fully implemented.
+> Note: cardinality affects whether an existing claim is retracted when a new one is asserted. Cardinality one implies replacement, cardinality many accumulates.
 
-### Ad-hoc Attributes
-
-For quick prototyping or one-off queries, the `the!` macro provides a dynamic path that bypasses the typed attribute system. The attribute is identified by a `"domain/name"` string literal, validated at compile time:
-
-```rs
-use dialog_query::the;
-
-let alice = Entity::new()?;
-
-// Assert without a predefined attribute type
-let mut edit = session.edit();
-edit.assert(the!("employee/name").of(alice.clone()).is("Alice".to_string()));
-edit.assert(the!("employee/role").of(alice.clone()).is("cryptographer".to_string()));
-session.commit(edit).await?;
-```
-
-Dynamic expressions are always concrete (no `Term` variables) and untyped (values are `Value`, not a specific Rust type). They are good fit for dynamic exploration. Typed attributes are better fit for all other uses cases as they provide compile-time type safety and richer metadata (cardinality, description).
-
-### Concepts
-
-A concept groups related attributes into a struct, providing a higher-level view of an entity — similar to a relation in relational databases, but applied at query time rather than write time (schema-on-query). Any entity can have attributes from multiple concepts without migration.
-
-Asserting a concept stores one fact per attribute:
-
-```rs
-#[derive(Concept, Debug, Clone, PartialEq)]
-pub struct Employee {
-    this: Entity,
-    name: employee::Name,
-    role: employee::Role,
-}
-
-// Asserting an Employee stores two facts:
-//   { the: "employee/name", of: alice, is: "Alice" }
-//   { the: "employee/role", of: alice, is: "cryptographer" }
-```
-
-[RDF]: https://en.wikipedia.org/wiki/Resource_Description_Framework
-[datom]: https://docs.datomic.com/glossary.html#datom
-
-## Querying Information
-
-Query patterns use `Term<T>` — either a variable (`Term::var("x")`) or a constant (`Term::from(value)`). Variables are bound by the query engine; constants constrain the search.
-
-### Attributes
-
-Single-attribute queries use `Query::<Attribute>` with `of` (entity) and `is` (value) fields:
-
-```rs
-// All entities with a name
-let query = Query::<employee::Name> {
-    of: Term::var("entity"),
-    is: Term::var("name"),
-};
-
-// A specific entity's name
-let query = Query::<employee::Name> {
-    of: Term::from(alice.clone()),
-    is: Term::var("name"),
-};
-```
-
-The expression syntax can also produce premises for use in rules. The same methods works with both concrete values and `Term` variables. Type system determines what operations are valid based on the argument types:
-
-```rs
-// As a premise (both terms)
-let premise: Premise = employee::Name::of(Term::var("entity"))
-    .is(Term::var("name"))
-    .into();
-
-// As a premise (concrete entity, variable value)
-let premise: Premise = employee::Name::of(alice.clone())
-    .is(Term::var("name"))
-    .into();
-
-// As a premise (concrete entity, concrete value) — also usable as a statement
-let premise: Premise = employee::Name::of(alice.clone())
-    .is("Alice")
-    .into();
-```
-
-### Concepts
-
-Querying a concept is a logical conjunction (AND) — an entity matches only when _all_ of the concept's attributes are present:
-
-```rs
-// All employees named Alice (must have both name AND role)
-let pattern = Query::<Employee> {
-    this: Term::var("person"),
-    name: Term::from("Alice".to_string()),
-    role: Term::var("role"),
-};
-let results = pattern.perform(&session).try_vec().await?;
-```
-
-## Accreting Information
-
-### Attributes
-
-The same `Attribute::of(...).is(...)` syntax used for queries also works for writes, but only when both the entity and value are concrete (not `Term` variables), the expression implements `Statement`:
+`Attribute::of(...).is(...)` constructs a statement that can be asserted or retracted:
 
 ```rs
 let mut session = Session::open(artifacts);
@@ -169,9 +130,22 @@ employee::Name::of(alice).is("Alice").retract(&mut edit);
 session.commit(edit).await?;
 ```
 
-### Concepts
+#### Concepts
 
-Asserting a concept asserts all its attributes at once. Retracting works the same way.
+A concept is a composition of attributes sharing an entity, much like a type in a programming language. It is the primary unit of domain modeling, realized through schema-on-read rather than schema-on-write. An entity is not limited to a single concept: the same entity can simultaneously satisfy `Employee`, `Manager`, and `Person` if it has the right claims.
+
+A concept acts as a bidirectional mapping into the associative model. In one direction, querying a concept composes matching claims into **conclusions** (realized concept instances, analogous to instances of a type). In the other direction, asserting a concept decomposes it into individual attribute statements.
+
+```rs
+#[derive(Concept, Debug, Clone, PartialEq)]
+pub struct Employee {
+    this: Entity,
+    name: employee::Name,
+    role: employee::Role,
+}
+```
+
+Asserting a concept decomposes it into individual attribute statements:
 
 ```rs
 let mut tx = session.edit();
@@ -182,18 +156,53 @@ tx.assert(Employee {
 });
 session.commit(tx).await?;
 
+// Equivalent to:
+// tx.assert(the!("employee/name").of(alice.clone()).is("Alice"));
+// tx.assert(the!("employee/role").of(alice.clone()).is("cryptographer"));
+```
+
+Querying a concept is a logical conjunction (AND). An entity matches only when _all_ of the concept's attributes are present. The result is a set of conclusions:
+
+```rs
+let pattern = Query::<Employee> {
+    this: Term::var("person"),
+    name: Term::from("Alice".to_string()),
+    role: Term::var("role"),
+};
+let conclusions = pattern.perform(&session).try_vec().await?;
+```
+
+You can also query by a single attribute:
+
+```rs
+let query = Query::<employee::Name> {
+    of: Term::var("entity"),
+    is: Term::var("name"),
+};
+let results = query.perform(&session).try_vec().await?;
+```
+
+Retracting works the same way as asserting:
+
+```rs
 let mut tx = session.edit();
 tx.retract(Employee {
-    this: alice,
+    this: alice.clone(),
     name: employee::Name("Alice".to_string()),
     role: employee::Role("cryptographer".to_string()),
 });
 session.commit(tx).await?;
+
+// Equivalent to:
+// tx.retract(the!("employee/name").of(alice.clone()).is("Alice"));
+// tx.retract(the!("employee/role").of(alice.clone()).is("cryptographer"));
 ```
 
-## Deductive Rules
+#### Deductive Rules
 
-Rules provide logical disjunction (OR) — they derive a concept from alternative sets of premises. Where a concept query requires all attributes to match, installing multiple rules for the same concept means _any_ rule can produce a match.
+Rules provide logical disjunction (OR). They derive a concept from alternative sets of premises. Where a concept query requires all attributes to match, installing multiple rules for the same concept means _any_ rule can produce a conclusion.
+
+A rule's body is a set of premises with `Term` variables acting as join points across them.
 
 ```rs
 // An Employee can be derived from a Person
@@ -218,15 +227,31 @@ fn employee_from_contractor(employee: Query<Employee>) -> impl When {
     )
 }
 
-// Installing both rules means querying Employee finds matches from either source
+// Installing both rules means querying Employee finds conclusions from either source
 let session = Session::open(store)
     .install(employee_from_person)?
     .install(employee_from_contractor)?;
 ```
 
-## Formulas
+Relation expressions can also be used as premises, allowing rules to work directly with the associative model. Use `Term::<The>::var` to query arbitrary relations:
 
-Pure computations integrated into the query planner — roughly equivalent to built-in functions in relational databases (like `CONCAT`, `SUM`, `LOWER`). Given bound input fields, a formula derives output fields.
+```rs
+// Derive Employee from ad-hoc relations
+fn employee_from_relations(employee: Query<Employee>) -> impl When {
+    (
+        the!("person/name")
+            .of(employee.this.clone())
+            .is(employee.name.clone()),
+        the!("person/role")
+            .of(employee.this.clone())
+            .is(employee.role.clone()),
+    )
+}
+```
+
+#### Formulas
+
+Pure computations integrated into the query planner. Given bound input fields, a formula derives output fields.
 
 ```rs
 #[derive(Debug, Clone, Formula)]
@@ -245,6 +270,28 @@ impl Sum {
           is: input.of + input.with
         }]
     }
+}
+```
+
+Formulas are used as premises in rules, computing derived values from bound variables:
+
+```rs
+fn total_compensation(result: Query<TotalComp>) -> impl When {
+    (
+        Query::<Salary> {
+            of: result.this.clone(),
+            is: Term::var("salary"),
+        },
+        Query::<Bonus> {
+            of: result.this.clone(),
+            is: Term::var("bonus"),
+        },
+        Query::<Sum> {
+            of: Term::var("salary"),
+            with: Term::var("bonus"),
+            is: result.total.clone(),
+        },
+    )
 }
 ```
 

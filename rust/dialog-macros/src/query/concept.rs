@@ -192,14 +192,13 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         });
 
-        // Generate DynamicAttributeExpression for IntoIterator implementation
+        // Generate AttributeStatement for IntoIterator implementation
         instance_relations.push(quote! {
-            dialog_query::DynamicAttributeExpression {
+            dialog_query::AttributeStatement {
                 the: <#field_type as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().the().clone(),
                 of: self.this.clone(),
                 is: dialog_query::Value::from(<#field_type as dialog_query::Attribute>::value(&self.#field_name).clone()),
-                cause: None,
-                cardinality: Some(<#field_type as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().cardinality()),
+                cardinality: <#field_type as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().cardinality(),
             }
         });
     }
@@ -392,8 +391,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         // Implement IntoIterator to convert concept into relations
         impl IntoIterator for #struct_name {
-            type Item = dialog_query::DynamicAttributeExpression;
-            type IntoIter = std::vec::IntoIter<dialog_query::DynamicAttributeExpression>;
+            type Item = dialog_query::AttributeStatement;
+            type IntoIter = std::vec::IntoIter<dialog_query::AttributeStatement>;
 
             fn into_iter(self) -> Self::IntoIter {
                 vec![

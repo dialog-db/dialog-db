@@ -242,7 +242,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
 
         impl dialog_query::Predicate for #struct_name {
-            type Conclusion = dialog_query::attribute::expression::AttributeStatement<Self>;
+            type Conclusion = dialog_query::attribute::expression::StaticAttributeStatement<Self>;
             type Application = dialog_query::attribute::query::AttributeQuery<Self>;
             type Descriptor = dialog_query::AttributeDescriptor;
         }
@@ -255,15 +255,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         }
 
-        impl dialog_query::AttributeExpressionBuilder for #struct_name {}
+        impl dialog_query::StaticAttributeExpressionBuilder for #struct_name {}
 
         impl #struct_name {
             /// Start building an expression for this attribute on a given entity.
-            pub fn of<Of>(entity: Of) -> dialog_query::attribute::AttributeBuilder<Self, Of>
+            pub fn of<Of>(entity: Of) -> dialog_query::attribute::StaticAttributeBuilder<Self, Of>
             where
                 dialog_query::Term<dialog_query::Entity>: From<Of>,
             {
-                <Self as dialog_query::AttributeExpressionBuilder>::of(entity)
+                <Self as dialog_query::StaticAttributeExpressionBuilder>::of(entity)
             }
 
             /// Returns the attribute descriptor.
@@ -315,6 +315,22 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl<U: ::std::convert::Into<#wrapped_type>> ::std::convert::From<U> for #struct_name {
             fn from(value: U) -> Self {
                 Self(value.into())
+            }
+        }
+
+        // Convert this attribute into a constant `Term` of its inner type.
+        //
+        // This is generated per-type rather than as a blanket
+        // `impl<A: Attribute> From<A> for Term<A::Type>` to avoid coherence
+        // conflicts with `impl<T: Scalar> From<T> for Term<Any>`. See the
+        // comment in `dialog_query::term` for details.
+        impl ::std::convert::From<#struct_name> for dialog_query::Term<#wrapped_type> {
+            fn from(attr: #struct_name) -> Self {
+                dialog_query::Term::Constant(
+                    <#wrapped_type as ::std::convert::Into<dialog_query::artifact::Value>>::into(
+                        attr.0
+                    )
+                )
             }
         }
     };

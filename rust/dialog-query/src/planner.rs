@@ -275,16 +275,18 @@ mod tests {
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        session
-            .transact(vec![
+        {
+            let mut tx = session.edit();
+            tx.assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alice".to_string()),
-                the!("person/age").of(alice.clone()).is(25u32),
-                the!("person/name").of(bob.clone()).is("Bob".to_string()),
-                the!("person/age").of(bob.clone()).is(30u32),
-            ])
-            .await?;
+            )
+            .assert(the!("person/age").of(alice.clone()).is(25u32))
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .assert(the!("person/age").of(bob.clone()).is(30u32));
+            session.commit(tx).await?;
+        }
 
         let fact1 = RelationQuery::new(
             Term::from(the!("person/name")),
