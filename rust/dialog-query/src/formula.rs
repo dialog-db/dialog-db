@@ -89,7 +89,7 @@ pub trait Formula: Predicate + Sized + Clone {
     /// This method orchestrates the full formula evaluation:
     /// 1. Calls `derive` to compute outputs
     /// 2. For each output, calls `write` to add values to bindings
-    /// 3. Returns the Answer with Factor::Derived provenance
+    /// 3. Returns the Answer with the derived values bound
     ///
     /// This default implementation should work for most formulas.
     fn compute(bindings: &mut Bindings) -> Result<Vec<Answer>, EvaluationError> {

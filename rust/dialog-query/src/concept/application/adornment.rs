@@ -81,18 +81,11 @@ impl Adornment {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::selection::Evidence;
-
     use crate::{Term, Value};
 
     fn bind(answer: &mut Answer, var_name: &str, value: Value) {
         let param = Term::var(var_name);
-        answer
-            .merge(Evidence::Parameter {
-                term: &param,
-                value: &value,
-            })
-            .unwrap();
+        answer.bind(&param, value).unwrap();
     }
 
     #[dialog_common::test]

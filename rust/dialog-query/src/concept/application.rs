@@ -9,8 +9,8 @@ use crate::attribute::AttributeDescriptor;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::planner::Disjunction;
 use crate::schema::CONCEPT_OVERHEAD;
+use crate::selection::Answer;
 use crate::selection::Answers;
-use crate::selection::{Answer, Evidence};
 use crate::{
     Cardinality, Environment, EvaluationError, Parameters, Schema, Source, Term, try_stream,
 };
@@ -26,22 +26,14 @@ fn extract_parameters(source: &Answer, terms: &Parameters) -> Result<Answer, Eva
     for (param_name, user_param) in terms.iter() {
         match user_param {
             Term::Variable { name: Some(_), .. } => {
-                // For named variables, map from user variable to parameter variable
                 let param = Term::var(param_name);
-                if let Some(factors) = source.lookup(user_param) {
-                    answer.merge(Evidence::Parameter {
-                        term: &param,
-                        value: &factors.content(),
-                    })?;
+                if let Ok(value) = source.resolve(user_param) {
+                    answer.bind(&param, value)?;
                 }
             }
             Term::Constant(value) => {
-                // For constants, directly bind the parameter variable to the constant value
                 let param = Term::var(param_name);
-                answer.merge(Evidence::Parameter {
-                    term: &param,
-                    value,
-                })?;
+                answer.bind(&param, value.clone())?;
             }
             Term::Variable { name: None, .. } => {}
         }
@@ -61,21 +53,14 @@ fn merge_parameters(
 ) -> Result<Answer, EvaluationError> {
     let mut merged = base.clone();
 
-    // Map through parameters: for each parameter, if it exists in result,
-    // merge it into base under the user variable name
     for (param_name, user_param) in terms.iter() {
-        // Skip constants - they were input parameters, not results to merge back
         if matches!(user_param, Term::Constant(_)) {
             continue;
         }
 
-        // Try to get the factors for the parameter name from result
         let param = Term::var(param_name);
-        if let Some(factors) = result.lookup(&param) {
-            // Merge all factors under the user's variable name, preserving provenance
-            for factor in factors.evidence() {
-                merged.assign(user_param, factor)?;
-            }
+        if let Ok(value) = result.resolve(&param) {
+            merged.bind(user_param, value)?;
         }
     }
 
@@ -456,10 +441,7 @@ mod tests {
         // Create evaluation context with bound entity in the answer
         let mut answer = Answer::new();
         let person_param = Term::var("person");
-        answer.merge(Evidence::Parameter {
-            term: &person_param,
-            value: &Value::from(alice),
-        })?;
+        answer.bind(&person_param, Value::from(alice))?;
 
         let answers = answer.seed();
 

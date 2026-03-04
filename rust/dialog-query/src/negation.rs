@@ -100,7 +100,7 @@ mod tests {
     use crate::Session;
     use crate::artifact::Artifacts;
     use crate::error::EvaluationError;
-    use crate::selection::{Answer, Evidence};
+    use crate::selection::Answer;
     use crate::types::Any;
     use crate::{Term, Value};
     use dialog_storage::MemoryStorageBackend;
@@ -118,14 +118,8 @@ mod tests {
         let premise = !a.clone().is(b.clone());
 
         let mut answer = Answer::new();
-        answer.merge(Evidence::Parameter {
-            term: &Term::<Any>::from(&a),
-            value: &Value::from(1),
-        })?;
-        answer.merge(Evidence::Parameter {
-            term: &Term::<Any>::from(&b),
-            value: &Value::from(2),
-        })?;
+        answer.bind(&Term::<Any>::from(&a), Value::from(1))?;
+        answer.bind(&Term::<Any>::from(&b), Value::from(2))?;
 
         let results: Vec<Answer> = premise
             .evaluate(answer.seed(), &session)
@@ -147,20 +141,13 @@ mod tests {
         let store = Artifacts::anonymous(backend).await.unwrap();
         let session = Session::open(store);
 
-        // a=1, b=1 → equality matches → negation drops the answer
         let a = Term::<String>::var("a");
         let b = Term::<String>::var("b");
         let premise = !a.clone().is(b.clone());
 
         let mut answer = Answer::new();
-        answer.merge(Evidence::Parameter {
-            term: &Term::<Any>::from(&a),
-            value: &Value::from(1),
-        })?;
-        answer.merge(Evidence::Parameter {
-            term: &Term::<Any>::from(&b),
-            value: &Value::from(1),
-        })?;
+        answer.bind(&Term::<Any>::from(&a), Value::from(1))?;
+        answer.bind(&Term::<Any>::from(&b), Value::from(1))?;
 
         let results: Vec<Answer> = premise
             .evaluate(answer.seed(), &session)

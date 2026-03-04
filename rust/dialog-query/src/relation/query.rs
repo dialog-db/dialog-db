@@ -10,7 +10,7 @@ pub use crate::proposition::Proposition;
 use crate::query::Application;
 pub use crate::query::Output;
 use crate::schema::SEGMENT_READ_COST;
-use crate::selection::{Answer, Answers, Evidence};
+use crate::selection::{Answer, Answers};
 use crate::types::Any;
 use crate::{
     Entity, EvaluationError, Field, Parameters, Premise, Requirement, Schema, Source, Term, Type,
@@ -56,10 +56,10 @@ fn pick_winner(current: Artifact, challenger: Artifact) -> Artifact {
 fn verify_winner<S: Source>(source: S, selector: RelationQuery, input: Answer) -> impl Answers {
     try_stream! {
         let attribute_term = selector.attribute();
-        let attribute: Attribute = input.get(&attribute_term)?;
-        let entity: Entity = input.get(selector.of())?;
+        let attribute: Attribute = Attribute::try_from(input.resolve(&Term::from(&attribute_term))?)?;
+        let entity: Entity = Entity::try_from(input.resolve(&Term::from(selector.of()))?)?;
         let candidate_value: Value = input.resolve(selector.is())?;
-        let candidate_cause: Cause = input.get(selector.cause())?;
+        let candidate_cause: Cause = Cause::try_from(input.resolve(&Term::from(selector.cause()))?)?;
 
         let verification_selector = ArtifactSelector::new()
             .the(attribute)
@@ -247,7 +247,10 @@ impl RelationQuery {
     pub fn resolve_from_answer(&self, source: &Answer) -> Self {
         let the = source.resolve_term(&self.the);
         let of = source.resolve_term(&self.of);
-        let is = source.resolve_parameter(&self.is);
+        let is = match source.resolve(&self.is) {
+            Ok(value) => Term::Constant(value),
+            Err(_) => self.is.clone(),
+        };
         let cause = source.resolve_term(&self.cause);
 
         Self {
@@ -295,10 +298,7 @@ impl RelationQuery {
                     let relation = selector.resolve(&artifact);
 
                     let mut answer = input.clone();
-                    answer.merge(Evidence::Relation {
-                        application: &selector,
-                        fact: &relation,
-                    })?;
+                    answer.merge_relation(&selector, &relation)?;
                     yield answer;
                 }
             }
@@ -357,12 +357,9 @@ impl RelationQuery {
                         candidate = Some(pick_winner(candidate.unwrap(), artifact));
                     } else {
                         if let Some(winner) = candidate.take() {
-                            let fact = selector.resolve(&winner);
+                            let claim = selector.resolve(&winner);
                             let mut answer = input.clone();
-                            answer.merge(Evidence::Relation {
-                                application: &selector,
-                                fact: &fact,
-                            })?;
+                            answer.merge_relation(&selector, &claim)?;
                             yield answer;
                         }
                         candidate = Some(artifact);
@@ -370,12 +367,9 @@ impl RelationQuery {
                 }
 
                 if let Some(winner) = candidate.take() {
-                    let fact = selector.resolve(&winner);
+                    let claim = selector.resolve(&winner);
                     let mut answer = input.clone();
-                    answer.merge(Evidence::Relation {
-                        application: &selector,
-                        fact: &fact,
-                    })?;
+                    answer.merge_relation(&selector, &claim)?;
                     yield answer;
                 }
             }
@@ -410,12 +404,12 @@ impl RelationQuery {
             Term::Constant(t) => The::try_from(t.clone()).map_err(|_| {
                 EvaluationError::Store("Could not convert value to The".to_string())
             })?,
-            _ => source.get(&the_term)?,
+            _ => The::try_from(source.resolve(&Term::from(&the_term))?)?,
         };
 
         Ok(Claim {
             the,
-            of: source.get(&of_term)?,
+            of: Entity::try_from(source.resolve(&Term::from(&of_term))?)?,
             is: source.resolve(&is_param)?,
             cause: Cause([0; 32]),
         })
@@ -570,7 +564,7 @@ mod tests {
         assert!(answer.contains(&Term::var("person")));
         assert!(answer.contains(&Term::var("name")));
 
-        let person_id: Entity = answer.get(&Term::var("person"))?;
+        let person_id: Entity = Entity::try_from(answer.resolve(&Term::var("person"))?)?;
         let name_value: Value = answer.resolve(&Term::var("name"))?;
 
         assert_eq!(person_id, alice);
