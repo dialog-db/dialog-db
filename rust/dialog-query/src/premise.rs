@@ -15,7 +15,8 @@ use crate::proposition::Proposition;
 use crate::selection::{Match, Selection};
 use crate::{Parameters, Schema};
 use futures_util::future::Either;
-use std::fmt::Display;
+use std::fmt::{self, Display};
+use std::ops;
 
 /// A single condition in a deductive rule's body.
 ///
@@ -79,7 +80,7 @@ impl Premise {
 }
 
 impl Display for Premise {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Premise::Assert(application) => Display::fmt(&application, f),
             Premise::Unless(negation) => Display::fmt(&negation, f),
@@ -87,7 +88,7 @@ impl Display for Premise {
     }
 }
 
-impl std::ops::Not for Premise {
+impl ops::Not for Premise {
     type Output = Premise;
 
     fn not(self) -> Self::Output {

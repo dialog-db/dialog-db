@@ -1,7 +1,9 @@
+use core::pin::Pin;
+
 use crate::selection::Selection;
 use crate::stream::{fork_stream, stream_select};
 use crate::{Source, try_stream};
-use core::pin::Pin;
+use futures_util::stream::empty;
 
 use super::Conjunction;
 
@@ -50,7 +52,7 @@ impl Disjunction {
         source: &S,
     ) -> Pin<Box<dyn Selection>> {
         match self {
-            Self::Empty => Box::pin(futures_util::stream::empty()),
+            Self::Empty => Box::pin(empty()),
             Self::Solo(join) => Box::pin(join.evaluate(selection, source)),
             Self::Duet(left, right) => Self::merge(Self::Solo(left), right, selection, source),
             Self::Or(left, right) => Self::merge(*left, right, selection, source),

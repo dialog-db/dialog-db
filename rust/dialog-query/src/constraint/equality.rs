@@ -4,6 +4,8 @@
 //! Supports bidirectional inference: if one term is bound, the other will be
 //! inferred to have the same value.
 
+use std::fmt;
+
 use crate::types::Any;
 pub use crate::{
     Cardinality, Environment, EvaluationError, Field, Parameters, Requirement, Schema, Selection,
@@ -148,7 +150,7 @@ impl Equality {
 }
 
 impl Display for Equality {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} == {}", self.this, self.is)
     }
 }

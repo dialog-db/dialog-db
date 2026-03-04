@@ -5,14 +5,15 @@ pub mod rules;
 
 pub use rules::ConceptRules;
 
+use std::fmt;
+
 use crate::attribute::AttributeDescriptor;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::planner::Disjunction;
 use crate::schema::CONCEPT_OVERHEAD;
-use crate::selection::Match;
 use crate::selection::Selection;
 use crate::{
-    Cardinality, Environment, EvaluationError, Parameters, Schema, Source, Term, try_stream,
+    Cardinality, Environment, EvaluationError, Match, Parameters, Schema, Source, Term, try_stream,
 };
 use std::fmt::Display;
 
@@ -260,7 +261,7 @@ impl ConceptQuery {
 }
 
 impl Display for ConceptQuery {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} {{", self.predicate.this())?;
         for (name, term) in self.terms.iter() {
             write!(f, "{}: {},", name, term)?;
@@ -275,7 +276,6 @@ mod tests {
     use super::*;
     use crate::concept::descriptor::ConceptDescriptor;
     use crate::relation::query::RelationQuery;
-    use crate::selection::Match;
     use crate::the;
 
     use crate::{

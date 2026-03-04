@@ -348,13 +348,13 @@ mod tests {
     // Allow the derive macro to reference dialog_query:: from within the crate
     extern crate self as dialog_query;
 
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
+    use crate::Match;
     use crate::artifact::{Artifacts, Entity, Value};
     use crate::query::{Output, Source};
     use crate::relation::query::RelationQuery;
-    use crate::selection::Match;
     use crate::the;
 
     use crate::{
@@ -620,8 +620,7 @@ mod tests {
         }
 
         // employee can be derived from the stuff concept
-        let employee_predicate: crate::concept::descriptor::ConceptDescriptor =
-            Query::<Employee>::default().into();
+        let employee_predicate: ConceptDescriptor = Query::<Employee>::default().into();
         let employee_from_stuff = DeductiveRule::new(
             employee_predicate,
             vec![
@@ -648,8 +647,7 @@ mod tests {
         let store = Artifacts::anonymous(backend).await?;
         let mut session = Session::open(store).register(employee_from_stuff)?;
 
-        let stuff_predicate: crate::concept::descriptor::ConceptDescriptor =
-            Query::<Stuff>::default().into();
+        let stuff_predicate: ConceptDescriptor = Query::<Stuff>::default().into();
         let alice = stuff_predicate
             .create()
             .with("name", "Alice".to_string())
@@ -768,8 +766,7 @@ mod tests {
         let mut session = Session::open(store).install(employee_from_stuff)?;
 
         // Create test data as Stuff
-        let stuff_predicate: crate::concept::descriptor::ConceptDescriptor =
-            Query::<Stuff>::default().into();
+        let stuff_predicate: ConceptDescriptor = Query::<Stuff>::default().into();
         let alice = stuff_predicate
             .create()
             .with("name", "Alice".to_string())
@@ -869,7 +866,7 @@ mod tests {
 
         // Verify resolve returns ConceptRules that can plan
         let rules = session_with_rule.acquire(&adult_conclusion)?;
-        let candidate = crate::selection::Match::new();
+        let candidate = Match::new();
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("e"));
         terms.insert("name".into(), Term::var("n"));
@@ -1263,8 +1260,6 @@ mod tests {
 
     #[dialog_common::test]
     fn it_caches_plans_by_adornment() {
-        use crate::selection::Match;
-
         let person = person_concept();
         let rules = ConceptRules::new(&person);
 
@@ -1285,8 +1280,6 @@ mod tests {
 
     #[dialog_common::test]
     fn it_caches_different_plans_per_adornment() {
-        use crate::selection::Match;
-
         let person = person_concept();
         let rules = ConceptRules::new(&person);
 
@@ -1312,8 +1305,6 @@ mod tests {
 
     #[dialog_common::test]
     fn it_invalidates_cache_on_rule_install() {
-        use crate::selection::Match;
-
         let person = person_concept();
         let mut rules = ConceptRules::new(&person);
 
@@ -1341,8 +1332,6 @@ mod tests {
 
     #[dialog_common::test]
     fn it_preserves_cache_for_unrelated_rules() {
-        use crate::selection::Match;
-
         let person = person_concept();
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("e"));
@@ -1375,8 +1364,6 @@ mod tests {
 
     #[dialog_common::test]
     fn it_preserves_cache_for_duplicate_rules() {
-        use crate::selection::Match;
-
         let person = person_concept();
         let mut rules = ConceptRules::new(&person);
 
@@ -1405,8 +1392,6 @@ mod tests {
 
     #[dialog_common::test]
     fn it_shares_cache_across_clones() {
-        use crate::selection::Match;
-
         let person = person_concept();
         let rules = ConceptRules::new(&person);
 
@@ -1432,7 +1417,6 @@ mod tests {
     #[dialog_common::test]
     fn it_produces_cheaper_plan_with_bound_entity() {
         use crate::concept::application::adornment::Adornment;
-        use crate::selection::Match;
 
         let person = person_concept();
         let rules = ConceptRules::new(&person);
@@ -1522,11 +1506,11 @@ mod tests {
         assert_eq!(results2.len(), 2, "Cached query should find 2 people");
 
         // Both runs should produce the same names
-        let names1: std::collections::HashSet<_> = results1
+        let names1: HashSet<_> = results1
             .iter()
             .map(|r| r.lookup(&name_param).unwrap())
             .collect();
-        let names2: std::collections::HashSet<_> = results2
+        let names2: HashSet<_> = results2
             .iter()
             .map(|r| r.lookup(&name_param).unwrap())
             .collect();
@@ -1542,7 +1526,6 @@ mod tests {
     #[dialog_common::test]
     async fn it_produces_correct_results_from_cached_plan_with_bound_entity() -> anyhow::Result<()>
     {
-        use crate::selection::Match;
         use dialog_storage::MemoryStorageBackend;
 
         let backend = MemoryStorageBackend::default();

@@ -1,6 +1,7 @@
 use crate::error::EvaluationError;
 use dialog_common::ConditionalSend;
 pub use futures_util::stream::{Stream, StreamExt, TryStream};
+use std::future::Future;
 
 /// A fallible, asynchronous stream of typed query results.
 ///
@@ -13,9 +14,7 @@ pub trait Output<T: ConditionalSend>:
 {
     /// Collect all items into a Vec, propagating any errors
     #[allow(async_fn_in_trait)]
-    fn try_vec(
-        self,
-    ) -> impl std::future::Future<Output = Result<Vec<T>, EvaluationError>> + ConditionalSend
+    fn try_vec(self) -> impl Future<Output = Result<Vec<T>, EvaluationError>> + ConditionalSend
     where
         Self: Sized,
     {

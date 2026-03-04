@@ -15,6 +15,7 @@ use crate::Statement;
 use crate::artifact::{Artifact, Attribute, Entity, Instruction, Value};
 use crate::attribute::The;
 use std::collections::HashMap;
+use std::vec::IntoIter;
 
 /// An in-memory buffer of pending writes that can be committed atomically.
 ///
@@ -148,7 +149,7 @@ impl Default for Transaction {
 /// Implement IntoIterator for Transaction to provide instruction iteration
 impl IntoIterator for Transaction {
     type Item = Instruction;
-    type IntoIter = std::vec::IntoIter<Instruction>;
+    type IntoIter = IntoIter<Instruction>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.into_instructions().into_iter()

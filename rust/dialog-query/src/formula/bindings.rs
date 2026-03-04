@@ -25,8 +25,7 @@ pub struct Bindings {
     pub terms: Parameters,
 
     /// The formula application these bindings belong to (kept for identity only)
-    #[allow(dead_code)]
-    formula: Arc<FormulaQuery>,
+    pub formula: Arc<FormulaQuery>,
 }
 
 impl Bindings {
@@ -115,21 +114,20 @@ impl Bindings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Term;
+    use crate::formula::math;
+    use crate::formula::query::FormulaQuery;
+    use crate::{Query, Term};
 
-    fn test_formula() -> crate::formula::query::FormulaQuery {
-        use crate::formula::math;
-        crate::formula::query::FormulaQuery::Sum(crate::Query::<math::Sum> {
-            of: crate::Term::var("_unused_of"),
-            with: crate::Term::var("_unused_with"),
-            is: crate::Term::var("_unused_is"),
+    fn test_formula() -> FormulaQuery {
+        FormulaQuery::Sum(Query::<math::Sum> {
+            of: Term::var("_unused_of"),
+            with: Term::var("_unused_with"),
+            is: Term::var("_unused_is"),
         })
     }
 
     #[dialog_common::test]
     fn it_reads_bound_values() {
-        use crate::selection::Match;
-
         let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::var("test"));
 
@@ -147,8 +145,6 @@ mod tests {
 
     #[dialog_common::test]
     fn it_errors_on_missing_parameter() {
-        use crate::selection::Match;
-
         let terms = Parameters::new();
         let source = Match::new();
         let formula = test_formula();
@@ -163,8 +159,6 @@ mod tests {
 
     #[dialog_common::test]
     fn it_errors_on_unbound_variable() {
-        use crate::selection::Match;
-
         let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::var("unbound"));
 
@@ -181,8 +175,6 @@ mod tests {
 
     #[dialog_common::test]
     fn it_rejects_conflicting_assignment() {
-        use crate::selection::Match;
-
         let mut input = Match::new();
         input
             .bind(&Term::var("test"), 42u32.into())
@@ -197,8 +189,6 @@ mod tests {
 
     #[dialog_common::test]
     fn it_rejects_conflicting_write_value() {
-        use crate::selection::Match;
-
         let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::var("test"));
 
@@ -229,8 +219,6 @@ mod tests {
 
     #[dialog_common::test]
     fn it_accepts_matching_constant_write() {
-        use crate::selection::Match;
-
         let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::from(42u32).into());
 
@@ -247,8 +235,6 @@ mod tests {
 
     #[dialog_common::test]
     fn it_rejects_mismatched_constant_write() {
-        use crate::selection::Match;
-
         let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::from(99u32).into());
 

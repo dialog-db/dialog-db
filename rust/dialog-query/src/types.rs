@@ -18,6 +18,7 @@ use std::fmt;
 use std::hash::Hash;
 
 pub use crate::artifact::{Attribute, Cause, Entity, Type, Value};
+use crate::attribute::The;
 
 /// Trait implemented by type descriptors — named ZSTs that represent a
 /// dialog-artifacts type at the Rust type level.
@@ -182,7 +183,7 @@ impl_typed!(f32, Float);
 impl_typed!(Vec<u8>, Bytes);
 impl_typed!(Entity, EntityType);
 impl_typed!(Attribute, Symbol);
-impl_typed!(crate::attribute::The, Symbol);
+impl_typed!(The, Symbol);
 impl_typed!(Cause, Bytes);
 impl_typed!(Value, Any);
 
@@ -219,7 +220,7 @@ impl_scalar!(
     Attribute,
     Vec<u8>,
     Cause,
-    crate::attribute::The
+    The
 );
 
 impl Scalar for usize {}

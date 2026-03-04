@@ -108,18 +108,24 @@ pub trait Conclusion: ConditionalSend {
 
 #[cfg(test)]
 mod tests {
+    use std::result;
+    use std::vec;
+
     use super::*;
     use crate::Query;
     use crate::artifact::{
         ArtifactSelector, ArtifactStore, Artifacts, Attribute as ArtifactAttribute, Type, Value,
     };
     use crate::attribute::{Attribute as _, AttributeDescriptor};
+    use crate::error::EvaluationError;
+    use crate::query::{Application, Source};
+    use crate::selection::Selection;
 
     use crate::relation::query::RelationQuery;
     use crate::term::Term;
     use crate::the;
     use crate::types::Any;
-    use crate::{Cardinality, Concept, EvaluationError, Match, Session, Statement, Transaction};
+    use crate::{Cardinality, Concept, Match, Session, Statement, Transaction};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
@@ -212,7 +218,7 @@ mod tests {
 
     impl IntoIterator for Person {
         type Item = AttributeStatement;
-        type IntoIter = std::vec::IntoIter<AttributeStatement>;
+        type IntoIter = vec::IntoIter<AttributeStatement>;
 
         fn into_iter(self) -> Self::IntoIter {
             vec![
@@ -253,7 +259,7 @@ mod tests {
     // Implement TryFrom<selection::Match> for Person
     // This extracts values from the match by field name
     impl TryFrom<Match> for Person {
-        type Error = crate::error::EvaluationError;
+        type Error = EvaluationError;
 
         fn try_from(input: Match) -> Result<Self, Self::Error> {
             Ok(Person {
@@ -299,19 +305,15 @@ mod tests {
     }
 
     // Implement Queryable for PersonMatch
-    impl crate::query::Application for PersonMatch {
+    impl Application for PersonMatch {
         type Conclusion = Person;
 
-        fn evaluate<S: crate::query::Source, M: crate::selection::Selection>(
-            self,
-            selection: M,
-            source: &S,
-        ) -> impl crate::selection::Selection {
+        fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
             let application: ConceptQuery = self.into();
             application.evaluate(selection, source)
         }
 
-        fn realize(&self, source: Match) -> std::result::Result<Self::Conclusion, EvaluationError> {
+        fn realize(&self, source: Match) -> result::Result<Self::Conclusion, EvaluationError> {
             Ok(Person {
                 this: Entity::try_from(source.lookup(&Term::from(&self.this))?)?,
                 name: String::try_from(source.lookup(&Term::from(&self.name))?)?,

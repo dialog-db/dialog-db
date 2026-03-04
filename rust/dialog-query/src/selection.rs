@@ -7,7 +7,9 @@ use dialog_common::ConditionalSend;
 
 use crate::error::EvaluationError;
 
-pub use futures_util::stream::{Stream, TryStream};
+pub use futures_util::future::Either;
+pub use futures_util::stream::{Stream, TryStream, once};
+pub use std::future::Future;
 
 /// A fallible, asynchronous stream of [`Match`] values.
 ///
@@ -25,9 +27,7 @@ pub trait Selection:
 {
     /// Collect all matches into a Vec, propagating any errors
     #[allow(async_fn_in_trait)]
-    fn try_vec(
-        self,
-    ) -> impl std::future::Future<Output = Result<Vec<Match>, EvaluationError>> + ConditionalSend
+    fn try_vec(self) -> impl Future<Output = Result<Vec<Match>, EvaluationError>> + ConditionalSend
     where
         Self: Sized,
     {
@@ -45,10 +45,9 @@ pub trait Selection:
         S: Selection,
         F: FnMut(Match) -> S + ConditionalSend + 'static,
     {
-        use futures_util::future::Either;
         futures_util::StreamExt::flat_map(self, move |result| match result {
             Ok(matched) => Either::Left(f(matched)),
-            Err(e) => Either::Right(futures_util::stream::once(async move { Err(e) })),
+            Err(e) => Either::Right(once(async move { Err(e) })),
         })
     }
 

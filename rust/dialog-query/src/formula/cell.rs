@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::fmt::Display;
+use std::fmt::{self, Display};
 
 use crate::error::{FieldTypeError, TypeError};
 use crate::term::Term;
@@ -138,7 +138,7 @@ impl Cell {
 }
 
 impl Display for Cell {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let prefix = if self.requirement.is_required() {
             ""
         } else {

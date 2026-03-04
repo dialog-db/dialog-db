@@ -2,6 +2,7 @@ use crate::artifact::Instruction;
 use futures_util::Stream;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::vec::IntoIter;
 
 use super::Transaction;
 
@@ -9,7 +10,7 @@ use super::Transaction;
 /// individual [`Instruction`]s for writing to the artifact store.
 pub struct TransactionStream {
     /// Iterator over the transaction's instructions
-    iter: std::vec::IntoIter<Instruction>,
+    iter: IntoIter<Instruction>,
 }
 
 impl From<Transaction> for TransactionStream {

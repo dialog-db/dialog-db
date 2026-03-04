@@ -208,8 +208,8 @@ mod tests {
         );
 
         let premises = vec![
-            crate::Premise::Assert(Proposition::Relation(Box::new(fact1))),
-            crate::Premise::Assert(Proposition::Relation(Box::new(fact2))),
+            Premise::Assert(Proposition::Relation(Box::new(fact1))),
+            Premise::Assert(Proposition::Relation(Box::new(fact2))),
         ];
 
         let plan = Planner::from(premises)
@@ -247,8 +247,8 @@ mod tests {
         );
 
         let premises = vec![
-            crate::Premise::Assert(Proposition::Relation(Box::new(fact1))),
-            crate::Premise::Assert(Proposition::Relation(Box::new(fact2))),
+            Premise::Assert(Proposition::Relation(Box::new(fact1))),
+            Premise::Assert(Proposition::Relation(Box::new(fact2))),
         ];
 
         let plan = Planner::from(premises)
@@ -305,8 +305,8 @@ mod tests {
         );
 
         let premises = vec![
-            crate::Premise::Assert(Proposition::Relation(Box::new(fact1))),
-            crate::Premise::Assert(Proposition::Relation(Box::new(fact2))),
+            Premise::Assert(Proposition::Relation(Box::new(fact1))),
+            Premise::Assert(Proposition::Relation(Box::new(fact2))),
         ];
         let plan = Planner::from(premises).plan(&Environment::new())?;
 

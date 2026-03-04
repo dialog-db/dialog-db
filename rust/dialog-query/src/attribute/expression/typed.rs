@@ -7,6 +7,7 @@ use crate::negation::Negation;
 use crate::statement::Statement;
 use crate::types::Scalar;
 use crate::{Cardinality, Entity, Premise, Proposition, Term, Transaction};
+use std::iter;
 use std::marker::PhantomData;
 use std::ops::Not;
 
@@ -102,12 +103,19 @@ pub type StaticAttributeStatement<A> = StaticAttributeExpression<A, Entity, A>;
 pub struct StaticAttributeExpression<A: Attribute, Of, Is, Because: ExpressionCause = Option<Cause>>
 {
     /// The entity (or entity term) this attribute belongs to.
-    pub of: Of,
+    of: Of,
     /// The attribute value (or value term).
-    pub is: Is,
+    is: Is,
     /// Provenance/cause for this expression.
-    pub cause: Because,
+    cause: Because,
     _marker: PhantomData<A>,
+}
+
+impl<A: Attribute, Of, Is, Because: ExpressionCause> StaticAttributeExpression<A, Of, Is, Because> {
+    /// Consume the expression and return its parts.
+    pub fn into_parts(self) -> (Of, Is, Because) {
+        (self.of, self.is, self.cause)
+    }
 }
 
 impl<A: Attribute> StaticAttributeStatement<A> {
@@ -127,9 +135,10 @@ impl<A: Attribute, Of, Is> StaticAttributeExpression<A, Of, Is, Option<Cause>> {
     ///
     /// Accepts a concrete [`Cause`], [`Option<Cause>`], or a [`Term<Cause>`].
     pub fn cause<C: ExpressionCause>(self, cause: C) -> StaticAttributeExpression<A, Of, Is, C> {
+        let (of, is, _) = self.into_parts();
         StaticAttributeExpression {
-            of: self.of,
-            is: self.is,
+            of,
+            is,
             cause,
             _marker: PhantomData,
         }
@@ -143,21 +152,23 @@ where
     Is: Into<A>,
 {
     fn assert(self, transaction: &mut Transaction) {
+        let (of, is, _) = self.into_parts();
         let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
         let the = desc.the().clone();
-        let attr: A = self.is.into();
+        let attr: A = is.into();
         let value = attr.value().clone().into();
         if desc.cardinality() == Cardinality::One {
-            transaction.associate_unique(the, self.of, value);
+            transaction.associate_unique(the, of, value);
         } else {
-            transaction.associate(the, self.of, value);
+            transaction.associate(the, of, value);
         }
     }
 
     fn retract(self, transaction: &mut Transaction) {
+        let (of, is, _) = self.into_parts();
         let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
-        let attr: A = self.is.into();
-        transaction.dissociate(desc.the().clone(), self.of, attr.value().clone().into());
+        let attr: A = is.into();
+        transaction.dissociate(desc.the().clone(), of, attr.value().clone().into());
     }
 }
 
@@ -168,14 +179,15 @@ where
     Is: Into<A>,
 {
     type Item = AttributeStatement;
-    type IntoIter = std::iter::Once<AttributeStatement>;
+    type IntoIter = iter::Once<AttributeStatement>;
 
     fn into_iter(self) -> Self::IntoIter {
+        let (of, is, _) = self.into_parts();
         let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
-        let attr: A = self.is.into();
-        std::iter::once(AttributeStatement {
+        let attr: A = is.into();
+        iter::once(AttributeStatement {
             the: desc.the().clone(),
-            of: self.of,
+            of,
             is: attr.value().clone().into(),
             cardinality: desc.cardinality(),
         })
@@ -192,12 +204,9 @@ where
     Because: ExpressionCause,
 {
     fn from(expression: StaticAttributeExpression<A, Of, Is, Because>) -> Self {
-        let value: Term<A::Type> = expression.is.into();
-        let query = relation_query::<A>(
-            expression.of.into(),
-            value.into(),
-            expression.cause.as_cause_term(),
-        );
+        let (of, is, cause) = expression.into_parts();
+        let value: Term<A::Type> = is.into();
+        let query = relation_query::<A>(of.into(), value.into(), cause.as_cause_term());
         Premise::Assert(Proposition::Relation(Box::new(query)))
     }
 }
@@ -229,11 +238,12 @@ where
     Is: Into<A>,
 {
     fn from(expr: StaticAttributeExpression<A, Entity, Is, Option<Cause>>) -> Self {
+        let (of, is, _) = expr.into_parts();
         let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
-        let attr: A = expr.is.into();
+        let attr: A = is.into();
         AttributeStatement {
             the: desc.the().clone(),
-            of: expr.of,
+            of,
             is: attr.value().clone().into(),
             cardinality: desc.cardinality(),
         }
@@ -243,6 +253,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Match;
     use crate::artifact::Value;
     use crate::premise::Premise;
     use crate::proposition::Proposition;
@@ -464,7 +475,6 @@ mod tests {
             _ => panic!("Expected Assert"),
         };
 
-        use crate::selection::Match;
         let results = prop
             .evaluate(Match::new().seed(), &Session::open(store.clone()))
             .try_collect::<Vec<_>>()

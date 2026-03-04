@@ -2,6 +2,8 @@
 mod named_attributes;
 pub use named_attributes::NamedAttributes;
 
+use std::iter;
+
 use crate::Predicate;
 use crate::attribute::{AttributeDescriptor, Attribution};
 use crate::concept::application::ConceptQuery;
@@ -79,7 +81,7 @@ impl ConceptDescriptor {
 
     /// Returns an iterator over operand names, starting with "this" followed by attribute keys.
     pub fn operands(&self) -> impl Iterator<Item = &str> {
-        std::iter::once("this").chain(self.with().keys())
+        iter::once("this").chain(self.with().keys())
     }
 
     /// Derives a `Schema` from this descriptor's attributes.
@@ -373,7 +375,7 @@ impl ConceptConclusion {
     /// Look up a field value by its concept field name (e.g. "name", "age").
     pub fn get<T>(&self, field: &str) -> Result<T, EvaluationError>
     where
-        T: Scalar + std::convert::TryFrom<Value>,
+        T: Scalar + TryFrom<Value>,
     {
         let param = self
             .terms

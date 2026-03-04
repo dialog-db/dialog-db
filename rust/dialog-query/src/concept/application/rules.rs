@@ -4,6 +4,8 @@
 //! execution plans keyed by adornment (binding pattern). This is the per-concept
 //! counterpart to the registry-level indexing in `RuleRegistry`.
 
+use std::iter;
+
 use super::adornment::Adornment;
 use crate::DeductiveRule;
 use crate::concept::descriptor::ConceptDescriptor;
@@ -56,7 +58,7 @@ impl ConceptRules {
 
         // Slow path: replan all rules with inferred scope
         let scope = adornment.into_environment(terms);
-        let all_rules = std::iter::once(&self.implicit).chain(&self.installed);
+        let all_rules = iter::once(&self.implicit).chain(&self.installed);
         let plan: Disjunction = all_rules.map(|rule| rule.plan(&scope)).collect();
 
         let fork = Arc::new(plan);

@@ -1,5 +1,9 @@
 //! Error types for the query engine
 
+use std::convert::Infallible;
+use std::error;
+use std::fmt;
+
 use crate::artifact::{DialogArtifactsError, Type, TypeError as ArtifactTypeError, Value};
 pub use crate::environment::Environment;
 pub use crate::proposition::Proposition;
@@ -343,8 +347,8 @@ impl From<DialogArtifactsError> for EvaluationError {
     }
 }
 
-impl From<std::convert::Infallible> for EvaluationError {
-    fn from(_: std::convert::Infallible) -> Self {
+impl From<Infallible> for EvaluationError {
+    fn from(_: Infallible) -> Self {
         unreachable!("Infallible can not occur")
     }
 }
@@ -425,14 +429,14 @@ pub struct InvalidIdentifier<'a> {
     pub reason: &'static str,
 }
 
-impl std::fmt::Display for InvalidIdentifier<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for InvalidIdentifier<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let input = String::from_utf8_lossy(self.input);
         write!(f, "invalid relation \"{input}\": {}", self.reason)
     }
 }
 
-impl std::error::Error for InvalidIdentifier<'_> {}
+impl error::Error for InvalidIdentifier<'_> {}
 
 /// Owned version of [`InvalidIdentifier`] for use in contexts that cannot
 /// carry the input lifetime (e.g. [`FromStr`](std::str::FromStr)).
@@ -444,13 +448,13 @@ pub struct OwnedInvalidIdentifier {
     pub reason: &'static str,
 }
 
-impl std::fmt::Display for OwnedInvalidIdentifier {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for OwnedInvalidIdentifier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "invalid relation \"{}\": {}", self.input, self.reason)
     }
 }
 
-impl std::error::Error for OwnedInvalidIdentifier {}
+impl error::Error for OwnedInvalidIdentifier {}
 
 impl From<OwnedInvalidIdentifier> for DialogArtifactsError {
     fn from(e: OwnedInvalidIdentifier) -> Self {

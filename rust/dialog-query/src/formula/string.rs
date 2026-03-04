@@ -4,6 +4,7 @@
 //! concatenation, length calculation, case conversion, and basic string processing.
 
 pub use crate::Formula;
+use crate::formula::Input;
 
 /// Concatenate formula that joins two strings
 #[derive(Debug, Clone, Formula)]
@@ -19,7 +20,7 @@ pub struct Concatenate {
 
 impl Concatenate {
     /// Concatenate `first` and `second` into `is`
-    pub fn derive(input: dialog_query::formula::Input<Self>) -> Vec<Self> {
+    pub fn derive(input: Input<Self>) -> Vec<Self> {
         vec![Concatenate {
             first: input.first.clone(),
             second: input.second.clone(),
@@ -40,7 +41,7 @@ pub struct Length {
 
 impl Length {
     /// Compute the length of the input string
-    pub fn derive(input: dialog_query::formula::Input<Self>) -> Vec<Self> {
+    pub fn derive(input: Input<Self>) -> Vec<Self> {
         vec![Length {
             of: input.of.clone(),
             is: input.of.len() as u32,
@@ -60,7 +61,7 @@ pub struct Uppercase {
 
 impl Uppercase {
     /// Convert the input string to uppercase
-    pub fn derive(input: dialog_query::formula::Input<Self>) -> Vec<Self> {
+    pub fn derive(input: Input<Self>) -> Vec<Self> {
         vec![Uppercase {
             of: input.of.clone(),
             is: input.of.to_uppercase(),
@@ -80,7 +81,7 @@ pub struct Lowercase {
 
 impl Lowercase {
     /// Convert the input string to lowercase
-    pub fn derive(input: dialog_query::formula::Input<Self>) -> Vec<Self> {
+    pub fn derive(input: Input<Self>) -> Vec<Self> {
         vec![Lowercase {
             of: input.of.clone(),
             is: input.of.to_lowercase(),
@@ -108,7 +109,7 @@ pub struct Like {
 
 impl Like {
     /// Match text against pattern, returning the matched text or empty on mismatch
-    pub fn derive(input: dialog_query::formula::Input<Self>) -> Vec<Self> {
+    pub fn derive(input: Input<Self>) -> Vec<Self> {
         if glob_match(&input.pattern, &input.text) {
             vec![Like {
                 text: input.text.clone(),

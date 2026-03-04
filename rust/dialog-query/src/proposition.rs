@@ -1,3 +1,5 @@
+use std::fmt;
+
 pub use crate::concept::application::ConceptQuery;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::constraint::Constraint;
@@ -10,6 +12,7 @@ use crate::selection::Selection;
 pub use crate::{Environment, Parameters, Schema, Source};
 use futures_util::future::Either;
 use serde::de;
+use serde::ser;
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use std::fmt::Display;
@@ -105,7 +108,7 @@ impl From<FormulaQuery> for Proposition {
 }
 
 impl Display for Proposition {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Proposition::Relation(application) => Display::fmt(application, f),
             Proposition::Concept(application) => Display::fmt(application, f),
@@ -132,7 +135,7 @@ impl Serialize for Proposition {
             }
             Proposition::Formula(fq) => fq.serialize(serializer),
             Proposition::Constraint(c) => c.serialize(serializer),
-            Proposition::Relation(_) => Err(serde::ser::Error::custom(
+            Proposition::Relation(_) => Err(ser::Error::custom(
                 "Relation propositions cannot be serialized in formal notation",
             )),
         }

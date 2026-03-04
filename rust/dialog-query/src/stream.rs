@@ -2,6 +2,7 @@ pub use async_stream::try_stream;
 pub use dialog_common::ConditionalSend;
 pub use futures_core::{Future, TryStream};
 pub use futures_util::{TryStreamExt, stream_select};
+use std::pin::Pin;
 use tokio::sync::mpsc::unbounded_channel;
 
 use crate::EvaluationError;
@@ -37,7 +38,7 @@ where
     tokio::spawn(future);
 }
 
-type PinnedSendStream<T> = std::pin::Pin<Box<dyn SendStream<T>>>;
+type PinnedSendStream<T> = Pin<Box<dyn SendStream<T>>>;
 
 /// Split a stream into two independent streams that each receive a clone of every item
 pub fn fork_stream<S, T>(input: S) -> (PinnedSendStream<T>, PinnedSendStream<T>)

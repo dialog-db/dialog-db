@@ -6,6 +6,8 @@
 
 pub mod equality;
 
+use std::fmt;
+
 pub use equality::Equality;
 
 use crate::selection::Selection;
@@ -74,7 +76,7 @@ impl Constraint {
 }
 
 impl Display for Constraint {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Constraint::Equality(constraint) => Display::fmt(constraint, f),
         }

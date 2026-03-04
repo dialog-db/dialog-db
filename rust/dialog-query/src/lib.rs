@@ -7,6 +7,15 @@
 //! designed to be equivalent to the TypeScript query engine in @query/.
 
 #![warn(missing_docs)]
+#![warn(clippy::absolute_paths)]
+#![warn(clippy::default_trait_access)]
+#![warn(clippy::fallible_impl_from)]
+#![warn(clippy::panicking_unwrap)]
+#![warn(clippy::unused_async)]
+// TODO: Enable this
+// #![warn(clippy::large_futures)]
+#![deny(clippy::partial_pub_fields)]
+#![deny(clippy::unnecessary_self_imports)]
 
 // Allow macro-generated code to reference this crate as `dialog_query::`
 extern crate self as dialog_query;

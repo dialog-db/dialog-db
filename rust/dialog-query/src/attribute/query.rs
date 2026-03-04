@@ -1,3 +1,5 @@
+use std::any::type_name;
+
 use crate::attribute::Attribute;
 use crate::attribute::AttributeDescriptor;
 use crate::attribute::expression::typed::{StaticAttributeExpression, StaticAttributeStatement};
@@ -71,7 +73,7 @@ where
         let typed_value = A::Type::try_from(value).map_err(|_| {
             EvaluationError::Store(format!(
                 "cannot convert value to {}",
-                std::any::type_name::<A::Type>()
+                type_name::<A::Type>()
             ))
         })?;
 
@@ -90,9 +92,10 @@ where
     Because: ExpressionCause,
 {
     fn from(expr: StaticAttributeExpression<A, Entity, Term<A::Type>, Because>) -> Self {
+        let (of, is, _) = expr.into_parts();
         AttributeQuery {
-            of: Term::Constant(Value::from(expr.of.clone())),
-            is: expr.is,
+            of: Term::Constant(Value::from(of.clone())),
+            is,
         }
     }
 }
@@ -105,10 +108,8 @@ where
     Because: ExpressionCause,
 {
     fn from(expr: StaticAttributeExpression<A, Term<Entity>, Term<A::Type>, Because>) -> Self {
-        AttributeQuery {
-            of: expr.of,
-            is: expr.is,
-        }
+        let (of, is, _) = expr.into_parts();
+        AttributeQuery { of, is }
     }
 }
 
@@ -118,9 +119,10 @@ where
     Because: ExpressionCause,
 {
     fn from(expr: StaticAttributeExpression<A, Term<Entity>, A, Because>) -> Self {
+        let (of, is, _) = expr.into_parts();
         AttributeQuery {
-            of: expr.of,
-            is: Term::Constant(expr.is.value().clone().into()),
+            of,
+            is: Term::Constant(is.value().clone().into()),
         }
     }
 }

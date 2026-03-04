@@ -14,12 +14,16 @@
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::Environment;
 use crate::Premise;
 use crate::artifact::{Attribute as ArtifactAttribute, Entity, Type, Value};
+use crate::attribute::The;
 use crate::constraint::{Constraint, Equality};
-use crate::error::TypeError;
+use crate::error::{FieldTypeError, TypeError};
 use crate::proposition::Proposition;
+use crate::selection;
 use crate::types::{Any, Scalar, TypeDescriptor, Typed};
+use serde::de::Error as DeserializeError;
 use std::hash::Hash;
 
 static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -103,7 +107,7 @@ where
     /// Resolve this term against a match. If the term is a variable
     /// bound in the match, returns a constant term with the bound value.
     /// Otherwise returns the term unchanged.
-    pub fn resolve(&self, source: &crate::selection::Match) -> Self {
+    pub fn resolve(&self, source: &selection::Match) -> Self {
         let term: Term<Any> = self.clone().into();
         match source.lookup(&term) {
             Ok(value) => {
@@ -206,7 +210,7 @@ impl<T: Typed> Term<T> {
     ///
     /// Constants are always bound. Named variables are bound if their name
     /// appears in the environment. Anonymous variables are never bound.
-    pub fn is_bound(&self, env: &crate::Environment) -> bool {
+    pub fn is_bound(&self, env: &Environment) -> bool {
         match self {
             Term::Constant(_) => true,
             Term::Variable { name: None, .. } => false,
@@ -217,7 +221,7 @@ impl<T: Typed> Term<T> {
     /// Adds this term's variable name to the environment.
     ///
     /// Only named variables are added; constants and blanks are ignored.
-    pub fn bind(&self, env: &mut crate::Environment) {
+    pub fn bind(&self, env: &mut Environment) {
         if let Term::Variable { name: Some(n), .. } = self {
             env.add(n.clone());
         }
@@ -226,7 +230,7 @@ impl<T: Typed> Term<T> {
     /// Removes this term's variable name from the environment.
     ///
     /// Returns `true` if the name was present. Constants and blanks return `false`.
-    pub fn unbind(&self, env: &mut crate::Environment) -> bool {
+    pub fn unbind(&self, env: &mut Environment) -> bool {
         match self {
             Term::Variable { name: Some(n), .. } => env.remove(n),
             _ => false,
@@ -280,8 +284,8 @@ impl From<Entity> for Term<Entity> {
     }
 }
 
-impl From<crate::attribute::The> for Term<crate::attribute::The> {
-    fn from(the: crate::attribute::The) -> Self {
+impl From<The> for Term<The> {
+    fn from(the: The) -> Self {
         Term::Constant(Value::from(the))
     }
 }
@@ -451,13 +455,13 @@ impl Term<Any> {
     /// type (via the `Any` descriptor or the constant's value) and `T` has a
     /// statically known type, they must match. Returns
     /// [`FieldTypeError::TypeMismatch`] on incompatible types.
-    pub fn narrow<T: Typed>(self) -> Result<Term<T>, crate::error::FieldTypeError> {
+    pub fn narrow<T: Typed>(self) -> Result<Term<T>, FieldTypeError> {
         let target = <<T as Typed>::Descriptor as TypeDescriptor>::TYPE;
         let source = self.content_type();
         if let (Some(expected), Some(actual)) = (target, source)
             && expected != actual
         {
-            return Err(crate::error::FieldTypeError::TypeMismatch {
+            return Err(FieldTypeError::TypeMismatch {
                 expected,
                 actual: Box::new(self),
             });
@@ -583,7 +587,7 @@ impl<'de, T: Typed> serde::Deserialize<'de> for Term<T> {
         match &raw {
             serde_json::Value::Object(map) if map.contains_key("?") => {
                 let var: VarInfo =
-                    serde_json::from_value(map["?"].clone()).map_err(serde::de::Error::custom)?;
+                    serde_json::from_value(map["?"].clone()).map_err(DeserializeError::custom)?;
                 Ok(Term::Variable {
                     name: var.name,
                     descriptor: <T as Typed>::Descriptor::from_content_type(var.content_type),
@@ -597,12 +601,12 @@ impl<'de, T: Typed> serde::Deserialize<'de> for Term<T> {
                 } else if let Some(f) = n.as_f64() {
                     Value::Float(f)
                 } else {
-                    return Err(serde::de::Error::custom(format!("unsupported number: {n}")));
+                    return Err(DeserializeError::custom(format!("unsupported number: {n}")));
                 };
                 Ok(Term::Constant(value))
             }
             _ => {
-                let value: Value = serde_json::from_value(raw).map_err(serde::de::Error::custom)?;
+                let value: Value = serde_json::from_value(raw).map_err(DeserializeError::custom)?;
                 Ok(Term::Constant(value))
             }
         }
@@ -1027,7 +1031,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         match err {
-            crate::error::FieldTypeError::TypeMismatch { expected, .. } => {
+            FieldTypeError::TypeMismatch { expected, .. } => {
                 assert_eq!(expected, Type::UnsignedInt);
             }
             other => panic!("Expected TypeMismatch, got {:?}", other),

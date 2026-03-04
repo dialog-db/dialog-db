@@ -48,24 +48,28 @@ mod tests {
     use crate::the;
 
     mod person {
-        use crate::Cardinality;
-        use crate::attribute::AttributeDescriptor;
+        use std::sync::OnceLock;
+
+        use crate::artifact::Value;
         use crate::attribute::expression::typed::StaticAttributeStatement;
         use crate::attribute::query::AttributeQuery;
+        use crate::attribute::{Attribute, AttributeDescriptor, StaticAttributeExpressionBuilder};
         use crate::descriptor::Descriptor;
+        use crate::term::Term;
         use crate::the;
-        use crate::types::Typed;
+        use crate::types::{TypeDescriptor, Typed};
+        use crate::{Cardinality, Predicate};
 
         #[derive(Clone, Debug)]
         pub struct Name(pub String);
 
-        impl crate::Predicate for Name {
+        impl Predicate for Name {
             type Conclusion = StaticAttributeStatement<Self>;
             type Application = AttributeQuery<Self>;
             type Descriptor = AttributeDescriptor;
         }
 
-        impl crate::attribute::Attribute for Name {
+        impl Attribute for Name {
             type Type = String;
 
             fn value(&self) -> &Self::Type {
@@ -75,20 +79,19 @@ mod tests {
 
         impl Descriptor<AttributeDescriptor> for Name {
             fn descriptor() -> &'static AttributeDescriptor {
-                static DESCRIPTOR: std::sync::OnceLock<AttributeDescriptor> =
-                    std::sync::OnceLock::new();
+                static DESCRIPTOR: OnceLock<AttributeDescriptor> = OnceLock::new();
                 DESCRIPTOR.get_or_init(|| {
                     AttributeDescriptor::new(
                         the!("person/name"),
                         "The name of the person",
                         Cardinality::One,
-                        <<String as Typed>::Descriptor as crate::types::TypeDescriptor>::TYPE,
+                        <<String as Typed>::Descriptor as TypeDescriptor>::TYPE,
                     )
                 })
             }
         }
 
-        impl crate::attribute::StaticAttributeExpressionBuilder for Name {}
+        impl StaticAttributeExpressionBuilder for Name {}
 
         impl From<String> for Name {
             fn from(value: String) -> Self {
@@ -96,9 +99,9 @@ mod tests {
             }
         }
 
-        impl From<Name> for crate::Term<String> {
+        impl From<Name> for Term<String> {
             fn from(attr: Name) -> Self {
-                crate::Term::Constant(<String as Into<crate::artifact::Value>>::into(attr.0))
+                Term::Constant(<String as Into<Value>>::into(attr.0))
             }
         }
     }

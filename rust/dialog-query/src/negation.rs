@@ -1,8 +1,9 @@
+use std::fmt::{self, Display};
+
 use super::proposition::Proposition;
 use crate::selection::Selection;
 use crate::{Environment, Parameters, Requirement, Schema, Source, try_stream};
 pub use futures_util::{TryStreamExt, stream};
-use std::fmt::Display;
 
 /// Cost overhead added for negation operations (checking non-existence)
 pub const NEGATION_OVERHEAD: usize = 100;
@@ -88,7 +89,7 @@ impl Negation {
 }
 
 impl Display for Negation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Negation(application) = self;
         write!(f, "! {}", application)
     }

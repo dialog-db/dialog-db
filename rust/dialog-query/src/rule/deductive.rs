@@ -5,7 +5,7 @@ pub use crate::planner::{Conjunction, Planner};
 pub use crate::premise::Premise;
 pub use crate::{Attribute, Cardinality, Parameters, Proposition, Requirement, Value};
 use crate::{Environment, Term, Type};
-use std::fmt::Display;
+use std::fmt::{Display, Formatter, Result as FmtResult};
 
 /// Represents a deductive rule that can be applied creating a premise.
 #[derive(Debug, Clone, PartialEq)]
@@ -99,7 +99,7 @@ impl UncompiledDeductiveRule {
 }
 
 impl Display for DeductiveRule {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "{} {{", self.conclusion.this())?;
         write!(f, "this: {},", Type::Entity)?;
         for (name, attribute) in self.conclusion.with().iter() {
@@ -123,7 +123,7 @@ impl From<&ConceptDescriptor> for DeductiveRule {
         for (name, attribute) in concept.with().iter() {
             premises.push(
                 RelationQuery::new(
-                    Term::Constant(crate::artifact::Value::from(attribute.the().clone())),
+                    Term::Constant(Value::from(attribute.the().clone())),
                     this.clone(),
                     Term::var(name),
                     Term::blank(),

@@ -20,6 +20,8 @@ use dialog_artifacts::{Artifact, Cause};
 use futures_util::future::Either;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
+use std::fmt::{Formatter, Result as FmtResult};
+use std::ops::Not;
 
 /// Per-match cost of the secondary lookup required when scanning the value
 /// index (VAE) with `Cardinality::One`. Each match from the primary scan
@@ -182,10 +184,10 @@ impl RelationQuery {
     pub fn attribute(&self) -> Term<Attribute> {
         match &self.the {
             Term::Constant(value) => Term::Constant(value.clone()),
-            Term::Variable { name, .. } => Term::Variable {
-                name: name.clone(),
-                descriptor: Default::default(),
-            },
+            Term::Variable {
+                name: Some(name), ..
+            } => Term::var(name.clone()),
+            Term::Variable { name: None, .. } => Term::blank(),
         }
     }
 
@@ -456,7 +458,7 @@ impl TryFrom<&RelationQuery> for ArtifactSelector<Constrained> {
 }
 
 impl Display for RelationQuery {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "Claim {{")?;
         write!(f, "the: {},", self.the)?;
         write!(f, "of: {},", self.of)?;
@@ -466,7 +468,7 @@ impl Display for RelationQuery {
     }
 }
 
-impl std::ops::Not for RelationQuery {
+impl Not for RelationQuery {
     type Output = Premise;
 
     fn not(self) -> Self::Output {

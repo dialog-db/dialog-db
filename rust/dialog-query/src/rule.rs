@@ -54,6 +54,7 @@ macro_rules! when {
 #[cfg(test)]
 mod tests {
     extern crate self as dialog_query;
+    use std::vec::IntoIter;
 
     use super::*;
     use crate::artifact::{Artifacts, Entity, Type};
@@ -63,7 +64,9 @@ mod tests {
     use crate::concept::{Concept, Conclusion};
     use crate::predicate::Predicate;
     use crate::premise::Premise;
+    use crate::query::{Application, Source};
     use crate::selection::Match;
+    use crate::selection::Selection;
     use crate::statement::Statement;
     use crate::term::Term;
     use crate::the;
@@ -164,7 +167,7 @@ mod tests {
 
     impl IntoIterator for Person {
         type Item = AttributeStatement;
-        type IntoIter = std::vec::IntoIter<AttributeStatement>;
+        type IntoIter = IntoIter<AttributeStatement>;
 
         fn into_iter(self) -> Self::IntoIter {
             vec![
@@ -232,14 +235,10 @@ mod tests {
         }
     }
 
-    impl crate::query::Application for PersonMatch {
+    impl Application for PersonMatch {
         type Conclusion = Person;
 
-        fn evaluate<S: crate::query::Source, M: crate::selection::Selection>(
-            self,
-            selection: M,
-            source: &S,
-        ) -> impl crate::selection::Selection {
+        fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
             let application: ConceptQuery = self.into();
             application.evaluate(selection, source)
         }

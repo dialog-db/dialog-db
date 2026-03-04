@@ -1,8 +1,12 @@
+use std::fmt;
+use std::str::{self, FromStr};
+
 use crate::artifact::Attribute as ArtifactsAttribute;
-use crate::artifact::Entity;
+use crate::artifact::{Entity, TypeError, Value};
 use crate::attribute::expression::dynamic::DynamicAttributeExpressionBuilder;
 use crate::error::{InvalidIdentifier, OwnedInvalidIdentifier};
 use crate::term::Term;
+use serde::de;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Maximum length in bytes for a relation identifier (`"domain/name"`).
@@ -122,7 +126,7 @@ impl The {
             .iter()
             .position(|&b| b == b'/')
             .expect("The always contains '/'");
-        std::str::from_utf8(&bytes[..slash]).expect("domain is valid UTF-8")
+        str::from_utf8(&bytes[..slash]).expect("domain is valid UTF-8")
     }
 
     /// Returns the relation name.
@@ -133,7 +137,7 @@ impl The {
             .position(|&b| b == b'/')
             .expect("The always contains '/'");
         let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-        std::str::from_utf8(&bytes[slash + 1..end]).expect("name is valid UTF-8")
+        str::from_utf8(&bytes[slash + 1..end]).expect("name is valid UTF-8")
     }
 
     /// Begin building a dynamic attribute expression for this attribute and
@@ -191,13 +195,13 @@ impl Term<The> {
     }
 }
 
-impl std::fmt::Display for The {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for The {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
-impl std::str::FromStr for The {
+impl FromStr for The {
     type Err = OwnedInvalidIdentifier;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::validate(s).map_err(|e| OwnedInvalidIdentifier {
@@ -223,15 +227,15 @@ impl From<&The> for ArtifactsAttribute {
     }
 }
 
-impl From<The> for crate::artifact::Value {
+impl From<The> for Value {
     fn from(the: The) -> Self {
-        crate::artifact::Value::from(ArtifactsAttribute::from(the))
+        Value::from(ArtifactsAttribute::from(the))
     }
 }
 
-impl From<&The> for crate::artifact::Value {
+impl From<&The> for Value {
     fn from(the: &The) -> Self {
-        crate::artifact::Value::from(ArtifactsAttribute::from(the))
+        Value::from(ArtifactsAttribute::from(the))
     }
 }
 
@@ -241,10 +245,10 @@ impl From<ArtifactsAttribute> for The {
     }
 }
 
-impl TryFrom<crate::artifact::Value> for The {
-    type Error = crate::artifact::TypeError;
+impl TryFrom<Value> for The {
+    type Error = TypeError;
 
-    fn try_from(value: crate::artifact::Value) -> Result<Self, Self::Error> {
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
         let attr = ArtifactsAttribute::try_from(value)?;
         Ok(Self(attr))
     }
@@ -265,7 +269,7 @@ impl<'de> Deserialize<'de> for The {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        s.parse().map_err(serde::de::Error::custom)
+        s.parse().map_err(de::Error::custom)
     }
 }
 

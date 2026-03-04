@@ -172,22 +172,32 @@ where
     }
 }
 
-// From<DynamicAttributeExpression<Entity, Is>> for AttributeStatement (type erasure)
+/// Convert a fully concrete dynamic expression into an `AttributeStatement`.
+///
+/// The `the` field is typed as `Term<The>` which could in theory be a variable,
+/// but this conversion is only called on expressions built with
+/// `the!("domain/name").of(entity).is(value)` where all positions are concrete.
+/// The type system does not encode the concreteness of `the` at the struct
+/// level, so clippy flags the panics as fallible, but they are unreachable
+/// in practice.
+#[allow(clippy::fallible_impl_from)]
 impl<Is: Scalar> From<DynamicAttributeExpression<Entity, Is>> for AttributeStatement {
-    fn from(expr: DynamicAttributeExpression<Entity, Is>) -> Self {
-        let the: The = expr
+    fn from(expression: DynamicAttributeExpression<Entity, Is>) -> Self {
+        let the: The = expression
             .the
             .as_typed_constant()
             .expect("Cannot convert a variable attribute to AttributeStatement");
-        let value: Value = match expr.is {
+        let value: Value = match expression.is {
             Term::Constant(v) => v,
-            Term::Variable { .. } => panic!("Cannot convert a variable term to AttributeStatement"),
+            Term::Variable { .. } => {
+                panic!("Cannot convert a variable term to AttributeStatement")
+            }
         };
         AttributeStatement {
             the,
-            of: expr.of,
+            of: expression.of,
             is: value,
-            cardinality: expr.cardinality.unwrap_or(Cardinality::Many),
+            cardinality: expression.cardinality.unwrap_or(Cardinality::Many),
         }
     }
 }
@@ -195,7 +205,8 @@ impl<Is: Scalar> From<DynamicAttributeExpression<Entity, Is>> for AttributeState
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::the;
+
+    use crate::{Match, the};
 
     #[dialog_common::test]
     fn it_asserts_with_string() {
@@ -386,7 +397,6 @@ mod tests {
     async fn it_roundtrips_assert_and_query() -> anyhow::Result<()> {
         use crate::Session;
         use crate::artifact::Artifacts;
-        use crate::selection::Match;
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
 
@@ -430,7 +440,6 @@ mod tests {
     async fn it_finds_all_relations_between_entities() -> anyhow::Result<()> {
         use crate::Session;
         use crate::artifact::Artifacts;
-        use crate::selection::Match;
         use dialog_storage::MemoryStorageBackend;
         use futures_util::TryStreamExt;
 

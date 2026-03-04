@@ -1,4 +1,6 @@
 use crate::premise::Premise;
+use std::slice::Iter;
+use std::vec::IntoIter;
 
 /// An ordered collection of [`Premise`] values forming a rule's body.
 ///
@@ -49,7 +51,7 @@ impl Premises {
 
 impl IntoIterator for Premises {
     type Item = Premise;
-    type IntoIter = std::vec::IntoIter<Premise>;
+    type IntoIter = IntoIter<Premise>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
@@ -58,7 +60,7 @@ impl IntoIterator for Premises {
 
 impl<'a> IntoIterator for &'a Premises {
     type Item = &'a Premise;
-    type IntoIter = std::slice::Iter<'a, Premise>;
+    type IntoIter = Iter<'a, Premise>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.iter()
