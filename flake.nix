@@ -164,14 +164,10 @@
 
             nativeBuildInputs = developmentBuildInputs;
 
-            # Skip Puppeteer's Chrome download; we use CHROME_PATH to point
-            # at an existing browser (Nix chromium on Linux, system Chrome on macOS).
+            # Skip Puppeteer's Chrome download during npm ci in the Nix sandbox.
+            # At test runtime, CHROME_PATH is provided by developmentEnvVars.
             env = {
               "PUPPETEER_SKIP_DOWNLOAD" = "true";
-            } // lib.optionalAttrs stdenv.isLinux {
-              "CHROME_PATH" = "${chromium}/bin/chromium";
-            } // lib.optionalAttrs stdenv.isDarwin {
-              "CHROME_PATH" = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
             };
 
             buildPhase = ''
@@ -272,8 +268,6 @@
           "test:npm" = {
             description = "JavaScript unit tests for NPM packages";
             command = ''
-              echo "CHROME_PATH=$CHROME_PATH"
-
               # Skip Puppeteer's Chrome download during npm ci; tests use
               # the browser specified by CHROME_PATH instead.
               export PUPPETEER_SKIP_DOWNLOAD=true

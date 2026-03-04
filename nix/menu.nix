@@ -122,34 +122,43 @@ let
       export -f showMenu
     '';
 
-  # On macOS, chromium/chromedriver are not available in nixpkgs
-  # (https://github.com/NixOS/nixpkgs/issues/247855), so we detect
-  # them from the system PATH and point the user to install them if missing.
-  darwinBrowserCheck = ''
-    if [ -z "''${CHROME:-}" ]; then
-      CHROME_DEFAULT="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-      if [ -x "$CHROME_DEFAULT" ]; then
-        export CHROME="$CHROME_DEFAULT"
+  # Ensures CHROME and CHROMEDRIVER are set before running browser tests.
+  # On Linux these are provided by menuTestEnv via Nix packages, so this
+  # is a no-op. On macOS, chromium/chromedriver are not available in nixpkgs
+  # (https://github.com/NixOS/nixpkgs/issues/247855), so we detect them
+  # from the system and guide the user to install them if missing.
+  ensureBrowser = pkgs.writeShellApplication {
+    name = "ensure-browser";
+    text = ''
+      if [ -z "''${CHROME:-}" ]; then
+        CHROME_DEFAULT="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        if [ -x "$CHROME_DEFAULT" ]; then
+          printf 'export CHROME=%q\n' "$CHROME_DEFAULT"
+        else
+          echo "Error: Chrome not found. Install Google Chrome or set the CHROME env var." >&2
+          exit 1
+        fi
       else
-        echo "Error: Chrome not found. Install Google Chrome or set the CHROME env var." >&2
-        exit 1
+        printf 'export CHROME=%q\n' "$CHROME"
       fi
-    fi
 
-    if [ -z "''${CHROMEDRIVER:-}" ]; then
-      CHROMEDRIVER_PATH="$(command -v chromedriver 2>/dev/null || true)"
-      if [ -n "$CHROMEDRIVER_PATH" ]; then
-        export CHROMEDRIVER="$CHROMEDRIVER_PATH"
+      if [ -z "''${CHROMEDRIVER:-}" ]; then
+        CHROMEDRIVER_PATH="$(command -v chromedriver 2>/dev/null || true)"
+        if [ -n "$CHROMEDRIVER_PATH" ]; then
+          printf 'export CHROMEDRIVER=%q\n' "$CHROMEDRIVER_PATH"
+        else
+          echo "Error: chromedriver not found in PATH." >&2
+          echo "Install it with: brew install --cask chromedriver" >&2
+          exit 1
+        fi
       else
-        echo "Error: chromedriver not found in PATH." >&2
-        echo "Install it with: brew install --cask chromedriver" >&2
-        exit 1
+        printf 'export CHROMEDRIVER=%q\n' "$CHROMEDRIVER"
       fi
-    fi
-  '';
+    '';
+  };
 
   makeMenuTestCommand = package: ''
-    ${if pkgs.stdenv.isDarwin then darwinBrowserCheck else ""}
+    eval "$(${ensureBrowser}/bin/ensure-browser)"
 
     nix build .#${package}
 
