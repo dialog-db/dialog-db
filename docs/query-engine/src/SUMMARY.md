@@ -4,7 +4,7 @@
 
 # From Syntax to Query
 
-- [Defining the Schema](./schema-definition.md)
+- [Data Modeling](./data-modeling.md)
 - [Building Queries](./building-queries.md)
 
 # Planning
@@ -15,14 +15,14 @@
 
 # Evaluation
 
-- [Unification and Answers](./unification.md)
-- [Relation Queries](./relation-queries.md)
+- [Unification](./unification.md)
+- [Attribute Queries](./attribute-queries.md)
 - [Concept Queries](./concept-queries.md)
 - [Formulas and Negation](./formulas-negation.md)
 
 # Storage and Replication
 
-- [Indexes and the Prolly Tree](./indexes-prolly-tree.md)
+- [Indexes and the Search Tree](./indexes.md)
 - [Partial Replication](./partial-replication.md)
 
 # Reference
