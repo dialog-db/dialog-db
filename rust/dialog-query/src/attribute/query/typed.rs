@@ -157,3 +157,118 @@ where
         Premise::Assert(Proposition::Attribute(Box::new(query)))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Session;
+    use crate::query::Output;
+    use dialog_storage::MemoryStorageBackend;
+
+    mod person {
+        use crate::Attribute;
+
+        #[derive(Attribute, Clone)]
+        pub struct Name(pub String);
+    }
+
+    #[dialog_common::test]
+    async fn it_converts_to_dynamic_query() {
+        let alice = Entity::new().unwrap();
+
+        let query = StaticAttributeQuery::<person::Name> {
+            of: Term::from(alice),
+            is: Term::var("name"),
+        };
+
+        let dynamic = DynamicAttributeQuery::from(query);
+
+        assert!(dynamic.the().is_constant());
+        assert!(dynamic.of().is_constant());
+        assert!(dynamic.is().is_variable());
+    }
+
+    #[dialog_common::test]
+    async fn it_converts_default_to_dynamic_query() {
+        let query = StaticAttributeQuery::<person::Name>::default();
+        let dynamic = DynamicAttributeQuery::from(query);
+
+        assert!(dynamic.the().is_constant());
+        assert!(dynamic.of().is_variable());
+        assert!(dynamic.is().is_variable());
+    }
+
+    #[dialog_common::test]
+    async fn it_performs_typed_query() -> anyhow::Result<()> {
+        use crate::artifact::Artifacts;
+
+        let storage_backend = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        let alice = Entity::new()?;
+
+        let mut session = Session::open(artifacts.clone());
+        session
+            .transact(person::Name::of(alice.clone()).is("Alice"))
+            .await?;
+
+        let query = StaticAttributeQuery::<person::Name> {
+            of: Term::from(alice.clone()),
+            is: Term::var("name"),
+        };
+
+        let session = Session::open(artifacts);
+        let results = Application::perform(query, &session).try_vec().await?;
+
+        assert_eq!(results.len(), 1);
+
+        let (of, is, _cause) = results.into_iter().next().unwrap().into_parts();
+        assert_eq!(of, alice);
+        assert_eq!(is.value(), &"Alice".to_string());
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_roundtrips_assert_and_typed_query() -> anyhow::Result<()> {
+        use crate::artifact::Artifacts;
+
+        let storage_backend = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        let mut session = Session::open(artifacts.clone());
+        session
+            .transact(person::Name::of(alice.clone()).is("Alice"))
+            .await?;
+
+        let mut session = Session::open(artifacts.clone());
+        session
+            .transact(person::Name::of(bob.clone()).is("Bob"))
+            .await?;
+
+        // Query all entities with default (all-variable) query.
+        let query = StaticAttributeQuery::<person::Name>::default();
+
+        let session = Session::open(artifacts);
+        let results = Application::perform(query, &session).try_vec().await?;
+
+        // Cardinality::One means one value per entity, so we should get two results.
+        assert_eq!(results.len(), 2);
+
+        let names: Vec<_> = results
+            .into_iter()
+            .map(|r| {
+                let (_of, is, _cause) = r.into_parts();
+                is.value().clone()
+            })
+            .collect();
+
+        assert!(names.contains(&"Alice".to_string()));
+        assert!(names.contains(&"Bob".to_string()));
+
+        Ok(())
+    }
+}

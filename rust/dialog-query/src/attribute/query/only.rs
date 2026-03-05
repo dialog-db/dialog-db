@@ -251,3 +251,204 @@ impl Display for AttributeQueryOnly {
         Display::fmt(&self.inner, f)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query::Output;
+    use crate::{Session, the};
+    use dialog_storage::MemoryStorageBackend;
+
+    macro_rules! assert_relation {
+        ($artifacts:expr, $the:expr, $of:expr, $is:expr) => {{
+            let mut session = Session::open($artifacts.clone());
+            let mut tx = session.edit();
+            tx.assert($the.clone().of($of.clone()).is($is));
+            session.commit(tx).await.unwrap();
+        }};
+    }
+
+    #[dialog_common::test]
+    async fn it_selects_winner_with_constant_entity() -> anyhow::Result<()> {
+        use crate::artifact::Artifacts;
+
+        let storage_backend = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        let alice = Entity::new()?;
+        let name_attr = the!("person/name");
+
+        assert_relation!(artifacts, name_attr, alice, "Alice".to_string());
+        assert_relation!(artifacts, name_attr, alice, "Alicia".to_string());
+
+        let query = AttributeQueryOnly::new(
+            Term::var("the"),
+            Term::from(alice.clone()),
+            Term::var("value"),
+            Term::var("cause"),
+        );
+
+        let session = Session::open(artifacts);
+        let results = query.perform(&session).try_vec().await?;
+
+        assert_eq!(
+            results.len(),
+            1,
+            "EAV path should yield one winner per (attribute, entity)"
+        );
+        assert_eq!(results[0].of(), &alice);
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_selects_winner_with_constant_attribute() -> anyhow::Result<()> {
+        use crate::artifact::Artifacts;
+
+        let storage_backend = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+        let name_attr = the!("person/name");
+
+        assert_relation!(artifacts, name_attr, alice, "Alice".to_string());
+        assert_relation!(artifacts, name_attr, alice, "Alicia".to_string());
+        assert_relation!(artifacts, name_attr, bob, "Bob".to_string());
+        assert_relation!(artifacts, name_attr, bob, "Robert".to_string());
+
+        let query = AttributeQueryOnly::new(
+            Term::from(the!("person/name")),
+            Term::var("person"),
+            Term::var("name"),
+            Term::var("cause"),
+        );
+
+        let session = Session::open(artifacts);
+        let results = query.perform(&session).try_vec().await?;
+
+        assert_eq!(
+            results.len(),
+            2,
+            "AEV path should yield one winner per entity"
+        );
+
+        let alice_results: Vec<_> = results.iter().filter(|f| f.of() == &alice).collect();
+        let bob_results: Vec<_> = results.iter().filter(|f| f.of() == &bob).collect();
+
+        assert_eq!(alice_results.len(), 1);
+        assert_eq!(bob_results.len(), 1);
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_selects_winner_via_vae_path() -> anyhow::Result<()> {
+        use crate::artifact::Artifacts;
+
+        let storage_backend = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        let alice = Entity::new()?;
+        let name_attr = the!("person/name");
+
+        assert_relation!(artifacts, name_attr, alice, "Alice".to_string());
+        assert_relation!(artifacts, name_attr, alice, "Alicia".to_string());
+
+        // First find the winner via AEV to know which value wins.
+        let aev_query = AttributeQueryOnly::new(
+            Term::from(the!("person/name")),
+            Term::var("person"),
+            Term::var("name"),
+            Term::var("cause"),
+        );
+
+        let session = Session::open(artifacts.clone());
+        let aev_results = aev_query.perform(&session).try_vec().await?;
+        assert_eq!(aev_results.len(), 1);
+        let winner_value = aev_results[0].is().clone();
+
+        // VAE path: only value known, both the and of are variables.
+        let vae_query = AttributeQueryOnly::new(
+            Term::var("the"),
+            Term::var("person"),
+            Term::Constant(winner_value.clone()),
+            Term::var("cause"),
+        );
+
+        let session = Session::open(artifacts.clone());
+        let vae_results = vae_query.perform(&session).try_vec().await?;
+
+        assert_eq!(
+            vae_results.len(),
+            1,
+            "VAE path should verify and return the winner"
+        );
+        assert_eq!(vae_results[0].is(), &winner_value);
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn choose_prefers_higher_cause() {
+        use dialog_artifacts::{Artifact, Cause};
+        use std::str::FromStr;
+
+        let attr = dialog_artifacts::Attribute::from_str("person/name").unwrap();
+        let entity = Entity::new().unwrap();
+
+        let older = Artifact {
+            the: attr.clone(),
+            of: entity.clone(),
+            is: crate::Value::String("Alice".into()),
+            cause: Some(Cause([1u8; 32])),
+        };
+
+        let newer = Artifact {
+            the: attr,
+            of: entity,
+            is: crate::Value::String("Alicia".into()),
+            cause: Some(Cause([2u8; 32])),
+        };
+
+        let winner = choose(older.clone(), newer.clone());
+        assert_eq!(winner.cause, newer.cause, "Higher cause should win");
+
+        // Reversed argument order should produce the same winner.
+        let winner2 = choose(newer.clone(), older.clone());
+        assert_eq!(winner2.cause, newer.cause);
+    }
+
+    #[dialog_common::test]
+    async fn choose_uses_fact_hash_for_equal_causes() {
+        use dialog_artifacts::{Artifact, Cause};
+        use std::str::FromStr;
+
+        let attr = dialog_artifacts::Attribute::from_str("person/name").unwrap();
+        let entity = Entity::new().unwrap();
+
+        let a = Artifact {
+            the: attr.clone(),
+            of: entity.clone(),
+            is: crate::Value::String("Alice".into()),
+            cause: Some(Cause([1u8; 32])),
+        };
+
+        let b = Artifact {
+            the: attr,
+            of: entity,
+            is: crate::Value::String("Alicia".into()),
+            cause: Some(Cause([1u8; 32])),
+        };
+
+        let winner_ab = choose(a.clone(), b.clone());
+        let winner_ba = choose(b.clone(), a.clone());
+
+        // The winner should be deterministic regardless of argument order.
+        assert_eq!(
+            Cause::from(&winner_ab),
+            Cause::from(&winner_ba),
+            "Tiebreaker should be deterministic"
+        );
+    }
+}

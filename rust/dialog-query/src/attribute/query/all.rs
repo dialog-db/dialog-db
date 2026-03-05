@@ -276,3 +276,166 @@ impl Display for AttributeQueryAll {
         write!(f, "}}")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query::Output;
+    use crate::{Session, the};
+    use dialog_storage::MemoryStorageBackend;
+
+    #[dialog_common::test]
+    async fn it_scans_with_all_variables() -> anyhow::Result<()> {
+        use crate::artifact::Artifacts;
+
+        let storage_backend = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        let alice = Entity::new()?;
+
+        let mut session = Session::open(artifacts.clone());
+        session
+            .transact(vec![
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            ])
+            .await?;
+
+        let query = AttributeQueryAll::new(
+            Term::from(the!("person/name")),
+            Term::var("person"),
+            Term::var("name"),
+            Term::var("cause"),
+        );
+
+        let session = Session::open(artifacts);
+        let results = query.perform(&session).try_vec().await?;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].of(), &alice);
+        assert_eq!(results[0].is(), &Value::String("Alice".to_string()));
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_scans_with_constant_entity() -> anyhow::Result<()> {
+        use crate::artifact::Artifacts;
+
+        let storage_backend = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        let mut session = Session::open(artifacts.clone());
+        session
+            .transact(vec![
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+                the!("person/name").of(bob.clone()).is("Bob".to_string()),
+            ])
+            .await?;
+
+        let query = AttributeQueryAll::new(
+            Term::from(the!("person/name")),
+            Term::from(alice.clone()),
+            Term::var("name"),
+            Term::var("cause"),
+        );
+
+        let session = Session::open(artifacts);
+        let results = query.perform(&session).try_vec().await?;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].of(), &alice);
+        assert_eq!(results[0].is(), &Value::String("Alice".to_string()));
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_returns_multiple_values() -> anyhow::Result<()> {
+        use crate::artifact::Artifacts;
+
+        let storage_backend = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        let alice = Entity::new()?;
+
+        let mut session = Session::open(artifacts.clone());
+        session
+            .transact(vec![
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            ])
+            .await?;
+
+        let mut session = Session::open(artifacts.clone());
+        session
+            .transact(vec![
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alicia".to_string()),
+            ])
+            .await?;
+
+        let query = AttributeQueryAll::new(
+            Term::from(the!("person/name")),
+            Term::from(alice.clone()),
+            Term::var("name"),
+            Term::var("cause"),
+        );
+
+        let session = Session::open(artifacts);
+        let results = query.perform(&session).try_vec().await?;
+
+        assert_eq!(
+            results.len(),
+            2,
+            "AttributeQueryAll should return all values, not just the winner"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_scans_with_constant_value() -> anyhow::Result<()> {
+        use crate::artifact::Artifacts;
+
+        let storage_backend = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        let alice = Entity::new()?;
+
+        let mut session = Session::open(artifacts.clone());
+        session
+            .transact(vec![
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alicia".to_string()),
+            ])
+            .await?;
+
+        let query = AttributeQueryAll::new(
+            Term::from(the!("person/name")),
+            Term::var("person"),
+            Term::constant("Alice".to_string()),
+            Term::var("cause"),
+        );
+
+        let session = Session::open(artifacts);
+        let results = query.perform(&session).try_vec().await?;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].is(), &Value::String("Alice".to_string()));
+
+        Ok(())
+    }
+}

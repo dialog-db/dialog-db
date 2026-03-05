@@ -791,4 +791,82 @@ mod tests {
 
         Ok(())
     }
+
+    #[dialog_common::test]
+    async fn it_queries_via_dynamic_expression() -> anyhow::Result<()> {
+        use crate::artifact::Artifacts;
+
+        let storage_backend = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        let alice = Entity::new()?;
+
+        let mut session = Session::open(artifacts.clone());
+        session
+            .transact(vec![
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            ])
+            .await?;
+
+        let premise: Premise = the!("person/name")
+            .of(alice.clone())
+            .is(Term::<String>::var("name"))
+            .into();
+
+        let query = match premise {
+            Premise::Assert(Proposition::Attribute(q)) => *q,
+            _ => panic!("Expected Attribute query"),
+        };
+
+        let session = Session::open(artifacts);
+        let results = query.perform(&session).try_vec().await?;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].of(), &alice);
+        assert_eq!(results[0].is(), &crate::Value::String("Alice".into()));
+
+        Ok(())
+    }
+
+    mod person {
+        use crate::Attribute;
+
+        #[derive(Attribute, Clone)]
+        pub struct Name(pub String);
+    }
+
+    #[dialog_common::test]
+    async fn it_queries_via_typed_expression() -> anyhow::Result<()> {
+        use crate::artifact::Artifacts;
+
+        let storage_backend = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        let alice = Entity::new()?;
+
+        let mut session = Session::open(artifacts.clone());
+        session
+            .transact(person::Name::of(alice.clone()).is("Alice"))
+            .await?;
+
+        let premise: Premise = person::Name::of(alice.clone())
+            .is(Term::<String>::var("name"))
+            .into();
+
+        let query = match premise {
+            Premise::Assert(Proposition::Attribute(q)) => *q,
+            _ => panic!("Expected Attribute query"),
+        };
+
+        let session = Session::open(artifacts);
+        let results = query.perform(&session).try_vec().await?;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].of(), &alice);
+        assert_eq!(results[0].is(), &crate::Value::String("Alice".into()));
+
+        Ok(())
+    }
 }
