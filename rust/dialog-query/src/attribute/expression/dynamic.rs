@@ -17,7 +17,7 @@ use std::ops::Not;
 /// - Concrete scalar values (`String`, `u32`, etc.) — produces a constant term.
 /// - [`Term<T>`] variables — passes through unchanged.
 pub trait IntoTerm {
-    /// The type this value represents.
+    /// The scalar type this value represents.
     type Type: Typed;
     /// Convert into a [`Term`] of the associated type.
     fn into_term(self) -> Term<Self::Type>;
@@ -47,22 +47,18 @@ pub struct DynamicAttributeExpressionBuilder<The, Of> {
     pub of: Of,
 }
 
-impl<T, Of> DynamicAttributeExpressionBuilder<T, Of>
-where
-    Term<Entity>: From<Of>,
-    Term<The>: From<T>,
-{
+impl<T, Of> DynamicAttributeExpressionBuilder<T, Of> {
     /// Set the value for this dynamic attribute expression.
     ///
     /// Accepts concrete scalar values (`"Alice"`, `25u32`),
     /// [`Term`] variables (`Term::<String>::var("name")`), and
     /// [`The`] identifiers or [`Term<The>`] variables for querying
     /// relations themselves (`Term::<The>::var("relation")`).
-    pub fn is<V: IntoTerm>(self, value: V) -> DynamicAttributeExpression<Of, V::Type> {
+    pub fn is<V: IntoTerm>(self, value: V) -> DynamicAttributeExpression<T, Of, V> {
         DynamicAttributeExpression {
-            the: Term::<The>::from(self.the),
+            the: self.the,
             of: self.of,
-            is: value.into_term(),
+            is: value,
             cause: None,
             cardinality: None,
         }
@@ -72,19 +68,20 @@ where
 /// A dynamic attribute expression binding an attribute name to an entity
 /// and a value.
 ///
-/// `Of` uses deferred conversion (raw value stored as-is), while `Is`
-/// is the scalar type whose value is stored as a [`Term<Is>`].
+/// All three positions use deferred conversion — raw values are stored
+/// as-is and converted only when needed for queries or statements.
 ///
-/// - [`Statement`] requires `Of = Entity` — only concrete entities.
-/// - [`From<...> for Premise`] requires `Of: Into<Term<Entity>>` —
-///   concrete values or [`Term`] variables.
-pub struct DynamicAttributeExpression<Of = Entity, Is: Typed = String> {
+/// - [`Statement`] requires `Relation = The`, `Of = Entity`, `Is: Scalar`
+///   — all concrete positions.
+/// - [`From<...> for Premise`] requires each position to convert into
+///   the corresponding [`Term`].
+pub struct DynamicAttributeExpression<Relation, Of, Is> {
     /// The attribute (predicate), concrete or variable.
-    pub the: Term<The>,
+    pub the: Relation,
     /// The entity (or entity term).
     pub of: Of,
-    /// The value term.
-    pub is: Term<Is>,
+    /// The value, concrete or a [`Term`] variable.
+    pub is: Is,
     /// Provenance/cause for this expression.
     pub cause: Option<Cause>,
     /// Optional cardinality override. When `Some(Cardinality::One)`,
@@ -92,7 +89,7 @@ pub struct DynamicAttributeExpression<Of = Entity, Is: Typed = String> {
     pub cardinality: Option<Cardinality>,
 }
 
-impl<Of, Is: Typed> DynamicAttributeExpression<Of, Is> {
+impl<Relation, Of, Is> DynamicAttributeExpression<Relation, Of, Is> {
     /// Set the cardinality for this expression.
     pub fn cardinality(mut self, cardinality: Cardinality) -> Self {
         self.cardinality = Some(cardinality);
@@ -100,17 +97,11 @@ impl<Of, Is: Typed> DynamicAttributeExpression<Of, Is> {
     }
 }
 
-// Statement: requires concrete entity and a constant value term.
-impl<Is: Scalar> Statement for DynamicAttributeExpression<Entity, Is> {
+// Statement: requires all three positions to be concrete.
+impl<Is: Scalar> Statement for DynamicAttributeExpression<The, Entity, Is> {
     fn assert(self, transaction: &mut Transaction) {
-        let the: The = self
-            .the
-            .as_typed_constant()
-            .expect("Cannot assert a variable attribute");
-        let value: Value = match self.is {
-            Term::Constant(v) => v,
-            Term::Variable { .. } => panic!("Cannot assert a variable term"),
-        };
+        let the = self.the;
+        let value: Value = self.is.into();
         match self.cardinality {
             Some(Cardinality::One) => {
                 transaction.associate_unique(the, self.of, value);
@@ -122,22 +113,19 @@ impl<Is: Scalar> Statement for DynamicAttributeExpression<Entity, Is> {
     }
 
     fn retract(self, transaction: &mut Transaction) {
-        let the: The = self
-            .the
-            .as_typed_constant()
-            .expect("Cannot retract a variable attribute");
-        let value: Value = match self.is {
-            Term::Constant(v) => v,
-            Term::Variable { .. } => panic!("Cannot retract a variable term"),
-        };
+        let the = self.the;
+        let value: Value = self.is.into();
         transaction.dissociate(the, self.of, value);
     }
 }
 
 // Not → Premise::Unless (query-level negation).
-impl<Of, Is: Scalar> Not for DynamicAttributeExpression<Of, Is>
+impl<Relation, Of, Is> Not for DynamicAttributeExpression<Relation, Of, Is>
 where
+    Relation: Into<Term<The>>,
     Of: Into<Term<Entity>>,
+    Is: IntoTerm,
+    Is::Type: Scalar,
 {
     type Output = Premise;
 
@@ -150,16 +138,19 @@ where
     }
 }
 
-// Into<Premise>: requires entity to convert to term.
-impl<Of, Is: Scalar> From<DynamicAttributeExpression<Of, Is>> for Premise
+// Into<Premise>: requires all positions to convert to terms.
+impl<Relation, Of, Is> From<DynamicAttributeExpression<Relation, Of, Is>> for Premise
 where
+    Relation: Into<Term<The>>,
     Of: Into<Term<Entity>>,
+    Is: IntoTerm,
+    Is::Type: Scalar,
 {
-    fn from(expr: DynamicAttributeExpression<Of, Is>) -> Self {
-        let value_term: Term<Value> = expr.is.into();
+    fn from(expr: DynamicAttributeExpression<Relation, Of, Is>) -> Self {
+        let value_term: Term<Value> = expr.is.into_term().into();
         let any_term: Term<Any> = value_term.into();
         let query = RelationQuery::new(
-            expr.the,
+            expr.the.into(),
             expr.of.into(),
             any_term,
             match expr.cause {
@@ -174,29 +165,14 @@ where
 
 /// Convert a fully concrete dynamic expression into an `AttributeStatement`.
 ///
-/// The `the` field is typed as `Term<The>` which could in theory be a variable,
-/// but this conversion is only called on expressions built with
-/// `the!("domain/name").of(entity).is(value)` where all positions are concrete.
-/// The type system does not encode the concreteness of `the` at the struct
-/// level, so clippy flags the panics as fallible, but they are unreachable
-/// in practice.
-#[allow(clippy::fallible_impl_from)]
-impl<Is: Scalar> From<DynamicAttributeExpression<Entity, Is>> for AttributeStatement {
-    fn from(expression: DynamicAttributeExpression<Entity, Is>) -> Self {
-        let the: The = expression
-            .the
-            .as_typed_constant()
-            .expect("Cannot convert a variable attribute to AttributeStatement");
-        let value: Value = match expression.is {
-            Term::Constant(v) => v,
-            Term::Variable { .. } => {
-                panic!("Cannot convert a variable term to AttributeStatement")
-            }
-        };
+/// All three positions are concrete types (`The`, `Entity`, `Is: Scalar`),
+/// so no runtime extraction from `Term` is needed.
+impl<Is: Scalar> From<DynamicAttributeExpression<The, Entity, Is>> for AttributeStatement {
+    fn from(expression: DynamicAttributeExpression<The, Entity, Is>) -> Self {
         AttributeStatement {
-            the,
+            the: expression.the,
             of: expression.of,
-            is: value,
+            is: expression.is.into(),
             cardinality: expression.cardinality.unwrap_or(Cardinality::Many),
         }
     }

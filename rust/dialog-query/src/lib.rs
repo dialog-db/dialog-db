@@ -16,6 +16,7 @@
 // #![warn(clippy::large_futures)]
 #![deny(clippy::partial_pub_fields)]
 #![deny(clippy::unnecessary_self_imports)]
+#![cfg_attr(not(test), deny(clippy::panic))]
 
 // Allow macro-generated code to reference this crate as `dialog_query::`
 extern crate self as dialog_query;
