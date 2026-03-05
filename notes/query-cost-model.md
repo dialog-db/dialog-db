@@ -4,7 +4,7 @@
 
 The query planner orders premises to minimize total execution cost. Each premise corresponds to a range scan over a prolly tree index. The size of that range determines how many tree nodes need to be traversed, and in a sparse replica, each node traversal may require a network roundtrip. Fewer nodes visited means fewer roundtrips. The cost model exists to give the planner a way to compare orderings.
 
-Today the cost model counts how many of the three triple components `{the, of, is}` are known and assigns a flat cost per count. Two known components always costs the same regardless of which two. But the actual scan cost depends on *which* components are known, because that determines which index is used, how much of the key is a contiguous prefix, and how many entries fall within the range.
+Counting how many of the three triple components `{the, of, is}` are known is not sufficient. The actual scan cost depends on *which* components are known, because that determines which index is used, how much of the key is a contiguous prefix, and how many entries fall within the range.
 
 Consider `{the, of}` vs `{the, is}`. Both have two components known. But `{the, of}` constructs a 129-byte key prefix that narrows to a single (entity, attribute) pair. `{the, is}` on the right index constructs a 97-byte prefix, on the wrong index it constructs a 65-byte prefix with the value post-filtered. These are not the same cost.
 
@@ -181,7 +181,7 @@ The greedy algorithm runs in O(N^2) where N is the number of premises. For each 
 
 ### Where greedy falls short
 
-Greedy can produce suboptimal orderings when multiple premises tie on cost. With the index-aware cost model, ties are less frequent than with the old constraint-count model (which collapsed genuinely different costs into the same bucket). But ties still occur, particularly when two premises are both in the `{the}` tier with the same cardinality.
+Greedy can produce suboptimal orderings when multiple premises tie on cost. With the index-aware cost model, ties are less frequent than with a naive count-based model. But ties still occur, particularly when two premises are both in the `{the}` tier with the same cardinality.
 
 When premises tie, greedy picks one arbitrarily (first encountered). But the two tied premises may bind different variables, and one set of bindings may reduce downstream costs more than the other. Greedy cannot see this because it only looks one step ahead.
 
@@ -234,8 +234,8 @@ A reasonable path forward: keep the greedy algorithm as the default for its simp
 
 ## Decision
 
-**Replace the constraint-count cost model with an index-aware model that reflects key prefix tightness.**
+**Build an index-aware cost model that reflects key prefix tightness.**
 
-The cost model should distinguish which triple components are known, not just how many. The index selection should route `{the, is}` queries to VAE instead of AEV. The cardinality-one winner verification should use secondary lookups when the primary scan does not produce contiguous (attribute, entity) groups.
+The cost model distinguishes which triple components are known, not just how many. Index selection routes `{the, is}` queries to VAE instead of AEV. Cardinality-one winner verification uses secondary lookups when the primary scan does not produce contiguous (attribute, entity) groups.
 
-The greedy premise ordering algorithm is a reasonable default. Held-Karp DP is a future improvement for tie-breaking.
+Start with the greedy premise ordering algorithm. Held-Karp DP is a future improvement for tie-breaking.
