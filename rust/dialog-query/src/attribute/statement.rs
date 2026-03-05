@@ -1,6 +1,7 @@
 use crate::Transaction;
 use crate::artifact::{Entity, Value};
 use crate::attribute::The;
+use crate::attribute::expression::dynamic::DynamicAttributeExpression;
 use crate::schema::Cardinality;
 use crate::statement::Statement;
 
@@ -13,24 +14,19 @@ use crate::statement::Statement;
 /// can convert into this type via `.into()`, enabling heterogeneous
 /// collections (e.g. `Vec<AttributeStatement>`) for concept instances
 /// that contain attributes of different types.
-#[derive(Clone, Debug)]
-pub struct AttributeStatement {
-    /// The attribute (predicate).
-    pub the: The,
-    /// The entity this attribute belongs to.
-    pub of: Entity,
-    /// The concrete value.
-    pub is: Value,
-    /// Whether this attribute allows one or many values per entity.
-    pub cardinality: Cardinality,
-}
+pub type AttributeStatement = DynamicAttributeExpression<The, Entity, Value>;
 
 impl Statement for AttributeStatement {
     fn assert(self, transaction: &mut Transaction) {
-        if self.cardinality == Cardinality::One {
-            transaction.associate_unique(self.the, self.of, self.is);
-        } else {
-            transaction.associate(self.the, self.of, self.is);
+        let the = self.the;
+        let value = self.is;
+        match self.cardinality {
+            Some(Cardinality::One) => {
+                transaction.associate_unique(the, self.of, value);
+            }
+            _ => {
+                transaction.associate(the, self.of, value);
+            }
         }
     }
 

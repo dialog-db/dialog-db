@@ -75,6 +75,7 @@ impl<T, Of> DynamicAttributeExpressionBuilder<T, Of> {
 ///   — all concrete positions.
 /// - [`From<...> for Premise`] requires each position to convert into
 ///   the corresponding [`Term`].
+#[derive(Clone, Debug)]
 pub struct DynamicAttributeExpression<The, Of, Is> {
     /// The attribute (predicate), concrete or variable.
     pub the: The,
@@ -168,11 +169,12 @@ where
 /// so no runtime extraction from `Term` is needed.
 impl<Is: Scalar> From<DynamicAttributeExpression<The, Entity, Is>> for AttributeStatement {
     fn from(expression: DynamicAttributeExpression<The, Entity, Is>) -> Self {
-        AttributeStatement {
+        DynamicAttributeExpression {
             the: expression.the,
             of: expression.of,
             is: expression.is.into(),
-            cardinality: expression.cardinality.unwrap_or(Cardinality::Many),
+            cause: expression.cause,
+            cardinality: expression.cardinality,
         }
     }
 }
@@ -342,7 +344,7 @@ mod tests {
         let stmt: AttributeStatement = expr.into();
         assert_eq!(stmt.of, alice);
         assert_eq!(stmt.is, Value::String("Alice".into()));
-        assert_eq!(stmt.cardinality, Cardinality::Many);
+        assert_eq!(stmt.cardinality, None);
     }
 
     #[dialog_common::test]
@@ -355,7 +357,7 @@ mod tests {
         let stmt: AttributeStatement = expr.into();
         assert_eq!(stmt.of, alice);
         assert_eq!(stmt.is, Value::String("Alice".into()));
-        assert_eq!(stmt.cardinality, Cardinality::One);
+        assert_eq!(stmt.cardinality, Some(Cardinality::One));
     }
 
     #[dialog_common::test]

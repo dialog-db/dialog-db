@@ -15,6 +15,7 @@ use crate::artifact::Value;
 use crate::attribute::query::dynamic::DynamicAttributeQuery;
 
 use super::ExpressionCause;
+use super::dynamic::DynamicAttributeExpression;
 
 /// Trait for attribute types that support building expressions via `::of()`.
 ///
@@ -185,14 +186,15 @@ where
     type IntoIter = iter::Once<AttributeStatement>;
 
     fn into_iter(self) -> Self::IntoIter {
-        let (of, is, _) = self.into_parts();
+        let (of, is, cause) = self.into_parts();
         let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
         let attr: A = is.into();
-        iter::once(AttributeStatement {
+        iter::once(DynamicAttributeExpression {
             the: desc.the().clone(),
             of,
             is: attr.value().clone().into(),
-            cardinality: desc.cardinality(),
+            cause,
+            cardinality: Some(desc.cardinality()),
         })
     }
 }
@@ -248,14 +250,15 @@ where
     Is: Into<A>,
 {
     fn from(expr: StaticAttributeExpression<A, Entity, Is, Option<Cause>>) -> Self {
-        let (of, is, _) = expr.into_parts();
+        let (of, is, cause) = expr.into_parts();
         let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
         let attr: A = is.into();
-        AttributeStatement {
+        DynamicAttributeExpression {
             the: desc.the().clone(),
             of,
             is: attr.value().clone().into(),
-            cardinality: desc.cardinality(),
+            cause,
+            cardinality: Some(desc.cardinality()),
         }
     }
 }
@@ -510,6 +513,6 @@ mod tests {
         let stmt: AttributeStatement = expr.into();
         assert_eq!(stmt.of, alice);
         assert_eq!(stmt.is, Value::String("Alice".into()));
-        assert_eq!(stmt.cardinality, Cardinality::One);
+        assert_eq!(stmt.cardinality, Some(Cardinality::One));
     }
 }

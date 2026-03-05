@@ -194,11 +194,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         // Generate AttributeStatement for IntoIterator implementation
         instance_relations.push(quote! {
-            dialog_query::AttributeStatement {
+            dialog_query::attribute::expression::dynamic::DynamicAttributeExpression {
                 the: <#field_type as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().the().clone(),
                 of: self.this.clone(),
                 is: dialog_query::Value::from(<#field_type as dialog_query::Attribute>::value(&self.#field_name).clone()),
-                cardinality: <#field_type as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().cardinality(),
+                cause: None,
+                cardinality: Some(<#field_type as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().cardinality()),
             }
         });
     }
