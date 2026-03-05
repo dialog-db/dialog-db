@@ -11,7 +11,10 @@ use std::iter;
 use std::marker::PhantomData;
 use std::ops::Not;
 
-use super::{ExpressionCause, relation_query};
+use crate::artifact::Value;
+use crate::attribute::query::dynamic::DynamicAttributeQuery;
+
+use super::ExpressionCause;
 
 /// Trait for attribute types that support building expressions via `::of()`.
 ///
@@ -206,8 +209,15 @@ where
     fn from(expression: StaticAttributeExpression<A, Of, Is, Because>) -> Self {
         let (of, is, cause) = expression.into_parts();
         let value: Term<A::Type> = is.into();
-        let query = relation_query::<A>(of.into(), value.into(), cause.as_cause_term());
-        Premise::Assert(Proposition::Relation(Box::new(query)))
+        let descriptor = <A as Descriptor<AttributeDescriptor>>::descriptor();
+        let query = DynamicAttributeQuery::new(
+            Term::Constant(Value::from(descriptor.the().clone())),
+            of.into(),
+            value.into(),
+            cause.as_cause_term(),
+            Some(descriptor.cardinality()),
+        );
+        Premise::Assert(Proposition::Attribute(Box::new(query)))
     }
 }
 
@@ -324,7 +334,7 @@ mod tests {
         let premise: Premise = person::Name::of(Term::var("e")).is(Term::var("v")).into();
 
         match premise {
-            Premise::Assert(Proposition::Relation(query)) => {
+            Premise::Assert(Proposition::Attribute(query)) => {
                 assert!(query.the().is_constant());
                 assert!(query.of().is_variable());
                 assert!(query.is().is_variable());
@@ -339,7 +349,7 @@ mod tests {
         let premise: Premise = person::Name::of(alice).is(Term::<String>::var("v")).into();
 
         match premise {
-            Premise::Assert(Proposition::Relation(query)) => {
+            Premise::Assert(Proposition::Attribute(query)) => {
                 assert!(query.the().is_constant());
                 assert!(query.of().is_constant());
                 assert!(query.is().is_variable());
@@ -353,7 +363,7 @@ mod tests {
         let premise: Premise = person::Name::of(Term::var("e")).is("Alice").into();
 
         match premise {
-            Premise::Assert(Proposition::Relation(query)) => {
+            Premise::Assert(Proposition::Attribute(query)) => {
                 assert!(query.the().is_constant());
                 assert!(query.of().is_variable());
                 assert!(query.is().is_constant());
@@ -368,7 +378,7 @@ mod tests {
         let premise: Premise = person::Name::of(alice).is("Alice").into();
 
         match premise {
-            Premise::Assert(Proposition::Relation(query)) => {
+            Premise::Assert(Proposition::Attribute(query)) => {
                 assert!(query.the().is_constant());
                 assert!(query.of().is_constant());
                 assert!(query.is().is_constant());
@@ -405,7 +415,7 @@ mod tests {
         let premise: Premise = person::Name::of(alice).is("Alice").cause(provenance).into();
 
         match premise {
-            Premise::Assert(Proposition::Relation(query)) => {
+            Premise::Assert(Proposition::Attribute(query)) => {
                 assert!(query.cause().is_constant());
             }
             _ => panic!("Expected Relation premise"),
@@ -420,7 +430,7 @@ mod tests {
             .into();
 
         match premise {
-            Premise::Assert(Proposition::Relation(query)) => {
+            Premise::Assert(Proposition::Attribute(query)) => {
                 assert!(query.cause().is_variable());
                 assert_eq!(query.cause().name(), Some("c"));
             }
@@ -439,7 +449,10 @@ mod tests {
 
         let expression = person::Name::of(alice).is("Alice");
         let premise: Premise = expression.into();
-        assert!(matches!(premise, Premise::Assert(Proposition::Relation(_))));
+        assert!(matches!(
+            premise,
+            Premise::Assert(Proposition::Attribute(_))
+        ));
     }
 
     #[dialog_common::test]

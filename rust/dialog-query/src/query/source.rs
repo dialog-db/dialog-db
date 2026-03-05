@@ -1,6 +1,6 @@
 use crate::artifact::ArtifactStore;
-use crate::concept::application::ConceptRules;
 use crate::concept::descriptor::ConceptDescriptor;
+use crate::concept::query::ConceptRules;
 use crate::error::EvaluationError;
 use dialog_common::{ConditionalSend, ConditionalSync};
 

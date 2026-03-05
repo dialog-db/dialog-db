@@ -16,8 +16,8 @@ pub use crate::artifact::{
     Artifact, ArtifactSelector, ArtifactStore, ConditionalSend, ConditionalSync, Constrained,
     DialogArtifactsError,
 };
-use crate::concept::application::ConceptRules;
 use crate::concept::descriptor::ConceptDescriptor;
+use crate::concept::query::ConceptRules;
 use crate::error::TransactionError;
 use crate::query::Application;
 use crate::query::Source;
@@ -353,8 +353,8 @@ mod tests {
 
     use crate::Match;
     use crate::artifact::{Artifacts, Entity, Value};
+    use crate::attribute::query::AttributeQuery;
     use crate::query::{Output, Source};
-    use crate::relation::query::RelationQuery;
     use crate::the;
 
     use crate::{
@@ -624,7 +624,7 @@ mod tests {
         let employee_from_stuff = DeductiveRule::new(
             employee_predicate,
             vec![
-                RelationQuery::new(
+                AttributeQuery::new(
                     Term::from(the!("stuff/name")),
                     Term::var("this"),
                     Term::var("name"),
@@ -632,7 +632,7 @@ mod tests {
                     None,
                 )
                 .into(),
-                RelationQuery::new(
+                AttributeQuery::new(
                     Term::from(the!("stuff/role")),
                     Term::var("this"),
                     Term::var("job"),
@@ -748,7 +748,7 @@ mod tests {
                     name: employee.name.clone(),
                     role: employee.job,
                 },
-                RelationQuery::new(
+                AttributeQuery::new(
                     Term::from(the!("stuff/name")),
                     employee.this,
                     employee.name.clone().into(),
@@ -1156,7 +1156,7 @@ mod tests {
             (
                 employee.role.is(Role("employee".into())),
                 // employee has a name
-                RelationQuery::new(
+                AttributeQuery::new(
                     Term::from(the!("implicit-attr-test/name")),
                     employee.this.clone(),
                     employee.name.clone().into(),
@@ -1164,7 +1164,7 @@ mod tests {
                     None,
                 ),
                 // but does not have role (using ! operator)
-                !RelationQuery::new(
+                !AttributeQuery::new(
                     Term::from(the!("implicit-attr-test/role")),
                     employee.this.clone(),
                     Term::blank(),
@@ -1416,7 +1416,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_produces_cheaper_plan_with_bound_entity() {
-        use crate::concept::application::adornment::Adornment;
+        use crate::concept::query::adornment::Adornment;
 
         let person = person_concept();
         let rules = ConceptRules::new(&person);

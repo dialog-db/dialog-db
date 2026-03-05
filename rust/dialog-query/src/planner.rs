@@ -188,10 +188,10 @@ mod tests {
 
     #[dialog_common::test]
     fn it_plans_two_fact_applications() {
-        use crate::relation::query::RelationQuery;
+        use crate::attribute::query::AttributeQuery;
         use crate::{Cardinality, Proposition, Term};
 
-        let fact1 = RelationQuery::new(
+        let fact1 = AttributeQuery::new(
             Term::from(the!("person/name")),
             Term::var("person"),
             Term::var("name"),
@@ -199,7 +199,7 @@ mod tests {
             Some(Cardinality::One),
         );
 
-        let fact2 = RelationQuery::new(
+        let fact2 = AttributeQuery::new(
             Term::from(the!("person/age")),
             Term::var("person"),
             Term::var("age"),
@@ -208,8 +208,8 @@ mod tests {
         );
 
         let premises = vec![
-            Premise::Assert(Proposition::Relation(Box::new(fact1))),
-            Premise::Assert(Proposition::Relation(Box::new(fact2))),
+            Premise::Assert(Proposition::Attribute(Box::new(fact1))),
+            Premise::Assert(Proposition::Attribute(Box::new(fact2))),
         ];
 
         let plan = Planner::from(premises)
@@ -226,11 +226,11 @@ mod tests {
 
     #[dialog_common::test]
     fn it_orders_cheaper_premise_first() {
-        use crate::relation::query::RelationQuery;
+        use crate::attribute::query::AttributeQuery;
         use crate::{Cardinality, Proposition, Term};
         use dialog_artifacts::Entity;
 
-        let fact1 = RelationQuery::new(
+        let fact1 = AttributeQuery::new(
             Term::from(the!("person/name")),
             Term::from(Entity::try_from("urn:alice".to_string()).unwrap()),
             Term::var("name"),
@@ -238,7 +238,7 @@ mod tests {
             Some(Cardinality::One),
         );
 
-        let fact2 = RelationQuery::new(
+        let fact2 = AttributeQuery::new(
             Term::from(the!("greeting/text")),
             Term::var("name"),
             Term::var("greeting"),
@@ -247,8 +247,8 @@ mod tests {
         );
 
         let premises = vec![
-            Premise::Assert(Proposition::Relation(Box::new(fact1))),
-            Premise::Assert(Proposition::Relation(Box::new(fact2))),
+            Premise::Assert(Proposition::Attribute(Box::new(fact1))),
+            Premise::Assert(Proposition::Attribute(Box::new(fact2))),
         ];
 
         let plan = Planner::from(premises)
@@ -261,7 +261,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_executes_planned_query() -> anyhow::Result<()> {
-        use crate::relation::query::RelationQuery;
+        use crate::attribute::query::AttributeQuery;
         use crate::session::Session;
 
         use crate::{Cardinality, Proposition, Term, Value, the};
@@ -288,7 +288,7 @@ mod tests {
             session.commit(tx).await?;
         }
 
-        let fact1 = RelationQuery::new(
+        let fact1 = AttributeQuery::new(
             Term::from(the!("person/name")),
             Term::var("person"),
             Term::var("name"),
@@ -296,7 +296,7 @@ mod tests {
             Some(Cardinality::One),
         );
 
-        let fact2 = RelationQuery::new(
+        let fact2 = AttributeQuery::new(
             Term::from(the!("person/age")),
             Term::var("person"),
             Term::var("age"),
@@ -305,8 +305,8 @@ mod tests {
         );
 
         let premises = vec![
-            Premise::Assert(Proposition::Relation(Box::new(fact1))),
-            Premise::Assert(Proposition::Relation(Box::new(fact2))),
+            Premise::Assert(Proposition::Attribute(Box::new(fact1))),
+            Premise::Assert(Proposition::Attribute(Box::new(fact2))),
         ];
         let plan = Planner::from(premises).plan(&Environment::new())?;
 
@@ -348,7 +348,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_restores_cost_when_replanned_to_empty_scope() {
-        use crate::relation::query::RelationQuery;
+        use crate::attribute::query::AttributeQuery;
         use crate::schema::{INDEX_SCAN, RANGE_SCAN_COST};
 
         use crate::{Cardinality, Proposition, Term};
@@ -357,7 +357,7 @@ mod tests {
         // Cardinality::Many premise:
         //   1/3 constraints (just 'the'): INDEX_SCAN = 5000
         //   2/3 constraints (the + of):   RANGE_SCAN_COST = 1000
-        let hobby = RelationQuery::new(
+        let hobby = AttributeQuery::new(
             Term::from(the!("person/hobbies")),
             Term::<Entity>::var("entity"),
             Term::var("hobby"),
@@ -365,7 +365,7 @@ mod tests {
             Some(Cardinality::Many),
         );
 
-        let premises = vec![Premise::Assert(Proposition::Relation(Box::new(hobby)))];
+        let premises = vec![Premise::Assert(Proposition::Attribute(Box::new(hobby)))];
         let plan = Planner::from(premises)
             .plan(&Environment::new())
             .expect("Should compile");

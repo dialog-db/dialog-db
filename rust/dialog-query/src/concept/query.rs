@@ -274,8 +274,8 @@ impl Display for ConceptQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::attribute::query::AttributeQuery;
     use crate::concept::descriptor::ConceptDescriptor;
-    use crate::relation::query::RelationQuery;
     use crate::the;
 
     use crate::{
@@ -582,7 +582,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_constructs_premises() {
-        let relation = RelationQuery::new(
+        let relation = AttributeQuery::new(
             Term::from(the!("person/name")),
             Term::var("person"),
             Term::constant("Alice".to_string()),
@@ -593,10 +593,10 @@ mod tests {
         let premise = Premise::from(relation);
 
         match premise {
-            Premise::Assert(Proposition::Relation(_)) => {
-                // Expected case - RelationQuery produces Relation premise
+            Premise::Assert(Proposition::Attribute(_)) => {
+                // Expected case - AttributeQuery produces Attribute premise
             }
-            _ => panic!("Expected Relation application"),
+            _ => panic!("Expected Attribute application"),
         }
     }
 
@@ -633,21 +633,21 @@ mod tests {
 
     #[dialog_common::test]
     fn it_handles_application_variants() {
-        // Test Relation application
-        let relation = RelationQuery::new(
+        // Test Attribute application
+        let relation = AttributeQuery::new(
             Term::from(the!("test/attr")),
             Term::blank(),
             Term::blank(),
             Term::blank(),
             None,
         );
-        let app = Proposition::Relation(Box::new(relation));
+        let app = Proposition::Attribute(Box::new(relation));
 
         match app {
-            Proposition::Relation(_) => {
+            Proposition::Attribute(_) => {
                 // Expected
             }
-            _ => panic!("Expected Relation variant"),
+            _ => panic!("Expected Attribute variant"),
         }
 
         // Test other variants exist
@@ -676,22 +676,22 @@ mod tests {
 
     #[dialog_common::test]
     fn it_constructs_negation() {
-        let relation = RelationQuery::new(
+        let relation = AttributeQuery::new(
             Term::from(the!("test/attr")),
             Term::blank(),
             Term::blank(),
             Term::blank(),
             None,
         );
-        let app = Proposition::Relation(Box::new(relation));
+        let app = Proposition::Attribute(Box::new(relation));
         let negation = Negation(app);
 
         // Test that negation wraps the application
         match negation {
-            Negation(Proposition::Relation(_)) => {
+            Negation(Proposition::Attribute(_)) => {
                 // Expected
             }
-            _ => panic!("Expected wrapped Relation application"),
+            _ => panic!("Expected wrapped Attribute application"),
         }
     }
 

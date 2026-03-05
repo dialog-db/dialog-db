@@ -54,8 +54,6 @@ pub mod predicate;
 pub mod premise;
 /// Query trait and store abstractions for polymorphic querying.
 pub mod query;
-/// Relation query and descriptor types.
-pub mod relation;
 /// Rule-based deduction system for deriving facts.
 pub mod rule;
 /// Schema system for describing parameter signatures.
@@ -74,10 +72,11 @@ pub mod term;
 pub mod types;
 
 pub use artifact::*;
+pub use attribute::query::{AttributeQuery, DynamicAttributeQuery};
 pub use attribute::*;
 pub use claim::Claim;
-pub use concept::application::{ConceptQuery, ConceptRules};
 pub use concept::descriptor::{ConceptConclusion, ConceptDescriptor};
+pub use concept::query::{ConceptQuery, ConceptRules};
 pub use concept::{Concept, Conclusion};
 pub use constraint::Constraint;
 pub use descriptor::Descriptor;
@@ -91,7 +90,6 @@ pub use predicate::*;
 pub use premise::*;
 pub use proposition::*;
 pub use query::*;
-pub use relation::*;
 pub use rule::*;
 pub use schema::*;
 pub use selection::*;

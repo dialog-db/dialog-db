@@ -1,10 +1,10 @@
-/// Concept application for querying entities that match a concept pattern.
-pub mod application;
 /// Concept descriptors for entity-centric queries.
 pub mod descriptor;
+/// Concept application for querying entities that match a concept pattern.
+pub mod query;
 
-pub use application::ConceptQuery;
 pub use descriptor::ConceptDescriptor;
+pub use query::ConceptQuery;
 
 #[cfg(test)]
 use crate::AttributeStatement;
@@ -121,7 +121,7 @@ mod tests {
     use crate::query::{Application, Source};
     use crate::selection::Selection;
 
-    use crate::relation::query::RelationQuery;
+    use crate::attribute::query::AttributeQuery;
     use crate::term::Term;
     use crate::the;
     use crate::types::Any;
@@ -555,7 +555,7 @@ mod tests {
         session.transact(claims).await?;
 
         // Test: Search for non-existent person using individual fact selector
-        let missing_query = RelationQuery::new(
+        let missing_query = AttributeQuery::new(
             Term::from(the!("person/name")),
             Term::var("person"),
             Term::constant("NonExistent".to_string()),
@@ -864,7 +864,7 @@ mod tests {
         let mut session = Session::open(store.clone());
         session.transact(vec![alice.clone()]).await?;
 
-        let name_query = RelationQuery::new(
+        let name_query = AttributeQuery::new(
             Term::from(the!("person-attr-concept/name")),
             Term::from(alice_id.clone()),
             Term::blank(),
@@ -872,7 +872,7 @@ mod tests {
             None,
         );
 
-        let birthday_query = RelationQuery::new(
+        let birthday_query = AttributeQuery::new(
             Term::from(the!("person-attr-concept/birthday")),
             Term::from(alice_id.clone()),
             Term::blank(),
@@ -1015,7 +1015,7 @@ mod tests {
         let mut session = Session::open(store.clone());
         session.transact(vec![alice_with_birthday]).await?;
 
-        let name_query = RelationQuery::new(
+        let name_query = AttributeQuery::new(
             Term::from(the!("person-attr-concept/name")),
             Term::from(alice_id.clone()),
             Term::blank(),
@@ -1023,7 +1023,7 @@ mod tests {
             None,
         );
 
-        let email_query = RelationQuery::new(
+        let email_query = AttributeQuery::new(
             Term::from(the!("person-attr-concept/email")),
             Term::from(alice_id.clone()),
             Term::blank(),
@@ -1031,7 +1031,7 @@ mod tests {
             None,
         );
 
-        let birthday_query = RelationQuery::new(
+        let birthday_query = AttributeQuery::new(
             Term::from(the!("person-attr-concept/birthday")),
             Term::from(alice_id.clone()),
             Term::blank(),
@@ -1082,7 +1082,7 @@ mod tests {
         let mut session = Session::open(store.clone());
         session.transact(vec![!alice]).await?;
 
-        let name_query = RelationQuery::new(
+        let name_query = AttributeQuery::new(
             Term::from(the!("person-attr-concept/name")),
             Term::from(alice_id.clone()),
             Term::blank(),
@@ -1090,7 +1090,7 @@ mod tests {
             None,
         );
 
-        let birthday_query = RelationQuery::new(
+        let birthday_query = AttributeQuery::new(
             Term::from(the!("person-attr-concept/birthday")),
             Term::from(alice_id),
             Term::blank(),

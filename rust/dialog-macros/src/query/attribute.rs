@@ -243,7 +243,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         impl dialog_query::Predicate for #struct_name {
             type Conclusion = dialog_query::attribute::expression::StaticAttributeStatement<Self>;
-            type Application = dialog_query::attribute::query::AttributeQuery<Self>;
+            type Application = dialog_query::attribute::query::StaticAttributeQuery<Self>;
             type Descriptor = dialog_query::AttributeDescriptor;
         }
 

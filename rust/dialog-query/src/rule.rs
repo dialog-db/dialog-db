@@ -23,17 +23,17 @@ pub use when::*;
 ///
 /// ```rust
 /// use dialog_query::{when, When, Term, Any, artifact::Value, the};
-/// use dialog_query::relation::query::RelationQuery;
+/// use dialog_query::AttributeQuery;
 ///
 /// fn example() -> impl When {
-///     let r1 = RelationQuery::new(
+///     let r1 = AttributeQuery::new(
 ///         Term::from(the!("ns/attr1")),
 ///         Term::var("entity"),
 ///         Term::<Any>::constant("value1".to_string()),
 ///         Term::blank(),
 ///         None,
 ///     );
-///     let r2 = RelationQuery::new(
+///     let r2 = AttributeQuery::new(
 ///         Term::from(the!("ns/attr2")),
 ///         Term::var("entity"),
 ///         Term::<Any>::var("value2"),
@@ -59,8 +59,8 @@ mod tests {
     use super::*;
     use crate::artifact::{Artifacts, Entity, Type};
     use crate::attribute::{AttributeDescriptor, Cardinality};
-    use crate::concept::application::ConceptQuery;
     use crate::concept::descriptor::ConceptDescriptor;
+    use crate::concept::query::ConceptQuery;
     use crate::concept::{Concept, Conclusion};
     use crate::predicate::Predicate;
     use crate::premise::Premise;

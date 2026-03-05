@@ -1,13 +1,14 @@
 use std::fmt;
 
-pub use crate::concept::application::ConceptQuery;
+use crate::attribute::query::AttributeQuery;
 use crate::concept::descriptor::ConceptDescriptor;
+pub use crate::concept::query::ConceptQuery;
 use crate::constraint::Constraint;
 pub use crate::error::AnalyzerError;
 pub use crate::error::QueryResult;
 pub use crate::formula::query::FormulaQuery;
 pub use crate::premise::{Negation, Premise};
-use crate::relation::query::RelationQuery;
+use crate::query::Application;
 use crate::selection::Selection;
 pub use crate::{Environment, Parameters, Schema, Source};
 use futures_util::future::Either;
@@ -20,7 +21,8 @@ pub use std::fmt::Display;
 /// A knowledge-base query embedded inside a [`Premise::When`](crate::Premise::When).
 ///
 /// Each variant binds a different kind of application:
-/// - `Relation` — low-level EAV triple lookup against the fact store.
+/// - `Attribute` — EAV triple lookup against the fact store, with
+///   cardinality-aware winner selection.
 /// - `Concept` — entity-level query using a concept predicate and its
 ///   associated deductive rules.
 /// - `Formula` — pure computation that derives new bindings from existing
@@ -29,13 +31,13 @@ pub use std::fmt::Display;
 ///   filters or infers bindings without querying stored data.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Proposition {
-    /// Relation query with separate domain and name.
-    /// Boxed to reduce enum size (RelationQuery is ~432 bytes vs ~96 for other variants).
-    Relation(Box<RelationQuery>),
     /// Concept realization - matching entities against concept patterns
     Concept(ConceptQuery),
     /// Application of a formula for computation
     Formula(FormulaQuery),
+    /// Attribute query — cardinality-aware EAV lookup.
+    /// Boxed to reduce enum size.
+    Attribute(Box<AttributeQuery>),
     /// Constraint between variables (equality, comparison, etc.)
     Constraint(Constraint),
 }
@@ -46,7 +48,7 @@ impl Proposition {
     /// Returns None if the application cannot be executed without more constraints.
     pub fn estimate(&self, env: &Environment) -> Option<usize> {
         match self {
-            Proposition::Relation(application) => application.estimate(env),
+            Proposition::Attribute(query) => query.estimate(env),
             Proposition::Concept(application) => application.estimate(env),
             Proposition::Formula(application) => application.estimate(env),
             Proposition::Constraint(constraint) => constraint.estimate(env),
@@ -56,8 +58,8 @@ impl Proposition {
     /// Evaluate this application against the given context, producing a selection stream
     pub fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
         match self {
-            Proposition::Relation(application) => Either::Left(Either::Left(Either::Left(
-                application.evaluate_with_provenance(source.clone(), selection),
+            Proposition::Attribute(query) => Either::Left(Either::Left(Either::Left(
+                Application::evaluate(*query, selection, source),
             ))),
             Proposition::Concept(application) => Either::Left(Either::Left(Either::Right(
                 application.evaluate(selection, source),
@@ -72,7 +74,7 @@ impl Proposition {
     /// Returns the parameter bindings for this application
     pub fn parameters(&self) -> Parameters {
         match self {
-            Proposition::Relation(application) => application.parameters(),
+            Proposition::Attribute(query) => query.parameters(),
             Proposition::Concept(application) => application.parameters(),
             Proposition::Formula(application) => application.parameters(),
             Proposition::Constraint(constraint) => constraint.parameters(),
@@ -82,7 +84,7 @@ impl Proposition {
     /// Returns the schema describing this application's parameters
     pub fn schema(&self) -> Schema {
         match self {
-            Proposition::Relation(application) => application.schema(),
+            Proposition::Attribute(query) => query.schema(),
             Proposition::Concept(application) => application.schema(),
             Proposition::Formula(application) => application.schema(),
             Proposition::Constraint(constraint) => constraint.schema(),
@@ -110,7 +112,7 @@ impl From<FormulaQuery> for Proposition {
 impl Display for Proposition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Proposition::Relation(application) => Display::fmt(application, f),
+            Proposition::Attribute(query) => Display::fmt(query, f),
             Proposition::Concept(application) => Display::fmt(application, f),
             Proposition::Formula(application) => Display::fmt(application, f),
             Proposition::Constraint(constraint) => Display::fmt(constraint, f),
@@ -135,8 +137,8 @@ impl Serialize for Proposition {
             }
             Proposition::Formula(fq) => fq.serialize(serializer),
             Proposition::Constraint(c) => c.serialize(serializer),
-            Proposition::Relation(_) => Err(ser::Error::custom(
-                "Relation propositions cannot be serialized in formal notation",
+            Proposition::Attribute(_) => Err(ser::Error::custom(
+                "Attribute propositions cannot be serialized in formal notation",
             )),
         }
     }

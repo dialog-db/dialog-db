@@ -541,12 +541,12 @@ mod cost_model_tests {
     use super::Candidate;
     use crate::artifact::Entity;
     use crate::attribute::Cardinality;
-    use crate::concept::application::ConceptQuery;
+    use crate::attribute::query::AttributeQuery;
     use crate::concept::descriptor::ConceptDescriptor;
+    use crate::concept::query::ConceptQuery;
     use crate::formula::Formula;
     use crate::formula::string::Length;
     use crate::proposition::Proposition;
-    use crate::relation::query::RelationQuery;
     use crate::schema::{
         CONCEPT_OVERHEAD, INDEX_SCAN, RANGE_READ_COST, RANGE_SCAN_COST, SEGMENT_READ_COST,
     };
@@ -558,14 +558,14 @@ mod cost_model_tests {
     fn it_excludes_constants_from_cost() {
         let entity_val: Entity = Entity::new().unwrap();
 
-        let app = RelationQuery::new(
+        let app = AttributeQuery::new(
             Term::from(the!("user/name")),
             Term::from(entity_val),
             Term::constant("test".to_string()),
             Term::var("cause"),
             Some(Cardinality::One),
         );
-        let premise = Premise::Assert(Proposition::Relation(Box::new(app)));
+        let premise = Premise::Assert(Proposition::Attribute(Box::new(app)));
         let candidate = Candidate::from(premise);
 
         assert_eq!(
@@ -579,14 +579,14 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn it_costs_one_constant_two_variables() {
-        let app = RelationQuery::new(
+        let query = AttributeQuery::new(
             Term::from(the!("user/name")),
             Term::<Entity>::var("entity"),
             Term::var("value"),
             Term::var("cause"),
             Some(Cardinality::One),
         );
-        let premise = Premise::Assert(Proposition::Relation(Box::new(app)));
+        let premise = Premise::Assert(Proposition::Attribute(Box::new(query)));
         let candidate = Candidate::from(premise);
 
         assert_eq!(
@@ -600,14 +600,14 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn it_reduces_cost_for_env_variables() {
-        let app = RelationQuery::new(
+        let query = AttributeQuery::new(
             Term::from(the!("user/name")),
             Term::<Entity>::var("entity"),
             Term::var("value"),
             Term::var("cause"),
             Some(Cardinality::One),
         );
-        let premise = Premise::Assert(Proposition::Relation(Box::new(app)));
+        let premise = Premise::Assert(Proposition::Attribute(Box::new(query)));
 
         let mut candidate = Candidate::from(premise);
         let initial_cost = candidate.cost();
@@ -637,7 +637,7 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn it_excludes_initial_env_variables_from_cost() {
-        let app = RelationQuery::new(
+        let query = AttributeQuery::new(
             Term::from(the!("user/name")),
             Term::<Entity>::var("entity"),
             Term::var("value"),
@@ -648,7 +648,7 @@ mod cost_model_tests {
         let mut env = Environment::new();
         env.add("entity");
 
-        let cost = app.estimate(&env).unwrap_or(usize::MAX);
+        let cost = query.estimate(&env).unwrap_or(usize::MAX);
 
         assert_eq!(
             cost, SEGMENT_READ_COST,
@@ -659,7 +659,7 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn it_costs_more_for_cardinality_many() {
-        let one_app = RelationQuery::new(
+        let one = AttributeQuery::new(
             Term::from(the!("user/tags")),
             Term::<Entity>::var("entity"),
             Term::var("tag"),
@@ -667,7 +667,7 @@ mod cost_model_tests {
             Some(Cardinality::One),
         );
 
-        let many_app = RelationQuery::new(
+        let many = AttributeQuery::new(
             Term::from(the!("user/tags")),
             Term::<Entity>::var("entity"),
             Term::var("tag"),
@@ -675,10 +675,9 @@ mod cost_model_tests {
             Some(Cardinality::Many),
         );
 
-        let one_candidate =
-            Candidate::from(Premise::Assert(Proposition::Relation(Box::new(one_app))));
+        let one_candidate = Candidate::from(Premise::Assert(Proposition::Attribute(Box::new(one))));
         let many_candidate =
-            Candidate::from(Premise::Assert(Proposition::Relation(Box::new(many_app))));
+            Candidate::from(Premise::Assert(Proposition::Attribute(Box::new(many))));
 
         assert!(
             many_candidate.cost() > one_candidate.cost(),
@@ -705,7 +704,7 @@ mod cost_model_tests {
         let entity_val: Entity = Entity::new().unwrap();
         let value_val = Value::String("rust".to_string());
 
-        let one_app = RelationQuery::new(
+        let one_app = AttributeQuery::new(
             Term::from(the!("user/tags")),
             Term::from(entity_val.clone()),
             Term::Constant(value_val.clone()),
@@ -713,7 +712,7 @@ mod cost_model_tests {
             Some(Cardinality::One),
         );
 
-        let many_app = RelationQuery::new(
+        let many_app = AttributeQuery::new(
             Term::from(the!("user/tags")),
             Term::from(entity_val),
             Term::Constant(value_val),
@@ -722,9 +721,9 @@ mod cost_model_tests {
         );
 
         let one_candidate =
-            Candidate::from(Premise::Assert(Proposition::Relation(Box::new(one_app))));
+            Candidate::from(Premise::Assert(Proposition::Attribute(Box::new(one_app))));
         let many_candidate =
-            Candidate::from(Premise::Assert(Proposition::Relation(Box::new(many_app))));
+            Candidate::from(Premise::Assert(Proposition::Attribute(Box::new(many_app))));
 
         assert_eq!(one_candidate.cost(), SEGMENT_READ_COST);
         assert_eq!(many_candidate.cost(), RANGE_READ_COST);
@@ -745,7 +744,7 @@ mod cost_model_tests {
         let formula_app = Length::apply(formula_params).unwrap();
         let formula_candidate = Candidate::from(Premise::from(formula_app));
 
-        let fact_app = RelationQuery::new(
+        let fact_app = AttributeQuery::new(
             Term::from(the!("user/name")),
             Term::<Entity>::var("entity"),
             Term::var("value"),
@@ -753,11 +752,11 @@ mod cost_model_tests {
             Some(Cardinality::One),
         );
         let fact_candidate =
-            Candidate::from(Premise::Assert(Proposition::Relation(Box::new(fact_app))));
+            Candidate::from(Premise::Assert(Proposition::Attribute(Box::new(fact_app))));
 
         assert!(
             formula_candidate.cost() < fact_candidate.cost(),
-            "Formula with no IO should be cheaper than RelationQuery. Formula: {}, Fact: {}",
+            "Formula with no IO should be cheaper than AttributeQuery. Formula: {}, Fact: {}",
             formula_candidate.cost(),
             fact_candidate.cost()
         );
@@ -781,7 +780,7 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn it_matches_fact_cost_nothing_bound() {
-        let fact_app = RelationQuery::new(
+        let fact_app = AttributeQuery::new(
             Term::from(the!("user/name")),
             Term::<Entity>::var("entity"),
             Term::var("value"),
@@ -818,7 +817,7 @@ mod cost_model_tests {
 
         assert!(
             concept_cost > fact_cost,
-            "ConceptQuery should cost more than RelationQuery due to rule overhead. \
+            "ConceptQuery should cost more than AttributeQuery due to rule overhead. \
              Fact: {}, Concept: {}",
             fact_cost,
             concept_cost
@@ -827,7 +826,7 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn it_matches_fact_cost_value_bound() {
-        let fact_app = RelationQuery::new(
+        let fact_app = AttributeQuery::new(
             Term::from(the!("user/name")),
             Term::<Entity>::var("entity"),
             Term::var("value"),
@@ -866,7 +865,7 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn it_matches_fact_cost_entity_bound() {
-        let fact_app = RelationQuery::new(
+        let fact_app = AttributeQuery::new(
             Term::from(the!("user/name")),
             Term::<Entity>::var("entity"),
             Term::var("value"),
@@ -905,7 +904,7 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn it_matches_fact_cost_many_nothing_bound() {
-        let fact_app = RelationQuery::new(
+        let fact_app = AttributeQuery::new(
             Term::from(the!("user/tags")),
             Term::<Entity>::var("entity"),
             Term::var("tag"),
@@ -942,7 +941,7 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn it_matches_fact_cost_many_value_bound() {
-        let fact_app = RelationQuery::new(
+        let fact_app = AttributeQuery::new(
             Term::from(the!("user/tags")),
             Term::<Entity>::var("entity"),
             Term::var("tag"),
@@ -980,7 +979,7 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn it_accumulates_cost_through_planning() {
-        let p1 = RelationQuery::new(
+        let p1 = AttributeQuery::new(
             Term::from(the!("user/name")),
             Term::<Entity>::var("entity"),
             Term::var("name"),
@@ -988,7 +987,7 @@ mod cost_model_tests {
             Some(Cardinality::One),
         );
 
-        let p2 = RelationQuery::new(
+        let p2 = AttributeQuery::new(
             Term::from(the!("user/age")),
             Term::<Entity>::var("entity"),
             Term::var("age"),
@@ -996,12 +995,14 @@ mod cost_model_tests {
             Some(Cardinality::One),
         );
 
-        let a1 = Candidate::from(Premise::Assert(Proposition::Relation(Box::new(p1))));
+        let a1 = Candidate::from(Premise::Assert(Proposition::Attribute(Box::new(p1))));
         let cost1 = a1.cost();
 
         assert_eq!(cost1, RANGE_SCAN_COST);
 
-        let mut a2 = Candidate::from(Premise::Assert(Proposition::Relation(Box::new(p2.clone()))));
+        let mut a2 = Candidate::from(Premise::Assert(Proposition::Attribute(Box::new(
+            p2.clone(),
+        ))));
         let mut env = Environment::new();
         env.add("entity");
         a2.update(&env);
@@ -1024,7 +1025,7 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn debug_update_cost() {
-        let app = RelationQuery::new(
+        let app = AttributeQuery::new(
             Term::from(the!("user/name")),
             Term::<Entity>::var("entity"),
             Term::var("value"),
@@ -1038,7 +1039,7 @@ mod cost_model_tests {
             eprintln!("  {}: {:?}", name, constraint.requirement);
         }
 
-        let premise = Premise::Assert(Proposition::Relation(Box::new(app)));
+        let premise = Premise::Assert(Proposition::Attribute(Box::new(app)));
         let mut candidate = Candidate::from(premise);
 
         eprintln!("\nInitial state:");
@@ -1063,14 +1064,14 @@ mod cost_model_tests {
 
     #[dialog_common::test]
     fn it_restores_cost_when_variable_leaves_scope() {
-        let app = RelationQuery::new(
+        let app = AttributeQuery::new(
             Term::from(the!("user/name")),
             Term::<Entity>::var("entity"),
             Term::var("value"),
             Term::var("cause"),
             Some(Cardinality::One),
         );
-        let premise = Premise::Assert(Proposition::Relation(Box::new(app)));
+        let premise = Premise::Assert(Proposition::Attribute(Box::new(app)));
         let mut candidate = Candidate::from(premise);
 
         // Bind entity → cost should decrease
@@ -1101,14 +1102,14 @@ mod cost_model_tests {
         // Cardinality::Many makes the cost difference more dramatic:
         //   1/3 constraints (just 'the'): INDEX_SCAN = 5000
         //   2/3 constraints (the + of):   RANGE_SCAN_COST = 1000
-        let app = RelationQuery::new(
+        let app = AttributeQuery::new(
             Term::from(the!("person/hobbies")),
             Term::<Entity>::var("entity"),
             Term::var("hobby"),
             Term::var("cause"),
             Some(Cardinality::Many),
         );
-        let premise = Premise::Assert(Proposition::Relation(Box::new(app)));
+        let premise = Premise::Assert(Proposition::Attribute(Box::new(app)));
         let mut candidate = Candidate::from(premise);
 
         assert_eq!(

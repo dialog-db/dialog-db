@@ -25,7 +25,7 @@ impl<T> Store for T where T: ArtifactStoreMut + Clone + ConditionalSend {}
 mod tests {
     use super::*;
     use crate::artifact::{Artifacts, Entity};
-    use crate::relation::query::RelationQuery;
+    use crate::attribute::query::AttributeQuery;
     use crate::{Session, Term, the};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
@@ -49,7 +49,7 @@ mod tests {
         let mut session = Session::open(artifacts.clone());
         session.transact(claims).await?;
 
-        let alice_query = RelationQuery::new(
+        let alice_query = AttributeQuery::new(
             Term::from(the!("user/name")),
             alice.clone().into(),
             Term::constant("Alice".to_string()),
@@ -61,7 +61,7 @@ mod tests {
         let result = alice_query.perform(&session).try_vec().await;
         assert!(result.is_ok());
 
-        let all_names_query = RelationQuery::new(
+        let all_names_query = AttributeQuery::new(
             Term::from(the!("user/name")),
             Term::blank(),
             Term::blank(),
@@ -73,7 +73,7 @@ mod tests {
         let result = all_names_query.perform(&session).try_vec().await;
         assert!(result.is_ok());
 
-        let email_query = RelationQuery::new(
+        let email_query = AttributeQuery::new(
             Term::from(the!("user/email")),
             alice.clone().into(),
             Term::blank(),
@@ -93,7 +93,7 @@ mod tests {
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
-        let variable_query = RelationQuery::new(
+        let variable_query = AttributeQuery::new(
             Term::from(the!("user/name")),
             Term::<Entity>::var("user"),
             Term::var("name"),
@@ -119,7 +119,7 @@ mod tests {
         let mut session = Session::open(artifacts.clone());
         session.transact(claims).await?;
 
-        let fact_selector = RelationQuery::new(
+        let fact_selector = AttributeQuery::new(
             Term::from(the!("user/name")),
             alice.clone().into(),
             Term::blank(),
@@ -153,7 +153,7 @@ mod tests {
         session.transact(claims).await?;
 
         let session = Session::open(artifacts.clone());
-        let admin_result = RelationQuery::new(
+        let admin_result = AttributeQuery::new(
             Term::from(the!("user/role")),
             Term::blank(),
             Term::constant("admin".to_string()),
@@ -166,7 +166,7 @@ mod tests {
         assert!(admin_result.is_ok());
 
         let session = Session::open(artifacts);
-        let names_result = RelationQuery::new(
+        let names_result = AttributeQuery::new(
             Term::from(the!("user/name")),
             Term::blank(),
             Term::blank(),

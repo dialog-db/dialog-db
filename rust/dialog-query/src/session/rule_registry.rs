@@ -1,7 +1,7 @@
 use crate::Entity;
 use crate::EvaluationError;
-use crate::concept::application::ConceptRules;
 use crate::concept::descriptor::ConceptDescriptor;
+use crate::concept::query::ConceptRules;
 use crate::rule::deductive::DeductiveRule;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};

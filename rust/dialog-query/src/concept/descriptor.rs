@@ -6,7 +6,7 @@ use std::iter;
 
 use crate::Predicate;
 use crate::attribute::{AttributeDescriptor, Attribution};
-use crate::concept::application::ConceptQuery;
+use crate::concept::query::ConceptQuery;
 use crate::concept::{Concept, Conclusion};
 use crate::error::TypeError;
 use crate::query::{Application, Source};

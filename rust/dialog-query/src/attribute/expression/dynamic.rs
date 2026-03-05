@@ -1,12 +1,12 @@
 use crate::artifact::{Cause, Entity, Value};
 use crate::attribute::The;
+use crate::attribute::query::AttributeQuery;
 use crate::attribute::statement::AttributeStatement;
 use crate::negation::Negation;
-use crate::relation::query::RelationQuery;
 use crate::schema::Cardinality;
 use crate::statement::Statement;
 use crate::term::Term;
-use crate::types::{Any, Scalar, Typed};
+use crate::types::{Scalar, Typed};
 use crate::{Premise, Proposition, Transaction};
 use std::ops::Not;
 
@@ -75,9 +75,9 @@ impl<T, Of> DynamicAttributeExpressionBuilder<T, Of> {
 ///   — all concrete positions.
 /// - [`From<...> for Premise`] requires each position to convert into
 ///   the corresponding [`Term`].
-pub struct DynamicAttributeExpression<Relation, Of, Is> {
+pub struct DynamicAttributeExpression<The, Of, Is> {
     /// The attribute (predicate), concrete or variable.
-    pub the: Relation,
+    pub the: The,
     /// The entity (or entity term).
     pub of: Of,
     /// The value, concrete or a [`Term`] variable.
@@ -146,20 +146,19 @@ where
     Is: IntoTerm,
     Is::Type: Scalar,
 {
-    fn from(expr: DynamicAttributeExpression<Relation, Of, Is>) -> Self {
-        let value_term: Term<Value> = expr.is.into_term().into();
-        let any_term: Term<Any> = value_term.into();
-        let query = RelationQuery::new(
-            expr.the.into(),
-            expr.of.into(),
-            any_term,
-            match expr.cause {
+    fn from(expression: DynamicAttributeExpression<Relation, Of, Is>) -> Self {
+        let value: Term<Value> = expression.is.into_term().into();
+        let query = AttributeQuery::new(
+            expression.the.into(),
+            expression.of.into(),
+            value.into(),
+            match expression.cause {
                 Some(c) => Term::Constant(Value::from(c)),
                 None => Term::blank(),
             },
-            expr.cardinality,
+            expression.cardinality,
         );
-        Premise::Assert(Proposition::Relation(Box::new(query)))
+        Premise::Assert(Proposition::Attribute(Box::new(query)))
     }
 }
 
@@ -233,7 +232,7 @@ mod tests {
             .into();
 
         match premise {
-            Premise::Assert(Proposition::Relation(query)) => {
+            Premise::Assert(Proposition::Attribute(query)) => {
                 assert!(query.the().is_constant());
                 assert!(query.of().is_variable());
                 assert!(query.is().is_variable());
@@ -251,7 +250,7 @@ mod tests {
             .into();
 
         match premise {
-            Premise::Assert(Proposition::Relation(query)) => {
+            Premise::Assert(Proposition::Attribute(query)) => {
                 assert!(query.the().is_constant());
                 assert!(query.of().is_constant());
                 assert!(query.is().is_variable());
@@ -268,7 +267,7 @@ mod tests {
             .into();
 
         match premise {
-            Premise::Assert(Proposition::Relation(query)) => {
+            Premise::Assert(Proposition::Attribute(query)) => {
                 assert!(query.the().is_constant());
                 assert!(query.of().is_variable());
                 assert!(query.is().is_constant());
@@ -283,7 +282,7 @@ mod tests {
         let premise: Premise = the!("person/name").of(alice).is("Alice".to_string()).into();
 
         match premise {
-            Premise::Assert(Proposition::Relation(query)) => {
+            Premise::Assert(Proposition::Attribute(query)) => {
                 assert!(query.the().is_constant());
                 assert!(query.of().is_constant());
                 assert!(query.is().is_constant());
@@ -328,7 +327,10 @@ mod tests {
 
         let expression = the!("person/name").of(alice).is("Alice".to_string());
         let premise: Premise = expression.into();
-        assert!(matches!(premise, Premise::Assert(Proposition::Relation(_))));
+        assert!(matches!(
+            premise,
+            Premise::Assert(Proposition::Attribute(_))
+        ));
     }
 
     #[dialog_common::test]

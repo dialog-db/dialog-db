@@ -182,7 +182,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             {
                 let value_param = dialog_query::Term::<dialog_query::types::Any>::from(terms.#field_name.clone());
 
-                dialog_query::RelationQuery::new(
+                dialog_query::AttributeQuery::new(
                     dialog_query::Term::Constant(dialog_query::Value::from(<#field_type as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().the().clone())),
                     terms.this.clone(),
                     value_param,

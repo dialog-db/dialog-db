@@ -115,14 +115,14 @@ impl Display for DeductiveRule {
 impl From<&ConceptDescriptor> for DeductiveRule {
     fn from(concept: &ConceptDescriptor) -> Self {
         use crate::artifact::Entity;
-        use crate::relation::query::RelationQuery;
+        use crate::attribute::query::AttributeQuery;
 
         let mut premises = Vec::new();
 
         let this = Term::<Entity>::var("this");
         for (name, attribute) in concept.with().iter() {
             premises.push(
-                RelationQuery::new(
+                AttributeQuery::new(
                     Term::Constant(Value::from(attribute.the().clone())),
                     this.clone(),
                     Term::var(name),
@@ -142,7 +142,7 @@ mod tests {
     use super::*;
     use crate::artifact::{Entity, Type};
     use crate::attribute::AttributeDescriptor;
-    use crate::relation::query::RelationQuery;
+    use crate::attribute::query::AttributeQuery;
     use crate::the;
 
     #[dialog_common::test]
@@ -169,7 +169,7 @@ mod tests {
         ]);
         let this = Term::<Entity>::var("this");
         let premises = vec![
-            RelationQuery::new(
+            AttributeQuery::new(
                 Term::from(the!("user/name")),
                 this.clone(),
                 Term::var("name"),
@@ -177,7 +177,7 @@ mod tests {
                 Some(Cardinality::One),
             )
             .into(),
-            RelationQuery::new(
+            AttributeQuery::new(
                 Term::from(the!("user/age")),
                 this,
                 Term::var("age"),
@@ -213,9 +213,9 @@ mod tests {
             ),
         ]);
         let premises = vec![
-            RelationQuery::new(
+            AttributeQuery::new(
                 Term::var("the"),
-                Term::<Entity>::var("user"),
+                Term::var("user"),
                 Term::var("value"),
                 Term::var("cause"),
                 Some(Cardinality::One),
@@ -251,9 +251,9 @@ mod tests {
         // All terms are variables — no constants at all.
         // The planner should reject this at install time.
         let premises = vec![
-            RelationQuery::new(
+            AttributeQuery::new(
                 Term::var("the"),
-                Term::<Entity>::var("user"),
+                Term::var("user"),
                 Term::var("value"),
                 Term::var("cause"),
                 None,
@@ -291,9 +291,9 @@ mod tests {
             ),
         ]);
         let premises = vec![
-            RelationQuery::new(
+            AttributeQuery::new(
                 Term::from(the!("user/name")),
-                Term::<Entity>::var("this"),
+                Term::var("this"),
                 Term::var("name"),
                 Term::var("cause"),
                 Some(Cardinality::One),
@@ -356,7 +356,7 @@ mod tests {
         ]);
         let this = Term::<Entity>::var("this");
         let premises = vec![
-            RelationQuery::new(
+            AttributeQuery::new(
                 Term::from(the!("user/name")),
                 this.clone(),
                 Term::constant("jack".to_string()),
@@ -366,7 +366,7 @@ mod tests {
             .into(),
             // Use ?key as the the variable
             // to ensure the conclusion parameter "key" gets bound.
-            RelationQuery::new(
+            AttributeQuery::new(
                 Term::var("key"),
                 this,
                 Term::var("value"),
@@ -388,7 +388,7 @@ mod tests {
         )]);
 
         let premises = vec![
-            RelationQuery::new(
+            AttributeQuery::new(
                 Term::from(the!("user/name")),
                 Term::<Entity>::var("this"),
                 Term::var("key_var"),
@@ -410,7 +410,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_rejects_negated_constraint_with_unbound_variable() {
-        use crate::relation::query::RelationQuery;
+        use crate::attribute::query::AttributeQuery;
 
         let conclusion = ConceptDescriptor::from(vec![(
             "name",
@@ -425,7 +425,7 @@ mod tests {
         let name = Term::<String>::var("name");
         let z = Term::<String>::var("z");
         let premises = vec![
-            RelationQuery::new(
+            AttributeQuery::new(
                 Term::from(the!("person/name")),
                 Term::<Entity>::var("this"),
                 name.clone().into(),
@@ -446,7 +446,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_rejects_negated_constraint_with_unbound_variable_on_left() {
-        use crate::relation::query::RelationQuery;
+        use crate::attribute::query::AttributeQuery;
 
         let conclusion = ConceptDescriptor::from(vec![(
             "name",
@@ -461,7 +461,7 @@ mod tests {
         let name = Term::<String>::var("name");
         let z = Term::<String>::var("z");
         let premises = vec![
-            RelationQuery::new(
+            AttributeQuery::new(
                 Term::from(the!("person/name")),
                 Term::<Entity>::var("this"),
                 name.clone().into(),

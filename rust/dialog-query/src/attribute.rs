@@ -1,7 +1,7 @@
 mod descriptor;
 /// Typed attribute expressions for single-attribute operations.
 pub mod expression;
-/// Typed attribute queries wrapping [`RelationQuery`](crate::relation::query::RelationQuery).
+/// Typed attribute queries wrapping [`DynamicAttributeQuery`](crate::attribute::query::dynamic::DynamicAttributeQuery).
 pub mod query;
 /// Type-erased concrete attribute statement.
 pub mod statement;
@@ -9,7 +9,7 @@ mod the;
 
 pub use descriptor::*;
 pub use expression::*;
-pub use query::*;
+pub use query::{AttributeQuery, DynamicAttributeQuery, StaticAttributeQuery};
 pub use statement::*;
 pub use the::*;
 
@@ -50,7 +50,7 @@ mod tests {
 
         use crate::artifact::Value;
         use crate::attribute::expression::typed::StaticAttributeStatement;
-        use crate::attribute::query::AttributeQuery;
+        use crate::attribute::query::StaticAttributeQuery;
         use crate::attribute::{Attribute, AttributeDescriptor, StaticAttributeExpressionBuilder};
         use crate::descriptor::Descriptor;
         use crate::term::Term;
@@ -63,7 +63,7 @@ mod tests {
 
         impl Predicate for Name {
             type Conclusion = StaticAttributeStatement<Self>;
-            type Application = AttributeQuery<Self>;
+            type Application = StaticAttributeQuery<Self>;
             type Descriptor = AttributeDescriptor;
         }
 

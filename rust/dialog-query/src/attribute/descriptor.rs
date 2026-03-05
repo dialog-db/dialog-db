@@ -1,8 +1,8 @@
 use crate::Parameters;
 use crate::artifact::{ArtifactsAttribute, Entity, Value};
 use crate::attribute::The;
+use crate::attribute::query::AttributeQuery;
 use crate::error::{FieldTypeError, TypeError};
-use crate::relation::query::RelationQuery;
 use crate::schema::Cardinality;
 use crate::term::Term;
 use crate::types::Any;
@@ -143,9 +143,9 @@ impl AttributeDescriptor {
             .expect("Should succeed if we know attribute")
     }
 
-    /// Builds a [`RelationQuery`] from named parameters, type-checking each
+    /// Builds an [`AttributeQuery`] from named parameters, type-checking each
     /// binding against this attribute's schema.
-    pub fn apply(&self, parameters: Parameters) -> Result<RelationQuery, TypeError> {
+    pub fn apply(&self, parameters: Parameters) -> Result<AttributeQuery, TypeError> {
         // Check that type of the `is` parameter matches the attribute's data type
         self.conform(parameters.get("is"))
             .map_err(|e| e.at("is".to_string()))?;
@@ -188,7 +188,7 @@ impl AttributeDescriptor {
             None => Term::blank(),
         };
 
-        Ok(RelationQuery::new(
+        Ok(AttributeQuery::new(
             Term::Constant(Value::from(self.the().clone())),
             of,
             is,
