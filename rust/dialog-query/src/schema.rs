@@ -130,11 +130,11 @@ impl Cardinality {
             (true, true, false, Cardinality::One) => Some(LOOKUP_COST),
             (true, true, false, Cardinality::Many) => Some(RANGE_READ_COST),
 
-            // {the, is} — VAE prefix (value + attribute, no entity)
+            // {the, is} — VAE prefix (value + attribute, no entity → verification)
             (true, false, true, Cardinality::One) => Some(RANGE_READ_COST + VERIFICATION_COST),
             (true, false, true, Cardinality::Many) => Some(RANGE_READ_COST),
 
-            // {of, is} — EAV prefix (entity + value via EAV scan)
+            // {of, is} — EAV scan (entity known, value constraint post-filtered)
             (false, true, true, Cardinality::One) => Some(RANGE_READ_COST),
             (false, true, true, Cardinality::Many) => Some(RANGE_SCAN_COST),
 
