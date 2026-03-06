@@ -10,7 +10,7 @@ use std::vec::IntoIter;
 /// handed to the [`Planner`](crate::planner::Planner) which reorders
 /// them for optimal execution.
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct Premises(pub(crate) Vec<Premise>);
+pub struct Premises(Vec<Premise>);
 
 impl Premises {
     /// Create a new empty When collection
@@ -73,7 +73,7 @@ impl<T: Into<Premise>> From<Vec<T>> for Premises {
         for each in source {
             premises.push(each.into());
         }
-        Premises(premises)
+        Self(premises)
     }
 }
 
@@ -83,6 +83,6 @@ impl<T: Into<Premise>, const N: usize> From<[T; N]> for Premises {
         for each in source {
             premises.push(each.into());
         }
-        Premises(premises)
+        Self(premises)
     }
 }

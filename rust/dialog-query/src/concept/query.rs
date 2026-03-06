@@ -87,8 +87,8 @@ impl ConceptQuery {
     /// Cost model:
     /// - If "this" is bound: Sum of costs for each attribute lookup
     ///   - For both 2/3 and 3/3 constraint:
-    ///     - Cardinality::One: SEGMENT_READ_COST (same lookup cost)
-    ///     - Cardinality::Many: RANGE_SCAN_COST (still need to scan)
+    ///     - Cardinality::One: LOOKUP_COST
+    ///     - Cardinality::Many: RANGE_READ_COST
     ///
     /// - If "this" is unbound but any attribute value is bound:
     ///   - Prefer Cardinality::One attribute (nearly free - just returns `this`)
@@ -537,7 +537,7 @@ mod tests {
         };
 
         let cost = concept_app.estimate(&Environment::new());
-        assert_eq!(cost, Some(2100));
+        assert_eq!(cost, Some(2200));
 
         let schema = concept_app.schema();
 

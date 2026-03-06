@@ -4,7 +4,7 @@ use crate::attribute::The;
 use crate::environment::Environment;
 use crate::query::Application;
 use crate::query::Output;
-use crate::schema::{Cardinality, SEGMENT_READ_COST};
+use crate::schema::Cardinality;
 use crate::selection::{Match, Selection};
 use crate::types::{Any, Record};
 use crate::{Entity, EvaluationError, Parameters, Schema, Source, Term, try_stream};
@@ -14,12 +14,6 @@ use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
 
 use super::all::AttributeQueryAll;
-
-/// Per-match cost of the secondary lookup required when scanning the value
-/// index (VAE) with `Cardinality::One`. Each match from the primary scan
-/// needs a secondary `(attribute, entity)` lookup to verify it is the
-/// winning value — the one with the highest cause.
-const SECONDARY_LOOKUP_COST: usize = SEGMENT_READ_COST;
 
 /// Given two artifacts for the same `(attribute, entity)` pair, return the
 /// winner. The winner is the artifact with the higher cause; when causes are
@@ -41,12 +35,13 @@ fn choose(current: Artifact, challenger: Artifact) -> Artifact {
     }
 }
 
-/// VAE winner verification.
+/// Winner verification.
 ///
-/// When only the value is known (VAE scan), groups aren't contiguous, so each
-/// candidate from the base scan is verified by a secondary `(attribute, entity)`
-/// range scan to find the true winner. Yields the match only if the candidate
-/// matches the winner.
+/// When the entity is unknown, results from the base scan (VAE or AEV) are
+/// not guaranteed to contain all competing values for the same
+/// `(attribute, entity)` pair. Each candidate is verified by a secondary
+/// `(attribute, entity)` lookup to find the true winner. Yields the match
+/// only if the candidate matches the winner.
 fn challenge<S: Source>(
     source: S,
     selector: AttributeQueryAll,
@@ -57,7 +52,12 @@ fn challenge<S: Source>(
         let attribute = ArtifactsAttribute::try_from(candidate.lookup(&Term::from(&relation))?)?;
         let entity = Entity::try_from(candidate.lookup(&Term::from(selector.of()))?)?;
         let value = candidate.lookup(selector.is())?;
-        let cause = Cause::try_from(candidate.lookup(&Term::from(selector.cause()))?)?;
+        let cause_term = selector.cause();
+        let cause = if cause_term.is_blank() {
+            None
+        } else {
+            Some(Cause::try_from(candidate.lookup(&Term::from(cause_term))?)?)
+        };
 
         let challengers = source.select(ArtifactSelector::new()
             .the(attribute)
@@ -74,9 +74,11 @@ fn challenge<S: Source>(
 
         if let Some(winner) = winner
             && winner.is == value
-            && winner.cause.unwrap_or(Cause([0; 32])) == cause
         {
-            yield candidate;
+            let winner_cause = winner.cause.unwrap_or(Cause([0; 32]));
+            if cause.is_none() || cause == Some(winner_cause) {
+                yield candidate;
+            }
         }
     }
 }
@@ -88,80 +90,74 @@ fn challenge<S: Source>(
 /// the highest cause.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct AttributeQueryOnly {
-    inner: AttributeQueryAll,
+    query: AttributeQueryAll,
 }
 
 impl AttributeQueryOnly {
     /// Create a new winner-selecting attribute query.
     pub fn new(the: Term<The>, of: Term<Entity>, is: Term<Any>, cause: Term<Cause>) -> Self {
         Self {
-            inner: AttributeQueryAll::new(the, of, is, cause),
+            query: AttributeQueryAll::new(the, of, is, cause),
         }
     }
 
     /// Get the 'the' (attribute) term.
     pub fn the(&self) -> &Term<The> {
-        self.inner.the()
+        self.query.the()
     }
 
     /// Get the 'of' (entity) term.
     pub fn of(&self) -> &Term<Entity> {
-        self.inner.of()
+        self.query.of()
     }
 
     /// Get the 'is' (value) parameter.
     pub fn is(&self) -> &Term<Any> {
-        self.inner.is()
+        self.query.is()
     }
 
     /// Get the 'cause' term.
     pub fn cause(&self) -> &Term<Cause> {
-        self.inner.cause()
+        self.query.cause()
     }
 
     /// Get the source term (internal claim handle).
     pub fn source(&self) -> &Term<Record> {
-        self.inner.source()
+        self.query.source()
     }
 
     /// Map `Term<The>` to `Term<ArtifactsAttribute>`.
     pub fn attribute(&self) -> Term<ArtifactsAttribute> {
-        self.inner.attribute()
+        self.query.attribute()
     }
 
     /// Returns the schema describing this application's parameters.
     pub fn schema(&self) -> Schema {
-        self.inner.schema()
+        self.query.schema()
     }
 
     /// Estimate cost for Cardinality::One semantics.
     ///
-    /// When only the value is known (neither entity nor attribute), each match
-    /// from the VAE scan requires a secondary lookup, adding
-    /// `SECONDARY_LOOKUP_COST` per match.
+    /// The cost table in [`Cardinality::estimate`] already includes the
+    /// VERIFY overhead for VAE-based lookups, so no additional adjustment
+    /// is needed here.
     pub fn estimate(&self, env: &Environment) -> Option<usize> {
-        let the = self.inner.the().is_bound(env);
-        let of = self.inner.of().is_bound(env);
-        let is = self.inner.is().is_bound(env);
+        let the = self.the().is_bound(env);
+        let of = self.of().is_bound(env);
+        let is = self.is().is_bound(env);
 
-        let base = Cardinality::One.estimate(the, of, is)?;
-
-        if is && !the && !of {
-            Some(base + SECONDARY_LOOKUP_COST)
-        } else {
-            Some(base)
-        }
+        Cardinality::One.estimate(the, of, is)
     }
 
     /// Returns the parameters for this query.
     pub fn parameters(&self) -> Parameters {
-        self.inner.parameters()
+        self.query.parameters()
     }
 
     /// EAV/AEV scan: results are grouped by `(attribute, entity)`.
     /// Buffer the winning candidate and yield when the group changes.
     fn select_winners<S: Source, M: Selection>(self, source: S, selection: M) -> impl Selection {
-        let selector = self.inner;
+        let selector = self.query;
         try_stream! {
             for await each in selection {
                 let base = each?;
@@ -196,23 +192,20 @@ impl AttributeQueryOnly {
 
     /// Evaluate with winner selection based on scan strategy.
     ///
-    /// - **EAV/AEV** (entity or attribute known): results are grouped by
-    ///   `(attribute, entity)`. A sliding window yields the winner per group.
-    /// - **VAE** (only value known): delegates to the inner base scan then
-    ///   verifies each candidate with a secondary lookup.
+    /// - **EAV** (entity known): results are grouped by `(attribute, entity)`.
+    ///   A sliding window yields the winner per group.
+    /// - **VAE** (entity unknown): each candidate needs a secondary
+    ///   `(attribute, entity)` lookup to verify it is the true winner,
+    ///   because the scan may not contain all competing values.
     pub fn evaluate<S: Source, M: Selection>(self, source: S, selection: M) -> impl Selection {
-        let entity_known = matches!(self.inner.of(), Term::Constant(_));
-        let attribute_known = matches!(self.inner.the(), Term::Constant(_));
-
-        if entity_known || attribute_known {
+        if self.of().is_constant() {
             Either::Left(self.select_winners(source, selection))
         } else {
-            let inner_clone = self.inner.clone();
-            let candidates = self.inner.evaluate(source.clone(), selection);
+            let query = self.query;
+            let candidates = query.clone().evaluate(source.clone(), selection);
             Either::Right(
-                candidates.try_flat_map(move |input| {
-                    challenge(source.clone(), inner_clone.clone(), input)
-                }),
+                candidates
+                    .try_flat_map(move |input| challenge(source.clone(), query.clone(), input)),
             )
         }
     }
@@ -234,7 +227,7 @@ impl Application for AttributeQueryOnly {
     }
 
     fn realize(&self, input: Match) -> Result<Claim, EvaluationError> {
-        input.prove(self.inner.source())
+        input.prove(self.query.source())
     }
 }
 
@@ -242,19 +235,20 @@ impl TryFrom<&AttributeQueryOnly> for ArtifactSelector<Constrained> {
     type Error = EvaluationError;
 
     fn try_from(from: &AttributeQueryOnly) -> Result<Self, Self::Error> {
-        ArtifactSelector::try_from(&from.inner)
+        ArtifactSelector::try_from(&from.query)
     }
 }
 
 impl Display for AttributeQueryOnly {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        Display::fmt(&self.inner, f)
+        Display::fmt(&self.query, f)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::attribute::query::AttributeQuery;
     use crate::query::Output;
     use crate::{Session, the};
     use dialog_storage::MemoryStorageBackend;
@@ -385,6 +379,96 @@ mod tests {
             "VAE path should verify and return the winner"
         );
         assert_eq!(vae_results[0].is(), &winner_value);
+
+        Ok(())
+    }
+
+    /// When both attribute and value are known ({the, is}) but entity is
+    /// unknown, the VAE scan only sees artifacts matching that exact value.
+    /// If another value is the actual winner for an entity, the scan won't
+    /// see it. The challenge/verification path must detect this and filter
+    /// out non-winners.
+    #[dialog_common::test]
+    async fn it_verifies_winner_for_attribute_and_value_known() -> anyhow::Result<()> {
+        use crate::Application;
+        use crate::artifact::Artifacts;
+
+        let storage_backend = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        let entity = Entity::new()?;
+
+        // Assert two competing values for the same (attribute, entity) pair.
+        {
+            let mut session = Session::open(artifacts.clone());
+            let mut tx = session.edit();
+            tx.assert(
+                the!("person/name")
+                    .of(entity.clone())
+                    .is("Alice".to_string()),
+            );
+            session.commit(tx).await.unwrap();
+        }
+        {
+            let mut session = Session::open(artifacts.clone());
+            let mut tx = session.edit();
+            tx.assert(
+                the!("person/name")
+                    .of(entity.clone())
+                    .is("Alicia".to_string()),
+            );
+            session.commit(tx).await.unwrap();
+        }
+
+        let session = Session::open(artifacts.clone());
+        // First, determine which value is the actual winner via an
+        // unconstrained Cardinality::One query (entity known → EAV path).
+        let race = the!("person/name")
+            .of(Term::from(entity.clone()))
+            .is(Term::<String>::var("name"))
+            .cardinality(Cardinality::One)
+            .perform(&session)
+            .try_vec()
+            .await?;
+        assert_eq!(race.len(), 1);
+        let winner_value = race[0].is().clone();
+        let (winner, looser) = if winner_value == crate::Value::String("Alice".into()) {
+            ("Alice".to_string(), "Alicia".to_string())
+        } else {
+            ("Alicia".to_string(), "Alice".to_string())
+        };
+
+        // Query with {the, is} for the LOSER value.
+        // The VAE scan finds it, but verification must reject it.
+        let session = Session::open(artifacts.clone());
+        let results = the!("person/name")
+            .of(Term::var("person"))
+            .is(looser.clone())
+            .cardinality(Cardinality::One)
+            .perform(&session)
+            .try_vec()
+            .await?;
+
+        assert_eq!(
+            results.len(),
+            0,
+            "The loser value '{}' should be filtered out by winner verification",
+            looser,
+        );
+
+        // Query with {the, is} for the WINNER value.
+        // Verification confirms it is the winner.
+        let session = Session::open(artifacts.clone());
+        let results = the!("person/name")
+            .of(Term::var("person"))
+            .is(winner.clone())
+            .cardinality(Cardinality::One)
+            .perform(&session)
+            .try_vec()
+            .await?;
+
+        assert_eq!(results.len(), 1, "The winner value should be returned");
+        assert_eq!(results[0].of(), &entity);
 
         Ok(())
     }

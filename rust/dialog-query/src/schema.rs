@@ -70,22 +70,20 @@ impl Default for Schema {
     }
 }
 
-/// Cost of a segment read for Cardinality::One with 3/3 or 2/3 constraints.
-/// This is a direct lookup that reads from a single segment.
-pub const SEGMENT_READ_COST: usize = 100;
+/// Cost of reading a single contiguous segment (e.g. EAV with full or near-full prefix).
+pub const LOOKUP_COST: usize = 100;
 
-/// Cost of a range read for Cardinality::Many with 3/3 constraints.
-/// This read could potentially span multiple segments but is bounded.
+/// Cost of reading a contiguous range that may span multiple segments.
 pub const RANGE_READ_COST: usize = 200;
 
-/// Cost of a range scan for Cardinality::Many with 2/3 constraints,
-/// or Cardinality::One with 1/3 constraints.
-/// This scan is likely to span multiple segments.
+/// Cost of scanning a large portion of an index.
 pub const RANGE_SCAN_COST: usize = 1_000;
 
-/// Cost of an index scan for Cardinality::Many with 1/3 constraints.
-/// This is the most expensive query pattern - scanning with minimal constraints.
-pub const INDEX_SCAN: usize = 5_000;
+/// Cost of a full index scan with minimal constraints.
+pub const INDEX_SCAN_COST: usize = 5_000;
+
+/// Cost of a secondary verification lookup (e.g. VAE winner check for Cardinality::One).
+pub const VERIFICATION_COST: usize = 100;
 
 /// Overhead cost for concept queries due to potential rule evaluation.
 /// Concepts may have associated deductive rules that need to be checked and evaluated.
@@ -120,26 +118,40 @@ impl Cardinality {
     /// The cost depends on how many components are known and the cardinality:
     /// - 3 known (lookup): Precise lookup, low cost
     /// - 2 known (select): Index-based selection
-    /// - 1 known (scan): Table/index scan
+    /// - 1 known (scan): Index scan
     /// - 0 known: Unbound (should be rejected)
     pub fn estimate(&self, the: bool, of: bool, is: bool) -> Option<usize> {
-        let count = (the as usize) + (of as usize) + (is as usize);
+        match (the, of, is, self) {
+            // {the, of, is} — EAV full prefix
+            (true, true, true, Cardinality::One) => Some(LOOKUP_COST),
+            (true, true, true, Cardinality::Many) => Some(LOOKUP_COST),
 
-        match (count, self) {
-            // Three constraints - fully bound lookup
-            (3, Cardinality::One) => Some(SEGMENT_READ_COST),
-            (3, Cardinality::Many) => Some(RANGE_READ_COST),
+            // {of, the} — EAV prefix (entity + attribute)
+            (true, true, false, Cardinality::One) => Some(LOOKUP_COST),
+            (true, true, false, Cardinality::Many) => Some(RANGE_READ_COST),
 
-            // Two constraints - index-based select
-            (2, Cardinality::One) => Some(SEGMENT_READ_COST),
-            (2, Cardinality::Many) => Some(RANGE_SCAN_COST),
+            // {the, is} — VAE prefix (value + attribute, no entity)
+            (true, false, true, Cardinality::One) => Some(RANGE_READ_COST + VERIFICATION_COST),
+            (true, false, true, Cardinality::Many) => Some(RANGE_READ_COST),
 
-            // One constraint - table/index scan
-            (1, Cardinality::One) => Some(RANGE_SCAN_COST),
-            (1, Cardinality::Many) => Some(INDEX_SCAN),
+            // {of, is} — EAV prefix (entity + value via EAV scan)
+            (false, true, true, Cardinality::One) => Some(RANGE_READ_COST),
+            (false, true, true, Cardinality::Many) => Some(RANGE_SCAN_COST),
 
-            // No constraints - unbound query
-            _ => None,
+            // {of} — EAV prefix (entity only)
+            (false, true, false, Cardinality::One) => Some(RANGE_READ_COST),
+            (false, true, false, Cardinality::Many) => Some(RANGE_SCAN_COST),
+
+            // {the} — AEV prefix (attribute only, entity unknown → needs verification)
+            (true, false, false, Cardinality::One) => Some(RANGE_SCAN_COST + VERIFICATION_COST),
+            (true, false, false, Cardinality::Many) => Some(INDEX_SCAN_COST),
+
+            // {is} — VAE prefix (value only)
+            (false, false, true, Cardinality::One) => Some(INDEX_SCAN_COST + VERIFICATION_COST),
+            (false, false, true, Cardinality::Many) => Some(INDEX_SCAN_COST),
+
+            // No constraints — unbound
+            (false, false, false, _) => None,
         }
     }
 }

@@ -3,11 +3,12 @@ use crate::attribute::The;
 use crate::attribute::query::AttributeQuery;
 use crate::attribute::statement::AttributeStatement;
 use crate::negation::Negation;
+use crate::query::Output;
 use crate::schema::Cardinality;
 use crate::statement::Statement;
 use crate::term::Term;
 use crate::types::{Scalar, Typed};
-use crate::{Premise, Proposition, Transaction};
+use crate::{Claim, Premise, Proposition, Source, Transaction};
 use std::ops::Not;
 
 /// Converts a value into a [`Term`], resolving the type unambiguously
@@ -90,11 +91,54 @@ pub struct DynamicAttributeExpression<The, Of, Is> {
     pub cardinality: Option<Cardinality>,
 }
 
-impl<Relation, Of, Is> DynamicAttributeExpression<Relation, Of, Is> {
+impl<The, Of, Is> DynamicAttributeExpression<The, Of, Is> {
     /// Set the cardinality for this expression.
     pub fn cardinality(mut self, cardinality: Cardinality) -> Self {
         self.cardinality = Some(cardinality);
         self
+    }
+
+    /// Set the caus for this expression
+    pub fn cause(mut self, cause: Cause) -> Self {
+        self.cause = Some(cause);
+        self
+    }
+}
+
+/// Convert a dynamic expression into an [`AttributeQuery`].
+impl<Relation, Of, Is> From<DynamicAttributeExpression<Relation, Of, Is>> for AttributeQuery
+where
+    Relation: Into<Term<The>>,
+    Of: Into<Term<Entity>>,
+    Is: IntoTerm,
+    Is::Type: Scalar,
+{
+    fn from(expression: DynamicAttributeExpression<Relation, Of, Is>) -> Self {
+        let value: Term<Value> = expression.is.into_term().into();
+        AttributeQuery::new(
+            expression.the.into(),
+            expression.of.into(),
+            value.into(),
+            match expression.cause {
+                Some(c) => Term::Constant(Value::from(c)),
+                None => Term::blank(),
+            },
+            expression.cardinality,
+        )
+    }
+}
+
+impl<Relation, Of, Is> DynamicAttributeExpression<Relation, Of, Is>
+where
+    Relation: Into<Term<The>>,
+    Of: Into<Term<Entity>>,
+    Is: IntoTerm,
+    Is::Type: Scalar,
+{
+    /// Execute this expression as a query, returning a stream of claims.
+    pub fn perform<S: Source>(self, source: &S) -> impl Output<Claim> {
+        let query: AttributeQuery = self.into();
+        query.perform(source)
     }
 }
 
@@ -148,17 +192,7 @@ where
     Is::Type: Scalar,
 {
     fn from(expression: DynamicAttributeExpression<Relation, Of, Is>) -> Self {
-        let value: Term<Value> = expression.is.into_term().into();
-        let query = AttributeQuery::new(
-            expression.the.into(),
-            expression.of.into(),
-            value.into(),
-            match expression.cause {
-                Some(c) => Term::Constant(Value::from(c)),
-                None => Term::blank(),
-            },
-            expression.cardinality,
-        );
+        let query: AttributeQuery = expression.into();
         Premise::Assert(Proposition::Attribute(Box::new(query)))
     }
 }

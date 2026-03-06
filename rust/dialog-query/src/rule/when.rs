@@ -55,7 +55,7 @@ where
     T1: Into<Premise>,
 {
     fn into_premises(self) -> Premises {
-        Premises(vec![self.0.into()])
+        vec![self.0.into()].into()
     }
 }
 
@@ -65,7 +65,7 @@ where
     T2: Into<Premise>,
 {
     fn into_premises(self) -> Premises {
-        Premises(vec![self.0.into(), self.1.into()])
+        vec![self.0.into(), self.1.into()].into()
     }
 }
 
@@ -76,7 +76,7 @@ where
     T3: Into<Premise>,
 {
     fn into_premises(self) -> Premises {
-        Premises(vec![self.0.into(), self.1.into(), self.2.into()])
+        vec![self.0.into(), self.1.into(), self.2.into()].into()
     }
 }
 
@@ -88,12 +88,7 @@ where
     T4: Into<Premise>,
 {
     fn into_premises(self) -> Premises {
-        Premises(vec![
-            self.0.into(),
-            self.1.into(),
-            self.2.into(),
-            self.3.into(),
-        ])
+        vec![self.0.into(), self.1.into(), self.2.into(), self.3.into()].into()
     }
 }
 
@@ -106,13 +101,14 @@ where
     T5: Into<Premise>,
 {
     fn into_premises(self) -> Premises {
-        Premises(vec![
+        vec![
             self.0.into(),
             self.1.into(),
             self.2.into(),
             self.3.into(),
             self.4.into(),
-        ])
+        ]
+        .into()
     }
 }
 
@@ -126,14 +122,15 @@ where
     T6: Into<Premise>,
 {
     fn into_premises(self) -> Premises {
-        Premises(vec![
+        vec![
             self.0.into(),
             self.1.into(),
             self.2.into(),
             self.3.into(),
             self.4.into(),
             self.5.into(),
-        ])
+        ]
+        .into()
     }
 }
 
@@ -148,7 +145,7 @@ where
     T7: Into<Premise>,
 {
     fn into_premises(self) -> Premises {
-        Premises(vec![
+        vec![
             self.0.into(),
             self.1.into(),
             self.2.into(),
@@ -156,7 +153,8 @@ where
             self.4.into(),
             self.5.into(),
             self.6.into(),
-        ])
+        ]
+        .into()
     }
 }
 
@@ -172,7 +170,7 @@ where
     T8: Into<Premise>,
 {
     fn into_premises(self) -> Premises {
-        Premises(vec![
+        vec![
             self.0.into(),
             self.1.into(),
             self.2.into(),
@@ -181,7 +179,8 @@ where
             self.5.into(),
             self.6.into(),
             self.7.into(),
-        ])
+        ]
+        .into()
     }
 }
 
@@ -198,7 +197,7 @@ where
     T9: Into<Premise>,
 {
     fn into_premises(self) -> Premises {
-        Premises(vec![
+        vec![
             self.0.into(),
             self.1.into(),
             self.2.into(),
@@ -208,7 +207,8 @@ where
             self.6.into(),
             self.7.into(),
             self.8.into(),
-        ])
+        ]
+        .into()
     }
 }
 
@@ -226,7 +226,7 @@ where
     T10: Into<Premise>,
 {
     fn into_premises(self) -> Premises {
-        Premises(vec![
+        vec![
             self.0.into(),
             self.1.into(),
             self.2.into(),
@@ -237,7 +237,8 @@ where
             self.7.into(),
             self.8.into(),
             self.9.into(),
-        ])
+        ]
+        .into()
     }
 }
 
@@ -257,7 +258,7 @@ where
     T11: Into<Premise>,
 {
     fn into_premises(self) -> Premises {
-        Premises(vec![
+        vec![
             self.0.into(),
             self.1.into(),
             self.2.into(),
@@ -269,7 +270,8 @@ where
             self.8.into(),
             self.9.into(),
             self.10.into(),
-        ])
+        ]
+        .into()
     }
 }
 
@@ -290,7 +292,7 @@ where
     T12: Into<Premise>,
 {
     fn into_premises(self) -> Premises {
-        Premises(vec![
+        vec![
             self.0.into(),
             self.1.into(),
             self.2.into(),
@@ -303,6 +305,7 @@ where
             self.9.into(),
             self.10.into(),
             self.11.into(),
-        ])
+        ]
+        .into()
     }
 }

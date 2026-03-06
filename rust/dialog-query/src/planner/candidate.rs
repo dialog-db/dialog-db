@@ -548,7 +548,8 @@ mod cost_model_tests {
     use crate::formula::string::Length;
     use crate::proposition::Proposition;
     use crate::schema::{
-        CONCEPT_OVERHEAD, INDEX_SCAN, RANGE_READ_COST, RANGE_SCAN_COST, SEGMENT_READ_COST,
+        CONCEPT_OVERHEAD, INDEX_SCAN_COST, LOOKUP_COST, RANGE_READ_COST, RANGE_SCAN_COST,
+        VERIFICATION_COST,
     };
     use crate::the;
 
@@ -570,9 +571,9 @@ mod cost_model_tests {
 
         assert_eq!(
             candidate.cost(),
-            SEGMENT_READ_COST,
-            "All constants should only cost SEGMENT_READ_COST ({}), got {}",
-            SEGMENT_READ_COST,
+            LOOKUP_COST,
+            "All constants should only cost LOOKUP_COST ({}), got {}",
+            LOOKUP_COST,
             candidate.cost()
         );
     }
@@ -591,9 +592,9 @@ mod cost_model_tests {
 
         assert_eq!(
             candidate.cost(),
-            RANGE_SCAN_COST,
-            "With 1 constraint (just constant 'the'), cost should be RANGE_SCAN_COST ({}), got {}",
-            RANGE_SCAN_COST,
+            RANGE_SCAN_COST + VERIFICATION_COST,
+            "With 1 constraint (just constant 'the'), cost should be RANGE_SCAN_COST + VERIFICATION_COST ({}), got {}",
+            RANGE_SCAN_COST + VERIFICATION_COST,
             candidate.cost()
         );
     }
@@ -611,7 +612,7 @@ mod cost_model_tests {
 
         let mut candidate = Candidate::from(premise);
         let initial_cost = candidate.cost();
-        assert_eq!(initial_cost, RANGE_SCAN_COST);
+        assert_eq!(initial_cost, RANGE_SCAN_COST + VERIFICATION_COST);
 
         let mut env = Environment::new();
         env.add("entity");
@@ -619,9 +620,9 @@ mod cost_model_tests {
 
         let after_entity = candidate.cost();
         assert_eq!(
-            after_entity, SEGMENT_READ_COST,
-            "After binding entity, cost should decrease to SEGMENT_READ_COST. Expected {}, got {}",
-            SEGMENT_READ_COST, after_entity
+            after_entity, LOOKUP_COST,
+            "After binding entity, cost should decrease to LOOKUP_COST. Expected {}, got {}",
+            LOOKUP_COST, after_entity
         );
 
         env.add("value");
@@ -629,9 +630,9 @@ mod cost_model_tests {
 
         let final_cost = candidate.cost();
         assert_eq!(
-            final_cost, SEGMENT_READ_COST,
-            "After binding all variables, cost stays at SEGMENT_READ_COST ({}), got {}",
-            SEGMENT_READ_COST, final_cost
+            final_cost, LOOKUP_COST,
+            "After binding all variables, cost stays at LOOKUP_COST ({}), got {}",
+            LOOKUP_COST, final_cost
         );
     }
 
@@ -651,9 +652,9 @@ mod cost_model_tests {
         let cost = query.estimate(&env).unwrap_or(usize::MAX);
 
         assert_eq!(
-            cost, SEGMENT_READ_COST,
-            "Variable already in env counts as bound. Expected SEGMENT_READ_COST ({}), got {}",
-            SEGMENT_READ_COST, cost
+            cost, LOOKUP_COST,
+            "Variable already in env counts as bound. Expected LOOKUP_COST ({}), got {}",
+            LOOKUP_COST, cost
         );
     }
 
@@ -686,15 +687,15 @@ mod cost_model_tests {
             many_candidate.cost()
         );
 
-        assert_eq!(one_candidate.cost(), RANGE_SCAN_COST);
-        assert_eq!(many_candidate.cost(), INDEX_SCAN);
+        assert_eq!(one_candidate.cost(), RANGE_SCAN_COST + VERIFICATION_COST);
+        assert_eq!(many_candidate.cost(), INDEX_SCAN_COST);
 
-        let expected_diff = INDEX_SCAN - RANGE_SCAN_COST;
+        let expected_diff = INDEX_SCAN_COST - (RANGE_SCAN_COST + VERIFICATION_COST);
         let actual_diff = many_candidate.cost() - one_candidate.cost();
 
         assert_eq!(
             actual_diff, expected_diff,
-            "Cost difference should be {} (INDEX_SCAN - RANGE_SCAN_COST), got {}",
+            "Cost difference should be {} (INDEX_SCAN_COST - (RANGE_SCAN_COST + VERIFICATION_COST)), got {}",
             expected_diff, actual_diff
         );
     }
@@ -725,13 +726,13 @@ mod cost_model_tests {
         let many_candidate =
             Candidate::from(Premise::Assert(Proposition::Attribute(Box::new(many_app))));
 
-        assert_eq!(one_candidate.cost(), SEGMENT_READ_COST);
-        assert_eq!(many_candidate.cost(), RANGE_READ_COST);
+        assert_eq!(one_candidate.cost(), LOOKUP_COST);
+        assert_eq!(many_candidate.cost(), LOOKUP_COST);
 
-        assert!(many_candidate.cost() > one_candidate.cost());
-        assert!(
-            many_candidate.cost() < one_candidate.cost() * 3,
-            "Fully bound Many should cost more than One, but not drastically more"
+        assert_eq!(
+            one_candidate.cost(),
+            many_candidate.cost(),
+            "Fully bound queries have the same cost regardless of cardinality"
         );
     }
 
@@ -812,8 +813,11 @@ mod cost_model_tests {
         let fact_cost = fact_app.estimate(&env).expect("Should have cost");
         let concept_cost = concept_app.estimate(&env).expect("Should have cost");
 
-        assert_eq!(fact_cost, RANGE_SCAN_COST);
-        assert_eq!(concept_cost, RANGE_SCAN_COST + CONCEPT_OVERHEAD);
+        assert_eq!(fact_cost, RANGE_SCAN_COST + VERIFICATION_COST);
+        assert_eq!(
+            concept_cost,
+            RANGE_SCAN_COST + VERIFICATION_COST + CONCEPT_OVERHEAD
+        );
 
         assert!(
             concept_cost > fact_cost,
@@ -859,8 +863,11 @@ mod cost_model_tests {
         let fact_cost = fact_app.estimate(&env).expect("Should have cost");
         let concept_cost = concept_app.estimate(&env).expect("Should have cost");
 
-        assert_eq!(fact_cost, SEGMENT_READ_COST);
-        assert_eq!(concept_cost, SEGMENT_READ_COST + CONCEPT_OVERHEAD);
+        assert_eq!(fact_cost, RANGE_READ_COST + VERIFICATION_COST);
+        assert_eq!(
+            concept_cost,
+            RANGE_READ_COST + VERIFICATION_COST + CONCEPT_OVERHEAD
+        );
     }
 
     #[dialog_common::test]
@@ -898,8 +905,8 @@ mod cost_model_tests {
         let fact_cost = fact_app.estimate(&env).expect("Should have cost");
         let concept_cost = concept_app.estimate(&env).expect("Should have cost");
 
-        assert_eq!(fact_cost, SEGMENT_READ_COST);
-        assert_eq!(concept_cost, SEGMENT_READ_COST + CONCEPT_OVERHEAD);
+        assert_eq!(fact_cost, LOOKUP_COST);
+        assert_eq!(concept_cost, LOOKUP_COST + CONCEPT_OVERHEAD);
     }
 
     #[dialog_common::test]
@@ -935,8 +942,8 @@ mod cost_model_tests {
         let fact_cost = fact_app.estimate(&env).expect("Should have cost");
         let concept_cost = concept_app.estimate(&env).expect("Should have cost");
 
-        assert_eq!(fact_cost, INDEX_SCAN);
-        assert_eq!(concept_cost, INDEX_SCAN + CONCEPT_OVERHEAD);
+        assert_eq!(fact_cost, INDEX_SCAN_COST);
+        assert_eq!(concept_cost, INDEX_SCAN_COST + CONCEPT_OVERHEAD);
     }
 
     #[dialog_common::test]
@@ -973,8 +980,8 @@ mod cost_model_tests {
         let fact_cost = fact_app.estimate(&env).expect("Should have cost");
         let concept_cost = concept_app.estimate(&env).expect("Should have cost");
 
-        assert_eq!(fact_cost, RANGE_SCAN_COST);
-        assert_eq!(concept_cost, RANGE_SCAN_COST + CONCEPT_OVERHEAD);
+        assert_eq!(fact_cost, RANGE_READ_COST);
+        assert_eq!(concept_cost, RANGE_READ_COST + CONCEPT_OVERHEAD);
     }
 
     #[dialog_common::test]
@@ -998,7 +1005,7 @@ mod cost_model_tests {
         let a1 = Candidate::from(Premise::Assert(Proposition::Attribute(Box::new(p1))));
         let cost1 = a1.cost();
 
-        assert_eq!(cost1, RANGE_SCAN_COST);
+        assert_eq!(cost1, RANGE_SCAN_COST + VERIFICATION_COST);
 
         let mut a2 = Candidate::from(Premise::Assert(Proposition::Attribute(Box::new(
             p2.clone(),
@@ -1009,13 +1016,13 @@ mod cost_model_tests {
         let cost2 = a2.cost();
 
         assert_eq!(
-            cost2, SEGMENT_READ_COST,
-            "Second premise with bound entity should cost SEGMENT_READ_COST. Expected {}, got {}",
-            SEGMENT_READ_COST, cost2
+            cost2, LOOKUP_COST,
+            "Second premise with bound entity should cost LOOKUP_COST. Expected {}, got {}",
+            LOOKUP_COST, cost2
         );
 
         let total = cost1 + cost2;
-        let expected_total = RANGE_SCAN_COST + SEGMENT_READ_COST;
+        let expected_total = RANGE_SCAN_COST + VERIFICATION_COST + LOOKUP_COST;
         assert_eq!(
             total, expected_total,
             "Total cost should be sum of individual costs. Expected {}, got {}",
@@ -1081,8 +1088,8 @@ mod cost_model_tests {
 
         assert_eq!(
             candidate.cost(),
-            SEGMENT_READ_COST,
-            "After binding entity, cost should be SEGMENT_READ_COST"
+            LOOKUP_COST,
+            "After binding entity, cost should be LOOKUP_COST"
         );
 
         // Now update back to empty environment → cost should increase again
@@ -1091,8 +1098,8 @@ mod cost_model_tests {
 
         assert_eq!(
             candidate.cost(),
-            RANGE_SCAN_COST,
-            "After removing entity from scope, cost should return to RANGE_SCAN_COST. \
+            RANGE_SCAN_COST + VERIFICATION_COST,
+            "After removing entity from scope, cost should return to RANGE_SCAN_COST + VERIFICATION_COST. \
              Without bidirectional update, stale env retains entity binding."
         );
     }
@@ -1100,8 +1107,8 @@ mod cost_model_tests {
     #[dialog_common::test]
     fn it_restores_cost_for_cardinality_many_when_variable_leaves_scope() {
         // Cardinality::Many makes the cost difference more dramatic:
-        //   1/3 constraints (just 'the'): INDEX_SCAN = 5000
-        //   2/3 constraints (the + of):   RANGE_SCAN_COST = 1000
+        //   1/3 constraints (just 'the'): INDEX_SCAN_COST = 5000
+        //   2/3 constraints (the + of):   RANGE_READ_COST = 200
         let app = AttributeQuery::new(
             Term::from(the!("person/hobbies")),
             Term::<Entity>::var("entity"),
@@ -1114,8 +1121,8 @@ mod cost_model_tests {
 
         assert_eq!(
             candidate.cost(),
-            INDEX_SCAN,
-            "With 1/3 constraints, Cardinality::Many should cost INDEX_SCAN"
+            INDEX_SCAN_COST,
+            "With 1/3 constraints, Cardinality::Many should cost INDEX_SCAN_COST"
         );
 
         // Bind entity → 2/3 constraints
@@ -1125,8 +1132,8 @@ mod cost_model_tests {
 
         assert_eq!(
             candidate.cost(),
-            RANGE_SCAN_COST,
-            "With 2/3 constraints, cost should drop to RANGE_SCAN_COST"
+            RANGE_READ_COST,
+            "With 2/3 constraints, cost should drop to RANGE_READ_COST"
         );
 
         // Update back to empty → should revert to 1/3 constraints
@@ -1135,7 +1142,7 @@ mod cost_model_tests {
 
         assert_eq!(
             candidate.cost(),
-            INDEX_SCAN,
+            INDEX_SCAN_COST,
             "After replanning back to empty env, cost should return to INDEX_SCAN. \
              Without bidirectional update, stale env would keep the lower cost."
         );
