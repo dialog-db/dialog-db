@@ -87,7 +87,7 @@ mod tests {
 
     /// Query pattern for Person - has Term-wrapped fields for querying
     #[derive(Debug, Clone)]
-    pub struct PersonMatch {
+    pub struct PersonQuery {
         /// The entity being matched
         pub this: Term<Entity>,
         /// Name term - can be a variable or concrete value
@@ -96,7 +96,7 @@ mod tests {
         pub age: Term<u32>,
     }
 
-    impl Default for PersonMatch {
+    impl Default for PersonQuery {
         fn default() -> Self {
             Self {
                 this: Term::var("this"),
@@ -150,8 +150,8 @@ mod tests {
         }
     }
 
-    impl From<PersonMatch> for ConceptDescriptor {
-        fn from(_: PersonMatch) -> Self {
+    impl From<PersonQuery> for ConceptDescriptor {
+        fn from(_: PersonQuery) -> Self {
             person_predicate()
         }
     }
@@ -207,7 +207,7 @@ mod tests {
 
     impl Predicate for Person {
         type Conclusion = Person;
-        type Application = PersonMatch;
+        type Application = PersonQuery;
         type Descriptor = ConceptDescriptor;
     }
 
@@ -223,8 +223,8 @@ mod tests {
         }
     }
 
-    impl From<PersonMatch> for Parameters {
-        fn from(source: PersonMatch) -> Self {
+    impl From<PersonQuery> for Parameters {
+        fn from(source: PersonQuery) -> Self {
             let mut terms = Self::new();
 
             terms.insert("this".into(), source.this.into());
@@ -235,7 +235,7 @@ mod tests {
         }
     }
 
-    impl Application for PersonMatch {
+    impl Application for PersonQuery {
         type Conclusion = Person;
 
         fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
@@ -252,8 +252,8 @@ mod tests {
         }
     }
 
-    impl From<PersonMatch> for ConceptQuery {
-        fn from(source: PersonMatch) -> Self {
+    impl From<PersonQuery> for ConceptQuery {
+        fn from(source: PersonQuery) -> Self {
             let predicate: ConceptDescriptor = source.clone().into();
             ConceptQuery {
                 terms: source.into(),
@@ -262,14 +262,14 @@ mod tests {
         }
     }
 
-    impl From<PersonMatch> for Proposition {
-        fn from(source: PersonMatch) -> Self {
+    impl From<PersonQuery> for Proposition {
+        fn from(source: PersonQuery) -> Self {
             Proposition::Concept(source.into())
         }
     }
 
-    impl From<PersonMatch> for Premise {
-        fn from(source: PersonMatch) -> Self {
+    impl From<PersonQuery> for Premise {
+        fn from(source: PersonQuery) -> Self {
             Premise::Assert(source.into())
         }
     }

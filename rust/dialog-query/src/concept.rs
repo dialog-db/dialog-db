@@ -138,16 +138,16 @@ mod tests {
         pub age: u32,
     }
 
-    // PersonMatch for querying - contains Term-wrapped fields
-    // Macro generates typed Terms (Term<String>, Term<u32>) not Term<Value>
+    // PersonQuery for querying — contains Term-wrapped fields
+    // The derive macro generates typed Terms (Term<String>, Term<u32>) not Term<Value>
     #[derive(Debug, Clone)]
-    struct PersonMatch {
+    struct PersonQuery {
         pub this: Term<Entity>,
         pub name: Term<String>,
         pub age: Term<u32>,
     }
 
-    impl Default for PersonMatch {
+    impl Default for PersonQuery {
         fn default() -> Self {
             Self {
                 this: Term::var("this"),
@@ -200,8 +200,8 @@ mod tests {
         }
     }
 
-    impl From<PersonMatch> for ConceptDescriptor {
-        fn from(_: PersonMatch) -> Self {
+    impl From<PersonQuery> for ConceptDescriptor {
+        fn from(_: PersonQuery) -> Self {
             person_predicate()
         }
     }
@@ -252,7 +252,7 @@ mod tests {
 
     impl Predicate for Person {
         type Conclusion = Person;
-        type Application = PersonMatch;
+        type Application = PersonQuery;
         type Descriptor = ConceptDescriptor;
     }
 
@@ -281,10 +281,9 @@ mod tests {
         }
     }
 
-    // Implement From<PersonMatch> for Parameters
-    // This mirrors what the macro generates
-    impl From<PersonMatch> for Parameters {
-        fn from(source: PersonMatch) -> Self {
+    // Implement From<PersonQuery> for Parameters
+    impl From<PersonQuery> for Parameters {
+        fn from(source: PersonQuery) -> Self {
             let mut terms = Self::new();
             terms.insert("this".into(), Term::<Any>::from(source.this));
             terms.insert("name".into(), Term::<Any>::from(source.name));
@@ -293,9 +292,9 @@ mod tests {
         }
     }
 
-    // Implement From<PersonMatch> for ConceptQuery
-    impl From<PersonMatch> for ConceptQuery {
-        fn from(source: PersonMatch) -> Self {
+    // Implement From<PersonQuery> for ConceptQuery
+    impl From<PersonQuery> for ConceptQuery {
+        fn from(source: PersonQuery) -> Self {
             let predicate: ConceptDescriptor = source.clone().into();
             ConceptQuery {
                 terms: source.into(),
@@ -304,8 +303,8 @@ mod tests {
         }
     }
 
-    // Implement Queryable for PersonMatch
-    impl Application for PersonMatch {
+    // Implement Application for PersonQuery
+    impl Application for PersonQuery {
         type Conclusion = Person;
 
         fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
@@ -343,12 +342,12 @@ mod tests {
 
     #[dialog_common::test]
     fn it_creates_person_match() {
-        // Test creating a PersonMatch for querying
+        // Test creating a PersonQuery for querying
         let entity_var = Term::var("person_entity");
         let name_var = Term::var("person_name");
         let age_var = Term::var("person_age");
 
-        let person_match = PersonMatch {
+        let person_match = PersonQuery {
             this: entity_var.clone(),
             name: name_var.clone(),
             age: age_var.clone(),
@@ -367,7 +366,7 @@ mod tests {
         let name_const = Term::from("Alice".to_string());
         let age_const = Term::from(30u32);
 
-        let person_match = PersonMatch {
+        let person_match = PersonQuery {
             this: entity_var.clone(),
             name: name_const.clone(),
             age: age_const.clone(),
@@ -389,7 +388,7 @@ mod tests {
         let name_const = Term::from("Bob".to_string());
         let age_var = Term::var("any_age");
 
-        let person_match = PersonMatch {
+        let person_match = PersonQuery {
             this: entity_var.clone(),
             name: name_const.clone(),
             age: age_var.clone(),
@@ -443,12 +442,12 @@ mod tests {
 
     #[dialog_common::test]
     fn it_exposes_match_fields() {
-        // Test that PersonMatch has the expected fields
+        // Test that PersonQuery has the expected fields
         let entity_var = Term::var("entity");
         let name_var = Term::var("name");
         let age_var = Term::var("age");
 
-        let person_match = PersonMatch {
+        let person_match = PersonQuery {
             this: entity_var.clone(),
             name: name_var.clone(),
             age: age_var.clone(),
@@ -490,9 +489,9 @@ mod tests {
         assert_eq!(person1.name, person2.name);
         assert_eq!(person1.age, person2.age);
 
-        // Test PersonMatch clone
+        // Test PersonQuery clone
         let entity_var = Term::var("entity");
-        let match1 = PersonMatch {
+        let match1 = PersonQuery {
             this: entity_var.clone(),
             name: Term::var("name"),
             age: Term::var("age"),
@@ -506,13 +505,13 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_matches_concept_structure() -> Result<()> {
-        // Test that PersonMatch correctly implements the Match trait
+        // Test that PersonQuery correctly implements the Match trait
         // This doesn't require actual querying, just tests the structure
 
         let alice = Entity::new()?;
 
-        // Test 1: Create a PersonMatch with mixed terms
-        let person_match = PersonMatch {
+        // Test 1: Create a PersonQuery with mixed terms
+        let person_match = PersonQuery {
             this: Term::from(alice.clone()),
             name: Term::from("Alice".to_string()),
             age: Term::var("age"),

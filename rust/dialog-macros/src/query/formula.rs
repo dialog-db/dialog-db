@@ -40,8 +40,8 @@
 //!     pub last: String,
 //! }
 //!
-//! // -- Match struct (all fields as Term<T> for query patterns) --
-//! pub struct FullNameFormulaMatch {
+//! // -- Query struct (all fields as Term<T> for query patterns) --
+//! pub struct FullNameFormulaQuery {
 //!     pub first: Term<String>,
 //!     pub last: Term<String>,
 //!     pub full: Term<String>,
@@ -56,7 +56,7 @@
 //! // -- Formula trait impl --
 //! impl Formula for FullNameFormula {
 //!     type Input = FullNameFormulaInput;
-//!     type Match = FullNameFormulaMatch;
+//!     type Query = FullNameFormulaQuery;
 //!
 //!     fn operator() -> &'static str { "full-name-formula" }
 //!     fn cells() -> &'static Cells { /* lazily built from above */ }
@@ -65,7 +65,7 @@
 //! }
 //!
 //! // -- Conversions --
-//! // FullNameFormulaMatch → Parameters
+//! // FullNameFormulaQuery → Parameters
 //! // TryFrom<&mut Bindings> for FullNameFormulaInput (reads input cells from bindings)
 //! // Formula::write() for FullNameFormula (writes derived cells to bindings)
 //! ```
@@ -142,7 +142,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
     // Generate type names
     let input_name = syn::Ident::new(&format!("{}Input", struct_name), struct_name.span());
-    let match_name = syn::Ident::new(&format!("{}Query", struct_name), struct_name.span());
+    let query_name = syn::Ident::new(&format!("{}Query", struct_name), struct_name.span());
     let cells_name = syn::Ident::new(
         &format!("{}_CELLS", struct_name.to_string().to_uppercase()),
         struct_name.span(),
@@ -161,7 +161,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         .collect();
 
     // Generate Query struct fields — each field becomes Term<T> for pattern matching
-    let match_struct_fields: Vec<_> = all_fields
+    let query_struct_fields: Vec<_> = all_fields
         .iter()
         .map(|(name, ty, doc, _is_derived, _cost)| {
             let doc_lit = syn::LitStr::new(doc, proc_macro2::Span::call_site());
@@ -210,7 +210,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         })
         .collect();
 
-    // Generate field names for Match Into<Parameters>
+    // Generate field names for Query Into<Parameters>
     let all_field_names: Vec<_> = all_fields.iter().map(|(name, _, _, _, _)| name).collect();
     let all_field_name_lits: Vec<_> = all_fields
         .iter()
@@ -258,8 +258,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
             ///
             /// Contains all fields (both input and derived) as Term<T> for pattern matching.
             #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-            pub struct #match_name {
-                #(#match_struct_fields),*
+            pub struct #query_name {
+                #(#query_struct_fields),*
             }
 
             /// Static storage for formula cells
@@ -267,11 +267,11 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
             impl dialog_query::Predicate for #struct_name {
                 type Conclusion = #struct_name;
-                type Application = #match_name;
+                type Application = #query_name;
                 type Descriptor = dialog_query::Entity;
             }
 
-            impl dialog_query::Application for #match_name
+            impl dialog_query::Application for #query_name
     {
                 type Conclusion = #struct_name;
 
@@ -291,31 +291,31 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 }
             }
 
-            impl ::std::convert::From<#match_name> for dialog_query::Parameters {
-                fn from(terms: #match_name) -> Self {
+            impl ::std::convert::From<#query_name> for dialog_query::Parameters {
+                fn from(terms: #query_name) -> Self {
                     let mut parameters = Self::new();
                     #(parameters.insert(#all_field_name_lits.into(), dialog_query::Term::<dialog_query::types::Any>::from(terms.#all_field_names));)*
                     parameters
                 }
             }
 
-            impl From<#match_name> for dialog_query::Premise
+            impl From<#query_name> for dialog_query::Premise
     {
-                fn from(source: #match_name) -> Self {
+                fn from(source: #query_name) -> Self {
                     let formula: dialog_query::FormulaQuery = source.into();
                     dialog_query::Premise::Assert(dialog_query::Proposition::from(formula))
                 }
             }
 
-            impl From<#match_name> for dialog_query::Proposition
+            impl From<#query_name> for dialog_query::Proposition
     {
-                fn from(source: #match_name) -> Self {
+                fn from(source: #query_name) -> Self {
                     let formula: dialog_query::FormulaQuery = source.into();
                     dialog_query::Proposition::from(formula)
                 }
             }
 
-            impl ::std::ops::Not for #match_name
+            impl ::std::ops::Not for #query_name
     {
                 type Output = dialog_query::Premise;
 
@@ -350,10 +350,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     #total_cost
                 }
 
-                fn apply(terms: dialog_query::Parameters) -> ::std::result::Result<#match_name, dialog_query::error::TypeError> {
+                fn apply(terms: dialog_query::Parameters) -> ::std::result::Result<#query_name, dialog_query::error::TypeError> {
                     let cells = <#struct_name as dialog_query::Formula>::cells();
                     let conformed = cells.conform(terms)?;
-                    ::std::result::Result::Ok(#match_name {
+                    ::std::result::Result::Ok(#query_name {
                         #(#all_field_names: conformed
                             .get(#all_field_name_lits)
                             .cloned()
