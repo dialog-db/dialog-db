@@ -73,25 +73,25 @@ Use a greedy algorithm with an index-aware cost function. At each step, estimate
 For a given premise, determine which of `{the, of, is}` are bound, select the best index by longest contiguous prefix, and assign a cost from the following tiers:
 
 ```
-SEGMENT  = 100      1-2 tree nodes, near point-lookup
-READ     = 200      small bounded range, a few nodes
-SCAN     = 1000     broader range, multiple segments
-FULL     = 5000     large portion of an index
-VERIFY   = 100      per-match secondary lookup for cardinality-one verification
+LOOKUP     = 100      1-2 tree nodes, near point-lookup
+RANGE_READ = 200      small bounded range, a few nodes
+RANGE_SCAN = 1000     broader range, multiple segments
+INDEX_SCAN = 5000     large portion of an index
+VERIFY     = 100      per-match secondary lookup for cardinality-one verification
 ```
 
 These are relative weights for ordering, not latency predictions. The full cost table:
 
 ```
-Known       Index   Prefix    ONE              MANY
----------   -----   ------    ---------------  ---------------
-{the,of,is} EAV     162B      SEGMENT (100)    SEGMENT (100)
-{of,the}    EAV     129B      SEGMENT (100)    READ    (200)
-{the,is}    VAE      97B      READ+V  (300)    READ    (200)
-{of}        EAV      65B      READ    (200)    SCAN    (1000)
-{of,is}     EAV      65B      READ    (200)    SCAN    (1000)
-{the}       AEV      65B      SCAN    (1000)   FULL    (5000)
-{is}        VAE      34B      SCAN+V  (1100)   FULL    (5000)
+Known       Index   Prefix    ONE                    MANY
+---------   -----   ------    -------------------    ---------------
+{the,of,is} EAV     162B      LOOKUP        (100)    LOOKUP     (100)
+{of,the}    EAV     129B      LOOKUP        (100)    RANGE_READ (200)
+{the,is}    VAE      97B      RANGE_READ+V  (300)    RANGE_READ (200)
+{of}        EAV      65B      RANGE_READ    (200)    RANGE_SCAN (1000)
+{of,is}     EAV      65B      RANGE_READ    (200)    RANGE_SCAN (1000)
+{the}       AEV      65B      RANGE_SCAN    (1000)   INDEX_SCAN (5000)
+{is}        VAE      34B      INDEX_SCAN+V  (5100)   INDEX_SCAN (5000)
 ```
 
 Notable details:
