@@ -640,6 +640,12 @@ impl From<Attribute> for Value {
     }
 }
 
+impl From<usize> for Value {
+    fn from(value: usize) -> Self {
+        Value::UnsignedInt(value as u128)
+    }
+}
+
 impl From<Cause> for Value {
     fn from(value: Cause) -> Self {
         Value::Bytes(value.to_vec())
@@ -830,10 +836,13 @@ pub enum ValueDataType {
     /// A boolean
     Boolean = 2,
     /// A UTF-8 string
+    #[serde(rename = "Text")]
     String = 3,
     /// A 128-bit unsigned integer
+    #[serde(rename = "UnsignedInteger")]
     UnsignedInt = 4,
     /// A 128-bit signed integer
+    #[serde(rename = "SignedInteger")]
     SignedInt = 5,
     /// A floating point number
     Float = 6,
