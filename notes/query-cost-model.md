@@ -74,7 +74,7 @@ Known       Index   Prefix    ONE              MANY
 {of}        EAV      65B      READ    (200)    SCAN    (1000)
 {of,is}     EAV      65B      READ    (200)    SCAN    (1000)
 {the}       AEV      65B      SCAN    (1000)   FULL    (5000)
-{is}        VAE      34B      SCAN+V  (1100)   FULL    (5000)
+{is}        VAE      34B      FULL+V  (5100)   FULL    (5000)
 ```
 
 Notable details:
