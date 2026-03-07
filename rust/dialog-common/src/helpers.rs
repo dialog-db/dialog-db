@@ -55,6 +55,7 @@
 
 use async_trait::async_trait;
 use dialog_common::ConditionalSend;
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use serde::{Serialize, de::DeserializeOwned};
 
 /// Environment variable name used to pass serialized address to inner tests.
@@ -146,6 +147,162 @@ pub fn address<A: DeserializeOwned>() -> anyhow::Result<A> {
     })?;
 
     serde_json::from_str(&json).map_err(|e| anyhow::anyhow!("Failed to deserialize address: {}", e))
+}
+
+/// A deterministic data generator for benchmarks and tests.
+///
+/// `BenchData` provides utilities for generating both sequential and random buffers
+/// with a seeded RNG, ensuring reproducible benchmark results across runs.
+///
+/// # Example
+///
+/// ```
+/// use dialog_common::helpers::BenchData;
+///
+/// let mut bench_data = BenchData::new(42);
+///
+/// // Generate sequential buffers (deterministic, based on index)
+/// let sequential: Vec<[u8; 4]> = bench_data.sequential_buffers(100);
+///
+/// // Generate random buffers (deterministic, based on seed)
+/// let random: Vec<[u8; 32]> = bench_data.random_buffers(100);
+///
+/// // Generate a single random buffer
+/// let single: [u8; 16] = bench_data.generate_buffer();
+/// ```
+pub struct BenchData {
+    rng: StdRng,
+}
+
+impl BenchData {
+    /// Create a new `BenchData` instance with the given seed.
+    ///
+    /// The seed ensures that all random data generation is deterministic and
+    /// reproducible across benchmark runs.
+    ///
+    /// # Arguments
+    ///
+    /// * `seed` - The seed value for the random number generator
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use dialog_common::helpers::BenchData;
+    ///
+    /// let bench_data = BenchData::new(42);
+    /// ```
+    pub fn new(seed: u64) -> Self {
+        Self {
+            rng: StdRng::seed_from_u64(seed),
+        }
+    }
+
+    /// Generate a vector of sequential buffers.
+    ///
+    /// Each buffer contains the index (0, 1, 2, ...) encoded as a little-endian u32
+    /// at the start of the buffer, with the rest zero-filled. This creates predictable,
+    /// ordered data useful for testing sequential insert/lookup patterns.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `N` - The size of each buffer in bytes
+    ///
+    /// # Arguments
+    ///
+    /// * `count` - The number of buffers to generate
+    ///
+    /// # Returns
+    ///
+    /// A vector of `count` buffers, where buffer at index `i` contains the bytes
+    /// of `i` encoded as little-endian u32.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use dialog_common::helpers::BenchData;
+    ///
+    /// let bench_data = BenchData::new(42);
+    /// let keys: Vec<[u8; 4]> = bench_data.sequential_buffers(10);
+    ///
+    /// // First key contains [0, 0, 0, 0]
+    /// assert_eq!(keys[0], 0u32.to_le_bytes());
+    /// // Second key contains [1, 0, 0, 0]
+    /// assert_eq!(keys[1], 1u32.to_le_bytes());
+    /// ```
+    pub fn sequential_buffers<const N: usize>(&self, count: usize) -> Vec<[u8; N]> {
+        let mut buffers = Vec::new();
+        for i in 0..count {
+            let mut buffer = [0u8; N];
+            let index_bytes = (i as u32).to_le_bytes();
+            let copy_len = index_bytes.len().min(N);
+            buffer[..copy_len].copy_from_slice(&index_bytes[..copy_len]);
+            buffers.push(buffer);
+        }
+        buffers
+    }
+
+    /// Generate a vector of random buffers using the seeded RNG.
+    ///
+    /// Each buffer is filled with random bytes. Due to the seeded RNG, the same
+    /// sequence is generated for the same seed, ensuring reproducible benchmarks.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `N` - The size of each buffer in bytes
+    ///
+    /// # Arguments
+    ///
+    /// * `count` - The number of buffers to generate
+    ///
+    /// # Returns
+    ///
+    /// A vector of `count` randomly-filled buffers.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use dialog_common::helpers::BenchData;
+    ///
+    /// let mut bench_data = BenchData::new(42);
+    /// let values: Vec<[u8; 32]> = bench_data.random_buffers(100);
+    ///
+    /// assert_eq!(values.len(), 100);
+    /// // Results are deterministic based on seed
+    /// let mut bench_data2 = BenchData::new(42);
+    /// let values2: Vec<[u8; 32]> = bench_data2.random_buffers(100);
+    /// assert_eq!(values, values2);
+    /// ```
+    pub fn random_buffers<const N: usize>(&mut self, count: usize) -> Vec<[u8; N]> {
+        let mut buffers = Vec::new();
+        for _ in 0..count {
+            buffers.push(self.rng.r#gen())
+        }
+        buffers
+    }
+
+    /// Generate a single random buffer using the seeded RNG.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `N` - The size of the buffer in bytes
+    ///
+    /// # Returns
+    ///
+    /// A randomly-filled buffer of size `N`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use dialog_common::helpers::BenchData;
+    ///
+    /// let mut bench_data = BenchData::new(42);
+    /// let buffer: [u8; 16] = bench_data.generate_buffer();
+    ///
+    /// assert_eq!(buffer.len(), 16);
+    /// ```
+    pub fn generate_buffer<const N: usize>(&mut self) -> [u8; N] {
+        self.rng.r#gen()
+    }
 }
 
 #[cfg(test)]
