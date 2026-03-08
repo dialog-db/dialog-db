@@ -29,7 +29,11 @@
 //!     pub age: Term<i64>,       // Term<Age::Type>
 //! }
 //! // Default fills every field with a named variable:
-//! //   PersonQuery { this: Term::var("this"), name: Term::var("name"), age: Term::var("age") }
+//! // PersonQuery {
+//! //      this: Term::var("this"),
+//! //      name: Term::var("name"),
+//! //      age: Term::var("age")
+//! // }
 //!
 //! // -- Terms struct (convenience constructors) --
 //! pub struct PersonTerms {}

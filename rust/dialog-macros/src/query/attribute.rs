@@ -1,7 +1,7 @@
 //! Attribute derive macro implementation
 //!
 //! Generates an `Attribute` trait impl for a newtype struct, turning it into
-//! a typed, self-describing ECS-style attribute that can be used in queries.
+//! a typed attribute that can be used to query and transact.
 //!
 //! # Example input
 //!
@@ -15,14 +15,6 @@
 //! # Generated output (simplified)
 //!
 //! ```rust,ignore
-//! // -- Domain derivation (when no explicit #[domain("...")] is given) --
-//! // Extracts the last segment of module_path!() at compile time.
-//! // e.g. module_path!() = "my_crate::model" → domain = "model"
-//! const __FULLNAME_MODULE_PATH: &str = module_path!();
-//! const __FULLNAME_DOMAIN_LEN: usize = __compute_fullname_domain_len(__FULLNAME_MODULE_PATH);
-//! const FULLNAME_DOMAIN_BYTES: [u8; __FULLNAME_DOMAIN_LEN] = __compute_fullname_domain_bytes(__FULLNAME_MODULE_PATH);
-//! // FULLNAME_DOMAIN(...) converts the byte array back to &str
-//!
 //! // -- Attribute trait impl --
 //! impl Attribute for FullName {
 //!     type Type = String;
