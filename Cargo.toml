@@ -27,6 +27,7 @@ members = [
     "rust/dialog-encoding",
     "rust/dialog-prolly-tree",
     "rust/dialog-query",
+    "rust/dialog-search-tree",
     "rust/dialog-storage",
     "rust/dialog-s3-credentials",
     "rust/dialog-ucan",
@@ -38,6 +39,7 @@ resolver = "2"
 version = "0.1.0"
 authors = ["The Meiosys Project Authors"]
 license = "MPL-2.0"
+edition = "2024"
 
 [workspace.dependencies]
 anyhow = "1"
@@ -58,10 +60,12 @@ console_error_panic_hook = "0.1"
 convert_case = "0.6"
 indexmap = "2.0"
 csv-async = { version = "1", features = ["tokio"] }
+dashmap = "6"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 futures = "0.3"
 futures-core = "0.3"
 futures-util = "0.3"
+hashbrown = "0.16"
 hmac = "0.12"
 http-body-util = "0.1"
 hyper = "1"
@@ -81,6 +85,7 @@ md5 = "0.8"
 nom = "7"
 nom-unicode = "0.3"
 nonempty = "0.11"
+parking_lot = "0.12"
 p256 = "0.13"
 p384 = "0.13"
 p521 = "0.13"
@@ -115,6 +120,7 @@ serde_json = "1"
 sha2 = "0.10"
 sieve-cache = "1"
 signature = "2.2"
+stable_deref_trait = "1"
 static_assertions = "1"
 syn = "2"
 tempfile = "3"
@@ -139,6 +145,7 @@ wasm-bindgen-test = "0.3"
 web-sys = "0.3"
 web-time = "1"
 zerocopy = "0.8"
+zerocopy-derive = "0.8"
 
 [workspace.dependencies.dialog-artifacts]
 path = "./rust/dialog-artifacts"
