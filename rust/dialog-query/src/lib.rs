@@ -11,8 +11,7 @@
 #![warn(clippy::fallible_impl_from)]
 #![warn(clippy::panicking_unwrap)]
 #![warn(clippy::unused_async)]
-// TODO: Enable this
-// #![warn(clippy::large_futures)]
+#![cfg_attr(not(test), warn(clippy::large_futures))]
 #![deny(clippy::partial_pub_fields)]
 #![deny(clippy::unnecessary_self_imports)]
 #![cfg_attr(not(test), deny(clippy::panic))]
