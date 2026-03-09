@@ -70,7 +70,6 @@ fn merge_parameters(
 
 /// Represents an application of a concept with specific term bindings.
 /// This is used when querying for entities that match a concept pattern.
-/// Note: The name has a typo (should be ConceptQuery) but is kept for compatibility.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConceptQuery {
     /// The term bindings for this concept application.

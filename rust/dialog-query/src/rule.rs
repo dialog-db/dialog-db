@@ -3,8 +3,7 @@
 //! This module implements the core rule system for dialog-query, allowing
 //! declarative specification of derived facts through logical rules.
 //!
-//! The design is based on the TypeScript implementation in @query/src/plan/rule.js
-//! and follows the patterns described in the design document at notes/rules.md.
+//! The design follows the patterns described in notes/rules.md.
 
 /// Deductive rule definitions for deriving new facts.
 pub mod deductive;

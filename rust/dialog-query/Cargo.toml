@@ -16,9 +16,6 @@ serde_ipld_dagcbor = { workspace = true }
 blake3 = { workspace = true }
 base58 = { workspace = true }
 
-# Collections
-indexmap = { workspace = true }
-
 # Error handling
 thiserror = { workspace = true }
 
@@ -32,7 +29,6 @@ futures-core = { workspace = true }
 async-stream = { workspace = true }
 
 # Macro utilities
-paste = { workspace = true }
 dialog-macros = { workspace = true }
 
 # Tokio with platform-specific features

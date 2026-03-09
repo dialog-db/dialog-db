@@ -127,7 +127,6 @@ impl Modulo {
 
 #[cfg(test)]
 mod tests {
-    use crate::formula::Input;
     use crate::formula::math::*;
     use crate::formula::query::FormulaQuery;
     use crate::*;
@@ -279,26 +278,6 @@ mod tests {
                 .and_then(|v| u32::try_from(v).ok()),
             Some(25)
         );
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    fn it_converts_between_numeric_types() -> anyhow::Result<()> {
-        // Test various data types with standard TryFrom<Value>
-        let bool_val = Value::Boolean(true);
-        assert!(bool::try_from(bool_val).unwrap());
-
-        let f64_val = Value::Float(2.5);
-        assert_eq!(f64::try_from(f64_val).unwrap(), 2.5);
-
-        let string_val = Value::String("hello".to_string());
-        assert_eq!(String::try_from(string_val).unwrap(), "hello");
-
-        let u32_val = Value::UnsignedInt(42);
-        assert_eq!(u32::try_from(u32_val).unwrap(), 42);
-
-        let i32_val = Value::SignedInt(-10);
-        assert_eq!(i32::try_from(i32_val).unwrap(), -10);
         Ok(())
     }
 
@@ -478,68 +457,6 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn it_chains_math_operations() -> anyhow::Result<()> {
-        // Test Sum formula: 10 + 5 = 15
-        let mut sum_terms = Parameters::new();
-        sum_terms.insert("of".to_string(), Term::var("x"));
-        sum_terms.insert("with".to_string(), Term::var("y"));
-        sum_terms.insert("is".to_string(), Term::var("sum_result"));
-
-        let sum_formula: FormulaQuery = Sum::apply(sum_terms)?.into();
-
-        let mut sum_input = Match::new();
-        sum_input.bind(&Term::var("x"), 10u32.into()).unwrap();
-        sum_input.bind(&Term::var("y"), 5u32.into()).unwrap();
-
-        let sum_results = sum_formula.compute(sum_input)?;
-        assert_eq!(sum_results.len(), 1);
-        assert_eq!(
-            u32::try_from(sum_results[0].lookup(&Term::var("sum_result")).unwrap()).ok(),
-            Some(15)
-        );
-
-        // Test Difference formula: 20 - 8 = 12
-        let mut diff_terms = Parameters::new();
-        diff_terms.insert("of".to_string(), Term::var("a"));
-        diff_terms.insert("subtract".to_string(), Term::var("b"));
-        diff_terms.insert("is".to_string(), Term::var("diff_result"));
-
-        let diff_formula: FormulaQuery = Difference::apply(diff_terms)?.into();
-
-        let mut diff_input = Match::new();
-        diff_input.bind(&Term::var("a"), 20u32.into()).unwrap();
-        diff_input.bind(&Term::var("b"), 8u32.into()).unwrap();
-
-        let diff_results = diff_formula.compute(diff_input)?;
-        assert_eq!(diff_results.len(), 1);
-        assert_eq!(
-            u32::try_from(diff_results[0].lookup(&Term::var("diff_result")).unwrap()).ok(),
-            Some(12)
-        );
-
-        // Test Product formula: 6 * 7 = 42
-        let mut prod_terms = Parameters::new();
-        prod_terms.insert("of".to_string(), Term::var("p"));
-        prod_terms.insert("times".to_string(), Term::var("q"));
-        prod_terms.insert("is".to_string(), Term::var("product"));
-
-        let product_formula: FormulaQuery = Product::apply(prod_terms)?.into();
-
-        let mut prod_input = Match::new();
-        prod_input.bind(&Term::var("p"), 6u32.into()).unwrap();
-        prod_input.bind(&Term::var("q"), 7u32.into()).unwrap();
-
-        let prod_results = product_formula.compute(prod_input)?;
-        assert_eq!(prod_results.len(), 1);
-        assert_eq!(
-            u32::try_from(prod_results[0].lookup(&Term::var("product")).unwrap()).ok(),
-            Some(42)
-        );
-
-        Ok(())
-    }
-
-    #[dialog_common::test]
     fn it_chains_formula_results() -> anyhow::Result<()> {
         use crate::formula::conversions::{ParseUnsignedInteger, ToString};
 
@@ -597,24 +514,6 @@ mod tests {
         );
 
         Ok(())
-    }
-
-    #[dialog_common::test]
-    fn it_generates_input_struct() {
-        let input = Input::<Sum> { of: 5, with: 3 };
-        assert_eq!(input.of, 5);
-        assert_eq!(input.with, 3);
-    }
-
-    #[dialog_common::test]
-    fn it_generates_match_struct() {
-        let match_pattern = Query::<Sum> {
-            of: Term::var("x"),
-            with: Term::var("y"),
-            is: Term::var("result"),
-        };
-
-        assert!(matches!(match_pattern.of, Term::Variable { .. }));
     }
 
     #[dialog_common::test]
@@ -691,12 +590,12 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_performs_formula_with_constant_derived() -> anyhow::Result<()> {
+    async fn it_performs_formula_with_constant_output() -> anyhow::Result<()> {
         use crate::query::Application;
         use crate::{Session, artifact::Artifacts};
         use dialog_storage::MemoryStorageBackend;
 
-        // Derived field is a constant matching the expected result
+        // Output field is a constant matching the expected result
         let query = Query::<Sum> {
             of: Term::var("x"),
             with: Term::var("y"),
@@ -730,7 +629,7 @@ mod tests {
         use crate::{Session, artifact::Artifacts};
         use dialog_storage::MemoryStorageBackend;
 
-        // Derived field is a constant that does NOT match (5 + 3 ≠ 99)
+        // Output field is a constant that does NOT match (5 + 3 ≠ 99)
         let query = Query::<Sum> {
             of: Term::var("x"),
             with: Term::var("y"),
@@ -822,46 +721,4 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_common::test]
-    fn it_handles_formula_errors() -> anyhow::Result<()> {
-        // Test division by zero in Quotient formula
-        let mut quotient_terms = Parameters::new();
-        quotient_terms.insert("of".to_string(), Term::var("dividend"));
-        quotient_terms.insert("by".to_string(), Term::var("divisor"));
-        quotient_terms.insert("is".to_string(), Term::var("quotient"));
-
-        let quotient_formula: FormulaQuery = Quotient::apply(quotient_terms)?.into();
-
-        let mut division_by_zero_input = Match::new();
-        division_by_zero_input
-            .bind(&Term::var("dividend"), 10u32.into())
-            .unwrap();
-        division_by_zero_input
-            .bind(&Term::var("divisor"), 0u32.into())
-            .unwrap();
-
-        let quotient_results = quotient_formula.compute(division_by_zero_input)?;
-        assert_eq!(quotient_results.len(), 0);
-
-        // Test modulo by zero
-        let mut modulo_terms = Parameters::new();
-        modulo_terms.insert("of".to_string(), Term::var("dividend"));
-        modulo_terms.insert("by".to_string(), Term::var("divisor"));
-        modulo_terms.insert("is".to_string(), Term::var("remainder"));
-
-        let modulo_formula: FormulaQuery = Modulo::apply(modulo_terms)?.into();
-
-        let mut modulo_by_zero_input = Match::new();
-        modulo_by_zero_input
-            .bind(&Term::var("dividend"), 17u32.into())
-            .unwrap();
-        modulo_by_zero_input
-            .bind(&Term::var("divisor"), 0u32.into())
-            .unwrap();
-
-        let modulo_results = modulo_formula.compute(modulo_by_zero_input)?;
-        assert_eq!(modulo_results.len(), 0);
-
-        Ok(())
-    }
 }

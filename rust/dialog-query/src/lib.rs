@@ -3,8 +3,7 @@
 //! A Datalog-inspired query engine for Dialog-DB that provides declarative
 //! pattern matching and rule-based deduction over facts.
 //!
-//! This crate implements the core query planning and execution functionality,
-//! designed to be equivalent to the TypeScript query engine in @query/.
+//! This crate implements the core query planning and execution functionality.
 
 #![warn(missing_docs)]
 #![warn(clippy::absolute_paths)]

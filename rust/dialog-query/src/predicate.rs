@@ -31,17 +31,13 @@ pub trait Predicate {
 /// Type alias to construct type-safe formula / concept applications.
 ///
 /// ```rs
-/// #[derive(Debug, Clone, Concept)]
-/// pub struct Person {
-///     this: Entity,
-///     name: String,
-///     address: Term,
-/// }
-///
+/// // Given a Concept or Formula type T, Query<T> resolves to T::Application.
+/// // For example, with a Person concept:
 /// let query = Query::<Person> {
-///     name: "John".to_string(),
+///     this: Term::var("entity"),
+///     name: Term::from("John"),
 ///     address: Term::var("address"),
-/// }
+/// };
 /// ```
 #[allow(type_alias_bounds)]
 pub type Query<T: Predicate> = T::Application;

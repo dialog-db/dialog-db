@@ -102,7 +102,7 @@ impl Cell {
             // type that's also fine.
             (_, None) => Ok(()),
             // if expected isn't any (has no type) it must be equal
-            // to actual or it's a type missmatch.
+            // to actual or it's a type mismatch.
             (Some(expected), actual) => {
                 if Some(*expected) == actual {
                     Ok(())

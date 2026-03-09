@@ -935,8 +935,6 @@ dependencies = [
  "dialog-storage",
  "futures-core",
  "futures-util",
- "indexmap",
- "paste",
  "serde",
  "serde_ipld_dagcbor",
  "serde_json",

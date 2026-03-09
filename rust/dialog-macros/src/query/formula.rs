@@ -1,6 +1,6 @@
 //! Formula derive macro implementation
 //!
-//! Generates a computed/derived attribute system from a struct. A formula has
+//! Generates a computed attribute system from a struct. A formula has
 //! "input" fields (provided by the caller) and "output" fields (computed by
 //! the formula's `compute()` function).
 //!
@@ -15,7 +15,7 @@
 //!     /// The last name
 //!     pub last: String,
 //!     /// The computed full name
-//!     #[output]             // marks this as an output field (cost defaults to 0)
+//!     #[output]             // marks this as an output field (cost defaults to 1)
 //!     pub full: String,
 //! }
 //!
@@ -51,16 +51,14 @@
 //! // Static OnceLock holding cell definitions built via a builder:
 //! //   builder.cell("first", DataType::String).the("The first name").required();
 //! //   builder.cell("last",  DataType::String).the("The last name").required();
-//! //   builder.cell("full",  DataType::String).the("The computed full name").output(0);
+//! //   builder.cell("full",  DataType::String).the("The computed full name").output(1);
 //!
 //! // -- Formula trait impl --
 //! impl Formula for FullNameFormula {
 //!     type Input = FullNameFormulaInput;
-//!     type Query = FullNameFormulaQuery;
 //!
-//!     fn operator() -> &'static str { "full-name-formula" }
 //!     fn cells() -> &'static Cells { /* lazily built from above */ }
-//!     fn cost() -> usize { 0 }  // sum of all #[output(cost)] values
+//!     fn cost() -> usize { 1 }  // sum of all #[output(cost)] values
 //!     fn compute(input: Self::Input) -> Vec<Self> { /* delegates to user impl */ }
 //! }
 //!
@@ -104,7 +102,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
     // Partition fields into "input" (required by caller) and "output" (computed).
     // Fields marked with #[output] or #[output(cost = N)] become outputs.
     let mut input_fields = Vec::new();
-    let mut derived_fields = Vec::new(); // (name, type, doc, cost)
+    let mut output_fields = Vec::new(); // (name, type, doc, cost)
     let mut all_fields = Vec::new();
 
     for field in fields {
@@ -115,14 +113,14 @@ pub fn derive(input: TokenStream) -> TokenStream {
         let doc_comment = extract_doc_comments(&field.attrs);
 
         // Check if field has #[output] and parse optional cost
-        let derived_info = match parse_output_attribute(&field.attrs) {
+        let output_info = match parse_output_attribute(&field.attrs) {
             Ok(info) => info,
             Err(e) => return e.to_compile_error().into(),
         };
 
-        if let Some(cost) = derived_info {
+        if let Some(cost) = output_info {
             all_fields.push((field_name, field_type, doc_comment.clone(), true, cost));
-            derived_fields.push((field_name, field_type, doc_comment, cost));
+            output_fields.push((field_name, field_type, doc_comment, cost));
         } else {
             all_fields.push((field_name, field_type, doc_comment.clone(), false, 0));
             input_fields.push((field_name, field_type, doc_comment));
@@ -130,7 +128,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
     }
 
     // Validate at least one output field exists
-    if derived_fields.is_empty() {
+    if output_fields.is_empty() {
         return syn::Error::new_spanned(
             &input,
             "Formula must have at least one field marked with #[output]",
@@ -141,7 +139,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
     // Total cost is the sum of per-field costs. This lets the query planner
     // estimate how expensive it is to evaluate this formula.
-    let total_cost: usize = derived_fields.iter().map(|(_, _, _, cost)| cost).sum();
+    let total_cost: usize = output_fields.iter().map(|(_, _, _, cost)| cost).sum();
 
     // Generate type names
     let input_name = syn::Ident::new(&format!("{}Input", struct_name), struct_name.span());
@@ -151,7 +149,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         struct_name.span(),
     );
 
-    // Generate Input struct fields (only non-derived fields)
+    // Generate Input struct fields (only non-output fields)
     let input_struct_fields: Vec<_> = input_fields
         .iter()
         .map(|(name, ty, doc)| {
@@ -166,7 +164,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
     // Generate Query struct fields — each field becomes Term<T> for pattern matching
     let query_struct_fields: Vec<_> = all_fields
         .iter()
-        .map(|(name, ty, doc, _is_derived, _cost)| {
+        .map(|(name, ty, doc, _is_output, _cost)| {
             let doc_lit = syn::LitStr::new(doc, proc_macro2::Span::call_site());
             quote! {
                 #[doc = #doc_lit]
@@ -179,13 +177,13 @@ pub fn derive(input: TokenStream) -> TokenStream {
     // Input fields are marked `.required()`, output fields are marked `.output(cost)`.
     let cell_definitions: Vec<_> = all_fields
         .iter()
-        .map(|(name, ty, doc, is_derived, cost)| {
+        .map(|(name, ty, doc, is_output, cost)| {
             let name_str = name.to_string();
             let name_lit = syn::LitStr::new(&name_str, proc_macro2::Span::call_site());
             let doc_lit = syn::LitStr::new(doc, proc_macro2::Span::call_site());
             let data_type = type_to_value_data_type(ty);
 
-            if *is_derived {
+            if *is_output {
                 quote! {
                     builder
                         .cell(#name_lit, #data_type)
@@ -225,7 +223,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
     // Generate Formula::write() statements — only output fields are written
     // back to the bindings after computation.
-    let write_statements: Vec<_> = derived_fields
+    let write_statements: Vec<_> = output_fields
         .iter()
         .map(|(name, _ty, _, _cost)| {
             let name_str = name.to_string();

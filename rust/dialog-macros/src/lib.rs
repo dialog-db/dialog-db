@@ -179,7 +179,7 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
 
 /// Derive macro to generate Formula implementation from a struct definition.
 ///
-/// Formulas are pure computations: given bound input fields, they derive output
+/// Formulas are pure computations: given bound input fields, they compute output
 /// fields. The query planner uses cost annotations to decide execution order.
 ///
 /// # Attributes
@@ -236,12 +236,11 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
 /// // Formula trait — describes the computation and writes output fields
 /// # struct Bindings;
 /// # struct EvaluationError;
-/// # trait Formula { type Input; type Query; fn operator() -> &'static str; fn cost() -> usize; fn compute(input: ConcatenateInput) -> Vec<Concatenate>; fn write(&self, bindings: &mut Bindings) -> Result<(), EvaluationError>; }
+/// # trait Formula { type Input; fn cells() -> (); fn cost() -> usize; fn compute(input: ConcatenateInput) -> Vec<Concatenate>; fn write(&self, bindings: &mut Bindings) -> Result<(), EvaluationError>; }
 /// impl Formula for Concatenate {
 ///     type Input = ConcatenateInput;
-///     type Query = ConcatenateQuery;
 ///
-///     fn operator() -> &'static str { "concatenate" }
+///     fn cells() -> () { /* lazily built from cell definitions */ }
 ///     fn cost() -> usize { 2 }  // sum of output field costs
 ///     fn compute(input: ConcatenateInput) -> Vec<Concatenate> {
 ///         todo!() // delegates to user's Concatenate::compute

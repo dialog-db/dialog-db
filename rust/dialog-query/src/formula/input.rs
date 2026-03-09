@@ -10,12 +10,12 @@ use super::Formula;
 ///     output: String,
 /// }
 ///
-/// impl Echo for Echo {
-///     fn compute(cells: Input<Self>) -> Self {
-///         Self {
+/// impl Echo {
+///     fn compute(cells: Input<Self>) -> Vec<Self> {
+///         vec![Self {
 ///             output: format!("{}, {}", &cells.input, &cells.input),
 ///             input: cells.input,
-///         }
+///         }]
 ///     }
 /// }
 /// ```

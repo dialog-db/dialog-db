@@ -114,7 +114,7 @@ pub trait Formula: Predicate + Sized + Clone {
 
     /// Write this formula instance's output values to the bindings.
     ///
-    /// This method is called for each output instance produced by `derive`
+    /// This method is called for each output instance produced by `compute`
     /// to write the computed values back to the bindings.
     fn write(&self, bindings: &mut Bindings) -> Result<(), EvaluationError>;
 }

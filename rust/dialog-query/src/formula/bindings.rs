@@ -1,8 +1,9 @@
 //! Bindings for reading and writing values during formula evaluation
 //!
 //! The `Bindings` type provides a controlled interface for formulas
-//! to read input values during evaluation. It maintains a mapping between
-//! formula parameter names and their corresponding terms in the evaluation context.
+//! to read input values and write output values during evaluation. It maintains
+//! a mapping between formula parameter names and their corresponding terms in
+//! the evaluation context.
 
 use crate::artifact::ArtifactTypeError;
 use crate::error::EvaluationError;

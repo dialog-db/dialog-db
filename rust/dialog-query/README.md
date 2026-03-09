@@ -311,4 +311,4 @@ fn total_compensation(result: Query<TotalComp>) -> impl When {
 }
 ```
 
-Built-in formulas: `Sum`, `Difference`, `Product`, `Quotient`, `Modulo`, `Concatenate`, `Length`, `Uppercase`, `Lowercase`, `ToString`, `ParseNumber`, `And`, `Or`, `Not`.
+Built-in formulas: `Sum`, `Difference`, `Product`, `Quotient`, `Modulo`, `Concatenate`, `Length`, `Uppercase`, `Lowercase`, `Like`, `ToString`, `ParseUnsignedInteger`, `ParseSignedInteger`, `ParseFloat`, `And`, `Or`, `Not`.
