@@ -81,13 +81,13 @@ define_formulas! {
     "math/modulo"             => Modulo(Modulo),
     "text/concatenate"        => Concatenate(Concatenate),
     "text/length"             => Length(Length),
-    "text/uppercase"          => Uppercase(Uppercase),
-    "text/lowercase"          => Lowercase(Lowercase),
+    "text/upper-case"         => Uppercase(Uppercase),
+    "text/lower-case"         => Lowercase(Lowercase),
     "text/like"               => Like(Like),
 
-    "logic/and"               => And(And),
-    "logic/or"                => Or(Or),
-    "logic/not"               => Not(Not),
+    "boolean/and"             => And(And),
+    "boolean/or"              => Or(Or),
+    "boolean/not"             => Not(Not),
 
     "text/from"               => ToString(conversions::ToString),
     "unsigned-integer/parse"  => ParseUnsignedInteger(ParseUnsignedInteger),
@@ -267,7 +267,7 @@ mod tests {
             of: Term::var("text"),
             is: Term::var("upper"),
         });
-        assert_round_trip(fq, "text/uppercase", &["of", "is"]);
+        assert_round_trip(fq, "text/upper-case", &["of", "is"]);
     }
 
     #[test]
@@ -276,7 +276,7 @@ mod tests {
             of: Term::var("text"),
             is: Term::var("lower"),
         });
-        assert_round_trip(fq, "text/lowercase", &["of", "is"]);
+        assert_round_trip(fq, "text/lower-case", &["of", "is"]);
     }
 
     #[test]
@@ -332,7 +332,7 @@ mod tests {
             right: Term::var("b"),
             is: Term::var("result"),
         });
-        assert_round_trip(fq, "logic/and", &["left", "right", "is"]);
+        assert_round_trip(fq, "boolean/and", &["left", "right", "is"]);
     }
 
     #[test]
@@ -342,7 +342,7 @@ mod tests {
             right: Term::var("b"),
             is: Term::var("result"),
         });
-        assert_round_trip(fq, "logic/or", &["left", "right", "is"]);
+        assert_round_trip(fq, "boolean/or", &["left", "right", "is"]);
     }
 
     #[test]
@@ -351,7 +351,7 @@ mod tests {
             value: Term::var("flag"),
             is: Term::var("negated"),
         });
-        assert_round_trip(fq, "logic/not", &["value", "is"]);
+        assert_round_trip(fq, "boolean/not", &["value", "is"]);
     }
 
     #[test]
