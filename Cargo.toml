@@ -26,6 +26,7 @@ members = [
     "rust/dialog-dbsp",
     "rust/dialog-encoding",
     "rust/dialog-prolly-tree",
+    "rust/dialog-query",
     "rust/dialog-search-tree",
     "rust/dialog-storage",
     "rust/dialog-s3-credentials",
@@ -57,6 +58,7 @@ clap = "4"
 clap_derive = "4"
 console_error_panic_hook = "0.1"
 convert_case = "0.6"
+indexmap = "2.0"
 csv-async = { version = "1", features = ["tokio"] }
 dashmap = "6"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
@@ -87,6 +89,7 @@ parking_lot = "0.12"
 p256 = "0.13"
 p384 = "0.13"
 p521 = "0.13"
+paste = "1.0"
 pidlock = "0.1"
 pretty_assertions = "1"
 proc-macro2 = "1"
@@ -170,6 +173,9 @@ path = "./rust/dialog-effects"
 
 [workspace.dependencies.dialog-macros]
 path = "./rust/dialog-macros"
+
+[workspace.dependencies.dialog-query]
+path = "./rust/dialog-query"
 
 [workspace.dependencies.dialog-s3-credentials]
 path = "./rust/dialog-s3-credentials"

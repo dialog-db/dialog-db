@@ -1,0 +1,247 @@
+//! Equality constraint between two terms
+//!
+//! Enforces that two terms must have equal values during query evaluation.
+//! Supports bidirectional inference: if one term is bound, the other will be
+//! inferred to have the same value.
+
+use std::fmt;
+
+use crate::types::Any;
+pub use crate::{
+    Cardinality, Environment, EvaluationError, Field, Parameters, Requirement, Schema, Selection,
+    Term, Value, try_stream,
+};
+use std::fmt::Display;
+
+/// Cost for evaluating an equality constraint (simple comparison operation)
+const EQUALITY_COST: usize = 1;
+
+/// Equality constraint between two terms.
+///
+/// This constraint ensures that two terms must have equal values during query evaluation.
+/// It implements three key behaviors:
+///
+/// 1. **Filtering**: When both terms are already bound, the constraint filters out selection
+///    where the values don't match.
+///
+/// 2. **Bidirectional Inference**: When only one term is bound, the constraint infers the
+///    value of the unbound term from the bound one. This works in both directions.
+///
+/// 3. **Error on Unbound**: When neither term is bound, the constraint cannot be evaluated
+///    and raises a `ConstraintViolation` error.
+///
+/// # Example
+/// ```no_run
+/// # use dialog_query::constraint::equality::Equality;
+/// # use dialog_query::{Term, types::Any};
+/// // x must equal y
+/// let eq = Equality::new(Term::<Any>::var("x"), Term::<Any>::var("y"));
+/// ```
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Equality {
+    /// The left-hand parameter of the equality constraint
+    pub this: Term<Any>,
+    /// The right-hand parameter of the equality constraint
+    pub is: Term<Any>,
+}
+
+impl Equality {
+    /// Creates a new equality constraint between two parameters.
+    pub fn new(this: Term<Any>, is: Term<Any>) -> Self {
+        Self { this, is }
+    }
+
+    /// Returns the schema for this constraint.
+    ///
+    /// The schema describes what parameters the constraint requires to be evaluable.
+    pub fn schema(&self) -> Schema {
+        let mut schema = Schema::new();
+        let requirement = Requirement::new_group();
+        schema.insert(
+            "this".into(),
+            Field {
+                description: "Term that must be equal to the \"is\" term.".into(),
+                content_type: self.this.content_type(),
+                requirement: requirement.required(),
+                cardinality: Cardinality::One,
+            },
+        );
+        schema.insert(
+            "is".into(),
+            Field {
+                description: "Term that must be equal to the \"this\" term.".into(),
+                content_type: self.is.content_type(),
+                requirement: requirement.required(),
+                cardinality: Cardinality::One,
+            },
+        );
+        schema
+    }
+
+    /// Estimates the cost of evaluating this constraint given the current environment.
+    ///
+    /// Returns `Some(cost)` if the constraint can be evaluated (at least one term is bound).
+    /// Returns `None` if the constraint cannot be evaluated yet (neither term is bound).
+    pub fn estimate(&self, env: &Environment) -> Option<usize> {
+        if self.this.is_bound(env) | self.is.is_bound(env) {
+            Some(EQUALITY_COST)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the parameters for this constraint.
+    pub fn parameters(&self) -> Parameters {
+        let mut params = Parameters::new();
+        params.insert("this".to_string(), self.this.clone());
+        params.insert("is".to_string(), self.is.clone());
+        params
+    }
+
+    /// Evaluates the constraint against the current selection of matches.
+    ///
+    /// This method processes each match in the input selection and:
+    /// - **Filters** matches where both terms are bound but have different values
+    /// - **Infers** missing bindings when one term is bound and the other isn't
+    /// - **Errors** when neither term is bound (ConstraintViolation)
+    ///
+    /// # Returns
+    /// A stream of matches that satisfy the constraint, with any necessary
+    /// variable bindings added through inference.
+    pub fn evaluate<M: Selection>(self, selection: M) -> impl Selection {
+        let this = self.this;
+        let is = self.is;
+        try_stream! {
+            for await candidate in selection {
+                let base = candidate?;
+
+                match (base.lookup(&this), base.lookup(&is)) {
+                    // Case 1: Both terms are bound - verify they are equal
+                    // Only pass through the match if the values are equal
+                    (Ok(this_val), Ok(is_val)) => {
+                        if this_val == is_val {
+                            yield base;
+                        }
+                        // Otherwise filter out this match (no yield)
+                    }
+                    // Case 2: Only "is" is bound - infer "this" from "is"
+                    (Err(_), Ok(is_val)) => {
+                        let mut extension = base.clone();
+                        extension.bind(&this, is_val)?;
+                        yield extension;
+                    }
+                    // Case 3: Only "this" is bound - infer "is" from "this"
+                    (Ok(this_val), Err(_)) => {
+                        let mut extension = base.clone();
+                        extension.bind(&is, this_val)?;
+                        yield extension;
+                    }
+                    // Case 4: Neither term is bound - cannot evaluate
+                    // Raise a constraint violation error
+                    (Err(_), Err(_)) => {
+                        Err(EvaluationError::ConstraintViolation {
+                            constraint: format!("{} == {}", this, is)
+                        })?;
+                    }
+                };
+            }
+        }
+    }
+}
+
+impl Display for Equality {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} == {}", self.this, self.is)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::selection::Match;
+    use futures_util::TryStreamExt;
+
+    #[dialog_common::test]
+    async fn it_passes_when_both_terms_equal() -> Result<(), EvaluationError> {
+        let constraint = Equality::new(Term::var("x"), Term::var("y"));
+
+        let mut candidate = Match::new();
+        candidate.bind(&Term::var("x"), Value::from(42))?;
+        candidate.bind(&Term::var("y"), Value::from(42))?;
+
+        let results: Vec<Match> = constraint.evaluate(candidate.seed()).try_collect().await?;
+
+        assert_eq!(results.len(), 1, "Should have one result");
+        assert_eq!(
+            results[0].lookup(&Term::var("x"))?,
+            Value::from(42),
+            "x should still be 42"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_filters_when_terms_differ() -> Result<(), EvaluationError> {
+        let constraint = Equality::new(Term::var("x"), Term::var("y"));
+
+        let mut candidate = Match::new();
+        candidate.bind(&Term::var("x"), Value::from(42))?;
+        candidate.bind(&Term::var("y"), Value::from(99))?;
+
+        let results: Vec<Match> = constraint.evaluate(candidate.seed()).try_collect().await?;
+
+        assert_eq!(
+            results.len(),
+            0,
+            "Should have no results when values don't match"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_infers_this_from_is() -> Result<(), EvaluationError> {
+        let constraint = Equality::new(Term::var("x"), Term::var("y"));
+
+        let mut candidate = Match::new();
+        candidate.bind(&Term::var("y"), Value::from(42))?;
+
+        let results: Vec<Match> = constraint.evaluate(candidate.seed()).try_collect().await?;
+
+        assert_eq!(results.len(), 1, "Should have one result");
+        assert_eq!(
+            results[0].lookup(&Term::var("x"))?,
+            Value::from(42),
+            "x should be inferred as 42"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    fn it_estimates_zero_cost_when_bound() {
+        let constraint = Equality::new(Term::var("x"), Term::var("y"));
+
+        let mut env = Environment::new();
+        env.add("x");
+
+        assert_eq!(
+            constraint.estimate(&env),
+            Some(EQUALITY_COST),
+            "Should return cost when at least one term is bound"
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_estimates_none_when_unbound() {
+        let constraint = Equality::new(Term::var("x"), Term::var("y"));
+        let env = Environment::new();
+
+        assert_eq!(
+            constraint.estimate(&env),
+            None,
+            "Should return None when neither term is bound"
+        );
+    }
+}

@@ -1,0 +1,90 @@
+//! Constraint system for query variables
+//!
+//! Constraints express relationships between terms that must be satisfied during
+//! query evaluation. Unlike applications which query the knowledge base, constraints
+//! operate on variable bindings to filter, infer, or validate values.
+
+pub mod equality;
+
+use std::fmt;
+
+pub use equality::Equality;
+
+use crate::selection::Selection;
+use crate::{Environment, Parameters, Schema};
+use std::fmt::Display;
+
+/// Constraint enum representing different types of constraints between terms.
+///
+/// Constraints express relationships that variables must satisfy. They support
+/// bidirectional inference when possible, meaning if one term is bound, the other
+/// can often be inferred from the constraint.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "assert", content = "where")]
+pub enum Constraint {
+    /// Equality constraint between two terms.
+    ///
+    /// Enforces that both terms must have equal values. Supports bidirectional
+    /// inference: if one term is bound, the other will be inferred to have the
+    /// same value.
+    #[serde(rename = "==")]
+    Equality(Equality),
+}
+
+impl Constraint {
+    /// Returns the schema for this constraint.
+    ///
+    /// The schema describes what parameters the constraint requires to be evaluable.
+    pub fn schema(&self) -> Schema {
+        match self {
+            Constraint::Equality(constraint) => constraint.schema(),
+        }
+    }
+
+    /// Estimates the cost of evaluating this constraint given the current environment.
+    ///
+    /// Returns `Some(cost)` if the constraint can be evaluated (at least one term is bound).
+    /// Returns `None` if the constraint cannot be evaluated yet (neither term is bound).
+    pub fn estimate(&self, env: &Environment) -> Option<usize> {
+        match self {
+            Constraint::Equality(constraint) => constraint.estimate(env),
+        }
+    }
+
+    /// Returns the parameters for this constraint.
+    pub fn parameters(&self) -> Parameters {
+        match self {
+            Constraint::Equality(constraint) => constraint.parameters(),
+        }
+    }
+
+    /// Evaluates the constraint against the current selection of matches.
+    ///
+    /// This method processes each match in the input selection and:
+    /// - **Filters** matches where constraints are violated
+    /// - **Infers** missing bindings when possible
+    /// - **Errors** when constraints cannot be evaluated
+    ///
+    /// # Returns
+    /// A stream of matches that satisfy the constraint, with any necessary
+    /// variable bindings added through inference.
+    pub fn evaluate<M: Selection>(self, selection: M) -> impl Selection {
+        match self {
+            Constraint::Equality(constraint) => constraint.evaluate(selection),
+        }
+    }
+}
+
+impl Display for Constraint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Constraint::Equality(constraint) => Display::fmt(constraint, f),
+        }
+    }
+}
+
+impl From<Equality> for Constraint {
+    fn from(constraint: Equality) -> Self {
+        Constraint::Equality(constraint)
+    }
+}
