@@ -13,6 +13,7 @@ pub mod premises;
 pub mod when;
 
 pub use deductive::DeductiveRule;
+pub use deductive::descriptor::DeductiveRuleDescriptor;
 pub use premises::*;
 pub use when::*;
 

@@ -1,10 +1,17 @@
+/// Serializable rule descriptor matching the formal notation.
+pub mod descriptor;
+
 pub use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::TypeError;
+use crate::negation::Negation;
 pub use crate::planner::Plan;
 pub use crate::planner::{Conjunction, Planner};
 pub use crate::premise::Premise;
 pub use crate::{Attribute, Cardinality, Parameters, Proposition, Requirement, Value};
 use crate::{Environment, Term, Type};
+use descriptor::DeductiveRuleDescriptor;
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt::{Display, Formatter, Result as FmtResult};
 
 /// Represents a deductive rule that can be applied creating a premise.
@@ -18,14 +25,34 @@ pub struct DeductiveRule {
     join: Conjunction,
 }
 impl DeductiveRule {
-    /// Create a new uncompiled rule from a conclusion and premises
+    /// Compile a rule from a conclusion and premises.
+    ///
+    /// Plans the optimal premise execution order and validates that every
+    /// conclusion variable is grounded by at least one positive premise.
     pub fn new(conclusion: ConceptDescriptor, premises: Vec<Premise>) -> Result<Self, TypeError> {
-        // Convert premises to an intermediate form, then compile
-        let uncompiled = UncompiledDeductiveRule {
-            conclusion,
-            premises,
-        };
-        uncompiled.compile()
+        // Plan the order of premises in a scope where none of the rule
+        // parameters are bound to find the optimal execution order, or to
+        // discover unsatisfiable premises (e.g. a formula whose required
+        // cell is never derived by another premise).
+        let join = Planner::from(premises).plan(&Environment::new())?;
+        let rule = DeductiveRule { conclusion, join };
+
+        // Verify that every conclusion parameter is derived by one of the
+        // premises; otherwise the rule could never fully bind its output.
+        let unbound = rule
+            .conclusion
+            .operands()
+            .find(|name| !rule.join.binds.contains(name))
+            .map(String::from);
+
+        if let Some(variable) = unbound {
+            return Err(TypeError::UnboundVariable {
+                rule: Box::new(rule),
+                variable,
+            });
+        }
+
+        Ok(rule)
     }
 
     /// Returns the conclusion predicate for this rule.
@@ -56,45 +83,40 @@ impl DeductiveRule {
     pub fn apply(&self, parameters: Parameters) -> Result<Proposition, TypeError> {
         self.conclusion.apply(parameters)
     }
-}
 
-/// Internal helper for rules before compilation
-pub struct UncompiledDeductiveRule {
-    conclusion: ConceptDescriptor,
-    premises: Vec<Premise>,
-}
+    /// Converts this compiled rule back into a serializable [`DeductiveRuleDescriptor`].
+    ///
+    /// Reconstructs the `when`/`unless` split from the compiled premises.
+    pub fn descriptor(&self) -> DeductiveRuleDescriptor {
+        let mut when = Vec::new();
+        let mut unless = Vec::new();
 
-impl UncompiledDeductiveRule {
-    /// Compiles the rule by planning premise execution order and validating bindings.
-    pub fn compile(self) -> Result<DeductiveRule, TypeError> {
-        // We attempt to plan the order of premises in a scope where none of the
-        // rule parameters are bound in order to identify most optimal execution
-        // order in such scenario or to discover that some premise in the rule
-        // is not satisfiable e.g. if formula uses rule parameter in the required
-        // cell which is not derived from any other premise.
-        let join = Planner::from(self.premises).plan(&Environment::new())?;
-
-        // We also verify that every rule parameter was derived by one of the
-        // rule premises, otherwise we produce an error since rule evaluation
-        // would not be able to bind such parameter.
-        for name in self.conclusion.operands() {
-            if !join.binds.contains(name) {
-                // Create a temporary rule for the error message
-                let temp_rule = DeductiveRule {
-                    conclusion: self.conclusion.clone(),
-                    join: join.clone(),
-                };
-                Err(TypeError::UnboundVariable {
-                    rule: Box::new(temp_rule),
-                    variable: name.to_string(),
-                })?;
+        for step in &self.join.steps {
+            match &step.premise {
+                Premise::Assert(proposition) => when.push(proposition.clone()),
+                Premise::Unless(Negation(proposition)) => unless.push(proposition.clone()),
             }
         }
 
-        Ok(DeductiveRule {
-            conclusion: self.conclusion,
-            join,
-        })
+        DeductiveRuleDescriptor {
+            description: None,
+            deduce: self.conclusion.clone(),
+            when,
+            unless,
+        }
+    }
+}
+
+impl Serialize for DeductiveRule {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.descriptor().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for DeductiveRule {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let definition = DeductiveRuleDescriptor::deserialize(deserializer)?;
+        definition.compile().map_err(D::Error::custom)
     }
 }
 

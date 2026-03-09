@@ -110,12 +110,12 @@ mod tests {
     use super::*;
     use crate::AttributeStatement;
     use crate::Query;
-    use crate::query::Output;
     use crate::artifact::{
         ArtifactSelector, ArtifactStore, Artifacts, ArtifactsAttribute, Type, Value,
     };
     use crate::attribute::{Attribute as _, AttributeDescriptor};
     use crate::error::EvaluationError;
+    use crate::query::Output;
     use crate::query::{Application, Source};
     use crate::selection::Selection;
 

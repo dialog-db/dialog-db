@@ -4,6 +4,7 @@ use super::proposition::Proposition;
 use crate::selection::Selection;
 use crate::{Environment, Parameters, Requirement, Schema, Source, try_stream};
 pub use futures_util::{TryStreamExt, stream};
+use serde::{Deserialize, Serialize};
 
 /// Cost overhead added for negation operations (checking non-existence)
 pub const NEGATION_OVERHEAD: usize = 100;
@@ -18,7 +19,8 @@ pub const NEGATION_OVERHEAD: usize = 100;
 /// Negations never bind new variables — they only constrain existing ones.
 /// The planner accounts for this by never adding a negation's parameters to
 /// the `binds` set of an [`Candidate`](crate::planner::Candidate).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct Negation(pub Proposition);
 
 impl Negation {
