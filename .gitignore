@@ -10,3 +10,4 @@ typescript/dialog-artifacts-web-tests/dialog-artifacts
 x-query
 .direnv
 .envrc
+webdriver.json

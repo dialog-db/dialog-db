@@ -1,0 +1,70 @@
+[package]
+name = "dialog-blobs"
+description = "Content-addressed blob storage for Dialog"
+version.workspace = true
+edition = "2024"
+authors.workspace = true
+license.workspace = true
+
+[features]
+archive = ["dep:dialog-capability", "dep:dialog-effects", "dep:async-trait"]
+
+[dependencies]
+dialog-common = { workspace = true, features = ["helpers"] }
+dialog-capability = { workspace = true, optional = true }
+dialog-effects = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
+futures-util = { workspace = true }
+futures-core = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "io-util"] }
+bytes = { workspace = true }
+blake3 = { workspace = true }
+base58 = { workspace = true }
+ulid = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+dirs = { workspace = true }
+tokio = { workspace = true, features = ["fs"] }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+js-sys = { workspace = true }
+wasm-streams = { workspace = true }
+getrandom = { workspace = true }
+getrandom_03 = { workspace = true }
+tokio = { workspace = true, features = ["io-util"] }
+web-sys = { workspace = true, features = [
+    "Crypto", "SubtleCrypto", "CryptoKey", "HkdfParams",
+    "Window", "Navigator", "StorageManager",
+    "FileSystemDirectoryHandle", "FileSystemFileHandle",
+    "FileSystemGetFileOptions", "FileSystemGetDirectoryOptions",
+    "FileSystemCreateWritableOptions", "FileSystemWritableFileStream",
+    "Blob", "File", "ReadableStream",
+    "LockManager",
+] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+dialog-capability = { workspace = true }
+dialog-effects = { workspace = true }
+async-trait = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+
+[lints.rust]
+# The dialog_common::test macro uses cfg conditions that originate from the macro crate.
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(dialog_test_native_integration)',
+    'cfg(dialog_test_wasm_integration)',
+    'cfg(feature, values("web-integration-tests"))',
+    'cfg(web_sys_unstable_apis)',
+] }
