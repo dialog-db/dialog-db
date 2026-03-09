@@ -85,7 +85,7 @@ Provides modeling primitives for describing a domain: attributes, concepts, rule
 
 An attribute is a relation elevated with domain-specific invariants. It extends the `domain/name` identifier with a value type and cardinality, specifying what kind of values the association admits and how many.
 
-An attribute is defined as a newtype wrapping a value type. The **domain** is derived from the enclosing module name (underscores become hyphens), and the **name** from the struct name (converted to kebab-case). The domain can be overridden with `#[domain(...)]`.
+An attribute is defined as a newtype wrapping a value type. The **domain** is derived from the enclosing module name (underscores become hyphens), and the **name** from the struct name (converted to kebab-case):
 
 ```rs
 mod employee {
@@ -96,6 +96,22 @@ mod employee {
     /// Job title or function
     #[derive(Attribute, Clone)]
     pub struct Role(pub String);   // -> "employee/role"
+}
+```
+
+The domain can be overridden with `#[domain(...)]` when the module name doesn't match the desired domain:
+
+```rs
+mod model {
+    /// Person's given name
+    #[derive(Attribute, Clone)]
+    #[domain("employee")]
+    pub struct Name(pub String);       // -> "employee/name" (not "model/name")
+
+    /// Account identifier
+    #[derive(Attribute, Clone)]
+    #[domain("io.gozala")]
+    pub struct AccountId(pub String);  // -> "io.gozala/account-id"
 }
 ```
 
