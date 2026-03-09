@@ -94,7 +94,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let description_lit = syn::LitStr::new(&description, proc_macro2::Span::call_site());
 
     // Parse cardinality
-    let cardinality = parse_cardinality_attribute(&input.attrs);
+    let cardinality = match parse_cardinality_attribute(&input.attrs) {
+        Ok(c) => c,
+        Err(e) => return e.to_compile_error().into(),
+    };
 
     // Generate unique identifiers for the const-fn domain machinery.
     // Each struct gets its own set to avoid name collisions when multiple
@@ -263,7 +266,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 <Self as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor()
             }
 
-            /// Returns the relation identifier for this attribute.
+            /// Returns the attribute identifier.
             pub fn the() -> dialog_query::The {
                 Self::descriptor().the().clone()
             }

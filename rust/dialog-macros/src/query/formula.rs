@@ -115,7 +115,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
         let doc_comment = extract_doc_comments(&field.attrs);
 
         // Check if field has #[derived] and parse optional cost
-        let derived_info = parse_derived_attribute(&field.attrs);
+        let derived_info = match parse_derived_attribute(&field.attrs) {
+            Ok(info) => info,
+            Err(e) => return e.to_compile_error().into(),
+        };
 
         if let Some(cost) = derived_info {
             all_fields.push((field_name, field_type, doc_comment.clone(), true, cost));

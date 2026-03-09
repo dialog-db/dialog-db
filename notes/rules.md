@@ -26,12 +26,12 @@ pub struct Employee {
 A rule is a function that takes a `Query<T>` pattern for the conclusion and returns an `impl When` describing the premises. The premises are a tuple of patterns that must all hold for the conclusion to be derived.
 
 ```rs
-fn employee_from_stuff(employee: Query<Employee>) -> impl When {
+fn employee_from_contractor(employee: Query<Employee>) -> impl When {
     (
-        Query::<Stuff> {
+        Query::<Contractor> {
             this: employee.this.clone(),
             name: employee.name.clone(),
-            role: employee.role.clone(),
+            position: employee.role.clone(),
         },
     )
 }
@@ -50,9 +50,10 @@ The order of premises in a rule body does not matter. The query planner reorders
 Rules are installed into a `Session` with `.install()`, which compiles and validates the rule:
 
 ```rs
-let session = Session::open(store).install(employee_from_stuff)?;
+let session = Session::open(artifacts)
+    .install(employee_from_contractor)?;
 
-// Now querying Employee will also find conclusions derived from Stuff
+// Now querying Employee will also find conclusions derived from Contractor
 let employees = Query::<Employee>::default()
     .perform(&session)
     .try_vec()
@@ -64,17 +65,17 @@ let employees = Query::<Employee>::default()
 Formulas can be used as premises to compute derived values from bound variables:
 
 ```rs
-fn full_name(person: Query<Person>) -> impl When {
+fn greeting_rule(greeting: Query<Greeting>) -> impl When {
     (
         Query::<Employee> {
-            this: person.this.clone(),
-            name: Term::var("first"),
+            this: greeting.this.clone(),
+            name: Term::var("name"),
             role: Term::blank(),
         },
         Query::<Concatenate> {
-            first: Term::var("first"),
-            second: " Smith".to_string().into(),
-            is: person.name,
+            first: "Hello, ".to_string().into(),
+            second: Term::var("name"),
+            is: greeting.message,
         },
     )
 }

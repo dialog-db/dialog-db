@@ -59,7 +59,7 @@ If cost is omitted, it defaults to 1.
 
 ## Built-in Formulas
 
-The system ships with a fixed set of built-in formulas. User-defined formulas are not supported. The complete set is registered in the `define_formulas!` macro in `dialog_query::formula::query`, which maps each formula to a `domain/name` identifier:
+While `#[derive(Formula)]` can define new formula types, they must be registered in the `define_formulas!` macro in `dialog_query::formula::query` to be usable in the query engine. The current set of built-in formulas:
 
 **Math** (`dialog_query::formula::math`):
 - `Sum` ("math/sum"), `Difference` ("math/difference"), `Product` ("math/product"), `Quotient` ("math/quotient"), `Modulo` ("math/modulo")

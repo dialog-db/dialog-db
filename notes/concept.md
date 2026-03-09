@@ -137,17 +137,18 @@ let results = query.perform(&session).try_vec().await?;
 Concepts are the conclusion type for deductive rules. A rule derives a concept from premises:
 
 ```rs
-fn employee_from_person(employee: Query<Employee>) -> impl When {
+fn employee_from_contractor(employee: Query<Employee>) -> impl When {
     (
-        Query::<Person> {
+        Query::<Contractor> {
             this: employee.this.clone(),
             name: employee.name.clone(),
-            title: employee.role.clone(),
+            position: employee.role.clone(),
         },
     )
 }
 
-session.install(employee_from_person)?;
+let session = Session::open(artifacts)
+    .install(employee_from_contractor)?;
 ```
 
 Multiple rules for the same concept provide logical disjunction (OR). Any rule can produce a conclusion. See [rules.md](rules.md) for details.

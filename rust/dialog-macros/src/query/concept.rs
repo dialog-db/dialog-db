@@ -75,7 +75,7 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Data, DeriveInput, Fields, parse_macro_input};
 
-use super::helpers::{extract_doc_comments, to_snake_case};
+use super::helpers::extract_doc_comments;
 
 pub fn derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -137,9 +137,6 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let mut terms_methods = Vec::new();
     let mut instance_expressions = Vec::new();
 
-    // Generate domain from struct name (e.g., Person -> "person")
-    let domain = to_snake_case(&struct_name.to_string());
-    let domain_lit = syn::LitStr::new(&domain, proc_macro2::Span::call_site());
     let terms_name = syn::Ident::new(&format!("{}Terms", struct_name), struct_name.span());
 
     for field in fields {
@@ -211,11 +208,6 @@ pub fn derive(input: TokenStream) -> TokenStream {
     // Generate type names based on struct name
     let query_name = syn::Ident::new(&format!("{}Query", struct_name), struct_name.span());
 
-    let operator_const_name = syn::Ident::new(
-        &format!("{}_OPERATOR", struct_name.to_string().to_uppercase()),
-        struct_name.span(),
-    );
-
     // Create validation function name
     let validate_fn_name = syn::Ident::new(
         &format!("validate_{}", struct_name.to_string().to_lowercase()),
@@ -231,7 +223,6 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         };
 
-        /// Query pattern for #struct_name - has Term-wrapped fields for querying
         #[derive(Debug, Clone, PartialEq)]
         pub struct #query_name {
             /// The entity being matched
@@ -256,9 +247,6 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         }
         #(#terms_methods)*
-
-        /// Const operator name for this concept
-        pub const #operator_const_name: &str = #domain_lit;
 
         // Implement Application trait for the Query struct
         impl dialog_query::Application for #query_name {
@@ -388,7 +376,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 #concept_description_lit
             }
 
-            fn this(&self) -> dialog_artifacts::Entity {
+            fn this(&self) -> dialog_query::Entity {
                 let predicate: dialog_query::ConceptDescriptor = self.clone().into();
                 predicate.this()
             }

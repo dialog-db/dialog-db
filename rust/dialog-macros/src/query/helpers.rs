@@ -43,23 +43,6 @@ pub fn extract_doc_comments(attrs: &[Attribute]) -> String {
     docs.join(" ").trim().to_string()
 }
 
-pub fn to_snake_case(s: &str) -> String {
-    let mut result = String::new();
-
-    for ch in s.chars() {
-        if ch.is_uppercase() {
-            if !result.is_empty() {
-                result.push('.');
-            }
-            result.push(ch.to_lowercase().next().unwrap());
-        } else {
-            result.push(ch);
-        }
-    }
-
-    result
-}
-
 /// Convert PascalCase or snake_case to kebab-case at compile time
 /// Examples:
 /// - UserName -> user-name
@@ -99,22 +82,24 @@ pub fn to_kebab_case(s: &str) -> String {
     result
 }
 
-/// Parse the `#[derived]` or `#[derived(cost = N)]` attribute
-/// Returns `Some(cost)` if the field is derived, `None` otherwise
-/// Default cost is 1 if not specified
-pub fn parse_derived_attribute(attrs: &[Attribute]) -> Option<usize> {
+/// Parse the `#[derived]` or `#[derived(cost = N)]` attribute.
+/// Returns `Ok(Some(cost))` if the field is derived, `Ok(None)` otherwise.
+/// Default cost is 1 if not specified.
+pub fn parse_derived_attribute(attrs: &[Attribute]) -> Result<Option<usize>, syn::Error> {
     for attr in attrs {
         if attr.path().is_ident("derived") {
-            // Check if there are any nested meta items
-            let mut cost = Some(1); // Default cost is 1
+            // Just #[derived] with no parameters
+            if matches!(attr.meta, syn::Meta::Path(_)) {
+                return Ok(Some(1));
+            }
 
-            // Try to parse nested meta (cost = N)
-            let result = attr.parse_nested_meta(|meta| {
+            let mut cost = 1usize;
+            attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("cost") {
                     let value = meta.value()?;
                     let lit: Lit = value.parse()?;
                     if let Lit::Int(lit_int) = lit {
-                        cost = Some(lit_int.base10_parse::<usize>()?);
+                        cost = lit_int.base10_parse::<usize>()?;
                         Ok(())
                     } else {
                         Err(meta.error("cost must be an integer"))
@@ -122,24 +107,12 @@ pub fn parse_derived_attribute(attrs: &[Attribute]) -> Option<usize> {
                 } else {
                     Err(meta.error("unknown derived attribute parameter"))
                 }
-            });
+            })?;
 
-            // If parsing succeeds or there's no nested content, return the cost
-            // If parsing fails, it's an error in the attribute syntax
-            match result {
-                Ok(()) => return cost,
-                Err(_) if matches!(attr.meta, syn::Meta::Path(_)) => {
-                    // Just #[derived] with no parameters - use default cost
-                    return Some(1);
-                }
-                Err(e) => {
-                    // Syntax error in attribute
-                    panic!("Error parsing derived attribute: {}", e);
-                }
-            }
+            return Ok(Some(cost));
         }
     }
-    None
+    Ok(None)
 }
 
 /// Parse the `#[domain(...)]` attribute to extract the domain value.
@@ -180,36 +153,30 @@ pub fn parse_domain_attribute(attrs: &[Attribute]) -> Option<String> {
     None
 }
 
-/// Parse the `#[cardinality(many)]` attribute
-/// Returns the appropriate Cardinality token stream
-pub fn parse_cardinality_attribute(attrs: &[Attribute]) -> TokenStream {
+/// Parse the `#[cardinality(one)]` or `#[cardinality(many)]` attribute.
+/// Returns the appropriate Cardinality token stream, defaulting to `One`.
+pub fn parse_cardinality_attribute(attrs: &[Attribute]) -> Result<TokenStream, syn::Error> {
     for attr in attrs {
         if attr.path().is_ident("cardinality") {
-            let result = attr.parse_nested_meta(|meta| {
-                if meta.path.is_ident("many") || meta.path.is_ident("one") {
+            let mut is_many = false;
+            attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("many") {
+                    is_many = true;
+                    Ok(())
+                } else if meta.path.is_ident("one") {
                     Ok(())
                 } else {
                     Err(meta.error("cardinality must be 'one' or 'many'"))
                 }
-            });
+            })?;
 
-            match result {
-                Ok(()) => {
-                    // Check which one it was
-                    if let Meta::List(list) = &attr.meta {
-                        let tokens_str = list.tokens.to_string();
-                        if tokens_str.contains("many") {
-                            return quote! { dialog_query::Cardinality::Many };
-                        }
-                    }
-                }
-                Err(e) => {
-                    panic!("Error parsing cardinality attribute: {}", e);
-                }
-            }
+            return if is_many {
+                Ok(quote! { dialog_query::Cardinality::Many })
+            } else {
+                Ok(quote! { dialog_query::Cardinality::One })
+            };
         }
     }
 
-    // Default to One
-    quote! { dialog_query::Cardinality::One }
+    Ok(quote! { dialog_query::Cardinality::One })
 }

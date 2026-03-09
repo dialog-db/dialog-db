@@ -621,7 +621,7 @@ mod tests {
         use crate::{Session, artifact::Artifacts};
         use dialog_storage::MemoryStorageBackend;
 
-        // Create a SumMatch with all variables
+        // Create a SumQuery with all variables
         let query = Query::<Sum> {
             of: Term::var("x"),
             with: Term::var("y"),
