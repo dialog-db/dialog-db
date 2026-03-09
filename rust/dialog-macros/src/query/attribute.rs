@@ -202,9 +202,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
                 #[allow(non_snake_case)]
                 const fn #domain_name<const N: usize>(bytes: &[u8; N]) -> &str {
-                    // SAFETY: We only insert valid UTF-8 bytes (ASCII letters, hyphens)
-                    // in compute_bytes_name, so this is guaranteed to be valid UTF-8
-                    unsafe { std::str::from_utf8_unchecked(bytes) }
+                    match std::str::from_utf8(bytes) {
+                        Ok(s) => s,
+                        Err(_) => panic!("domain contains non-UTF-8 bytes"),
+                    }
                 }
 
                 const #domain_len_name: usize = #compute_len_name(#module_path_const_name);

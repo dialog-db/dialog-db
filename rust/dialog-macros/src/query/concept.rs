@@ -171,10 +171,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
         });
 
         terms_methods.push(quote! {
-            impl #terms_name {
-                pub fn #field_name() -> dialog_query::Term<#inner_type> {
-                    dialog_query::Term::<#inner_type>::var(#field_name_lit)
-                }
+            pub fn #field_name() -> dialog_query::Term<#inner_type> {
+                dialog_query::Term::<#inner_type>::var(#field_name_lit)
             }
         });
 
@@ -245,8 +243,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
             pub fn this() -> dialog_query::Term<dialog_query::Entity> {
                 dialog_query::Term::<dialog_query::Entity>::var("this")
             }
+            #(#terms_methods)*
         }
-        #(#terms_methods)*
 
         // Implement Application trait for the Query struct
         impl dialog_query::Application for #query_name {

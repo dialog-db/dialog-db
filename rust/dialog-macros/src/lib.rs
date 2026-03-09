@@ -2,9 +2,10 @@
 
 //! Procedural macros for the dialog project.
 //!
-//! This crate provides procedural macro implementations for testing and service
-//! provisioning across dialog crates. Macros are re-exported through `dialog_common`
-//! (with the `helpers` feature) for convenient access.
+//! This crate provides derive macros for the query engine (`Attribute`, `Concept`,
+//! `Formula`) and procedural macros for testing and service provisioning.
+//! Query macros are re-exported through `dialog_query`, while test/provider macros
+//! are re-exported through `dialog_common` (with the `helpers` feature).
 //!
 //! Procedural macros must be defined in their own crate, which is why these live
 //! here rather than in the crates that use them.
