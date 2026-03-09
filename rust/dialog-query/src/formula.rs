@@ -56,7 +56,7 @@ use crate::selection::Match;
 /// 1. Define an input type that implements `TryFrom<Bindings>`
 /// 2. Implement `name()` to return the formula's identifier
 /// 3. Implement `dependencies()` to declare parameter requirements
-/// 4. Implement `derive` to create output instances from input
+/// 4. Implement `compute` to create output instances from input
 /// 5. Implement `write` to write computed values back to the bindings
 ///
 /// # Example
@@ -84,18 +84,17 @@ pub trait Formula: Predicate + Sized + Clone {
         Self::cells().keys()
     }
 
-    /// Convert derived outputs to Match instances with proper provenance
+    /// Resolve bindings by orchestrating the full read-compute-write cycle.
     ///
-    /// This method orchestrates the full formula evaluation:
-    /// 1. Calls `derive` to compute outputs
+    /// 1. Calls `compute` to produce outputs from input
     /// 2. For each output, calls `write` to add values to bindings
-    /// 3. Returns the Match with the derived values bound
+    /// 3. Returns the Match with the output values bound
     ///
     /// This default implementation should work for most formulas.
-    fn compute(bindings: &mut Bindings) -> Result<Vec<Match>, EvaluationError> {
+    fn resolve(bindings: &mut Bindings) -> Result<Vec<Match>, EvaluationError> {
         let mut results = Vec::new();
         let input: Self::Input = bindings.try_into()?;
-        for output in Self::derive(input) {
+        for output in Self::compute(input) {
             let mut bindings = bindings.clone();
             output.write(&mut bindings)?;
             results.push(bindings.source);
@@ -110,9 +109,8 @@ pub trait Formula: Predicate + Sized + Clone {
     /// then constructs the typed application struct.
     fn apply(terms: Parameters) -> Result<<Self as Predicate>::Application, TypeError>;
 
-    /// This method contains actual logic for deriving an output from provided
-    /// inputs.
-    fn derive(input: Self::Input) -> Vec<Self>;
+    /// Pure computation: given bound inputs, produce output instances.
+    fn compute(input: Self::Input) -> Vec<Self>;
 
     /// Write this formula instance's output values to the bindings.
     ///

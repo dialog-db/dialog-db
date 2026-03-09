@@ -1,6 +1,6 @@
 # Formulas
 
-Formulas are pure computations integrated into the query planner. Given bound input fields, they derive output fields.
+Formulas are pure computations integrated into the query planner. Given bound input fields, they compute output fields.
 
 ## Defining a Formula
 
@@ -9,12 +9,12 @@ Formulas are pure computations integrated into the query planner. Given bound in
 pub struct Sum {
     pub of: u32,
     pub with: u32,
-    #[derived]
+    #[output]
     pub is: u32,
 }
 
 impl Sum {
-    pub fn derive(input: Input<Self>) -> Vec<Self> {
+    pub fn compute(input: Input<Self>) -> Vec<Self> {
         vec![Sum {
             of: input.of,
             with: input.with,
@@ -24,9 +24,9 @@ impl Sum {
 }
 ```
 
-The `#[derive(Formula)]` macro generates all the boilerplate needed to use the formula in queries and rules. It also generates an `Input` struct (e.g. `SumInput`) containing only the non-derived fields. The type alias `Input<Sum>` resolves to this struct, which is what the `derive` function receives.
+The `#[derive(Formula)]` macro generates all the boilerplate needed to use the formula in queries and rules. It also generates an `Input` struct (e.g. `SumInput`) containing only the non-output fields. The type alias `Input<Sum>` resolves to this struct, which is what the `compute` function receives.
 
-You must manually implement the `derive` function that computes derived fields from the input. Note that `derive` returns a `Vec`, so a single input can produce zero, one, or many outputs. Returning an empty vec filters out the match (acting as a guard), while returning multiple results expands a single input into many (e.g. splitting a string into parts). Most formulas return exactly one result.
+You must manually implement the `compute` function that produces output fields from the input. Note that `compute` returns a `Vec`, so a single input can produce zero, one, or many outputs. Returning an empty vec filters out the match (acting as a guard), while returning multiple results expands a single input into many (e.g. splitting a string into parts). Most formulas return exactly one result.
 
 ## Using in Queries
 
@@ -47,9 +47,9 @@ You can specify a cost for each derived field:
 pub struct QuotientRemainder {
     pub dividend: u32,
     pub divisor: u32,
-    #[derived(cost = 3)]
+    #[output(cost = 3)]
     pub quotient: u32,
-    #[derived(cost = 2)]
+    #[output(cost = 2)]
     pub remainder: u32,
 }
 // Total formula cost = 3 + 2 = 5

@@ -6,12 +6,12 @@ use super::Formula;
 /// #[derive(Debug, Clone, Formula)]
 /// pub struct Echo {
 ///     input: String,
-///     #[derived]
+///     #[output]
 ///     output: String,
 /// }
 ///
 /// impl Echo for Echo {
-///     fn derive(cells: Input<Self>) -> Self {
+///     fn compute(cells: Input<Self>) -> Self {
 ///         Self {
 ///             output: format!("{}, {}", &cells.input, &cells.input),
 ///             input: cells.input,

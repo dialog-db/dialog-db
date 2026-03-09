@@ -267,19 +267,19 @@ fn employee_from_relations(employee: Query<Employee>) -> impl When {
 
 #### Formulas
 
-Pure computations integrated into the query planner. Given bound input fields, a formula derives output fields.
+Pure computations integrated into the query planner. Given bound input fields, a formula computes output fields.
 
 ```rs
 #[derive(Debug, Clone, Formula)]
 pub struct Sum {
     pub of: u32,
     pub with: u32,
-    #[derived]
+    #[output]
     pub is: u32,
 }
 
 impl Sum {
-    pub fn derive(input: Input<Self>) -> Vec<Self> {
+    pub fn compute(input: Input<Self>) -> Vec<Self> {
         vec![Sum {
           of: input.of,
           with: input.with,

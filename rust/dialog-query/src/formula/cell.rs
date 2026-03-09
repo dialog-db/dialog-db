@@ -10,10 +10,10 @@ use serde::{Deserialize, Serialize};
 /// A single named parameter slot in a formula's schema.
 ///
 /// Each `Cell` declares its name, an optional value type, and whether it is
-/// required (must be bound before the formula runs) or optional/derived
+/// required (must be bound before the formula runs) or optional/output
 /// (will be produced by the formula). The `#[derive(Formula)]` macro
 /// generates a [`Cells`] collection from a formula struct's fields —
-/// non-`#[derived]` fields become required cells, `#[derived]` fields
+/// non-`#[output]` fields become required cells, `#[output]` fields
 /// become optional cells.
 ///
 /// Cells are also used for type checking: [`Cell::check`] validates that a
@@ -61,8 +61,8 @@ impl Cell {
         self
     }
 
-    /// Marks this cell as derived (optional), returning `self` for chaining.
-    pub fn derived(&mut self, _derivation: usize) -> &mut Self {
+    /// Marks this cell as an output (optional), returning `self` for chaining.
+    pub fn output(&mut self, _derivation: usize) -> &mut Self {
         self.requirement = Requirement::Optional;
         self
     }
@@ -281,7 +281,7 @@ mod tests {
             builder
                 .cell("age", Some(Type::UnsignedInt))
                 .the("age field")
-                .derived(15);
+                .output(15);
         });
 
         assert_eq!(cells.count(), 2);

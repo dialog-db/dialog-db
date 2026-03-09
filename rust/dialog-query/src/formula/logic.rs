@@ -14,13 +14,13 @@ pub struct And {
     /// Right operand
     pub right: bool,
     /// Result of AND operation
-    #[derived]
+    #[output]
     pub is: bool,
 }
 
 impl And {
     /// Compute the logical AND of `left` and `right`
-    pub fn derive(input: Input<Self>) -> Vec<Self> {
+    pub fn compute(input: Input<Self>) -> Vec<Self> {
         vec![And {
             left: input.left,
             right: input.right,
@@ -37,13 +37,13 @@ pub struct Or {
     /// Right operand
     pub right: bool,
     /// Result of OR operation
-    #[derived]
+    #[output]
     pub is: bool,
 }
 
 impl Or {
     /// Compute the logical OR of `left` and `right`
-    pub fn derive(input: Input<Self>) -> Vec<Self> {
+    pub fn compute(input: Input<Self>) -> Vec<Self> {
         vec![Or {
             left: input.left,
             right: input.right,
@@ -58,13 +58,13 @@ pub struct Not {
     /// Boolean value to negate
     pub value: bool,
     /// Result of NOT operation
-    #[derived]
+    #[output]
     pub is: bool,
 }
 
 impl Not {
     /// Compute the logical NOT of `value`
-    pub fn derive(input: Input<Self>) -> Vec<Self> {
+    pub fn compute(input: Input<Self>) -> Vec<Self> {
         vec![Not {
             value: input.value,
             is: !input.value,
@@ -91,7 +91,7 @@ mod tests {
         input.bind(&Term::var("b"), true.into()).unwrap();
 
         let app: FormulaQuery = And::apply(terms)?.into();
-        let results = app.derive(input).expect("And formula failed");
+        let results = app.compute(input).expect("And formula failed");
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
@@ -117,7 +117,7 @@ mod tests {
         input.bind(&Term::var("b"), false.into()).unwrap();
 
         let app: FormulaQuery = And::apply(terms)?.into();
-        let results = app.derive(input).expect("And formula failed");
+        let results = app.compute(input).expect("And formula failed");
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
@@ -143,7 +143,7 @@ mod tests {
         input.bind(&Term::var("b"), false.into()).unwrap();
 
         let app: FormulaQuery = And::apply(terms)?.into();
-        let results = app.derive(input).expect("And formula failed");
+        let results = app.compute(input).expect("And formula failed");
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
@@ -169,7 +169,7 @@ mod tests {
         input.bind(&Term::var("b"), false.into()).unwrap();
 
         let app: FormulaQuery = Or::apply(terms)?.into();
-        let results = app.derive(input).expect("Or formula failed");
+        let results = app.compute(input).expect("Or formula failed");
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
@@ -195,7 +195,7 @@ mod tests {
         input.bind(&Term::var("b"), false.into()).unwrap();
 
         let app: FormulaQuery = Or::apply(terms)?.into();
-        let results = app.derive(input).expect("Or formula failed");
+        let results = app.compute(input).expect("Or formula failed");
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
@@ -219,7 +219,7 @@ mod tests {
         input.bind(&Term::var("bool"), true.into()).unwrap();
 
         let app: FormulaQuery = Not::apply(terms)?.into();
-        let results = app.derive(input).expect("Not formula failed");
+        let results = app.compute(input).expect("Not formula failed");
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
@@ -244,7 +244,7 @@ mod tests {
 
         let app: FormulaQuery = Not::apply(terms)?.into();
 
-        let results = app.derive(input).expect("Not formula failed");
+        let results = app.compute(input).expect("Not formula failed");
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
@@ -271,7 +271,7 @@ mod tests {
         input.bind(&Term::var("b"), false.into()).unwrap();
 
         let and_app: FormulaQuery = And::apply(and_terms)?.into();
-        let and_results = and_app.derive(input).expect("And formula failed");
+        let and_results = and_app.compute(input).expect("And formula failed");
         let and_result = &and_results[0];
 
         // Now apply NOT to the result
@@ -281,7 +281,7 @@ mod tests {
 
         let not_app: FormulaQuery = Not::apply(not_terms)?.into();
         let not_results = not_app
-            .derive(and_result.clone())
+            .compute(and_result.clone())
             .expect("Not formula failed");
 
         assert_eq!(not_results.len(), 1);
@@ -310,7 +310,7 @@ mod tests {
         and_input.bind(&Term::var("a"), true.into()).unwrap();
         and_input.bind(&Term::var("b"), true.into()).unwrap();
 
-        let and_results = and_formula.derive(and_input)?;
+        let and_results = and_formula.compute(and_input)?;
         assert_eq!(and_results.len(), 1);
         assert_eq!(
             bool::try_from(and_results[0].lookup(&Term::var("and_result")).unwrap()).ok(),
@@ -329,7 +329,7 @@ mod tests {
         or_input.bind(&Term::var("x"), false.into()).unwrap();
         or_input.bind(&Term::var("y"), true.into()).unwrap();
 
-        let or_results = or_formula.derive(or_input)?;
+        let or_results = or_formula.compute(or_input)?;
         assert_eq!(or_results.len(), 1);
         assert_eq!(
             bool::try_from(or_results[0].lookup(&Term::var("or_result")).unwrap()).ok(),
@@ -346,7 +346,7 @@ mod tests {
         let mut not_input = Match::new();
         not_input.bind(&Term::var("input"), true.into()).unwrap();
 
-        let not_results = not_formula.derive(not_input)?;
+        let not_results = not_formula.compute(not_input)?;
         assert_eq!(not_results.len(), 1);
         assert_eq!(
             bool::try_from(not_results[0].lookup(&Term::var("not_result")).unwrap()).ok(),

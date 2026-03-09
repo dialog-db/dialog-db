@@ -184,9 +184,9 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
 ///
 /// # Attributes
 ///
-/// - `#[derived]` or `#[derived(cost = N)]` - Mark fields as derived/computed
+/// - `#[output]` or `#[output(cost = N)]` - Mark fields as output/computed
 ///   - If cost is omitted, defaults to 1
-///   - Total formula cost is the sum of all derived field costs
+///   - Total formula cost is the sum of all output field costs
 ///
 /// # Example
 ///
@@ -200,12 +200,12 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
 ///     /// Second string
 ///     pub second: String,
 ///     /// Concatenated result
-///     // #[derived(cost = 2)]
+///     // #[output(cost = 2)]
 ///     pub is: String,
 /// }
 ///
 /// impl Concatenate {
-///     pub fn derive(input: Input) -> Vec<Self> {
+///     pub fn compute(input: Input) -> Vec<Self> {
 ///         vec![Concatenate {
 ///             first: input.first.clone(),
 ///             second: input.second.clone(),
@@ -220,7 +220,7 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
 /// ```no_run
 /// # struct Concatenate { first: String, second: String, is: String }
 /// # struct Term<T>(T);
-/// // Input struct — only non-derived fields
+/// // Input struct — only non-output fields
 /// pub struct ConcatenateInput {
 ///     pub first: String,
 ///     pub second: String,
@@ -233,18 +233,18 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
 ///     pub is: Term<String>,
 /// }
 ///
-/// // Formula trait — describes the computation and writes derived fields
+/// // Formula trait — describes the computation and writes output fields
 /// # struct Bindings;
 /// # struct EvaluationError;
-/// # trait Formula { type Input; type Query; fn operator() -> &'static str; fn cost() -> usize; fn derive(input: ConcatenateInput) -> Vec<Concatenate>; fn write(&self, bindings: &mut Bindings) -> Result<(), EvaluationError>; }
+/// # trait Formula { type Input; type Query; fn operator() -> &'static str; fn cost() -> usize; fn compute(input: ConcatenateInput) -> Vec<Concatenate>; fn write(&self, bindings: &mut Bindings) -> Result<(), EvaluationError>; }
 /// impl Formula for Concatenate {
 ///     type Input = ConcatenateInput;
 ///     type Query = ConcatenateQuery;
 ///
 ///     fn operator() -> &'static str { "concatenate" }
-///     fn cost() -> usize { 2 }  // sum of derived field costs
-///     fn derive(input: ConcatenateInput) -> Vec<Concatenate> {
-///         todo!() // delegates to user's Concatenate::derive
+///     fn cost() -> usize { 2 }  // sum of output field costs
+///     fn compute(input: ConcatenateInput) -> Vec<Concatenate> {
+///         todo!() // delegates to user's Concatenate::compute
 ///     }
 ///     fn write(&self, bindings: &mut Bindings) -> Result<(), EvaluationError> {
 ///         // bindings.write("is", &self.is.clone().into())?;
@@ -266,7 +266,7 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
 ///     is: Term::var("full_name"),
 /// };
 /// ```
-#[proc_macro_derive(Formula, attributes(derived))]
+#[proc_macro_derive(Formula, attributes(output))]
 pub fn derive_formula(input: TokenStream) -> TokenStream {
     query::formula::derive(input)
 }

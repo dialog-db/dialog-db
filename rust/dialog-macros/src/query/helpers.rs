@@ -82,13 +82,13 @@ pub fn to_kebab_case(s: &str) -> String {
     result
 }
 
-/// Parse the `#[derived]` or `#[derived(cost = N)]` attribute.
-/// Returns `Ok(Some(cost))` if the field is derived, `Ok(None)` otherwise.
+/// Parse the `#[output]` or `#[output(cost = N)]` attribute.
+/// Returns `Ok(Some(cost))` if the field is an output, `Ok(None)` otherwise.
 /// Default cost is 1 if not specified.
-pub fn parse_derived_attribute(attrs: &[Attribute]) -> Result<Option<usize>, syn::Error> {
+pub fn parse_output_attribute(attrs: &[Attribute]) -> Result<Option<usize>, syn::Error> {
     for attr in attrs {
-        if attr.path().is_ident("derived") {
-            // Just #[derived] with no parameters
+        if attr.path().is_ident("output") {
+            // Just #[output] with no parameters
             if matches!(attr.meta, syn::Meta::Path(_)) {
                 return Ok(Some(1));
             }
@@ -105,7 +105,7 @@ pub fn parse_derived_attribute(attrs: &[Attribute]) -> Result<Option<usize>, syn
                         Err(meta.error("cost must be an integer"))
                     }
                 } else {
-                    Err(meta.error("unknown derived attribute parameter"))
+                    Err(meta.error("unknown output attribute parameter"))
                 }
             })?;
 

@@ -8,13 +8,13 @@ pub struct Sum {
     /// Second operand
     pub with: u32,
     /// Computed sum
-    #[derived(cost = 5)]
+    #[output(cost = 5)]
     pub is: u32,
 }
 
 impl Sum {
     /// Compute the sum of `of` and `with`
-    pub fn derive(input: Input<Self>) -> Vec<Self> {
+    pub fn compute(input: Input<Self>) -> Vec<Self> {
         vec![Sum {
             of: input.of,
             with: input.with,
@@ -31,13 +31,13 @@ pub struct Difference {
     /// Number to subtract
     pub subtract: u32,
     /// Difference
-    #[derived(cost = 2)]
+    #[output(cost = 2)]
     pub is: u32,
 }
 
 impl Difference {
     /// Compute the difference of `of` minus `subtract`
-    pub fn derive(input: Input<Self>) -> Vec<Self> {
+    pub fn compute(input: Input<Self>) -> Vec<Self> {
         vec![Difference {
             of: input.of,
             subtract: input.subtract,
@@ -54,13 +54,13 @@ pub struct Product {
     /// Times to multiply
     pub times: u32,
     /// Result of multiplication
-    #[derived(cost = 5)]
+    #[output(cost = 5)]
     pub is: u32,
 }
 
 impl Product {
     /// Compute the product of `of` times `times`
-    pub fn derive(input: Input<Self>) -> Vec<Self> {
+    pub fn compute(input: Input<Self>) -> Vec<Self> {
         vec![Product {
             of: input.of,
             times: input.times,
@@ -77,13 +77,13 @@ pub struct Quotient {
     /// Number to divide by
     pub by: u32,
     /// Result of division
-    #[derived(cost = 5)]
+    #[output(cost = 5)]
     pub is: u32,
 }
 
 impl Quotient {
     /// Compute the quotient of `of` divided by `by`, returning empty on division by zero
-    pub fn derive(input: Input<Self>) -> Vec<Self> {
+    pub fn compute(input: Input<Self>) -> Vec<Self> {
         if input.by == 0 {
             // Return empty Vec for division by zero - this will be filtered out
             vec![]
@@ -105,13 +105,13 @@ pub struct Modulo {
     /// Number to compute modulo by
     pub by: u32,
     /// Result of modulo operation
-    #[derived(cost = 10)]
+    #[output(cost = 10)]
     pub is: u32,
 }
 
 impl Modulo {
     /// Compute `of` modulo `by`, returning empty on modulo by zero
-    pub fn derive(input: Input<Self>) -> Vec<Self> {
+    pub fn compute(input: Input<Self>) -> Vec<Self> {
         if input.by == 0 {
             // Return empty Vec for modulo by zero
             vec![]
@@ -154,7 +154,7 @@ mod tests {
         let app: FormulaQuery = Sum::apply(terms)?.into();
 
         // Expand the formula
-        let results = app.derive(input).expect("Formula expansion failed");
+        let results = app.compute(input).expect("Formula expansion failed");
 
         // Verify results
         assert_eq!(results.len(), 1);
@@ -200,7 +200,7 @@ mod tests {
             .expect("Failed to set x");
 
         let app: FormulaQuery = Sum::apply(terms)?.into();
-        let result = app.derive(input);
+        let result = app.compute(input);
 
         assert!(result.is_err());
         assert!(matches!(
@@ -225,7 +225,7 @@ mod tests {
         input1.bind(&Term::var("a"), 2u32.into()).unwrap();
         input1.bind(&Term::var("b"), 3u32.into()).unwrap();
 
-        let results1 = app.derive(input1).expect("First expansion failed");
+        let results1 = app.compute(input1).expect("First expansion failed");
         assert_eq!(results1.len(), 1);
         let result1 = &results1[0];
         assert_eq!(
@@ -255,7 +255,7 @@ mod tests {
         input2.bind(&Term::var("a"), 10u32.into()).unwrap();
         input2.bind(&Term::var("b"), 15u32.into()).unwrap();
 
-        let results2 = app.derive(input2).expect("Second expansion failed");
+        let results2 = app.compute(input2).expect("Second expansion failed");
         assert_eq!(results2.len(), 1);
         let result2 = &results2[0];
         assert_eq!(
@@ -314,7 +314,7 @@ mod tests {
         input.bind(&Term::var("y"), 3u32.into()).unwrap();
 
         let app: FormulaQuery = Difference::apply(terms)?.into();
-        let results = app.derive(input).expect("Difference failed");
+        let results = app.compute(input).expect("Difference failed");
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
@@ -341,7 +341,7 @@ mod tests {
 
         let app: FormulaQuery = Difference::apply(terms)?.into();
         let results = app
-            .derive(input)
+            .compute(input)
             .expect("Difference underflow should be handled");
 
         assert_eq!(results.len(), 1);
@@ -369,7 +369,7 @@ mod tests {
         input.bind(&Term::var("y"), 7u32.into()).unwrap();
 
         let app: FormulaQuery = Product::apply(terms)?.into();
-        let results = app.derive(input).expect("Product failed");
+        let results = app.compute(input).expect("Product failed");
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
@@ -395,7 +395,7 @@ mod tests {
         input.bind(&Term::var("y"), 3u32.into()).unwrap();
 
         let app: FormulaQuery = Quotient::apply(terms)?.into();
-        let results = app.derive(input).expect("Quotient failed");
+        let results = app.compute(input).expect("Quotient failed");
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
@@ -422,7 +422,7 @@ mod tests {
 
         let app: FormulaQuery = Quotient::apply(terms)?.into();
         let results = app
-            .derive(input)
+            .compute(input)
             .expect("Division by zero should be handled");
 
         // Should return empty Vec for division by zero
@@ -442,7 +442,7 @@ mod tests {
         input.bind(&Term::var("y"), 5u32.into()).unwrap();
 
         let app: FormulaQuery = Modulo::apply(terms)?.into();
-        let results = app.derive(input).expect("Modulo failed");
+        let results = app.compute(input).expect("Modulo failed");
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
@@ -468,7 +468,9 @@ mod tests {
         input.bind(&Term::var("y"), 0u32.into()).unwrap();
 
         let app: FormulaQuery = Modulo::apply(terms)?.into();
-        let results = app.derive(input).expect("Modulo by zero should be handled");
+        let results = app
+            .compute(input)
+            .expect("Modulo by zero should be handled");
 
         // Should return empty Vec for modulo by zero
         assert_eq!(results.len(), 0);
@@ -489,7 +491,7 @@ mod tests {
         sum_input.bind(&Term::var("x"), 10u32.into()).unwrap();
         sum_input.bind(&Term::var("y"), 5u32.into()).unwrap();
 
-        let sum_results = sum_formula.derive(sum_input)?;
+        let sum_results = sum_formula.compute(sum_input)?;
         assert_eq!(sum_results.len(), 1);
         assert_eq!(
             u32::try_from(sum_results[0].lookup(&Term::var("sum_result")).unwrap()).ok(),
@@ -508,7 +510,7 @@ mod tests {
         diff_input.bind(&Term::var("a"), 20u32.into()).unwrap();
         diff_input.bind(&Term::var("b"), 8u32.into()).unwrap();
 
-        let diff_results = diff_formula.derive(diff_input)?;
+        let diff_results = diff_formula.compute(diff_input)?;
         assert_eq!(diff_results.len(), 1);
         assert_eq!(
             u32::try_from(diff_results[0].lookup(&Term::var("diff_result")).unwrap()).ok(),
@@ -527,7 +529,7 @@ mod tests {
         prod_input.bind(&Term::var("p"), 6u32.into()).unwrap();
         prod_input.bind(&Term::var("q"), 7u32.into()).unwrap();
 
-        let prod_results = product_formula.derive(prod_input)?;
+        let prod_results = product_formula.compute(prod_input)?;
         assert_eq!(prod_results.len(), 1);
         assert_eq!(
             u32::try_from(prod_results[0].lookup(&Term::var("product")).unwrap()).ok(),
@@ -553,7 +555,7 @@ mod tests {
             .bind(&Term::var("str_input"), "10".to_string().into())
             .unwrap();
 
-        let parsed_results = parse_formula.derive(parse_input)?;
+        let parsed_results = parse_formula.compute(parse_input)?;
         assert_eq!(parsed_results.len(), 1);
         let intermediate_result = &parsed_results[0];
 
@@ -568,7 +570,7 @@ mod tests {
         let mut sum_input = intermediate_result.clone();
         sum_input.bind(&Term::var("addend"), 5u32.into()).unwrap();
 
-        let final_results = sum_formula.derive(sum_input)?;
+        let final_results = sum_formula.compute(sum_input)?;
         assert_eq!(final_results.len(), 1);
         assert_eq!(
             u32::try_from(final_results[0].lookup(&Term::var("final_sum")).unwrap()).ok(),
@@ -582,7 +584,7 @@ mod tests {
 
         let to_string_formula: FormulaQuery = ToString::apply(to_string_terms)?.into();
 
-        let string_results = to_string_formula.derive(final_results[0].clone())?;
+        let string_results = to_string_formula.compute(final_results[0].clone())?;
         assert_eq!(string_results.len(), 1);
         assert_eq!(
             String::try_from(
@@ -662,7 +664,7 @@ mod tests {
         use crate::{Session, artifact::Artifacts};
         use dialog_storage::MemoryStorageBackend;
 
-        // Input fields are constants, derived field is a variable
+        // Input fields are constants, output field is a variable
         let query = Query::<Sum> {
             of: Term::from(5u32),
             with: Term::from(3u32),
@@ -762,7 +764,7 @@ mod tests {
         use crate::{Session, artifact::Artifacts};
         use dialog_storage::MemoryStorageBackend;
 
-        // Mix: one input is constant, one is variable, derived is variable
+        // Mix: one input is constant, one is variable, output is variable
         let query = Query::<Sum> {
             of: Term::from(10u32),
             with: Term::var("y"),
@@ -838,7 +840,7 @@ mod tests {
             .bind(&Term::var("divisor"), 0u32.into())
             .unwrap();
 
-        let quotient_results = quotient_formula.derive(division_by_zero_input)?;
+        let quotient_results = quotient_formula.compute(division_by_zero_input)?;
         assert_eq!(quotient_results.len(), 0);
 
         // Test modulo by zero
@@ -857,7 +859,7 @@ mod tests {
             .bind(&Term::var("divisor"), 0u32.into())
             .unwrap();
 
-        let modulo_results = modulo_formula.derive(modulo_by_zero_input)?;
+        let modulo_results = modulo_formula.compute(modulo_by_zero_input)?;
         assert_eq!(modulo_results.len(), 0);
 
         Ok(())

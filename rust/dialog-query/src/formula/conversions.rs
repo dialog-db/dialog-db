@@ -11,13 +11,13 @@ pub struct ToString {
     /// Value to convert
     pub value: Value,
     /// Resulting string representation
-    #[derived]
+    #[output]
     pub is: String,
 }
 
 impl ToString {
     /// Convert the input value to its string representation
-    pub fn derive(input: ToStringInput) -> Vec<Self> {
+    pub fn compute(input: ToStringInput) -> Vec<Self> {
         let string_repr = match &input.value {
             Value::String(s) => s.clone(),
             Value::UnsignedInt(n) => n.to_string(),
@@ -43,13 +43,13 @@ pub struct ParseUnsignedInteger {
     /// String to parse
     pub text: String,
     /// Parsed unsigned integer
-    #[derived(cost = 2)]
+    #[output(cost = 2)]
     pub is: u128,
 }
 
 impl ParseUnsignedInteger {
     /// Parse the text as u128, returning empty on failure
-    pub fn derive(input: Input<Self>) -> Vec<Self> {
+    pub fn compute(input: Input<Self>) -> Vec<Self> {
         match input.text.trim().parse::<u128>() {
             Ok(number) => vec![ParseUnsignedInteger {
                 text: input.text,
@@ -66,13 +66,13 @@ pub struct ParseSignedInteger {
     /// String to parse
     pub text: String,
     /// Parsed signed integer
-    #[derived(cost = 2)]
+    #[output(cost = 2)]
     pub is: i128,
 }
 
 impl ParseSignedInteger {
     /// Parse the text as i128, returning empty on failure
-    pub fn derive(input: Input<Self>) -> Vec<Self> {
+    pub fn compute(input: Input<Self>) -> Vec<Self> {
         match input.text.trim().parse::<i128>() {
             Ok(number) => vec![ParseSignedInteger {
                 text: input.text,
@@ -89,13 +89,13 @@ pub struct ParseFloat {
     /// String to parse
     pub text: String,
     /// Parsed float
-    #[derived(cost = 2)]
+    #[output(cost = 2)]
     pub is: f64,
 }
 
 impl ParseFloat {
     /// Parse the text as f64, returning empty on failure
-    pub fn derive(input: Input<Self>) -> Vec<Self> {
+    pub fn compute(input: Input<Self>) -> Vec<Self> {
         match input.text.trim().parse::<f64>() {
             Ok(number) => vec![ParseFloat {
                 text: input.text,

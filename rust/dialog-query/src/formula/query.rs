@@ -20,7 +20,7 @@ pub const PARAM_COST: usize = 10;
 ///
 /// Generates:
 /// - The enum with `#[serde(tag = "assert", content = "where")]` and per-variant renames
-/// - Per-variant dispatch: `name()`, `cells()`, `compute()`, `cost()`, `parameters()`
+/// - Per-variant dispatch: `name()`, `cells()`, `resolve()`, `cost()`, `parameters()`
 /// - `From<Query<T>> for FormulaQuery` for each variant
 macro_rules! define_formulas {
     ( $( $name:literal => $variant:ident($ty:ty) ),* $(,)? ) => {
@@ -49,9 +49,9 @@ macro_rules! define_formulas {
                 match self { $( Self::$variant(_) => <$ty>::cells(), )* }
             }
 
-            /// Runs the formula's compute logic against the given bindings.
-            fn compute(&self, bindings: &mut Bindings) -> Result<Vec<Match>, EvaluationError> {
-                match self { $( Self::$variant(_) => <$ty>::compute(bindings), )* }
+            /// Runs the formula's resolve logic against the given bindings.
+            fn resolve(&self, bindings: &mut Bindings) -> Result<Vec<Match>, EvaluationError> {
+                match self { $( Self::$variant(_) => <$ty>::resolve(bindings), )* }
             }
 
             /// Returns the base cost of evaluating this formula.
@@ -107,11 +107,11 @@ impl FormulaQuery {
     }
 
     /// Computes matches using this formula
-    pub fn derive(&self, input: Match) -> Result<Vec<Match>, EvaluationError> {
+    pub fn compute(&self, input: Match) -> Result<Vec<Match>, EvaluationError> {
         let formula = Arc::new(self.clone());
         let parameters = self.parameters();
         let mut bindings = Bindings::new(formula, input, parameters);
-        self.compute(&mut bindings)
+        self.resolve(&mut bindings)
     }
 
     /// Expand this formula with the given match, swallowing conflicts
@@ -119,7 +119,7 @@ impl FormulaQuery {
         let formula = Arc::new(self.clone());
         let parameters = self.parameters();
         let mut bindings = Bindings::new(formula, matched, parameters);
-        match self.compute(&mut bindings) {
+        match self.resolve(&mut bindings) {
             Ok(output) => Ok(output),
             Err(EvaluationError::Conflict { .. }) => Ok(vec![]),
             Err(e) => Err(e),

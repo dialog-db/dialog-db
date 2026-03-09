@@ -14,13 +14,13 @@ pub struct Concatenate {
     /// Second string
     pub second: String,
     /// Concatenated string
-    #[derived(cost = 2)]
+    #[output(cost = 2)]
     pub is: String,
 }
 
 impl Concatenate {
     /// Concatenate `first` and `second` into `is`
-    pub fn derive(input: Input<Self>) -> Vec<Self> {
+    pub fn compute(input: Input<Self>) -> Vec<Self> {
         vec![Concatenate {
             first: input.first.clone(),
             second: input.second.clone(),
@@ -35,13 +35,13 @@ pub struct Length {
     /// String to measure
     pub of: String,
     /// Length of string
-    #[derived]
+    #[output]
     pub is: u32,
 }
 
 impl Length {
     /// Compute the length of the input string
-    pub fn derive(input: Input<Self>) -> Vec<Self> {
+    pub fn compute(input: Input<Self>) -> Vec<Self> {
         vec![Length {
             of: input.of.clone(),
             is: input.of.len() as u32,
@@ -55,13 +55,13 @@ pub struct Uppercase {
     /// String to convert
     pub of: String,
     /// Uppercase string
-    #[derived]
+    #[output]
     pub is: String,
 }
 
 impl Uppercase {
     /// Convert the input string to uppercase
-    pub fn derive(input: Input<Self>) -> Vec<Self> {
+    pub fn compute(input: Input<Self>) -> Vec<Self> {
         vec![Uppercase {
             of: input.of.clone(),
             is: input.of.to_uppercase(),
@@ -75,13 +75,13 @@ pub struct Lowercase {
     /// String to convert
     pub of: String,
     /// Lowercase string
-    #[derived]
+    #[output]
     pub is: String,
 }
 
 impl Lowercase {
     /// Convert the input string to lowercase
-    pub fn derive(input: Input<Self>) -> Vec<Self> {
+    pub fn compute(input: Input<Self>) -> Vec<Self> {
         vec![Lowercase {
             of: input.of.clone(),
             is: input.of.to_lowercase(),
@@ -103,13 +103,13 @@ pub struct Like {
     /// Glob pattern (`*` = any chars, `?` = single char)
     pub pattern: String,
     /// The matched text (same as input text when pattern matches)
-    #[derived(cost = 3)]
+    #[output(cost = 3)]
     pub is: String,
 }
 
 impl Like {
     /// Match text against pattern, returning the matched text or empty on mismatch
-    pub fn derive(input: Input<Self>) -> Vec<Self> {
+    pub fn compute(input: Input<Self>) -> Vec<Self> {
         if glob_match(&input.pattern, &input.text) {
             vec![Like {
                 text: input.text.clone(),
@@ -214,7 +214,7 @@ mod tests {
             .unwrap();
 
         let app: FormulaQuery = Concatenate::apply(terms).expect("apply should work").into();
-        let results = app.derive(input).expect("Concatenate failed");
+        let results = app.compute(input).expect("Concatenate failed");
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
@@ -239,7 +239,7 @@ mod tests {
             .unwrap();
 
         let app: FormulaQuery = Length::apply(terms).expect("apply should work").into();
-        let results = app.derive(input).expect("Length failed");
+        let results = app.compute(input).expect("Length failed");
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
@@ -264,7 +264,7 @@ mod tests {
             .unwrap();
 
         let app: FormulaQuery = Uppercase::apply(terms).expect("apply should work").into();
-        let results = app.derive(input).expect("Uppercase failed");
+        let results = app.compute(input).expect("Uppercase failed");
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
@@ -289,7 +289,7 @@ mod tests {
             .unwrap();
 
         let app: FormulaQuery = Lowercase::apply(terms).expect("apply should work").into();
-        let results = app.derive(input).expect("Lowercase failed");
+        let results = app.compute(input).expect("Lowercase failed");
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
@@ -314,7 +314,7 @@ mod tests {
             .unwrap();
 
         let app: FormulaQuery = Length::apply(terms).expect("apply should work").into();
-        let results = app.derive(input).expect("Length of empty string failed");
+        let results = app.compute(input).expect("Length of empty string failed");
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
@@ -342,7 +342,7 @@ mod tests {
 
         let app: FormulaQuery = Concatenate::apply(terms).expect("apply should work").into();
         let results = app
-            .derive(input)
+            .compute(input)
             .expect("Concatenate with empty string failed");
 
         assert_eq!(results.len(), 1);
@@ -374,7 +374,7 @@ mod tests {
             .bind(&Term::var("lname"), " Doe".to_string().into())
             .unwrap();
 
-        let concat_results = concat_formula.derive(concat_input)?;
+        let concat_results = concat_formula.compute(concat_input)?;
         assert_eq!(concat_results.len(), 1);
         assert_eq!(
             String::try_from(concat_results[0].lookup(&Term::var("full_name")).unwrap()).ok(),
@@ -393,7 +393,7 @@ mod tests {
             .bind(&Term::var("text"), "Hello World".to_string().into())
             .unwrap();
 
-        let length_results = length_formula.derive(length_input)?;
+        let length_results = length_formula.compute(length_input)?;
         assert_eq!(length_results.len(), 1);
         assert_eq!(
             u32::try_from(length_results[0].lookup(&Term::var("length")).unwrap()).ok(),
@@ -412,7 +412,7 @@ mod tests {
             .bind(&Term::var("input"), "hello world".to_string().into())
             .unwrap();
 
-        let upper_results = upper_formula.derive(upper_input)?;
+        let upper_results = upper_formula.compute(upper_input)?;
         assert_eq!(upper_results.len(), 1);
         assert_eq!(
             String::try_from(upper_results[0].lookup(&Term::var("output")).unwrap()).ok(),
@@ -438,7 +438,7 @@ mod tests {
             .unwrap();
 
         let app: FormulaQuery = Like::apply(terms).expect("apply should work").into();
-        let results = app.derive(input).expect("Like failed");
+        let results = app.compute(input).expect("Like failed");
         assert_eq!(results.len(), 1);
         assert_eq!(
             results[0]
@@ -466,7 +466,7 @@ mod tests {
         input
             .bind(&Term::var("p"), "hello*".to_string().into())
             .unwrap();
-        let results = app.derive(input).expect("Like failed");
+        let results = app.compute(input).expect("Like failed");
         assert_eq!(results.len(), 1);
 
         // Suffix match
@@ -477,7 +477,7 @@ mod tests {
         input
             .bind(&Term::var("p"), "*world".to_string().into())
             .unwrap();
-        let results = app.derive(input).expect("Like failed");
+        let results = app.compute(input).expect("Like failed");
         assert_eq!(results.len(), 1);
 
         // Contains match
@@ -488,7 +488,7 @@ mod tests {
         input
             .bind(&Term::var("p"), "*lo wo*".to_string().into())
             .unwrap();
-        let results = app.derive(input).expect("Like failed");
+        let results = app.compute(input).expect("Like failed");
         assert_eq!(results.len(), 1);
 
         // No match
@@ -499,7 +499,7 @@ mod tests {
         input
             .bind(&Term::var("p"), "goodbye*".to_string().into())
             .unwrap();
-        let results = app.derive(input).expect("Like failed");
+        let results = app.compute(input).expect("Like failed");
         assert_eq!(results.len(), 0);
     }
 
@@ -520,7 +520,7 @@ mod tests {
         input
             .bind(&Term::var("p"), "c?t".to_string().into())
             .unwrap();
-        let results = app.derive(input).expect("Like failed");
+        let results = app.compute(input).expect("Like failed");
         assert_eq!(results.len(), 1);
 
         // Too few chars
@@ -531,7 +531,7 @@ mod tests {
         input
             .bind(&Term::var("p"), "c?t".to_string().into())
             .unwrap();
-        let results = app.derive(input).expect("Like failed");
+        let results = app.compute(input).expect("Like failed");
         assert_eq!(results.len(), 0);
     }
 
@@ -552,7 +552,7 @@ mod tests {
         input
             .bind(&Term::var("p"), "a\\*b".to_string().into())
             .unwrap();
-        let results = app.derive(input).expect("Like failed");
+        let results = app.compute(input).expect("Like failed");
         assert_eq!(results.len(), 1);
 
         // Without escape, * is a wildcard
@@ -563,7 +563,7 @@ mod tests {
         input
             .bind(&Term::var("p"), "a*b".to_string().into())
             .unwrap();
-        let results = app.derive(input).expect("Like failed");
+        let results = app.compute(input).expect("Like failed");
         assert_eq!(results.len(), 1);
     }
 
@@ -581,7 +581,7 @@ mod tests {
             .bind(&Term::var("t"), "anything".to_string().into())
             .unwrap();
         input.bind(&Term::var("p"), "*".to_string().into()).unwrap();
-        let results = app.derive(input).expect("Like failed");
+        let results = app.compute(input).expect("Like failed");
         assert_eq!(results.len(), 1);
     }
 
