@@ -52,14 +52,23 @@ where
     spawn(async move {
         tokio::pin!(input);
 
+        // Track whether each consumer is still listening. Unbounded channel
+        // send only fails when the receiver has been dropped, so a send error
+        // means the consumer is gone — not a transient failure.
+        let mut left_open = true;
+        let mut right_open = true;
+
         while let Ok(Some(item)) = input.try_next().await {
-            if let Err(_error) = left_tx.send(item.clone()) {
-                // TODO: Don't silently discard errors here!
+            if left_open && left_tx.send(item.clone()).is_err() {
+                left_open = false;
+            }
+            if right_open && right_tx.send(item).is_err() {
+                right_open = false;
+            }
+            // Stop draining the input only when both consumers are gone.
+            if !left_open && !right_open {
                 break;
-            };
-            if let Err(_error) = right_tx.send(item) {
-                break;
-            };
+            }
         }
     });
 
