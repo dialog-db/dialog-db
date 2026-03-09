@@ -38,9 +38,9 @@ Query::<Sum> {
 }
 ```
 
-## Derived Field Costs
+## Output Field Costs
 
-You can specify a cost for each derived field:
+You can specify a cost for each output field:
 
 ```rs
 #[derive(Debug, Clone, Formula)]
