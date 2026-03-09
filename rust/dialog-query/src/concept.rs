@@ -6,11 +6,7 @@ pub mod query;
 pub use descriptor::ConceptDescriptor;
 pub use query::ConceptQuery;
 
-#[cfg(test)]
-use crate::AttributeStatement;
 pub use crate::predicate::Predicate;
-#[cfg(test)]
-use crate::query::Output;
 use crate::{Entity, Parameters};
 use dialog_common::ConditionalSend;
 use std::fmt::Debug;
@@ -112,7 +108,9 @@ mod tests {
     use std::vec;
 
     use super::*;
+    use crate::AttributeStatement;
     use crate::Query;
+    use crate::query::Output;
     use crate::artifact::{
         ArtifactSelector, ArtifactStore, Artifacts, ArtifactsAttribute, Type, Value,
     };
