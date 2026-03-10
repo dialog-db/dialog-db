@@ -1,3 +1,4 @@
+use dialog_common::ConditionalSend;
 use rkyv::Archive;
 use std::fmt::Debug;
 
@@ -7,7 +8,17 @@ use crate::SymmetryWith;
 ///
 /// Keys must be fixed-size, comparable, and serializable.
 pub trait Key:
-    Clone + Debug + Sized + AsRef<[u8]> + std::hash::Hash + PartialOrd + Ord + PartialEq + Eq + Archive
+    Clone
+    + Debug
+    + Sized
+    + AsRef<[u8]>
+    + std::hash::Hash
+    + PartialOrd
+    + Ord
+    + PartialEq
+    + Eq
+    + Archive
+    + ConditionalSend
 where
     Self: PartialOrd<Self::Archived>,
     Self::Archived: PartialOrd<Self> + PartialEq<Self> + SymmetryWith<Self> + Ord,
@@ -39,6 +50,6 @@ impl<const N: usize> SymmetryWith<[u8; N]> for [u8; N] {}
 /// Trait for types that can be used as values in a search tree.
 ///
 /// Values must be cloneable and serializable.
-pub trait Value: Clone + Debug + Sized + Archive {}
+pub trait Value: Clone + Debug + Sized + Archive + ConditionalSend {}
 
 impl Value for Vec<u8> {}

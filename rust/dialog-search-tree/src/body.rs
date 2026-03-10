@@ -59,6 +59,11 @@ where
             entries: vec![entry],
         }
     }
+
+    /// Returns the key of the last entry in this segment.
+    pub fn upper_bound(&self) -> Option<&Key> {
+        self.entries.last().map(|entry| &entry.key)
+    }
 }
 
 impl<Key, Value> ArchivedSegment<Key, Value>
