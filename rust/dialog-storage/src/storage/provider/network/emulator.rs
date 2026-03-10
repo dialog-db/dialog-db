@@ -1,11 +1,14 @@
 //! In-memory emulated network connection.
 //!
 //! When a [`Network`] is wrapped in [`Emulator`], all remote invocations are
-//! redirected to in-memory [`Volatile`] storage regardless of the address type.
+//! redirected to in-memory [`Volatile`] storage regardless of the address type,
+//! allowing the full capability routing pipeline to run without real S3 buckets,
+//! UCAN services, or network access.
 //!
 //! The emulator provides [`Route<Address>`] — a generic route that implements
 //! [`ProviderRoute`] and [`Provider<RemoteInvocation<Fx, Address>>`] by delegating
-//! to [`Volatile`] storage keyed by address.
+//! to [`Volatile`] storage keyed by address. Each unique address gets its own
+//! isolated `Volatile` instance.
 
 use async_trait::async_trait;
 use dialog_capability::{Capability, Constraint, Effect, Provider, ProviderRoute};

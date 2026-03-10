@@ -1,10 +1,13 @@
-//! Transparent emulator decorator.
+//! Transparent decorator that redirects to in-memory storage, useful for testing.
 //!
-//! [`Emulator<T>`] wraps any type `T`, marking it for emulated (in-memory)
-//! behaviour. Capability-specific modules provide the actual impls, e.g.
-//! `impl Connector<Address> for Emulator<Network<Issuer>>`.
+//! [`Emulator<T>`] wraps any type `T`, opting it into alternative trait
+//! implementations that replace real I/O with in-memory [`Volatile`](crate::provider::volatile::Volatile)
+//! storage. The wrapper itself holds no extra state — capability-specific
+//! modules supply the actual impls, e.g.
+//! `impl Provider<RemoteInvocation<Fx, Address>> for Emulator<Network<Issuer>>`
+//! routes every address to its own in-memory store.
 
-/// Transparent wrapper that marks `T` for emulated behaviour.
+/// Transparent wrapper that opts `T` into in-memory behaviour.
 pub struct Emulator<T>(pub T);
 
 impl<T> Emulator<T> {

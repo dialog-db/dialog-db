@@ -3,6 +3,8 @@
 //! This module uses [`#[derive(Router)]`](dialog_capability::Router) to compose
 //! per-address-type routes into a single `Network` provider. Each route field
 //! handles its own address type and connection caching.
+use dialog_capability::Router;
+
 pub mod emulator;
 pub mod route;
 #[cfg(feature = "s3")]
@@ -16,7 +18,7 @@ pub mod ucan;
 /// Each field is a route that handles a specific address type. The
 /// `#[derive(Router)]` macro generates `Provider<RemoteInvocation<Fx, Addr>>`
 /// implementations that forward to the matching field.
-#[derive(dialog_capability::Router)]
+#[derive(Router)]
 pub struct Network<Issuer: Clone> {
     #[cfg(feature = "s3")]
     s3: route::Route<Issuer, s3::Credentials, s3::Connection<Issuer>>,
@@ -48,6 +50,7 @@ mod archive_tests {
     use dialog_common::Blake3Hash;
     use dialog_effects::archive::{Archive, Catalog, Get, Put};
     use dialog_effects::remote::RemoteInvocation;
+    use dialog_s3_credentials::{Address, s3};
 
     use super::Network;
 
@@ -65,13 +68,9 @@ mod archive_tests {
 
     #[allow(dead_code)]
     fn create_address(env: &helpers::PublicS3Address) -> super::s3::Credentials {
-        dialog_s3_credentials::s3::Credentials::public(dialog_s3_credentials::Address::new(
-            &env.endpoint,
-            "us-east-1",
-            &env.bucket,
-        ))
-        .unwrap()
-        .with_path_style(true)
+        s3::Credentials::public(Address::new(&env.endpoint, "us-east-1", &env.bucket))
+            .unwrap()
+            .with_path_style(true)
     }
 
     #[dialog_common::test]
@@ -396,6 +395,7 @@ mod archive_signed_session_tests {
     use dialog_common::Blake3Hash;
     use dialog_effects::archive::{Archive, Catalog, Get, Put};
     use dialog_effects::remote::RemoteInvocation;
+    use dialog_s3_credentials::{Address, s3};
 
     use super::Network;
 
@@ -413,8 +413,8 @@ mod archive_signed_session_tests {
 
     #[allow(dead_code)]
     fn create_address(env: &helpers::S3Address) -> super::s3::Credentials {
-        dialog_s3_credentials::s3::Credentials::private(
-            dialog_s3_credentials::Address::new(&env.endpoint, "us-east-1", &env.bucket),
+        s3::Credentials::private(
+            Address::new(&env.endpoint, "us-east-1", &env.bucket),
             &env.access_key_id,
             &env.secret_access_key,
         )
@@ -543,8 +543,8 @@ mod archive_signed_session_tests {
     async fn it_fails_with_wrong_credentials(env: helpers::S3Address) -> anyhow::Result<()> {
         let mut provider: Network<helpers::Session> =
             Network::new(helpers::Session::new(TEST_SUBJECT.parse::<Did>().unwrap()));
-        let addr = dialog_s3_credentials::s3::Credentials::private(
-            dialog_s3_credentials::Address::new(&env.endpoint, "us-east-1", &env.bucket),
+        let addr = s3::Credentials::private(
+            Address::new(&env.endpoint, "us-east-1", &env.bucket),
             &env.access_key_id,
             "wrong-secret",
         )
@@ -834,11 +834,12 @@ mod ucan_archive_tests {
 }
 
 #[cfg(all(test, feature = "s3"))]
-mod memory_tests {
+mod transactional_memory_tests {
     use crate::s3::helpers;
     use dialog_capability::{Did, Subject};
     use dialog_effects::memory::{Cell, Memory, MemoryError, Publish, Resolve, Retract, Space};
     use dialog_effects::remote::RemoteInvocation;
+    use dialog_s3_credentials::{Address, s3};
 
     use super::Network;
 
@@ -856,13 +857,9 @@ mod memory_tests {
 
     #[allow(dead_code)]
     fn create_address(env: &helpers::PublicS3Address) -> super::s3::Credentials {
-        dialog_s3_credentials::s3::Credentials::public(dialog_s3_credentials::Address::new(
-            &env.endpoint,
-            "us-east-1",
-            &env.bucket,
-        ))
-        .unwrap()
-        .with_path_style(true)
+        s3::Credentials::public(Address::new(&env.endpoint, "us-east-1", &env.bucket))
+            .unwrap()
+            .with_path_style(true)
     }
 
     #[dialog_common::test]
@@ -1278,11 +1275,12 @@ mod memory_tests {
 }
 
 #[cfg(all(test, feature = "s3"))]
-mod memory_signed_session_tests {
+mod memory_cell_signed_session_tests {
     use crate::s3::helpers;
     use dialog_capability::{Did, Subject};
     use dialog_effects::memory::{Cell, Memory, MemoryError, Publish, Resolve, Retract, Space};
     use dialog_effects::remote::RemoteInvocation;
+    use dialog_s3_credentials::{Address, s3};
 
     use super::Network;
 
@@ -1300,8 +1298,8 @@ mod memory_signed_session_tests {
 
     #[allow(dead_code)]
     fn create_address(env: &helpers::S3Address) -> super::s3::Credentials {
-        dialog_s3_credentials::s3::Credentials::private(
-            dialog_s3_credentials::Address::new(&env.endpoint, "us-east-1", &env.bucket),
+        s3::Credentials::private(
+            Address::new(&env.endpoint, "us-east-1", &env.bucket),
             &env.access_key_id,
             &env.secret_access_key,
         )
@@ -1580,7 +1578,7 @@ mod memory_signed_session_tests {
 }
 
 #[cfg(all(test, feature = "s3", feature = "ucan"))]
-mod ucan_memory_tests {
+mod ucan_memory_cell_tests {
     use crate::s3::helpers;
     use crate::s3::helpers::Ed25519Signer;
     use dialog_capability::{Principal, Subject};

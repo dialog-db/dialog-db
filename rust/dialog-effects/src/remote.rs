@@ -4,7 +4,7 @@
 //! providers to route effects to remote site at a given address. It implements
 //! [`Invocation`] following the same pattern as [`Authorized`] and allows
 //! performing capabilities on addressed sites. Effectively it's a routing
-//! mechanism for dispatching to a provider that correspondns to a specific
+//! mechanism for dispatching to a provider that corresponds to a specific
 //! address.
 
 use dialog_capability::{Capability, Constraint, Effect, Invocation, Provider};
