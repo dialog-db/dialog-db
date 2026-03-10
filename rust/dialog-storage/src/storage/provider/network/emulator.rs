@@ -1,9 +1,11 @@
 //! In-memory emulated network connection.
 //!
 //! When a [`Network`] is wrapped in [`Emulator`], all remote invocations are
-//! redirected to in-memory [`Volatile`] storage regardless of the address type,
-//! allowing the full capability routing pipeline to run without real S3 buckets,
-//! UCAN services, or network access.
+//! redirected to in-memory [`Volatile`] storage regardless of the address type.
+//!
+//! Primary designed for testing allowing us to exercise the full push / pull
+//! pipeline (invocation, dispatch, provider execution) without standing up real
+//! S3 buckets or UCAN services.
 //!
 //! The emulator provides [`Route<Address>`] — a generic route that implements
 //! [`ProviderRoute`] and [`Provider<RemoteInvocation<Fx, Address>>`] by delegating
