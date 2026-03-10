@@ -7,6 +7,9 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use super::RepositoryError;
 
+/// Cached value paired with its edition, behind a shared lock.
+type SharedState<T> = Arc<RwLock<Option<(T, Vec<u8>)>>>;
+
 /// A transactional memory cell that stores a typed value with edition tracking.
 ///
 /// `Cell<T>` wraps a capability chain (`Subject → Memory → Space → Cell`) and
@@ -25,7 +28,7 @@ use super::RepositoryError;
 pub struct Cell<T, Codec = CborEncoder> {
     capability: Capability<memory::Cell>,
     codec: Codec,
-    state: Arc<RwLock<Option<(T, Vec<u8>)>>>,
+    state: SharedState<T>,
 }
 
 impl<T, Codec: Clone> Clone for Cell<T, Codec> {
@@ -54,7 +57,7 @@ impl<T> Cell<T> {
         Self {
             capability,
             codec: CborEncoder,
-            state: Arc::new(RwLock::new(None)),
+            state: SharedState::default(),
         }
     }
 
@@ -63,7 +66,7 @@ impl<T> Cell<T> {
         Self {
             capability,
             codec: CborEncoder,
-            state: Arc::new(RwLock::new(None)),
+            state: SharedState::default(),
         }
     }
 }
@@ -84,7 +87,7 @@ impl<T, Codec: Encoder> Cell<T, Codec> {
         Self {
             capability,
             codec,
-            state: Arc::new(RwLock::new(None)),
+            state: SharedState::default(),
         }
     }
 }
@@ -147,11 +150,8 @@ where
             .await
             .map_err(|e| RepositoryError::StorageError(format!("Memory resolve failed: {}", e)))?;
 
-        let mut guard = self.state.write().expect("RwLock poisoned");
-        match publication {
-            None => {
-                *guard = None;
-            }
+        let new_state = match publication {
+            None => None,
             Some(pub_data) => {
                 let value: T = self.codec.decode(&pub_data.content).await.map_err(|e| {
                     RepositoryError::StorageError(format!(
@@ -159,10 +159,11 @@ where
                         Into::<DialogStorageError>::into(e)
                     ))
                 })?;
-                *guard = Some((value, pub_data.edition));
+                Some((value, pub_data.edition))
             }
-        }
+        };
 
+        *self.state.write().expect("RwLock poisoned") = new_state;
         Ok(())
     }
 }
