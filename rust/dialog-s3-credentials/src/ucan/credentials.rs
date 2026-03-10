@@ -76,6 +76,14 @@ pub struct Credentials {
     audience: Did,
 }
 
+impl std::hash::Hash for Credentials {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.endpoint.hash(state);
+        self.audience.hash(state);
+        self.delegation.proof_cids().hash(state);
+    }
+}
+
 impl Credentials {
     pub fn new(endpoint: String, delegation: DelegationChain) -> Self {
         Self {

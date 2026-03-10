@@ -665,9 +665,7 @@ mod tests {
         #[allow(dead_code)]
         fn create_test_bucket(env: &PublicS3Address) -> S3<helpers::Session> {
             let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-            let s3_creds = S3Credentials::public(address)
-                .unwrap()
-                .with_path_style(true);
+            let s3_creds = S3Credentials::public(address).unwrap().with_path_style();
             S3::from_s3(s3_creds, helpers::Session::new(test_subject()))
         }
 
@@ -847,9 +845,7 @@ mod tests {
         #[allow(dead_code)]
         fn create_test_bucket(env: &helpers::PublicS3Address) -> Bucket<helpers::Session> {
             let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-            let s3_creds = S3Credentials::public(address)
-                .unwrap()
-                .with_path_style(true);
+            let s3_creds = S3Credentials::public(address).unwrap().with_path_style();
             let s3 = S3::from_s3(s3_creds, helpers::Session::new(test_subject()));
             Bucket::new(s3, test_subject(), "test-store")
         }
@@ -992,9 +988,7 @@ mod tests {
         #[dialog_common::test]
         async fn it_uses_prefix(env: helpers::PublicS3Address) -> anyhow::Result<()> {
             let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-            let s3_creds = S3Credentials::public(address)
-                .unwrap()
-                .with_path_style(true);
+            let s3_creds = S3Credentials::public(address).unwrap().with_path_style();
             let s3 = S3::from_s3(s3_creds, helpers::Session::new(test_subject()));
 
             // Create two backends with different paths
@@ -1192,7 +1186,7 @@ mod tests {
             let s3_creds =
                 S3Credentials::private(address, &env.access_key_id, &env.secret_access_key)
                     .unwrap()
-                    .with_path_style(true);
+                    .with_path_style();
             let s3 = S3::from_s3(s3_creds, helpers::Session::new(test_subject()));
             Bucket::new(s3, test_subject(), "signed-test")
         }
@@ -1219,7 +1213,7 @@ mod tests {
             let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
             let s3_creds = S3Credentials::private(address, &env.access_key_id, "wrong-secret")
                 .unwrap()
-                .with_path_style(true);
+                .with_path_style();
             let s3 = S3::from_s3(s3_creds, helpers::Session::new(test_subject()));
             let mut bucket = Bucket::new(s3, test_subject(), "test");
 
@@ -1240,7 +1234,7 @@ mod tests {
             let s3_creds =
                 S3Credentials::private(address, "wrong-access-key", &env.secret_access_key)
                     .unwrap()
-                    .with_path_style(true);
+                    .with_path_style();
             let s3 = S3::from_s3(s3_creds, helpers::Session::new(test_subject()));
             let mut bucket = Bucket::new(s3, test_subject(), "test");
 
@@ -1261,9 +1255,7 @@ mod tests {
         ) -> anyhow::Result<()> {
             // Client uses no credentials but server requires authentication
             let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-            let s3_creds = S3Credentials::public(address)
-                .unwrap()
-                .with_path_style(true);
+            let s3_creds = S3Credentials::public(address).unwrap().with_path_style();
             let s3 = S3::from_s3(s3_creds, helpers::Session::new(test_subject()));
             let mut bucket = Bucket::new(s3, test_subject(), "test");
 
@@ -1292,7 +1284,7 @@ mod tests {
             let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
             let wrong_creds = S3Credentials::private(address, &env.access_key_id, "wrong-secret")
                 .unwrap()
-                .with_path_style(true);
+                .with_path_style();
             let s3 = S3::from_s3(wrong_creds, helpers::Session::new(test_subject()));
             let wrong_bucket = Bucket::new(s3, test_subject(), "signed-test");
 
@@ -1444,9 +1436,7 @@ mod tests {
             store: &str,
         ) -> Bucket<helpers::Session> {
             let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-            let s3_creds = S3Credentials::public(address)
-                .unwrap()
-                .with_path_style(true);
+            let s3_creds = S3Credentials::public(address).unwrap().with_path_style();
             let s3 = S3::from_s3(s3_creds, helpers::Session::new(test_subject()));
             Bucket::new(s3, test_subject(), store)
         }
@@ -1457,7 +1447,7 @@ mod tests {
             let s3_creds =
                 S3Credentials::private(address, &env.access_key_id, &env.secret_access_key)
                     .unwrap()
-                    .with_path_style(true);
+                    .with_path_style();
             let s3 = S3::from_s3(s3_creds, helpers::Session::new(test_subject()));
             Bucket::new(s3, test_subject(), store)
         }
@@ -1508,9 +1498,7 @@ mod tests {
         #[dialog_common::test]
         async fn it_uses_prefix_for_listing(env: helpers::PublicS3Address) -> anyhow::Result<()> {
             let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-            let s3_creds = S3Credentials::public(address)
-                .unwrap()
-                .with_path_style(true);
+            let s3_creds = S3Credentials::public(address).unwrap().with_path_style();
             let s3 = S3::from_s3(s3_creds, helpers::Session::new(test_subject()));
 
             // Create two buckets with different prefixes
@@ -1564,9 +1552,7 @@ mod tests {
         ) -> anyhow::Result<()> {
             // Create a bucket pointing to a non-existent bucket
             let address = Address::new(&env.endpoint, "us-east-1", "bucket-that-does-not-exist");
-            let s3_creds = S3Credentials::public(address)
-                .unwrap()
-                .with_path_style(true);
+            let s3_creds = S3Credentials::public(address).unwrap().with_path_style();
             let s3 = S3::from_s3(s3_creds, helpers::Session::new(test_subject()));
             let bucket = Bucket::new(s3, test_subject(), "test");
 
@@ -1704,18 +1690,7 @@ mod tests {
         fn it_allows_forcing_path_style() {
             // Force path-style on a non-localhost endpoint
             let address = Address::new("https://custom-s3.example.com", "us-east-1", "bucket");
-            let _credentials = S3Credentials::public(address)
-                .unwrap()
-                .with_path_style(true);
-        }
-
-        #[dialog_common::test]
-        fn it_allows_forcing_virtual_hosted_on_localhost() {
-            // Force virtual-hosted on localhost (not typical, but supported)
-            let address = Address::new("http://localhost:9000", "us-east-1", "bucket");
-            let _credentials = S3Credentials::public(address)
-                .unwrap()
-                .with_path_style(false);
+            let _credentials = S3Credentials::public(address).unwrap().with_path_style();
         }
 
         #[dialog_common::test]

@@ -5,6 +5,7 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt::Write;
+use std::hash::{Hash, Hasher};
 use url::Url;
 
 use crate::capability::{AuthorizedRequest, Precondition, S3Request};
@@ -45,6 +46,13 @@ impl<'de> Deserialize<'de> for PublicCredentials {
     }
 }
 
+impl Hash for PublicCredentials {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.address.hash(state);
+        self.path_style.hash(state);
+    }
+}
+
 impl PublicCredentials {
     /// Create new public credentials.
     ///
@@ -68,9 +76,10 @@ impl PublicCredentials {
         })
     }
 
-    /// Set whether to use path-style URLs.
-    pub fn with_path_style(mut self, path_style: bool) -> Self {
-        self.path_style = path_style;
+    /// Enable path-style URL addressing (e.g. `endpoint/bucket/key`
+    /// instead of `bucket.endpoint/key`).
+    pub fn with_path_style(mut self) -> Self {
+        self.path_style = true;
         self
     }
 
@@ -113,6 +122,15 @@ impl PublicCredentials {
         if let Some(checksum) = request.checksum() {
             let header_name = format!("x-amz-checksum-{}", checksum.name());
             headers.push((header_name, checksum.to_string()));
+        }
+        match request.precondition() {
+            Precondition::IfMatch(etag) => {
+                headers.push(("if-match".to_string(), format!("\"{}\"", etag)));
+            }
+            Precondition::IfNoneMatch => {
+                headers.push(("if-none-match".to_string(), "*".to_string()));
+            }
+            Precondition::None => {}
         }
 
         Ok(AuthorizedRequest {
@@ -177,6 +195,15 @@ impl<'de> Deserialize<'de> for PrivateCredentials {
     }
 }
 
+impl Hash for PrivateCredentials {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.access_key_id.hash(state);
+        self.secret_access_key.hash(state);
+        self.address.hash(state);
+        self.path_style.hash(state);
+    }
+}
+
 impl PrivateCredentials {
     /// Create new private credentials allowing [AWS SigV4] signing.
     /// [AWS SigV4]:https://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-authenticating-requests.html
@@ -209,9 +236,10 @@ impl PrivateCredentials {
         })
     }
 
-    /// Set whether to use path-style URLs.
-    pub fn with_path_style(mut self, path_style: bool) -> Self {
-        self.path_style = path_style;
+    /// Enable path-style URL addressing (e.g. `endpoint/bucket/key`
+    /// instead of `bucket.endpoint/key`).
+    pub fn with_path_style(mut self) -> Self {
+        self.path_style = true;
         self
     }
 
@@ -418,7 +446,7 @@ impl PrivateCredentials {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum Credentials {
     /// Public access without signing.
     Public(PublicCredentials),
@@ -453,11 +481,12 @@ impl Credentials {
         Ok(PrivateCredentials::new(address, access_key_id, secret_access_key)?.into())
     }
 
-    /// Set whether to use path-style URLs.
-    pub fn with_path_style(self, path_style: bool) -> Self {
+    /// Enable path-style URL addressing (e.g. `endpoint/bucket/key`
+    /// instead of `bucket.endpoint/key`).
+    pub fn with_path_style(self) -> Self {
         match self {
-            Self::Public(c) => Self::Public(c.with_path_style(path_style)),
-            Self::Private(c) => Self::Private(c.with_path_style(path_style)),
+            Self::Public(c) => Self::Public(c.with_path_style()),
+            Self::Private(c) => Self::Private(c.with_path_style()),
         }
     }
 
