@@ -25,6 +25,7 @@ dialog-credentials = { workspace = true }
 dialog-effects = { workspace = true }
 dialog-storage = { workspace = true }
 dialog-prolly-tree = { workspace = true }
+dialog-varsig = { workspace = true }
 
 anyhow = { workspace = true, optional = true }
 arrayref = { workspace = true }
@@ -40,6 +41,7 @@ rand = { workspace = true }
 rand_core = { workspace = true }
 rand_chacha = { workspace = true }
 serde = { workspace = true }
+signature = { workspace = true }
 serde-big-array = { workspace = true }
 serde_ipld_dagcbor = { workspace = true }
 serde_json = { workspace = true }
