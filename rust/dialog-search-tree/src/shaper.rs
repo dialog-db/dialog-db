@@ -108,14 +108,24 @@ where
         new_entry: Entry<Key, Value>,
         search_result: Option<SearchResult<Key, Value>>,
     ) -> Result<(Blake3Hash, Delta<Blake3Hash, Buffer>), DialogSearchTreeError> {
-        let (entries, search_result) = match search_result {
+        let new_entry_key = new_entry.key.clone();
+        let new_entry_rank =
+            distribution::geometric::rank(&Blake3Hash::hash(new_entry_key.as_ref()));
+
+        let (entries, search_result, segment_rank) = match search_result {
             Some(search_result) => {
                 let key = new_entry.key.to_owned();
-                let segment = search_result.leaf.as_segment()?;
+                let segment = into_owned::<Segment<Key, Value>>(search_result.leaf.as_segment()?)?;
+                let segment_rank = segment
+                    .upper_bound()
+                    .map(|key: &Key| {
+                        let hash = Blake3Hash::hash((*key).as_ref());
+                        distribution::geometric::rank(&hash)
+                    })
+                    .unwrap_or_default();
 
                 // Extract and modify entries
-                let mut entries: Vec<Entry<Key, Value>> =
-                    into_owned::<Segment<Key, Value>>(segment)?.entries;
+                let mut entries: Vec<Entry<Key, Value>> = segment.entries;
 
                 match entries.binary_search_by(|probe| probe.key.cmp(&key)) {
                     // Entry was found; update the value.
@@ -140,11 +150,11 @@ where
                     )
                 })?;
 
-                (entries, Some(search_result))
+                (entries, Some(search_result), segment_rank)
             }
             None => {
                 // Empty tree; just a single entry
-                (NonEmpty::singleton(new_entry), None)
+                (NonEmpty::singleton(new_entry), None, 0)
             }
         };
 
@@ -152,7 +162,11 @@ where
         let next_entries = entries
             .into_iter()
             .map(|entry| {
-                let rank = distribution::geometric::rank(&Blake3Hash::hash(entry.key.as_ref()));
+                let rank = if entry.key == new_entry_key {
+                    new_entry_rank
+                } else {
+                    segment_rank
+                };
                 (entry, rank)
             })
             .collect::<Vec<_>>();
