@@ -70,7 +70,7 @@ mod archive_tests {
     fn create_address(env: &helpers::PublicS3Address) -> super::s3::Credentials {
         s3::Credentials::public(Address::new(&env.endpoint, "us-east-1", &env.bucket))
             .unwrap()
-            .with_path_style(true)
+            .with_path_style()
     }
 
     #[dialog_common::test]
@@ -419,7 +419,7 @@ mod archive_signed_session_tests {
             &env.secret_access_key,
         )
         .unwrap()
-        .with_path_style(true)
+        .with_path_style()
     }
 
     #[dialog_common::test]
@@ -549,7 +549,7 @@ mod archive_signed_session_tests {
             "wrong-secret",
         )
         .unwrap()
-        .with_path_style(true);
+        .with_path_style();
 
         let content = b"should fail".to_vec();
         let digest = Blake3Hash::hash(&content);
@@ -859,7 +859,7 @@ mod transactional_memory_tests {
     fn create_address(env: &helpers::PublicS3Address) -> super::s3::Credentials {
         s3::Credentials::public(Address::new(&env.endpoint, "us-east-1", &env.bucket))
             .unwrap()
-            .with_path_style(true)
+            .with_path_style()
     }
 
     #[dialog_common::test]
@@ -1304,7 +1304,7 @@ mod memory_cell_signed_session_tests {
             &env.secret_access_key,
         )
         .unwrap()
-        .with_path_style(true)
+        .with_path_style()
     }
 
     #[dialog_common::test]

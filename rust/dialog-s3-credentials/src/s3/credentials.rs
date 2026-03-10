@@ -76,9 +76,10 @@ impl PublicCredentials {
         })
     }
 
-    /// Set whether to use path-style URLs.
-    pub fn with_path_style(mut self, path_style: bool) -> Self {
-        self.path_style = path_style;
+    /// Enable path-style URL addressing (e.g. `endpoint/bucket/key`
+    /// instead of `bucket.endpoint/key`).
+    pub fn with_path_style(mut self) -> Self {
+        self.path_style = true;
         self
     }
 
@@ -235,9 +236,10 @@ impl PrivateCredentials {
         })
     }
 
-    /// Set whether to use path-style URLs.
-    pub fn with_path_style(mut self, path_style: bool) -> Self {
-        self.path_style = path_style;
+    /// Enable path-style URL addressing (e.g. `endpoint/bucket/key`
+    /// instead of `bucket.endpoint/key`).
+    pub fn with_path_style(mut self) -> Self {
+        self.path_style = true;
         self
     }
 
@@ -479,11 +481,12 @@ impl Credentials {
         Ok(PrivateCredentials::new(address, access_key_id, secret_access_key)?.into())
     }
 
-    /// Set whether to use path-style URLs.
-    pub fn with_path_style(self, path_style: bool) -> Self {
+    /// Enable path-style URL addressing (e.g. `endpoint/bucket/key`
+    /// instead of `bucket.endpoint/key`).
+    pub fn with_path_style(self) -> Self {
         match self {
-            Self::Public(c) => Self::Public(c.with_path_style(path_style)),
-            Self::Private(c) => Self::Private(c.with_path_style(path_style)),
+            Self::Public(c) => Self::Public(c.with_path_style()),
+            Self::Private(c) => Self::Private(c.with_path_style()),
         }
     }
 
