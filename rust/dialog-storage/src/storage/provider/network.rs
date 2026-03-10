@@ -3,6 +3,55 @@
 //! This module uses [`#[derive(Router)]`](dialog_capability::Router) to compose
 //! per-address-type routes into a single `Network` provider. Each route field
 //! handles its own address type and connection caching.
+//!
+//! # Targeting multiple remotes
+//!
+//! The same capability can target different backends by pairing it with
+//! different address types. `Network` routes `s3::Credentials` to direct
+//! S3 connections and `ucan::Credentials` to UCAN-delegated connections:
+//!
+//! ```no_run
+//! # use dialog_capability::{Did, Subject};
+//! # use dialog_common::Blake3Hash;
+//! use dialog_effects::remote::RemoteInvocation;
+//! use dialog_effects::archive::{Archive, Catalog, Get};
+//! use dialog_s3_credentials::{Address, s3};
+//! use dialog_s3_credentials::ucan::{Credentials as UcanCredentials, DelegationChain};
+//! # use dialog_storage::provider::Network;
+//! #
+//! # async fn example(
+//! #     issuer: dialog_storage::s3::helpers::Session,
+//! #     delegation_chain: DelegationChain,
+//! # ) {
+//! # let did: Did = "did:key:z6Mk...".parse().unwrap();
+//! # let digest = Blake3Hash::hash(b"hello");
+//!
+//! let mut network = Network::new(issuer);
+//!
+//! let cap = Subject::from(did)
+//!     .attenuate(Archive)
+//!     .attenuate(Catalog::new("index"))
+//!     .invoke(Get::new(digest));
+//!
+//! // Route to a direct S3 backend
+//! let s3_addr = s3::Credentials::public(
+//!     Address::new("https://s3.amazonaws.com", "us-east-1", "my-bucket"),
+//! )
+//! .unwrap();
+//! RemoteInvocation::new(cap.clone(), s3_addr)
+//!     .perform(&mut network)
+//!     .await;
+//!
+//! // Route the same capability to a UCAN-delegated backend
+//! let ucan_addr = UcanCredentials::new(
+//!     "https://access.example.com".into(),
+//!     delegation_chain,
+//! );
+//! RemoteInvocation::new(cap, ucan_addr)
+//!     .perform(&mut network)
+//!     .await;
+//! # }
+//! ```
 use dialog_capability::Router;
 
 pub mod emulator;

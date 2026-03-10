@@ -1,11 +1,19 @@
 //! Remote invocation envelope for targeting effects at specific remote sites.
 //!
 //! [`RemoteInvocation`] pairs a [`Capability`] with an address, allowing
-//! providers to route effects to remote site at a given address. It implements
+//! providers to route effects to a remote site at a given address. It implements
 //! [`Invocation`] following the same pattern as [`Authorized`] and allows
 //! performing capabilities on addressed sites. Effectively it's a routing
 //! mechanism for dispatching to a provider that corresponds to a specific
 //! address.
+//!
+//! # Targeting multiple remotes
+//!
+//! The same capability can be sent to different remotes by pairing it with
+//! different addresses. In `dialog-storage`, the [`Network`] router uses
+//! `#[derive(Router)]` to dispatch by address type — direct S3 credentials
+//! vs UCAN-delegated credentials each route to their own connection pool.
+//! See [`dialog_storage::provider::network`] for a full working example.
 
 use dialog_capability::{Capability, Constraint, Effect, Invocation, Provider};
 use dialog_common::ConditionalSend;
