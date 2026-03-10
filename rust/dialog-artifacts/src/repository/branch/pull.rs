@@ -75,7 +75,7 @@ impl PullLocal {
         let changes = base.differentiate(&current);
 
         // Integrate local changes into upstream tree
-        target.integrate(changes).await.map_err(|e| {
+        Box::pin(target.integrate(changes)).await.map_err(|e| {
             DialogArtifactsError::Storage(format!("Failed to integrate changes: {:?}", e))
         })?;
 
@@ -126,13 +126,14 @@ mod tests {
     use crate::artifacts::{Artifact, Instruction};
     use crate::repository::node_reference::NodeReference;
     use crate::repository::revision::Revision;
+    use dialog_storage::provider::Volatile;
     use futures_util::stream;
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
     #[dialog_common::test]
     async fn it_pulls_from_local_upstream_no_changes() -> anyhow::Result<()> {
-        let env = Arc::new(Mutex::new(dialog_storage::provider::Volatile::new()));
+        let env = Arc::new(Mutex::new(Volatile::new()));
 
         let issuer = test_issuer().await;
 
@@ -153,7 +154,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_pulls_upstream_changes_without_local_changes() -> anyhow::Result<()> {
-        let env = Arc::new(Mutex::new(dialog_storage::provider::Volatile::new()));
+        let env = Arc::new(Mutex::new(Volatile::new()));
 
         let issuer = test_issuer().await;
 

@@ -39,10 +39,11 @@ mod tests {
     use super::super::Branch;
     use super::super::tests::{test_issuer, test_subject};
     use crate::repository::node_reference::NodeReference;
+    use dialog_storage::provider::Volatile;
 
     #[dialog_common::test]
     async fn it_opens_new_branch() -> anyhow::Result<()> {
-        let mut env = dialog_storage::provider::Volatile::new();
+        let mut env = Volatile::new();
 
         let branch = Branch::open("main", test_issuer().await, test_subject())
             .perform(&mut env)

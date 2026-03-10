@@ -1,7 +1,8 @@
 use dialog_capability::{Did, Subject};
 use dialog_prolly_tree::{GeometricDistribution, Tree};
 use dialog_storage::Blake3Hash;
-use std::fmt::Debug;
+
+use std::fmt::{Debug, Formatter, Result as FmtResult};
 
 use crate::artifacts::selector::Constrained;
 use crate::artifacts::{ArtifactSelector, Datum};
@@ -54,7 +55,7 @@ pub struct Branch {
 }
 
 impl Debug for Branch {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         self.cell.read_with(|state| {
             f.debug_struct("Branch")
                 .field("id", &state.id)

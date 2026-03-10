@@ -1,6 +1,6 @@
 use dialog_storage::DialogStorageError;
 use serde::{Deserialize, Serialize};
-use std::fmt::{Display, Formatter};
+use std::fmt::{Display, Formatter, Result as FmtResult};
 use thiserror::Error;
 
 use super::Site;
@@ -94,7 +94,7 @@ pub enum OperationKind {
 }
 
 impl Display for OperationKind {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
             OperationKind::ResolveBranch => write!(f, "ResolveBranch"),
             OperationKind::ResolveRevision => write!(f, "ResolveRevision"),

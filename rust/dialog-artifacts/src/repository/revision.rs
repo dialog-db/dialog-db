@@ -1,9 +1,11 @@
 use dialog_capability::Did;
 use dialog_prolly_tree::KeyType;
 use serde::{Deserialize, Serialize};
+use std::any;
+use std::cmp::Ordering;
 use std::collections::HashSet;
-use std::fmt::Debug;
-use std::hash::Hash;
+use std::fmt::{Debug, Formatter, Result as FmtResult};
+use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 
 use base58::ToBase58;
@@ -117,17 +119,17 @@ impl<T> Clone for Edition<T> {
 }
 
 impl<T> Debug for Edition<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.write_str(&format!(
             "#<{}>{}",
-            std::any::type_name::<T>(),
+            any::type_name::<T>(),
             self.0.to_base58().as_str()
         ))
     }
 }
 
 impl<T> Hash for Edition<T> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+    fn hash<H: Hasher>(&self, state: &mut H) {
         self.0.hash(state);
     }
 }
@@ -141,13 +143,13 @@ impl<T> PartialEq for Edition<T> {
 impl<T> Eq for Edition<T> {}
 
 impl<T> PartialOrd for Edition<T> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
 impl<T> Ord for Edition<T> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> Ordering {
         self.0.cmp(&other.0)
     }
 }

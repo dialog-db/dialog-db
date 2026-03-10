@@ -52,6 +52,9 @@ use futures_util::TryStreamExt;
 #[cfg(feature = "csv")]
 use async_stream::stream;
 
+#[cfg(feature = "csv")]
+use tokio::io::{AsyncRead, AsyncWrite};
+
 use crate::{
     AttributeKey, DialogArtifactsError, EntityKey, FromKey, HASH_SIZE, Key, KeyView,
     KeyViewConstruct, KeyViewMut, State, ValueKey, artifacts::selector::Constrained,
@@ -175,7 +178,7 @@ where
     // on pattern matching.
     pub async fn export<Write>(&self, write: &mut Write) -> Result<(), DialogArtifactsError>
     where
-        Write: tokio::io::AsyncWrite + Unpin,
+        Write: AsyncWrite + Unpin,
     {
         use crate::{EntityKey, KeyViewConstruct};
 
@@ -208,7 +211,7 @@ where
     /// [`Artifacts::export`]
     pub async fn import<Read>(&mut self, read: &mut Read) -> Result<(), DialogArtifactsError>
     where
-        Read: tokio::io::AsyncRead + Unpin + Send,
+        Read: AsyncRead + Unpin + Send,
     {
         let instructions = stream! {
             let mut reader = csv_async::AsyncReaderBuilder::new()
@@ -557,6 +560,7 @@ where
 #[cfg(test)]
 mod tests {
     use std::{collections::BTreeSet, str::FromStr, sync::Arc};
+    use tokio::io::{BufReader, BufWriter};
 
     use anyhow::Result;
     use dialog_storage::{
@@ -668,7 +672,7 @@ mod tests {
                 .collect::<Vec<Artifact>>()
                 .await;
 
-            let mut csv = tokio::io::BufWriter::new(Vec::<u8>::new());
+            let mut csv = BufWriter::new(Vec::<u8>::new());
             artifacts.export(&mut csv).await?;
             (csv.into_inner(), ids, artifacts.revision().await)
         };
@@ -677,9 +681,7 @@ mod tests {
 
         let mut artifacts = Artifacts::anonymous(MemoryStorageBackend::default()).await?;
 
-        artifacts
-            .import(&mut tokio::io::BufReader::new(csv.as_ref()))
-            .await?;
+        artifacts.import(&mut BufReader::new(csv.as_ref())).await?;
 
         let actual_ids = artifacts
             .select(ArtifactSelector::new().the(Attribute::from_str("item/id")?))
