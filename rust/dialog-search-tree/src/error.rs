@@ -4,10 +4,6 @@ use thiserror::Error;
 /// Errors that can occur when working with search trees.
 #[derive(Error, Debug)]
 pub enum DialogSearchTreeError {
-    /// An error that occurs when working with a tree entry.
-    #[error("Problem with tree entry: {0}")]
-    Entry(String),
-
     /// An error that occurs when accessing a node.
     #[error("Problem accessing node: {0}")]
     Node(String),
