@@ -42,10 +42,11 @@ mod tests {
     use super::super::Branch;
     use super::super::tests::{test_issuer, test_subject};
     use crate::repository::error::RepositoryError;
+    use dialog_storage::provider::Volatile;
 
     #[dialog_common::test]
     async fn it_loads_existing_branch() -> anyhow::Result<()> {
-        let mut env = dialog_storage::provider::Volatile::new();
+        let mut env = Volatile::new();
         let issuer = test_issuer().await;
 
         // First open creates
@@ -64,7 +65,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_fails_loading_missing_branch() -> anyhow::Result<()> {
-        let mut env = dialog_storage::provider::Volatile::new();
+        let mut env = Volatile::new();
 
         let result = Branch::load("nonexistent", test_issuer().await, test_subject())
             .perform(&mut env)

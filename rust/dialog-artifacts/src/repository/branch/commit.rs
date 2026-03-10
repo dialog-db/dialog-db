@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 
 use super::state::BranchState;
 use super::{Branch, Index};
-use crate::artifacts::{Artifact, Datum, Instruction};
+use crate::artifacts::{Artifact, Cause, Datum, Instruction};
 use crate::repository::archive::ContentAddressedStore;
 use crate::repository::node_reference::NodeReference;
 use crate::repository::revision::Revision;
@@ -89,8 +89,7 @@ where
                             while let Some(candidate) = search_stream.try_next().await? {
                                 if let State::Added(current_element) = candidate.value {
                                     let current_artifact = Artifact::try_from(current_element)?;
-                                    let current_artifact_reference =
-                                        crate::artifacts::Cause::from(&current_artifact);
+                                    let current_artifact_reference = Cause::from(&current_artifact);
 
                                     if cause == &current_artifact_reference {
                                         ancestor_key = Some(candidate.key);
@@ -187,13 +186,14 @@ mod tests {
     use super::super::tests::{test_issuer, test_subject};
     use crate::artifacts::{Artifact, ArtifactSelector, Instruction};
     use dialog_prolly_tree::EMPT_TREE_HASH;
+    use dialog_storage::provider::Volatile;
     use futures_util::{StreamExt, stream};
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
     #[dialog_common::test]
     async fn it_commits_and_selects() -> anyhow::Result<()> {
-        let env = Arc::new(Mutex::new(dialog_storage::provider::Volatile::new()));
+        let env = Arc::new(Mutex::new(Volatile::new()));
 
         let branch = Branch::open("main", test_issuer().await, test_subject())
             .perform(&mut *env.lock().await)

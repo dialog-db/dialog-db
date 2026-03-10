@@ -1,8 +1,12 @@
 use dialog_capability::Did;
 use dialog_prolly_tree::KeyType;
 use serde::{Deserialize, Serialize};
-use std::fmt::Display;
+use std::{
+    fmt::{Display, Formatter, Result as FmtResult},
+    string::FromUtf8Error,
+};
 
+use crate::repository::Site;
 use crate::repository::node_reference::NodeReference;
 use crate::repository::revision::Revision;
 
@@ -89,7 +93,7 @@ impl KeyType for BranchId {
 }
 
 impl TryFrom<Vec<u8>> for BranchId {
-    type Error = std::string::FromUtf8Error;
+    type Error = FromUtf8Error;
 
     fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
         Ok(BranchId(String::from_utf8(bytes)?))
@@ -97,7 +101,7 @@ impl TryFrom<Vec<u8>> for BranchId {
 }
 
 impl Display for BranchId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "{}", self.0)
     }
 }
@@ -131,7 +135,7 @@ pub enum UpstreamState {
     /// A remote branch upstream
     Remote {
         /// Remote site identifier
-        site: crate::repository::Site,
+        site: Site,
         /// Branch identifier
         branch: BranchId,
         /// Subject DID of the repository being tracked

@@ -2,7 +2,7 @@ use base58::ToBase58;
 use dialog_prolly_tree::EMPT_TREE_HASH;
 use dialog_storage::Blake3Hash;
 use serde::{Deserialize, Serialize};
-use std::fmt::{Debug, Display, Formatter};
+use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 
 /// We reference a tree by the root hash.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -23,14 +23,14 @@ impl Default for NodeReference {
 }
 
 impl Display for NodeReference {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         let bytes: &[u8] = self.hash();
         write!(f, "#{}", ToBase58::to_base58(bytes))
     }
 }
 
 impl Debug for NodeReference {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         Display::fmt(&self, f)
     }
 }

@@ -6,7 +6,7 @@ use dialog_storage::{
     Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder,
 };
 use serde::{Serialize, de::DeserializeOwned};
-use std::sync::Arc;
+use std::{fmt::Debug, sync::Arc};
 use tokio::sync::Mutex;
 
 /// CAS (Content-Addressed Storage) adapter that bridges the capability system
@@ -98,7 +98,7 @@ where
 
     async fn write<T>(&mut self, block: &T) -> Result<Self::Hash, Self::Error>
     where
-        T: Serialize + ConditionalSync + std::fmt::Debug,
+        T: Serialize + ConditionalSync + Debug,
     {
         let (hash, bytes) = self.encoder.encode(block).await?;
 
@@ -124,7 +124,7 @@ where
 
     async fn encode<T>(&self, block: &T) -> Result<(Self::Hash, Self::Bytes), Self::Error>
     where
-        T: Serialize + ConditionalSync + std::fmt::Debug,
+        T: Serialize + ConditionalSync + Debug,
     {
         self.encoder.encode(block).await
     }

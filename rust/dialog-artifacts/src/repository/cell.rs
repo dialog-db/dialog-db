@@ -407,7 +407,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn or_returns_default_before_resolve() -> anyhow::Result<()> {
+    fn or_returns_default_before_resolve() -> anyhow::Result<()> {
         let cell =
             Cell::<TestValue>::new(test_subject(), "local", "or-default").or(TestValue::default());
 

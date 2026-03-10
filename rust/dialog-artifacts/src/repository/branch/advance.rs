@@ -41,13 +41,14 @@ mod tests {
     use crate::artifacts::{Artifact, Instruction};
     use crate::repository::node_reference::NodeReference;
     use crate::repository::revision::Revision;
+    use dialog_storage::provider::Volatile;
     use futures_util::stream;
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
     #[dialog_common::test]
     async fn it_advances_with_explicit_base() -> anyhow::Result<()> {
-        let env = Arc::new(Mutex::new(dialog_storage::provider::Volatile::new()));
+        let env = Arc::new(Mutex::new(Volatile::new()));
 
         let issuer = test_issuer().await;
 

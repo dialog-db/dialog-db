@@ -1,4 +1,11 @@
-use std::{fmt::Display, io::Write, ops::Deref, str::FromStr};
+use std::{
+    fmt::{Display, Formatter, Result as FmtResult},
+    hash::{Hash, Hasher},
+    io,
+    io::Write,
+    ops::Deref,
+    str::FromStr,
+};
 
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -16,8 +23,8 @@ use crate::{DialogArtifactsError, ENTITY_LENGTH, make_reference, mutable_slice};
 #[repr(transparent)]
 pub struct Uri(Url);
 
-impl std::hash::Hash for Uri {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+impl Hash for Uri {
+    fn hash<H: Hasher>(&self, state: &mut H) {
         self.0.as_str().hash(state);
     }
 }
@@ -64,7 +71,7 @@ impl Uri {
                 mutable_slice!(key_bytes, 0, 32).write_all(bytes)?;
             }
 
-            Ok(key_bytes) as Result<[u8; 64], std::io::Error>
+            Ok(key_bytes) as Result<[u8; 64], io::Error>
         };
 
         format(self.0.as_str().as_bytes()).map_err(|error| {
@@ -74,7 +81,7 @@ impl Uri {
 }
 
 impl Display for Uri {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "{}", **self)
     }
 }
