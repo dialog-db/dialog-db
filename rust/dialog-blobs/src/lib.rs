@@ -72,6 +72,3 @@ pub use vfs::*;
 
 mod blob_storage;
 pub use blob_storage::*;
-
-#[cfg(feature = "archive")]
-mod provider;

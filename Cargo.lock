@@ -805,13 +805,10 @@ dependencies = [
 name = "dialog-blobs"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "base58",
  "blake3",
  "bytes",
- "dialog-capability",
  "dialog-common",
- "dialog-effects",
  "dirs",
  "futures-core",
  "futures-util",

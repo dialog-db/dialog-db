@@ -6,14 +6,8 @@ edition = "2024"
 authors.workspace = true
 license.workspace = true
 
-[features]
-archive = ["dep:dialog-capability", "dep:dialog-effects", "dep:async-trait"]
-
 [dependencies]
 dialog-common = { workspace = true, features = ["helpers"] }
-dialog-capability = { workspace = true, optional = true }
-dialog-effects = { workspace = true, optional = true }
-async-trait = { workspace = true, optional = true }
 futures-util = { workspace = true }
 futures-core = { workspace = true }
 thiserror = { workspace = true }
@@ -49,9 +43,6 @@ web-sys = { workspace = true, features = [
 
 [dev-dependencies]
 tempfile = { workspace = true }
-dialog-capability = { workspace = true }
-dialog-effects = { workspace = true }
-async-trait = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
