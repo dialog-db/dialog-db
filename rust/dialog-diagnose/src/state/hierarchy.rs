@@ -2,11 +2,13 @@
 
 use std::sync::mpsc::Sender;
 
-use dialog_artifacts::{Datum, DialogArtifactsError, Index, Key, State};
+use dialog_artifacts::{CborEncoder, Datum, DialogArtifactsError, Key, State, Storage};
 use dialog_prolly_tree::{Block, Entry};
 use dialog_storage::{Blake3Hash, ContentAddressedStorage, MemoryStorageBackend};
 
 use super::store::WorkerMessage;
+
+type DiagnoseStorage = Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>;
 
 /// Represents a node in the prolly tree hierarchy.
 ///
@@ -33,8 +35,8 @@ pub enum TreeNode {
 /// This worker loads individual tree nodes on-demand as the UI navigates
 /// the prolly tree structure.
 pub struct ArtifactsHierarchy {
-    /// The prolly tree index to load nodes from
-    tree: Index<Key, Datum, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
+    /// The storage backend for tree operations
+    storage: DiagnoseStorage,
     /// Channel sender for worker messages
     tx: Sender<WorkerMessage>,
 }
@@ -46,11 +48,8 @@ impl ArtifactsHierarchy {
     ///
     /// * `tree` - The prolly tree index to load nodes from
     /// * `tx` - Channel sender for worker messages
-    pub fn new(
-        tree: Index<Key, Datum, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
-        tx: Sender<WorkerMessage>,
-    ) -> Self {
-        Self { tree, tx }
+    pub fn new(storage: DiagnoseStorage, tx: Sender<WorkerMessage>) -> Self {
+        Self { storage, tx }
     }
 
     /// Looks up a tree node by its hash, loading it in the background.
@@ -62,13 +61,13 @@ impl ArtifactsHierarchy {
     ///
     /// * `hash` - The hash of the node to look up
     pub fn lookup_node(&self, hash: &Blake3Hash) {
-        let tree = self.tree.clone();
+        let storage = self.storage.clone();
         let tx = self.tx.clone();
         let hash = hash.to_owned();
 
         tokio::spawn(async move {
             let Some(block): Option<Block<Key, State<Datum>, Blake3Hash>> =
-                tree.storage().read(&hash).await?
+                storage.read(&hash).await?
             else {
                 // TODO: This should be an error condition
                 return Ok(());

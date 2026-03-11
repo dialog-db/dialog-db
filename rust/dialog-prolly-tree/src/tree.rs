@@ -19,15 +19,13 @@ pub static EMPT_TREE_HASH: [u8; 32] = [0; 32];
 /// A key-value store backed by a Ranked Prolly Tree with configurable storage,
 /// encoding and rank distribution.
 #[derive(Debug, Clone)]
-pub struct Tree<Distribution, Key, Value, Hash, Storage>
+pub struct Tree<Distribution, Key, Value, Hash>
 where
     Distribution: crate::Distribution<Key, Hash>,
     Key: KeyType + 'static,
     Value: ValueType,
     Hash: HashType,
-    Storage: ContentAddressedStorage<Hash = Hash>,
 {
-    storage: Storage,
     root: Option<Node<Key, Value, Hash>>,
 
     distribution_type: PhantomData<Distribution>,
@@ -36,18 +34,16 @@ where
     hash_type: PhantomData<Hash>,
 }
 
-impl<Distribution, Key, Value, Hash, Storage> Tree<Distribution, Key, Value, Hash, Storage>
+impl<Distribution, Key, Value, Hash> Tree<Distribution, Key, Value, Hash>
 where
     Distribution: crate::Distribution<Key, Hash>,
     Key: KeyType,
     Value: ValueType,
     Hash: HashType,
-    Storage: ContentAddressedStorage<Hash = Hash>,
 {
-    /// Creates a new [`Tree`] with provided [`ContentAddressedStorage`].
-    pub fn new(storage: Storage) -> Self {
+    /// Creates a new empty [`Tree`].
+    pub fn new() -> Self {
         Self {
-            storage,
             root: None,
 
             distribution_type: PhantomData,
@@ -58,26 +54,26 @@ where
     }
 
     /// Hydrate a new [`Tree`] from a [`HashType`] that references a [`Node`].
-    pub async fn from_hash(hash: &Hash, storage: Storage) -> Result<Self, DialogProllyTreeError> {
+    pub async fn from_hash<Storage>(
+        hash: &Hash,
+        storage: &Storage,
+    ) -> Result<Self, DialogProllyTreeError>
+    where
+        Storage: ContentAddressedStorage<Hash = Hash>,
+    {
         let root = if hash.as_ref() == EMPT_TREE_HASH {
             None
         } else {
-            Some(Node::from_hash(hash.clone(), &storage).await?)
+            Some(Node::from_hash(hash.clone(), storage).await?)
         };
 
         Ok(Self {
-            storage,
             root,
             distribution_type: PhantomData,
             key_type: PhantomData,
             value_type: PhantomData,
             hash_type: PhantomData,
         })
-    }
-
-    /// The [`ContentAddressedStorage`] used by this tree.
-    pub fn storage(&self) -> &Storage {
-        &self.storage
     }
 
     /// Returns the [`Node`] representing the root of this tree.
@@ -89,9 +85,16 @@ where
 
     /// Changes the root (revision) of the tree to the node identified by the
     /// given [`HashType`]
-    pub async fn set_hash(&mut self, hash: Option<Hash>) -> Result<(), DialogProllyTreeError> {
+    pub async fn set_hash<Storage>(
+        &mut self,
+        hash: Option<Hash>,
+        storage: &Storage,
+    ) -> Result<(), DialogProllyTreeError>
+    where
+        Storage: ContentAddressedStorage<Hash = Hash>,
+    {
         self.root = if let Some(hash) = hash {
-            Some(Node::from_hash(hash, &self.storage).await?)
+            Some(Node::from_hash(hash, storage).await?)
         } else {
             None
         };
@@ -106,9 +109,16 @@ where
     }
 
     /// Retrieves the value associated with `key` from the tree.
-    pub async fn get(&self, key: &Key) -> Result<Option<Value>, DialogProllyTreeError> {
+    pub async fn get<Storage>(
+        &self,
+        key: &Key,
+        storage: &Storage,
+    ) -> Result<Option<Value>, DialogProllyTreeError>
+    where
+        Storage: ContentAddressedStorage<Hash = Hash>,
+    {
         match &self.root {
-            Some(root) => match root.get_entry(key, &self.storage).await? {
+            Some(root) => match root.get_entry(key, storage).await? {
                 Some(entry) => Ok(Some(entry.value)),
                 None => Ok(None),
             },
@@ -117,17 +127,23 @@ where
     }
 
     /// Sets a `key`/`value` pair into the tree.
-    pub async fn set(&mut self, key: Key, value: Value) -> Result<(), DialogProllyTreeError> {
+    pub async fn set<Storage>(
+        &mut self,
+        key: Key,
+        value: Value,
+        storage: &mut Storage,
+    ) -> Result<(), DialogProllyTreeError>
+    where
+        Storage: ContentAddressedStorage<Hash = Hash>,
+    {
         let entry = Entry { key, value };
         match &self.root {
             Some(root) => {
-                let new_root = root
-                    .insert::<Distribution, _>(entry, &mut self.storage)
-                    .await?;
+                let new_root = root.insert::<Distribution, _>(entry, storage).await?;
                 self.root = Some(new_root);
             }
             None => {
-                let segment = Entry::adopt(NonEmpty::singleton(entry), &mut self.storage).await?;
+                let segment = Entry::adopt(NonEmpty::singleton(entry), storage).await?;
                 self.root = Some(segment);
             }
         }
@@ -135,12 +151,17 @@ where
     }
 
     /// Remove the `key`/`value` pair associated with `key` (if it is present)
-    pub async fn delete(&mut self, key: &Key) -> Result<(), DialogProllyTreeError> {
+    pub async fn delete<Storage>(
+        &mut self,
+        key: &Key,
+        storage: &mut Storage,
+    ) -> Result<(), DialogProllyTreeError>
+    where
+        Storage: ContentAddressedStorage<Hash = Hash>,
+    {
         match &self.root {
             Some(root) => {
-                self.root = root
-                    .remove::<Distribution, _>(key, &mut self.storage)
-                    .await?;
+                self.root = root.remove::<Distribution, _>(key, storage).await?;
                 Ok(())
             }
             None => Ok(()),
@@ -148,19 +169,25 @@ where
     }
 
     /// Returns an async stream over all entries.
-    pub fn stream(
-        &self,
-    ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogProllyTreeError>> + '_ {
-        self.stream_range(..)
+    pub fn stream<'a, Storage>(
+        &'a self,
+        storage: &'a Storage,
+    ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogProllyTreeError>> + 'a
+    where
+        Storage: ContentAddressedStorage<Hash = Hash>,
+    {
+        self.stream_range(.., storage)
     }
 
     /// Returns an async stream over entries with keys within the provided range.
-    pub fn stream_range<'a, R>(
+    pub fn stream_range<'a, R, Storage>(
         &'a self,
         range: R,
+        storage: &'a Storage,
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogProllyTreeError>> + 'a
     where
         R: RangeBounds<Key> + 'a,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
         try_stream! {
             match (range.start_bound(), range.end_bound()) {
@@ -170,7 +197,7 @@ where
                     Bound::Included(start_key) | Bound::Excluded(start_key),
                     Bound::Included(end_key) | Bound::Excluded(end_key),
                 ) if start_key == end_key => {
-                    if let Some(value) = self.get(start_key).await? {
+                    if let Some(value) = self.get(start_key, storage).await? {
                         yield Entry {
                             key: start_key.clone(),
                             value,
@@ -179,7 +206,7 @@ where
                 }
                 _ => {
                     if let Some(root) = self.root.as_ref() {
-                        let stream = root.get_range(range, &self.storage);
+                        let stream = root.get_range(range, storage);
                         for await item in stream {
                             yield item?;
                         }
@@ -192,10 +219,13 @@ where
     /// Create a new [`Tree`] from a [`BTreeMap`].
     ///
     /// A more efficient method than iteratively adding values.
-    pub async fn from_collection(
+    pub async fn from_collection<Storage>(
         collection: BTreeMap<Key, Value>,
-        mut storage: Storage,
-    ) -> Result<Self, DialogProllyTreeError> {
+        storage: &mut Storage,
+    ) -> Result<Self, DialogProllyTreeError>
+    where
+        Storage: ContentAddressedStorage<Hash = Hash>,
+    {
         let mut nodes = {
             let entries = collection
                 .into_iter()
@@ -210,18 +240,17 @@ where
                     "Tree must have at least one child".into(),
                 )
             })?;
-            Node::join_with_rank(entries, 1, &mut storage).await?
+            Node::join_with_rank(entries, 1, storage).await?
         };
         let mut minimum_rank = 2;
         loop {
-            nodes = Node::join_with_rank(nodes, minimum_rank, &mut storage).await?;
+            nodes = Node::join_with_rank(nodes, minimum_rank, storage).await?;
             if nodes.len() == 1 {
                 break;
             }
             minimum_rank += 1;
         }
         Ok(Tree {
-            storage,
             root: Some(nodes.head.0),
 
             distribution_type: PhantomData,
@@ -232,24 +261,40 @@ where
     }
 }
 
+impl<Distribution, Key, Value, Hash> Default for Tree<Distribution, Key, Value, Hash>
+where
+    Distribution: crate::Distribution<Key, Hash>,
+    Key: KeyType,
+    Value: ValueType,
+    Hash: HashType,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // Impl block for methods that require Value: PartialEq
-impl<Distribution, Key, Value, Hash, Storage> Tree<Distribution, Key, Value, Hash, Storage>
+impl<Distribution, Key, Value, Hash> Tree<Distribution, Key, Value, Hash>
 where
     Distribution: crate::Distribution<Key, Hash>,
     Key: KeyType,
     Value: ValueType + PartialEq,
     Hash: HashType,
-    Storage: ContentAddressedStorage<Hash = Hash>,
 {
     /// Returns a differential that produces changes to transform `self` into `other`.
     ///
     /// Usage: `self.integrate(self.differentiate(other))` will result in `other`.
-    pub fn differentiate<'a>(
+    pub fn differentiate<'a, Storage>(
         &'a self,
         other: &'a Self,
-    ) -> impl crate::differential::Differential<Key, Value> + 'a {
+        self_storage: &'a Storage,
+        other_storage: &'a Storage,
+    ) -> impl crate::differential::Differential<Key, Value> + 'a
+    where
+        Storage: ContentAddressedStorage<Hash = Hash>,
+    {
         try_stream! {
-            let delta = TreeDifference::compute(self, other).await?;
+            let delta = TreeDifference::compute(self, other, self_storage, other_storage).await?;
             for await change in delta.changes() {
                 yield change?;
             }
@@ -258,13 +303,12 @@ where
 }
 
 // Impl block for methods that require Encoder
-impl<Distribution, Key, Value, Hash, Storage> Tree<Distribution, Key, Value, Hash, Storage>
+impl<Distribution, Key, Value, Hash> Tree<Distribution, Key, Value, Hash>
 where
     Distribution: crate::Distribution<Key, Hash>,
     Key: KeyType,
     Value: ValueType + PartialEq,
     Hash: HashType,
-    Storage: ContentAddressedStorage<Hash = Hash> + Encoder,
 {
     /// Integrates changes into this tree with deterministic conflict resolution.
     ///
@@ -277,11 +321,13 @@ where
     /// - **Remove**: Only removes if the exact entry (key+value) exists
     ///
     /// The operation is atomic - if any change fails, the entire integration is rolled back.
-    pub async fn integrate<Changes>(
+    pub async fn integrate<Storage, Changes>(
         &mut self,
         changes: Changes,
+        storage: &mut Storage,
     ) -> Result<(), DialogProllyTreeError>
     where
+        Storage: ContentAddressedStorage<Hash = Hash> + Encoder,
         Changes: crate::differential::Differential<Key, Value>,
     {
         // Copy root here in case we fail integration and need to revert
@@ -294,10 +340,10 @@ where
                 match change {
                     Change::Add(entry) => {
                         // Check if key already exists
-                        match self.get(&entry.key).await? {
+                        match self.get(&entry.key, storage).await? {
                             None => {
                                 // Key doesn't exist - insert it
-                                self.set(entry.key, entry.value).await?;
+                                self.set(entry.key, entry.value, storage).await?;
                             }
                             Some(existing_value) => {
                                 if existing_value == entry.value {
@@ -305,20 +351,16 @@ where
                                 } else {
                                     // Different values - resolve conflict by comparing hashes
 
-                                    let (existing_hash, _) = self
-                                        .storage()
+                                    let (existing_hash, _) = storage
                                         .encode(&existing_value)
                                         .await
                                         .map_err(|e| e.into())?;
-                                    let (new_hash, _) = self
-                                        .storage()
-                                        .encode(&entry.value)
-                                        .await
-                                        .map_err(|e| e.into())?;
+                                    let (new_hash, _) =
+                                        storage.encode(&entry.value).await.map_err(|e| e.into())?;
 
                                     if new_hash.as_ref() > existing_hash.as_ref() {
                                         // New value wins - update
-                                        self.set(entry.key, entry.value).await?;
+                                        self.set(entry.key, entry.value, storage).await?;
                                     }
                                     // Else: existing wins, no-op
                                 }
@@ -327,14 +369,14 @@ where
                     }
                     Change::Remove(entry) => {
                         // Check if key exists
-                        match self.get(&entry.key).await? {
+                        match self.get(&entry.key, storage).await? {
                             None => {
                                 // Key doesn't exist - no-op (already removed)
                             }
                             Some(existing_value) => {
                                 if existing_value == entry.value {
                                     // Same value - remove it
-                                    self.delete(&entry.key).await?;
+                                    self.delete(&entry.key, storage).await?;
                                 }
                                 // Else: different value - no-op (concurrent update)
                             }

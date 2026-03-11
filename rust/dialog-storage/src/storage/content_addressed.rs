@@ -15,7 +15,7 @@ use crate::{DialogStorageError, Encoder, HashType, StorageBackend};
 /// [Encoder] and [StorageBackend] in a compatible fashion.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait ContentAddressedStorage: ConditionalSync + 'static {
+pub trait ContentAddressedStorage: ConditionalSync {
     /// The type of hash that is produced by this [ContentAddressedStorage]
     type Hash: HashType + ConditionalSync;
     /// The type of error that is produced by this [ContentAddressedStorage]
@@ -41,8 +41,7 @@ where
     BackendError: Into<DialogStorageError>,
     U: Encoder<Bytes = Bytes, Hash = Hash, Error = EncoderError>
         + StorageBackend<Key = Hash, Value = Bytes, Error = BackendError>
-        + ConditionalSync
-        + 'static,
+        + ConditionalSync,
 {
     type Hash = Hash;
     type Error = DialogStorageError;
@@ -83,8 +82,7 @@ where
     BackendError: Into<DialogStorageError>,
     U: Encoder<Bytes = Bytes, Hash = Hash, Error = EncoderError>
         + StorageBackend<Key = Hash, Value = Bytes, Error = BackendError>
-        + ConditionalSync
-        + 'static,
+        + ConditionalSync,
 {
     type Hash = Hash;
     type Error = DialogStorageError;
