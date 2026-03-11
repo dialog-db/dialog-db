@@ -60,8 +60,7 @@ use crate::{
 
 /// An alias type that describes the [`Tree`]-based prolly tree that is
 /// used for each index in [`Artifacts`]
-pub type Index<Key, Value, Backend> =
-    Tree<GeometricDistribution, Key, State<Value>, Blake3Hash, Storage<CborEncoder, Backend>>;
+pub type Index<Key, Value> = Tree<GeometricDistribution, Key, State<Value>, Blake3Hash>;
 
 /// [`Artifacts`] is an implementor of [`ArtifactStore`] and [`ArtifactStoreMut`].
 /// Internally, [`Artifacts`] maintains indexes built from [`Tree`]s (that is,
@@ -84,7 +83,7 @@ where
 {
     identifier: String,
     storage: Storage<CborEncoder, Backend>,
-    index: Arc<RwLock<Index<Key, Datum, Backend>>>,
+    index: Arc<RwLock<Index<Key, Datum>>>,
 }
 
 impl<Backend> Artifacts<Backend>
@@ -95,8 +94,14 @@ where
 {
     #[cfg(feature = "debug")]
     /// Get a reference-counted pointer to the internal entity index of the [`Artifacts`]
-    pub fn index(&self) -> Arc<RwLock<Index<Key, Datum, Backend>>> {
+    pub fn index(&self) -> Arc<RwLock<Index<Key, Datum>>> {
         self.index.clone()
+    }
+
+    #[cfg(feature = "debug")]
+    /// Get a clone of the storage used by this [`Artifacts`]
+    pub fn storage(&self) -> Storage<CborEncoder, Backend> {
+        self.storage.clone()
     }
 
     /// The name used to uniquely identify the data of this [`Artifacts`]
@@ -137,9 +142,9 @@ where
             };
 
             if let Some(revision) = revision {
-                Tree::from_hash(revision.index(), storage.clone()).await?
+                Tree::from_hash(revision.index(), &storage).await?
             } else {
-                Tree::new(storage.clone())
+                Tree::new()
             }
         };
 
@@ -179,7 +184,7 @@ where
         let index = self.index.read().await;
         let range = <EntityKey<Key> as KeyViewConstruct>::min().0
             ..<EntityKey<Key> as KeyViewConstruct>::max().0;
-        let entity_stream = index.stream_range(range);
+        let entity_stream = index.stream_range(range, &self.storage);
 
         tokio::pin!(entity_stream);
 
@@ -312,7 +317,7 @@ where
 
         // Finally update the index
         let mut index = self.index.write().await;
-        index.set_hash(index_version).await?;
+        index.set_hash(index_version, &self.storage).await?;
 
         Ok(())
     }
@@ -332,6 +337,7 @@ where
     ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static + ConditionalSend
     {
         let index = self.index.clone();
+        let storage = self.storage.clone();
 
         try_stream! {
             // We clone to "pin" the indexes at a version for the lifetime of the stream
@@ -341,7 +347,7 @@ where
                 let start = <EntityKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
                 let end = <EntityKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
 
-                let stream = index.stream_range(Range { start, end });
+                let stream = index.stream_range(Range { start, end }, &storage);
 
                 tokio::pin!(stream);
 
@@ -358,7 +364,7 @@ where
                 let start = <ValueKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
                 let end = <ValueKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
 
-                let stream = index.stream_range(Range { start, end });
+                let stream = index.stream_range(Range { start, end }, &storage);
 
                 tokio::pin!(stream);
 
@@ -375,7 +381,7 @@ where
                 let start = <AttributeKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
                 let end = <AttributeKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
 
-                let stream = index.stream_range(Range { start, end });
+                let stream = index.stream_range(Range { start, end }, &storage);
 
                 tokio::pin!(stream);
 
@@ -437,7 +443,8 @@ where
                                     .set_attribute(entity_key.attribute())
                                     .into_key();
 
-                                let search_stream = index.stream_range(search_start..search_end);
+                                let search_stream =
+                                    index.stream_range(search_start..search_end, &self.storage);
 
                                 let mut ancestor_key = None;
 
@@ -466,20 +473,36 @@ where
                                 let attribute_key = AttributeKey::from_key(&entity_key);
 
                                 // TODO: Make it concurrent / parallel
-                                index.delete(&entity_key.into_key()).await?;
-                                index.delete(&value_key.into_key()).await?;
-                                index.delete(&attribute_key.into_key()).await?;
+                                index
+                                    .delete(&entity_key.into_key(), &mut self.storage)
+                                    .await?;
+                                index
+                                    .delete(&value_key.into_key(), &mut self.storage)
+                                    .await?;
+                                index
+                                    .delete(&attribute_key.into_key(), &mut self.storage)
+                                    .await?;
                             }
                         }
 
                         // TODO: Make it concurrent / parallel
                         index
-                            .set(entity_key.into_key(), State::Added(datum.clone()))
+                            .set(
+                                entity_key.into_key(),
+                                State::Added(datum.clone()),
+                                &mut self.storage,
+                            )
                             .await?;
                         index
-                            .set(attribute_key.into_key(), State::Added(datum.clone()))
+                            .set(
+                                attribute_key.into_key(),
+                                State::Added(datum.clone()),
+                                &mut self.storage,
+                            )
                             .await?;
-                        index.set(value_key.into_key(), State::Added(datum)).await?;
+                        index
+                            .set(value_key.into_key(), State::Added(datum), &mut self.storage)
+                            .await?;
                     }
                     Instruction::Retract(fact) => {
                         let entity_key = EntityKey::from(&fact);
@@ -487,9 +510,15 @@ where
                         let attribute_key = AttributeKey::from_key(&entity_key);
 
                         // TODO: Make it concurrent / parallel
-                        index.set(entity_key.into_key(), State::Removed).await?;
-                        index.set(attribute_key.into_key(), State::Removed).await?;
-                        index.set(value_key.into_key(), State::Removed).await?;
+                        index
+                            .set(entity_key.into_key(), State::Removed, &mut self.storage)
+                            .await?;
+                        index
+                            .set(attribute_key.into_key(), State::Removed, &mut self.storage)
+                            .await?;
+                        index
+                            .set(value_key.into_key(), State::Removed, &mut self.storage)
+                            .await?;
                     }
                 }
             }

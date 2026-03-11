@@ -2,10 +2,12 @@
 
 use std::{collections::VecDeque, sync::mpsc::Sender};
 
-use dialog_artifacts::{Datum, DialogArtifactsError, Index, Key};
+use dialog_artifacts::{CborEncoder, Datum, DialogArtifactsError, Index, Key, Storage};
 use dialog_storage::{Blake3Hash, MemoryStorageBackend};
 
 use super::store::WorkerMessage;
+
+type DiagnoseStorage = Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>;
 
 /// Statistics about the structure and content of a prolly tree.
 ///
@@ -31,7 +33,9 @@ pub struct ArtifactsTreeStats {
 /// to compute various statistics about its structure and contents.
 pub struct ArtifactsTreeAnalysis {
     /// The prolly tree index to analyze
-    tree: Index<Key, Datum, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
+    tree: Index<Key, Datum>,
+    /// The storage backend for tree operations
+    storage: DiagnoseStorage,
     /// Channel sender for worker messages
     tx: Sender<WorkerMessage>,
 }
@@ -42,12 +46,14 @@ impl ArtifactsTreeAnalysis {
     /// # Arguments
     ///
     /// * `tree` - The prolly tree index to analyze
+    /// * `storage` - The storage backend for tree operations
     /// * `tx` - Channel sender for worker messages
     pub fn new(
-        tree: Index<Key, Datum, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
+        tree: Index<Key, Datum>,
+        storage: DiagnoseStorage,
         tx: Sender<WorkerMessage>,
     ) -> Self {
-        Self { tree, tx }
+        Self { tree, storage, tx }
     }
 
     /// Starts the background analysis task.
@@ -61,20 +67,20 @@ impl ArtifactsTreeAnalysis {
         };
 
         let root = root.clone();
-        let tree = self.tree.clone();
+        let storage = self.storage.clone();
         let tx = self.tx.clone();
 
         tokio::spawn(async move {
             let mut stats = ArtifactsTreeStats::default();
             let mut levels = VecDeque::from([vec![root.clone()]]);
-            let mut segment_sizes = vec![];
+            let mut segment_sizes: Vec<usize> = vec![];
 
             while let Some(level) = levels.pop_front() {
                 let mut next_level = vec![];
 
                 for node in level {
                     if node.is_branch() {
-                        let mut children = Vec::from(node.load_children(tree.storage()).await?);
+                        let mut children = Vec::from(node.load_children(&storage).await?);
                         next_level.append(&mut children);
                     } else {
                         let entries = node.into_entries()?;
@@ -93,13 +99,16 @@ impl ArtifactsTreeAnalysis {
             }
 
             let (minimum_segment_size, maximum_segment_size) =
-                segment_sizes.iter().fold((None, 0), |(min, max), value| {
-                    (
-                        min.or(Some(value)).map(|min| min.min(value)),
-                        max.max(*value),
-                    )
-                });
-            let minimum_segment_size = minimum_segment_size.copied().unwrap_or_default();
+                segment_sizes
+                    .iter()
+                    .copied()
+                    .fold((None, 0usize), |(min, max), value| {
+                        (
+                            Some(min.map_or(value, |m: usize| m.min(value))),
+                            max.max(value),
+                        )
+                    });
+            let minimum_segment_size = minimum_segment_size.unwrap_or_default();
             let segment_band_width =
                 maximum_segment_size.saturating_sub(minimum_segment_size) as f64 / 9.;
 

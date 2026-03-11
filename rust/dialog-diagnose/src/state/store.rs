@@ -77,11 +77,12 @@ impl DiagnoseStore {
     /// data loading and initializes the internal caches.
     pub async fn new(artifacts: Artifacts<MemoryStorageBackend<Blake3Hash, Vec<u8>>>) -> Self {
         let tree = artifacts.index().read().await.clone();
+        let storage = artifacts.storage();
 
         let (tx, message_rx) = channel();
-        let cursor = ArtifactsCursor::new(tree.clone(), tx.clone());
-        let analysis = ArtifactsTreeAnalysis::new(tree.clone(), tx.clone());
-        let hierarchy = ArtifactsHierarchy::new(tree, tx);
+        let cursor = ArtifactsCursor::new(tree.clone(), storage.clone(), tx.clone());
+        let analysis = ArtifactsTreeAnalysis::new(tree, storage.clone(), tx.clone());
+        let hierarchy = ArtifactsHierarchy::new(storage, tx);
 
         Self {
             message_rx,
