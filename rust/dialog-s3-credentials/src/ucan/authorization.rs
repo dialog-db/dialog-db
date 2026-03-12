@@ -311,10 +311,7 @@ where
     Do: Effect<Output = Result<AuthorizedRequest, AccessError>> + 'static,
     Capability<Do>: ConditionalSend + S3Request,
 {
-    async fn execute(
-        &mut self,
-        capability: Capability<Do>,
-    ) -> Result<AuthorizedRequest, AccessError> {
+    async fn execute(&self, capability: Capability<Do>) -> Result<AuthorizedRequest, AccessError> {
         self.grant(&capability).await
     }
 }

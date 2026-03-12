@@ -26,7 +26,7 @@
 //! # let did: Did = "did:key:z6Mk...".parse().unwrap();
 //! # let digest = Blake3Hash::hash(b"hello");
 //!
-//! let mut network = Network::new(issuer);
+//! let network = Network::new(issuer);
 //!
 //! let cap = Subject::from(did)
 //!     .attenuate(Archive)
@@ -39,7 +39,7 @@
 //! )
 //! .unwrap();
 //! RemoteInvocation::new(cap.clone(), s3_addr)
-//!     .perform(&mut network)
+//!     .perform(&network)
 //!     .await;
 //!
 //! // Route the same capability to a UCAN-delegated backend
@@ -48,7 +48,7 @@
 //!     delegation_chain,
 //! );
 //! RemoteInvocation::new(cap, ucan_addr)
-//!     .perform(&mut network)
+//!     .perform(&network)
 //!     .await;
 //! # }
 //! ```
@@ -126,7 +126,7 @@ mod archive_tests {
     async fn it_returns_none_for_missing_content(
         env: helpers::PublicS3Address,
     ) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
         let digest = Blake3Hash::hash(b"nonexistent");
 
@@ -136,7 +136,7 @@ mod archive_tests {
             .invoke(Get::new(digest));
 
         let result = RemoteInvocation::new(capability, addr)
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
         assert!(result.is_none());
 
@@ -145,7 +145,7 @@ mod archive_tests {
 
     #[dialog_common::test]
     async fn it_stores_and_retrieves_content(env: helpers::PublicS3Address) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
         let content = b"hello world".to_vec();
         let digest = Blake3Hash::hash(&content);
@@ -158,7 +158,7 @@ mod archive_tests {
                 .invoke(Put::new(digest.clone(), content.clone())),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         // Get content
@@ -169,7 +169,7 @@ mod archive_tests {
                 .invoke(Get::new(digest)),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert_eq!(result, Some(content));
 
@@ -178,7 +178,7 @@ mod archive_tests {
 
     #[dialog_common::test]
     async fn it_handles_different_catalogs(env: helpers::PublicS3Address) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
         let content1 = b"content for catalog 1".to_vec();
         let content2 = b"content for catalog 2".to_vec();
@@ -193,7 +193,7 @@ mod archive_tests {
                 .invoke(Put::new(digest1.clone(), content1.clone())),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         RemoteInvocation::new(
@@ -203,7 +203,7 @@ mod archive_tests {
                 .invoke(Put::new(digest2.clone(), content2.clone())),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         // Retrieve from catalog1
@@ -214,7 +214,7 @@ mod archive_tests {
                 .invoke(Get::new(digest1)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert_eq!(result1, Some(content1));
 
@@ -226,7 +226,7 @@ mod archive_tests {
                 .invoke(Get::new(digest2.clone())),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert_eq!(result2, Some(content2));
 
@@ -238,7 +238,7 @@ mod archive_tests {
                 .invoke(Get::new(digest2)),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert!(cross.is_none());
 
@@ -249,7 +249,7 @@ mod archive_tests {
     async fn it_is_idempotent_for_same_content(
         env: helpers::PublicS3Address,
     ) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
         let content = b"idempotent content".to_vec();
         let digest = Blake3Hash::hash(&content);
@@ -263,7 +263,7 @@ mod archive_tests {
                     .invoke(Put::new(digest.clone(), content.clone())),
                 addr.clone(),
             )
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
         }
 
@@ -275,7 +275,7 @@ mod archive_tests {
                 .invoke(Get::new(digest)),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert_eq!(result, Some(content));
 
@@ -284,7 +284,7 @@ mod archive_tests {
 
     #[dialog_common::test]
     async fn it_handles_empty_content(env: helpers::PublicS3Address) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
         let content = vec![];
         let digest = Blake3Hash::hash(&content);
@@ -296,7 +296,7 @@ mod archive_tests {
                 .invoke(Put::new(digest.clone(), content.clone())),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let result = RemoteInvocation::new(
@@ -306,7 +306,7 @@ mod archive_tests {
                 .invoke(Get::new(digest)),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert_eq!(result, Some(content));
 
@@ -315,7 +315,7 @@ mod archive_tests {
 
     #[dialog_common::test]
     async fn it_handles_large_content(env: helpers::PublicS3Address) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
         // 100KB content (matching S3 backend test size)
         let content: Vec<u8> = (0..100_000).map(|i| (i % 256) as u8).collect();
@@ -328,7 +328,7 @@ mod archive_tests {
                 .invoke(Put::new(digest.clone(), content.clone())),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let result = RemoteInvocation::new(
@@ -338,7 +338,7 @@ mod archive_tests {
                 .invoke(Get::new(digest)),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert_eq!(result, Some(content));
 
@@ -349,7 +349,7 @@ mod archive_tests {
     async fn it_caches_connections_across_invocations(
         env: helpers::PublicS3Address,
     ) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
         let content = b"cached connection content".to_vec();
         let digest = Blake3Hash::hash(&content);
@@ -362,7 +362,7 @@ mod archive_tests {
                 .invoke(Put::new(digest.clone(), content.clone())),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         // Get via second invocation (should reuse cached connection)
@@ -373,7 +373,7 @@ mod archive_tests {
                 .invoke(Get::new(digest)),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert_eq!(result, Some(content));
 
@@ -382,7 +382,7 @@ mod archive_tests {
 
     #[dialog_common::test]
     async fn it_performs_multiple_operations(env: helpers::PublicS3Address) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
 
         // Store 3 different blobs
@@ -402,7 +402,7 @@ mod archive_tests {
                     .invoke(Put::new(digest.clone(), content.clone())),
                 addr.clone(),
             )
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
         }
 
@@ -415,7 +415,7 @@ mod archive_tests {
                     .invoke(Get::new(digest.clone())),
                 addr.clone(),
             )
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
             assert_eq!(result, Some(content.clone()));
         }
@@ -429,7 +429,7 @@ mod archive_tests {
                 .invoke(Get::new(missing_digest)),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert_eq!(result, None);
 
@@ -473,7 +473,7 @@ mod archive_signed_session_tests {
 
     #[dialog_common::test]
     async fn it_returns_none_for_missing_content(env: helpers::S3Address) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
         let digest = Blake3Hash::hash(b"nonexistent");
 
@@ -484,7 +484,7 @@ mod archive_signed_session_tests {
                 .invoke(Get::new(digest)),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert!(result.is_none());
 
@@ -493,7 +493,7 @@ mod archive_signed_session_tests {
 
     #[dialog_common::test]
     async fn it_stores_and_retrieves_content(env: helpers::S3Address) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
         let content = b"hello world signed".to_vec();
         let digest = Blake3Hash::hash(&content);
@@ -505,7 +505,7 @@ mod archive_signed_session_tests {
                 .invoke(Put::new(digest.clone(), content.clone())),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let result = RemoteInvocation::new(
@@ -515,7 +515,7 @@ mod archive_signed_session_tests {
                 .invoke(Get::new(digest)),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert_eq!(result, Some(content));
 
@@ -524,7 +524,7 @@ mod archive_signed_session_tests {
 
     #[dialog_common::test]
     async fn it_handles_different_catalogs(env: helpers::S3Address) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
         let content1 = b"signed catalog 1".to_vec();
         let content2 = b"signed catalog 2".to_vec();
@@ -538,7 +538,7 @@ mod archive_signed_session_tests {
                 .invoke(Put::new(digest1.clone(), content1.clone())),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         RemoteInvocation::new(
@@ -548,7 +548,7 @@ mod archive_signed_session_tests {
                 .invoke(Put::new(digest2.clone(), content2.clone())),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let result1 = RemoteInvocation::new(
@@ -558,7 +558,7 @@ mod archive_signed_session_tests {
                 .invoke(Get::new(digest1)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert_eq!(result1, Some(content1));
 
@@ -569,7 +569,7 @@ mod archive_signed_session_tests {
                 .invoke(Get::new(digest2.clone())),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert_eq!(result2, Some(content2));
 
@@ -581,7 +581,7 @@ mod archive_signed_session_tests {
                 .invoke(Get::new(digest2)),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert!(cross.is_none());
 
@@ -590,7 +590,7 @@ mod archive_signed_session_tests {
 
     #[dialog_common::test]
     async fn it_fails_with_wrong_credentials(env: helpers::S3Address) -> anyhow::Result<()> {
-        let mut provider: Network<helpers::Session> =
+        let provider: Network<helpers::Session> =
             Network::new(helpers::Session::new(TEST_SUBJECT.parse::<Did>().unwrap()));
         let addr = s3::Credentials::private(
             Address::new(&env.endpoint, "us-east-1", &env.bucket),
@@ -610,7 +610,7 @@ mod archive_signed_session_tests {
                 .invoke(Put::new(digest, content)),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await;
 
         assert!(
@@ -623,7 +623,7 @@ mod archive_signed_session_tests {
 
     #[dialog_common::test]
     async fn it_handles_large_content(env: helpers::S3Address) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
         let content: Vec<u8> = (0..100_000).map(|i| (i % 256) as u8).collect();
         let digest = Blake3Hash::hash(&content);
@@ -635,7 +635,7 @@ mod archive_signed_session_tests {
                 .invoke(Put::new(digest.clone(), content.clone())),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let result = RemoteInvocation::new(
@@ -645,7 +645,7 @@ mod archive_signed_session_tests {
                 .invoke(Get::new(digest)),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert_eq!(result, Some(content));
 
@@ -698,7 +698,7 @@ mod ucan_archive_tests {
         env: helpers::UcanS3Address,
     ) -> anyhow::Result<()> {
         let operator = Ed25519Signer::generate().await.unwrap();
-        let mut provider = create_network_provider(&operator);
+        let provider = create_network_provider(&operator);
         let addr = create_address(&env, &operator).await;
         let digest = Blake3Hash::hash(b"nonexistent");
 
@@ -709,7 +709,7 @@ mod ucan_archive_tests {
                 .invoke(Get::new(digest)),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert!(result.is_none());
 
@@ -719,7 +719,7 @@ mod ucan_archive_tests {
     #[dialog_common::test]
     async fn it_stores_and_retrieves_content(env: helpers::UcanS3Address) -> anyhow::Result<()> {
         let operator = Ed25519Signer::generate().await.unwrap();
-        let mut provider = create_network_provider(&operator);
+        let provider = create_network_provider(&operator);
         let addr = create_address(&env, &operator).await;
         let content = b"hello world ucan".to_vec();
         let digest = Blake3Hash::hash(&content);
@@ -731,7 +731,7 @@ mod ucan_archive_tests {
                 .invoke(Put::new(digest.clone(), content.clone())),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let result = RemoteInvocation::new(
@@ -741,7 +741,7 @@ mod ucan_archive_tests {
                 .invoke(Get::new(digest)),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert_eq!(result, Some(content));
 
@@ -751,7 +751,7 @@ mod ucan_archive_tests {
     #[dialog_common::test]
     async fn it_handles_different_catalogs(env: helpers::UcanS3Address) -> anyhow::Result<()> {
         let operator = Ed25519Signer::generate().await.unwrap();
-        let mut provider = create_network_provider(&operator);
+        let provider = create_network_provider(&operator);
         let addr = create_address(&env, &operator).await;
         let content1 = b"ucan catalog 1".to_vec();
         let content2 = b"ucan catalog 2".to_vec();
@@ -765,7 +765,7 @@ mod ucan_archive_tests {
                 .invoke(Put::new(digest1.clone(), content1.clone())),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         RemoteInvocation::new(
@@ -775,7 +775,7 @@ mod ucan_archive_tests {
                 .invoke(Put::new(digest2.clone(), content2.clone())),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let result1 = RemoteInvocation::new(
@@ -785,7 +785,7 @@ mod ucan_archive_tests {
                 .invoke(Get::new(digest1)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert_eq!(result1, Some(content1));
 
@@ -796,7 +796,7 @@ mod ucan_archive_tests {
                 .invoke(Get::new(digest2.clone())),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert_eq!(result2, Some(content2));
 
@@ -808,7 +808,7 @@ mod ucan_archive_tests {
                 .invoke(Get::new(digest2)),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert!(cross.is_none());
 
@@ -818,7 +818,7 @@ mod ucan_archive_tests {
     #[dialog_common::test]
     async fn it_is_idempotent_for_same_content(env: helpers::UcanS3Address) -> anyhow::Result<()> {
         let operator = Ed25519Signer::generate().await.unwrap();
-        let mut provider = create_network_provider(&operator);
+        let provider = create_network_provider(&operator);
         let addr = create_address(&env, &operator).await;
         let content = b"idempotent ucan content".to_vec();
         let digest = Blake3Hash::hash(&content);
@@ -831,7 +831,7 @@ mod ucan_archive_tests {
                     .invoke(Put::new(digest.clone(), content.clone())),
                 addr.clone(),
             )
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
         }
 
@@ -842,7 +842,7 @@ mod ucan_archive_tests {
                 .invoke(Get::new(digest)),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert_eq!(result, Some(content));
 
@@ -852,7 +852,7 @@ mod ucan_archive_tests {
     #[dialog_common::test]
     async fn it_handles_large_content(env: helpers::UcanS3Address) -> anyhow::Result<()> {
         let operator = Ed25519Signer::generate().await.unwrap();
-        let mut provider = create_network_provider(&operator);
+        let provider = create_network_provider(&operator);
         let addr = create_address(&env, &operator).await;
         let content: Vec<u8> = (0..100_000).map(|i| (i % 256) as u8).collect();
         let digest = Blake3Hash::hash(&content);
@@ -864,7 +864,7 @@ mod ucan_archive_tests {
                 .invoke(Put::new(digest.clone(), content.clone())),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let result = RemoteInvocation::new(
@@ -874,7 +874,7 @@ mod ucan_archive_tests {
                 .invoke(Get::new(digest)),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert_eq!(result, Some(content));
 
@@ -913,7 +913,7 @@ mod transactional_memory_tests {
 
     #[dialog_common::test]
     async fn it_resolves_non_existent_cell(env: helpers::PublicS3Address) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
 
         let cap = test_subject()
@@ -922,9 +922,7 @@ mod transactional_memory_tests {
             .attenuate(Cell::new("missing"))
             .invoke(Resolve);
 
-        let result = RemoteInvocation::new(cap, addr)
-            .perform(&mut provider)
-            .await?;
+        let result = RemoteInvocation::new(cap, addr).perform(&provider).await?;
         assert!(result.is_none());
 
         Ok(())
@@ -932,7 +930,7 @@ mod transactional_memory_tests {
 
     #[dialog_common::test]
     async fn it_publishes_new_content(env: helpers::PublicS3Address) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
         let content = b"hello world".to_vec();
 
@@ -945,7 +943,7 @@ mod transactional_memory_tests {
                 .invoke(Publish::new(content.clone(), None)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         assert!(!edition.is_empty());
@@ -959,7 +957,7 @@ mod transactional_memory_tests {
                 .invoke(Resolve),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let publication = resolved.expect("should have content");
@@ -971,7 +969,7 @@ mod transactional_memory_tests {
 
     #[dialog_common::test]
     async fn it_updates_existing_content(env: helpers::PublicS3Address) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
 
         // Create initial content
@@ -983,7 +981,7 @@ mod transactional_memory_tests {
                 .invoke(Publish::new(b"initial", None)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         // Update with correct edition
@@ -995,7 +993,7 @@ mod transactional_memory_tests {
                 .invoke(Publish::new(b"updated", Some(edition1.clone()))),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         assert_ne!(edition1, edition2);
@@ -1009,7 +1007,7 @@ mod transactional_memory_tests {
                 .invoke(Resolve),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let publication = resolved.expect("should have content");
@@ -1020,7 +1018,7 @@ mod transactional_memory_tests {
 
     #[dialog_common::test]
     async fn it_fails_on_edition_mismatch(env: helpers::PublicS3Address) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
 
         RemoteInvocation::new(
@@ -1031,7 +1029,7 @@ mod transactional_memory_tests {
                 .invoke(Publish::new(b"initial", None)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let wrong_edition = b"wrong-etag".to_vec();
@@ -1043,7 +1041,7 @@ mod transactional_memory_tests {
                 .invoke(Publish::new(b"updated", Some(wrong_edition))),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await;
 
         assert!(matches!(result, Err(MemoryError::EditionMismatch { .. })));
@@ -1053,7 +1051,7 @@ mod transactional_memory_tests {
 
     #[dialog_common::test]
     async fn it_fails_creating_when_exists(env: helpers::PublicS3Address) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
 
         RemoteInvocation::new(
@@ -1064,7 +1062,7 @@ mod transactional_memory_tests {
                 .invoke(Publish::new(b"initial", None)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let result = RemoteInvocation::new(
@@ -1075,7 +1073,7 @@ mod transactional_memory_tests {
                 .invoke(Publish::new(b"new", None)),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await;
 
         assert!(matches!(result, Err(MemoryError::EditionMismatch { .. })));
@@ -1085,7 +1083,7 @@ mod transactional_memory_tests {
 
     #[dialog_common::test]
     async fn it_retracts_content(env: helpers::PublicS3Address) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
 
         // Create content
@@ -1097,7 +1095,7 @@ mod transactional_memory_tests {
                 .invoke(Publish::new(b"to be deleted", None)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         // Retract with correct edition
@@ -1109,7 +1107,7 @@ mod transactional_memory_tests {
                 .invoke(Retract::new(edition)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         // Verify deleted
@@ -1121,7 +1119,7 @@ mod transactional_memory_tests {
                 .invoke(Resolve),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         assert!(resolved.is_none());
@@ -1131,7 +1129,7 @@ mod transactional_memory_tests {
 
     #[dialog_common::test]
     async fn it_handles_different_spaces(env: helpers::PublicS3Address) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
 
         // Publish to different spaces
@@ -1143,7 +1141,7 @@ mod transactional_memory_tests {
                 .invoke(Publish::new(b"content1", None)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         RemoteInvocation::new(
@@ -1154,7 +1152,7 @@ mod transactional_memory_tests {
                 .invoke(Publish::new(b"content2", None)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         // Resolve from space1
@@ -1166,7 +1164,7 @@ mod transactional_memory_tests {
                 .invoke(Resolve),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert_eq!(result1.unwrap().content, b"content1".to_vec());
 
@@ -1179,7 +1177,7 @@ mod transactional_memory_tests {
                 .invoke(Resolve),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert_eq!(result2.unwrap().content, b"content2".to_vec());
 
@@ -1188,7 +1186,7 @@ mod transactional_memory_tests {
 
     #[dialog_common::test]
     async fn it_handles_nested_spaces(env: helpers::PublicS3Address) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
         let content = b"nested content".to_vec();
 
@@ -1201,7 +1199,7 @@ mod transactional_memory_tests {
                 .invoke(Publish::new(content.clone(), None)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         assert!(!edition.is_empty());
@@ -1215,7 +1213,7 @@ mod transactional_memory_tests {
                 .invoke(Resolve),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let publication = resolved.expect("should have content");
@@ -1226,7 +1224,7 @@ mod transactional_memory_tests {
 
     #[dialog_common::test]
     async fn it_handles_empty_content(env: helpers::PublicS3Address) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
         let content = vec![];
 
@@ -1238,7 +1236,7 @@ mod transactional_memory_tests {
                 .invoke(Publish::new(content.clone(), None)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         assert!(!edition.is_empty());
@@ -1251,7 +1249,7 @@ mod transactional_memory_tests {
                 .invoke(Resolve),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let publication = resolved.expect("should have content");
@@ -1262,7 +1260,7 @@ mod transactional_memory_tests {
 
     #[dialog_common::test]
     async fn it_handles_large_content(env: helpers::PublicS3Address) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
         // 100KB content (matching S3 backend test size)
         let content: Vec<u8> = (0..100_000).map(|i| (i % 256) as u8).collect();
@@ -1275,7 +1273,7 @@ mod transactional_memory_tests {
                 .invoke(Publish::new(content.clone(), None)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         assert!(!edition.is_empty());
@@ -1288,7 +1286,7 @@ mod transactional_memory_tests {
                 .invoke(Resolve),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let publication = resolved.expect("should have content");
@@ -1301,7 +1299,7 @@ mod transactional_memory_tests {
     async fn it_succeeds_retracting_already_retracted(
         env: helpers::PublicS3Address,
     ) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
 
         // Try to retract non-existent cell - should succeed
@@ -1314,7 +1312,7 @@ mod transactional_memory_tests {
                 .invoke(Retract::new(wrong_edition)),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await;
 
         assert!(result.is_ok());
@@ -1358,7 +1356,7 @@ mod memory_cell_signed_session_tests {
 
     #[dialog_common::test]
     async fn it_resolves_non_existent_cell(env: helpers::S3Address) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
 
         let result = RemoteInvocation::new(
@@ -1369,7 +1367,7 @@ mod memory_cell_signed_session_tests {
                 .invoke(Resolve),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert!(result.is_none());
 
@@ -1378,7 +1376,7 @@ mod memory_cell_signed_session_tests {
 
     #[dialog_common::test]
     async fn it_publishes_new_content(env: helpers::S3Address) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
         let content = b"signed memory content".to_vec();
 
@@ -1390,7 +1388,7 @@ mod memory_cell_signed_session_tests {
                 .invoke(Publish::new(content.clone(), None)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         assert!(!edition.is_empty());
@@ -1403,7 +1401,7 @@ mod memory_cell_signed_session_tests {
                 .invoke(Resolve),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let publication = resolved.expect("should have content");
@@ -1415,7 +1413,7 @@ mod memory_cell_signed_session_tests {
 
     #[dialog_common::test]
     async fn it_updates_existing_content(env: helpers::S3Address) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
 
         let edition1 = RemoteInvocation::new(
@@ -1426,7 +1424,7 @@ mod memory_cell_signed_session_tests {
                 .invoke(Publish::new(b"initial", None)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let edition2 = RemoteInvocation::new(
@@ -1437,7 +1435,7 @@ mod memory_cell_signed_session_tests {
                 .invoke(Publish::new(b"updated", Some(edition1.clone()))),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         assert_ne!(edition1, edition2);
@@ -1450,7 +1448,7 @@ mod memory_cell_signed_session_tests {
                 .invoke(Resolve),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let publication = resolved.expect("should have content");
@@ -1461,7 +1459,7 @@ mod memory_cell_signed_session_tests {
 
     #[dialog_common::test]
     async fn it_fails_on_edition_mismatch(env: helpers::S3Address) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
 
         RemoteInvocation::new(
@@ -1472,7 +1470,7 @@ mod memory_cell_signed_session_tests {
                 .invoke(Publish::new(b"initial", None)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let wrong_edition = b"wrong-etag".to_vec();
@@ -1484,7 +1482,7 @@ mod memory_cell_signed_session_tests {
                 .invoke(Publish::new(b"updated", Some(wrong_edition))),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await;
 
         assert!(matches!(result, Err(MemoryError::EditionMismatch { .. })));
@@ -1494,7 +1492,7 @@ mod memory_cell_signed_session_tests {
 
     #[dialog_common::test]
     async fn it_retracts_content(env: helpers::S3Address) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
 
         let edition = RemoteInvocation::new(
@@ -1505,7 +1503,7 @@ mod memory_cell_signed_session_tests {
                 .invoke(Publish::new(b"to be deleted", None)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         RemoteInvocation::new(
@@ -1516,7 +1514,7 @@ mod memory_cell_signed_session_tests {
                 .invoke(Retract::new(edition)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let resolved = RemoteInvocation::new(
@@ -1527,7 +1525,7 @@ mod memory_cell_signed_session_tests {
                 .invoke(Resolve),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         assert!(resolved.is_none());
@@ -1537,7 +1535,7 @@ mod memory_cell_signed_session_tests {
 
     #[dialog_common::test]
     async fn it_handles_different_spaces(env: helpers::S3Address) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
 
         RemoteInvocation::new(
@@ -1548,7 +1546,7 @@ mod memory_cell_signed_session_tests {
                 .invoke(Publish::new(b"content1", None)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         RemoteInvocation::new(
@@ -1559,7 +1557,7 @@ mod memory_cell_signed_session_tests {
                 .invoke(Publish::new(b"content2", None)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let result1 = RemoteInvocation::new(
@@ -1570,7 +1568,7 @@ mod memory_cell_signed_session_tests {
                 .invoke(Resolve),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert_eq!(result1.unwrap().content, b"content1".to_vec());
 
@@ -1582,7 +1580,7 @@ mod memory_cell_signed_session_tests {
                 .invoke(Resolve),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert_eq!(result2.unwrap().content, b"content2".to_vec());
 
@@ -1591,7 +1589,7 @@ mod memory_cell_signed_session_tests {
 
     #[dialog_common::test]
     async fn it_handles_large_content(env: helpers::S3Address) -> anyhow::Result<()> {
-        let mut provider = create_network_provider(&env);
+        let provider = create_network_provider(&env);
         let addr = create_address(&env);
         let content: Vec<u8> = (0..100_000).map(|i| (i % 256) as u8).collect();
 
@@ -1603,7 +1601,7 @@ mod memory_cell_signed_session_tests {
                 .invoke(Publish::new(content.clone(), None)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         assert!(!edition.is_empty());
@@ -1616,7 +1614,7 @@ mod memory_cell_signed_session_tests {
                 .invoke(Resolve),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let publication = resolved.expect("should have content");
@@ -1668,7 +1666,7 @@ mod ucan_memory_cell_tests {
     #[dialog_common::test]
     async fn it_resolves_non_existent_cell(env: helpers::UcanS3Address) -> anyhow::Result<()> {
         let operator = Ed25519Signer::generate().await.unwrap();
-        let mut provider = create_network_provider(&operator);
+        let provider = create_network_provider(&operator);
         let addr = create_address(&env, &operator).await;
 
         let result = RemoteInvocation::new(
@@ -1679,7 +1677,7 @@ mod ucan_memory_cell_tests {
                 .invoke(Resolve),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert!(result.is_none());
 
@@ -1689,7 +1687,7 @@ mod ucan_memory_cell_tests {
     #[dialog_common::test]
     async fn it_publishes_new_content(env: helpers::UcanS3Address) -> anyhow::Result<()> {
         let operator = Ed25519Signer::generate().await.unwrap();
-        let mut provider = create_network_provider(&operator);
+        let provider = create_network_provider(&operator);
         let addr = create_address(&env, &operator).await;
         let content = b"ucan memory content".to_vec();
 
@@ -1701,7 +1699,7 @@ mod ucan_memory_cell_tests {
                 .invoke(Publish::new(content.clone(), None)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         assert!(!edition.is_empty());
@@ -1714,7 +1712,7 @@ mod ucan_memory_cell_tests {
                 .invoke(Resolve),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let publication = resolved.expect("should have content");
@@ -1727,7 +1725,7 @@ mod ucan_memory_cell_tests {
     #[dialog_common::test]
     async fn it_updates_existing_content(env: helpers::UcanS3Address) -> anyhow::Result<()> {
         let operator = Ed25519Signer::generate().await.unwrap();
-        let mut provider = create_network_provider(&operator);
+        let provider = create_network_provider(&operator);
         let addr = create_address(&env, &operator).await;
 
         let edition1 = RemoteInvocation::new(
@@ -1738,7 +1736,7 @@ mod ucan_memory_cell_tests {
                 .invoke(Publish::new(b"initial", None)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let edition2 = RemoteInvocation::new(
@@ -1749,7 +1747,7 @@ mod ucan_memory_cell_tests {
                 .invoke(Publish::new(b"updated", Some(edition1.clone()))),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         assert_ne!(edition1, edition2);
@@ -1762,7 +1760,7 @@ mod ucan_memory_cell_tests {
                 .invoke(Resolve),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let publication = resolved.expect("should have content");
@@ -1774,7 +1772,7 @@ mod ucan_memory_cell_tests {
     #[dialog_common::test]
     async fn it_fails_on_edition_mismatch(env: helpers::UcanS3Address) -> anyhow::Result<()> {
         let operator = Ed25519Signer::generate().await.unwrap();
-        let mut provider = create_network_provider(&operator);
+        let provider = create_network_provider(&operator);
         let addr = create_address(&env, &operator).await;
 
         RemoteInvocation::new(
@@ -1785,7 +1783,7 @@ mod ucan_memory_cell_tests {
                 .invoke(Publish::new(b"initial", None)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let wrong_edition = b"wrong-etag".to_vec();
@@ -1797,7 +1795,7 @@ mod ucan_memory_cell_tests {
                 .invoke(Publish::new(b"updated", Some(wrong_edition))),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await;
 
         assert!(matches!(result, Err(MemoryError::EditionMismatch { .. })));
@@ -1808,7 +1806,7 @@ mod ucan_memory_cell_tests {
     #[dialog_common::test]
     async fn it_retracts_content(env: helpers::UcanS3Address) -> anyhow::Result<()> {
         let operator = Ed25519Signer::generate().await.unwrap();
-        let mut provider = create_network_provider(&operator);
+        let provider = create_network_provider(&operator);
         let addr = create_address(&env, &operator).await;
 
         let edition = RemoteInvocation::new(
@@ -1819,7 +1817,7 @@ mod ucan_memory_cell_tests {
                 .invoke(Publish::new(b"to be deleted", None)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         RemoteInvocation::new(
@@ -1830,7 +1828,7 @@ mod ucan_memory_cell_tests {
                 .invoke(Retract::new(edition)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let resolved = RemoteInvocation::new(
@@ -1841,7 +1839,7 @@ mod ucan_memory_cell_tests {
                 .invoke(Resolve),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         assert!(resolved.is_none());
@@ -1852,7 +1850,7 @@ mod ucan_memory_cell_tests {
     #[dialog_common::test]
     async fn it_handles_different_spaces(env: helpers::UcanS3Address) -> anyhow::Result<()> {
         let operator = Ed25519Signer::generate().await.unwrap();
-        let mut provider = create_network_provider(&operator);
+        let provider = create_network_provider(&operator);
         let addr = create_address(&env, &operator).await;
 
         RemoteInvocation::new(
@@ -1863,7 +1861,7 @@ mod ucan_memory_cell_tests {
                 .invoke(Publish::new(b"content1", None)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         RemoteInvocation::new(
@@ -1874,7 +1872,7 @@ mod ucan_memory_cell_tests {
                 .invoke(Publish::new(b"content2", None)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let result1 = RemoteInvocation::new(
@@ -1885,7 +1883,7 @@ mod ucan_memory_cell_tests {
                 .invoke(Resolve),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert_eq!(result1.unwrap().content, b"content1".to_vec());
 
@@ -1897,7 +1895,7 @@ mod ucan_memory_cell_tests {
                 .invoke(Resolve),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
         assert_eq!(result2.unwrap().content, b"content2".to_vec());
 
@@ -1907,7 +1905,7 @@ mod ucan_memory_cell_tests {
     #[dialog_common::test]
     async fn it_handles_large_content(env: helpers::UcanS3Address) -> anyhow::Result<()> {
         let operator = Ed25519Signer::generate().await.unwrap();
-        let mut provider = create_network_provider(&operator);
+        let provider = create_network_provider(&operator);
         let addr = create_address(&env, &operator).await;
         let content: Vec<u8> = (0..100_000).map(|i| (i % 256) as u8).collect();
 
@@ -1919,7 +1917,7 @@ mod ucan_memory_cell_tests {
                 .invoke(Publish::new(content.clone(), None)),
             addr.clone(),
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         assert!(!edition.is_empty());
@@ -1932,7 +1930,7 @@ mod ucan_memory_cell_tests {
                 .invoke(Resolve),
             addr,
         )
-        .perform(&mut provider)
+        .perform(&provider)
         .await?;
 
         let publication = resolved.expect("should have content");

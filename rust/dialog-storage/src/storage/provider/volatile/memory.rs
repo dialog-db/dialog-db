@@ -27,7 +27,7 @@ fn format_edition(edition: Option<&[u8]>) -> Option<String> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<Resolve> for Volatile {
     async fn execute(
-        &mut self,
+        &self,
         effect: Capability<Resolve>,
     ) -> Result<Option<Publication>, MemoryError> {
         let subject = effect.subject().into();
@@ -36,20 +36,26 @@ impl Provider<Resolve> for Volatile {
 
         let key: MemoryKey = (space.to_string(), cell.to_string());
 
-        Ok(self.session(&subject).memory.get(&key).map(|content| {
-            let edition = Blake3Hash::hash(content);
-            Publication {
-                content: content.clone(),
-                edition: edition.as_bytes().to_vec(),
-            }
-        }))
+        // Recover from lock poisoning — session data may be
+        // inconsistent but we avoid panicking the current thread.
+        let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
+        Ok(sessions
+            .get(&subject)
+            .and_then(|session| session.memory.get(&key))
+            .map(|content| {
+                let edition = Blake3Hash::hash(content);
+                Publication {
+                    content: content.clone(),
+                    edition: edition.as_bytes().to_vec(),
+                }
+            }))
     }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<Publish> for Volatile {
-    async fn execute(&mut self, effect: Capability<Publish>) -> Result<Vec<u8>, MemoryError> {
+    async fn execute(&self, effect: Capability<Publish>) -> Result<Vec<u8>, MemoryError> {
         let subject = effect.subject().into();
         let space = effect.space();
         let cell = effect.cell();
@@ -57,7 +63,10 @@ impl Provider<Publish> for Volatile {
         let expected_edition = effect.when().map(|e| e.to_vec());
 
         let key: MemoryKey = (space.to_string(), cell.to_string());
-        let session = self.session(&subject);
+        // Recover from lock poisoning — session data may be
+        // inconsistent but we avoid panicking the current thread.
+        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
+        let session = sessions.entry(subject).or_default();
 
         // Get current value and edition
         let current_edition = session
@@ -112,14 +121,17 @@ impl Provider<Publish> for Volatile {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<Retract> for Volatile {
-    async fn execute(&mut self, effect: Capability<Retract>) -> Result<(), MemoryError> {
+    async fn execute(&self, effect: Capability<Retract>) -> Result<(), MemoryError> {
         let subject = effect.subject().into();
         let space = effect.space();
         let cell = effect.cell();
         let expected_edition = effect.when().to_vec();
 
         let key: MemoryKey = (space.to_string(), cell.to_string());
-        let session = self.session(&subject);
+        // Recover from lock poisoning — session data may be
+        // inconsistent but we avoid panicking the current thread.
+        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
+        let session = sessions.entry(subject).or_default();
 
         // Get current value
         let Some(current_bytes) = session.memory.get(&key) else {
@@ -166,7 +178,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_resolves_non_existent_cell() -> anyhow::Result<()> {
-        let mut provider = Volatile::new();
+        let provider = Volatile::new();
         let subject = unique_subject("memory-resolve-none");
 
         let effect = subject
@@ -175,7 +187,7 @@ mod tests {
             .attenuate(Cell::new("missing"))
             .invoke(Resolve);
 
-        let result = effect.perform(&mut provider).await?;
+        let result = effect.perform(&provider).await?;
         assert!(result.is_none());
 
         Ok(())
@@ -183,7 +195,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_publishes_new_content() -> anyhow::Result<()> {
-        let mut provider = Volatile::new();
+        let provider = Volatile::new();
         let subject = unique_subject("memory-publish-new");
         let content = b"hello world".to_vec();
 
@@ -194,7 +206,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Publish::new(content.clone(), None))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         assert!(!edition.is_empty());
@@ -205,7 +217,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Resolve)
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         let publication = resolved.expect("should have content");
@@ -217,7 +229,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_updates_existing_content() -> anyhow::Result<()> {
-        let mut provider = Volatile::new();
+        let provider = Volatile::new();
         let subject = unique_subject("memory-publish-update");
 
         // Create initial content
@@ -227,7 +239,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Publish::new(b"initial", None))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         // Update with correct edition
@@ -237,7 +249,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Publish::new(b"updated", Some(edition1.clone())))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         assert_ne!(edition1, edition2);
@@ -248,7 +260,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Resolve)
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         let publication = resolved.expect("should have content");
@@ -259,7 +271,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_fails_on_edition_mismatch() -> anyhow::Result<()> {
-        let mut provider = Volatile::new();
+        let provider = Volatile::new();
         let subject = unique_subject("memory-mismatch");
 
         // Create initial content
@@ -269,7 +281,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Publish::new(b"initial", None))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         // Try to update with wrong edition
@@ -279,7 +291,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Publish::new(b"updated", Some(wrong_edition)))
-            .perform(&mut provider)
+            .perform(&provider)
             .await;
 
         assert!(matches!(result, Err(MemoryError::EditionMismatch { .. })));
@@ -289,7 +301,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_fails_creating_when_exists() -> anyhow::Result<()> {
-        let mut provider = Volatile::new();
+        let provider = Volatile::new();
         let subject = unique_subject("memory-create-exists");
 
         // Create initial content
@@ -299,7 +311,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Publish::new(b"initial", None))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         // Try to create again (when = None means expect empty)
@@ -308,7 +320,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Publish::new(b"new", None))
-            .perform(&mut provider)
+            .perform(&provider)
             .await;
 
         assert!(matches!(result, Err(MemoryError::EditionMismatch { .. })));
@@ -318,7 +330,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_retracts_content() -> anyhow::Result<()> {
-        let mut provider = Volatile::new();
+        let provider = Volatile::new();
         let subject = unique_subject("memory-retract");
 
         // Create content
@@ -328,7 +340,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Publish::new(b"to be deleted", None))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         // Retract with correct edition
@@ -338,7 +350,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Retract::new(edition))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         // Verify deleted
@@ -347,7 +359,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Resolve)
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         assert!(resolved.is_none());
@@ -357,7 +369,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_fails_retract_on_edition_mismatch() -> anyhow::Result<()> {
-        let mut provider = Volatile::new();
+        let provider = Volatile::new();
         let subject = unique_subject("memory-retract-mismatch");
 
         // Create content
@@ -367,7 +379,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Publish::new(b"content", None))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         // Try to retract with wrong edition
@@ -377,7 +389,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Retract::new(wrong_edition))
-            .perform(&mut provider)
+            .perform(&provider)
             .await;
 
         assert!(matches!(result, Err(MemoryError::EditionMismatch { .. })));
@@ -387,7 +399,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_handles_different_spaces() -> anyhow::Result<()> {
-        let mut provider = Volatile::new();
+        let provider = Volatile::new();
         let subject = unique_subject("memory-spaces");
 
         // Publish to different spaces
@@ -397,7 +409,7 @@ mod tests {
             .attenuate(Space::new("space1"))
             .attenuate(Cell::new("cell"))
             .invoke(Publish::new(b"content1", None))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         subject
@@ -406,7 +418,7 @@ mod tests {
             .attenuate(Space::new("space2"))
             .attenuate(Cell::new("cell"))
             .invoke(Publish::new(b"content2", None))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         // Resolve from space1
@@ -416,7 +428,7 @@ mod tests {
             .attenuate(Space::new("space1"))
             .attenuate(Cell::new("cell"))
             .invoke(Resolve)
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
         assert_eq!(result1.unwrap().content, b"content1".to_vec());
 
@@ -426,7 +438,7 @@ mod tests {
             .attenuate(Space::new("space2"))
             .attenuate(Cell::new("cell"))
             .invoke(Resolve)
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
         assert_eq!(result2.unwrap().content, b"content2".to_vec());
 
@@ -435,7 +447,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_succeeds_with_stale_edition_when_value_matches() -> anyhow::Result<()> {
-        let mut provider = Volatile::new();
+        let provider = Volatile::new();
         let subject = unique_subject("memory-stale-ok");
         let content = b"desired value".to_vec();
 
@@ -446,7 +458,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Publish::new(content.clone(), None))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         // Try to publish same content with wrong edition - should succeed
@@ -456,7 +468,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Publish::new(content.clone(), Some(wrong_edition)))
-            .perform(&mut provider)
+            .perform(&provider)
             .await;
 
         assert!(result.is_ok());
@@ -470,7 +482,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_produces_deterministic_content_hash() -> anyhow::Result<()> {
-        let mut provider = Volatile::new();
+        let provider = Volatile::new();
         let subject = unique_subject("memory-deterministic-hash");
         let content = b"same content".to_vec();
 
@@ -481,7 +493,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("cell1"))
             .invoke(Publish::new(content.clone(), None))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         // Create same value at cell2
@@ -490,7 +502,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("cell2"))
             .invoke(Publish::new(content, None))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         // Same content should produce same edition (content hash)
@@ -501,7 +513,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_succeeds_retracting_already_retracted() -> anyhow::Result<()> {
-        let mut provider = Volatile::new();
+        let provider = Volatile::new();
         let subject = unique_subject("memory-retract-already-retracted");
 
         // Try to retract non-existent cell - should succeed
@@ -511,7 +523,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("nonexistent"))
             .invoke(Retract::new(wrong_edition))
-            .perform(&mut provider)
+            .perform(&provider)
             .await;
 
         assert!(result.is_ok());
@@ -521,7 +533,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_handles_nested_spaces() -> anyhow::Result<()> {
-        let mut provider = Volatile::new();
+        let provider = Volatile::new();
         let subject = unique_subject("memory-nested-spaces");
         let content = b"nested content".to_vec();
 
@@ -532,7 +544,7 @@ mod tests {
             .attenuate(Space::new("parent/child/grandchild"))
             .attenuate(Cell::new("cell"))
             .invoke(Publish::new(content.clone(), None))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         assert!(!edition.is_empty());
@@ -543,7 +555,7 @@ mod tests {
             .attenuate(Space::new("parent/child/grandchild"))
             .attenuate(Cell::new("cell"))
             .invoke(Resolve)
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         let publication = resolved.expect("should have content");
@@ -554,7 +566,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_handles_empty_content() -> anyhow::Result<()> {
-        let mut provider = Volatile::new();
+        let provider = Volatile::new();
         let subject = unique_subject("memory-empty");
         let content = vec![];
 
@@ -564,7 +576,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("empty"))
             .invoke(Publish::new(content.clone(), None))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         assert!(!edition.is_empty());
@@ -574,7 +586,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("empty"))
             .invoke(Resolve)
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         let publication = resolved.expect("should have content");
@@ -585,7 +597,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_handles_large_content() -> anyhow::Result<()> {
-        let mut provider = Volatile::new();
+        let provider = Volatile::new();
         let subject = unique_subject("memory-large");
         // 1MB content
         let content: Vec<u8> = (0..1024 * 1024).map(|i| (i % 256) as u8).collect();
@@ -596,7 +608,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("large"))
             .invoke(Publish::new(content.clone(), None))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         assert!(!edition.is_empty());
@@ -606,7 +618,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("large"))
             .invoke(Resolve)
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         let publication = resolved.expect("should have content");

@@ -82,7 +82,7 @@ where
     ///
     /// Use this when the provider trusts the caller (e.g., local execution).
     /// For operations that require authorization, use `acquire` first.
-    pub async fn perform<Env>(self, env: &mut Env) -> Fx::Output
+    pub async fn perform<Env>(self, env: &Env) -> Fx::Output
     where
         Self: Into<Capability<Fx>>,
         Env: Provider<Fx>,
