@@ -17,11 +17,17 @@ csv = ["dep:csv-async"]
 integration-tests = ["dialog-common/integration-tests"]
 # Enable web integration tests
 web-integration-tests = ["dialog-common/web-integration-tests"]
+ucan = ["dialog-storage/ucan"]
 
 [dependencies]
+dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
-dialog-storage = { workspace = true }
+dialog-credentials = { workspace = true }
+dialog-effects = { workspace = true }
+dialog-s3-credentials = { workspace = true }
+dialog-storage = { workspace = true, features = ["s3"] }
 dialog-prolly-tree = { workspace = true }
+dialog-varsig = { workspace = true }
 
 anyhow = { workspace = true, optional = true }
 arrayref = { workspace = true }
@@ -37,7 +43,9 @@ rand = { workspace = true }
 rand_core = { workspace = true }
 rand_chacha = { workspace = true }
 serde = { workspace = true }
+signature = { workspace = true }
 serde-big-array = { workspace = true }
+serde_ipld_dagcbor = { workspace = true }
 serde_json = { workspace = true }
 static_assertions = { workspace = true }
 thiserror = { workspace = true }
