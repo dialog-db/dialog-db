@@ -69,7 +69,7 @@ where
     Capability<Do>: ConditionalSend + S3Request,
 {
     async fn execute(
-        &mut self,
+        &self,
         authorized: Authorized<Do, Authorization>,
     ) -> Result<AuthorizedRequest, AccessError> {
         authorized

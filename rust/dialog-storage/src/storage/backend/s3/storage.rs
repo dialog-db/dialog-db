@@ -21,7 +21,7 @@ impl<Issuer> Provider<Get> for S3<Issuer>
 where
     Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
-    async fn execute(&mut self, input: Capability<Get>) -> Result<Option<Vec<u8>>, StorageError> {
+    async fn execute(&self, input: Capability<Get>) -> Result<Option<Vec<u8>>, StorageError> {
         // Build the authorization capability
         let capability = Subject::from(input.subject().clone())
             .attenuate(Storage)
@@ -71,7 +71,7 @@ impl<Issuer> Provider<Set> for S3<Issuer>
 where
     Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
-    async fn execute(&mut self, input: Capability<Set>) -> Result<(), StorageError> {
+    async fn execute(&self, input: Capability<Set>) -> Result<(), StorageError> {
         let Set { key, value } = Set::of(&input);
         let checksum = Hasher::Sha256.checksum(value);
 
@@ -119,7 +119,7 @@ impl<Issuer> Provider<Delete> for S3<Issuer>
 where
     Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
-    async fn execute(&mut self, input: Capability<Delete>) -> Result<(), StorageError> {
+    async fn execute(&self, input: Capability<Delete>) -> Result<(), StorageError> {
         // Build the authorization capability
         let capability = Subject::from(input.subject().clone())
             .attenuate(Storage)

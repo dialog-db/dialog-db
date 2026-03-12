@@ -18,7 +18,7 @@ impl From<FileSystemError> for ArchiveError {
 
 #[async_trait]
 impl Provider<Get> for FileSystem {
-    async fn execute(&mut self, effect: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
+    async fn execute(&self, effect: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
         let subject = effect.subject().into();
         let catalog = effect.catalog();
         let digest = effect.digest();
@@ -39,7 +39,7 @@ impl Provider<Get> for FileSystem {
 
 #[async_trait]
 impl Provider<Put> for FileSystem {
-    async fn execute(&mut self, effect: Capability<Put>) -> Result<(), ArchiveError> {
+    async fn execute(&self, effect: Capability<Put>) -> Result<(), ArchiveError> {
         let subject = effect.subject().into();
         let catalog = effect.catalog();
         let digest = effect.digest();
@@ -106,7 +106,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_returns_none_for_missing_content() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
-        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
         let subject = unique_subject("archive-get-none");
         let digest = Blake3Hash::hash(b"nonexistent");
 
@@ -115,7 +115,7 @@ mod tests {
             .attenuate(Catalog::new("index"))
             .invoke(Get::new(digest));
 
-        let result = effect.perform(&mut provider).await?;
+        let result = effect.perform(&provider).await?;
         assert!(result.is_none());
 
         Ok(())
@@ -124,7 +124,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_stores_and_retrieves_content() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
-        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
         let subject = unique_subject("archive-put-get");
         let content = b"hello world".to_vec();
         let digest = Blake3Hash::hash(&content);
@@ -136,7 +136,7 @@ mod tests {
             .attenuate(Catalog::new("index"))
             .invoke(Put::new(digest.clone(), content.clone()));
 
-        put_effect.perform(&mut provider).await?;
+        put_effect.perform(&provider).await?;
 
         // Get content
         let get_effect = subject
@@ -144,7 +144,7 @@ mod tests {
             .attenuate(Catalog::new("index"))
             .invoke(Get::new(digest));
 
-        let result = get_effect.perform(&mut provider).await?;
+        let result = get_effect.perform(&provider).await?;
         assert_eq!(result, Some(content));
 
         Ok(())
@@ -153,7 +153,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_rejects_digest_mismatch() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
-        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
         let subject = unique_subject("archive-mismatch");
         let content = b"hello world".to_vec();
         let wrong_digest = Blake3Hash::hash(b"different content");
@@ -163,7 +163,7 @@ mod tests {
             .attenuate(Catalog::new("index"))
             .invoke(Put::new(wrong_digest, content));
 
-        let result = effect.perform(&mut provider).await;
+        let result = effect.perform(&provider).await;
         assert!(matches!(result, Err(ArchiveError::DigestMismatch { .. })));
 
         Ok(())
@@ -172,7 +172,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_handles_different_catalogs() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
-        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
         let subject = unique_subject("archive-catalogs");
         let content1 = b"content for catalog 1".to_vec();
         let content2 = b"content for catalog 2".to_vec();
@@ -185,7 +185,7 @@ mod tests {
             .attenuate(Archive)
             .attenuate(Catalog::new("catalog1"))
             .invoke(Put::new(digest1.clone(), content1.clone()))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         subject
@@ -193,7 +193,7 @@ mod tests {
             .attenuate(Archive)
             .attenuate(Catalog::new("catalog2"))
             .invoke(Put::new(digest2.clone(), content2.clone()))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         // Retrieve from catalog1
@@ -202,7 +202,7 @@ mod tests {
             .attenuate(Archive)
             .attenuate(Catalog::new("catalog1"))
             .invoke(Get::new(digest1))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
         assert_eq!(result1, Some(content1));
 
@@ -212,7 +212,7 @@ mod tests {
             .attenuate(Archive)
             .attenuate(Catalog::new("catalog2"))
             .invoke(Get::new(digest2.clone()))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
         assert_eq!(result2, Some(content2));
 
@@ -221,7 +221,7 @@ mod tests {
             .attenuate(Archive)
             .attenuate(Catalog::new("catalog1"))
             .invoke(Get::new(digest2))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
         assert!(cross.is_none());
 
@@ -231,7 +231,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_is_idempotent_for_same_content() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
-        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
         let subject = unique_subject("archive-idempotent");
         let content = b"idempotent content".to_vec();
         let digest = Blake3Hash::hash(&content);
@@ -242,7 +242,7 @@ mod tests {
             .attenuate(Archive)
             .attenuate(Catalog::new("index"))
             .invoke(Put::new(digest.clone(), content.clone()))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         subject
@@ -250,7 +250,7 @@ mod tests {
             .attenuate(Archive)
             .attenuate(Catalog::new("index"))
             .invoke(Put::new(digest.clone(), content.clone()))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         // Should still be retrievable
@@ -258,7 +258,7 @@ mod tests {
             .attenuate(Archive)
             .attenuate(Catalog::new("index"))
             .invoke(Get::new(digest))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
         assert_eq!(result, Some(content));
 
@@ -268,7 +268,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_handles_empty_content() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
-        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
         let subject = unique_subject("archive-empty");
         let content = vec![];
         let digest = Blake3Hash::hash(&content);
@@ -278,14 +278,14 @@ mod tests {
             .attenuate(Archive)
             .attenuate(Catalog::new("index"))
             .invoke(Put::new(digest.clone(), content.clone()))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         let result = subject
             .attenuate(Archive)
             .attenuate(Catalog::new("index"))
             .invoke(Get::new(digest))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
         assert_eq!(result, Some(content));
 
@@ -295,7 +295,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_handles_large_content() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
-        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
         let subject = unique_subject("archive-large");
         // 1MB content
         let content: Vec<u8> = (0..1024 * 1024).map(|i| (i % 256) as u8).collect();
@@ -306,14 +306,14 @@ mod tests {
             .attenuate(Archive)
             .attenuate(Catalog::new("index"))
             .invoke(Put::new(digest.clone(), content.clone()))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         let result = subject
             .attenuate(Archive)
             .attenuate(Catalog::new("index"))
             .invoke(Get::new(digest))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
         assert_eq!(result, Some(content));
 

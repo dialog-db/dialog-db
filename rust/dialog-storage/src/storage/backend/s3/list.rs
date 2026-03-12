@@ -112,7 +112,7 @@ where
 
         // Execute the capability using the Provider trait
         let result = capability
-            .perform(&mut self.bucket.clone())
+            .perform(&self.bucket.clone())
             .await
             .map_err(|e| S3StorageError::ServiceError(e.to_string()))?;
 
@@ -132,7 +132,7 @@ where
     Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
     async fn execute(
-        &mut self,
+        &self,
         input: Capability<storage::List>,
     ) -> Result<storage::ListResult, storage::StorageError> {
         // Build the authorization capability

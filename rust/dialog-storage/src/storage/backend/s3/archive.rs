@@ -19,7 +19,7 @@ impl<Issuer> Provider<Get> for S3<Issuer>
 where
     Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
-    async fn execute(&mut self, input: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
+    async fn execute(&self, input: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
         // Build the authorization capability
         let capability = Subject::from(input.subject().clone())
             .attenuate(Archive)
@@ -69,7 +69,7 @@ impl<Issuer> Provider<Put> for S3<Issuer>
 where
     Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
-    async fn execute(&mut self, input: Capability<Put>) -> Result<(), ArchiveError> {
+    async fn execute(&self, input: Capability<Put>) -> Result<(), ArchiveError> {
         let Put { content, digest } = Put::of(&input);
         let checksum = Hasher::Sha256.checksum(content);
 
