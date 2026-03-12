@@ -29,8 +29,32 @@
           overlays = [
             (import rust-overlay)
           ];
+          config = {
+            allowUnfreePredicate =
+              pkg:
+              builtins.elem (pkgs.lib.getName pkg) [
+                "google-chrome"
+              ];
+          };
         };
+
         filter = nix-filter.lib;
+
+        chrome = if pkgs.stdenv.isDarwin then pkgs.google-chrome else pkgs.chromium;
+        chromePath = "${chrome}/bin/${chrome.meta.mainProgram}";
+
+        # NOTE: We only need to make use of this on Darwin at this time
+        webdriverConfig =
+          with pkgs;
+          (formats.json { }).generate "webdriver.json" {
+            "goog:chromeOptions" = {
+              binary = "${chromePath}";
+              args = [
+                "--no-sandbox"
+                "--disable-gpu"
+              ];
+            };
+          };
 
         commonBuildInputs =
           with pkgs;
@@ -42,10 +66,6 @@
             trunk
             wasm-bindgen-cli
             wasm-pack
-          ]
-          ++ lib.optionals stdenv.isLinux [
-            chromium
-            chromedriver
           ]
           ++ lib.optionals stdenv.isDarwin [
             apple-sdk
@@ -76,6 +96,8 @@
               nodejs
               cargo-nextest
               rustToolchain
+              chrome
+              chromedriver
             ]
           );
 
@@ -83,17 +105,13 @@
           with pkgs;
           {
             "WASM_BINDGEN_TEST_TIMEOUT" = "180";
-          }
-          // lib.optionalAttrs stdenv.isLinux {
-            "CHROME" = "${chromium}/bin/chromium";
+
+            "CHROME_PATH" = "${chromePath}";
+            "CHROME" = "${chromePath}";
             "CHROMEDRIVER" = "${chromedriver}/bin/chromedriver";
-            "CHROME_PATH" = "${chromium}/bin/chromium";
           }
-          # Chromium is not packaged for darwin in nixpkgs
-          # (https://github.com/NixOS/nixpkgs/issues/247855),
-          # so we fall back to the default system Chrome install path.
           // lib.optionalAttrs stdenv.isDarwin {
-            "CHROME_PATH" = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+            "WASM_BINDGEN_TEST_WEBDRIVER_JSON" = webdriverConfig;
           };
 
         dialog-artifacts-web = buildWasmCrate {

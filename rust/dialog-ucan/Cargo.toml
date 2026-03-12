@@ -43,6 +43,7 @@ base64 = { workspace = true }
 dialog-credentials = { workspace = true }
 ipld-core = { workspace = true, features = ["arb"] }
 pretty_assertions = { workspace = true }
+quickcheck = { workspace = true }
 serde_json = { workspace = true }
 serde_ipld_dagjson = { workspace = true }
 test-log = { workspace = true }
@@ -52,7 +53,6 @@ testresult = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
-getrandom_04 = { workspace = true, features = ["wasm_js"] }
 wasm-bindgen-test = { workspace = true }
 
 [features]

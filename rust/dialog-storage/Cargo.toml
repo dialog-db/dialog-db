@@ -48,11 +48,14 @@ base64 = { workspace = true }
 blake3 = { workspace = true }
 brotli = { workspace = true }
 futures-util = { workspace = true }
+hyper = { workspace = true, optional = true }
+hyper-util = { workspace = true, features = ["server", "tokio", "service"], optional = true }
 md5 = { workspace = true }
 reqwest = { workspace = true, features = ["json"], optional = true }
 dialog-credentials = { workspace = true, optional = true }
 dialog-s3-credentials = { workspace = true, optional = true }
 quick-xml = { workspace = true, features = ["serde", "serialize"], optional = true }
+s3s = { workspace = true, optional = true }
 sieve-cache = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_ipld_dagcbor = { workspace = true }
@@ -67,13 +70,6 @@ url = { workspace = true }
 pidlock = { workspace = true }
 tempfile = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["sync", "fs", "macros", "rt", "net"] }
-s3s = { workspace = true, optional = true }
-hyper = { workspace = true, optional = true }
-hyper-util = { workspace = true, features = [
-  "server",
-  "tokio",
-  "service",
-], optional = true }
 http-body-util = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 tokio-test = { workspace = true, optional = true }
