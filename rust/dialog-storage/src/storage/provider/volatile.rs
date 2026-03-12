@@ -37,8 +37,8 @@ mod archive;
 mod memory;
 
 use dialog_capability::Did;
+use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::RwLock;
 
 /// Archive key: (catalog, digest_base58)
 type ArchiveKey = (String, String);
@@ -60,8 +60,10 @@ struct Session {
 /// A simple provider that stores all data in memory. Each subject DID gets its
 /// own session with separate archive and memory storage. Data is not persisted.
 ///
-/// Uses `RwLock` for interior mutability so that `Provider::execute` can take
-/// `&self`. All lock guards are dropped before any `.await` points.
+/// Uses `parking_lot::RwLock` for interior mutability so that
+/// `Provider::execute` can take `&self`. All lock guards are dropped before
+/// any `.await` points. Unlike `std::sync::RwLock`, `parking_lot` locks are
+/// infallible (no poisoning).
 #[derive(Default, Debug)]
 pub struct Volatile {
     sessions: RwLock<HashMap<Did, Session>>,
@@ -80,15 +82,6 @@ pub enum VolatileError {
     /// CAS condition failed.
     #[error("CAS condition failed: {0}")]
     Cas(String),
-    /// RwLock was poisoned by a panicking thread.
-    #[error("Lock poisoned: {0}")]
-    LockPoisoned(String),
-}
-
-impl<T> From<std::sync::PoisonError<T>> for VolatileError {
-    fn from(e: std::sync::PoisonError<T>) -> Self {
-        VolatileError::LockPoisoned(e.to_string())
-    }
 }
 
 #[cfg(test)]
@@ -101,13 +94,7 @@ mod tests {
     #[dialog_common::test]
     fn it_creates_new_provider() {
         let provider = Volatile::new();
-        assert!(
-            provider
-                .sessions
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .is_empty()
-        );
+        assert!(provider.sessions.read().is_empty());
     }
 
     #[dialog_common::test]
@@ -118,16 +105,9 @@ mod tests {
         provider
             .sessions
             .write()
-            .unwrap_or_else(|e| e.into_inner())
             .entry(subject.clone())
             .or_default();
-        assert!(
-            provider
-                .sessions
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .contains_key(&subject)
-        );
+        assert!(provider.sessions.read().contains_key(&subject));
     }
 
     #[dialog_common::test]
@@ -140,14 +120,13 @@ mod tests {
         provider
             .sessions
             .write()
-            .unwrap_or_else(|e| e.into_inner())
             .entry(subject.clone())
             .or_default()
             .archive
             .insert(("catalog".to_string(), digest), b"value".to_vec());
 
         // Second access should see the same data
-        let sessions = provider.sessions.read().unwrap_or_else(|e| e.into_inner());
+        let sessions = provider.sessions.read();
         let session = sessions.get(&subject).unwrap();
         assert_eq!(session.archive.len(), 1);
     }
@@ -162,7 +141,6 @@ mod tests {
         provider
             .sessions
             .write()
-            .unwrap_or_else(|e| e.into_inner())
             .entry(subject1.clone())
             .or_default()
             .archive
@@ -171,14 +149,63 @@ mod tests {
         provider
             .sessions
             .write()
-            .unwrap_or_else(|e| e.into_inner())
             .entry(subject2.clone())
             .or_default()
             .archive
             .insert(("catalog".to_string(), digest), b"value2".to_vec());
 
-        let sessions = provider.sessions.read().unwrap_or_else(|e| e.into_inner());
+        let sessions = provider.sessions.read();
         assert_eq!(sessions.get(&subject1).unwrap().archive.len(), 1);
         assert_eq!(sessions.get(&subject2).unwrap().archive.len(), 1);
+    }
+
+    /// Demonstrates that a provider can be shared across concurrent tasks,
+    /// which is the key motivation for `Provider::execute` taking `&self`
+    /// instead of `&mut self`.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[dialog_common::test]
+    async fn it_supports_concurrent_access() -> anyhow::Result<()> {
+        use dialog_capability::Subject;
+        use dialog_effects::archive::{Archive, Catalog, Get, Put};
+        use std::sync::Arc;
+
+        let provider = Arc::new(Volatile::new());
+
+        // Spawn multiple tasks that write to the same provider concurrently.
+        let mut handles = Vec::new();
+        for i in 0..10u8 {
+            let provider = provider.clone();
+            let handle = tokio::spawn(async move {
+                let subject = Subject::from(did!("test:concurrent"));
+                let content = vec![i; 64];
+                let digest = Blake3Hash::hash(&content);
+
+                subject
+                    .clone()
+                    .attenuate(Archive)
+                    .attenuate(Catalog::new("index"))
+                    .invoke(Put::new(digest.clone(), content))
+                    .perform(provider.as_ref())
+                    .await
+                    .unwrap();
+
+                let result = subject
+                    .attenuate(Archive)
+                    .attenuate(Catalog::new("index"))
+                    .invoke(Get::new(digest))
+                    .perform(provider.as_ref())
+                    .await
+                    .unwrap();
+
+                assert!(result.is_some());
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.await?;
+        }
+
+        Ok(())
     }
 }

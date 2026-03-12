@@ -23,10 +23,7 @@ impl Provider<Get> for Volatile {
 
         let key: ArchiveKey = (catalog.to_string(), digest.as_bytes().to_base58());
 
-        let sessions = self
-            .sessions
-            .read()
-            .map_err(|_| VolatileError::LockPoisoned("sessions".into()))?;
+        let sessions = self.sessions.read();
         Ok(sessions
             .get(&subject)
             .and_then(|session| session.archive.get(&key).cloned()))
@@ -54,10 +51,7 @@ impl Provider<Put> for Volatile {
         let key: ArchiveKey = (catalog.to_string(), digest.as_bytes().to_base58());
 
         // Content-addressed storage is idempotent
-        let mut sessions = self
-            .sessions
-            .write()
-            .map_err(|_| VolatileError::LockPoisoned("sessions".into()))?;
+        let mut sessions = self.sessions.write();
         let session = sessions.entry(subject).or_default();
         session
             .archive
