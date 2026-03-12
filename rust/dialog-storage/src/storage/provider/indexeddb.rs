@@ -26,7 +26,7 @@
 //! use dialog_common::Blake3Hash;
 //!
 //! # async fn example() -> anyhow::Result<()> {
-//! let mut provider = IndexedDb::new();
+//! let provider = IndexedDb::new();
 //! let digest = Blake3Hash::hash(b"hello");
 //!
 //! let effect = Subject::from(did!("key:z6Mk..."))
@@ -34,7 +34,7 @@
 //!     .attenuate(Catalog::new("index"))
 //!     .invoke(Get::new(digest));
 //!
-//! let result = effect.perform(&mut provider).await?;
+//! let result = effect.perform(&provider).await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -45,6 +45,7 @@ mod memory;
 use dialog_capability::Did;
 use js_sys::Uint8Array;
 use rexie::{ObjectStore, Rexie, RexieBuilder, TransactionMode};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 /// Convert bytes to a JS Uint8Array.
@@ -206,27 +207,52 @@ impl<'a> Store<'a> {
 ///
 /// Databases are opened lazily on first access and stores are created dynamically
 /// as needed.
+///
+/// Uses `RefCell` for interior mutability since this provider only targets
+/// wasm32 (single-threaded). This avoids the overhead and poisoning concerns
+/// of `RwLock`.
 pub struct IndexedDb {
     /// Cached database sessions keyed by subject DID.
-    sessions: HashMap<Did, Session>,
+    sessions: RefCell<HashMap<Did, Session>>,
 }
 
 impl IndexedDb {
     /// Creates a new IndexedDB provider.
     pub fn new() -> Self {
         Self {
-            sessions: HashMap::new(),
+            sessions: RefCell::new(HashMap::new()),
         }
     }
 
     /// Opens or returns an existing session for the given subject.
-    async fn open(&mut self, subject: &Did) -> Result<&mut Session, IndexedDbError> {
-        if !self.sessions.contains_key(subject) {
+    ///
+    /// Checks for an existing session via a short borrow, drops it before
+    /// any async work, then borrows mutably to insert a new session if needed.
+    async fn open(&self, subject: &Did) -> Result<(), IndexedDbError> {
+        let exists = self.sessions.borrow().contains_key(subject);
+        if !exists {
             let session = Session::open(subject.as_ref()).await?;
-            self.sessions.insert(subject.clone(), session);
+            self.sessions.borrow_mut().insert(subject.clone(), session);
         }
+        Ok(())
+    }
 
-        Ok(self.sessions.get_mut(subject).unwrap())
+    /// Temporarily removes a session from the cache for async operations.
+    ///
+    /// IndexedDB operations require `&mut Session` and are async, so we
+    /// cannot hold a `RefCell` borrow across `.await` points. Instead we
+    /// remove the session, perform the work, then re-insert it via
+    /// [`IndexedDb::return_session`].
+    fn take_session(&self, subject: &Did) -> Result<Session, IndexedDbError> {
+        self.sessions
+            .borrow_mut()
+            .remove(subject)
+            .ok_or_else(|| IndexedDbError::Database(format!("No session for {}", subject)))
+    }
+
+    /// Returns a session to the cache after async operations complete.
+    fn return_session(&self, subject: Did, session: Session) {
+        self.sessions.borrow_mut().insert(subject, session);
     }
 }
 

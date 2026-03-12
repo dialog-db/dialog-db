@@ -29,7 +29,7 @@ use crate::Invocation;
 /// #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 /// #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 /// impl Provider<MyInvocation> for MyEnv {
-///     async fn execute(&mut self, input: String) -> usize {
+///     async fn execute(&self, input: String) -> usize {
 ///         input.len()
 ///     }
 /// }
@@ -38,5 +38,5 @@ use crate::Invocation;
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait Provider<I: Invocation> {
     /// Execute an invocation and return the output.
-    async fn execute(&mut self, input: I::Input) -> I::Output;
+    async fn execute(&self, input: I::Input) -> I::Output;
 }

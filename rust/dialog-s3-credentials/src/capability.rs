@@ -71,7 +71,7 @@
 //!
 //! ```ignore
 //! // With S3 credentials
-//! let result = get_capability.perform(&mut s3_credentials).await?;
+//! let result = get_capability.perform(&s3_credentials).await?;
 //!
 //! // Result is an AuthorizedRequest with presigned URL and headers
 //! println!("URL: {}", result.url);

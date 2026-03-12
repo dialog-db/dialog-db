@@ -22,7 +22,7 @@ where
     Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
     async fn execute(
-        &mut self,
+        &self,
         input: Capability<Resolve>,
     ) -> Result<Option<Publication>, MemoryError> {
         // Build the authorization capability
@@ -85,7 +85,7 @@ impl<Issuer> Provider<Publish> for S3<Issuer>
 where
     Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
-    async fn execute(&mut self, input: Capability<Publish>) -> Result<Vec<u8>, MemoryError> {
+    async fn execute(&self, input: Capability<Publish>) -> Result<Vec<u8>, MemoryError> {
         let Publish { content, when } = Publish::of(&input);
         let when = when
             .as_ref()
@@ -151,7 +151,7 @@ impl<Issuer> Provider<Retract> for S3<Issuer>
 where
     Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
-    async fn execute(&mut self, input: Capability<Retract>) -> Result<(), MemoryError> {
+    async fn execute(&self, input: Capability<Retract>) -> Result<(), MemoryError> {
         let Retract { when } = Retract::of(&input);
         let when = String::from_utf8_lossy(when).to_string();
 
