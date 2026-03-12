@@ -4,9 +4,13 @@
 //! semantic triples. Entities are based on URIs and provide unique identification
 //! for objects in the triple store.
 
-use std::{fmt::Display, ops::Deref, str::FromStr};
+use std::{
+    fmt::{Debug, Display, Formatter, Result as FmtResult},
+    ops::Deref,
+    str::FromStr,
+};
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 use crate::{DialogArtifactsError, ENTITY_LENGTH, Uri};
 
@@ -31,7 +35,7 @@ where
 {
     String::deserialize(deserializer)?
         .parse::<Entity>()
-        .map_err(|error| serde::de::Error::custom(format!("{:?}", error)))
+        .map_err(|error| de::Error::custom(format!("{error:?}")))
 }
 
 impl Deref for Entity {
@@ -85,7 +89,7 @@ impl From<Entity> for String {
 }
 
 impl Display for Entity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "{}", **self)
     }
 }
@@ -109,8 +113,8 @@ impl Entity {
     }
 }
 
-impl std::fmt::Debug for Entity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for Entity {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.write_str(&self.0.to_string())
     }
 }

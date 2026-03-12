@@ -1,4 +1,13 @@
 #![warn(missing_docs)]
+#![warn(clippy::absolute_paths)]
+#![warn(clippy::default_trait_access)]
+#![warn(clippy::fallible_impl_from)]
+#![warn(clippy::panicking_unwrap)]
+#![warn(clippy::unused_async)]
+#![deny(clippy::partial_pub_fields)]
+#![deny(clippy::unnecessary_self_imports)]
+#![cfg_attr(not(test), warn(clippy::large_futures))]
+#![cfg_attr(not(test), deny(clippy::panic))]
 
 //! This package embodies a data storage primitive called [`Artifacts`]. [`Artifacts`]
 //! is a triple store backed by indexes that are represented as prolly trees.
