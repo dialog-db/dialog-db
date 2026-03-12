@@ -1183,6 +1183,7 @@ dependencies = [
  "ipld-core",
  "js-sys",
  "md5",
+ "parking_lot",
  "pidlock",
  "quick-xml",
  "rand 0.8.5",

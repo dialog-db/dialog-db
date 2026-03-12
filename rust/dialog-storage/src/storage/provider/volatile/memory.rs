@@ -36,10 +36,7 @@ impl Provider<Resolve> for Volatile {
 
         let key: MemoryKey = (space.to_string(), cell.to_string());
 
-        let sessions = self
-            .sessions
-            .read()
-            .map_err(|_| VolatileError::LockPoisoned("sessions".into()))?;
+        let sessions = self.sessions.read();
         Ok(sessions
             .get(&subject)
             .and_then(|session| session.memory.get(&key))
@@ -64,10 +61,7 @@ impl Provider<Publish> for Volatile {
         let expected_edition = effect.when().map(|e| e.to_vec());
 
         let key: MemoryKey = (space.to_string(), cell.to_string());
-        let mut sessions = self
-            .sessions
-            .write()
-            .map_err(|_| VolatileError::LockPoisoned("sessions".into()))?;
+        let mut sessions = self.sessions.write();
         let session = sessions.entry(subject).or_default();
 
         // Get current value and edition
@@ -130,10 +124,7 @@ impl Provider<Retract> for Volatile {
         let expected_edition = effect.when().to_vec();
 
         let key: MemoryKey = (space.to_string(), cell.to_string());
-        let mut sessions = self
-            .sessions
-            .write()
-            .map_err(|_| VolatileError::LockPoisoned("sessions".into()))?;
+        let mut sessions = self.sessions.write();
         let session = sessions.entry(subject).or_default();
 
         // Get current value

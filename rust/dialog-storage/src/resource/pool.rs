@@ -1,8 +1,8 @@
 //! Caching pool for address-keyed resources.
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::sync::RwLock;
 
 /// A pool that caches resources by address.
 ///
@@ -10,13 +10,9 @@ use std::sync::RwLock;
 /// inserting them via [`Pool::insert`]. The pool provides thread-safe
 /// lookup and insertion through an internal `RwLock`.
 ///
-/// Uses `RwLock` for interior mutability so callers can check and
-/// insert through `&self`. All lock guards are short-lived and never
-/// held across `.await` points.
-///
-/// If the lock is poisoned (a thread panicked while holding it),
-/// methods recover by replacing the contents with an empty map since
-/// the pool is only a cache.
+/// Uses `parking_lot::RwLock` for interior mutability so callers can
+/// check and insert through `&self`. All lock guards are short-lived
+/// and never held across `.await` points.
 pub struct Pool<Address, R> {
     resources: RwLock<HashMap<Address, R>>,
 }
@@ -31,18 +27,12 @@ impl<Address, R> Pool<Address, R> {
 
     /// Get the number of cached resources.
     pub fn len(&self) -> usize {
-        self.resources
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .len()
+        self.resources.read().len()
     }
 
     /// Check if the pool has no cached resources.
     pub fn is_empty(&self) -> bool {
-        self.resources
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_empty()
+        self.resources.read().is_empty()
     }
 }
 
@@ -55,10 +45,7 @@ impl<Address, R> Default for Pool<Address, R> {
 impl<Address: Eq + Hash, R> Pool<Address, R> {
     /// Check whether the pool already contains a resource for the given address.
     pub fn contains(&self, address: &Address) -> bool {
-        self.resources
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .contains_key(address)
+        self.resources.read().contains_key(address)
     }
 
     /// Get a clone of the cached resource for the given address.
@@ -69,19 +56,12 @@ impl<Address: Eq + Hash, R> Pool<Address, R> {
     where
         R: Clone,
     {
-        self.resources
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(address)
-            .cloned()
+        self.resources.read().get(address).cloned()
     }
 
     /// Insert a resource for the given address, returning the old one if present.
     pub fn insert(&self, address: Address, resource: R) -> Option<R> {
-        self.resources
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(address, resource)
+        self.resources.write().insert(address, resource)
     }
 }
 
