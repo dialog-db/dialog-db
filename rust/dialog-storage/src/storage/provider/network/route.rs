@@ -196,10 +196,10 @@ mod tests {
             type Output = String;
         }
 
-        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
         struct AlphaAddr(String);
 
-        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
         struct BetaAddr(String);
 
         struct AlphaBackend;
@@ -264,6 +264,50 @@ mod tests {
             let remote_b = RemoteInvocation::new(cap_b, BetaAddr("site-b".into()));
             let result_b = remote_b.perform(&router).await;
             assert_eq!(result_b, "beta:site-b:doc-2");
+        }
+
+        #[dialog_common::test]
+        async fn it_dispatches_via_unified_address() {
+            let router = CompositeRouter {
+                alpha: AlphaBackend,
+                beta: BetaBackend,
+            };
+
+            let cap_a = Subject::from("did:key:zAlpha".parse::<Did>().unwrap())
+                .attenuate(Storage)
+                .invoke(Fetch {
+                    key: "doc-1".into(),
+                });
+            let addr_a: CompositeRouterAddress = AlphaAddr("site-a".into()).into();
+            let result_a = RemoteInvocation::new(cap_a, addr_a).perform(&router).await;
+            assert_eq!(result_a, "alpha:site-a:doc-1");
+
+            let cap_b = Subject::from("did:key:zBeta".parse::<Did>().unwrap())
+                .attenuate(Storage)
+                .invoke(Fetch {
+                    key: "doc-2".into(),
+                });
+            let addr_b: CompositeRouterAddress = BetaAddr("site-b".into()).into();
+            let result_b = RemoteInvocation::new(cap_b, addr_b).perform(&router).await;
+            assert_eq!(result_b, "beta:site-b:doc-2");
+        }
+
+        #[test]
+        fn it_generates_from_impls_for_unified_address() {
+            let alpha: CompositeRouterAddress = AlphaAddr("a".into()).into();
+            let beta: CompositeRouterAddress = BetaAddr("b".into()).into();
+
+            assert_eq!(alpha, CompositeRouterAddress::Alpha(AlphaAddr("a".into())));
+            assert_eq!(beta, CompositeRouterAddress::Beta(BetaAddr("b".into())));
+        }
+
+        #[test]
+        fn it_implements_provider_route_via_router() {
+            use dialog_capability::ProviderRoute;
+
+            // CompositeRouter implements ProviderRoute via the Router blanket
+            fn _assert_provider_route<T: ProviderRoute>() {}
+            _assert_provider_route::<CompositeRouter>();
         }
     }
 }
