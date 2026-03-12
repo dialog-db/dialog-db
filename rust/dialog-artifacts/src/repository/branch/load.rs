@@ -18,7 +18,7 @@ pub struct Load {
 
 impl Load {
     /// Execute the load operation.
-    pub async fn perform<Env>(self, env: &mut Env) -> Result<Branch, RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<Branch, RepositoryError>
     where
         Env: Provider<memory_fx::Resolve>,
     {
@@ -46,17 +46,17 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_loads_existing_branch() -> anyhow::Result<()> {
-        let mut env = Volatile::new();
+        let env = Volatile::new();
         let issuer = test_issuer().await;
 
         // First open creates
         let _ = Branch::open("main", issuer.clone(), test_subject())
-            .perform(&mut env)
+            .perform(&env)
             .await?;
 
         // Load should find it
         let branch = Branch::load("main", issuer, test_subject())
-            .perform(&mut env)
+            .perform(&env)
             .await?;
 
         assert_eq!(branch.id().id(), "main");
@@ -65,10 +65,10 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_fails_loading_missing_branch() -> anyhow::Result<()> {
-        let mut env = Volatile::new();
+        let env = Volatile::new();
 
         let result = Branch::load("nonexistent", test_issuer().await, test_subject())
-            .perform(&mut env)
+            .perform(&env)
             .await;
 
         assert!(matches!(

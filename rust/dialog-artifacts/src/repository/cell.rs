@@ -138,7 +138,7 @@ where
 {
     /// Fetch the cell value from env, updating the shared cache.
     /// Use [`get`](Cell::get) to read the cached value without hitting env.
-    pub async fn resolve<Env>(&self, env: &mut Env) -> Result<(), RepositoryError>
+    pub async fn resolve<Env>(&self, env: &Env) -> Result<(), RepositoryError>
     where
         Env: Provider<memory::Resolve>,
     {
@@ -175,7 +175,7 @@ where
 {
     /// Publish a new value to this cell, using the cached edition automatically.
     /// Updates the shared cache on success.
-    pub async fn publish<Env>(&self, value: T, env: &mut Env) -> Result<(), RepositoryError>
+    pub async fn publish<Env>(&self, value: T, env: &Env) -> Result<(), RepositoryError>
     where
         Env: Provider<memory::Publish>,
     {
@@ -262,7 +262,7 @@ where
 {
     /// Fetch the cell value from env, updating the shared cache.
     /// Use [`get`](CellOr::get) to read the cached value without hitting env.
-    pub async fn resolve<Env>(&self, env: &mut Env) -> Result<T, RepositoryError>
+    pub async fn resolve<Env>(&self, env: &Env) -> Result<T, RepositoryError>
     where
         Env: Provider<memory::Resolve>,
     {
@@ -278,7 +278,7 @@ where
 {
     /// Resolve the cell, publishing the default value if the cell is empty
     /// in env. After this call the cell is guaranteed to be synced.
-    pub async fn get_or_init<Env>(&self, env: &mut Env) -> Result<T, RepositoryError>
+    pub async fn get_or_init<Env>(&self, env: &Env) -> Result<T, RepositoryError>
     where
         Env: Provider<memory::Resolve> + Provider<memory::Publish>,
     {
@@ -296,7 +296,7 @@ where
     Codec: Encoder,
 {
     /// Publish a new value to this cell.
-    pub async fn publish<Env>(&self, value: T, env: &mut Env) -> Result<(), RepositoryError>
+    pub async fn publish<Env>(&self, value: T, env: &Env) -> Result<(), RepositoryError>
     where
         Env: Provider<memory::Publish>,
     {
@@ -332,10 +332,10 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_resolves_empty_cell() -> anyhow::Result<()> {
-        let mut provider = Volatile::new();
+        let provider = Volatile::new();
         let cell: Cell<TestValue> = Cell::new(test_subject(), "local", "missing");
 
-        cell.resolve(&mut provider).await?;
+        cell.resolve(&provider).await?;
         assert!(cell.get().is_none());
 
         Ok(())
@@ -343,7 +343,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_publishes_then_resolves() -> anyhow::Result<()> {
-        let mut provider = Volatile::new();
+        let provider = Volatile::new();
         let cell: Cell<TestValue> = Cell::new(test_subject(), "local", "test");
 
         let value = TestValue {
@@ -351,10 +351,10 @@ mod tests {
             name: "hello".into(),
         };
 
-        cell.publish(value.clone(), &mut provider).await?;
+        cell.publish(value.clone(), &provider).await?;
         assert_eq!(cell.get(), Some(value.clone()));
 
-        cell.resolve(&mut provider).await?;
+        cell.resolve(&provider).await?;
         assert_eq!(cell.get(), Some(value));
 
         Ok(())
@@ -362,22 +362,22 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_updates_with_automatic_edition() -> anyhow::Result<()> {
-        let mut provider = Volatile::new();
+        let provider = Volatile::new();
         let cell: Cell<TestValue> = Cell::new(test_subject(), "local", "update");
 
         let v1 = TestValue {
             count: 1,
             name: "first".into(),
         };
-        cell.publish(v1, &mut provider).await?;
+        cell.publish(v1, &provider).await?;
 
         let v2 = TestValue {
             count: 2,
             name: "second".into(),
         };
-        cell.publish(v2.clone(), &mut provider).await?;
+        cell.publish(v2.clone(), &provider).await?;
 
-        cell.resolve(&mut provider).await?;
+        cell.resolve(&provider).await?;
         assert_eq!(cell.get(), Some(v2));
 
         Ok(())
@@ -385,7 +385,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_caches_on_resolve() -> anyhow::Result<()> {
-        let mut provider = Volatile::new();
+        let provider = Volatile::new();
         let cell: Cell<TestValue> = Cell::new(test_subject(), "local", "cache");
 
         let value = TestValue {
@@ -394,13 +394,13 @@ mod tests {
         };
 
         let writer: Cell<TestValue> = Cell::new(test_subject(), "local", "cache");
-        writer.publish(value.clone(), &mut provider).await?;
+        writer.publish(value.clone(), &provider).await?;
 
         assert!(cell.get().is_none());
-        cell.resolve(&mut provider).await?;
+        cell.resolve(&provider).await?;
         assert_eq!(cell.get(), Some(value.clone()));
 
-        cell.resolve(&mut provider).await?;
+        cell.resolve(&provider).await?;
         assert_eq!(cell.get(), Some(value));
 
         Ok(())
@@ -419,7 +419,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn or_resolves_to_persisted_value() -> anyhow::Result<()> {
-        let mut provider = Volatile::new();
+        let provider = Volatile::new();
 
         let value = TestValue {
             count: 42,
@@ -427,11 +427,11 @@ mod tests {
         };
 
         let writer: Cell<TestValue> = Cell::new(test_subject(), "local", "or-read");
-        writer.publish(value.clone(), &mut provider).await?;
+        writer.publish(value.clone(), &provider).await?;
 
         let cell =
             Cell::<TestValue>::new(test_subject(), "local", "or-read").or(TestValue::default());
-        cell.resolve(&mut provider).await?;
+        cell.resolve(&provider).await?;
 
         assert_eq!(cell.get(), value);
 
@@ -440,7 +440,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn or_get_or_init_publishes_default_when_empty() -> anyhow::Result<()> {
-        let mut provider = Volatile::new();
+        let provider = Volatile::new();
 
         let default = TestValue {
             count: 99,
@@ -448,13 +448,13 @@ mod tests {
         };
         let cell = Cell::<TestValue>::new(test_subject(), "local", "or-init").or(default.clone());
 
-        cell.get_or_init(&mut provider).await?;
+        cell.get_or_init(&provider).await?;
 
         assert_eq!(cell.get(), default);
 
         // Verify persisted by reading from a separate cell
         let reader: Cell<TestValue> = Cell::new(test_subject(), "local", "or-init");
-        reader.resolve(&mut provider).await?;
+        reader.resolve(&provider).await?;
         assert_eq!(reader.get(), Some(default));
 
         Ok(())
@@ -462,7 +462,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn clones_share_published_state() -> anyhow::Result<()> {
-        let mut provider = Volatile::new();
+        let provider = Volatile::new();
         let cell: Cell<TestValue> = Cell::new(test_subject(), "local", "shared");
         let clone = cell.clone();
 
@@ -472,7 +472,7 @@ mod tests {
         };
 
         // Publish on original, read from clone
-        cell.publish(value.clone(), &mut provider).await?;
+        cell.publish(value.clone(), &provider).await?;
         assert_eq!(clone.get(), Some(value));
 
         Ok(())
@@ -480,7 +480,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn publish_on_clone_visible_from_original() -> anyhow::Result<()> {
-        let mut provider = Volatile::new();
+        let provider = Volatile::new();
         let original: Cell<TestValue> = Cell::new(test_subject(), "local", "shared-reverse");
         let clone = original.clone();
 
@@ -490,7 +490,7 @@ mod tests {
         };
 
         // Publish on clone, read from original
-        clone.publish(value.clone(), &mut provider).await?;
+        clone.publish(value.clone(), &provider).await?;
         assert_eq!(original.get(), Some(value));
 
         Ok(())

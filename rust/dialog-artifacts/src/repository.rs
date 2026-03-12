@@ -20,6 +20,8 @@ pub mod credentials;
 pub mod error;
 /// Node reference type for tree root hashes.
 pub mod node_reference;
+/// Remote site / repository / branch cursor hierarchy.
+pub mod remote;
 /// Occurence logical timestamp type.
 pub mod occurence;
 /// Revision type and edition tracking.

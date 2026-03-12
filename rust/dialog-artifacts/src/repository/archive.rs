@@ -1,3 +1,6 @@
+/// Fallback store that reads from local, falls back to remote.
+pub mod fallback;
+
 use async_trait::async_trait;
 use dialog_capability::{Capability, Provider};
 use dialog_common::ConditionalSync;
@@ -6,67 +9,45 @@ use dialog_storage::{
     Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder,
 };
 use serde::{Serialize, de::DeserializeOwned};
-use std::{fmt::Debug, sync::Arc};
-use tokio::sync::Mutex;
+use std::fmt::Debug;
 
 /// CAS (Content-Addressed Storage) adapter that bridges the capability system
 /// with the prolly tree's `ContentAddressedStorage` trait.
 ///
-/// This is the **only** struct in the capability-based repository that captures
-/// `Env`. It exists because the prolly tree requires an owned
-/// `ContentAddressedStorage` implementation, but we want all storage to go
-/// through capability effects.
-///
-/// Uses `Arc<Mutex<Env>>` for interior mutability since `Provider::execute`
-/// requires `&mut Env` but `ContentAddressedStorage::read` takes `&self`.
-///
-/// Created on-the-fly inside `perform()` methods when tree operations are
-/// needed, and dropped when those operations complete.
-pub struct ContentAddressedStore<Env> {
-    env: Arc<Mutex<Env>>,
+/// Borrows `&Env` — no `Arc<Mutex>` needed because `Provider::execute` takes
+/// `&self`. Created on the stack inside `perform()` methods, passed to tree
+/// operations by reference, and dropped when those operations complete.
+pub struct ContentAddressedStore<'a, Env> {
+    env: &'a Env,
     encoder: CborEncoder,
     catalog: Capability<Catalog>,
 }
 
-impl<Env> Clone for ContentAddressedStore<Env> {
+impl<Env> Clone for ContentAddressedStore<'_, Env> {
     fn clone(&self) -> Self {
         Self {
-            env: self.env.clone(),
+            env: self.env,
             encoder: self.encoder.clone(),
             catalog: self.catalog.clone(),
         }
     }
 }
 
-impl<Env> ContentAddressedStore<Env> {
+impl<'a, Env> ContentAddressedStore<'a, Env> {
     /// Create a new ContentAddressedStore that delegates storage operations to
     /// capability effects on the given environment.
-    pub fn new(env: Arc<Mutex<Env>>, catalog: Capability<Catalog>) -> Self {
+    pub fn new(env: &'a Env, catalog: Capability<Catalog>) -> Self {
         Self {
             env,
             encoder: CborEncoder,
             catalog,
         }
     }
-
-    /// Unwrap the inner environment, consuming this archive.
-    /// Panics if there are other references to the Arc.
-    pub fn into_inner(self) -> Env {
-        Arc::try_unwrap(self.env)
-            .ok()
-            .expect("ContentAddressedStore: other references still exist")
-            .into_inner()
-    }
-
-    /// Get a reference to the shared environment.
-    pub fn env(&self) -> &Arc<Mutex<Env>> {
-        &self.env
-    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> ContentAddressedStorage for ContentAddressedStore<Env>
+impl<Env> ContentAddressedStorage for ContentAddressedStore<'_, Env>
 where
     Env: Provider<Get> + Provider<Put> + ConditionalSync + 'static,
 {
@@ -79,8 +60,7 @@ where
     {
         let effect = self.catalog.clone().invoke(Get::new(*hash));
 
-        let mut env = self.env.lock().await;
-        let result: Result<Option<Vec<u8>>, _> = effect.perform(&mut *env).await;
+        let result: Result<Option<Vec<u8>>, _> = effect.perform(self.env).await;
         let result = result.map_err(|e| DialogStorageError::StorageBackend(e.to_string()))?;
 
         match result {
@@ -104,8 +84,7 @@ where
 
         let effect = self.catalog.clone().invoke(Put::new(hash, bytes.clone()));
 
-        let mut env = self.env.lock().await;
-        let result: Result<(), _> = effect.perform(&mut *env).await;
+        let result: Result<(), _> = effect.perform(self.env).await;
         result.map_err(|e| DialogStorageError::StorageBackend(e.to_string()))?;
 
         Ok(hash)
@@ -114,7 +93,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> Encoder for ContentAddressedStore<Env>
+impl<Env> Encoder for ContentAddressedStore<'_, Env>
 where
     Env: ConditionalSync + 'static,
 {
@@ -159,8 +138,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_writes_and_reads_block() -> anyhow::Result<()> {
-        let env = Arc::new(Mutex::new(Volatile::new()));
-        let mut archive = ContentAddressedStore::new(env, test_catalog("index"));
+        let env = Volatile::new();
+        let mut archive = ContentAddressedStore::new(&env, test_catalog("index"));
 
         let block = TestBlock {
             value: 42,
@@ -176,8 +155,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_returns_none_for_missing_hash() -> anyhow::Result<()> {
-        let env = Arc::new(Mutex::new(Volatile::new()));
-        let archive = ContentAddressedStore::new(env, test_catalog("index"));
+        let env = Volatile::new();
+        let archive = ContentAddressedStore::new(&env, test_catalog("index"));
 
         let missing_hash = [0u8; 32];
         let result: Option<TestBlock> = archive.read(&missing_hash).await?;
@@ -188,7 +167,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_isolates_catalogs() -> anyhow::Result<()> {
-        let env = Arc::new(Mutex::new(Volatile::new()));
+        let env = Volatile::new();
 
         let block = TestBlock {
             value: 99,
@@ -197,20 +176,20 @@ mod tests {
 
         // Write to catalog "a"
         let hash = {
-            let mut archive = ContentAddressedStore::new(env.clone(), test_catalog("a"));
+            let mut archive = ContentAddressedStore::new(&env, test_catalog("a"));
             archive.write(&block).await?
         };
 
         // Read from catalog "b" — should not find it
         {
-            let archive = ContentAddressedStore::new(env.clone(), test_catalog("b"));
+            let archive = ContentAddressedStore::new(&env, test_catalog("b"));
             let result: Option<TestBlock> = archive.read(&hash).await?;
             assert!(result.is_none());
         }
 
         // Read from catalog "a" — should find it
         {
-            let archive = ContentAddressedStore::new(env.clone(), test_catalog("a"));
+            let archive = ContentAddressedStore::new(&env, test_catalog("a"));
             let result: Option<TestBlock> = archive.read(&hash).await?;
             assert_eq!(result, Some(block));
         }

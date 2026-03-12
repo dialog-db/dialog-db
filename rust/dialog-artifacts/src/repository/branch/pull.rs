@@ -2,18 +2,17 @@ use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
-use dialog_prolly_tree::{EMPT_TREE_HASH, Tree};
-use std::collections::HashSet;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use dialog_effects::remote::RemoteInvocation;
 
-use super::{Branch, Index};
+use super::Branch;
 use crate::DialogArtifactsError;
-use crate::repository::archive::ContentAddressedStore;
-use crate::repository::node_reference::NodeReference;
+use crate::repository::Site;
 use crate::repository::revision::Revision;
 
-/// Command struct for pulling from a local upstream revision.
+pub(crate) mod local;
+mod remote;
+
+/// Command struct for pulling from a local upstream revision (legacy API).
 ///
 /// This performs a three-way merge between the current branch, the base
 /// (last sync point), and the upstream revision.
@@ -27,7 +26,7 @@ impl PullLocal {
     /// new revision (or None if no changes).
     pub async fn perform<Env>(
         self,
-        env: Arc<Mutex<Env>>,
+        env: &Env,
     ) -> Result<(Branch, Option<Revision>), DialogArtifactsError>
     where
         Env: Provider<archive_fx::Get>
@@ -37,84 +36,65 @@ impl PullLocal {
             + ConditionalSync
             + 'static,
     {
-        let branch = self.branch;
-        let upstream_revision = self.upstream_revision;
-        let branch_base = branch.base();
-        let branch_revision = branch.revision();
+        local::pull(self.branch, self.upstream_revision, env).await
+    }
+}
 
-        // If upstream revision's tree matches our base, nothing to do
-        if branch_base == *upstream_revision.tree() {
-            return Ok((branch, None));
-        }
+/// Command struct for pulling from upstream (auto-dispatches local/remote).
+///
+/// Borrows the `Branch` (consuming). Reads `branch.state().upstream` to
+/// determine whether to pull from a local or remote upstream.
+pub struct Pull {
+    pub(super) branch: Branch,
+}
 
-        let archive = ContentAddressedStore::new(env.clone(), branch.archive().index());
-
-        // Load upstream tree
-        let mut target: Index<Env> =
-            Tree::from_hash(upstream_revision.tree.hash(), archive.clone())
-                .await
-                .map_err(|e| {
-                    DialogArtifactsError::Storage(format!("Failed to load upstream tree: {:?}", e))
-                })?;
-
-        // Load base tree (state at last sync)
-        let base: Index<Env> = Tree::from_hash(branch_base.hash(), archive.clone())
-            .await
-            .map_err(|e| {
-                DialogArtifactsError::Storage(format!("Failed to load base tree: {:?}", e))
-            })?;
-
-        // Load current tree
-        let current: Index<Env> = Tree::from_hash(branch_revision.tree.hash(), archive)
-            .await
-            .map_err(|e| {
-                DialogArtifactsError::Storage(format!("Failed to load current tree: {:?}", e))
-            })?;
-
-        // Compute local changes: what operations transform base into current
-        let changes = base.differentiate(&current);
-
-        // Integrate local changes into upstream tree
-        Box::pin(target.integrate(changes)).await.map_err(|e| {
-            DialogArtifactsError::Storage(format!("Failed to integrate changes: {:?}", e))
+impl Pull {
+    /// Execute the pull operation.
+    ///
+    /// For local upstreams, loads the upstream branch revision and performs
+    /// a three-way merge. For remote upstreams, resolves the remote revision
+    /// and merges using FallbackStore.
+    pub async fn perform<Env>(
+        self,
+        env: &Env,
+    ) -> Result<(Branch, Option<Revision>), DialogArtifactsError>
+    where
+        Env: Provider<archive_fx::Get>
+            + Provider<archive_fx::Put>
+            + Provider<memory_fx::Resolve>
+            + Provider<memory_fx::Publish>
+            + Provider<RemoteInvocation<archive_fx::Get, Site>>
+            + Provider<RemoteInvocation<memory_fx::Resolve, Site>>
+            + ConditionalSync
+            + 'static,
+    {
+        let state = self.branch.state();
+        let upstream = state.upstream.as_ref().ok_or_else(|| {
+            DialogArtifactsError::Storage(format!(
+                "Branch {} has no upstream",
+                self.branch.id()
+            ))
         })?;
 
-        // Get the hash of the integrated tree
-        let hash = target.hash().cloned().unwrap_or(EMPT_TREE_HASH);
-
-        // Check if integration actually changed the tree
-        if &hash == upstream_revision.tree.hash() {
-            // No local changes were integrated — adopt upstream directly
-            let mut env = env.lock().await;
-            let branch = branch
-                .reset(upstream_revision.clone())
-                .perform(&mut *env)
+        match upstream.clone() {
+            crate::repository::branch::state::UpstreamState::Local { branch: id } => {
+                // Load upstream branch revision, then three-way merge
+                let upstream_branch = Branch::load(
+                    id,
+                    self.branch.issuer().clone(),
+                    self.branch.subject().clone(),
+                )
+                .perform(env)
                 .await
                 .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
 
-            Ok((branch, Some(upstream_revision)))
-        } else {
-            // Create new revision with integrated changes
-            let issuer_did = branch.issuer.did();
-            let new_revision = Revision {
-                issuer: issuer_did,
-                tree: NodeReference(hash),
-                cause: HashSet::from([upstream_revision.edition().map_err(|e| {
-                    DialogArtifactsError::Storage(format!("Failed to create edition: {:?}", e))
-                })?]),
-                period: upstream_revision.period.max(branch_revision.period) + 1,
-                moment: 0,
-            };
-
-            // Advance branch to merged revision with upstream's tree as base
-            let mut env = env.lock().await;
-            let branch = branch
-                .advance(new_revision.clone(), upstream_revision.tree.clone())
-                .perform(&mut *env)
-                .await
-                .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
-
-            Ok((branch, Some(new_revision)))
+                local::pull(self.branch, upstream_branch.revision(), env).await
+            }
+            crate::repository::branch::state::UpstreamState::Remote {
+                site,
+                branch: id,
+                subject,
+            } => remote::pull(self.branch, &site, &id, &subject, env).await,
         }
     }
 }
@@ -128,23 +108,20 @@ mod tests {
     use crate::repository::revision::Revision;
     use dialog_storage::provider::Volatile;
     use futures_util::stream;
-    use std::sync::Arc;
-    use tokio::sync::Mutex;
 
     #[dialog_common::test]
     async fn it_pulls_from_local_upstream_no_changes() -> anyhow::Result<()> {
-        let env = Arc::new(Mutex::new(Volatile::new()));
-
+        let env = Volatile::new();
         let issuer = test_issuer().await;
 
         let branch = Branch::open("feature", issuer.clone(), test_subject())
-            .perform(&mut *env.lock().await)
+            .perform(&env)
             .await?;
 
         // Pull with upstream at same base — should be a no-op
         let upstream_revision = Revision::new(issuer.did());
 
-        let (branch, pulled) = branch.pull(upstream_revision).perform(env.clone()).await?;
+        let (branch, pulled) = branch.pull(upstream_revision).perform(&env).await?;
 
         assert!(pulled.is_none(), "No changes expected when base matches");
         assert_eq!(branch.revision().tree(), &NodeReference::default());
@@ -154,13 +131,12 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_pulls_upstream_changes_without_local_changes() -> anyhow::Result<()> {
-        let env = Arc::new(Mutex::new(Volatile::new()));
-
+        let env = Volatile::new();
         let issuer = test_issuer().await;
 
         // Create "main" branch and commit something
         let main = Branch::open("main", issuer.clone(), test_subject())
-            .perform(&mut *env.lock().await)
+            .perform(&env)
             .await?;
 
         let artifact = Artifact {
@@ -171,25 +147,77 @@ mod tests {
         };
         let (main, _) = main
             .commit(stream::iter(vec![Instruction::Assert(artifact)]))
-            .perform(env.clone())
+            .perform(&env)
             .await?;
 
         let main_revision = main.revision().clone();
 
         // Create "feature" branch (empty, base = empty tree)
         let feature = Branch::open("feature", issuer, test_subject())
-            .perform(&mut *env.lock().await)
+            .perform(&env)
             .await?;
 
         // Pull main's revision into feature (no local changes)
         let (feature, pulled) = feature
             .pull(main_revision.clone())
-            .perform(env.clone())
+            .perform(&env)
             .await?;
 
         assert!(pulled.is_some());
-        // Since feature had no local changes, it should adopt main's revision
         assert_eq!(feature.revision().tree(), main_revision.tree());
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_pulls_and_merges_with_both_sides_changed() -> anyhow::Result<()> {
+        let env = Volatile::new();
+        let issuer = test_issuer().await;
+
+        // Create "main" branch
+        let main = Branch::open("main", issuer.clone(), test_subject())
+            .perform(&env)
+            .await?;
+
+        // Commit to main
+        let (main, _) = main
+            .commit(stream::iter(vec![Instruction::Assert(Artifact {
+                the: "user/name".parse()?,
+                of: "user:main".parse()?,
+                is: crate::Value::String("Main data".to_string()),
+                cause: None,
+            })]))
+            .perform(&env)
+            .await?;
+
+        let main_revision = main.revision().clone();
+
+        // Create "feature" branch from same starting point
+        let feature = Branch::open("feature", issuer.clone(), test_subject())
+            .perform(&env)
+            .await?;
+
+        // Commit to feature (different entity)
+        let (feature, _) = feature
+            .commit(stream::iter(vec![Instruction::Assert(Artifact {
+                the: "user/email".parse()?,
+                of: "user:feature".parse()?,
+                is: crate::Value::String("feature@test.com".to_string()),
+                cause: None,
+            })]))
+            .perform(&env)
+            .await?;
+
+        // Pull main's changes into feature (both sides changed)
+        let (feature, pulled) = feature
+            .pull(main_revision.clone())
+            .perform(&env)
+            .await?;
+
+        assert!(pulled.is_some());
+        // Tree should differ from both main and feature originals (merged)
+        let merged_tree = feature.revision().tree().clone();
+        assert_ne!(&merged_tree, main_revision.tree());
 
         Ok(())
     }

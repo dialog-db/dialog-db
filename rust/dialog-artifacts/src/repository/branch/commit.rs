@@ -6,8 +6,6 @@ use dialog_prolly_tree::Tree;
 use dialog_storage::Blake3Hash;
 use futures_util::{StreamExt, TryStreamExt};
 use std::collections::HashSet;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 
 use super::state::BranchState;
 use super::{Branch, Index};
@@ -31,13 +29,7 @@ where
     I: futures_util::Stream<Item = Instruction> + ConditionalSend,
 {
     /// Execute the commit operation, returning the updated branch and tree hash.
-    ///
-    /// Takes `Arc<Mutex<Env>>` because the prolly tree requires an owned
-    /// `ContentAddressedStorage` implementation via `ContentAddressedStore`.
-    pub async fn perform<Env>(
-        self,
-        env: Arc<Mutex<Env>>,
-    ) -> Result<(Branch, Blake3Hash), DialogArtifactsError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<(Branch, Blake3Hash), DialogArtifactsError>
     where
         Env: Provider<archive_fx::Get>
             + Provider<archive_fx::Put>
@@ -50,10 +42,10 @@ where
         let instructions = self.instructions;
         let base_revision = branch.revision();
 
-        let archive = ContentAddressedStore::new(env.clone(), branch.archive().index());
+        let mut store = ContentAddressedStore::new(env, branch.archive().index());
 
         // Load tree from current revision hash
-        let mut tree: Index<Env> = Tree::from_hash(base_revision.tree().hash(), archive)
+        let mut tree: Index = Tree::from_hash(base_revision.tree().hash(), &store)
             .await
             .map_err(|e| DialogArtifactsError::Storage(format!("Failed to load tree: {:?}", e)))?;
 
@@ -80,7 +72,7 @@ where
                                 .set_attribute(entity_key.attribute())
                                 .into_key();
 
-                            let search_stream = tree.stream_range(search_start..search_end);
+                            let search_stream = tree.stream_range(search_start..search_end, &store);
 
                             let mut ancestor_key = None;
 
@@ -107,26 +99,38 @@ where
                             let attribute_key: AttributeKey<Key> =
                                 AttributeKey::from_key(&entity_key);
 
-                            tree.delete(&entity_key.into_key()).await?;
-                            tree.delete(&value_key.into_key()).await?;
-                            tree.delete(&attribute_key.into_key()).await?;
+                            tree.delete(&entity_key.into_key(), &mut store).await?;
+                            tree.delete(&value_key.into_key(), &mut store).await?;
+                            tree.delete(&attribute_key.into_key(), &mut store).await?;
                         }
                     }
 
-                    tree.set(entity_key.into_key(), State::Added(datum.clone()))
+                    tree.set(
+                        entity_key.into_key(),
+                        State::Added(datum.clone()),
+                        &mut store,
+                    )
+                    .await?;
+                    tree.set(
+                        attribute_key.into_key(),
+                        State::Added(datum.clone()),
+                        &mut store,
+                    )
+                    .await?;
+                    tree.set(value_key.into_key(), State::Added(datum), &mut store)
                         .await?;
-                    tree.set(attribute_key.into_key(), State::Added(datum.clone()))
-                        .await?;
-                    tree.set(value_key.into_key(), State::Added(datum)).await?;
                 }
                 Instruction::Retract(fact) => {
                     let entity_key = EntityKey::from(&fact);
                     let value_key = ValueKey::from_key(&entity_key);
                     let attribute_key = AttributeKey::from_key(&entity_key);
 
-                    tree.set(entity_key.into_key(), State::Removed).await?;
-                    tree.set(attribute_key.into_key(), State::Removed).await?;
-                    tree.set(value_key.into_key(), State::Removed).await?;
+                    tree.set(entity_key.into_key(), State::Removed, &mut store)
+                        .await?;
+                    tree.set(attribute_key.into_key(), State::Removed, &mut store)
+                        .await?;
+                    tree.set(value_key.into_key(), State::Removed, &mut store)
+                        .await?;
                 }
             }
         }
@@ -169,10 +173,9 @@ where
         };
 
         // Publish updated state
-        let mut env = env.lock().await;
         branch
             .cell
-            .publish(new_state, &mut *env)
+            .publish(new_state, env)
             .await
             .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
 
@@ -188,15 +191,13 @@ mod tests {
     use dialog_prolly_tree::EMPT_TREE_HASH;
     use dialog_storage::provider::Volatile;
     use futures_util::{StreamExt, stream};
-    use std::sync::Arc;
-    use tokio::sync::Mutex;
 
     #[dialog_common::test]
     async fn it_commits_and_selects() -> anyhow::Result<()> {
-        let env = Arc::new(Mutex::new(Volatile::new()));
+        let env = Volatile::new();
 
         let branch = Branch::open("main", test_issuer().await, test_subject())
-            .perform(&mut *env.lock().await)
+            .perform(&env)
             .await?;
 
         let artifact = Artifact {
@@ -208,12 +209,12 @@ mod tests {
 
         let instructions = stream::iter(vec![Instruction::Assert(artifact.clone())]);
 
-        let (branch, hash) = branch.commit(instructions).perform(env.clone()).await?;
+        let (branch, hash) = branch.commit(instructions).perform(&env).await?;
         assert_ne!(hash, EMPT_TREE_HASH);
 
         // Select should find the artifact
         let selector = ArtifactSelector::new().the("user/name".parse()?);
-        let stream = branch.select(selector).perform(env.clone()).await?;
+        let stream = branch.select(selector).perform(&env).await?;
         tokio::pin!(stream);
 
         let results: Vec<_> = stream.filter_map(|r| async { r.ok() }).collect().await;
