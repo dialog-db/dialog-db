@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use dialog_common::ConditionalSend;
 use dialog_storage::Blake3Hash;
-use futures_util::Stream;
+use futures_util::{Stream, stream};
 
 use crate::{
     Artifact, ArtifactSelector, DialogArtifactsError, Instruction, artifacts::selector::Constrained,
@@ -64,7 +64,7 @@ pub trait ArtifactStoreMutExt: ArtifactStoreMut {
         Instructions: IntoIterator<Item = Instruction> + ConditionalSend,
         Instructions::IntoIter: ConditionalSend,
     {
-        ArtifactStoreMut::commit(self, futures_util::stream::iter(instructions)).await
+        ArtifactStoreMut::commit(self, stream::iter(instructions)).await
     }
 }
 

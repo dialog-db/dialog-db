@@ -4,7 +4,10 @@
 //! (subject-predicate-object) in the Dialog database. Artifacts are the fundamental
 //! units of data storage and retrieval.
 
-use std::{fmt::Display, str::FromStr};
+use std::{
+    fmt::{Debug, Display, Formatter, Result as FmtResult},
+    str::FromStr,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -51,8 +54,8 @@ impl Artifact {
     }
 }
 
-impl std::fmt::Debug for Artifact {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for Artifact {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.debug_struct("Artifact")
             .field("the", &self.the.to_string())
             .field("of", &self.of.to_string())
@@ -63,7 +66,7 @@ impl std::fmt::Debug for Artifact {
 }
 
 impl Display for Artifact {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         let attribute = self.the.to_string();
         let entity = format!("{}", &self.of);
         let value = self.is.to_utf8();
