@@ -27,9 +27,9 @@ pub mod remote;
 /// Revision type and edition tracking.
 pub mod revision;
 
-pub use branch::{BranchName, BranchState, UpstreamState};
-pub use remote::SiteName;
-pub use error::{OperationKind, RepositoryError};
-pub use node_reference::NodeReference;
-pub use occurence::Occurence;
-pub use revision::{Edition, Revision};
+pub use branch::*;
+pub use error::*;
+pub use node_reference::*;
+pub use occurence::*;
+pub use remote::*;
+pub use revision::*;

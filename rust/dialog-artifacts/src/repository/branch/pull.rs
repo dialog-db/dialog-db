@@ -1,4 +1,4 @@
-use crate::environment::Address;
+use crate::RemoteAddress;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
@@ -22,8 +22,17 @@ use crate::repository::revision::Revision;
 /// This performs a three-way merge between the current branch, the base
 /// (last sync point), and the upstream revision.
 pub struct PullLocal {
-    pub(super) branch: Branch,
-    pub(super) upstream_revision: Revision,
+    branch: Branch,
+    upstream_revision: Revision,
+}
+
+impl PullLocal {
+    pub(super) fn new(branch: Branch, upstream_revision: Revision) -> Self {
+        Self {
+            branch,
+            upstream_revision,
+        }
+    }
 }
 
 impl PullLocal {
@@ -50,7 +59,13 @@ impl PullLocal {
 /// Borrows the `Branch` (consuming). Reads `branch.state().upstream` to
 /// determine whether to pull from a local or remote upstream.
 pub struct Pull {
-    pub(super) branch: Branch,
+    branch: Branch,
+}
+
+impl Pull {
+    pub(super) fn new(branch: Branch) -> Self {
+        Self { branch }
+    }
 }
 
 impl Pull {
@@ -68,8 +83,8 @@ impl Pull {
             + Provider<archive_fx::Put>
             + Provider<memory_fx::Resolve>
             + Provider<memory_fx::Publish>
-            + Provider<RemoteInvocation<archive_fx::Get, Address>>
-            + Provider<RemoteInvocation<memory_fx::Resolve, Address>>
+            + Provider<RemoteInvocation<archive_fx::Get, RemoteAddress>>
+            + Provider<RemoteInvocation<memory_fx::Resolve, RemoteAddress>>
             + ConditionalSync
             + 'static,
     {
@@ -103,7 +118,7 @@ impl Pull {
 /// Perform a three-way merge from a local upstream revision.
 ///
 /// Returns the updated branch and the new revision (or None if no changes).
-pub(crate) async fn pull_local<Env>(
+async fn pull_local<Env>(
     branch: Branch,
     upstream_revision: Revision,
     env: &Env,
@@ -164,7 +179,7 @@ where
         let issuer_did = branch.issuer.did();
         let new_revision = Revision {
             issuer: issuer_did,
-            tree: NodeReference(hash),
+            tree: NodeReference::from(hash),
             cause: HashSet::from([upstream_revision.edition().map_err(|e| {
                 DialogArtifactsError::Storage(format!("Failed to create edition: {:?}", e))
             })?]),
@@ -199,8 +214,8 @@ where
         + Provider<archive_fx::Put>
         + Provider<memory_fx::Resolve>
         + Provider<memory_fx::Publish>
-        + Provider<RemoteInvocation<archive_fx::Get, Address>>
-        + Provider<RemoteInvocation<memory_fx::Resolve, Address>>
+        + Provider<RemoteInvocation<archive_fx::Get, RemoteAddress>>
+        + Provider<RemoteInvocation<memory_fx::Resolve, RemoteAddress>>
         + ConditionalSync
         + 'static,
 {
@@ -208,12 +223,12 @@ where
         .await
         .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
 
-    let remote_branch = RemoteBranch {
-        remote: remote_site.name().clone(),
-        address: remote_site.address().clone(),
-        subject: upstream_subject.clone(),
-        branch: upstream_branch_name.clone(),
-    };
+    let remote_branch = RemoteBranch::new(
+        remote_site.name().clone(),
+        remote_site.address().clone(),
+        upstream_subject.clone(),
+        upstream_branch_name.clone(),
+    );
 
     let upstream_revision = remote_branch
         .resolve(env)
@@ -273,7 +288,7 @@ where
         let issuer_did = branch.issuer.did();
         let new_revision = Revision {
             issuer: issuer_did,
-            tree: NodeReference(hash),
+            tree: NodeReference::from(hash),
             cause: HashSet::from([upstream_revision.edition().map_err(|e| {
                 DialogArtifactsError::Storage(format!("Failed to create edition: {:?}", e))
             })?]),

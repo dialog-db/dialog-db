@@ -11,9 +11,19 @@ use crate::repository::revision::Revision;
 
 /// Command to load an existing branch, returning an error if not found.
 pub struct Load {
-    pub(super) name: BranchName,
-    pub(super) issuer: Credentials,
-    pub(super) subject: Did,
+    name: BranchName,
+    issuer: Credentials,
+    subject: Did,
+}
+
+impl Load {
+    pub(super) fn new(name: BranchName, issuer: Credentials, subject: Did) -> Self {
+        Self {
+            name,
+            issuer,
+            subject,
+        }
+    }
 }
 
 impl Load {

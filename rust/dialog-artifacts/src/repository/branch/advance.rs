@@ -9,9 +9,19 @@ use crate::repository::revision::Revision;
 
 /// Command struct for advancing a branch to a new revision with explicit base.
 pub struct Advance {
-    pub(super) branch: Branch,
-    pub(super) revision: Revision,
-    pub(super) base: NodeReference,
+    branch: Branch,
+    revision: Revision,
+    base: NodeReference,
+}
+
+impl Advance {
+    pub(super) fn new(branch: Branch, revision: Revision, base: NodeReference) -> Self {
+        Self {
+            branch,
+            revision,
+            base,
+        }
+    }
 }
 
 impl Advance {

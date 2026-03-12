@@ -2,7 +2,7 @@ use dialog_capability::Did;
 
 use super::SiteName;
 use super::branch::RemoteBranch;
-use crate::environment::Address;
+use crate::RemoteAddress;
 use crate::repository::branch::BranchName;
 
 /// A cursor pointing to a specific repository at a remote site.
@@ -14,17 +14,22 @@ use crate::repository::branch::BranchName;
 /// specific branch within this repository.
 #[derive(Debug, Clone)]
 pub struct RemoteRepository {
-    /// The remote name (e.g., "origin") used to look up configuration.
-    pub(super) remote: SiteName,
-    /// The credentials for authenticating remote operations.
-    pub(super) address: Address,
-    /// The subject DID of the repository.
-    pub(super) subject: Did,
+    remote: SiteName,
+    address: RemoteAddress,
+    subject: Did,
 }
 
 impl RemoteRepository {
+    pub(super) fn new(remote: SiteName, address: RemoteAddress, subject: Did) -> Self {
+        Self {
+            remote,
+            address,
+            subject,
+        }
+    }
+
     /// The address for authenticating remote operations.
-    pub fn address(&self) -> &Address {
+    pub fn address(&self) -> &RemoteAddress {
         &self.address
     }
 
@@ -40,11 +45,11 @@ impl RemoteRepository {
 
     /// Get a cursor into a specific branch at this remote repository.
     pub fn branch(&self, name: impl Into<BranchName>) -> RemoteBranch {
-        RemoteBranch {
-            remote: self.remote.clone(),
-            address: self.address.clone(),
-            subject: self.subject.clone(),
-            branch: name.into(),
-        }
+        RemoteBranch::new(
+            self.remote.clone(),
+            self.address.clone(),
+            self.subject.clone(),
+            name.into(),
+        )
     }
 }

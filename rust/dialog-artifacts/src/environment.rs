@@ -16,7 +16,7 @@ pub use dialog_storage::provider::network::NetworkAddress;
 use crate::repository::credentials::Credentials;
 
 /// Concrete address type for remote operations.
-pub type Address = NetworkAddress<Credentials>;
+pub type RemoteAddress = NetworkAddress<Credentials>;
 
 /// Native environment: filesystem local storage with network remote.
 #[cfg(not(target_arch = "wasm32"))]
@@ -29,4 +29,4 @@ pub type WebEnvironment<Issuer> = Environment<dialog_storage::provider::IndexedD
 /// Test environment: in-memory local storage with emulated remote keyed by
 /// the generated [`NetworkAddress`].
 #[cfg(any(test, feature = "helpers"))]
-pub type TestEnvironment = Environment<Volatile, Route<Address>>;
+pub type TestEnvironment = Environment<Volatile, Route<RemoteAddress>>;

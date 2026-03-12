@@ -11,9 +11,19 @@ use crate::repository::revision::Revision;
 
 /// Command to open a branch, creating it with defaults if it doesn't exist.
 pub struct Open {
-    pub(super) name: BranchName,
-    pub(super) issuer: Credentials,
-    pub(super) subject: Did,
+    name: BranchName,
+    issuer: Credentials,
+    subject: Did,
+}
+
+impl Open {
+    pub(super) fn new(name: BranchName, issuer: Credentials, subject: Did) -> Self {
+        Self {
+            name,
+            issuer,
+            subject,
+        }
+    }
 }
 
 impl Open {

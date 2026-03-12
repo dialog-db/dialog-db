@@ -1,4 +1,4 @@
-use crate::environment::Address;
+use crate::RemoteAddress;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
@@ -19,7 +19,13 @@ use crate::repository::revision::Revision;
 /// Borrows `&Branch` (non-consuming). Reads `branch.state().upstream` to
 /// dispatch to local or remote push logic.
 pub struct Push<'a> {
-    pub(super) branch: &'a Branch,
+    branch: &'a Branch,
+}
+
+impl<'a> Push<'a> {
+    pub(super) fn new(branch: &'a Branch) -> Self {
+        Self { branch }
+    }
 }
 
 impl Push<'_> {
@@ -33,9 +39,9 @@ impl Push<'_> {
             + Provider<archive_fx::Put>
             + Provider<memory_fx::Resolve>
             + Provider<memory_fx::Publish>
-            + Provider<RemoteInvocation<archive_fx::Put, Address>>
-            + Provider<RemoteInvocation<memory_fx::Resolve, Address>>
-            + Provider<RemoteInvocation<memory_fx::Publish, Address>>
+            + Provider<RemoteInvocation<archive_fx::Put, RemoteAddress>>
+            + Provider<RemoteInvocation<memory_fx::Resolve, RemoteAddress>>
+            + Provider<RemoteInvocation<memory_fx::Publish, RemoteAddress>>
             + ConditionalSync
             + 'static,
     {
@@ -64,7 +70,7 @@ impl Push<'_> {
 /// Fast-forward: if the upstream's tree matches our base (it hasn't diverged),
 /// reset upstream to our revision and return success.
 /// Diverged: return `Ok(None)`.
-pub(crate) async fn push_local<Env>(
+async fn push_local<Env>(
     branch: &Branch,
     upstream_name: &BranchName,
     env: &Env,
@@ -115,20 +121,20 @@ where
         + Provider<archive_fx::Put>
         + Provider<memory_fx::Resolve>
         + Provider<memory_fx::Publish>
-        + Provider<RemoteInvocation<archive_fx::Put, Address>>
-        + Provider<RemoteInvocation<memory_fx::Resolve, Address>>
-        + Provider<RemoteInvocation<memory_fx::Publish, Address>>
+        + Provider<RemoteInvocation<archive_fx::Put, RemoteAddress>>
+        + Provider<RemoteInvocation<memory_fx::Resolve, RemoteAddress>>
+        + Provider<RemoteInvocation<memory_fx::Publish, RemoteAddress>>
         + ConditionalSync
         + 'static,
 {
     let remote_site = RemoteSite::load(remote, branch.subject(), env).await?;
 
-    let remote_branch = RemoteBranch {
-        remote: remote_site.name().clone(),
-        address: remote_site.address().clone(),
-        subject: upstream_subject.clone(),
-        branch: upstream_branch_name.clone(),
-    };
+    let remote_branch = RemoteBranch::new(
+        remote_site.name().clone(),
+        remote_site.address().clone(),
+        upstream_subject.clone(),
+        upstream_branch_name.clone(),
+    );
 
     let branch_revision = branch.revision();
     let branch_base = branch.base();

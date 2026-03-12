@@ -20,8 +20,17 @@ use crate::{
 
 /// Command struct for committing instructions to a branch.
 pub struct Commit<I> {
-    pub(super) branch: Branch,
-    pub(super) instructions: I,
+    branch: Branch,
+    instructions: I,
+}
+
+impl<I> Commit<I> {
+    pub(super) fn new(branch: Branch, instructions: I) -> Self {
+        Self {
+            branch,
+            instructions,
+        }
+    }
 }
 
 impl<I> Commit<I>
@@ -140,7 +149,7 @@ where
             .hash()
             .ok_or_else(|| DialogArtifactsError::Storage("Failed to get tree hash".to_string()))?;
 
-        let tree_reference = NodeReference(tree_hash);
+        let tree_reference = NodeReference::from(tree_hash);
 
         // Calculate new period and moment
         let issuer_did = branch.issuer.did();

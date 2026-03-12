@@ -54,7 +54,7 @@ impl BranchState {
 
 /// Unique name for the branch
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct BranchName(pub(crate) String);
+pub struct BranchName(String);
 
 impl BranchName {
     /// Creates a new branch name from a string.

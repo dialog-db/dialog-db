@@ -1,4 +1,4 @@
-use crate::environment::Address;
+use crate::RemoteAddress;
 use dialog_capability::{Capability, Did, Provider, Subject};
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
@@ -21,24 +21,35 @@ use super::UpstreamState;
 /// Provides remote operations: resolve, publish, and upload.
 #[derive(Debug, Clone)]
 pub struct RemoteBranch {
-    /// The remote name (e.g., "origin") used to look up configuration.
-    pub(crate) remote: SiteName,
-    /// The credentials used for remote operations.
-    pub(crate) address: Address,
-    /// The subject DID of the remote repository.
-    pub(crate) subject: Did,
-    /// The branch name.
-    pub(crate) branch: BranchName,
+    remote: SiteName,
+    address: RemoteAddress,
+    subject: Did,
+    branch: BranchName,
 }
 
 impl RemoteBranch {
+    /// Create a new remote branch cursor.
+    pub fn new(
+        remote: SiteName,
+        address: RemoteAddress,
+        subject: Did,
+        branch: BranchName,
+    ) -> Self {
+        Self {
+            remote,
+            address,
+            subject,
+            branch,
+        }
+    }
+
     /// The remote name (e.g., "origin").
     pub fn remote(&self) -> &SiteName {
         &self.remote
     }
 
     /// The address for this remote.
-    pub fn address(&self) -> &Address {
+    pub fn address(&self) -> &RemoteAddress {
         &self.address
     }
 
@@ -70,7 +81,7 @@ impl RemoteBranch {
     /// Returns `None` if the remote branch has no state (not yet created).
     pub async fn resolve<Env>(&self, env: &Env) -> Result<Option<Revision>, RepositoryError>
     where
-        Env: Provider<RemoteInvocation<memory_fx::Resolve, Address>>,
+        Env: Provider<RemoteInvocation<memory_fx::Resolve, RemoteAddress>>,
     {
         let capability = self.cell_capability().invoke(memory_fx::Resolve);
 
@@ -103,8 +114,8 @@ impl RemoteBranch {
     /// then publishes the updated state with the new revision.
     pub async fn publish<Env>(&self, revision: Revision, env: &Env) -> Result<(), RepositoryError>
     where
-        Env: Provider<RemoteInvocation<memory_fx::Resolve, Address>>
-            + Provider<RemoteInvocation<memory_fx::Publish, Address>>,
+        Env: Provider<RemoteInvocation<memory_fx::Resolve, RemoteAddress>>
+            + Provider<RemoteInvocation<memory_fx::Publish, RemoteAddress>>,
     {
         let cell_cap = self.cell_capability();
 
@@ -166,7 +177,7 @@ impl RemoteBranch {
         env: &Env,
     ) -> Result<(), DialogArtifactsError>
     where
-        Env: Provider<RemoteInvocation<archive_fx::Put, Address>>,
+        Env: Provider<RemoteInvocation<archive_fx::Put, RemoteAddress>>,
     {
         let catalog = self.archive().index();
         let put_cap = catalog.invoke(archive_fx::Put::new(hash, bytes));
@@ -184,7 +195,7 @@ impl RemoteBranch {
         env: &Env,
     ) -> Result<Option<Vec<u8>>, DialogArtifactsError>
     where
-        Env: Provider<RemoteInvocation<archive_fx::Get, Address>>,
+        Env: Provider<RemoteInvocation<archive_fx::Get, RemoteAddress>>,
     {
         let catalog = self.archive().index();
         let get_cap = catalog.invoke(archive_fx::Get::new(hash));
@@ -217,19 +228,19 @@ mod tests {
         "did:test:remote-branch".parse().unwrap()
     }
 
-    fn test_address() -> Address {
+    fn test_address() -> RemoteAddress {
         let s3_addr = S3Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "bucket");
-        Address::S3(S3Credentials::public(s3_addr).unwrap())
+        RemoteAddress::S3(S3Credentials::public(s3_addr).unwrap())
     }
 
     #[test]
     fn it_creates_remote_branch_cursor() {
-        let remote = RemoteBranch {
-            remote: "origin".into(),
-            address: test_address(),
-            subject: test_subject(),
-            branch: "main".into(),
-        };
+        let remote = RemoteBranch::new(
+            "origin".into(),
+            test_address(),
+            test_subject(),
+            "main".into(),
+        );
 
         assert_eq!(remote.subject(), &test_subject());
         assert_eq!(remote.branch(), &BranchName::from("main"));
@@ -237,12 +248,12 @@ mod tests {
 
     #[test]
     fn it_converts_remote_branch_to_upstream_state() {
-        let remote = RemoteBranch {
-            remote: "origin".into(),
-            address: test_address(),
-            subject: test_subject(),
-            branch: "main".into(),
-        };
+        let remote = RemoteBranch::new(
+            "origin".into(),
+            test_address(),
+            test_subject(),
+            "main".into(),
+        );
 
         let upstream: UpstreamState = remote.into();
         match upstream {

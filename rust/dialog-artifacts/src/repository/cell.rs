@@ -75,6 +75,7 @@ impl<T> Cell<T> {
 
 impl<T, Codec: Encoder> Cell<T, Codec> {
     /// Create a new Cell with a custom codec from subject, space, and cell name.
+    #[allow(dead_code)]
     pub fn with_codec(
         subject: impl Into<Subject>,
         space: impl Into<String>,

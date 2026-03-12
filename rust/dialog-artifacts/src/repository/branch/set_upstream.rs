@@ -7,8 +7,14 @@ use crate::repository::error::RepositoryError;
 
 /// Command struct for setting a branch's upstream.
 pub struct SetUpstream<'a> {
-    pub(super) branch: &'a Branch,
-    pub(super) upstream: UpstreamState,
+    branch: &'a Branch,
+    upstream: UpstreamState,
+}
+
+impl<'a> SetUpstream<'a> {
+    pub(super) fn new(branch: &'a Branch, upstream: UpstreamState) -> Self {
+        Self { branch, upstream }
+    }
 }
 
 impl SetUpstream<'_> {
@@ -43,7 +49,7 @@ mod tests {
     use dialog_s3_credentials::s3::Credentials as S3Credentials;
     use dialog_storage::provider::Volatile;
 
-    use crate::environment::Address;
+    use crate::RemoteAddress;
     use crate::repository::branch::state::UpstreamState;
     use crate::repository::error::RepositoryError;
     use crate::repository::remote::RemoteBranch;
@@ -93,12 +99,12 @@ mod tests {
             .await?;
 
         let s3_addr = S3Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "bucket");
-        let remote_branch = RemoteBranch {
-            remote: "origin".into(),
-            address: Address::S3(S3Credentials::public(s3_addr).unwrap()),
-            subject: "did:test:remote-repo".parse()?,
-            branch: "main".into(),
-        };
+        let remote_branch = RemoteBranch::new(
+            "origin".into(),
+            RemoteAddress::S3(S3Credentials::public(s3_addr).unwrap()),
+            "did:test:remote-repo".parse()?,
+            "main".into(),
+        );
 
         branch.set_upstream(remote_branch).perform(&env).await?;
 

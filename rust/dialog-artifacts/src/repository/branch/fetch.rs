@@ -1,4 +1,4 @@
-use crate::environment::Address;
+use crate::RemoteAddress;
 use dialog_capability::Provider;
 use dialog_effects::memory as memory_fx;
 use dialog_effects::remote::RemoteInvocation;
@@ -17,7 +17,13 @@ use crate::repository::revision::Revision;
 ///
 /// Does NOT modify local state — only reads from upstream.
 pub struct Fetch<'a> {
-    pub(super) branch: &'a Branch,
+    branch: &'a Branch,
+}
+
+impl<'a> Fetch<'a> {
+    pub(super) fn new(branch: &'a Branch) -> Self {
+        Self { branch }
+    }
 }
 
 impl Fetch<'_> {
@@ -26,7 +32,8 @@ impl Fetch<'_> {
     /// Returns `None` if the upstream has no revision yet.
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, RepositoryError>
     where
-        Env: Provider<memory_fx::Resolve> + Provider<RemoteInvocation<memory_fx::Resolve, Address>>,
+        Env: Provider<memory_fx::Resolve>
+            + Provider<RemoteInvocation<memory_fx::Resolve, RemoteAddress>>,
     {
         let state = self.branch.state();
         let upstream =
@@ -51,7 +58,7 @@ impl Fetch<'_> {
 /// Fetch the current revision from a local upstream branch.
 ///
 /// Does NOT modify local state.
-pub(crate) async fn fetch_local<Env>(
+async fn fetch_local<Env>(
     branch: &Branch,
     upstream_name: &BranchName,
     env: &Env,
@@ -80,16 +87,17 @@ async fn fetch_remote<Env>(
     env: &Env,
 ) -> Result<Option<Revision>, RepositoryError>
 where
-    Env: Provider<memory_fx::Resolve> + Provider<RemoteInvocation<memory_fx::Resolve, Address>>,
+    Env: Provider<memory_fx::Resolve>
+        + Provider<RemoteInvocation<memory_fx::Resolve, RemoteAddress>>,
 {
     let remote_site = RemoteSite::load(remote, upstream_subject, env).await?;
 
-    let remote_branch = RemoteBranch {
-        remote: remote_site.name().clone(),
-        address: remote_site.address().clone(),
-        subject: upstream_subject.clone(),
-        branch: upstream_branch_name.clone(),
-    };
+    let remote_branch = RemoteBranch::new(
+        remote_site.name().clone(),
+        remote_site.address().clone(),
+        upstream_subject.clone(),
+        upstream_branch_name.clone(),
+    );
 
     remote_branch.resolve(env).await
 }

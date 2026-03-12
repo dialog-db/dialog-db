@@ -1,8 +1,8 @@
-use crate::environment::Address;
 use dialog_capability::{Did, Provider, Subject};
 use dialog_effects::memory as memory_fx;
 
-use super::state::{RemoteState, SiteName};
+use super::state::SiteName;
+use crate::RemoteAddress;
 use crate::repository::cell::Cell;
 use crate::repository::error::RepositoryError;
 
@@ -18,17 +18,13 @@ use super::repository::RemoteRepository;
 /// a specific repository at this site.
 #[derive(Debug, Clone)]
 pub struct RemoteSite {
-    /// The name of this remote (e.g., "origin").
-    pub(super) name: SiteName,
-    /// The issuer DID that authenticates operations.
-    pub(super) issuer: Did,
-    /// The address for authenticating remote operations.
-    pub(super) address: Address,
+    name: SiteName,
+    address: RemoteAddress,
 }
 
 impl RemoteSite {
     /// The memory cell where remote configuration is persisted.
-    fn cell(name: &SiteName, subject: &Did) -> Cell<RemoteState> {
+    fn cell(name: &SiteName, subject: &Did) -> Cell<RemoteAddress> {
         Cell::new(
             Subject::from(subject.clone()),
             "remotes",
@@ -42,8 +38,7 @@ impl RemoteSite {
     /// remote with the same name already exists.
     pub async fn add<Env>(
         name: impl Into<SiteName>,
-        issuer: Did,
-        address: Address,
+        address: RemoteAddress,
         subject: &Did,
         env: &Env,
     ) -> Result<RemoteSite, RepositoryError>
@@ -61,17 +56,9 @@ impl RemoteSite {
             });
         }
 
-        let state = RemoteState {
-            issuer: issuer.clone(),
-            address: address.clone(),
-        };
-        cell.publish(state, env).await?;
+        cell.publish(address.clone(), env).await?;
 
-        Ok(RemoteSite {
-            name,
-            issuer,
-            address,
-        })
+        Ok(RemoteSite { name, address })
     }
 
     /// Load an existing remote site configuration.
@@ -91,11 +78,7 @@ impl RemoteSite {
 
         cell.resolve(env).await?;
         match cell.get() {
-            Some(state) => Ok(RemoteSite {
-                name,
-                issuer: state.issuer,
-                address: state.address,
-            }),
+            Some(address) => Ok(RemoteSite { name, address }),
             None => Err(RepositoryError::RemoteNotFound {
                 remote: name.clone(),
             }),
@@ -107,23 +90,14 @@ impl RemoteSite {
         &self.name
     }
 
-    /// The issuer DID.
-    pub fn issuer(&self) -> &Did {
-        &self.issuer
-    }
-
     /// The address for this remote.
-    pub fn address(&self) -> &Address {
+    pub fn address(&self) -> &RemoteAddress {
         &self.address
     }
 
     /// Get a cursor into a specific repository at this remote site.
     pub fn repository(&self, subject: Did) -> RemoteRepository {
-        RemoteRepository {
-            remote: self.name.clone(),
-            address: self.address.clone(),
-            subject,
-        }
+        RemoteRepository::new(self.name.clone(), self.address.clone(), subject)
     }
 }
 
@@ -139,13 +113,13 @@ mod tests {
         "did:test:remote-site".parse().unwrap()
     }
 
-    fn test_address() -> Address {
+    fn test_address() -> RemoteAddress {
         let s3_addr = S3Address::new(
             "https://s3.us-east-1.amazonaws.com",
             "us-east-1",
             "my-bucket",
         );
-        Address::S3(S3Credentials::public(s3_addr).unwrap())
+        RemoteAddress::S3(S3Credentials::public(s3_addr).unwrap())
     }
 
     #[dialog_common::test]
@@ -153,17 +127,9 @@ mod tests {
         let env = Volatile::new();
         let subject = test_subject();
 
-        let site = RemoteSite::add(
-            "origin",
-            "did:key:zAlice".parse()?,
-            test_address(),
-            &subject,
-            &env,
-        )
-        .await?;
+        let site = RemoteSite::add("origin", test_address(), &subject, &env).await?;
 
         assert_eq!(site.name(), "origin");
-        assert_eq!(site.issuer(), &"did:key:zAlice".parse::<Did>()?);
         assert_eq!(site.address(), &test_address());
 
         // Load the same remote
@@ -193,23 +159,9 @@ mod tests {
         let env = Volatile::new();
         let subject = test_subject();
 
-        RemoteSite::add(
-            "origin",
-            "did:key:zAlice".parse()?,
-            test_address(),
-            &subject,
-            &env,
-        )
-        .await?;
+        RemoteSite::add("origin", test_address(), &subject, &env).await?;
 
-        let result = RemoteSite::add(
-            "origin",
-            "did:key:zBob".parse()?,
-            test_address(),
-            &subject,
-            &env,
-        )
-        .await;
+        let result = RemoteSite::add("origin", test_address(), &subject, &env).await;
 
         assert!(matches!(
             result,

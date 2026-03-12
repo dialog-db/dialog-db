@@ -17,9 +17,19 @@ use crate::{
 
 /// Command struct for selecting artifacts from a branch.
 pub struct Select {
-    pub(super) subject: Did,
-    pub(super) state: BranchState,
-    pub(super) selector: ArtifactSelector<Constrained>,
+    subject: Did,
+    state: BranchState,
+    selector: ArtifactSelector<Constrained>,
+}
+
+impl Select {
+    pub(super) fn new(subject: Did, state: BranchState, selector: ArtifactSelector<Constrained>) -> Self {
+        Self {
+            subject,
+            state,
+            selector,
+        }
+    }
 }
 
 impl Select {

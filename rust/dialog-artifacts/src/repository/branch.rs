@@ -33,7 +33,6 @@ pub use advance::Advance;
 pub use commit::Commit;
 pub use fetch::Fetch;
 pub use load::Load;
-pub use novelty::novelty;
 pub use open::Open;
 pub use pull::{Pull, PullLocal};
 pub use push::Push;
@@ -120,45 +119,27 @@ impl Branch {
 impl Branch {
     /// Create a command to open (load or create) a branch.
     pub fn open(name: impl Into<BranchName>, issuer: Credentials, subject: Did) -> Open {
-        Open {
-            name: name.into(),
-            issuer,
-            subject,
-        }
+        Open::new(name.into(), issuer, subject)
     }
 
     /// Create a command to load an existing branch (error if not found).
     pub fn load(name: impl Into<BranchName>, issuer: Credentials, subject: Did) -> Load {
-        Load {
-            name: name.into(),
-            issuer,
-            subject,
-        }
+        Load::new(name.into(), issuer, subject)
     }
 
     /// Create a command to commit instructions to this branch.
     pub fn commit<I>(self, instructions: I) -> Commit<I> {
-        Commit {
-            branch: self,
-            instructions,
-        }
+        Commit::new(self, instructions)
     }
 
     /// Create a command to select artifacts from this branch.
     pub fn select(&self, selector: ArtifactSelector<Constrained>) -> Select {
-        Select {
-            subject: self.subject().clone(),
-            state: self.state(),
-            selector,
-        }
+        Select::new(self.subject().clone(), self.state(), selector)
     }
 
     /// Create a command to reset the branch to a given revision.
     pub fn reset(self, revision: Revision) -> Reset {
-        Reset {
-            branch: self,
-            revision,
-        }
+        Reset::new(self, revision)
     }
 
     /// Create a command to advance the branch to a new revision with an
@@ -166,11 +147,7 @@ impl Branch {
     /// be set to the upstream's tree (what we synced from) while `revision`
     /// is the merged result.
     pub fn advance(self, revision: Revision, base: NodeReference) -> Advance {
-        Advance {
-            branch: self,
-            revision,
-            base,
-        }
+        Advance::new(self, revision, base)
     }
 
     /// Create a command to pull changes from a local upstream revision.
@@ -179,10 +156,7 @@ impl Branch {
     /// upstream revision. For auto-dispatching based on the branch's
     /// configured upstream, use [`pull_upstream`](Branch::pull_upstream).
     pub fn pull(self, upstream_revision: Revision) -> PullLocal {
-        PullLocal {
-            branch: self,
-            upstream_revision,
-        }
+        PullLocal::new(self, upstream_revision)
     }
 
     /// Create a command to pull from the configured upstream.
@@ -190,14 +164,14 @@ impl Branch {
     /// Reads `branch.state().upstream` and dispatches to local or remote
     /// pull logic automatically.
     pub fn pull_upstream(self) -> Pull {
-        Pull { branch: self }
+        Pull::new(self)
     }
 
     /// Create a command to fetch the upstream branch's current revision.
     ///
     /// Does NOT modify local state — only reads from upstream.
     pub fn fetch(&self) -> Fetch<'_> {
-        Fetch { branch: self }
+        Fetch::new(self)
     }
 
     /// Create a command to push local changes to the upstream branch.
@@ -205,7 +179,7 @@ impl Branch {
     /// Reads the upstream configuration from branch state and dispatches
     /// to local or remote push logic.
     pub fn push(&self) -> Push<'_> {
-        Push { branch: self }
+        Push::new(self)
     }
 
     /// Create a command to set the upstream for this branch.
@@ -213,15 +187,12 @@ impl Branch {
     /// Accepts both `UpstreamState` and `RemoteBranch` directly via
     /// `impl Into<UpstreamState>`.
     pub fn set_upstream(&self, upstream: impl Into<UpstreamState>) -> SetUpstream<'_> {
-        SetUpstream {
-            branch: self,
-            upstream: upstream.into(),
-        }
+        SetUpstream::new(self, upstream.into())
     }
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use dialog_capability::Did;
 
     use super::super::credentials::Credentials;

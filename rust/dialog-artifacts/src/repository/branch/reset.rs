@@ -8,8 +8,14 @@ use crate::repository::revision::Revision;
 
 /// Command struct for resetting a branch to a given revision.
 pub struct Reset {
-    pub(super) branch: Branch,
-    pub(super) revision: Revision,
+    branch: Branch,
+    revision: Revision,
+}
+
+impl Reset {
+    pub(super) fn new(branch: Branch, revision: Revision) -> Self {
+        Self { branch, revision }
+    }
 }
 
 impl Reset {

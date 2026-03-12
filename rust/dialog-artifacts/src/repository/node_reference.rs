@@ -6,7 +6,7 @@ use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 
 /// We reference a tree by the root hash.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct NodeReference(pub(crate) Blake3Hash);
+pub struct NodeReference(Blake3Hash);
 
 impl NodeReference {
     /// Returns a reference to the underlying hash.
@@ -32,6 +32,12 @@ impl Display for NodeReference {
 impl Debug for NodeReference {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         Display::fmt(&self, f)
+    }
+}
+
+impl From<Blake3Hash> for NodeReference {
+    fn from(hash: Blake3Hash) -> Self {
+        Self(hash)
     }
 }
 

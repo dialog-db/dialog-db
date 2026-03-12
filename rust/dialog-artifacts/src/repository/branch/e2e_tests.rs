@@ -5,23 +5,24 @@ use dialog_storage::provider::Volatile;
 use dialog_storage::provider::network::emulator::Route;
 use futures_util::stream;
 
+use crate::RemoteAddress;
 use crate::artifacts::{Artifact, Instruction};
-use crate::environment::{Address, TestEnvironment};
+use crate::environment::TestEnvironment;
 use crate::repository::remote::RemoteSite;
 
 use super::Branch;
 use super::tests::{test_issuer, test_subject};
 
-fn test_address(name: &str) -> Address {
+fn test_address(name: &str) -> RemoteAddress {
     let s3_addr = S3Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", name);
-    Address::S3(S3Credentials::public(s3_addr).unwrap())
+    RemoteAddress::S3(S3Credentials::public(s3_addr).unwrap())
 }
 
 fn new_env() -> TestEnvironment {
     Environment::new(Volatile::new(), Route::new())
 }
 
-fn env_with_remote(remote: Route<Address>) -> TestEnvironment {
+fn env_with_remote(remote: Route<RemoteAddress>) -> TestEnvironment {
     Environment::new(Volatile::new(), remote)
 }
 
@@ -31,14 +32,7 @@ async fn it_pushes_to_remote() -> anyhow::Result<()> {
     let issuer = test_issuer().await;
     let subject = test_subject();
 
-    let site = RemoteSite::add(
-        "origin",
-        issuer.did(),
-        test_address("remote-1"),
-        &subject,
-        &env,
-    )
-    .await?;
+    let site = RemoteSite::add("origin", test_address("remote-1"), &subject, &env).await?;
 
     let branch = Branch::open("main", issuer.clone(), subject.clone())
         .perform(&env)
@@ -75,14 +69,7 @@ async fn it_fetches_from_remote_upstream() -> anyhow::Result<()> {
     let issuer = test_issuer().await;
     let subject = test_subject();
 
-    let site = RemoteSite::add(
-        "origin",
-        issuer.did(),
-        test_address("remote-2"),
-        &subject,
-        &env,
-    )
-    .await?;
+    let site = RemoteSite::add("origin", test_address("remote-2"), &subject, &env).await?;
 
     let branch = Branch::open("main", issuer.clone(), subject.clone())
         .perform(&env)
@@ -118,14 +105,7 @@ async fn it_fetch_does_not_modify_local_state() -> anyhow::Result<()> {
     let issuer = test_issuer().await;
     let subject = test_subject();
 
-    let site = RemoteSite::add(
-        "origin",
-        issuer.did(),
-        test_address("remote-3"),
-        &subject,
-        &env,
-    )
-    .await?;
+    let site = RemoteSite::add("origin", test_address("remote-3"), &subject, &env).await?;
 
     let branch = Branch::open("main", issuer.clone(), subject.clone())
         .perform(&env)
@@ -159,14 +139,13 @@ async fn it_fetch_does_not_modify_local_state() -> anyhow::Result<()> {
 #[dialog_common::test]
 async fn it_pushes_then_pulls_from_remote() -> anyhow::Result<()> {
     // Alice and Bob share a remote
-    let remote = Route::<Address>::new();
+    let remote = Route::<RemoteAddress>::new();
     let alice_env = env_with_remote(remote);
     let alice_issuer = test_issuer().await;
     let subject = test_subject();
 
     let site = RemoteSite::add(
         "origin",
-        alice_issuer.did(),
         test_address("shared-remote"),
         &subject,
         &alice_env,
@@ -220,14 +199,7 @@ async fn it_pull_without_local_changes_adopts_upstream() -> anyhow::Result<()> {
     let issuer = test_issuer().await;
     let subject = test_subject();
 
-    let site = RemoteSite::add(
-        "origin",
-        issuer.did(),
-        test_address("remote-adopt"),
-        &subject,
-        &env,
-    )
-    .await?;
+    let site = RemoteSite::add("origin", test_address("remote-adopt"), &subject, &env).await?;
 
     let branch = Branch::open("main", issuer.clone(), subject.clone())
         .perform(&env)
@@ -264,26 +236,11 @@ async fn it_pull_without_local_changes_adopts_upstream() -> anyhow::Result<()> {
 #[dialog_common::test]
 async fn it_adds_multiple_remotes() -> anyhow::Result<()> {
     let env = new_env();
-    let issuer = test_issuer().await;
     let subject = test_subject();
 
-    let origin = RemoteSite::add(
-        "origin",
-        issuer.did(),
-        test_address("remote-origin"),
-        &subject,
-        &env,
-    )
-    .await?;
+    let origin = RemoteSite::add("origin", test_address("remote-origin"), &subject, &env).await?;
 
-    let backup = RemoteSite::add(
-        "backup",
-        issuer.did(),
-        test_address("remote-backup"),
-        &subject,
-        &env,
-    )
-    .await?;
+    let backup = RemoteSite::add("backup", test_address("remote-backup"), &subject, &env).await?;
 
     assert_eq!(origin.name(), "origin");
     assert_eq!(backup.name(), "backup");

@@ -25,6 +25,6 @@ pub mod state;
 pub use branch::RemoteBranch;
 pub use repository::RemoteRepository;
 pub use site::RemoteSite;
-pub use state::{RemoteState, SiteName};
+pub use state::SiteName;
 
 use super::branch::UpstreamState;

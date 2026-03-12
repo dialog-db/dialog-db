@@ -73,9 +73,14 @@ pub use uri::*;
 
 /// Concrete environment composition for the repository layer.
 pub mod environment;
+pub use environment::*;
 
 /// Capability-based repository system.
-pub mod repository;
+mod repository;
+pub use repository::{
+    Branch, BranchName, BranchState, NodeReference, Occurence, RemoteBranch, RemoteRepository,
+    RemoteSite, Revision,
+};
 
 #[cfg(any(test, feature = "helpers"))]
 mod helpers;
