@@ -2,6 +2,7 @@ use dialog_capability::{Capability, Did, Provider, Subject};
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
 use dialog_effects::remote::RemoteInvocation;
+use dialog_s3_credentials::Credentials;
 use dialog_storage::{Blake3Hash, CborEncoder, Encoder};
 
 use crate::repository::Site;
@@ -19,8 +20,12 @@ use super::UpstreamState;
 /// Provides remote operations: resolve, publish, and upload.
 #[derive(Debug, Clone)]
 pub struct RemoteBranch {
-    /// The remote site address.
+    /// The remote name (e.g., "origin") used to look up configuration.
+    pub(crate) remote: String,
+    /// The remote site address (human-readable).
     pub(crate) site: Site,
+    /// The credentials used for remote operations.
+    pub(crate) credentials: Credentials,
     /// The subject DID of the remote repository.
     pub(crate) subject: Did,
     /// The branch identifier.
@@ -28,9 +33,19 @@ pub struct RemoteBranch {
 }
 
 impl RemoteBranch {
+    /// The remote name (e.g., "origin").
+    pub fn remote(&self) -> &str {
+        &self.remote
+    }
+
     /// The remote site address.
     pub fn site(&self) -> &Site {
         &self.site
+    }
+
+    /// The credentials for this remote.
+    pub fn credentials(&self) -> &Credentials {
+        &self.credentials
     }
 
     /// The subject DID of the remote repository.
@@ -61,11 +76,11 @@ impl RemoteBranch {
     /// Returns `None` if the remote branch has no state (not yet created).
     pub async fn resolve<Env>(&self, env: &Env) -> Result<Option<Revision>, RepositoryError>
     where
-        Env: Provider<RemoteInvocation<memory_fx::Resolve, Site>>,
+        Env: Provider<RemoteInvocation<memory_fx::Resolve, Credentials>>,
     {
         let capability = self.cell_capability().invoke(memory_fx::Resolve);
 
-        let result = RemoteInvocation::new(capability, self.site.clone())
+        let result = RemoteInvocation::new(capability, self.credentials.clone())
             .perform(env)
             .await
             .map_err(|e| {
@@ -97,15 +112,15 @@ impl RemoteBranch {
         env: &Env,
     ) -> Result<(), RepositoryError>
     where
-        Env: Provider<RemoteInvocation<memory_fx::Resolve, Site>>
-            + Provider<RemoteInvocation<memory_fx::Publish, Site>>,
+        Env: Provider<RemoteInvocation<memory_fx::Resolve, Credentials>>
+            + Provider<RemoteInvocation<memory_fx::Publish, Credentials>>,
     {
         let cell_cap = self.cell_capability();
 
         // Resolve to get current edition
         let resolve_result = RemoteInvocation::new(
             cell_cap.clone().invoke(memory_fx::Resolve),
-            self.site.clone(),
+            self.credentials.clone(),
         )
         .perform(env)
         .await
@@ -146,7 +161,7 @@ impl RemoteBranch {
 
         RemoteInvocation::new(
             cell_cap.invoke(memory_fx::Publish::new(content, edition)),
-            self.site.clone(),
+            self.credentials.clone(),
         )
         .perform(env)
         .await
@@ -168,11 +183,11 @@ impl RemoteBranch {
         env: &Env,
     ) -> Result<(), DialogArtifactsError>
     where
-        Env: Provider<RemoteInvocation<archive_fx::Put, Site>>,
+        Env: Provider<RemoteInvocation<archive_fx::Put, Credentials>>,
     {
         let catalog = self.archive().index();
         let put_cap = catalog.invoke(archive_fx::Put::new(hash, bytes));
-        RemoteInvocation::new(put_cap, self.site.clone())
+        RemoteInvocation::new(put_cap, self.credentials.clone())
             .perform(env)
             .await
             .map_err(|e| {
@@ -188,11 +203,11 @@ impl RemoteBranch {
         env: &Env,
     ) -> Result<Option<Vec<u8>>, DialogArtifactsError>
     where
-        Env: Provider<RemoteInvocation<archive_fx::Get, Site>>,
+        Env: Provider<RemoteInvocation<archive_fx::Get, Credentials>>,
     {
         let catalog = self.archive().index();
         let get_cap = catalog.invoke(archive_fx::Get::new(hash));
-        let result = RemoteInvocation::new(get_cap, self.site.clone())
+        let result = RemoteInvocation::new(get_cap, self.credentials.clone())
             .perform(env)
             .await
             .map_err(|e| {
@@ -205,7 +220,7 @@ impl RemoteBranch {
 impl From<RemoteBranch> for UpstreamState {
     fn from(remote: RemoteBranch) -> Self {
         UpstreamState::Remote {
-            site: remote.site,
+            site: remote.remote,
             branch: remote.branch,
             subject: remote.subject,
         }
@@ -220,10 +235,21 @@ mod tests {
         "did:test:remote-branch".parse().unwrap()
     }
 
+    fn test_credentials() -> Credentials {
+        let address = dialog_s3_credentials::Address::new(
+            "https://s3.us-east-1.amazonaws.com",
+            "us-east-1",
+            "bucket",
+        );
+        Credentials::S3(dialog_s3_credentials::s3::Credentials::public(address).unwrap())
+    }
+
     #[test]
     fn it_creates_remote_branch_cursor() {
         let remote = RemoteBranch {
+            remote: "origin".to_string(),
             site: "s3://bucket".to_string(),
+            credentials: test_credentials(),
             subject: test_subject(),
             branch: "main".into(),
         };
@@ -236,7 +262,9 @@ mod tests {
     #[test]
     fn it_converts_remote_branch_to_upstream_state() {
         let remote = RemoteBranch {
+            remote: "origin".to_string(),
             site: "s3://bucket".to_string(),
+            credentials: test_credentials(),
             subject: test_subject(),
             branch: "main".into(),
         };
@@ -248,7 +276,7 @@ mod tests {
                 branch,
                 subject,
             } => {
-                assert_eq!(site, "s3://bucket");
+                assert_eq!(site, "origin");
                 assert_eq!(branch, BranchId::from("main"));
                 assert_eq!(subject, test_subject());
             }

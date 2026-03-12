@@ -3,14 +3,15 @@ use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
 use dialog_effects::remote::RemoteInvocation;
+use dialog_s3_credentials::Credentials;
+use futures_util::StreamExt;
 
 use super::Branch;
-use crate::repository::Site;
+use super::novelty::novelty;
+use super::state::BranchId;
 use crate::repository::error::RepositoryError;
+use crate::repository::remote::RemoteBranch;
 use crate::repository::revision::Revision;
-
-pub(crate) mod local;
-mod remote;
 
 /// Command struct for pushing local changes to an upstream branch.
 ///
@@ -31,9 +32,9 @@ impl Push<'_> {
             + Provider<archive_fx::Put>
             + Provider<memory_fx::Resolve>
             + Provider<memory_fx::Publish>
-            + Provider<RemoteInvocation<archive_fx::Put, Site>>
-            + Provider<RemoteInvocation<memory_fx::Resolve, Site>>
-            + Provider<RemoteInvocation<memory_fx::Publish, Site>>
+            + Provider<RemoteInvocation<archive_fx::Put, Credentials>>
+            + Provider<RemoteInvocation<memory_fx::Resolve, Credentials>>
+            + Provider<RemoteInvocation<memory_fx::Publish, Credentials>>
             + ConditionalSync
             + 'static,
     {
@@ -46,15 +47,137 @@ impl Push<'_> {
 
         match upstream {
             crate::repository::branch::state::UpstreamState::Local { branch: id } => {
-                local::push(self.branch, id, env).await
+                push_local(self.branch, id, env).await
             }
             crate::repository::branch::state::UpstreamState::Remote {
                 site,
                 branch: id,
                 subject,
-            } => remote::push(self.branch, site, id, subject, env).await,
+            } => push_remote(self.branch, site, id, subject, env).await,
         }
     }
+}
+
+/// Push local changes to a local upstream branch.
+///
+/// Fast-forward: if the upstream's tree matches our base (it hasn't diverged),
+/// reset upstream to our revision and return success.
+/// Diverged: return `Ok(None)`.
+pub(crate) async fn push_local<Env>(
+    branch: &Branch,
+    upstream_id: &BranchId,
+    env: &Env,
+) -> Result<Option<Revision>, RepositoryError>
+where
+    Env: Provider<archive_fx::Get>
+        + Provider<archive_fx::Put>
+        + Provider<memory_fx::Resolve>
+        + Provider<memory_fx::Publish>
+        + ConditionalSync
+        + 'static,
+{
+    let issuer = branch.issuer().clone();
+    let subject = branch.subject().clone();
+
+    let upstream = Branch::load(upstream_id.clone(), issuer, subject)
+        .perform(env)
+        .await?;
+
+    let branch_revision = branch.revision();
+    let branch_base = branch.base();
+
+    if upstream.revision().tree() != &branch_base {
+        return Ok(None);
+    }
+
+    let _upstream = upstream
+        .reset(branch_revision.clone())
+        .perform(env)
+        .await?;
+
+    Ok(Some(branch_revision))
+}
+
+/// Push local changes to a remote upstream branch.
+///
+/// 1. Look up credentials from `RemoteSite`
+/// 2. Build `RemoteBranch` from upstream state
+/// 3. Compute novel nodes via `novelty()`
+/// 4. Read each node's raw bytes from local archive, upload to remote
+/// 5. Publish revision to remote
+async fn push_remote<Env>(
+    branch: &Branch,
+    site: &str,
+    upstream_branch_id: &BranchId,
+    upstream_subject: &dialog_capability::Did,
+    env: &Env,
+) -> Result<Option<Revision>, RepositoryError>
+where
+    Env: Provider<archive_fx::Get>
+        + Provider<archive_fx::Put>
+        + Provider<memory_fx::Resolve>
+        + Provider<memory_fx::Publish>
+        + Provider<RemoteInvocation<archive_fx::Put, Credentials>>
+        + Provider<RemoteInvocation<memory_fx::Resolve, Credentials>>
+        + Provider<RemoteInvocation<memory_fx::Publish, Credentials>>
+        + ConditionalSync
+        + 'static,
+{
+    let remote_site =
+        crate::repository::remote::RemoteSite::load(site, branch.subject(), env).await?;
+
+    let remote_branch = RemoteBranch {
+        remote: remote_site.name().to_string(),
+        site: remote_site.site().clone(),
+        credentials: remote_site.credentials().clone(),
+        subject: upstream_subject.clone(),
+        branch: upstream_branch_id.clone(),
+    };
+
+    let branch_revision = branch.revision();
+    let branch_base = branch.base();
+    let catalog = branch.archive().index();
+
+    let nodes = novelty(
+        *branch_base.hash(),
+        *branch_revision.tree().hash(),
+        env,
+        catalog.clone(),
+    );
+    tokio::pin!(nodes);
+
+    while let Some(node_result) = nodes.next().await {
+        let node = node_result.map_err(|e| RepositoryError::PushFailed {
+            cause: format!("Failed to compute novelty: {}", e),
+        })?;
+
+        let hash = *node.hash();
+
+        let get_cap = catalog.clone().invoke(archive_fx::Get::new(hash));
+        let bytes = get_cap.perform(env).await.map_err(|e| {
+            RepositoryError::PushFailed {
+                cause: format!("Failed to read local block: {}", e),
+            }
+        })?;
+
+        if let Some(bytes) = bytes {
+            remote_branch
+                .upload_block(hash, bytes, env)
+                .await
+                .map_err(|e| RepositoryError::PushFailed {
+                    cause: format!("Failed to upload block: {}", e),
+                })?;
+        }
+    }
+
+    remote_branch
+        .publish(branch_revision.clone(), env)
+        .await
+        .map_err(|e| RepositoryError::PushFailed {
+            cause: format!("Failed to publish revision: {}", e),
+        })?;
+
+    Ok(Some(branch_revision))
 }
 
 #[cfg(test)]
@@ -71,12 +194,10 @@ mod tests {
         let env = Volatile::new();
         let issuer = test_issuer().await;
 
-        // Create main branch
         let _main = Branch::open("main", issuer.clone(), test_subject())
             .perform(&env)
             .await?;
 
-        // Create feature branch tracking main
         let feature = Branch::open("feature", issuer.clone(), test_subject())
             .perform(&env)
             .await?;
@@ -87,7 +208,6 @@ mod tests {
             .perform(&env)
             .await?;
 
-        // Commit to feature
         let artifact = Artifact {
             the: "user/name".parse()?,
             of: "user:123".parse()?,
@@ -101,11 +221,9 @@ mod tests {
 
         let feature_revision = feature.revision();
 
-        // Push feature -> main (using local push directly)
-        let result = super::local::push(&feature, &"main".into(), &env).await?;
+        let result = super::push_local(&feature, &"main".into(), &env).await?;
         assert!(result.is_some());
 
-        // Verify main got updated
         let main_reloaded = Branch::load("main", issuer, test_subject())
             .perform(&env)
             .await?;
@@ -119,7 +237,6 @@ mod tests {
         let env = Volatile::new();
         let issuer = test_issuer().await;
 
-        // Create main branch and commit
         let main = Branch::open("main", issuer.clone(), test_subject())
             .perform(&env)
             .await?;
@@ -133,7 +250,6 @@ mod tests {
             .perform(&env)
             .await?;
 
-        // Create feature from empty, track main
         let feature = Branch::open("feature", issuer.clone(), test_subject())
             .perform(&env)
             .await?;
@@ -144,7 +260,6 @@ mod tests {
             .perform(&env)
             .await?;
 
-        // Commit to feature
         let (feature, _) = feature
             .commit(stream::iter(vec![Instruction::Assert(Artifact {
                 the: "user/email".parse()?,
@@ -155,8 +270,7 @@ mod tests {
             .perform(&env)
             .await?;
 
-        // Push should fail (diverged — main has changes feature doesn't know about)
-        let result = super::local::push(&feature, &"main".into(), &env).await?;
+        let result = super::push_local(&feature, &"main".into(), &env).await?;
         assert!(result.is_none(), "Push should return None when diverged");
 
         Ok(())
@@ -171,7 +285,6 @@ mod tests {
             .perform(&env)
             .await?;
 
-        // No upstream set
         assert!(branch.state().upstream.is_none());
 
         Ok(())
