@@ -1,9 +1,9 @@
 use dialog_capability::Did;
 
+use super::SiteName;
 use super::branch::RemoteBranch;
 use crate::environment::Address;
-use crate::repository::Site;
-use crate::repository::branch::BranchId;
+use crate::repository::branch::BranchName;
 
 /// A cursor pointing to a specific repository at a remote site.
 ///
@@ -15,9 +15,7 @@ use crate::repository::branch::BranchId;
 #[derive(Debug, Clone)]
 pub struct RemoteRepository {
     /// The remote name (e.g., "origin") used to look up configuration.
-    pub(super) remote: String,
-    /// The remote site address.
-    pub(super) site: Site,
+    pub(super) remote: SiteName,
     /// The credentials for authenticating remote operations.
     pub(super) address: Address,
     /// The subject DID of the repository.
@@ -25,11 +23,6 @@ pub struct RemoteRepository {
 }
 
 impl RemoteRepository {
-    /// The remote site address.
-    pub fn site(&self) -> &Site {
-        &self.site
-    }
-
     /// The address for authenticating remote operations.
     pub fn address(&self) -> &Address {
         &self.address
@@ -41,15 +34,14 @@ impl RemoteRepository {
     }
 
     /// The remote name.
-    pub fn remote(&self) -> &str {
+    pub fn remote(&self) -> &SiteName {
         &self.remote
     }
 
     /// Get a cursor into a specific branch at this remote repository.
-    pub fn branch(&self, name: impl Into<BranchId>) -> RemoteBranch {
+    pub fn branch(&self, name: impl Into<BranchName>) -> RemoteBranch {
         RemoteBranch {
             remote: self.remote.clone(),
-            site: self.site.clone(),
             address: self.address.clone(),
             subject: self.subject.clone(),
             branch: name.into(),

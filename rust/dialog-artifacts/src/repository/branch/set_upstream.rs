@@ -19,10 +19,10 @@ impl SetUpstream<'_> {
     {
         // Validate: upstream must not be this branch itself
         if let UpstreamState::Local { ref branch } = self.upstream
-            && *branch == self.branch.id()
+            && *branch == self.branch.name()
         {
             return Err(RepositoryError::BranchUpstreamIsItself {
-                id: self.branch.id(),
+                name: self.branch.name(),
             });
         }
 
@@ -94,8 +94,7 @@ mod tests {
 
         let s3_addr = S3Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "bucket");
         let remote_branch = RemoteBranch {
-            remote: "origin".to_string(),
-            site: "s3://bucket".to_string(),
+            remote: "origin".into(),
             address: Address::S3(S3Credentials::public(s3_addr).unwrap()),
             subject: "did:test:remote-repo".parse()?,
             branch: "main".into(),
@@ -106,12 +105,12 @@ mod tests {
         let state = branch.state();
         match state.upstream {
             Some(UpstreamState::Remote {
-                site,
+                name,
                 branch,
                 subject,
             }) => {
-                assert_eq!(site, "origin");
-                assert_eq!(branch.id(), "main");
+                assert_eq!(name, "origin");
+                assert_eq!(branch.as_str(), "main");
                 assert_eq!(subject, "did:test:remote-repo".parse()?);
             }
             _ => panic!("Expected Remote upstream"),

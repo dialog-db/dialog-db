@@ -6,24 +6,18 @@ use std::{
     string::FromUtf8Error,
 };
 
-use crate::repository::Site;
 use crate::repository::node_reference::NodeReference;
+use crate::repository::remote::SiteName;
 use crate::repository::revision::Revision;
 
 /// Branch is similar to a git branch and represents a named state of
 /// the work that is either diverged or converged from other workstream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BranchState {
-    /// Unique identifier of this fork.
-    pub id: BranchId,
-
-    /// Free-form human-readable description of this fork.
-    pub description: String,
-
     /// Current revision associated with this branch.
     pub revision: Revision,
 
-    /// Root of the search tree our this revision is based off.
+    /// Root of the search tree branich is based on.
     pub base: NodeReference,
 
     /// An upstream through which updates get propagated. Branch may
@@ -33,29 +27,17 @@ pub struct BranchState {
 
 impl BranchState {
     /// Create a new fork from the given revision.
-    pub fn new(id: BranchId, revision: Revision, description: Option<String>) -> Self {
+    pub fn new(revision: Revision) -> Self {
         Self {
-            description: description.unwrap_or_else(|| id.0.clone()),
             base: revision.tree.clone(),
             revision,
             upstream: None,
-            id,
         }
-    }
-
-    /// Unique identifier of this fork.
-    pub fn id(&self) -> &BranchId {
-        &self.id
     }
 
     /// Current revision of this branch.
     pub fn revision(&self) -> &Revision {
         &self.revision
-    }
-
-    /// Description of this branch.
-    pub fn description(&self) -> &str {
-        &self.description
     }
 
     /// Upstream branch of this branch.
@@ -72,55 +54,55 @@ impl BranchState {
 
 /// Unique name for the branch
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct BranchId(pub(crate) String);
+pub struct BranchName(pub(crate) String);
 
-impl BranchId {
-    /// Creates a new branch identifier from a string.
-    pub fn new(id: String) -> Self {
-        BranchId(id)
+impl BranchName {
+    /// Creates a new branch name from a string.
+    pub fn new(name: String) -> Self {
+        BranchName(name)
     }
 
-    /// Returns a reference to the branch identifier string.
-    pub fn id(&self) -> &String {
+    /// Returns a reference to the branch name string.
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
-impl KeyType for BranchId {
+impl KeyType for BranchName {
     fn bytes(&self) -> &[u8] {
         self.0.as_bytes()
     }
 }
 
-impl TryFrom<Vec<u8>> for BranchId {
+impl TryFrom<Vec<u8>> for BranchName {
     type Error = FromUtf8Error;
 
     fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
-        Ok(BranchId(String::from_utf8(bytes)?))
+        Ok(BranchName(String::from_utf8(bytes)?))
     }
 }
 
-impl Display for BranchId {
+impl Display for BranchName {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "{}", self.0)
     }
 }
 
-impl From<&BranchId> for BranchId {
-    fn from(value: &BranchId) -> Self {
+impl From<&BranchName> for BranchName {
+    fn from(value: &BranchName) -> Self {
         value.clone()
     }
 }
 
-impl From<&str> for BranchId {
+impl From<&str> for BranchName {
     fn from(value: &str) -> Self {
-        BranchId(value.to_string())
+        BranchName(value.to_string())
     }
 }
 
-impl From<String> for BranchId {
+impl From<String> for BranchName {
     fn from(value: String) -> Self {
-        BranchId(value)
+        BranchName(value)
     }
 }
 
@@ -129,23 +111,23 @@ impl From<String> for BranchId {
 pub enum UpstreamState {
     /// A local branch upstream
     Local {
-        /// Branch identifier
-        branch: BranchId,
+        /// Branch name
+        branch: BranchName,
     },
     /// A remote branch upstream
     Remote {
-        /// Remote site identifier
-        site: Site,
-        /// Branch identifier
-        branch: BranchId,
+        /// Remote name (e.g., "origin")
+        name: SiteName,
+        /// Branch name
+        branch: BranchName,
         /// Subject DID of the repository being tracked
         subject: Did,
     },
 }
 
 impl UpstreamState {
-    /// Returns the branch identifier of this upstream.
-    pub fn id(&self) -> &BranchId {
+    /// Returns the branch name of this upstream.
+    pub fn branch(&self) -> &BranchName {
         match self {
             Self::Local { branch } => branch,
             Self::Remote { branch, .. } => branch,

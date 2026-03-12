@@ -27,10 +27,8 @@ pub mod remote;
 /// Revision type and edition tracking.
 pub mod revision;
 
-/// Remote site identifier.
-pub type Site = String;
-
-pub use branch::{BranchId, BranchState, UpstreamState};
+pub use branch::{BranchName, BranchState, UpstreamState};
+pub use remote::SiteName;
 pub use error::{OperationKind, RepositoryError};
 pub use node_reference::NodeReference;
 pub use occurence::Occurence;

@@ -4,8 +4,9 @@ use dialog_effects::memory as memory_fx;
 use dialog_effects::remote::RemoteInvocation;
 
 use super::Branch;
-use super::state::{BranchId, UpstreamState};
+use super::state::{BranchName, UpstreamState};
 use crate::repository::error::RepositoryError;
+use crate::repository::remote::SiteName;
 use crate::repository::remote::{RemoteBranch, RemoteSite};
 use crate::repository::revision::Revision;
 
@@ -33,16 +34,16 @@ impl Fetch<'_> {
                 .upstream
                 .as_ref()
                 .ok_or_else(|| RepositoryError::BranchHasNoUpstream {
-                    id: self.branch.id(),
+                    name: self.branch.name(),
                 })?;
 
         match upstream {
-            UpstreamState::Local { branch: id } => fetch_local(self.branch, id, env).await,
+            UpstreamState::Local { branch: name } => fetch_local(self.branch, name, env).await,
             UpstreamState::Remote {
-                site,
-                branch: id,
+                name,
+                branch: branch_name,
                 subject,
-            } => fetch_remote(site, id, subject, env).await,
+            } => fetch_remote(name, branch_name, subject, env).await,
         }
     }
 }
@@ -52,7 +53,7 @@ impl Fetch<'_> {
 /// Does NOT modify local state.
 pub(crate) async fn fetch_local<Env>(
     branch: &Branch,
-    upstream_id: &BranchId,
+    upstream_name: &BranchName,
     env: &Env,
 ) -> Result<Option<Revision>, RepositoryError>
 where
@@ -61,7 +62,7 @@ where
     let issuer = branch.issuer().clone();
     let subject = branch.subject().clone();
 
-    let upstream = Branch::load(upstream_id.clone(), issuer, subject)
+    let upstream = Branch::load(upstream_name.clone(), issuer, subject)
         .perform(env)
         .await?;
 
@@ -73,22 +74,21 @@ where
 /// Does NOT modify local state. Looks up credentials from the persisted
 /// `RemoteSite` configuration.
 async fn fetch_remote<Env>(
-    site: &str,
-    upstream_branch_id: &BranchId,
+    remote: &SiteName,
+    upstream_branch_name: &BranchName,
     upstream_subject: &dialog_capability::Did,
     env: &Env,
 ) -> Result<Option<Revision>, RepositoryError>
 where
     Env: Provider<memory_fx::Resolve> + Provider<RemoteInvocation<memory_fx::Resolve, Address>>,
 {
-    let remote_site = RemoteSite::load(site, upstream_subject, env).await?;
+    let remote_site = RemoteSite::load(remote, upstream_subject, env).await?;
 
     let remote_branch = RemoteBranch {
-        remote: remote_site.name().to_string(),
-        site: remote_site.site().clone(),
+        remote: remote_site.name().clone(),
         address: remote_site.address().clone(),
         subject: upstream_subject.clone(),
-        branch: upstream_branch_id.clone(),
+        branch: upstream_branch_name.clone(),
     };
 
     remote_branch.resolve(env).await

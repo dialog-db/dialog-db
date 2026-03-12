@@ -3,7 +3,7 @@ use dialog_effects::memory as memory_fx;
 
 use super::Branch;
 use super::memory;
-use super::state::{BranchId, BranchState};
+use super::state::{BranchName, BranchState};
 use crate::repository::cell::CellOr;
 use crate::repository::credentials::Credentials;
 use crate::repository::error::RepositoryError;
@@ -11,7 +11,7 @@ use crate::repository::revision::Revision;
 
 /// Command to load an existing branch, returning an error if not found.
 pub struct Load {
-    pub(super) id: BranchId,
+    pub(super) name: BranchName,
     pub(super) issuer: Credentials,
     pub(super) subject: Did,
 }
@@ -22,15 +22,15 @@ impl Load {
     where
         Env: Provider<memory_fx::Resolve>,
     {
-        let default_state =
-            BranchState::new(self.id.clone(), Revision::new(self.issuer.did()), None);
-        let mem = memory::Memory::new(Subject::from(self.subject), self.id.clone());
+        let default_state = BranchState::new(Revision::new(self.issuer.did()));
+        let mem = memory::Memory::new(Subject::from(self.subject), self.name.clone());
         let cell: CellOr<BranchState> = mem.cell().or(default_state);
         cell.resolve(env).await?;
         if cell.inner().read_with(|opt| opt.is_none()) {
-            return Err(RepositoryError::BranchNotFound { id: self.id });
+            return Err(RepositoryError::BranchNotFound { name: self.name });
         }
         Ok(Branch {
+            name: self.name,
             issuer: self.issuer,
             cell,
         })
@@ -59,7 +59,7 @@ mod tests {
             .perform(&env)
             .await?;
 
-        assert_eq!(branch.id().id(), "main");
+        assert_eq!(branch.name().as_str(), "main");
         Ok(())
     }
 

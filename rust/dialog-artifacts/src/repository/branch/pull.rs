@@ -14,7 +14,7 @@ use crate::DialogArtifactsError;
 use crate::repository::archive::ContentAddressedStore;
 use crate::repository::archive::fallback::FallbackStore;
 use crate::repository::node_reference::NodeReference;
-use crate::repository::remote::{RemoteBranch, RemoteSite};
+use crate::repository::remote::{RemoteBranch, RemoteSite, SiteName};
 use crate::repository::revision::Revision;
 
 /// Command struct for pulling from a local upstream revision (legacy API).
@@ -75,7 +75,7 @@ impl Pull {
     {
         let state = self.branch.state();
         let upstream = state.upstream.as_ref().ok_or_else(|| {
-            DialogArtifactsError::Storage(format!("Branch {} has no upstream", self.branch.id()))
+            DialogArtifactsError::Storage(format!("Branch {} has no upstream", self.branch.name()))
         })?;
 
         match upstream.clone() {
@@ -92,10 +92,10 @@ impl Pull {
                 pull_local(self.branch, upstream_branch.revision(), env).await
             }
             UpstreamState::Remote {
-                site,
-                branch: id,
+                name,
+                branch: branch_name,
                 subject,
-            } => pull_remote(self.branch, &site, &id, &subject, env).await,
+            } => pull_remote(self.branch, &name, &branch_name, &subject, env).await,
         }
     }
 }
@@ -189,8 +189,8 @@ where
 /// from the persisted `RemoteSite` configuration.
 async fn pull_remote<Env>(
     branch: Branch,
-    site: &str,
-    upstream_branch_id: &super::state::BranchId,
+    remote: &SiteName,
+    upstream_branch_name: &super::state::BranchName,
     upstream_subject: &dialog_capability::Did,
     env: &Env,
 ) -> Result<(Branch, Option<Revision>), DialogArtifactsError>
@@ -204,16 +204,15 @@ where
         + ConditionalSync
         + 'static,
 {
-    let remote_site = RemoteSite::load(site, branch.subject(), env)
+    let remote_site = RemoteSite::load(remote, branch.subject(), env)
         .await
         .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
 
     let remote_branch = RemoteBranch {
-        remote: remote_site.name().to_string(),
-        site: remote_site.site().clone(),
+        remote: remote_site.name().clone(),
         address: remote_site.address().clone(),
         subject: upstream_subject.clone(),
-        branch: upstream_branch_id.clone(),
+        branch: upstream_branch_name.clone(),
     };
 
     let upstream_revision = remote_branch

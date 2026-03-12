@@ -3,7 +3,7 @@ use dialog_effects::memory as memory_fx;
 
 use super::Branch;
 use super::memory;
-use super::state::{BranchId, BranchState};
+use super::state::{BranchName, BranchState};
 use crate::repository::cell::CellOr;
 use crate::repository::credentials::Credentials;
 use crate::repository::error::RepositoryError;
@@ -11,7 +11,7 @@ use crate::repository::revision::Revision;
 
 /// Command to open a branch, creating it with defaults if it doesn't exist.
 pub struct Open {
-    pub(super) id: BranchId,
+    pub(super) name: BranchName,
     pub(super) issuer: Credentials,
     pub(super) subject: Did,
 }
@@ -22,12 +22,12 @@ impl Open {
     where
         Env: Provider<memory_fx::Resolve> + Provider<memory_fx::Publish>,
     {
-        let default_state =
-            BranchState::new(self.id.clone(), Revision::new(self.issuer.did()), None);
-        let mem = memory::Memory::new(Subject::from(self.subject), self.id);
+        let default_state = BranchState::new(Revision::new(self.issuer.did()));
+        let mem = memory::Memory::new(Subject::from(self.subject), self.name.clone());
         let cell: CellOr<BranchState> = mem.cell().or(default_state);
         cell.get_or_init(env).await?;
         Ok(Branch {
+            name: self.name,
             issuer: self.issuer,
             cell,
         })
@@ -49,7 +49,7 @@ mod tests {
             .perform(&env)
             .await?;
 
-        assert_eq!(branch.id().id(), "main");
+        assert_eq!(branch.name().as_str(), "main");
         assert_eq!(branch.revision().tree(), &NodeReference::default());
         Ok(())
     }

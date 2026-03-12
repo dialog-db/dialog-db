@@ -2,8 +2,7 @@ use crate::environment::Address;
 use dialog_capability::{Did, Provider, Subject};
 use dialog_effects::memory as memory_fx;
 
-use super::state::RemoteState;
-use crate::repository::Site;
+use super::state::{RemoteState, SiteName};
 use crate::repository::cell::Cell;
 use crate::repository::error::RepositoryError;
 
@@ -20,9 +19,7 @@ use super::repository::RemoteRepository;
 #[derive(Debug, Clone)]
 pub struct RemoteSite {
     /// The name of this remote (e.g., "origin").
-    pub(super) name: String,
-    /// The remote site address.
-    pub(super) site: Site,
+    pub(super) name: SiteName,
     /// The issuer DID that authenticates operations.
     pub(super) issuer: Did,
     /// The address for authenticating remote operations.
@@ -31,8 +28,12 @@ pub struct RemoteSite {
 
 impl RemoteSite {
     /// The memory cell where remote configuration is persisted.
-    fn cell(name: &str, subject: &Did) -> Cell<RemoteState> {
-        Cell::new(Subject::from(subject.clone()), "remotes", name.to_string())
+    fn cell(name: &SiteName, subject: &Did) -> Cell<RemoteState> {
+        Cell::new(
+            Subject::from(subject.clone()),
+            "remotes",
+            name.as_str().to_string(),
+        )
     }
 
     /// Add a new remote site configuration.
@@ -40,8 +41,7 @@ impl RemoteSite {
     /// Persists the remote config to a memory cell. Returns an error if a
     /// remote with the same name already exists.
     pub async fn add<Env>(
-        name: impl Into<String>,
-        site: Site,
+        name: impl Into<SiteName>,
         issuer: Did,
         address: Address,
         subject: &Did,
@@ -50,7 +50,7 @@ impl RemoteSite {
     where
         Env: Provider<memory_fx::Resolve> + Provider<memory_fx::Publish>,
     {
-        let name = name.into();
+        let name: SiteName = name.into();
         let cell = Self::cell(&name, subject);
 
         // Resolve to check if it already exists
@@ -62,7 +62,6 @@ impl RemoteSite {
         }
 
         let state = RemoteState {
-            site: site.clone(),
             issuer: issuer.clone(),
             address: address.clone(),
         };
@@ -70,7 +69,6 @@ impl RemoteSite {
 
         Ok(RemoteSite {
             name,
-            site,
             issuer,
             address,
         })
@@ -81,21 +79,20 @@ impl RemoteSite {
     /// Reads the remote config from a memory cell. Returns an error if the
     /// remote does not exist.
     pub async fn load<Env>(
-        name: impl Into<String>,
+        name: impl Into<SiteName>,
         subject: &Did,
         env: &Env,
     ) -> Result<RemoteSite, RepositoryError>
     where
         Env: Provider<memory_fx::Resolve>,
     {
-        let name = name.into();
+        let name: SiteName = name.into();
         let cell = Self::cell(&name, subject);
 
         cell.resolve(env).await?;
         match cell.get() {
             Some(state) => Ok(RemoteSite {
                 name,
-                site: state.site,
                 issuer: state.issuer,
                 address: state.address,
             }),
@@ -106,13 +103,8 @@ impl RemoteSite {
     }
 
     /// The name of this remote.
-    pub fn name(&self) -> &str {
+    pub fn name(&self) -> &SiteName {
         &self.name
-    }
-
-    /// The site address.
-    pub fn site(&self) -> &Site {
-        &self.site
     }
 
     /// The issuer DID.
@@ -129,7 +121,6 @@ impl RemoteSite {
     pub fn repository(&self, subject: Did) -> RemoteRepository {
         RemoteRepository {
             remote: self.name.clone(),
-            site: self.site.clone(),
             address: self.address.clone(),
             subject,
         }
@@ -164,7 +155,6 @@ mod tests {
 
         let site = RemoteSite::add(
             "origin",
-            "s3://my-bucket".to_string(),
             "did:key:zAlice".parse()?,
             test_address(),
             &subject,
@@ -173,14 +163,12 @@ mod tests {
         .await?;
 
         assert_eq!(site.name(), "origin");
-        assert_eq!(site.site(), "s3://my-bucket");
         assert_eq!(site.issuer(), &"did:key:zAlice".parse::<Did>()?);
         assert_eq!(site.address(), &test_address());
 
         // Load the same remote
         let loaded = RemoteSite::load("origin", &subject, &env).await?;
         assert_eq!(loaded.name(), "origin");
-        assert_eq!(loaded.site(), "s3://my-bucket");
         assert_eq!(loaded.address(), &test_address());
 
         Ok(())
@@ -207,7 +195,6 @@ mod tests {
 
         RemoteSite::add(
             "origin",
-            "s3://bucket-1".to_string(),
             "did:key:zAlice".parse()?,
             test_address(),
             &subject,
@@ -217,7 +204,6 @@ mod tests {
 
         let result = RemoteSite::add(
             "origin",
-            "s3://bucket-2".to_string(),
             "did:key:zBob".parse()?,
             test_address(),
             &subject,

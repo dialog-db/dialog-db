@@ -33,7 +33,6 @@ async fn it_pushes_to_remote() -> anyhow::Result<()> {
 
     let site = RemoteSite::add(
         "origin",
-        "remote-1".to_string(),
         issuer.did(),
         test_address("remote-1"),
         &subject,
@@ -78,7 +77,6 @@ async fn it_fetches_from_remote_upstream() -> anyhow::Result<()> {
 
     let site = RemoteSite::add(
         "origin",
-        "remote-2".to_string(),
         issuer.did(),
         test_address("remote-2"),
         &subject,
@@ -122,7 +120,6 @@ async fn it_fetch_does_not_modify_local_state() -> anyhow::Result<()> {
 
     let site = RemoteSite::add(
         "origin",
-        "remote-3".to_string(),
         issuer.did(),
         test_address("remote-3"),
         &subject,
@@ -169,7 +166,6 @@ async fn it_pushes_then_pulls_from_remote() -> anyhow::Result<()> {
 
     let site = RemoteSite::add(
         "origin",
-        "shared-remote".to_string(),
         alice_issuer.did(),
         test_address("shared-remote"),
         &subject,
@@ -226,7 +222,6 @@ async fn it_pull_without_local_changes_adopts_upstream() -> anyhow::Result<()> {
 
     let site = RemoteSite::add(
         "origin",
-        "remote-adopt".to_string(),
         issuer.did(),
         test_address("remote-adopt"),
         &subject,
@@ -274,7 +269,6 @@ async fn it_adds_multiple_remotes() -> anyhow::Result<()> {
 
     let origin = RemoteSite::add(
         "origin",
-        "remote-origin".to_string(),
         issuer.did(),
         test_address("remote-origin"),
         &subject,
@@ -284,7 +278,6 @@ async fn it_adds_multiple_remotes() -> anyhow::Result<()> {
 
     let backup = RemoteSite::add(
         "backup",
-        "remote-backup".to_string(),
         issuer.did(),
         test_address("remote-backup"),
         &subject,
@@ -294,12 +287,12 @@ async fn it_adds_multiple_remotes() -> anyhow::Result<()> {
 
     assert_eq!(origin.name(), "origin");
     assert_eq!(backup.name(), "backup");
-    assert_ne!(origin.site(), backup.site());
+    assert_ne!(origin.address(), backup.address());
 
     let loaded_origin = RemoteSite::load("origin", &subject, &env).await?;
     let loaded_backup = RemoteSite::load("backup", &subject, &env).await?;
-    assert_eq!(loaded_origin.site(), "remote-origin");
-    assert_eq!(loaded_backup.site(), "remote-backup");
+    assert_eq!(loaded_origin.name(), "origin");
+    assert_eq!(loaded_backup.name(), "backup");
 
     Ok(())
 }

@@ -1,7 +1,7 @@
 use dialog_capability::Subject;
 use dialog_effects::memory as fx;
 
-use super::state::BranchId;
+use super::state::BranchName;
 use crate::repository::cell::Cell;
 
 /// Pre-attenuated memory capability (`Subject → Memory → Space("local")`),
@@ -12,16 +12,16 @@ use crate::repository::cell::Cell;
 #[derive(Debug, Clone)]
 pub struct Memory {
     space: dialog_capability::Capability<fx::Space>,
-    branch_id: BranchId,
+    branch_name: BranchName,
 }
 
 impl Memory {
     /// Create a new memory capability scoped to the given branch.
-    pub fn new(subject: Subject, branch_id: BranchId) -> Self {
+    pub fn new(subject: Subject, branch_name: BranchName) -> Self {
         let space = subject
             .attenuate(fx::Memory)
             .attenuate(fx::Space::new("local"));
-        Self { space, branch_id }
+        Self { space, branch_name }
     }
 
     /// A [`Cell`] for this branch's state.
@@ -29,7 +29,7 @@ impl Memory {
         let capability = self
             .space
             .clone()
-            .attenuate(fx::Cell::new(self.branch_id.to_string()));
+            .attenuate(fx::Cell::new(self.branch_name.to_string()));
         Cell::from_capability(capability)
     }
 }

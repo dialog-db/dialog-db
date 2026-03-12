@@ -45,7 +45,7 @@ use super::cell::CellOr;
 use super::credentials::Credentials;
 use super::node_reference::NodeReference;
 use super::revision::Revision;
-pub use state::{BranchId, BranchState, UpstreamState};
+pub use state::{BranchName, BranchState, UpstreamState};
 
 /// Type alias for the prolly tree index.
 pub type Index = Tree<GeometricDistribution, Key, State<Datum>, Blake3Hash>;
@@ -53,28 +53,27 @@ pub type Index = Tree<GeometricDistribution, Key, State<Datum>, Blake3Hash>;
 /// A branch represents a named line of development within a repository.
 ///
 /// Wraps a `Cell<BranchState>` (transactional memory cell) plus issuer
-/// credentials. The subject DID and branch id are derived from the cell's
+/// credentials. The subject DID and branch name are derived from the cell's
 /// capability chain and cached state respectively.
 pub struct Branch {
+    name: BranchName,
     issuer: Credentials,
     cell: CellOr<BranchState>,
 }
 
 impl Debug for Branch {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        self.cell.read_with(|state| {
-            f.debug_struct("Branch")
-                .field("id", &state.id)
-                .field("issuer", &self.issuer.did())
-                .finish_non_exhaustive()
-        })
+        f.debug_struct("Branch")
+            .field("name", &self.name)
+            .field("issuer", &self.issuer.did())
+            .finish_non_exhaustive()
     }
 }
 
 impl Branch {
-    /// Returns the branch identifier.
-    pub fn id(&self) -> BranchId {
-        self.cell.read_with(|state| state.id.clone())
+    /// Returns the branch name.
+    pub fn name(&self) -> BranchName {
+        self.name.clone()
     }
 
     /// Returns the DID of the authority issuing changes on this branch.
@@ -107,11 +106,6 @@ impl Branch {
         self.cell.subject()
     }
 
-    /// Returns a description of this branch.
-    pub fn description(&self) -> String {
-        self.cell.read_with(|state| state.description.clone())
-    }
-
     /// Logical time on this branch
     pub fn occurence(&self) -> super::occurence::Occurence {
         self.cell.read_with(|state| state.revision.clone().into())
@@ -125,18 +119,18 @@ impl Branch {
 
 impl Branch {
     /// Create a command to open (load or create) a branch.
-    pub fn open(id: impl Into<BranchId>, issuer: Credentials, subject: Did) -> Open {
+    pub fn open(name: impl Into<BranchName>, issuer: Credentials, subject: Did) -> Open {
         Open {
-            id: id.into(),
+            name: name.into(),
             issuer,
             subject,
         }
     }
 
     /// Create a command to load an existing branch (error if not found).
-    pub fn load(id: impl Into<BranchId>, issuer: Credentials, subject: Did) -> Load {
+    pub fn load(name: impl Into<BranchName>, issuer: Credentials, subject: Did) -> Load {
         Load {
-            id: id.into(),
+            name: name.into(),
             issuer,
             subject,
         }

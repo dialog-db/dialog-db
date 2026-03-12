@@ -8,8 +8,9 @@ use futures_util::{StreamExt, TryStreamExt};
 
 use super::Branch;
 use super::novelty::novelty;
-use super::state::{BranchId, UpstreamState};
+use super::state::{BranchName, UpstreamState};
 use crate::repository::error::RepositoryError;
+use crate::repository::remote::SiteName;
 use crate::repository::remote::{RemoteBranch, RemoteSite};
 use crate::repository::revision::Revision;
 
@@ -44,16 +45,16 @@ impl Push<'_> {
                 .upstream
                 .as_ref()
                 .ok_or_else(|| RepositoryError::BranchHasNoUpstream {
-                    id: self.branch.id(),
+                    name: self.branch.name(),
                 })?;
 
         match upstream {
-            UpstreamState::Local { branch: id } => push_local(self.branch, id, env).await,
+            UpstreamState::Local { branch: name } => push_local(self.branch, name, env).await,
             UpstreamState::Remote {
-                site,
-                branch: id,
+                name,
+                branch: branch_name,
                 subject,
-            } => push_remote(self.branch, site, id, subject, env).await,
+            } => push_remote(self.branch, name, branch_name, subject, env).await,
         }
     }
 }
@@ -65,7 +66,7 @@ impl Push<'_> {
 /// Diverged: return `Ok(None)`.
 pub(crate) async fn push_local<Env>(
     branch: &Branch,
-    upstream_id: &BranchId,
+    upstream_name: &BranchName,
     env: &Env,
 ) -> Result<Option<Revision>, RepositoryError>
 where
@@ -79,7 +80,7 @@ where
     let issuer = branch.issuer().clone();
     let subject = branch.subject().clone();
 
-    let upstream = Branch::load(upstream_id.clone(), issuer, subject)
+    let upstream = Branch::load(upstream_name.clone(), issuer, subject)
         .perform(env)
         .await?;
 
@@ -104,8 +105,8 @@ where
 /// 5. Publish revision to remote
 async fn push_remote<Env>(
     branch: &Branch,
-    site: &str,
-    upstream_branch_id: &BranchId,
+    remote: &SiteName,
+    upstream_branch_name: &BranchName,
     upstream_subject: &dialog_capability::Did,
     env: &Env,
 ) -> Result<Option<Revision>, RepositoryError>
@@ -120,14 +121,13 @@ where
         + ConditionalSync
         + 'static,
 {
-    let remote_site = RemoteSite::load(site, branch.subject(), env).await?;
+    let remote_site = RemoteSite::load(remote, branch.subject(), env).await?;
 
     let remote_branch = RemoteBranch {
-        remote: remote_site.name().to_string(),
-        site: remote_site.site().clone(),
+        remote: remote_site.name().clone(),
         address: remote_site.address().clone(),
         subject: upstream_subject.clone(),
-        branch: upstream_branch_id.clone(),
+        branch: upstream_branch_name.clone(),
     };
 
     let branch_revision = branch.revision();

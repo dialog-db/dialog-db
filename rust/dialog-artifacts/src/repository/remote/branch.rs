@@ -6,13 +6,13 @@ use dialog_effects::remote::RemoteInvocation;
 use dialog_storage::{Blake3Hash, CborEncoder, Encoder};
 
 use crate::DialogArtifactsError;
-use crate::repository::Site;
-use crate::repository::branch::BranchId;
+use crate::repository::branch::BranchName;
 use crate::repository::branch::archive::Archive;
 use crate::repository::branch::state::BranchState;
 use crate::repository::error::RepositoryError;
 use crate::repository::revision::Revision;
 
+use super::SiteName;
 use super::UpstreamState;
 
 /// A cursor pointing to a specific branch at a remote repository.
@@ -22,26 +22,19 @@ use super::UpstreamState;
 #[derive(Debug, Clone)]
 pub struct RemoteBranch {
     /// The remote name (e.g., "origin") used to look up configuration.
-    pub(crate) remote: String,
-    /// The remote site address (human-readable).
-    pub(crate) site: Site,
+    pub(crate) remote: SiteName,
     /// The credentials used for remote operations.
     pub(crate) address: Address,
     /// The subject DID of the remote repository.
     pub(crate) subject: Did,
-    /// The branch identifier.
-    pub(crate) branch: BranchId,
+    /// The branch name.
+    pub(crate) branch: BranchName,
 }
 
 impl RemoteBranch {
     /// The remote name (e.g., "origin").
-    pub fn remote(&self) -> &str {
+    pub fn remote(&self) -> &SiteName {
         &self.remote
-    }
-
-    /// The remote site address.
-    pub fn site(&self) -> &Site {
-        &self.site
     }
 
     /// The address for this remote.
@@ -54,8 +47,8 @@ impl RemoteBranch {
         &self.subject
     }
 
-    /// The branch identifier.
-    pub fn branch(&self) -> &BranchId {
+    /// The branch name.
+    pub fn branch(&self) -> &BranchName {
         &self.branch
     }
 
@@ -144,7 +137,7 @@ impl RemoteBranch {
                 state.revision = revision;
                 state
             }
-            None => BranchState::new(self.branch.clone(), revision, None),
+            None => BranchState::new(revision),
         };
 
         let content = serde_ipld_dagcbor::to_vec(&new_state).map_err(|e| {
@@ -206,7 +199,7 @@ impl RemoteBranch {
 impl From<RemoteBranch> for UpstreamState {
     fn from(remote: RemoteBranch) -> Self {
         UpstreamState::Remote {
-            site: remote.remote,
+            name: remote.remote,
             branch: remote.branch,
             subject: remote.subject,
         }
@@ -232,23 +225,20 @@ mod tests {
     #[test]
     fn it_creates_remote_branch_cursor() {
         let remote = RemoteBranch {
-            remote: "origin".to_string(),
-            site: "s3://bucket".to_string(),
+            remote: "origin".into(),
             address: test_address(),
             subject: test_subject(),
             branch: "main".into(),
         };
 
-        assert_eq!(remote.site(), "s3://bucket");
         assert_eq!(remote.subject(), &test_subject());
-        assert_eq!(remote.branch(), &BranchId::from("main"));
+        assert_eq!(remote.branch(), &BranchName::from("main"));
     }
 
     #[test]
     fn it_converts_remote_branch_to_upstream_state() {
         let remote = RemoteBranch {
-            remote: "origin".to_string(),
-            site: "s3://bucket".to_string(),
+            remote: "origin".into(),
             address: test_address(),
             subject: test_subject(),
             branch: "main".into(),
@@ -257,12 +247,12 @@ mod tests {
         let upstream: UpstreamState = remote.into();
         match upstream {
             UpstreamState::Remote {
-                site,
+                name,
                 branch,
                 subject,
             } => {
-                assert_eq!(site, "origin");
-                assert_eq!(branch, BranchId::from("main"));
+                assert_eq!(name, "origin");
+                assert_eq!(branch, BranchName::from("main"));
                 assert_eq!(subject, test_subject());
             }
             _ => panic!("Expected Remote upstream"),

@@ -3,17 +3,17 @@ use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use thiserror::Error;
 
-use super::Site;
-use super::branch::BranchId;
+use super::branch::BranchName;
+use super::remote::SiteName;
 
 /// The common error type used by repository operations.
 #[derive(Error, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepositoryError {
-    /// Branch with the given ID was not found
-    #[error("Branch {id} not found")]
+    /// Branch with the given name was not found
+    #[error("Branch {name} not found")]
     BranchNotFound {
-        /// The ID of the branch that was not found
-        id: BranchId,
+        /// The name of the branch that was not found
+        name: BranchName,
     },
 
     /// A storage operation failed
@@ -21,10 +21,10 @@ pub enum RepositoryError {
     StorageError(String),
 
     /// Branch has no configured upstream
-    #[error("Branch {id} has no upstream")]
+    #[error("Branch {name} has no upstream")]
     BranchHasNoUpstream {
-        /// The ID of the branch that has no upstream
-        id: BranchId,
+        /// The name of the branch that has no upstream
+        name: BranchName,
     },
 
     /// Pushing a revision failed
@@ -37,27 +37,27 @@ pub enum RepositoryError {
     /// Remote repository not found
     #[error("Remote {remote} not found")]
     RemoteNotFound {
-        /// Remote site identifier
-        remote: Site,
+        /// Remote site name
+        remote: SiteName,
     },
     /// Remote repository already exists
     #[error("Remote {remote} already exist")]
     RemoteAlreadyExists {
-        /// Remote site identifier
-        remote: Site,
+        /// Remote site name
+        remote: SiteName,
     },
     /// Connection to remote repository failed
     #[error("Connection to remote {remote} failed")]
     RemoteConnectionError {
-        /// Remote site identifier
-        remote: Site,
+        /// Remote site name
+        remote: SiteName,
     },
 
     /// Branch upstream is set to itself
-    #[error("Upsteam of local {id} is set to itself")]
+    #[error("Upsteam of local {name} is set to itself")]
     BranchUpstreamIsItself {
-        /// Branch identifier
-        id: BranchId,
+        /// Branch name
+        name: BranchName,
     },
 
     /// Invalid internal state (should never happen in normal operation)
@@ -79,7 +79,7 @@ impl RepositoryError {
 /// Used in [`RepositoryError::StorageError`] to provide context about where the failure happened.
 #[derive(Error, Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OperationKind {
-    /// Failed while resolving a branch by ID
+    /// Failed while resolving a branch by name
     ResolveBranch,
     /// Failed while resolving a revision
     ResolveRevision,
