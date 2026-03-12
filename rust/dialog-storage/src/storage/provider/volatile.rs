@@ -80,6 +80,15 @@ pub enum VolatileError {
     /// CAS condition failed.
     #[error("CAS condition failed: {0}")]
     Cas(String),
+    /// RwLock was poisoned by a panicking thread.
+    #[error("Lock poisoned: {0}")]
+    LockPoisoned(String),
+}
+
+impl<T> From<std::sync::PoisonError<T>> for VolatileError {
+    fn from(e: std::sync::PoisonError<T>) -> Self {
+        VolatileError::LockPoisoned(e.to_string())
+    }
 }
 
 #[cfg(test)]

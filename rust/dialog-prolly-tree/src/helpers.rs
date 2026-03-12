@@ -9,13 +9,13 @@
 //! # Tree Specification Example
 //!
 //! ```no_run
-//! use dialog_prolly_tree::tree_spec;
-//! use dialog_storage::{Blake3Hash, CborEncoder, JournaledStorage, MemoryStorageBackend, Storage};
+//! use dialog_prolly_tree::{tree_spec, JournaledBackend, TestStorage, TreeSpec};
+//! use dialog_storage::{CborEncoder, MemoryStorageBackend, Storage};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-//! let storage = Storage {
+//! let storage: TestStorage = Storage {
 //!     encoder: CborEncoder,
-//!     backend: JournaledStorage::new(MemoryStorageBackend::default()),
+//!     backend: JournaledBackend::new(MemoryStorageBackend::default()),
 //! };
 //!
 //! let spec = tree_spec![
@@ -23,7 +23,7 @@
 //!     [..a, c..e, f..f, g..g, h..l]  // Height 0 (segment nodes/leaves)
 //! ];
 //!
-//! let tree_spec = spec.build(storage).await?;
+//! let tree_spec: TreeSpec = spec.build(storage).await?;
 //! let tree = tree_spec.tree();
 //! # Ok(())
 //! # }
@@ -35,11 +35,13 @@
 //! use dialog_prolly_tree::{Tree, GeometricDistribution, Traversable, TraversalOrder, TreeNodes};
 //! use dialog_storage::{Blake3Hash, CborEncoder, MemoryStorageBackend, Storage};
 //!
-//! # type TestTree = Tree<GeometricDistribution, Vec<u8>, Vec<u8>, Blake3Hash,
-//! #     Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>>;
-//! # async fn example(tree: &TestTree) -> Result<(), Box<dyn std::error::Error>> {
+//! # type TestStorage = Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>;
+//! # async fn example(
+//! #     tree: &Tree<GeometricDistribution, Vec<u8>, Vec<u8>, Blake3Hash>,
+//! #     storage: &TestStorage,
+//! # ) -> Result<(), Box<dyn std::error::Error>> {
 //! // Collect all node hashes for comparison
-//! let hashes = tree.traverse(TraversalOrder::DepthFirst).into_hash_set().await;
+//! let hashes = tree.traverse(TraversalOrder::DepthFirst, storage).into_hash_set().await;
 //! println!("Tree contains {} nodes", hashes.len());
 //! # Ok(())
 //! # }

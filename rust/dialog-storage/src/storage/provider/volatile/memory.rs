@@ -36,9 +36,10 @@ impl Provider<Resolve> for Volatile {
 
         let key: MemoryKey = (space.to_string(), cell.to_string());
 
-        // Recover from lock poisoning — session data may be
-        // inconsistent but we avoid panicking the current thread.
-        let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
+        let sessions = self
+            .sessions
+            .read()
+            .map_err(|_| VolatileError::LockPoisoned("sessions".into()))?;
         Ok(sessions
             .get(&subject)
             .and_then(|session| session.memory.get(&key))
@@ -63,9 +64,10 @@ impl Provider<Publish> for Volatile {
         let expected_edition = effect.when().map(|e| e.to_vec());
 
         let key: MemoryKey = (space.to_string(), cell.to_string());
-        // Recover from lock poisoning — session data may be
-        // inconsistent but we avoid panicking the current thread.
-        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|_| VolatileError::LockPoisoned("sessions".into()))?;
         let session = sessions.entry(subject).or_default();
 
         // Get current value and edition
@@ -128,9 +130,10 @@ impl Provider<Retract> for Volatile {
         let expected_edition = effect.when().to_vec();
 
         let key: MemoryKey = (space.to_string(), cell.to_string());
-        // Recover from lock poisoning — session data may be
-        // inconsistent but we avoid panicking the current thread.
-        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|_| VolatileError::LockPoisoned("sessions".into()))?;
         let session = sessions.entry(subject).or_default();
 
         // Get current value
