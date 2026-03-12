@@ -1,4 +1,30 @@
-//! Local blob storage backed by the filesystem.
+//! Content-addressed blob storage.
+//!
+//! This crate provides a purpose-built blob storage layer that differs
+//! from the general-purpose filesystem provider in `dialog_storage` in
+//! several ways:
+//!
+//! - **Streaming interface**: Blobs are read and written as async streams,
+//!   enabling support for large files without loading entire contents
+//!   into memory.
+//!
+//! - **Fastest storage backend per platform**: On native targets, this uses
+//!   direct filesystem operations. On web targets, this uses the Origin
+//!   Private File System (OPFS) rather than IndexedDB. OPFS provides
+//!   significantly better performance for large file access and supports
+//!   efficient streaming.
+//!
+//! - **Sharded directory structure**: Blobs are stored in a 3-level directory
+//!   tree derived from the first 6 characters of their base58-encoded hash
+//!   (e.g., `Ab/Cd/Ef/AbCdEfGh...`). This prevents any single directory from
+//!   accumulating too many entries, which can degrade filesystem performance.
+//!
+//! - **Cross-platform WASM support**: The same API works on both native and
+//!   web targets with platform-appropriate implementations.
+//!
+//! The existing content-addressed storage in `dialog_storage` is designed
+//! for smaller blocks and uses IndexedDB on web, which makes efficient
+//! chunk streaming comparatively slow and complicated.
 //!
 //! # Examples
 //!
