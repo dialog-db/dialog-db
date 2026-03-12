@@ -39,8 +39,8 @@ impl SetUpstream<'_> {
 
 #[cfg(test)]
 mod tests {
-    use dialog_s3_credentials::s3::Credentials as S3Credentials;
     use dialog_s3_credentials::Address as S3Address;
+    use dialog_s3_credentials::s3::Credentials as S3Credentials;
     use dialog_storage::provider::Volatile;
 
     use crate::environment::Address;
@@ -92,11 +92,7 @@ mod tests {
             .perform(&env)
             .await?;
 
-        let s3_addr = S3Address::new(
-            "https://s3.us-east-1.amazonaws.com",
-            "us-east-1",
-            "bucket",
-        );
+        let s3_addr = S3Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "bucket");
         let remote_branch = RemoteBranch {
             remote: "origin".to_string(),
             site: "s3://bucket".to_string(),
@@ -105,10 +101,7 @@ mod tests {
             branch: "main".into(),
         };
 
-        branch
-            .set_upstream(remote_branch)
-            .perform(&env)
-            .await?;
+        branch.set_upstream(remote_branch).perform(&env).await?;
 
         let state = branch.state();
         match state.upstream {

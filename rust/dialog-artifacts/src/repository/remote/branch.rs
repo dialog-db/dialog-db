@@ -1,17 +1,17 @@
+use crate::environment::Address;
 use dialog_capability::{Capability, Did, Provider, Subject};
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
 use dialog_effects::remote::RemoteInvocation;
-use crate::environment::Address;
 use dialog_storage::{Blake3Hash, CborEncoder, Encoder};
 
+use crate::DialogArtifactsError;
 use crate::repository::Site;
 use crate::repository::branch::BranchId;
 use crate::repository::branch::archive::Archive;
 use crate::repository::branch::state::BranchState;
 use crate::repository::error::RepositoryError;
 use crate::repository::revision::Revision;
-use crate::DialogArtifactsError;
 
 use super::UpstreamState;
 
@@ -84,20 +84,21 @@ impl RemoteBranch {
         let result = RemoteInvocation::new(capability, self.address.clone())
             .perform(env)
             .await
-            .map_err(|e| {
-                RepositoryError::StorageError(format!("Remote resolve failed: {}", e))
-            })?;
+            .map_err(|e| RepositoryError::StorageError(format!("Remote resolve failed: {}", e)))?;
 
         match result {
             None => Ok(None),
             Some(publication) => {
                 let state: BranchState =
-                    CborEncoder.decode(&publication.content).await.map_err(|e| {
-                        RepositoryError::StorageError(format!(
-                            "Failed to decode remote branch state: {}",
-                            e
-                        ))
-                    })?;
+                    CborEncoder
+                        .decode(&publication.content)
+                        .await
+                        .map_err(|e| {
+                            RepositoryError::StorageError(format!(
+                                "Failed to decode remote branch state: {}",
+                                e
+                            ))
+                        })?;
                 Ok(Some(state.revision))
             }
         }
@@ -107,11 +108,7 @@ impl RemoteBranch {
     ///
     /// This resolves the remote branch state first to get the current edition,
     /// then publishes the updated state with the new revision.
-    pub async fn publish<Env>(
-        &self,
-        revision: Revision,
-        env: &Env,
-    ) -> Result<(), RepositoryError>
+    pub async fn publish<Env>(&self, revision: Revision, env: &Env) -> Result<(), RepositoryError>
     where
         Env: Provider<RemoteInvocation<memory_fx::Resolve, Address>>
             + Provider<RemoteInvocation<memory_fx::Publish, Address>>,
@@ -125,9 +122,7 @@ impl RemoteBranch {
         )
         .perform(env)
         .await
-        .map_err(|e| {
-            RepositoryError::StorageError(format!("Remote resolve failed: {}", e))
-        })?;
+        .map_err(|e| RepositoryError::StorageError(format!("Remote resolve failed: {}", e)))?;
 
         let (current_state, edition) = match resolve_result {
             None => (None, None),
@@ -149,11 +144,7 @@ impl RemoteBranch {
                 state.revision = revision;
                 state
             }
-            None => BranchState::new(
-                self.branch.clone(),
-                revision,
-                None,
-            ),
+            None => BranchState::new(self.branch.clone(), revision, None),
         };
 
         let content = serde_ipld_dagcbor::to_vec(&new_state).map_err(|e| {
@@ -166,9 +157,7 @@ impl RemoteBranch {
         )
         .perform(env)
         .await
-        .map_err(|e| {
-            RepositoryError::StorageError(format!("Remote publish failed: {}", e))
-        })?;
+        .map_err(|e| RepositoryError::StorageError(format!("Remote publish failed: {}", e)))?;
 
         Ok(())
     }
@@ -191,9 +180,7 @@ impl RemoteBranch {
         RemoteInvocation::new(put_cap, self.address.clone())
             .perform(env)
             .await
-            .map_err(|e| {
-                DialogArtifactsError::Storage(format!("Remote upload failed: {}", e))
-            })?;
+            .map_err(|e| DialogArtifactsError::Storage(format!("Remote upload failed: {}", e)))?;
         Ok(())
     }
 
@@ -211,9 +198,7 @@ impl RemoteBranch {
         let result = RemoteInvocation::new(get_cap, self.address.clone())
             .perform(env)
             .await
-            .map_err(|e| {
-                DialogArtifactsError::Storage(format!("Remote download failed: {}", e))
-            })?;
+            .map_err(|e| DialogArtifactsError::Storage(format!("Remote download failed: {}", e)))?;
         Ok(result)
     }
 }
@@ -230,8 +215,8 @@ impl From<RemoteBranch> for UpstreamState {
 
 #[cfg(test)]
 mod tests {
-    use dialog_s3_credentials::s3::Credentials as S3Credentials;
     use dialog_s3_credentials::Address as S3Address;
+    use dialog_s3_credentials::s3::Credentials as S3Credentials;
 
     use super::*;
 
@@ -240,11 +225,7 @@ mod tests {
     }
 
     fn test_address() -> Address {
-        let s3_addr = S3Address::new(
-            "https://s3.us-east-1.amazonaws.com",
-            "us-east-1",
-            "bucket",
-        );
+        let s3_addr = S3Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "bucket");
         Address::S3(S3Credentials::public(s3_addr).unwrap())
     }
 
