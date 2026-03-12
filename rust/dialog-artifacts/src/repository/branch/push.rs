@@ -4,7 +4,7 @@ use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
 use dialog_effects::remote::RemoteInvocation;
 use dialog_s3_credentials::Credentials;
-use futures_util::StreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 
 use super::Branch;
 use super::novelty::novelty;
@@ -138,37 +138,49 @@ where
     let branch_base = branch.base();
     let catalog = branch.archive().index();
 
+    // Maximum number of concurrent block uploads.
+    const UPLOAD_CONCURRENCY: usize = 16;
+
     let nodes = novelty(
         *branch_base.hash(),
         *branch_revision.tree().hash(),
         env,
         catalog.clone(),
     );
-    tokio::pin!(nodes);
 
-    while let Some(node_result) = nodes.next().await {
-        let node = node_result.map_err(|e| RepositoryError::PushFailed {
-            cause: format!("Failed to compute novelty: {}", e),
-        })?;
-
-        let hash = *node.hash();
-
-        let get_cap = catalog.clone().invoke(archive_fx::Get::new(hash));
-        let bytes = get_cap.perform(env).await.map_err(|e| {
-            RepositoryError::PushFailed {
-                cause: format!("Failed to read local block: {}", e),
-            }
-        })?;
-
-        if let Some(bytes) = bytes {
-            remote_branch
-                .upload_block(hash, bytes, env)
-                .await
-                .map_err(|e| RepositoryError::PushFailed {
-                    cause: format!("Failed to upload block: {}", e),
+    nodes
+        .map(|node_result| {
+            let catalog = &catalog;
+            let remote_branch = &remote_branch;
+            async move {
+                let node = node_result.map_err(|e| RepositoryError::PushFailed {
+                    cause: format!("Failed to compute novelty: {}", e),
                 })?;
-        }
-    }
+
+                let hash = *node.hash();
+
+                let get_cap = catalog.clone().invoke(archive_fx::Get::new(hash));
+                let bytes = get_cap.perform(env).await.map_err(|e| {
+                    RepositoryError::PushFailed {
+                        cause: format!("Failed to read local block: {}", e),
+                    }
+                })?;
+
+                if let Some(bytes) = bytes {
+                    remote_branch
+                        .upload_block(hash, bytes, env)
+                        .await
+                        .map_err(|e| RepositoryError::PushFailed {
+                            cause: format!("Failed to upload block: {}", e),
+                        })?;
+                }
+
+                Ok(())
+            }
+        })
+        .buffer_unordered(UPLOAD_CONCURRENCY)
+        .try_collect::<()>()
+        .await?;
 
     remote_branch
         .publish(branch_revision.clone(), env)
