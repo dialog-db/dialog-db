@@ -18,7 +18,7 @@ pub struct Open {
 
 impl Open {
     /// Execute the open operation.
-    pub async fn perform<Env>(self, env: &mut Env) -> Result<Branch, RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<Branch, RepositoryError>
     where
         Env: Provider<memory_fx::Resolve> + Provider<memory_fx::Publish>,
     {
@@ -43,10 +43,10 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_opens_new_branch() -> anyhow::Result<()> {
-        let mut env = Volatile::new();
+        let env = Volatile::new();
 
         let branch = Branch::open("main", test_issuer().await, test_subject())
-            .perform(&mut env)
+            .perform(&env)
             .await?;
 
         assert_eq!(branch.id().id(), "main");

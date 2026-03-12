@@ -17,32 +17,38 @@ pub mod state;
 
 mod advance;
 mod commit;
+#[cfg(test)]
+mod e2e_tests;
+mod fetch;
 mod load;
 mod novelty;
 mod open;
 mod pull;
+mod push;
 mod reset;
 mod select;
+mod set_upstream;
 
 pub use advance::Advance;
 pub use commit::Commit;
+pub use fetch::Fetch;
 pub use load::Load;
 pub use novelty::novelty;
 pub use open::Open;
-pub use pull::PullLocal;
+pub use pull::{Pull, PullLocal};
+pub use push::Push;
 pub use reset::Reset;
 pub use select::Select;
+pub use set_upstream::SetUpstream;
 
-use super::archive::ContentAddressedStore;
 use super::cell::CellOr;
 use super::credentials::Credentials;
 use super::node_reference::NodeReference;
 use super::revision::Revision;
 pub use state::{BranchId, BranchState, UpstreamState};
 
-/// Type alias for the prolly tree index backed by capability-based archive.
-pub type Index<Env> =
-    Tree<GeometricDistribution, Key, State<Datum>, Blake3Hash, ContentAddressedStore<Env>>;
+/// Type alias for the prolly tree index.
+pub type Index = Tree<GeometricDistribution, Key, State<Datum>, Blake3Hash>;
 
 /// A branch represents a named line of development within a repository.
 ///
@@ -173,17 +179,49 @@ impl Branch {
         }
     }
 
-    /// Create a command to pull changes from a local upstream branch.
+    /// Create a command to pull changes from a local upstream revision.
     ///
-    /// This performs a three-way merge:
-    /// 1. Loads the upstream tree (their changes)
-    /// 2. Computes local changes since last pull
-    /// 3. Integrates local changes into upstream tree
-    /// 4. Creates a new revision
+    /// This performs a three-way merge using an explicitly provided
+    /// upstream revision. For auto-dispatching based on the branch's
+    /// configured upstream, use [`pull_upstream`](Branch::pull_upstream).
     pub fn pull(self, upstream_revision: Revision) -> PullLocal {
         PullLocal {
             branch: self,
             upstream_revision,
+        }
+    }
+
+    /// Create a command to pull from the configured upstream.
+    ///
+    /// Reads `branch.state().upstream` and dispatches to local or remote
+    /// pull logic automatically.
+    pub fn pull_upstream(self) -> Pull {
+        Pull { branch: self }
+    }
+
+    /// Create a command to fetch the upstream branch's current revision.
+    ///
+    /// Does NOT modify local state — only reads from upstream.
+    pub fn fetch(&self) -> Fetch<'_> {
+        Fetch { branch: self }
+    }
+
+    /// Create a command to push local changes to the upstream branch.
+    ///
+    /// Reads the upstream configuration from branch state and dispatches
+    /// to local or remote push logic.
+    pub fn push(&self) -> Push<'_> {
+        Push { branch: self }
+    }
+
+    /// Create a command to set the upstream for this branch.
+    ///
+    /// Accepts both `UpstreamState` and `RemoteBranch` directly via
+    /// `impl Into<UpstreamState>`.
+    pub fn set_upstream(&self, upstream: impl Into<UpstreamState>) -> SetUpstream<'_> {
+        SetUpstream {
+            branch: self,
+            upstream: upstream.into(),
         }
     }
 }

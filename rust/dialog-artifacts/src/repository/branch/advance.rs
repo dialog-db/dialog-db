@@ -16,7 +16,7 @@ pub struct Advance {
 
 impl Advance {
     /// Execute the advance operation, returning the updated branch.
-    pub async fn perform<Env>(self, env: &mut Env) -> Result<Branch, RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<Branch, RepositoryError>
     where
         Env: Provider<memory_fx::Publish>,
     {
@@ -43,17 +43,15 @@ mod tests {
     use crate::repository::revision::Revision;
     use dialog_storage::provider::Volatile;
     use futures_util::stream;
-    use std::sync::Arc;
-    use tokio::sync::Mutex;
 
     #[dialog_common::test]
     async fn it_advances_with_explicit_base() -> anyhow::Result<()> {
-        let env = Arc::new(Mutex::new(Volatile::new()));
+        let env = Volatile::new();
 
         let issuer = test_issuer().await;
 
         let branch = Branch::open("main", issuer.clone(), test_subject())
-            .perform(&mut *env.lock().await)
+            .perform(&env)
             .await?;
 
         // Commit something to create a non-empty tree
@@ -64,7 +62,7 @@ mod tests {
             cause: None,
         };
         let instructions = stream::iter(vec![Instruction::Assert(artifact)]);
-        let (branch, _hash) = branch.commit(instructions).perform(env.clone()).await?;
+        let (branch, _hash) = branch.commit(instructions).perform(&env).await?;
 
         // Advance to a new revision with a different base
         let new_revision = Revision::new(issuer.did());
@@ -72,7 +70,7 @@ mod tests {
 
         let branch = branch
             .advance(new_revision.clone(), explicit_base.clone())
-            .perform(&mut *env.lock().await)
+            .perform(&env)
             .await?;
 
         // Verify the branch has the new revision and explicit base

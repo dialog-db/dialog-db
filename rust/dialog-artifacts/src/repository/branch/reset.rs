@@ -14,7 +14,7 @@ pub struct Reset {
 
 impl Reset {
     /// Execute the reset operation, returning the updated branch.
-    pub async fn perform<Env>(self, env: &mut Env) -> Result<Branch, RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<Branch, RepositoryError>
     where
         Env: Provider<memory_fx::Publish>,
     {
