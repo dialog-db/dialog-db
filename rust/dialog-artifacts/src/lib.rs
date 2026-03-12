@@ -71,6 +71,9 @@ pub use key::*;
 mod uri;
 pub use uri::*;
 
+/// Concrete environment composition for the repository layer.
+pub mod environment;
+
 /// Capability-based repository system.
 pub mod repository;
 

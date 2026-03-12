@@ -6,12 +6,14 @@ use crate::repository::Site;
 /// Persisted configuration for a remote site.
 ///
 /// Stored in a memory cell keyed by the remote name, this captures
-/// the site address and the issuer DID that authenticates operations
-/// against this remote.
+/// the site address, the issuer DID, and the credentials used to
+/// authenticate operations against this remote.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteState {
-    /// The site address (e.g., S3 bucket URL or service endpoint).
+    /// The human-readable site name (e.g., "s3://my-bucket").
     pub site: Site,
     /// The DID of the issuer who has access to this remote.
     pub issuer: Did,
+    /// The credentials used to authenticate remote operations.
+    pub credentials: dialog_s3_credentials::Credentials,
 }

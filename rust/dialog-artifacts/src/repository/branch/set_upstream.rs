@@ -87,8 +87,17 @@ mod tests {
             .perform(&env)
             .await?;
 
+        let address = dialog_s3_credentials::Address::new(
+            "https://s3.us-east-1.amazonaws.com",
+            "us-east-1",
+            "bucket",
+        );
         let remote_branch = RemoteBranch {
+            remote: "origin".to_string(),
             site: "s3://bucket".to_string(),
+            credentials: dialog_s3_credentials::Credentials::S3(
+                dialog_s3_credentials::s3::Credentials::public(address).unwrap(),
+            ),
             subject: "did:test:remote-repo".parse()?,
             branch: "main".into(),
         };
@@ -105,7 +114,7 @@ mod tests {
                 branch,
                 subject,
             }) => {
-                assert_eq!(site, "s3://bucket");
+                assert_eq!(site, "origin");
                 assert_eq!(branch.id(), "main");
                 assert_eq!(subject, "did:test:remote-repo".parse()?);
             }

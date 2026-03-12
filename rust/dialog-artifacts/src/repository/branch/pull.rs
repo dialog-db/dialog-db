@@ -3,14 +3,18 @@ use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
 use dialog_effects::remote::RemoteInvocation;
+use dialog_prolly_tree::{EMPT_TREE_HASH, Tree};
+use dialog_s3_credentials::Credentials;
+use std::collections::HashSet;
 
 use super::Branch;
+use super::Index;
 use crate::DialogArtifactsError;
-use crate::repository::Site;
+use crate::repository::archive::ContentAddressedStore;
+use crate::repository::archive::fallback::FallbackStore;
+use crate::repository::node_reference::NodeReference;
+use crate::repository::remote::RemoteBranch;
 use crate::repository::revision::Revision;
-
-pub(crate) mod local;
-mod remote;
 
 /// Command struct for pulling from a local upstream revision (legacy API).
 ///
@@ -36,7 +40,7 @@ impl PullLocal {
             + ConditionalSync
             + 'static,
     {
-        local::pull(self.branch, self.upstream_revision, env).await
+        pull_local(self.branch, self.upstream_revision, env).await
     }
 }
 
@@ -63,8 +67,8 @@ impl Pull {
             + Provider<archive_fx::Put>
             + Provider<memory_fx::Resolve>
             + Provider<memory_fx::Publish>
-            + Provider<RemoteInvocation<archive_fx::Get, Site>>
-            + Provider<RemoteInvocation<memory_fx::Resolve, Site>>
+            + Provider<RemoteInvocation<archive_fx::Get, Credentials>>
+            + Provider<RemoteInvocation<memory_fx::Resolve, Credentials>>
             + ConditionalSync
             + 'static,
     {
@@ -78,7 +82,6 @@ impl Pull {
 
         match upstream.clone() {
             crate::repository::branch::state::UpstreamState::Local { branch: id } => {
-                // Load upstream branch revision, then three-way merge
                 let upstream_branch = Branch::load(
                     id,
                     self.branch.issuer().clone(),
@@ -88,14 +91,210 @@ impl Pull {
                 .await
                 .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
 
-                local::pull(self.branch, upstream_branch.revision(), env).await
+                pull_local(self.branch, upstream_branch.revision(), env).await
             }
             crate::repository::branch::state::UpstreamState::Remote {
                 site,
                 branch: id,
                 subject,
-            } => remote::pull(self.branch, &site, &id, &subject, env).await,
+            } => pull_remote(self.branch, &site, &id, &subject, env).await,
         }
+    }
+}
+
+/// Perform a three-way merge from a local upstream revision.
+///
+/// Returns the updated branch and the new revision (or None if no changes).
+pub(crate) async fn pull_local<Env>(
+    branch: Branch,
+    upstream_revision: Revision,
+    env: &Env,
+) -> Result<(Branch, Option<Revision>), DialogArtifactsError>
+where
+    Env: Provider<archive_fx::Get>
+        + Provider<archive_fx::Put>
+        + Provider<memory_fx::Resolve>
+        + Provider<memory_fx::Publish>
+        + ConditionalSync
+        + 'static,
+{
+    let branch_base = branch.base();
+    let branch_revision = branch.revision();
+
+    if branch_base == *upstream_revision.tree() {
+        return Ok((branch, None));
+    }
+
+    let mut store = ContentAddressedStore::new(env, branch.archive().index());
+
+    let mut target: Index = Tree::from_hash(upstream_revision.tree.hash(), &store)
+        .await
+        .map_err(|e| {
+            DialogArtifactsError::Storage(format!("Failed to load upstream tree: {:?}", e))
+        })?;
+
+    let base: Index = Tree::from_hash(branch_base.hash(), &store)
+        .await
+        .map_err(|e| {
+            DialogArtifactsError::Storage(format!("Failed to load base tree: {:?}", e))
+        })?;
+
+    let current: Index = Tree::from_hash(branch_revision.tree.hash(), &store)
+        .await
+        .map_err(|e| {
+            DialogArtifactsError::Storage(format!("Failed to load current tree: {:?}", e))
+        })?;
+
+    let diff_store = store.clone();
+    let changes = base.differentiate(&current, &diff_store, &diff_store);
+
+    Box::pin(target.integrate(changes, &mut store))
+        .await
+        .map_err(|e| {
+            DialogArtifactsError::Storage(format!("Failed to integrate changes: {:?}", e))
+        })?;
+
+    let hash = target.hash().cloned().unwrap_or(EMPT_TREE_HASH);
+
+    if &hash == upstream_revision.tree.hash() {
+        let branch = branch
+            .reset(upstream_revision.clone())
+            .perform(env)
+            .await
+            .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
+
+        Ok((branch, Some(upstream_revision)))
+    } else {
+        let issuer_did = branch.issuer.did();
+        let new_revision = Revision {
+            issuer: issuer_did,
+            tree: NodeReference(hash),
+            cause: HashSet::from([upstream_revision.edition().map_err(|e| {
+                DialogArtifactsError::Storage(format!("Failed to create edition: {:?}", e))
+            })?]),
+            period: upstream_revision.period.max(branch_revision.period) + 1,
+            moment: 0,
+        };
+
+        let branch = branch
+            .advance(new_revision.clone(), upstream_revision.tree.clone())
+            .perform(env)
+            .await
+            .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
+
+        Ok((branch, Some(new_revision)))
+    }
+}
+
+/// Perform a three-way merge pulling from a remote upstream.
+///
+/// Uses `FallbackStore` so that reads can fall through to the remote
+/// when the local archive doesn't have the blocks. Looks up credentials
+/// from the persisted `RemoteSite` configuration.
+async fn pull_remote<Env>(
+    branch: Branch,
+    site: &str,
+    upstream_branch_id: &super::state::BranchId,
+    upstream_subject: &dialog_capability::Did,
+    env: &Env,
+) -> Result<(Branch, Option<Revision>), DialogArtifactsError>
+where
+    Env: Provider<archive_fx::Get>
+        + Provider<archive_fx::Put>
+        + Provider<memory_fx::Resolve>
+        + Provider<memory_fx::Publish>
+        + Provider<RemoteInvocation<archive_fx::Get, Credentials>>
+        + Provider<RemoteInvocation<memory_fx::Resolve, Credentials>>
+        + ConditionalSync
+        + 'static,
+{
+    let remote_site =
+        crate::repository::remote::RemoteSite::load(site, branch.subject(), env)
+            .await
+            .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
+
+    let remote_branch = RemoteBranch {
+        remote: remote_site.name().to_string(),
+        site: remote_site.site().clone(),
+        credentials: remote_site.credentials().clone(),
+        subject: upstream_subject.clone(),
+        branch: upstream_branch_id.clone(),
+    };
+
+    let upstream_revision = remote_branch.resolve(env).await.map_err(|e| {
+        DialogArtifactsError::Storage(format!("Failed to resolve remote: {:?}", e))
+    })?;
+
+    let upstream_revision = match upstream_revision {
+        Some(rev) => rev,
+        None => return Ok((branch, None)),
+    };
+
+    let branch_base = branch.base();
+    let branch_revision = branch.revision();
+
+    if branch_base == *upstream_revision.tree() {
+        return Ok((branch, None));
+    }
+
+    let mut store = FallbackStore::new(env, branch.archive().index(), &remote_branch);
+
+    let mut target: Index = Tree::from_hash(upstream_revision.tree.hash(), &store)
+        .await
+        .map_err(|e| {
+            DialogArtifactsError::Storage(format!("Failed to load upstream tree: {:?}", e))
+        })?;
+
+    let base: Index = Tree::from_hash(branch_base.hash(), &store)
+        .await
+        .map_err(|e| {
+            DialogArtifactsError::Storage(format!("Failed to load base tree: {:?}", e))
+        })?;
+
+    let current: Index = Tree::from_hash(branch_revision.tree.hash(), &store)
+        .await
+        .map_err(|e| {
+            DialogArtifactsError::Storage(format!("Failed to load current tree: {:?}", e))
+        })?;
+
+    let diff_store = store.clone();
+    let changes = base.differentiate(&current, &diff_store, &diff_store);
+
+    Box::pin(target.integrate(changes, &mut store))
+        .await
+        .map_err(|e| {
+            DialogArtifactsError::Storage(format!("Failed to integrate changes: {:?}", e))
+        })?;
+
+    let hash = target.hash().cloned().unwrap_or(EMPT_TREE_HASH);
+
+    if &hash == upstream_revision.tree.hash() {
+        let branch = branch
+            .reset(upstream_revision.clone())
+            .perform(env)
+            .await
+            .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
+
+        Ok((branch, Some(upstream_revision)))
+    } else {
+        let issuer_did = branch.issuer.did();
+        let new_revision = Revision {
+            issuer: issuer_did,
+            tree: NodeReference(hash),
+            cause: HashSet::from([upstream_revision.edition().map_err(|e| {
+                DialogArtifactsError::Storage(format!("Failed to create edition: {:?}", e))
+            })?]),
+            period: upstream_revision.period.max(branch_revision.period) + 1,
+            moment: 0,
+        };
+
+        let branch = branch
+            .advance(new_revision.clone(), upstream_revision.tree.clone())
+            .perform(env)
+            .await
+            .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
+
+        Ok((branch, Some(new_revision)))
     }
 }
 
@@ -118,7 +317,6 @@ mod tests {
             .perform(&env)
             .await?;
 
-        // Pull with upstream at same base — should be a no-op
         let upstream_revision = Revision::new(issuer.did());
 
         let (branch, pulled) = branch.pull(upstream_revision).perform(&env).await?;
@@ -134,7 +332,6 @@ mod tests {
         let env = Volatile::new();
         let issuer = test_issuer().await;
 
-        // Create "main" branch and commit something
         let main = Branch::open("main", issuer.clone(), test_subject())
             .perform(&env)
             .await?;
@@ -152,12 +349,10 @@ mod tests {
 
         let main_revision = main.revision().clone();
 
-        // Create "feature" branch (empty, base = empty tree)
         let feature = Branch::open("feature", issuer, test_subject())
             .perform(&env)
             .await?;
 
-        // Pull main's revision into feature (no local changes)
         let (feature, pulled) = feature
             .pull(main_revision.clone())
             .perform(&env)
@@ -174,12 +369,10 @@ mod tests {
         let env = Volatile::new();
         let issuer = test_issuer().await;
 
-        // Create "main" branch
         let main = Branch::open("main", issuer.clone(), test_subject())
             .perform(&env)
             .await?;
 
-        // Commit to main
         let (main, _) = main
             .commit(stream::iter(vec![Instruction::Assert(Artifact {
                 the: "user/name".parse()?,
@@ -192,12 +385,10 @@ mod tests {
 
         let main_revision = main.revision().clone();
 
-        // Create "feature" branch from same starting point
         let feature = Branch::open("feature", issuer.clone(), test_subject())
             .perform(&env)
             .await?;
 
-        // Commit to feature (different entity)
         let (feature, _) = feature
             .commit(stream::iter(vec![Instruction::Assert(Artifact {
                 the: "user/email".parse()?,
@@ -208,14 +399,12 @@ mod tests {
             .perform(&env)
             .await?;
 
-        // Pull main's changes into feature (both sides changed)
         let (feature, pulled) = feature
             .pull(main_revision.clone())
             .perform(&env)
             .await?;
 
         assert!(pulled.is_some());
-        // Tree should differ from both main and feature originals (merged)
         let merged_tree = feature.revision().tree().clone();
         assert_ne!(&merged_tree, main_revision.tree());
 

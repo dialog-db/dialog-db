@@ -895,6 +895,7 @@ dependencies = [
  "dialog-credentials",
  "dialog-effects",
  "dialog-prolly-tree",
+ "dialog-s3-credentials",
  "dialog-storage",
  "dialog-varsig",
  "ed25519-dalek",

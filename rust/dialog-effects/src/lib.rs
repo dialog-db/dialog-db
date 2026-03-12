@@ -26,6 +26,7 @@
 #![warn(missing_docs)]
 
 pub mod archive;
+pub mod environment;
 pub mod memory;
 pub mod remote;
 pub mod storage;
