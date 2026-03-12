@@ -53,6 +53,7 @@ reqwest = { workspace = true, features = ["json"], optional = true }
 dialog-credentials = { workspace = true, optional = true }
 dialog-s3-credentials = { workspace = true, optional = true }
 quick-xml = { workspace = true, features = ["serde", "serialize"], optional = true }
+parking_lot = { workspace = true }
 sieve-cache = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_ipld_dagcbor = { workspace = true }

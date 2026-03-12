@@ -20,7 +20,7 @@
 //! use dialog_common::Blake3Hash;
 //!
 //! # async fn example() -> anyhow::Result<()> {
-//! let mut provider = Volatile::new();
+//! let provider = Volatile::new();
 //! let digest = Blake3Hash::hash(b"hello");
 //!
 //! let effect = Subject::from(did!("key:z6Mk..."))
@@ -28,7 +28,7 @@
 //!     .attenuate(Catalog::new("index"))
 //!     .invoke(Get::new(digest));
 //!
-//! let result = effect.perform(&mut provider).await?;
+//! let result = effect.perform(&provider).await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -37,6 +37,7 @@ mod archive;
 mod memory;
 
 use dialog_capability::Did;
+use parking_lot::RwLock;
 use std::collections::HashMap;
 
 /// Archive key: (catalog, digest_base58)
@@ -58,20 +59,20 @@ struct Session {
 ///
 /// A simple provider that stores all data in memory. Each subject DID gets its
 /// own session with separate archive and memory storage. Data is not persisted.
+///
+/// Uses `parking_lot::RwLock` for interior mutability so that
+/// `Provider::execute` can take `&self`. All lock guards are dropped before
+/// any `.await` points. Unlike `std::sync::RwLock`, `parking_lot` locks are
+/// infallible (no poisoning).
 #[derive(Default, Debug)]
 pub struct Volatile {
-    sessions: HashMap<Did, Session>,
+    sessions: RwLock<HashMap<Did, Session>>,
 }
 
 impl Volatile {
     /// Creates a new volatile provider.
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Gets or creates a session for the given subject.
-    fn session(&mut self, subject: &Did) -> &mut Session {
-        self.sessions.entry(subject.clone()).or_default()
     }
 }
 
@@ -93,53 +94,118 @@ mod tests {
     #[dialog_common::test]
     fn it_creates_new_provider() {
         let provider = Volatile::new();
-        assert!(provider.sessions.is_empty());
+        assert!(provider.sessions.read().is_empty());
     }
 
     #[dialog_common::test]
     fn it_creates_session_on_demand() {
-        let mut provider = Volatile::new();
+        let provider = Volatile::new();
         let subject = did!("test:subject1");
 
-        let _session = provider.session(&subject);
-        assert!(provider.sessions.contains_key(&subject));
+        provider
+            .sessions
+            .write()
+            .entry(subject.clone())
+            .or_default();
+        assert!(provider.sessions.read().contains_key(&subject));
     }
 
     #[dialog_common::test]
     fn it_reuses_existing_session() {
-        let mut provider = Volatile::new();
+        let provider = Volatile::new();
         let subject = did!("test:subject2");
 
         // First access creates session
         let digest = Blake3Hash::hash(b"test").as_bytes().to_base58();
         provider
-            .session(&subject)
+            .sessions
+            .write()
+            .entry(subject.clone())
+            .or_default()
             .archive
             .insert(("catalog".to_string(), digest), b"value".to_vec());
 
         // Second access should see the same data
-        let session = provider.session(&subject);
+        let sessions = provider.sessions.read();
+        let session = sessions.get(&subject).unwrap();
         assert_eq!(session.archive.len(), 1);
     }
 
     #[dialog_common::test]
     fn it_isolates_sessions_by_subject() {
-        let mut provider = Volatile::new();
+        let provider = Volatile::new();
         let subject1 = did!("test:subject-a");
         let subject2 = did!("test:subject-b");
 
         let digest = Blake3Hash::hash(b"test").as_bytes().to_base58();
         provider
-            .session(&subject1)
+            .sessions
+            .write()
+            .entry(subject1.clone())
+            .or_default()
             .archive
             .insert(("catalog".to_string(), digest.clone()), b"value1".to_vec());
 
         provider
-            .session(&subject2)
+            .sessions
+            .write()
+            .entry(subject2.clone())
+            .or_default()
             .archive
             .insert(("catalog".to_string(), digest), b"value2".to_vec());
 
-        assert_eq!(provider.session(&subject1).archive.len(), 1);
-        assert_eq!(provider.session(&subject2).archive.len(), 1);
+        let sessions = provider.sessions.read();
+        assert_eq!(sessions.get(&subject1).unwrap().archive.len(), 1);
+        assert_eq!(sessions.get(&subject2).unwrap().archive.len(), 1);
+    }
+
+    /// Demonstrates that a provider can be shared across concurrent tasks,
+    /// which is the key motivation for `Provider::execute` taking `&self`
+    /// instead of `&mut self`.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[dialog_common::test]
+    async fn it_supports_concurrent_access() -> anyhow::Result<()> {
+        use dialog_capability::Subject;
+        use dialog_effects::archive::{Archive, Catalog, Get, Put};
+        use std::sync::Arc;
+
+        let provider = Arc::new(Volatile::new());
+
+        // Spawn multiple tasks that write to the same provider concurrently.
+        let mut handles = Vec::new();
+        for i in 0..10u8 {
+            let provider = provider.clone();
+            let handle = tokio::spawn(async move {
+                let subject = Subject::from(did!("test:concurrent"));
+                let content = vec![i; 64];
+                let digest = Blake3Hash::hash(&content);
+
+                subject
+                    .clone()
+                    .attenuate(Archive)
+                    .attenuate(Catalog::new("index"))
+                    .invoke(Put::new(digest.clone(), content))
+                    .perform(provider.as_ref())
+                    .await
+                    .unwrap();
+
+                let result = subject
+                    .attenuate(Archive)
+                    .attenuate(Catalog::new("index"))
+                    .invoke(Get::new(digest))
+                    .perform(provider.as_ref())
+                    .await
+                    .unwrap();
+
+                assert!(result.is_some());
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.await?;
+        }
+
+        Ok(())
     }
 }

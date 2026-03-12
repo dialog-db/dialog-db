@@ -71,7 +71,7 @@ impl<T: Constraint> Capability<T> {
     /// capability with its authorization proof.
     pub async fn acquire<A: Access + Principal>(
         self,
-        access: &mut A,
+        access: &A,
     ) -> Result<Authorized<T, A::Authorization>, A::Error>
     where
         Self: ConditionalSend + Clone + 'static,
@@ -105,7 +105,7 @@ impl<T: Policy + Constraint> Capability<T> {
 impl<Fx: Effect> Capability<Fx> {
     /// Perform the invocation directly without authorization verification.
     /// For operations that require authorization, use `acquire` first.
-    pub async fn perform<Env>(self, env: &mut Env) -> Fx::Output
+    pub async fn perform<Env>(self, env: &Env) -> Fx::Output
     where
         Env: Provider<Fx>,
     {

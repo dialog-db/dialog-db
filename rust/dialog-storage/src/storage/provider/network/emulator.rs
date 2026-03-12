@@ -16,8 +16,10 @@ use async_trait::async_trait;
 use dialog_capability::{Capability, Constraint, Effect, Provider, ProviderRoute};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::remote::RemoteInvocation;
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::sync::Arc;
 
 pub use crate::Emulator;
 use crate::provider::volatile::Volatile;
@@ -27,17 +29,22 @@ use crate::provider::volatile::Volatile;
 /// Each address gets its own independent `Volatile` instance, so data
 /// stored via one address is isolated from other addresses.
 ///
+/// Uses `parking_lot::RwLock` for interior mutability so
+/// `Provider::execute` can take `&self`. Connections are wrapped in
+/// `Arc` so they can be cloned out of the lock before any `.await`
+/// points.
+///
 /// Implements [`ProviderRoute`] so it can be used as a field in a
 /// `#[derive(Router)]` struct.
 pub struct Route<Address> {
-    connections: HashMap<Address, Volatile>,
+    connections: RwLock<HashMap<Address, Arc<Volatile>>>,
 }
 
 impl<Address> Route<Address> {
     /// Create a new emulated route with no cached connections.
     pub fn new() -> Self {
         Self {
-            connections: HashMap::new(),
+            connections: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -62,12 +69,28 @@ where
     Address: Eq + Hash + Clone + ConditionalSend + ConditionalSync + 'static,
     Volatile: Provider<Fx>,
 {
-    async fn execute(&mut self, input: RemoteInvocation<Fx, Address>) -> Fx::Output {
+    async fn execute(&self, input: RemoteInvocation<Fx, Address>) -> Fx::Output {
         let (capability, address) = input.into_parts();
-        if !self.connections.contains_key(&address) {
-            self.connections.insert(address.clone(), Volatile::new());
-        }
-        let volatile = self.connections.get_mut(&address).unwrap();
-        <Volatile as Provider<Fx>>::execute(volatile, capability).await
+
+        // Check the cache (read lock, dropped immediately).
+        let volatile = {
+            let cache = self.connections.read();
+            cache.get(&address).cloned()
+        };
+
+        let volatile = match volatile {
+            Some(v) => v,
+            None => {
+                let new_volatile = Arc::new(Volatile::new());
+                // Insert into cache (write lock, dropped immediately).
+                self.connections
+                    .write()
+                    .insert(address.clone(), new_volatile.clone());
+                new_volatile
+            }
+        };
+
+        // Execute on the Arc'd volatile — no lock held.
+        <Volatile as Provider<Fx>>::execute(&volatile, capability).await
     }
 }

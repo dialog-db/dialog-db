@@ -85,7 +85,7 @@ impl<Ok, E: Error, Fx: Effect<Output = Result<Ok, E>> + Constraint, A: Authoriza
 {
     /// Perform the invocation directly without authorization verification.
     /// For operations that require authorization, use `acquire` first.
-    pub async fn perform<Env>(self, env: &mut Env) -> Result<Ok, DialogCapabilityPerformError<E>>
+    pub async fn perform<Env>(self, env: &Env) -> Result<Ok, DialogCapabilityPerformError<E>>
     where
         Env: Provider<Self>
             + Authority<Signature = A::Signature>
