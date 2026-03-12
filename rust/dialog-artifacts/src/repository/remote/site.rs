@@ -138,8 +138,8 @@ impl RemoteSite {
 
 #[cfg(test)]
 mod tests {
-    use dialog_s3_credentials::s3::Credentials as S3Credentials;
     use dialog_s3_credentials::Address as S3Address;
+    use dialog_s3_credentials::s3::Credentials as S3Credentials;
     use dialog_storage::provider::Volatile;
 
     use super::*;

@@ -4,11 +4,11 @@
 //! remote network provider. The [`Network`] router handles unified address
 //! dispatch via its generated [`NetworkAddress`] enum.
 
-use dialog_storage::provider::{FileSystem, Network};
 #[cfg(any(test, feature = "helpers"))]
 use dialog_storage::provider::Volatile;
 #[cfg(any(test, feature = "helpers"))]
 use dialog_storage::provider::network::emulator::Route;
+use dialog_storage::provider::{FileSystem, Network};
 
 pub use dialog_effects::environment::Environment;
 pub use dialog_storage::provider::network::NetworkAddress;
@@ -24,8 +24,7 @@ pub type NativeEnvironment<Issuer> = Environment<FileSystem, Network<Issuer>>;
 
 /// Web environment: IndexedDB local storage with network remote.
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-pub type WebEnvironment<Issuer> =
-    Environment<dialog_storage::provider::IndexedDb, Network<Issuer>>;
+pub type WebEnvironment<Issuer> = Environment<dialog_storage::provider::IndexedDb, Network<Issuer>>;
 
 /// Test environment: in-memory local storage with emulated remote keyed by
 /// the generated [`NetworkAddress`].

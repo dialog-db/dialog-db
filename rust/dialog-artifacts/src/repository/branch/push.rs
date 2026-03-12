@@ -1,9 +1,9 @@
+use crate::environment::Address;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
 use dialog_effects::remote::RemoteInvocation;
-use crate::environment::Address;
 use futures_util::{StreamExt, TryStreamExt};
 
 use super::Branch;
@@ -39,16 +39,16 @@ impl Push<'_> {
             + 'static,
     {
         let state = self.branch.state();
-        let upstream = state.upstream.as_ref().ok_or_else(|| {
-            RepositoryError::BranchHasNoUpstream {
-                id: self.branch.id(),
-            }
-        })?;
+        let upstream =
+            state
+                .upstream
+                .as_ref()
+                .ok_or_else(|| RepositoryError::BranchHasNoUpstream {
+                    id: self.branch.id(),
+                })?;
 
         match upstream {
-            UpstreamState::Local { branch: id } => {
-                push_local(self.branch, id, env).await
-            }
+            UpstreamState::Local { branch: id } => push_local(self.branch, id, env).await,
             UpstreamState::Remote {
                 site,
                 branch: id,
@@ -90,10 +90,7 @@ where
         return Ok(None);
     }
 
-    let _upstream = upstream
-        .reset(branch_revision.clone())
-        .perform(env)
-        .await?;
+    let _upstream = upstream.reset(branch_revision.clone()).perform(env).await?;
 
     Ok(Some(branch_revision))
 }
@@ -123,8 +120,7 @@ where
         + ConditionalSync
         + 'static,
 {
-    let remote_site =
-        RemoteSite::load(site, branch.subject(), env).await?;
+    let remote_site = RemoteSite::load(site, branch.subject(), env).await?;
 
     let remote_branch = RemoteBranch {
         remote: remote_site.name().to_string(),
@@ -160,11 +156,13 @@ where
                 let hash = *node.hash();
 
                 let get_cap = catalog.clone().invoke(archive_fx::Get::new(hash));
-                let bytes = get_cap.perform(env).await.map_err(|e| {
-                    RepositoryError::PushFailed {
-                        cause: format!("Failed to read local block: {}", e),
-                    }
-                })?;
+                let bytes =
+                    get_cap
+                        .perform(env)
+                        .await
+                        .map_err(|e| RepositoryError::PushFailed {
+                            cause: format!("Failed to read local block: {}", e),
+                        })?;
 
                 if let Some(bytes) = bytes {
                     remote_branch

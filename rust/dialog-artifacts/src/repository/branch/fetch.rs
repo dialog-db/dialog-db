@@ -1,7 +1,7 @@
+use crate::environment::Address;
 use dialog_capability::Provider;
 use dialog_effects::memory as memory_fx;
 use dialog_effects::remote::RemoteInvocation;
-use crate::environment::Address;
 
 use super::Branch;
 use super::state::{BranchId, UpstreamState};
@@ -25,20 +25,19 @@ impl Fetch<'_> {
     /// Returns `None` if the upstream has no revision yet.
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, RepositoryError>
     where
-        Env: Provider<memory_fx::Resolve>
-            + Provider<RemoteInvocation<memory_fx::Resolve, Address>>,
+        Env: Provider<memory_fx::Resolve> + Provider<RemoteInvocation<memory_fx::Resolve, Address>>,
     {
         let state = self.branch.state();
-        let upstream = state.upstream.as_ref().ok_or_else(|| {
-            RepositoryError::BranchHasNoUpstream {
-                id: self.branch.id(),
-            }
-        })?;
+        let upstream =
+            state
+                .upstream
+                .as_ref()
+                .ok_or_else(|| RepositoryError::BranchHasNoUpstream {
+                    id: self.branch.id(),
+                })?;
 
         match upstream {
-            UpstreamState::Local { branch: id } => {
-                fetch_local(self.branch, id, env).await
-            }
+            UpstreamState::Local { branch: id } => fetch_local(self.branch, id, env).await,
             UpstreamState::Remote {
                 site,
                 branch: id,
@@ -80,11 +79,9 @@ async fn fetch_remote<Env>(
     env: &Env,
 ) -> Result<Option<Revision>, RepositoryError>
 where
-    Env: Provider<memory_fx::Resolve>
-        + Provider<RemoteInvocation<memory_fx::Resolve, Address>>,
+    Env: Provider<memory_fx::Resolve> + Provider<RemoteInvocation<memory_fx::Resolve, Address>>,
 {
-    let remote_site =
-        RemoteSite::load(site, upstream_subject, env).await?;
+    let remote_site = RemoteSite::load(site, upstream_subject, env).await?;
 
     let remote_branch = RemoteBranch {
         remote: remote_site.name().to_string(),

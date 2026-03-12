@@ -1,10 +1,10 @@
+use crate::environment::Address;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
 use dialog_effects::remote::RemoteInvocation;
 use dialog_prolly_tree::{EMPT_TREE_HASH, Tree};
-use crate::environment::Address;
 use std::collections::HashSet;
 
 use super::Branch;
@@ -75,10 +75,7 @@ impl Pull {
     {
         let state = self.branch.state();
         let upstream = state.upstream.as_ref().ok_or_else(|| {
-            DialogArtifactsError::Storage(format!(
-                "Branch {} has no upstream",
-                self.branch.id()
-            ))
+            DialogArtifactsError::Storage(format!("Branch {} has no upstream", self.branch.id()))
         })?;
 
         match upstream.clone() {
@@ -136,9 +133,7 @@ where
 
     let base: Index = Tree::from_hash(branch_base.hash(), &store)
         .await
-        .map_err(|e| {
-            DialogArtifactsError::Storage(format!("Failed to load base tree: {:?}", e))
-        })?;
+        .map_err(|e| DialogArtifactsError::Storage(format!("Failed to load base tree: {:?}", e)))?;
 
     let current: Index = Tree::from_hash(branch_revision.tree.hash(), &store)
         .await
@@ -209,10 +204,9 @@ where
         + ConditionalSync
         + 'static,
 {
-    let remote_site =
-        RemoteSite::load(site, branch.subject(), env)
-            .await
-            .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
+    let remote_site = RemoteSite::load(site, branch.subject(), env)
+        .await
+        .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
 
     let remote_branch = RemoteBranch {
         remote: remote_site.name().to_string(),
@@ -222,9 +216,10 @@ where
         branch: upstream_branch_id.clone(),
     };
 
-    let upstream_revision = remote_branch.resolve(env).await.map_err(|e| {
-        DialogArtifactsError::Storage(format!("Failed to resolve remote: {:?}", e))
-    })?;
+    let upstream_revision = remote_branch
+        .resolve(env)
+        .await
+        .map_err(|e| DialogArtifactsError::Storage(format!("Failed to resolve remote: {:?}", e)))?;
 
     let upstream_revision = match upstream_revision {
         Some(rev) => rev,
@@ -248,9 +243,7 @@ where
 
     let base: Index = Tree::from_hash(branch_base.hash(), &store)
         .await
-        .map_err(|e| {
-            DialogArtifactsError::Storage(format!("Failed to load base tree: {:?}", e))
-        })?;
+        .map_err(|e| DialogArtifactsError::Storage(format!("Failed to load base tree: {:?}", e)))?;
 
     let current: Index = Tree::from_hash(branch_revision.tree.hash(), &store)
         .await
@@ -354,10 +347,7 @@ mod tests {
             .perform(&env)
             .await?;
 
-        let (feature, pulled) = feature
-            .pull(main_revision.clone())
-            .perform(&env)
-            .await?;
+        let (feature, pulled) = feature.pull(main_revision.clone()).perform(&env).await?;
 
         assert!(pulled.is_some());
         assert_eq!(feature.revision().tree(), main_revision.tree());
@@ -400,10 +390,7 @@ mod tests {
             .perform(&env)
             .await?;
 
-        let (feature, pulled) = feature
-            .pull(main_revision.clone())
-            .perform(&env)
-            .await?;
+        let (feature, pulled) = feature.pull(main_revision.clone()).perform(&env).await?;
 
         assert!(pulled.is_some());
         let merged_tree = feature.revision().tree().clone();

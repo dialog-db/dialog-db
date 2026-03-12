@@ -1,6 +1,6 @@
 use dialog_effects::environment::Environment;
-use dialog_s3_credentials::s3::Credentials as S3Credentials;
 use dialog_s3_credentials::Address as S3Address;
+use dialog_s3_credentials::s3::Credentials as S3Credentials;
 use dialog_storage::provider::Volatile;
 use dialog_storage::provider::network::emulator::Route;
 use futures_util::stream;
@@ -13,11 +13,7 @@ use super::Branch;
 use super::tests::{test_issuer, test_subject};
 
 fn test_address(name: &str) -> Address {
-    let s3_addr = S3Address::new(
-        "https://s3.us-east-1.amazonaws.com",
-        "us-east-1",
-        name,
-    );
+    let s3_addr = S3Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", name);
     Address::S3(S3Credentials::public(s3_addr).unwrap())
 }
 
@@ -50,10 +46,7 @@ async fn it_pushes_to_remote() -> anyhow::Result<()> {
         .await?;
 
     let remote_branch = site.repository(subject.clone()).branch("main");
-    branch
-        .set_upstream(remote_branch)
-        .perform(&env)
-        .await?;
+    branch.set_upstream(remote_branch).perform(&env).await?;
 
     let artifact = Artifact {
         the: "user/name".parse()?,
@@ -62,9 +55,7 @@ async fn it_pushes_to_remote() -> anyhow::Result<()> {
         cause: None,
     };
     let (branch, _) = branch
-        .commit(stream::iter(vec![Instruction::Assert(
-            artifact,
-        )]))
+        .commit(stream::iter(vec![Instruction::Assert(artifact)]))
         .perform(&env)
         .await?;
 
@@ -106,14 +97,12 @@ async fn it_fetches_from_remote_upstream() -> anyhow::Result<()> {
         .await?;
 
     let (branch, _) = branch
-        .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
-                the: "user/name".parse()?,
-                of: "user:1".parse()?,
-                is: crate::Value::String("Data".to_string()),
-                cause: None,
-            },
-        )]))
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:1".parse()?,
+            is: crate::Value::String("Data".to_string()),
+            cause: None,
+        })]))
         .perform(&env)
         .await?;
 
@@ -152,14 +141,12 @@ async fn it_fetch_does_not_modify_local_state() -> anyhow::Result<()> {
         .await?;
 
     let (branch, _) = branch
-        .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
-                the: "user/name".parse()?,
-                of: "user:1".parse()?,
-                is: crate::Value::String("Data".to_string()),
-                cause: None,
-            },
-        )]))
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:1".parse()?,
+            is: crate::Value::String("Data".to_string()),
+            cause: None,
+        })]))
         .perform(&env)
         .await?;
 
@@ -201,14 +188,12 @@ async fn it_pushes_then_pulls_from_remote() -> anyhow::Result<()> {
         .await?;
 
     let (alice_branch, _) = alice_branch
-        .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
-                the: "user/name".parse()?,
-                of: "user:alice".parse()?,
-                is: crate::Value::String("Alice".to_string()),
-                cause: None,
-            },
-        )]))
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:alice".parse()?,
+            is: crate::Value::String("Alice".to_string()),
+            cause: None,
+        })]))
         .perform(&alice_env)
         .await?;
 
@@ -254,20 +239,15 @@ async fn it_pull_without_local_changes_adopts_upstream() -> anyhow::Result<()> {
         .await?;
 
     let remote = site.repository(subject.clone()).branch("main");
-    branch
-        .set_upstream(remote)
-        .perform(&env)
-        .await?;
+    branch.set_upstream(remote).perform(&env).await?;
 
     let (branch, _) = branch
-        .commit(stream::iter(vec![Instruction::Assert(
-            Artifact {
-                the: "user/name".parse()?,
-                of: "user:1".parse()?,
-                is: crate::Value::String("Original".to_string()),
-                cause: None,
-            },
-        )]))
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:1".parse()?,
+            is: crate::Value::String("Original".to_string()),
+            cause: None,
+        })]))
         .perform(&env)
         .await?;
 
@@ -277,10 +257,7 @@ async fn it_pull_without_local_changes_adopts_upstream() -> anyhow::Result<()> {
         .perform(&env)
         .await?;
     let remote = site.repository(subject).branch("main");
-    other
-        .set_upstream(remote)
-        .perform(&env)
-        .await?;
+    other.set_upstream(remote).perform(&env).await?;
 
     let (other, pulled) = other.pull_upstream().perform(&env).await?;
     assert!(pulled.is_some());
