@@ -1,6 +1,6 @@
+use crate::environment::Address;
 use dialog_capability::{Did, Provider, Subject};
 use dialog_effects::memory as memory_fx;
-use dialog_s3_credentials::Credentials;
 
 use super::state::RemoteState;
 use crate::repository::Site;
@@ -25,18 +25,14 @@ pub struct RemoteSite {
     pub(super) site: Site,
     /// The issuer DID that authenticates operations.
     pub(super) issuer: Did,
-    /// The credentials for authenticating remote operations.
-    pub(super) credentials: Credentials,
+    /// The address for authenticating remote operations.
+    pub(super) address: Address,
 }
 
 impl RemoteSite {
     /// The memory cell where remote configuration is persisted.
     fn cell(name: &str, subject: &Did) -> Cell<RemoteState> {
-        Cell::new(
-            Subject::from(subject.clone()),
-            "remotes",
-            name.to_string(),
-        )
+        Cell::new(Subject::from(subject.clone()), "remotes", name.to_string())
     }
 
     /// Add a new remote site configuration.
@@ -47,7 +43,7 @@ impl RemoteSite {
         name: impl Into<String>,
         site: Site,
         issuer: Did,
-        credentials: Credentials,
+        address: Address,
         subject: &Did,
         env: &Env,
     ) -> Result<RemoteSite, RepositoryError>
@@ -68,7 +64,7 @@ impl RemoteSite {
         let state = RemoteState {
             site: site.clone(),
             issuer: issuer.clone(),
-            credentials: credentials.clone(),
+            address: address.clone(),
         };
         cell.publish(state, env).await?;
 
@@ -76,7 +72,7 @@ impl RemoteSite {
             name,
             site,
             issuer,
-            credentials,
+            address,
         })
     }
 
@@ -101,7 +97,7 @@ impl RemoteSite {
                 name,
                 site: state.site,
                 issuer: state.issuer,
-                credentials: state.credentials,
+                address: state.address,
             }),
             None => Err(RepositoryError::RemoteNotFound {
                 remote: name.clone(),
@@ -124,9 +120,9 @@ impl RemoteSite {
         &self.issuer
     }
 
-    /// The credentials for this remote.
-    pub fn credentials(&self) -> &Credentials {
-        &self.credentials
+    /// The address for this remote.
+    pub fn address(&self) -> &Address {
+        &self.address
     }
 
     /// Get a cursor into a specific repository at this remote site.
@@ -134,7 +130,7 @@ impl RemoteSite {
         RemoteRepository {
             remote: self.name.clone(),
             site: self.site.clone(),
-            credentials: self.credentials.clone(),
+            address: self.address.clone(),
             subject,
         }
     }
@@ -142,20 +138,23 @@ impl RemoteSite {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use dialog_s3_credentials::s3::Credentials as S3Credentials;
+    use dialog_s3_credentials::Address as S3Address;
     use dialog_storage::provider::Volatile;
+
+    use super::*;
 
     fn test_subject() -> Did {
         "did:test:remote-site".parse().unwrap()
     }
 
-    fn test_credentials() -> Credentials {
-        let address = dialog_s3_credentials::Address::new(
+    fn test_address() -> Address {
+        let s3_addr = S3Address::new(
             "https://s3.us-east-1.amazonaws.com",
             "us-east-1",
             "my-bucket",
         );
-        Credentials::S3(dialog_s3_credentials::s3::Credentials::public(address).unwrap())
+        Address::S3(S3Credentials::public(s3_addr).unwrap())
     }
 
     #[dialog_common::test]
@@ -167,7 +166,7 @@ mod tests {
             "origin",
             "s3://my-bucket".to_string(),
             "did:key:zAlice".parse()?,
-            test_credentials(),
+            test_address(),
             &subject,
             &env,
         )
@@ -176,13 +175,13 @@ mod tests {
         assert_eq!(site.name(), "origin");
         assert_eq!(site.site(), "s3://my-bucket");
         assert_eq!(site.issuer(), &"did:key:zAlice".parse::<Did>()?);
-        assert_eq!(site.credentials(), &test_credentials());
+        assert_eq!(site.address(), &test_address());
 
         // Load the same remote
         let loaded = RemoteSite::load("origin", &subject, &env).await?;
         assert_eq!(loaded.name(), "origin");
         assert_eq!(loaded.site(), "s3://my-bucket");
-        assert_eq!(loaded.credentials(), &test_credentials());
+        assert_eq!(loaded.address(), &test_address());
 
         Ok(())
     }
@@ -210,7 +209,7 @@ mod tests {
             "origin",
             "s3://bucket-1".to_string(),
             "did:key:zAlice".parse()?,
-            test_credentials(),
+            test_address(),
             &subject,
             &env,
         )
@@ -220,7 +219,7 @@ mod tests {
             "origin",
             "s3://bucket-2".to_string(),
             "did:key:zBob".parse()?,
-            test_credentials(),
+            test_address(),
             &subject,
             &env,
         )

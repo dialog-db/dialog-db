@@ -2,12 +2,13 @@ use dialog_capability::{Capability, Did, Provider, Subject};
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
 use dialog_effects::remote::RemoteInvocation;
-use dialog_s3_credentials::Credentials;
+use crate::environment::Address;
 use dialog_storage::{Blake3Hash, CborEncoder, Encoder};
 
 use crate::repository::Site;
 use crate::repository::branch::BranchId;
 use crate::repository::branch::archive::Archive;
+use crate::repository::branch::state::BranchState;
 use crate::repository::error::RepositoryError;
 use crate::repository::revision::Revision;
 use crate::DialogArtifactsError;
@@ -25,7 +26,7 @@ pub struct RemoteBranch {
     /// The remote site address (human-readable).
     pub(crate) site: Site,
     /// The credentials used for remote operations.
-    pub(crate) credentials: Credentials,
+    pub(crate) address: Address,
     /// The subject DID of the remote repository.
     pub(crate) subject: Did,
     /// The branch identifier.
@@ -43,9 +44,9 @@ impl RemoteBranch {
         &self.site
     }
 
-    /// The credentials for this remote.
-    pub fn credentials(&self) -> &Credentials {
-        &self.credentials
+    /// The address for this remote.
+    pub fn address(&self) -> &Address {
+        &self.address
     }
 
     /// The subject DID of the remote repository.
@@ -76,11 +77,11 @@ impl RemoteBranch {
     /// Returns `None` if the remote branch has no state (not yet created).
     pub async fn resolve<Env>(&self, env: &Env) -> Result<Option<Revision>, RepositoryError>
     where
-        Env: Provider<RemoteInvocation<memory_fx::Resolve, Credentials>>,
+        Env: Provider<RemoteInvocation<memory_fx::Resolve, Address>>,
     {
         let capability = self.cell_capability().invoke(memory_fx::Resolve);
 
-        let result = RemoteInvocation::new(capability, self.credentials.clone())
+        let result = RemoteInvocation::new(capability, self.address.clone())
             .perform(env)
             .await
             .map_err(|e| {
@@ -90,7 +91,7 @@ impl RemoteBranch {
         match result {
             None => Ok(None),
             Some(publication) => {
-                let state: crate::repository::branch::state::BranchState =
+                let state: BranchState =
                     CborEncoder.decode(&publication.content).await.map_err(|e| {
                         RepositoryError::StorageError(format!(
                             "Failed to decode remote branch state: {}",
@@ -112,15 +113,15 @@ impl RemoteBranch {
         env: &Env,
     ) -> Result<(), RepositoryError>
     where
-        Env: Provider<RemoteInvocation<memory_fx::Resolve, Credentials>>
-            + Provider<RemoteInvocation<memory_fx::Publish, Credentials>>,
+        Env: Provider<RemoteInvocation<memory_fx::Resolve, Address>>
+            + Provider<RemoteInvocation<memory_fx::Publish, Address>>,
     {
         let cell_cap = self.cell_capability();
 
         // Resolve to get current edition
         let resolve_result = RemoteInvocation::new(
             cell_cap.clone().invoke(memory_fx::Resolve),
-            self.credentials.clone(),
+            self.address.clone(),
         )
         .perform(env)
         .await
@@ -131,7 +132,7 @@ impl RemoteBranch {
         let (current_state, edition) = match resolve_result {
             None => (None, None),
             Some(pub_data) => {
-                let state: crate::repository::branch::state::BranchState =
+                let state: BranchState =
                     CborEncoder.decode(&pub_data.content).await.map_err(|e| {
                         RepositoryError::StorageError(format!(
                             "Failed to decode remote branch state: {}",
@@ -148,7 +149,7 @@ impl RemoteBranch {
                 state.revision = revision;
                 state
             }
-            None => crate::repository::branch::state::BranchState::new(
+            None => BranchState::new(
                 self.branch.clone(),
                 revision,
                 None,
@@ -161,7 +162,7 @@ impl RemoteBranch {
 
         RemoteInvocation::new(
             cell_cap.invoke(memory_fx::Publish::new(content, edition)),
-            self.credentials.clone(),
+            self.address.clone(),
         )
         .perform(env)
         .await
@@ -183,11 +184,11 @@ impl RemoteBranch {
         env: &Env,
     ) -> Result<(), DialogArtifactsError>
     where
-        Env: Provider<RemoteInvocation<archive_fx::Put, Credentials>>,
+        Env: Provider<RemoteInvocation<archive_fx::Put, Address>>,
     {
         let catalog = self.archive().index();
         let put_cap = catalog.invoke(archive_fx::Put::new(hash, bytes));
-        RemoteInvocation::new(put_cap, self.credentials.clone())
+        RemoteInvocation::new(put_cap, self.address.clone())
             .perform(env)
             .await
             .map_err(|e| {
@@ -203,11 +204,11 @@ impl RemoteBranch {
         env: &Env,
     ) -> Result<Option<Vec<u8>>, DialogArtifactsError>
     where
-        Env: Provider<RemoteInvocation<archive_fx::Get, Credentials>>,
+        Env: Provider<RemoteInvocation<archive_fx::Get, Address>>,
     {
         let catalog = self.archive().index();
         let get_cap = catalog.invoke(archive_fx::Get::new(hash));
-        let result = RemoteInvocation::new(get_cap, self.credentials.clone())
+        let result = RemoteInvocation::new(get_cap, self.address.clone())
             .perform(env)
             .await
             .map_err(|e| {
@@ -229,19 +230,22 @@ impl From<RemoteBranch> for UpstreamState {
 
 #[cfg(test)]
 mod tests {
+    use dialog_s3_credentials::s3::Credentials as S3Credentials;
+    use dialog_s3_credentials::Address as S3Address;
+
     use super::*;
 
     fn test_subject() -> Did {
         "did:test:remote-branch".parse().unwrap()
     }
 
-    fn test_credentials() -> Credentials {
-        let address = dialog_s3_credentials::Address::new(
+    fn test_address() -> Address {
+        let s3_addr = S3Address::new(
             "https://s3.us-east-1.amazonaws.com",
             "us-east-1",
             "bucket",
         );
-        Credentials::S3(dialog_s3_credentials::s3::Credentials::public(address).unwrap())
+        Address::S3(S3Credentials::public(s3_addr).unwrap())
     }
 
     #[test]
@@ -249,7 +253,7 @@ mod tests {
         let remote = RemoteBranch {
             remote: "origin".to_string(),
             site: "s3://bucket".to_string(),
-            credentials: test_credentials(),
+            address: test_address(),
             subject: test_subject(),
             branch: "main".into(),
         };
@@ -264,7 +268,7 @@ mod tests {
         let remote = RemoteBranch {
             remote: "origin".to_string(),
             site: "s3://bucket".to_string(),
-            credentials: test_credentials(),
+            address: test_address(),
             subject: test_subject(),
             branch: "main".into(),
         };

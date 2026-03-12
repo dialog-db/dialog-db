@@ -1,3 +1,5 @@
+use std::hash::{Hash, Hasher};
+
 use dialog_capability::{Authority, Did, Principal};
 use dialog_credentials::{Ed25519Signer, Ed25519Verifier};
 use dialog_varsig::Signer as VarsigSigner;
@@ -40,6 +42,12 @@ impl PartialEq for Credentials {
 }
 
 impl Eq for Credentials {}
+
+impl Hash for Credentials {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.did().hash(state);
+    }
+}
 
 impl From<Ed25519Signer> for Credentials {
     fn from(signer: Ed25519Signer) -> Self {

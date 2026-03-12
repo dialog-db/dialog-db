@@ -4,16 +4,17 @@ use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
 use dialog_effects::remote::RemoteInvocation;
 use dialog_prolly_tree::{EMPT_TREE_HASH, Tree};
-use dialog_s3_credentials::Credentials;
+use crate::environment::Address;
 use std::collections::HashSet;
 
 use super::Branch;
 use super::Index;
+use super::state::UpstreamState;
 use crate::DialogArtifactsError;
 use crate::repository::archive::ContentAddressedStore;
 use crate::repository::archive::fallback::FallbackStore;
 use crate::repository::node_reference::NodeReference;
-use crate::repository::remote::RemoteBranch;
+use crate::repository::remote::{RemoteBranch, RemoteSite};
 use crate::repository::revision::Revision;
 
 /// Command struct for pulling from a local upstream revision (legacy API).
@@ -67,8 +68,8 @@ impl Pull {
             + Provider<archive_fx::Put>
             + Provider<memory_fx::Resolve>
             + Provider<memory_fx::Publish>
-            + Provider<RemoteInvocation<archive_fx::Get, Credentials>>
-            + Provider<RemoteInvocation<memory_fx::Resolve, Credentials>>
+            + Provider<RemoteInvocation<archive_fx::Get, Address>>
+            + Provider<RemoteInvocation<memory_fx::Resolve, Address>>
             + ConditionalSync
             + 'static,
     {
@@ -81,7 +82,7 @@ impl Pull {
         })?;
 
         match upstream.clone() {
-            crate::repository::branch::state::UpstreamState::Local { branch: id } => {
+            UpstreamState::Local { branch: id } => {
                 let upstream_branch = Branch::load(
                     id,
                     self.branch.issuer().clone(),
@@ -93,7 +94,7 @@ impl Pull {
 
                 pull_local(self.branch, upstream_branch.revision(), env).await
             }
-            crate::repository::branch::state::UpstreamState::Remote {
+            UpstreamState::Remote {
                 site,
                 branch: id,
                 subject,
@@ -203,20 +204,20 @@ where
         + Provider<archive_fx::Put>
         + Provider<memory_fx::Resolve>
         + Provider<memory_fx::Publish>
-        + Provider<RemoteInvocation<archive_fx::Get, Credentials>>
-        + Provider<RemoteInvocation<memory_fx::Resolve, Credentials>>
+        + Provider<RemoteInvocation<archive_fx::Get, Address>>
+        + Provider<RemoteInvocation<memory_fx::Resolve, Address>>
         + ConditionalSync
         + 'static,
 {
     let remote_site =
-        crate::repository::remote::RemoteSite::load(site, branch.subject(), env)
+        RemoteSite::load(site, branch.subject(), env)
             .await
             .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
 
     let remote_branch = RemoteBranch {
         remote: remote_site.name().to_string(),
         site: remote_site.site().clone(),
-        credentials: remote_site.credentials().clone(),
+        address: remote_site.address().clone(),
         subject: upstream_subject.clone(),
         branch: upstream_branch_id.clone(),
     };

@@ -1,31 +1,31 @@
-#![cfg(test)]
-
 use dialog_effects::environment::Environment;
-use dialog_s3_credentials::Credentials;
+use dialog_s3_credentials::s3::Credentials as S3Credentials;
+use dialog_s3_credentials::Address as S3Address;
 use dialog_storage::provider::Volatile;
 use dialog_storage::provider::network::emulator::Route;
+use futures_util::stream;
+
+use crate::artifacts::{Artifact, Instruction};
+use crate::environment::{Address, TestEnvironment};
+use crate::repository::remote::RemoteSite;
 
 use super::Branch;
 use super::tests::{test_issuer, test_subject};
-use crate::artifacts::{Artifact, Instruction};
-use crate::repository::remote::RemoteSite;
 
-type TestEnv = Environment<Volatile, Route<Credentials>>;
-
-fn test_credentials(name: &str) -> Credentials {
-    let address = dialog_s3_credentials::Address::new(
+fn test_address(name: &str) -> Address {
+    let s3_addr = S3Address::new(
         "https://s3.us-east-1.amazonaws.com",
         "us-east-1",
         name,
     );
-    Credentials::S3(dialog_s3_credentials::s3::Credentials::public(address).unwrap())
+    Address::S3(S3Credentials::public(s3_addr).unwrap())
 }
 
-fn new_env() -> TestEnv {
+fn new_env() -> TestEnvironment {
     Environment::new(Volatile::new(), Route::new())
 }
 
-fn env_with_remote(remote: Route<Credentials>) -> TestEnv {
+fn env_with_remote(remote: Route<Address>) -> TestEnvironment {
     Environment::new(Volatile::new(), remote)
 }
 
@@ -39,7 +39,7 @@ async fn it_pushes_to_remote() -> anyhow::Result<()> {
         "origin",
         "remote-1".to_string(),
         issuer.did(),
-        test_credentials("remote-1"),
+        test_address("remote-1"),
         &subject,
         &env,
     )
@@ -62,7 +62,7 @@ async fn it_pushes_to_remote() -> anyhow::Result<()> {
         cause: None,
     };
     let (branch, _) = branch
-        .commit(futures_util::stream::iter(vec![Instruction::Assert(
+        .commit(stream::iter(vec![Instruction::Assert(
             artifact,
         )]))
         .perform(&env)
@@ -89,7 +89,7 @@ async fn it_fetches_from_remote_upstream() -> anyhow::Result<()> {
         "origin",
         "remote-2".to_string(),
         issuer.did(),
-        test_credentials("remote-2"),
+        test_address("remote-2"),
         &subject,
         &env,
     )
@@ -106,7 +106,7 @@ async fn it_fetches_from_remote_upstream() -> anyhow::Result<()> {
         .await?;
 
     let (branch, _) = branch
-        .commit(futures_util::stream::iter(vec![Instruction::Assert(
+        .commit(stream::iter(vec![Instruction::Assert(
             Artifact {
                 the: "user/name".parse()?,
                 of: "user:1".parse()?,
@@ -135,7 +135,7 @@ async fn it_fetch_does_not_modify_local_state() -> anyhow::Result<()> {
         "origin",
         "remote-3".to_string(),
         issuer.did(),
-        test_credentials("remote-3"),
+        test_address("remote-3"),
         &subject,
         &env,
     )
@@ -152,7 +152,7 @@ async fn it_fetch_does_not_modify_local_state() -> anyhow::Result<()> {
         .await?;
 
     let (branch, _) = branch
-        .commit(futures_util::stream::iter(vec![Instruction::Assert(
+        .commit(stream::iter(vec![Instruction::Assert(
             Artifact {
                 the: "user/name".parse()?,
                 of: "user:1".parse()?,
@@ -175,7 +175,7 @@ async fn it_fetch_does_not_modify_local_state() -> anyhow::Result<()> {
 #[dialog_common::test]
 async fn it_pushes_then_pulls_from_remote() -> anyhow::Result<()> {
     // Alice and Bob share a remote
-    let remote = Route::new();
+    let remote = Route::<Address>::new();
     let alice_env = env_with_remote(remote);
     let alice_issuer = test_issuer().await;
     let subject = test_subject();
@@ -184,7 +184,7 @@ async fn it_pushes_then_pulls_from_remote() -> anyhow::Result<()> {
         "origin",
         "shared-remote".to_string(),
         alice_issuer.did(),
-        test_credentials("shared-remote"),
+        test_address("shared-remote"),
         &subject,
         &alice_env,
     )
@@ -201,7 +201,7 @@ async fn it_pushes_then_pulls_from_remote() -> anyhow::Result<()> {
         .await?;
 
     let (alice_branch, _) = alice_branch
-        .commit(futures_util::stream::iter(vec![Instruction::Assert(
+        .commit(stream::iter(vec![Instruction::Assert(
             Artifact {
                 the: "user/name".parse()?,
                 of: "user:alice".parse()?,
@@ -243,7 +243,7 @@ async fn it_pull_without_local_changes_adopts_upstream() -> anyhow::Result<()> {
         "origin",
         "remote-adopt".to_string(),
         issuer.did(),
-        test_credentials("remote-adopt"),
+        test_address("remote-adopt"),
         &subject,
         &env,
     )
@@ -260,7 +260,7 @@ async fn it_pull_without_local_changes_adopts_upstream() -> anyhow::Result<()> {
         .await?;
 
     let (branch, _) = branch
-        .commit(futures_util::stream::iter(vec![Instruction::Assert(
+        .commit(stream::iter(vec![Instruction::Assert(
             Artifact {
                 the: "user/name".parse()?,
                 of: "user:1".parse()?,
@@ -299,7 +299,7 @@ async fn it_adds_multiple_remotes() -> anyhow::Result<()> {
         "origin",
         "remote-origin".to_string(),
         issuer.did(),
-        test_credentials("remote-origin"),
+        test_address("remote-origin"),
         &subject,
         &env,
     )
@@ -309,7 +309,7 @@ async fn it_adds_multiple_remotes() -> anyhow::Result<()> {
         "backup",
         "remote-backup".to_string(),
         issuer.did(),
-        test_credentials("remote-backup"),
+        test_address("remote-backup"),
         &subject,
         &env,
     )
