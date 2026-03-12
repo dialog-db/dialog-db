@@ -1,6 +1,7 @@
 use dialog_capability::Did;
 use serde::{Deserialize, Serialize};
 
+use crate::environment::Address;
 use crate::repository::Site;
 
 /// Persisted configuration for a remote site.
@@ -15,5 +16,5 @@ pub struct RemoteState {
     /// The DID of the issuer who has access to this remote.
     pub issuer: Did,
     /// The credentials used to authenticate remote operations.
-    pub credentials: dialog_s3_credentials::Credentials,
+    pub address: Address,
 }

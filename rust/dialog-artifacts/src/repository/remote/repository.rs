@@ -1,7 +1,7 @@
 use dialog_capability::Did;
-use dialog_s3_credentials::Credentials;
 
 use super::branch::RemoteBranch;
+use crate::environment::Address;
 use crate::repository::Site;
 use crate::repository::branch::BranchId;
 
@@ -19,7 +19,7 @@ pub struct RemoteRepository {
     /// The remote site address.
     pub(super) site: Site,
     /// The credentials for authenticating remote operations.
-    pub(super) credentials: Credentials,
+    pub(super) address: Address,
     /// The subject DID of the repository.
     pub(super) subject: Did,
 }
@@ -30,9 +30,9 @@ impl RemoteRepository {
         &self.site
     }
 
-    /// The credentials for authenticating remote operations.
-    pub fn credentials(&self) -> &Credentials {
-        &self.credentials
+    /// The address for authenticating remote operations.
+    pub fn address(&self) -> &Address {
+        &self.address
     }
 
     /// The subject DID of the repository.
@@ -50,7 +50,7 @@ impl RemoteRepository {
         RemoteBranch {
             remote: self.remote.clone(),
             site: self.site.clone(),
-            credentials: self.credentials.clone(),
+            address: self.address.clone(),
             subject: self.subject.clone(),
             branch: name.into(),
         }

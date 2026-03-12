@@ -1,11 +1,12 @@
 use dialog_capability::Provider;
 use dialog_effects::memory as memory_fx;
 use dialog_effects::remote::RemoteInvocation;
-use dialog_s3_credentials::Credentials;
+use crate::environment::Address;
 
 use super::Branch;
-use super::state::BranchId;
+use super::state::{BranchId, UpstreamState};
 use crate::repository::error::RepositoryError;
+use crate::repository::remote::{RemoteBranch, RemoteSite};
 use crate::repository::revision::Revision;
 
 /// Command struct for fetching the upstream branch's current revision.
@@ -25,7 +26,7 @@ impl Fetch<'_> {
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, RepositoryError>
     where
         Env: Provider<memory_fx::Resolve>
-            + Provider<RemoteInvocation<memory_fx::Resolve, Credentials>>,
+            + Provider<RemoteInvocation<memory_fx::Resolve, Address>>,
     {
         let state = self.branch.state();
         let upstream = state.upstream.as_ref().ok_or_else(|| {
@@ -35,10 +36,10 @@ impl Fetch<'_> {
         })?;
 
         match upstream {
-            crate::repository::branch::state::UpstreamState::Local { branch: id } => {
+            UpstreamState::Local { branch: id } => {
                 fetch_local(self.branch, id, env).await
             }
-            crate::repository::branch::state::UpstreamState::Remote {
+            UpstreamState::Remote {
                 site,
                 branch: id,
                 subject,
@@ -80,15 +81,15 @@ async fn fetch_remote<Env>(
 ) -> Result<Option<Revision>, RepositoryError>
 where
     Env: Provider<memory_fx::Resolve>
-        + Provider<RemoteInvocation<memory_fx::Resolve, Credentials>>,
+        + Provider<RemoteInvocation<memory_fx::Resolve, Address>>,
 {
     let remote_site =
-        crate::repository::remote::RemoteSite::load(site, upstream_subject, env).await?;
+        RemoteSite::load(site, upstream_subject, env).await?;
 
-    let remote_branch = crate::repository::remote::RemoteBranch {
+    let remote_branch = RemoteBranch {
         remote: remote_site.name().to_string(),
         site: remote_site.site().clone(),
-        credentials: remote_site.credentials().clone(),
+        address: remote_site.address().clone(),
         subject: upstream_subject.clone(),
         branch: upstream_branch_id.clone(),
     };

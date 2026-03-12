@@ -9,7 +9,7 @@ use dialog_storage::{
 use serde::{Serialize, de::DeserializeOwned};
 use std::fmt::Debug;
 
-use dialog_s3_credentials::Credentials;
+use crate::environment::Address;
 use crate::repository::remote::RemoteBranch;
 
 /// A content-addressed store that reads from local first, falls back to remote.
@@ -56,7 +56,7 @@ impl<Env> ContentAddressedStorage for FallbackStore<'_, Env>
 where
     Env: Provider<Get>
         + Provider<Put>
-        + Provider<RemoteInvocation<Get, Credentials>>
+        + Provider<RemoteInvocation<Get, Address>>
         + ConditionalSync
         + 'static,
 {

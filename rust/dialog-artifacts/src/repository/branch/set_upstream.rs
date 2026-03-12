@@ -18,12 +18,12 @@ impl SetUpstream<'_> {
         Env: Provider<memory_fx::Publish>,
     {
         // Validate: upstream must not be this branch itself
-        if let UpstreamState::Local { ref branch } = self.upstream {
-            if *branch == self.branch.id() {
-                return Err(RepositoryError::BranchUpstreamIsItself {
-                    id: self.branch.id(),
-                });
-            }
+        if let UpstreamState::Local { ref branch } = self.upstream
+            && *branch == self.branch.id()
+        {
+            return Err(RepositoryError::BranchUpstreamIsItself {
+                id: self.branch.id(),
+            });
         }
 
         let new_state = BranchState {
@@ -39,12 +39,17 @@ impl SetUpstream<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::Branch;
-    use super::super::tests::{test_issuer, test_subject};
+    use dialog_s3_credentials::s3::Credentials as S3Credentials;
+    use dialog_s3_credentials::Address as S3Address;
+    use dialog_storage::provider::Volatile;
+
+    use crate::environment::Address;
     use crate::repository::branch::state::UpstreamState;
     use crate::repository::error::RepositoryError;
     use crate::repository::remote::RemoteBranch;
-    use dialog_storage::provider::Volatile;
+
+    use super::super::Branch;
+    use super::super::tests::{test_issuer, test_subject};
 
     #[dialog_common::test]
     async fn it_sets_local_upstream() -> anyhow::Result<()> {
@@ -87,7 +92,7 @@ mod tests {
             .perform(&env)
             .await?;
 
-        let address = dialog_s3_credentials::Address::new(
+        let s3_addr = S3Address::new(
             "https://s3.us-east-1.amazonaws.com",
             "us-east-1",
             "bucket",
@@ -95,9 +100,7 @@ mod tests {
         let remote_branch = RemoteBranch {
             remote: "origin".to_string(),
             site: "s3://bucket".to_string(),
-            credentials: dialog_s3_credentials::Credentials::S3(
-                dialog_s3_credentials::s3::Credentials::public(address).unwrap(),
-            ),
+            address: Address::S3(S3Credentials::public(s3_addr).unwrap()),
             subject: "did:test:remote-repo".parse()?,
             branch: "main".into(),
         };
