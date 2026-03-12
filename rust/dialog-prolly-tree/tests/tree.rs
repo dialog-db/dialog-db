@@ -16,26 +16,41 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn basic_set_and_get() -> Result<()> {
-    let storage = Arc::new(Mutex::new(Storage {
+    let mut storage = Storage {
         backend: MemoryStorageBackend::default(),
         encoder: CborEncoder,
-    }));
-    let mut tree = Tree::<GeometricDistribution, _, _, _, _>::new(storage.clone());
+    };
+    let mut tree = Tree::<GeometricDistribution, _, _, _>::new();
 
-    tree.set(bytes("foo1"), bytes("bar1")).await?;
-    tree.set(bytes("foo2"), bytes("bar2")).await?;
-    tree.set(bytes("foo3"), bytes("bar3")).await?;
+    tree.set(bytes("foo1"), bytes("bar1"), &mut storage).await?;
+    tree.set(bytes("foo2"), bytes("bar2"), &mut storage).await?;
+    tree.set(bytes("foo3"), bytes("bar3"), &mut storage).await?;
 
-    assert_eq!(tree.get(&bytes("bar")).await?, None);
-    assert_eq!(tree.get(&bytes("foo1")).await?, Some(bytes("bar1")));
-    assert_eq!(tree.get(&bytes("foo2")).await?, Some(bytes("bar2")));
-    assert_eq!(tree.get(&bytes("foo3")).await?, Some(bytes("bar3")));
+    assert_eq!(tree.get(&bytes("bar"), &storage).await?, None);
+    assert_eq!(
+        tree.get(&bytes("foo1"), &storage).await?,
+        Some(bytes("bar1"))
+    );
+    assert_eq!(
+        tree.get(&bytes("foo2"), &storage).await?,
+        Some(bytes("bar2"))
+    );
+    assert_eq!(
+        tree.get(&bytes("foo3"), &storage).await?,
+        Some(bytes("bar3"))
+    );
 
-    let mut inverse_tree = Tree::<GeometricDistribution, _, _, _, _>::new(storage);
+    let mut inverse_tree = Tree::<GeometricDistribution, _, _, _>::new();
 
-    inverse_tree.set(bytes("foo3"), bytes("bar3")).await?;
-    inverse_tree.set(bytes("foo2"), bytes("bar2")).await?;
-    inverse_tree.set(bytes("foo1"), bytes("bar1")).await?;
+    inverse_tree
+        .set(bytes("foo3"), bytes("bar3"), &mut storage)
+        .await?;
+    inverse_tree
+        .set(bytes("foo2"), bytes("bar2"), &mut storage)
+        .await?;
+    inverse_tree
+        .set(bytes("foo1"), bytes("bar1"), &mut storage)
+        .await?;
 
     assert_eq!(
         tree.hash(),
@@ -49,26 +64,36 @@ async fn basic_set_and_get() -> Result<()> {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn basic_delete() -> Result<()> {
-    let storage = Arc::new(Mutex::new(Storage {
+    let mut storage = Storage {
         backend: MemoryStorageBackend::default(),
         encoder: CborEncoder,
-    }));
-    let mut expected_tree = Tree::<GeometricDistribution, _, _, _, _>::new(storage.clone());
+    };
+    let mut expected_tree = Tree::<GeometricDistribution, _, _, _>::new();
 
-    expected_tree.set(bytes("foo1"), bytes("bar1")).await?;
-    expected_tree.set(bytes("foo3"), bytes("bar3")).await?;
+    expected_tree
+        .set(bytes("foo1"), bytes("bar1"), &mut storage)
+        .await?;
+    expected_tree
+        .set(bytes("foo3"), bytes("bar3"), &mut storage)
+        .await?;
 
-    let mut tree = Tree::<GeometricDistribution, _, _, _, _>::new(storage.clone());
+    let mut tree = Tree::<GeometricDistribution, _, _, _>::new();
 
-    tree.set(bytes("foo1"), bytes("bar1")).await?;
-    tree.set(bytes("foo2"), bytes("bar2")).await?;
-    tree.set(bytes("foo3"), bytes("bar3")).await?;
+    tree.set(bytes("foo1"), bytes("bar1"), &mut storage).await?;
+    tree.set(bytes("foo2"), bytes("bar2"), &mut storage).await?;
+    tree.set(bytes("foo3"), bytes("bar3"), &mut storage).await?;
 
-    tree.delete(&bytes("foo2")).await?;
+    tree.delete(&bytes("foo2"), &mut storage).await?;
 
-    assert_eq!(tree.get(&bytes("foo1")).await?, Some(bytes("bar1")));
-    assert_eq!(tree.get(&bytes("foo2")).await?, None);
-    assert_eq!(tree.get(&bytes("foo3")).await?, Some(bytes("bar3")));
+    assert_eq!(
+        tree.get(&bytes("foo1"), &storage).await?,
+        Some(bytes("bar1"))
+    );
+    assert_eq!(tree.get(&bytes("foo2"), &storage).await?, None);
+    assert_eq!(
+        tree.get(&bytes("foo3"), &storage).await?,
+        Some(bytes("bar3"))
+    );
 
     assert_eq!(tree.hash(), expected_tree.hash());
 
@@ -78,18 +103,18 @@ async fn basic_delete() -> Result<()> {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn delete_from_tree_with_one_entry() -> Result<()> {
-    let storage = Arc::new(Mutex::new(Storage {
+    let mut storage = Storage {
         backend: MemoryStorageBackend::default(),
         encoder: CborEncoder,
-    }));
+    };
 
-    let mut tree = Tree::<GeometricDistribution, _, _, _, _>::new(storage.clone());
+    let mut tree = Tree::<GeometricDistribution, _, _, _>::new();
 
-    tree.set(bytes("foo1"), bytes("bar1")).await?;
+    tree.set(bytes("foo1"), bytes("bar1"), &mut storage).await?;
 
-    tree.delete(&bytes("foo1")).await?;
+    tree.delete(&bytes("foo1"), &mut storage).await?;
 
-    assert_eq!(tree.get(&bytes("foo1")).await?, None);
+    assert_eq!(tree.get(&bytes("foo1"), &storage).await?, None);
     assert_eq!(tree.hash(), None);
 
     Ok(())
@@ -98,32 +123,37 @@ async fn delete_from_tree_with_one_entry() -> Result<()> {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn create_tree_from_set() -> Result<()> {
-    let iter_storage = Arc::new(Mutex::new(Storage {
+    let mut iter_storage = Storage {
         backend: MemoryStorageBackend::default(),
         encoder: CborEncoder,
-    }));
-    let collection_storage = Arc::new(Mutex::new(Storage {
+    };
+    let mut collection_storage = Storage {
         backend: MemoryStorageBackend::default(),
         encoder: CborEncoder,
-    }));
-    let mut iter_tree = Tree::<GeometricDistribution, _, _, _, _>::new(iter_storage.clone());
+    };
+    let mut iter_tree = Tree::<GeometricDistribution, _, _, _>::new();
     let mut collection = BTreeMap::default();
 
     for i in 0..=255 {
         let key = vec![i];
         let value = vec![255 - i];
         collection.insert(key.clone(), value.clone());
-        iter_tree.set(key, value).await?;
+        iter_tree.set(key, value, &mut iter_storage).await?;
     }
-    let collection_tree =
-        Tree::<GeometricDistribution, _, _, _, _>::from_collection(collection, collection_storage)
-            .await?;
+    let collection_tree = Tree::<GeometricDistribution, _, _, _>::from_collection(
+        collection,
+        &mut collection_storage,
+    )
+    .await?;
 
     for i in 0..=255 {
         let key = vec![i];
         let value = vec![255 - i];
-        assert_eq!(collection_tree.get(&key).await?, Some(value.clone()));
-        assert_eq!(iter_tree.get(&key).await?, Some(value));
+        assert_eq!(
+            collection_tree.get(&key, &collection_storage).await?,
+            Some(value.clone())
+        );
+        assert_eq!(iter_tree.get(&key, &iter_storage).await?, Some(value));
     }
 
     assert!(iter_tree.hash().is_some());
@@ -147,19 +177,19 @@ async fn larger_random_tree() -> Result<()> {
     }
 
     let mut ledger = vec![];
-    let storage = Storage {
+    let mut storage = Storage {
         backend: MemoryStorageBackend::default(),
         encoder: CborEncoder,
     };
-    let mut tree = Tree::<GeometricDistribution, _, _, _, _>::new(storage);
+    let mut tree = Tree::<GeometricDistribution, _, _, _>::new();
     for _ in 1..1024 {
         let key_value = (random(), random());
         ledger.push(key_value.clone());
-        tree.set(key_value.0, key_value.1).await?;
+        tree.set(key_value.0, key_value.1, &mut storage).await?;
     }
 
     for entry in ledger {
-        assert_eq!(tree.get(&entry.0).await?, Some(entry.1));
+        assert_eq!(tree.get(&entry.0, &storage).await?, Some(entry.1));
     }
 
     Ok(())
@@ -168,23 +198,32 @@ async fn larger_random_tree() -> Result<()> {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn restores_tree_from_hash() -> Result<()> {
-    let storage = Arc::new(Mutex::new(Storage {
+    let mut storage = Storage {
         backend: MemoryStorageBackend::default(),
         encoder: CborEncoder,
-    }));
-    let mut tree = Tree::<GeometricDistribution, _, _, _, _>::new(storage.clone());
+    };
+    let mut tree = Tree::<GeometricDistribution, _, _, _>::new();
 
-    tree.set(bytes("foo1"), bytes("bar1")).await?;
-    tree.set(bytes("foo2"), bytes("bar2")).await?;
-    tree.set(bytes("foo3"), bytes("bar3")).await?;
+    tree.set(bytes("foo1"), bytes("bar1"), &mut storage).await?;
+    tree.set(bytes("foo2"), bytes("bar2"), &mut storage).await?;
+    tree.set(bytes("foo3"), bytes("bar3"), &mut storage).await?;
 
     let root_hash = tree.hash().unwrap().to_owned();
 
-    let tree = Tree::<GeometricDistribution, _, _, _, _>::from_hash(&root_hash, storage).await?;
+    let tree = Tree::<GeometricDistribution, _, _, _>::from_hash(&root_hash, &storage).await?;
 
-    assert_eq!(tree.get(&bytes("foo1")).await?, Some(bytes("bar1")));
-    assert_eq!(tree.get(&bytes("foo2")).await?, Some(bytes("bar2")));
-    assert_eq!(tree.get(&bytes("foo3")).await?, Some(bytes("bar3")));
+    assert_eq!(
+        tree.get(&bytes("foo1"), &storage).await?,
+        Some(bytes("bar1"))
+    );
+    assert_eq!(
+        tree.get(&bytes("foo2"), &storage).await?,
+        Some(bytes("bar2"))
+    );
+    assert_eq!(
+        tree.get(&bytes("foo3"), &storage).await?,
+        Some(bytes("bar3"))
+    );
 
     Ok(())
 }
@@ -194,7 +233,7 @@ async fn restores_tree_from_hash() -> Result<()> {
 async fn lru_store_caches() -> Result<()> {
     let backend = MemoryStorageBackend::default();
     let root_hash = {
-        let storage = Storage {
+        let mut storage = Storage {
             backend: backend.clone(),
             encoder: CborEncoder,
         };
@@ -205,18 +244,18 @@ async fn lru_store_caches() -> Result<()> {
             collection.insert(key, value);
         }
         let tree =
-            Tree::<GeometricDistribution, _, _, _, _>::from_collection(collection, storage).await?;
+            Tree::<GeometricDistribution, _, _, _>::from_collection(collection, &mut storage)
+                .await?;
         tree.hash().unwrap().to_owned()
     };
 
     let tracking = Arc::new(Mutex::new(MeasuredStorage::new(backend)));
     let lru = StorageCache::new(tracking.clone(), 10)?;
-    let storage = Storage {
+    let mut storage = Storage {
         backend: lru,
         encoder: CborEncoder,
     };
-    let mut tree =
-        Tree::<GeometricDistribution, _, _, _, _>::from_hash(&root_hash, storage).await?;
+    let mut tree = Tree::<GeometricDistribution, _, _, _>::from_hash(&root_hash, &storage).await?;
 
     {
         let tracking = tracking.lock().await;
@@ -226,7 +265,7 @@ async fn lru_store_caches() -> Result<()> {
     }
 
     let key = 1023u32.to_be_bytes().to_vec();
-    let _ = tree.get(&key).await?;
+    let _ = tree.get(&key, &storage).await?;
 
     {
         let tracking = tracking.lock().await;
@@ -234,7 +273,7 @@ async fn lru_store_caches() -> Result<()> {
         assert_eq!(tracking.reads(), 4);
     }
 
-    let _ = tree.get(&key).await?;
+    let _ = tree.get(&key, &storage).await?;
 
     {
         let tracking = tracking.lock().await;
@@ -242,7 +281,7 @@ async fn lru_store_caches() -> Result<()> {
         assert_eq!(tracking.reads(), 4); // reads cached
     }
 
-    tree.set(key.to_vec(), vec![1]).await?;
+    tree.set(key.to_vec(), vec![1], &mut storage).await?;
 
     let tracking = tracking.lock().await;
     assert_eq!(tracking.writes(), 4); // writes on insertion
