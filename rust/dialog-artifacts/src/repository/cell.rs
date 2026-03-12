@@ -1,4 +1,6 @@
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 
 use dialog_capability::{Capability, Provider, Subject};
 use dialog_effects::memory::{self, Memory, Space};
@@ -99,7 +101,7 @@ where
     /// Read the cached value without hitting env.
     /// Returns `None` if the cell has not been resolved or published yet.
     pub fn get(&self) -> Option<T> {
-        let guard = self.state.read().expect("RwLock poisoned");
+        let guard = self.state.read();
         guard.as_ref().map(|(v, _)| v.clone())
     }
 }
@@ -111,7 +113,7 @@ impl<T, Codec> Cell<T, Codec> {
     where
         F: FnOnce(Option<&T>) -> R,
     {
-        let guard = self.state.read().expect("RwLock poisoned");
+        let guard = self.state.read();
         f(guard.as_ref().map(|(v, _)| v))
     }
 
@@ -163,7 +165,7 @@ where
             }
         };
 
-        *self.state.write().expect("RwLock poisoned") = new_state;
+        *self.state.write() = new_state;
         Ok(())
     }
 }
@@ -180,7 +182,7 @@ where
         Env: Provider<memory::Publish>,
     {
         let edition = {
-            let guard = self.state.read().expect("RwLock poisoned");
+            let guard = self.state.read();
             guard.as_ref().map(|(_, e)| e.clone())
         };
 
@@ -195,7 +197,7 @@ where
             .await
             .map_err(|e| RepositoryError::StorageError(format!("Memory publish failed: {}", e)))?;
 
-        let mut guard = self.state.write().expect("RwLock poisoned");
+        let mut guard = self.state.write();
         *guard = Some((value, new_edition));
 
         Ok(())
