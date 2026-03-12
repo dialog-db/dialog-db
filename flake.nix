@@ -20,6 +20,13 @@
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs {
           inherit system overlays;
+          config = {
+            allowUnfreePredicate =
+              pkg:
+              builtins.elem (pkgs.lib.getName pkg) [
+                "google-chrome"
+              ];
+          };
         };
 
         rustToolchain =
@@ -64,30 +71,32 @@
 
         common-build-inputs =
           toolchain:
-            with pkgs;
-            let
-              rust-toolchain = rustToolchain toolchain;
-            in
-            with pkgs;
-            [
-              binaryen
-              gnused
-              pkg-config
-              protobuf
-              rust-toolchain
-              trunk
-              wasm-bindgen-cli
-              wasm-pack
-            ]
-            ++ lib.optionals stdenv.isDarwin [
-              apple-sdk
-            ];
+          with pkgs;
+          let
+            rust-toolchain = rustToolchain toolchain;
+          in
+          with pkgs;
+          [
+            binaryen
+            gnused
+            pkg-config
+            protobuf
+            rust-toolchain
+            trunk
+            wasm-bindgen-cli
+            wasm-pack
+          ]
+          ++ lib.optionals stdenv.isDarwin [
+            apple-sdk
+          ];
 
         common-dev-tools = with pkgs; [
           cargo-nextest
           playwright-test
           nodejs
         ];
+
+        chrome-pkg = if pkgs.stdenv.isDarwin then pkgs.google-chrome else pkgs.chromium;
 
         interactive-dev-tools =
           with pkgs;
@@ -96,9 +105,7 @@
             static-web-server
             leptosfmt
             cargo-generate
-          ]
-          ++ lib.optionals stdenv.isLinux [
-            chromium
+            chrome-pkg
             chromedriver
             playwright-driver
           ];
@@ -154,11 +161,11 @@
             ];
 
             nativeBuildInputs = common-build-inputs "stable" ++ [
-              chromium
+              chrome-pkg
             ];
 
             env = {
-              CHROME_PATH = "${chromium}/bin/chromium";
+              CHROME_PATH = "${chrome-pkg}/bin/${chrome-pkg.meta.mainProgram}";
             };
 
             buildPhase = ''
@@ -249,10 +256,22 @@
               shellHook = ''
                 export PATH=$PATH:./node_modules/.bin
                 export CHROMEDRIVER="${chromedriver}/bin/chromedriver"
+                export CHROME_PATH="${chrome-pkg}/bin/${chrome-pkg.meta.mainProgram}"
                 export WASM_BINDGEN_TEST_TIMEOUT=180
                 export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1
                 export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1;
                 export PLAYWRIGHT_BROWSERS_PATH=${playwright-driver.browsers}
+
+                # Generate webdriver.json so chromedriver can find the Nix-provided Chrome binary
+                cat > webdriver.json <<WDEOF
+                {
+                  "goog:chromeOptions": {
+                    "binary": "${chrome-pkg}/bin/${chrome-pkg.meta.mainProgram}",
+                    "args": ["--no-sandbox", "--disable-gpu"]
+                  }
+                }
+                WDEOF
+                export WASM_BINDGEN_TEST_WEBDRIVER_JSON="$PWD/webdriver.json"
               '';
             };
         };
