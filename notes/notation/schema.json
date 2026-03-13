@@ -1,0 +1,497 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gozala.io/schema/dialog/notation/schema.json",
+  "title": "Dialog Schema",
+  "description": "Schema for Dialog domain modeling: attributes, concepts, rules, formulas, and relations.",
+
+  "$defs": {
+    "Attribute": {
+      "type": "object",
+      "description": "A relation elevated with domain-specific invariants. An attribute's identity is structural: (the, type, cardinality).",
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of the attribute."
+        },
+        "the": {
+          "type": "string",
+          "description": "The relation in domain/name format (e.g. 'diy.cook/quantity'). Max 64 bytes total. Domain: lowercase letters, digits, hyphens, dots; must start with a letter. Name: lowercase kebab-case (no dots); must start with a letter.",
+          "maxLength": 64,
+          "pattern": "^[a-z][a-z0-9.-]*[a-z0-9]?/[a-z][a-z0-9-]*[a-z0-9]?$"
+        },
+        "cardinality": {
+          "$ref": "#/$defs/Cardinality",
+          "description": "Cardinality of the attribute. Defaults to 'one' when omitted."
+        },
+        "as": {
+          "$ref": "#/$defs/Assert",
+          "description": "Value type of the attribute. If omitted, any type is allowed."
+        }
+      },
+      "required": ["the"]
+    },
+
+    "Cardinality": {
+      "type": "string",
+      "enum": ["one", "many"],
+      "description": "'one' means asserting a new value retracts the prior claim. 'many' means new claims accumulate alongside existing ones.",
+      "default": "one"
+    },
+
+    "Assert": {
+      "description": "The asserted value type for an attribute. Currently only scalar types are supported. Concept references and symbol enumerations are planned future extensions.",
+      "oneOf": [
+        { "$ref": "#/$defs/ScalarType" },
+        { "$ref": "#/$defs/ConceptRef" },
+        { "$ref": "#/$defs/SymbolEnum" }
+      ]
+    },
+
+    "ScalarType": {
+      "type": "string",
+      "enum": [
+        "Bytes",
+        "Entity",
+        "Boolean",
+        "Text",
+        "UnsignedInteger",
+        "SignedInteger",
+        "Float",
+        "Symbol"
+      ],
+      "description": "Built-in scalar types from the dialog domain. 'Text' is shorthand for 'dialog/Text', etc."
+    },
+
+    "ConceptRef": {
+      "type": "string",
+      "pattern": "^[a-zA-Z]",
+      "description": "Reference to a concept. Can be dot-prefixed (.Ingredient) for current domain, or fully qualified (diy.cook/Ingredient)."
+    },
+
+    "SymbolEnum": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "description": "[Future extension, not yet supported] A fixed set of fully qualified symbol values (e.g. [\"diy.cook/tsp\", \"diy.cook/mls\"])."
+    },
+
+    "Concept": {
+      "type": "object",
+      "description": "A composition of attributes sharing an entity. An entity matches a concept if and only if it has claims satisfying all required attributes.",
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of the concept."
+        },
+        "with": {
+          "$ref": "#/$defs/NamedRelations",
+          "description": "Required fields. An entity must have claims satisfying all these attributes to match.",
+          "minProperties": 1
+        },
+        "maybe": {
+          "$ref": "#/$defs/NamedRelations",
+          "description": "[Future extension , not yet supported] Optional fields. The entity may or may not have claims for these attributes."
+        }
+      },
+      "required": ["with"]
+    },
+
+    "NamedRelations": {
+      "type": "object",
+      "description": "Map of field names to attribute descriptors (inline) or attribute references (string paths).",
+      "additionalProperties": {
+        "oneOf": [
+          { "$ref": "#/$defs/Attribute" },
+          { "$ref": "#/$defs/AttributeRef" }
+        ]
+      }
+    },
+
+    "AttributeRef": {
+      "type": "string",
+      "description": "Reference to a pre-defined attribute. '.' means same-named attribute under the current domain. '.name' resolves within current domain. 'domain/name' is fully qualified."
+    },
+
+    "Rule": {
+      "type": "object",
+      "description": "A deductive rule that derives conclusions from existing information through pattern matching, computation, and logical composition.",
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of the rule."
+        },
+        "deduce": {
+          "$ref": "#/$defs/Concept",
+          "description": "The conclusion: a concept instance the rule derives when its body is satisfied."
+        },
+        "when": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Premise" },
+          "minItems": 1,
+          "description": "Conjunction of premises. All must be satisfied by the same variable bindings."
+        },
+        "unless": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Premise" },
+          "description": "Exclusion patterns. If any can be satisfied, the result is filtered out (negation as failure)."
+        }
+      },
+      "required": ["deduce", "when"]
+    },
+
+    "FormulaRef": {
+      "type": "string",
+      "enum": [
+        "math/sum",
+        "math/difference",
+        "math/product",
+        "math/quotient",
+        "math/modulo",
+        "text/concatenate",
+        "text/length",
+        "text/upper-case",
+        "text/lower-case",
+        "text/like",
+        "boolean/and",
+        "boolean/or",
+        "boolean/not"
+      ],
+      "description": "Reference to a built-in formula by name."
+    },
+
+    "ConstraintRef": {
+      "type": "string",
+      "enum": ["=="],
+      "description": "Reference to a built-in constraint by name."
+    },
+
+    "Premise": {
+      "type": "object",
+      "description": "A single premise in a rule body. Combines an assertion (what to match) with named term bindings (how to bind variables).",
+      "properties": {
+        "assert": {
+          "description": "What to match: a concept (inline definition), a formula reference, or a constraint reference.",
+          "oneOf": [
+            { "$ref": "#/$defs/Concept" },
+            { "$ref": "#/$defs/FormulaRef" },
+            { "$ref": "#/$defs/ConstraintRef" }
+          ]
+        },
+        "where": {
+          "type": "object",
+          "description": "Named terms mapping field names to variables or constants. For concepts, names correspond to the concept's attribute names. For formulas and constraints, names correspond to their parameter names.",
+          "additionalProperties": { "$ref": "#/$defs/Term" }
+        }
+      },
+      "required": ["assert", "where"]
+    },
+
+    "MathFormula": {
+      "type": "object",
+      "description": "Arithmetic formulas over integer values.",
+      "properties": {
+        "math/sum": {
+          "type": "object",
+          "description": "Adds two integers: is = of + with.",
+          "properties": {
+            "of": { "$ref": "#/$defs/Term", "description": "First operand." },
+            "with": {
+              "$ref": "#/$defs/Term",
+              "description": "Second operand."
+            },
+            "is": {
+              "$ref": "#/$defs/Term",
+              "description": "Derived: sum of the two operands."
+            }
+          },
+          "required": ["of", "with", "is"]
+        },
+        "math/difference": {
+          "type": "object",
+          "description": "Subtracts second from first (saturating at 0): is = of - subtract.",
+          "properties": {
+            "of": { "$ref": "#/$defs/Term", "description": "Minuend." },
+            "subtract": {
+              "$ref": "#/$defs/Term",
+              "description": "Subtrahend."
+            },
+            "is": {
+              "$ref": "#/$defs/Term",
+              "description": "Derived: difference (saturating)."
+            }
+          },
+          "required": ["of", "subtract", "is"]
+        },
+        "math/product": {
+          "type": "object",
+          "description": "Multiplies two integers: is = of * times.",
+          "properties": {
+            "of": { "$ref": "#/$defs/Term", "description": "Multiplicand." },
+            "times": { "$ref": "#/$defs/Term", "description": "Multiplier." },
+            "is": { "$ref": "#/$defs/Term", "description": "Derived: product." }
+          },
+          "required": ["of", "times", "is"]
+        },
+        "math/quotient": {
+          "type": "object",
+          "description": "Divides first by second: is = of / by. Produces no result when divisor is zero.",
+          "properties": {
+            "of": { "$ref": "#/$defs/Term", "description": "Dividend." },
+            "by": { "$ref": "#/$defs/Term", "description": "Divisor." },
+            "is": {
+              "$ref": "#/$defs/Term",
+              "description": "Derived: quotient (empty if by = 0)."
+            }
+          },
+          "required": ["of", "by", "is"]
+        },
+        "math/modulo": {
+          "type": "object",
+          "description": "Remainder of division: is = of % by. Produces no result when divisor is zero.",
+          "properties": {
+            "of": { "$ref": "#/$defs/Term", "description": "Dividend." },
+            "by": { "$ref": "#/$defs/Term", "description": "Divisor." },
+            "is": {
+              "$ref": "#/$defs/Term",
+              "description": "Derived: remainder (empty if by = 0)."
+            }
+          },
+          "required": ["of", "by", "is"]
+        }
+      }
+    },
+
+    "TextFormula": {
+      "type": "object",
+      "description": "String operation formulas.",
+      "properties": {
+        "text/concatenate": {
+          "type": "object",
+          "description": "Joins two strings: is = first ++ second.",
+          "properties": {
+            "first": { "$ref": "#/$defs/Term", "description": "First string." },
+            "second": {
+              "$ref": "#/$defs/Term",
+              "description": "Second string."
+            },
+            "is": {
+              "$ref": "#/$defs/Term",
+              "description": "Derived: concatenation."
+            }
+          },
+          "required": ["first", "second", "is"]
+        },
+        "text/length": {
+          "type": "object",
+          "description": "Byte length of a string.",
+          "properties": {
+            "of": {
+              "$ref": "#/$defs/Term",
+              "description": "String to measure."
+            },
+            "is": {
+              "$ref": "#/$defs/Term",
+              "description": "Derived: byte length as integer."
+            }
+          },
+          "required": ["of", "is"]
+        },
+        "text/upper-case": {
+          "type": "object",
+          "description": "Converts a string to uppercase.",
+          "properties": {
+            "of": {
+              "$ref": "#/$defs/Term",
+              "description": "String to convert."
+            },
+            "is": {
+              "$ref": "#/$defs/Term",
+              "description": "Derived: uppercased string."
+            }
+          },
+          "required": ["of", "is"]
+        },
+        "text/lower-case": {
+          "type": "object",
+          "description": "Converts a string to lowercase.",
+          "properties": {
+            "of": {
+              "$ref": "#/$defs/Term",
+              "description": "String to convert."
+            },
+            "is": {
+              "$ref": "#/$defs/Term",
+              "description": "Derived: lowercased string."
+            }
+          },
+          "required": ["of", "is"]
+        },
+        "text/like": {
+          "type": "object",
+          "description": "Glob pattern match. Produces a result only when the pattern matches. '*' matches any sequence, '?' matches a single character.",
+          "properties": {
+            "text": { "$ref": "#/$defs/Term", "description": "Text to match." },
+            "pattern": {
+              "$ref": "#/$defs/Term",
+              "description": "Glob pattern."
+            },
+            "is": {
+              "$ref": "#/$defs/Term",
+              "description": "Derived: the matched text (empty if no match)."
+            }
+          },
+          "required": ["text", "pattern", "is"]
+        }
+      }
+    },
+
+    "LogicFormula": {
+      "type": "object",
+      "description": "Boolean logic formulas.",
+      "properties": {
+        "boolean/and": {
+          "type": "object",
+          "description": "Logical AND of two booleans.",
+          "properties": {
+            "left": { "$ref": "#/$defs/Term", "description": "First boolean." },
+            "right": {
+              "$ref": "#/$defs/Term",
+              "description": "Second boolean."
+            },
+            "is": {
+              "$ref": "#/$defs/Term",
+              "description": "Derived: left AND right."
+            }
+          },
+          "required": ["left", "right", "is"]
+        },
+        "boolean/or": {
+          "type": "object",
+          "description": "Logical OR of two booleans.",
+          "properties": {
+            "left": { "$ref": "#/$defs/Term", "description": "First boolean." },
+            "right": {
+              "$ref": "#/$defs/Term",
+              "description": "Second boolean."
+            },
+            "is": {
+              "$ref": "#/$defs/Term",
+              "description": "Derived: left OR right."
+            }
+          },
+          "required": ["left", "right", "is"]
+        },
+        "boolean/not": {
+          "type": "object",
+          "description": "Logical NOT of a boolean.",
+          "properties": {
+            "value": {
+              "$ref": "#/$defs/Term",
+              "description": "Boolean to negate."
+            },
+            "is": {
+              "$ref": "#/$defs/Term",
+              "description": "Derived: NOT value."
+            }
+          },
+          "required": ["value", "is"]
+        }
+      }
+    },
+
+    "EqualityConstraint": {
+      "type": "object",
+      "description": "Equality constraint, referenced as '==' in a premise's assert field. Asserts two terms must hold equal values. Can filter (both bound), infer (one bound, one free), or fail (neither bound). Used via { \"assert\": \"==\", \"where\": { \"this\": ..., \"is\": ... } }.",
+      "properties": {
+        "this": { "$ref": "#/$defs/Term", "description": "Left-hand term." },
+        "is": { "$ref": "#/$defs/Term", "description": "Right-hand term." }
+      },
+      "required": ["this", "is"]
+    },
+
+    "Term": {
+      "description": "A term is either a variable or a constant value.",
+      "oneOf": [{ "$ref": "#/$defs/Variable" }, { "$ref": "#/$defs/Constant" }]
+    },
+
+    "Variable": {
+      "type": "object",
+      "description": "A query variable. Variables are bound by the query engine. The same variable appearing in multiple positions requires unification. A blank variable { \"?\": {} } matches any value without binding.",
+      "properties": {
+        "?": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Variable name. When omitted, acts as a blank (wildcard) that matches any value without binding."
+            }
+          }
+        }
+      },
+      "required": ["?"]
+    },
+
+    "Constant": {
+      "description": "A concrete value: string, number, or boolean.",
+      "oneOf": [
+        { "type": "string" },
+        { "type": "number" },
+        { "type": "integer" },
+        { "type": "boolean" }
+      ]
+    },
+
+    "Claim": {
+      "type": "object",
+      "description": "A claim in the associative layer. An assertion that has been incorporated by the transactor. Composed of a relation (the), an entity (of), a value (is), and provenance (cause).",
+      "properties": {
+        "the": {
+          "type": "string",
+          "description": "The relation, in domain/name format (e.g. 'diy.cook/quantity')."
+        },
+        "of": {
+          "type": "string",
+          "description": "The entity this claim is about."
+        },
+        "is": {
+          "description": "The value being linked to the entity through this relation.",
+          "oneOf": [
+            { "type": "string" },
+            { "type": "number" },
+            { "type": "integer" },
+            { "type": "boolean" }
+          ]
+        },
+        "cause": {
+          "$ref": "#/$defs/Provenance",
+          "description": "Provenance describing who produced this claim and when."
+        }
+      },
+      "required": ["the", "of", "is", "cause"]
+    },
+
+    "Provenance": {
+      "type": "object",
+      "description": "Provenance of a claim, capturing when and where it was produced. Establishes partial order across a distributed system.",
+      "properties": {
+        "by": {
+          "type": "string",
+          "description": "DID of the operator or session authority that produced the claim."
+        },
+        "period": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Coordinated time component: last synchronization cycle."
+        },
+        "moment": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Uncoordinated local time component: moment within a period."
+        }
+      },
+      "required": ["by", "period", "moment"]
+    }
+  }
+}
