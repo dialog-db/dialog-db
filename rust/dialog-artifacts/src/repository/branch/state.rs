@@ -8,49 +8,6 @@ use std::{
 
 use crate::repository::node_reference::NodeReference;
 use crate::repository::remote::SiteName;
-use crate::repository::revision::Revision;
-
-/// Branch is similar to a git branch and represents a named state of
-/// the work that is either diverged or converged from other workstream.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BranchState {
-    /// Current revision associated with this branch.
-    pub revision: Revision,
-
-    /// Root of the search tree branich is based on.
-    pub base: NodeReference,
-
-    /// An upstream through which updates get propagated. Branch may
-    /// not have an upstream.
-    pub upstream: Option<UpstreamState>,
-}
-
-impl BranchState {
-    /// Create a new fork from the given revision.
-    pub fn new(revision: Revision) -> Self {
-        Self {
-            base: revision.tree.clone(),
-            revision,
-            upstream: None,
-        }
-    }
-
-    /// Current revision of this branch.
-    pub fn revision(&self) -> &Revision {
-        &self.revision
-    }
-
-    /// Upstream branch of this branch.
-    pub fn upstream(&self) -> Option<&UpstreamState> {
-        self.upstream.as_ref()
-    }
-
-    /// Resets the branch to a new revision.
-    pub fn reset(&mut self, revision: Revision) -> &mut Self {
-        self.revision = revision;
-        self
-    }
-}
 
 /// Unique name for the branch
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -106,13 +63,18 @@ impl From<String> for BranchName {
     }
 }
 
-/// Upstream represents some branch being tracked
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Upstream represents some branch being tracked.
+///
+/// The `tree` field stores the upstream's tree root at the time of last
+/// sync — used as the base for three-way merge when rebasing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UpstreamState {
     /// A local branch upstream
     Local {
         /// Branch name
         branch: BranchName,
+        /// Tree root at last sync point
+        tree: NodeReference,
     },
     /// A remote branch upstream
     Remote {
@@ -122,6 +84,8 @@ pub enum UpstreamState {
         branch: BranchName,
         /// Subject DID of the repository being tracked
         subject: Did,
+        /// Tree root at last sync point
+        tree: NodeReference,
     },
 }
 
@@ -129,7 +93,7 @@ impl UpstreamState {
     /// Returns the branch name of this upstream.
     pub fn branch(&self) -> &BranchName {
         match self {
-            Self::Local { branch } => branch,
+            Self::Local { branch, .. } => branch,
             Self::Remote { branch, .. } => branch,
         }
     }
@@ -139,6 +103,32 @@ impl UpstreamState {
         match self {
             Self::Local { .. } => None,
             Self::Remote { subject, .. } => Some(subject),
+        }
+    }
+
+    /// Returns the tree root at the last sync point.
+    pub fn tree(&self) -> &NodeReference {
+        match self {
+            Self::Local { tree, .. } => tree,
+            Self::Remote { tree, .. } => tree,
+        }
+    }
+
+    /// Returns a new upstream with the tree updated to the given value.
+    pub fn with_tree(self, tree: NodeReference) -> Self {
+        match self {
+            Self::Local { branch, .. } => Self::Local { branch, tree },
+            Self::Remote {
+                name,
+                branch,
+                subject,
+                ..
+            } => Self::Remote {
+                name,
+                branch,
+                subject,
+                tree,
+            },
         }
     }
 }

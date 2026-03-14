@@ -5,11 +5,12 @@ use dialog_prolly_tree::{Entry, Tree};
 use futures_util::Stream;
 use std::ops::Range;
 
-use super::state::BranchState;
-use super::{Index, archive};
+use super::Index;
+use crate::repository::archive::Archive;
 use crate::artifacts::selector::Constrained;
 use crate::artifacts::{Artifact, ArtifactSelector, Datum, MatchCandidate};
 use crate::repository::archive::ContentAddressedStore;
+use crate::repository::revision::Revision;
 use crate::{
     AttributeKey, DialogArtifactsError, EntityKey, Key, KeyViewConstruct, KeyViewMut, State,
     ValueKey,
@@ -18,15 +19,15 @@ use crate::{
 /// Command struct for selecting artifacts from a branch.
 pub struct Select {
     subject: Did,
-    state: BranchState,
+    revision: Revision,
     selector: ArtifactSelector<Constrained>,
 }
 
 impl Select {
-    pub(super) fn new(subject: Did, state: BranchState, selector: ArtifactSelector<Constrained>) -> Self {
+    pub(super) fn new(subject: Did, revision: Revision, selector: ArtifactSelector<Constrained>) -> Self {
         Self {
             subject,
-            state,
+            revision,
             selector,
         }
     }
@@ -43,10 +44,10 @@ impl Select {
     {
         let store = ContentAddressedStore::new(
             env,
-            archive::Archive::new(Subject::from(self.subject.clone())).index(),
+            Archive::new(Subject::from(self.subject.clone())).index(),
         );
 
-        let tree: Index = Tree::from_hash(self.state.revision.tree.hash(), &store)
+        let tree: Index = Tree::from_hash(self.revision.tree.hash(), &store)
             .await
             .map_err(|e| DialogArtifactsError::Storage(format!("Failed to load tree: {:?}", e)))?;
 

@@ -1,5 +1,5 @@
 use crate::RemoteAddress;
-use dialog_capability::{Capability, Did, Provider, Subject};
+use dialog_capability::{Did, Provider, Subject};
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
 use dialog_effects::remote::RemoteInvocation;
@@ -7,9 +7,10 @@ use dialog_storage::{Blake3Hash, CborEncoder, Encoder};
 
 use crate::DialogArtifactsError;
 use crate::repository::branch::BranchName;
-use crate::repository::branch::archive::Archive;
-use crate::repository::branch::state::BranchState;
+use crate::repository::archive::Archive;
+use crate::repository::memory::Memory;
 use crate::repository::error::RepositoryError;
+use crate::repository::node_reference::NodeReference;
 use crate::repository::revision::Revision;
 
 use super::SiteName;
@@ -64,11 +65,10 @@ impl RemoteBranch {
     }
 
     /// Build the memory cell capability chain for this remote branch.
-    fn cell_capability(&self) -> Capability<memory_fx::Cell> {
-        Subject::from(self.subject.clone())
-            .attenuate(memory_fx::Memory)
-            .attenuate(memory_fx::Space::new("local"))
-            .attenuate(memory_fx::Cell::new(self.branch.to_string()))
+    fn cell_capability(&self) -> dialog_capability::Capability<memory_fx::Cell> {
+        Memory::new(Subject::from(self.subject.clone()))
+            .trace(self.branch.as_str())
+            .cell_capability("revision")
     }
 
     /// Archive capability for the remote repository.
@@ -93,17 +93,17 @@ impl RemoteBranch {
         match result {
             None => Ok(None),
             Some(publication) => {
-                let state: BranchState =
+                let revision: Revision =
                     CborEncoder
                         .decode(&publication.content)
                         .await
                         .map_err(|e| {
                             RepositoryError::StorageError(format!(
-                                "Failed to decode remote branch state: {}",
+                                "Failed to decode remote revision: {}",
                                 e
                             ))
                         })?;
-                Ok(Some(state.revision))
+                Ok(Some(revision))
             }
         }
     }
@@ -128,31 +128,13 @@ impl RemoteBranch {
         .await
         .map_err(|e| RepositoryError::StorageError(format!("Remote resolve failed: {}", e)))?;
 
-        let (current_state, edition) = match resolve_result {
-            None => (None, None),
-            Some(pub_data) => {
-                let state: BranchState =
-                    CborEncoder.decode(&pub_data.content).await.map_err(|e| {
-                        RepositoryError::StorageError(format!(
-                            "Failed to decode remote branch state: {}",
-                            e
-                        ))
-                    })?;
-                (Some(state), Some(pub_data.edition))
-            }
+        let edition = match resolve_result {
+            None => None,
+            Some(pub_data) => Some(pub_data.edition),
         };
 
-        // Build the new state
-        let new_state = match current_state {
-            Some(mut state) => {
-                state.revision = revision;
-                state
-            }
-            None => BranchState::new(revision),
-        };
-
-        let content = serde_ipld_dagcbor::to_vec(&new_state).map_err(|e| {
-            RepositoryError::StorageError(format!("Failed to encode branch state: {}", e))
+        let content = serde_ipld_dagcbor::to_vec(&revision).map_err(|e| {
+            RepositoryError::StorageError(format!("Failed to encode revision: {}", e))
         })?;
 
         RemoteInvocation::new(
@@ -213,6 +195,7 @@ impl From<RemoteBranch> for UpstreamState {
             name: remote.remote,
             branch: remote.branch,
             subject: remote.subject,
+            tree: NodeReference::default(),
         }
     }
 }
@@ -261,6 +244,7 @@ mod tests {
                 name,
                 branch,
                 subject,
+                ..
             } => {
                 assert_eq!(name, "origin");
                 assert_eq!(branch, BranchName::from("main"));

@@ -8,10 +8,9 @@ use futures_util::stream;
 use crate::RemoteAddress;
 use crate::artifacts::{Artifact, Instruction};
 use crate::environment::TestEnvironment;
-use crate::repository::remote::RemoteSite;
 
-use super::Branch;
 use super::tests::{test_issuer, test_subject};
+use crate::repository::Repository;
 
 fn test_address(name: &str) -> RemoteAddress {
     let s3_addr = S3Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", name);
@@ -29,14 +28,16 @@ fn env_with_remote(remote: Route<RemoteAddress>) -> TestEnvironment {
 #[dialog_common::test]
 async fn it_pushes_to_remote() -> anyhow::Result<()> {
     let env = new_env();
-    let issuer = test_issuer().await;
     let subject = test_subject();
 
-    let site = RemoteSite::add("origin", test_address("remote-1"), &subject, &env).await?;
+    let repo = Repository::new(test_issuer().await, subject.clone());
 
-    let branch = Branch::open("main", issuer.clone(), subject.clone())
+    let site = repo
+        .add_remote("origin", test_address("remote-1"))
         .perform(&env)
         .await?;
+
+    let branch = repo.open_branch("main").perform(&env).await?;
 
     let remote_branch = site.repository(subject.clone()).branch("main");
     branch.set_upstream(remote_branch).perform(&env).await?;
@@ -47,7 +48,7 @@ async fn it_pushes_to_remote() -> anyhow::Result<()> {
         is: crate::Value::String("Alice".to_string()),
         cause: None,
     };
-    let (branch, _) = branch
+    let _hash = branch
         .commit(stream::iter(vec![Instruction::Assert(artifact)]))
         .perform(&env)
         .await?;
@@ -66,14 +67,16 @@ async fn it_pushes_to_remote() -> anyhow::Result<()> {
 #[dialog_common::test]
 async fn it_fetches_from_remote_upstream() -> anyhow::Result<()> {
     let env = new_env();
-    let issuer = test_issuer().await;
     let subject = test_subject();
 
-    let site = RemoteSite::add("origin", test_address("remote-2"), &subject, &env).await?;
+    let repo = Repository::new(test_issuer().await, subject.clone());
 
-    let branch = Branch::open("main", issuer.clone(), subject.clone())
+    let site = repo
+        .add_remote("origin", test_address("remote-2"))
         .perform(&env)
         .await?;
+
+    let branch = repo.open_branch("main").perform(&env).await?;
 
     let remote_branch_cursor = site.repository(subject.clone()).branch("main");
     branch
@@ -81,7 +84,7 @@ async fn it_fetches_from_remote_upstream() -> anyhow::Result<()> {
         .perform(&env)
         .await?;
 
-    let (branch, _) = branch
+    let _hash = branch
         .commit(stream::iter(vec![Instruction::Assert(Artifact {
             the: "user/name".parse()?,
             of: "user:1".parse()?,
@@ -102,14 +105,16 @@ async fn it_fetches_from_remote_upstream() -> anyhow::Result<()> {
 #[dialog_common::test]
 async fn it_fetch_does_not_modify_local_state() -> anyhow::Result<()> {
     let env = new_env();
-    let issuer = test_issuer().await;
     let subject = test_subject();
 
-    let site = RemoteSite::add("origin", test_address("remote-3"), &subject, &env).await?;
+    let repo = Repository::new(test_issuer().await, subject.clone());
 
-    let branch = Branch::open("main", issuer.clone(), subject.clone())
+    let site = repo
+        .add_remote("origin", test_address("remote-3"))
         .perform(&env)
         .await?;
+
+    let branch = repo.open_branch("main").perform(&env).await?;
 
     let remote_branch_cursor = site.repository(subject.clone()).branch("main");
     branch
@@ -117,7 +122,7 @@ async fn it_fetch_does_not_modify_local_state() -> anyhow::Result<()> {
         .perform(&env)
         .await?;
 
-    let (branch, _) = branch
+    let _hash = branch
         .commit(stream::iter(vec![Instruction::Assert(Artifact {
             the: "user/name".parse()?,
             of: "user:1".parse()?,
@@ -138,23 +143,18 @@ async fn it_fetch_does_not_modify_local_state() -> anyhow::Result<()> {
 
 #[dialog_common::test]
 async fn it_pushes_then_pulls_from_remote() -> anyhow::Result<()> {
-    // Alice and Bob share a remote
     let remote = Route::<RemoteAddress>::new();
     let alice_env = env_with_remote(remote);
-    let alice_issuer = test_issuer().await;
     let subject = test_subject();
 
-    let site = RemoteSite::add(
-        "origin",
-        test_address("shared-remote"),
-        &subject,
-        &alice_env,
-    )
-    .await?;
+    let repo = Repository::new(test_issuer().await, subject.clone());
 
-    let alice_branch = Branch::open("main", alice_issuer.clone(), subject.clone())
+    let site = repo
+        .add_remote("origin", test_address("shared-remote"))
         .perform(&alice_env)
         .await?;
+
+    let alice_branch = repo.open_branch("main").perform(&alice_env).await?;
 
     let remote_branch_cursor = site.repository(subject.clone()).branch("main");
     alice_branch
@@ -162,7 +162,7 @@ async fn it_pushes_then_pulls_from_remote() -> anyhow::Result<()> {
         .perform(&alice_env)
         .await?;
 
-    let (alice_branch, _) = alice_branch
+    let _hash = alice_branch
         .commit(stream::iter(vec![Instruction::Assert(Artifact {
             the: "user/name".parse()?,
             of: "user:alice".parse()?,
@@ -174,10 +174,7 @@ async fn it_pushes_then_pulls_from_remote() -> anyhow::Result<()> {
 
     alice_branch.push().perform(&alice_env).await?;
 
-    // Bob opens his own branch sharing Alice's env (same remote)
-    let bob_branch = Branch::open("bob-main", alice_issuer.clone(), subject.clone())
-        .perform(&alice_env)
-        .await?;
+    let bob_branch = repo.open_branch("bob-main").perform(&alice_env).await?;
 
     let bob_remote = site.repository(subject.clone()).branch("main");
     bob_branch
@@ -185,8 +182,7 @@ async fn it_pushes_then_pulls_from_remote() -> anyhow::Result<()> {
         .perform(&alice_env)
         .await?;
 
-    // Bob pulls from remote
-    let (bob_branch, pulled) = bob_branch.pull_upstream().perform(&alice_env).await?;
+    let pulled = bob_branch.pull_upstream().perform(&alice_env).await?;
     assert!(pulled.is_some());
     assert_eq!(bob_branch.revision().tree(), alice_branch.revision().tree());
 
@@ -196,19 +192,21 @@ async fn it_pushes_then_pulls_from_remote() -> anyhow::Result<()> {
 #[dialog_common::test]
 async fn it_pull_without_local_changes_adopts_upstream() -> anyhow::Result<()> {
     let env = new_env();
-    let issuer = test_issuer().await;
     let subject = test_subject();
 
-    let site = RemoteSite::add("origin", test_address("remote-adopt"), &subject, &env).await?;
+    let repo = Repository::new(test_issuer().await, subject.clone());
 
-    let branch = Branch::open("main", issuer.clone(), subject.clone())
+    let site = repo
+        .add_remote("origin", test_address("remote-adopt"))
         .perform(&env)
         .await?;
+
+    let branch = repo.open_branch("main").perform(&env).await?;
 
     let remote = site.repository(subject.clone()).branch("main");
     branch.set_upstream(remote).perform(&env).await?;
 
-    let (branch, _) = branch
+    let _hash = branch
         .commit(stream::iter(vec![Instruction::Assert(Artifact {
             the: "user/name".parse()?,
             of: "user:1".parse()?,
@@ -220,13 +218,11 @@ async fn it_pull_without_local_changes_adopts_upstream() -> anyhow::Result<()> {
 
     branch.push().perform(&env).await?;
 
-    let other = Branch::open("other", issuer.clone(), subject.clone())
-        .perform(&env)
-        .await?;
+    let other = repo.open_branch("other").perform(&env).await?;
     let remote = site.repository(subject).branch("main");
     other.set_upstream(remote).perform(&env).await?;
 
-    let (other, pulled) = other.pull_upstream().perform(&env).await?;
+    let pulled = other.pull_upstream().perform(&env).await?;
     assert!(pulled.is_some());
     assert_eq!(other.revision().tree(), branch.revision().tree());
 
@@ -236,18 +232,25 @@ async fn it_pull_without_local_changes_adopts_upstream() -> anyhow::Result<()> {
 #[dialog_common::test]
 async fn it_adds_multiple_remotes() -> anyhow::Result<()> {
     let env = new_env();
-    let subject = test_subject();
 
-    let origin = RemoteSite::add("origin", test_address("remote-origin"), &subject, &env).await?;
+    let repo = Repository::new(test_issuer().await, test_subject());
 
-    let backup = RemoteSite::add("backup", test_address("remote-backup"), &subject, &env).await?;
+    let origin = repo
+        .add_remote("origin", test_address("remote-origin"))
+        .perform(&env)
+        .await?;
+
+    let backup = repo
+        .add_remote("backup", test_address("remote-backup"))
+        .perform(&env)
+        .await?;
 
     assert_eq!(origin.name(), "origin");
     assert_eq!(backup.name(), "backup");
     assert_ne!(origin.address(), backup.address());
 
-    let loaded_origin = RemoteSite::load("origin", &subject, &env).await?;
-    let loaded_backup = RemoteSite::load("backup", &subject, &env).await?;
+    let loaded_origin = repo.load_remote("origin").perform(&env).await?;
+    let loaded_backup = repo.load_remote("backup").perform(&env).await?;
     assert_eq!(loaded_origin.name(), "origin");
     assert_eq!(loaded_backup.name(), "backup");
 

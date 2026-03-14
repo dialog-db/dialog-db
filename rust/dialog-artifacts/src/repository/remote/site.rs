@@ -1,18 +1,18 @@
-use dialog_capability::{Did, Provider, Subject};
+use dialog_capability::{Did, Provider};
 use dialog_effects::memory as memory_fx;
 
 use super::state::SiteName;
 use crate::RemoteAddress;
 use crate::repository::cell::Cell;
 use crate::repository::error::RepositoryError;
+use crate::repository::memory::Space;
 
 use super::repository::RemoteRepository;
 
 /// A loaded remote site configuration.
 ///
 /// Represents a named remote (like git's "origin") that has been loaded from
-/// or persisted to memory. Use [`add`](RemoteSite::add) to create a new remote
-/// or [`load`](RemoteSite::load) to load an existing one.
+/// or persisted to memory.
 ///
 /// Call [`.repository(subject)`](RemoteSite::repository) to get a cursor into
 /// a specific repository at this site.
@@ -23,68 +23,6 @@ pub struct RemoteSite {
 }
 
 impl RemoteSite {
-    /// The memory cell where remote configuration is persisted.
-    fn cell(name: &SiteName, subject: &Did) -> Cell<RemoteAddress> {
-        Cell::new(
-            Subject::from(subject.clone()),
-            "remotes",
-            name.as_str().to_string(),
-        )
-    }
-
-    /// Add a new remote site configuration.
-    ///
-    /// Persists the remote config to a memory cell. Returns an error if a
-    /// remote with the same name already exists.
-    pub async fn add<Env>(
-        name: impl Into<SiteName>,
-        address: RemoteAddress,
-        subject: &Did,
-        env: &Env,
-    ) -> Result<RemoteSite, RepositoryError>
-    where
-        Env: Provider<memory_fx::Resolve> + Provider<memory_fx::Publish>,
-    {
-        let name: SiteName = name.into();
-        let cell = Self::cell(&name, subject);
-
-        // Resolve to check if it already exists
-        cell.resolve(env).await?;
-        if cell.get().is_some() {
-            return Err(RepositoryError::RemoteAlreadyExists {
-                remote: name.clone(),
-            });
-        }
-
-        cell.publish(address.clone(), env).await?;
-
-        Ok(RemoteSite { name, address })
-    }
-
-    /// Load an existing remote site configuration.
-    ///
-    /// Reads the remote config from a memory cell. Returns an error if the
-    /// remote does not exist.
-    pub async fn load<Env>(
-        name: impl Into<SiteName>,
-        subject: &Did,
-        env: &Env,
-    ) -> Result<RemoteSite, RepositoryError>
-    where
-        Env: Provider<memory_fx::Resolve>,
-    {
-        let name: SiteName = name.into();
-        let cell = Self::cell(&name, subject);
-
-        cell.resolve(env).await?;
-        match cell.get() {
-            Some(address) => Ok(RemoteSite { name, address }),
-            None => Err(RepositoryError::RemoteNotFound {
-                remote: name.clone(),
-            }),
-        }
-    }
-
     /// The name of this remote.
     pub fn name(&self) -> &SiteName {
         &self.name
@@ -101,17 +39,89 @@ impl RemoteSite {
     }
 }
 
+/// Command to add a new remote site, persisting its configuration.
+pub struct Open {
+    name: SiteName,
+    address: RemoteAddress,
+    sites: Space,
+}
+
+impl Open {
+    pub(crate) fn new(name: impl Into<SiteName>, address: RemoteAddress, sites: Space) -> Self {
+        Self {
+            name: name.into(),
+            address,
+            sites,
+        }
+    }
+
+    /// Execute the open operation.
+    pub async fn perform<Env>(self, env: &Env) -> Result<RemoteSite, RepositoryError>
+    where
+        Env: Provider<memory_fx::Resolve> + Provider<memory_fx::Publish>,
+    {
+        let cell: Cell<RemoteAddress> = self.sites.cell(self.name.as_str().to_string());
+
+        cell.resolve(env).await?;
+        if cell.get().is_some() {
+            return Err(RepositoryError::RemoteAlreadyExists {
+                remote: self.name,
+            });
+        }
+
+        cell.publish(self.address.clone(), env).await?;
+
+        Ok(RemoteSite {
+            name: self.name,
+            address: self.address,
+        })
+    }
+}
+
+/// Command to load an existing remote site configuration.
+pub struct Load {
+    name: SiteName,
+    sites: Space,
+}
+
+impl Load {
+    pub(crate) fn new(name: impl Into<SiteName>, sites: Space) -> Self {
+        Self {
+            name: name.into(),
+            sites,
+        }
+    }
+
+    /// Execute the load operation.
+    pub async fn perform<Env>(self, env: &Env) -> Result<RemoteSite, RepositoryError>
+    where
+        Env: Provider<memory_fx::Resolve>,
+    {
+        let cell: Cell<RemoteAddress> = self.sites.cell(self.name.as_str().to_string());
+
+        cell.resolve(env).await?;
+        match cell.get() {
+            Some(address) => Ok(RemoteSite {
+                name: self.name,
+                address,
+            }),
+            None => Err(RepositoryError::RemoteNotFound {
+                remote: self.name,
+            }),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use dialog_s3_credentials::Address as S3Address;
     use dialog_s3_credentials::s3::Credentials as S3Credentials;
     use dialog_storage::provider::Volatile;
 
-    use super::*;
-
-    fn test_subject() -> Did {
-        "did:test:remote-site".parse().unwrap()
-    }
+    use crate::RemoteAddress;
+    use crate::repository::Repository;
+    use crate::repository::credentials::Credentials;
+    use crate::repository::error::RepositoryError;
 
     fn test_address() -> RemoteAddress {
         let s3_addr = S3Address::new(
@@ -122,18 +132,28 @@ mod tests {
         RemoteAddress::S3(S3Credentials::public(s3_addr).unwrap())
     }
 
+    async fn test_repo() -> Repository {
+        let issuer = Credentials::from_passphrase("test")
+            .await
+            .unwrap();
+        let subject = "did:test:remote-site".parse().unwrap();
+        Repository::new(issuer, subject)
+    }
+
     #[dialog_common::test]
     async fn it_adds_and_loads_remote() -> anyhow::Result<()> {
         let env = Volatile::new();
-        let subject = test_subject();
+        let repo = test_repo().await;
 
-        let site = RemoteSite::add("origin", test_address(), &subject, &env).await?;
+        let site = repo
+            .add_remote("origin", test_address())
+            .perform(&env)
+            .await?;
 
         assert_eq!(site.name(), "origin");
         assert_eq!(site.address(), &test_address());
 
-        // Load the same remote
-        let loaded = RemoteSite::load("origin", &subject, &env).await?;
+        let loaded = repo.load_remote("origin").perform(&env).await?;
         assert_eq!(loaded.name(), "origin");
         assert_eq!(loaded.address(), &test_address());
 
@@ -143,9 +163,9 @@ mod tests {
     #[dialog_common::test]
     async fn it_errors_loading_missing_remote() -> anyhow::Result<()> {
         let env = Volatile::new();
-        let subject = test_subject();
+        let repo = test_repo().await;
 
-        let result = RemoteSite::load("nonexistent", &subject, &env).await;
+        let result = repo.load_remote("nonexistent").perform(&env).await;
         assert!(matches!(
             result,
             Err(RepositoryError::RemoteNotFound { .. })
@@ -157,11 +177,16 @@ mod tests {
     #[dialog_common::test]
     async fn it_errors_adding_duplicate_remote() -> anyhow::Result<()> {
         let env = Volatile::new();
-        let subject = test_subject();
+        let repo = test_repo().await;
 
-        RemoteSite::add("origin", test_address(), &subject, &env).await?;
+        repo.add_remote("origin", test_address())
+            .perform(&env)
+            .await?;
 
-        let result = RemoteSite::add("origin", test_address(), &subject, &env).await;
+        let result = repo
+            .add_remote("origin", test_address())
+            .perform(&env)
+            .await;
 
         assert!(matches!(
             result,

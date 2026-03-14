@@ -78,8 +78,8 @@ pub use environment::*;
 /// Capability-based repository system.
 mod repository;
 pub use repository::{
-    Branch, BranchName, BranchState, NodeReference, Occurence, RemoteBranch, RemoteRepository,
-    RemoteSite, Revision,
+    Branch, BranchName, NodeReference, Occurence, RemoteBranch, RemoteRepository, RemoteSite,
+    Repository, Revision,
 };
 
 #[cfg(any(test, feature = "helpers"))]

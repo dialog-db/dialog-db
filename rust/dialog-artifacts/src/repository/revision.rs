@@ -1,16 +1,7 @@
 use dialog_capability::Did;
-use dialog_prolly_tree::KeyType;
 use serde::{Deserialize, Serialize};
-use std::any;
-use std::cmp::Ordering;
 use std::collections::HashSet;
-use std::fmt::{Debug, Formatter, Result as FmtResult};
-use std::hash::{Hash, Hasher};
-use std::marker::PhantomData;
 
-use base58::ToBase58;
-
-use super::RepositoryError;
 use super::node_reference::NodeReference;
 
 /// A [`Revision`] represents a concrete state of the dialog instance. It is
@@ -26,13 +17,16 @@ pub struct Revision {
     /// Reference the root of the search tree.
     pub tree: NodeReference,
 
-    /// Set of revisions this is based of. It can be an empty set if this is
-    /// a first revision, but more commonly it will point to a previous revision
-    /// it is based on. If branch tracks multiple concurrent upstreams it will
-    /// contain a set of revisions.
+    /// Set of parent tree roots this revision is based on. An empty set means
+    /// this is the first revision (based on the empty tree).
     ///
-    /// It is effectively equivalent of of `parents` in git commit objects.
-    pub cause: HashSet<Edition<Revision>>,
+    /// Each entry is the tree root of a revision that was merged to produce
+    /// this revision's base. Equivalent to `parents` in git commit objects.
+    ///
+    /// TODO: Store revision metadata as claims in the tree so that a `Revision`
+    /// can be reconstructed from a tree root alone, enabling DAG traversal
+    /// without external state.
+    pub cause: HashSet<NodeReference>,
 
     /// Period indicating when this revision was created. This MUST be derived
     /// from the `cause`al revisions and it must be greater by one than the
@@ -84,95 +78,8 @@ impl Revision {
         &self.moment
     }
 
-    /// Previous revision this replaced.
-    pub fn cause(&self) -> &HashSet<Edition<Revision>> {
+    /// Parent tree roots this revision is based on.
+    pub fn cause(&self) -> &HashSet<NodeReference> {
         &self.cause
-    }
-
-    /// Creates an [`Edition`] of this revision by hashing it.
-    ///
-    /// This is used to reference this revision as a causal ancestor in subsequent revisions.
-    pub fn edition(&self) -> Result<Edition<Revision>, RepositoryError> {
-        let revision_bytes = serde_ipld_dagcbor::to_vec(self).map_err(|e| {
-            RepositoryError::StorageError(format!("Failed to serialize revision: {}", e))
-        })?;
-        let revision_hash: [u8; 32] = *blake3::hash(&revision_bytes).as_bytes();
-        Ok(Edition::new(revision_hash))
-    }
-}
-
-/// Blake3 hash of the branch state.
-#[derive(Serialize, Deserialize)]
-pub struct Edition<T>([u8; 32], PhantomData<fn() -> T>);
-
-impl<T> Edition<T> {
-    /// Creates a new edition from a hash.
-    pub fn new(hash: [u8; 32]) -> Self {
-        Self(hash, PhantomData)
-    }
-}
-
-impl<T> Clone for Edition<T> {
-    fn clone(&self) -> Self {
-        Self(self.0, PhantomData)
-    }
-}
-
-impl<T> Debug for Edition<T> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        f.write_str(&format!(
-            "#<{}>{}",
-            any::type_name::<T>(),
-            self.0.to_base58().as_str()
-        ))
-    }
-}
-
-impl<T> Hash for Edition<T> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.hash(state);
-    }
-}
-
-impl<T> PartialEq for Edition<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-
-impl<T> Eq for Edition<T> {}
-
-impl<T> PartialOrd for Edition<T> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<T> Ord for Edition<T> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.0.cmp(&other.0)
-    }
-}
-
-impl<T> KeyType for Edition<T> {
-    fn bytes(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl<T> TryFrom<Vec<u8>> for Edition<T> {
-    type Error = crate::DialogArtifactsError;
-
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        Ok(Self(
-            value.try_into().map_err(|value: Vec<u8>| {
-                crate::DialogArtifactsError::InvalidReference(format!(
-                    "Incorrect length (expected {}, got {})",
-                    32,
-                    value.len()
-                ))
-            })?,
-            PhantomData,
-        ))
     }
 }

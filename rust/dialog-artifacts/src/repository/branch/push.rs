@@ -11,12 +11,12 @@ use super::novelty::novelty;
 use super::state::{BranchName, UpstreamState};
 use crate::repository::error::RepositoryError;
 use crate::repository::remote::SiteName;
-use crate::repository::remote::{RemoteBranch, RemoteSite};
+use crate::repository::remote::RemoteBranch;
 use crate::repository::revision::Revision;
 
 /// Command struct for pushing local changes to an upstream branch.
 ///
-/// Borrows `&Branch` (non-consuming). Reads `branch.state().upstream` to
+/// Borrows `&Branch` (non-consuming). Reads the branch's upstream to
 /// dispatch to local or remote push logic.
 pub struct Push<'a> {
     branch: &'a Branch,
@@ -45,21 +45,20 @@ impl Push<'_> {
             + ConditionalSync
             + 'static,
     {
-        let state = self.branch.state();
         let upstream =
-            state
-                .upstream
-                .as_ref()
+            self.branch
+                .upstream()
                 .ok_or_else(|| RepositoryError::BranchHasNoUpstream {
-                    name: self.branch.name(),
+                    name: self.branch.name().clone(),
                 })?;
 
-        match upstream {
-            UpstreamState::Local { branch: name } => push_local(self.branch, name, env).await,
+        match &upstream {
+            UpstreamState::Local { branch: name, .. } => push_local(self.branch, name, env).await,
             UpstreamState::Remote {
                 name,
                 branch: branch_name,
                 subject,
+                ..
             } => push_remote(self.branch, name, branch_name, subject, env).await,
         }
     }
@@ -83,21 +82,21 @@ where
         + ConditionalSync
         + 'static,
 {
-    let issuer = branch.issuer().clone();
-    let subject = branch.subject().clone();
-
-    let upstream = Branch::load(upstream_name.clone(), issuer, subject)
+    let upstream = branch.load_branch(upstream_name.clone())
         .perform(env)
         .await?;
 
     let branch_revision = branch.revision();
-    let branch_base = branch.base();
+    let branch_base = branch
+        .upstream()
+        .map(|u| u.tree().clone())
+        .unwrap_or_default();
 
     if upstream.revision().tree() != &branch_base {
         return Ok(None);
     }
 
-    let _upstream = upstream.reset(branch_revision.clone()).perform(env).await?;
+    upstream.reset(branch_revision.clone()).perform(env).await?;
 
     Ok(Some(branch_revision))
 }
@@ -127,7 +126,9 @@ where
         + ConditionalSync
         + 'static,
 {
-    let remote_site = RemoteSite::load(remote, branch.subject(), env).await?;
+    let remote_site = branch.load_remote(remote.clone())
+        .perform(env)
+        .await?;
 
     let remote_branch = RemoteBranch::new(
         remote_site.name().clone(),
@@ -137,7 +138,10 @@ where
     );
 
     let branch_revision = branch.revision();
-    let branch_base = branch.base();
+    let branch_base = branch
+        .upstream()
+        .map(|u| u.tree().clone())
+        .unwrap_or_default();
     let catalog = branch.archive().index();
 
     // Maximum number of concurrent block uploads.
@@ -198,28 +202,27 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::Branch;
     use super::super::tests::{test_issuer, test_subject};
     use crate::artifacts::{Artifact, Instruction};
+    use crate::repository::Repository;
     use crate::repository::branch::state::UpstreamState;
+    use crate::repository::node_reference::NodeReference;
     use dialog_storage::provider::Volatile;
     use futures_util::stream;
 
     #[dialog_common::test]
     async fn it_pushes_to_local_upstream() -> anyhow::Result<()> {
         let env = Volatile::new();
-        let issuer = test_issuer().await;
 
-        let _main = Branch::open("main", issuer.clone(), test_subject())
-            .perform(&env)
-            .await?;
+        let repo = Repository::new(test_issuer().await, test_subject());
 
-        let feature = Branch::open("feature", issuer.clone(), test_subject())
-            .perform(&env)
-            .await?;
+        let _main = repo.open_branch("main").perform(&env).await?;
+
+        let feature = repo.open_branch("feature").perform(&env).await?;
         feature
             .set_upstream(UpstreamState::Local {
                 branch: "main".into(),
+                tree: NodeReference::default(),
             })
             .perform(&env)
             .await?;
@@ -230,7 +233,7 @@ mod tests {
             is: crate::Value::String("Alice".to_string()),
             cause: None,
         };
-        let (feature, _) = feature
+        let _hash = feature
             .commit(stream::iter(vec![Instruction::Assert(artifact)]))
             .perform(&env)
             .await?;
@@ -240,9 +243,7 @@ mod tests {
         let result = super::push_local(&feature, &"main".into(), &env).await?;
         assert!(result.is_some());
 
-        let main_reloaded = Branch::load("main", issuer, test_subject())
-            .perform(&env)
-            .await?;
+        let main_reloaded = repo.load_branch("main").perform(&env).await?;
         assert_eq!(main_reloaded.revision().tree(), feature_revision.tree());
 
         Ok(())
@@ -251,12 +252,11 @@ mod tests {
     #[dialog_common::test]
     async fn it_returns_none_when_local_upstream_diverged() -> anyhow::Result<()> {
         let env = Volatile::new();
-        let issuer = test_issuer().await;
 
-        let main = Branch::open("main", issuer.clone(), test_subject())
-            .perform(&env)
-            .await?;
-        let (_main, _) = main
+        let repo = Repository::new(test_issuer().await, test_subject());
+
+        let main = repo.open_branch("main").perform(&env).await?;
+        let _hash = main
             .commit(stream::iter(vec![Instruction::Assert(Artifact {
                 the: "user/name".parse()?,
                 of: "user:main".parse()?,
@@ -266,17 +266,16 @@ mod tests {
             .perform(&env)
             .await?;
 
-        let feature = Branch::open("feature", issuer.clone(), test_subject())
-            .perform(&env)
-            .await?;
+        let feature = repo.open_branch("feature").perform(&env).await?;
         feature
             .set_upstream(UpstreamState::Local {
                 branch: "main".into(),
+                tree: NodeReference::default(),
             })
             .perform(&env)
             .await?;
 
-        let (feature, _) = feature
+        let _hash = feature
             .commit(stream::iter(vec![Instruction::Assert(Artifact {
                 the: "user/email".parse()?,
                 of: "user:feature".parse()?,
@@ -295,13 +294,11 @@ mod tests {
     #[dialog_common::test]
     async fn it_has_no_upstream_by_default() -> anyhow::Result<()> {
         let env = Volatile::new();
-        let issuer = test_issuer().await;
 
-        let branch = Branch::open("feature", issuer, test_subject())
-            .perform(&env)
-            .await?;
+        let repo = Repository::new(test_issuer().await, test_subject());
+        let branch = repo.open_branch("feature").perform(&env).await?;
 
-        assert!(branch.state().upstream.is_none());
+        assert!(branch.upstream().is_none());
 
         Ok(())
     }

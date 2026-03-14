@@ -3,7 +3,7 @@
 //! Provides a navigation pattern for addressing remote repositories:
 //!
 //! ```text
-//! RemoteSite::load("origin", &subject, &env)
+//! repo.load_remote("origin").perform(&env)
 //!   └── .repository(subject_did)  → RemoteRepository
 //!         └── .branch("main")     → RemoteBranch
 //! ```

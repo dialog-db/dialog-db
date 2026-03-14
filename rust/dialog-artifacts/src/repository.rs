@@ -8,7 +8,7 @@
 //! - [`cell`] — Transactional memory cells with edition tracking
 //! - [`revision`] — Revision tracking and logical timestamps
 
-/// CAS adapter bridging capabilities with prolly tree's ContentAddressedStorage.
+/// Archive capabilities and CAS adapters.
 pub mod archive;
 /// Capability-based branch operations (command pattern).
 pub mod branch;
@@ -18,12 +18,16 @@ pub mod cell;
 pub mod credentials;
 /// Repository error types.
 pub mod error;
+/// Memory capability wrapper (`Subject → Memory → Space → Cell`).
+pub mod memory;
 /// Node reference type for tree root hashes.
 pub mod node_reference;
 /// Occurence logical timestamp type.
 pub mod occurence;
 /// Remote site / repository / branch cursor hierarchy.
 pub mod remote;
+/// Repository struct for scoped access to branches and remotes.
+mod repo;
 /// Revision type and edition tracking.
 pub mod revision;
 
@@ -32,4 +36,5 @@ pub use error::*;
 pub use node_reference::*;
 pub use occurence::*;
 pub use remote::*;
+pub use repo::Repository;
 pub use revision::*;

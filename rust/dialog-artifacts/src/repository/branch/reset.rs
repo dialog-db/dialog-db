@@ -2,39 +2,29 @@ use dialog_capability::Provider;
 use dialog_effects::memory as memory_fx;
 
 use super::Branch;
-use super::state::BranchState;
 use crate::repository::error::RepositoryError;
 use crate::repository::revision::Revision;
 
 /// Command struct for resetting a branch to a given revision.
-pub struct Reset {
-    branch: Branch,
+pub struct Reset<'a> {
+    branch: &'a Branch,
     revision: Revision,
 }
 
-impl Reset {
-    pub(super) fn new(branch: Branch, revision: Revision) -> Self {
+impl<'a> Reset<'a> {
+    pub(super) fn new(branch: &'a Branch, revision: Revision) -> Self {
         Self { branch, revision }
     }
 }
 
-impl Reset {
-    /// Execute the reset operation, returning the updated branch.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Branch, RepositoryError>
+impl Reset<'_> {
+    /// Execute the reset operation.
+    pub async fn perform<Env>(self, env: &Env) -> Result<(), RepositoryError>
     where
         Env: Provider<memory_fx::Publish>,
     {
-        let branch = self.branch;
-        let revision = self.revision;
+        self.branch.revision.publish(self.revision, env).await?;
 
-        let new_state = BranchState {
-            revision: revision.clone(),
-            base: revision.tree.clone(),
-            ..branch.state()
-        };
-
-        branch.cell.publish(new_state, env).await?;
-
-        Ok(branch)
+        Ok(())
     }
 }

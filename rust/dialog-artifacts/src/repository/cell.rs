@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use dialog_capability::{Capability, Provider, Subject};
-use dialog_effects::memory::{self, Memory, Space};
+use dialog_capability::{Capability, Provider};
+use dialog_effects::memory;
 use dialog_storage::{CborEncoder, DialogStorageError, Encoder};
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -44,52 +44,11 @@ impl<T, Codec: Clone> Clone for Cell<T, Codec> {
 }
 
 impl<T> Cell<T> {
-    /// Create a new Cell with the default CBOR codec from subject, space, and
-    /// cell name.
-    pub fn new(
-        subject: impl Into<Subject>,
-        space: impl Into<String>,
-        cell: impl Into<String>,
-    ) -> Self {
-        let capability = subject
-            .into()
-            .attenuate(Memory)
-            .attenuate(Space::new(space))
-            .attenuate(memory::Cell::new(cell));
-        Self {
-            capability,
-            codec: CborEncoder,
-            state: SharedState::default(),
-        }
-    }
-
     /// Create a Cell from a pre-built cell capability.
     pub fn from_capability(capability: Capability<memory::Cell>) -> Self {
         Self {
             capability,
             codec: CborEncoder,
-            state: SharedState::default(),
-        }
-    }
-}
-
-impl<T, Codec: Encoder> Cell<T, Codec> {
-    /// Create a new Cell with a custom codec from subject, space, and cell name.
-    #[allow(dead_code)]
-    pub fn with_codec(
-        subject: impl Into<Subject>,
-        space: impl Into<String>,
-        cell: impl Into<String>,
-        codec: Codec,
-    ) -> Self {
-        let capability = subject
-            .into()
-            .attenuate(Memory)
-            .attenuate(Space::new(space))
-            .attenuate(memory::Cell::new(cell));
-        Self {
-            capability,
-            codec,
             state: SharedState::default(),
         }
     }
@@ -310,12 +269,17 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dialog_capability::Did;
+    use crate::repository::memory::Memory;
+    use dialog_capability::{Did, Subject};
     use dialog_storage::provider::Volatile;
 
-    fn test_subject() -> Subject {
+    fn test_memory() -> Memory {
         let did: Did = "did:test:cell-tests".parse().unwrap();
-        Subject::from(did)
+        Memory::new(Subject::from(did))
+    }
+
+    fn test_cell<T>(name: &str) -> Cell<T> {
+        test_memory().space("test").cell(name)
     }
 
     #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -336,7 +300,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_resolves_empty_cell() -> anyhow::Result<()> {
         let provider = Volatile::new();
-        let cell: Cell<TestValue> = Cell::new(test_subject(), "local", "missing");
+        let cell: Cell<TestValue> = test_cell("missing");
 
         cell.resolve(&provider).await?;
         assert!(cell.get().is_none());
@@ -347,7 +311,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_publishes_then_resolves() -> anyhow::Result<()> {
         let provider = Volatile::new();
-        let cell: Cell<TestValue> = Cell::new(test_subject(), "local", "test");
+        let cell: Cell<TestValue> = test_cell("test");
 
         let value = TestValue {
             count: 42,
@@ -366,7 +330,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_updates_with_automatic_edition() -> anyhow::Result<()> {
         let provider = Volatile::new();
-        let cell: Cell<TestValue> = Cell::new(test_subject(), "local", "update");
+        let cell: Cell<TestValue> = test_cell("update");
 
         let v1 = TestValue {
             count: 1,
@@ -389,14 +353,14 @@ mod tests {
     #[dialog_common::test]
     async fn it_caches_on_resolve() -> anyhow::Result<()> {
         let provider = Volatile::new();
-        let cell: Cell<TestValue> = Cell::new(test_subject(), "local", "cache");
+        let cell: Cell<TestValue> = test_cell("cache");
 
         let value = TestValue {
             count: 7,
             name: "cached".into(),
         };
 
-        let writer: Cell<TestValue> = Cell::new(test_subject(), "local", "cache");
+        let writer: Cell<TestValue> = test_cell("cache");
         writer.publish(value.clone(), &provider).await?;
 
         assert!(cell.get().is_none());
@@ -411,8 +375,7 @@ mod tests {
 
     #[dialog_common::test]
     fn or_returns_default_before_resolve() -> anyhow::Result<()> {
-        let cell =
-            Cell::<TestValue>::new(test_subject(), "local", "or-default").or(TestValue::default());
+        let cell = test_cell::<TestValue>("or-default").or(TestValue::default());
 
         assert_eq!(cell.get().count, 0);
         assert_eq!(cell.get().name, "default");
@@ -429,11 +392,10 @@ mod tests {
             name: "hello".into(),
         };
 
-        let writer: Cell<TestValue> = Cell::new(test_subject(), "local", "or-read");
+        let writer: Cell<TestValue> = test_cell("or-read");
         writer.publish(value.clone(), &provider).await?;
 
-        let cell =
-            Cell::<TestValue>::new(test_subject(), "local", "or-read").or(TestValue::default());
+        let cell = test_cell::<TestValue>("or-read").or(TestValue::default());
         cell.resolve(&provider).await?;
 
         assert_eq!(cell.get(), value);
@@ -449,14 +411,14 @@ mod tests {
             count: 99,
             name: "initial".into(),
         };
-        let cell = Cell::<TestValue>::new(test_subject(), "local", "or-init").or(default.clone());
+        let cell = test_cell::<TestValue>("or-init").or(default.clone());
 
         cell.get_or_init(&provider).await?;
 
         assert_eq!(cell.get(), default);
 
         // Verify persisted by reading from a separate cell
-        let reader: Cell<TestValue> = Cell::new(test_subject(), "local", "or-init");
+        let reader: Cell<TestValue> = test_cell("or-init");
         reader.resolve(&provider).await?;
         assert_eq!(reader.get(), Some(default));
 
@@ -466,7 +428,7 @@ mod tests {
     #[dialog_common::test]
     async fn clones_share_published_state() -> anyhow::Result<()> {
         let provider = Volatile::new();
-        let cell: Cell<TestValue> = Cell::new(test_subject(), "local", "shared");
+        let cell: Cell<TestValue> = test_cell("shared");
         let clone = cell.clone();
 
         let value = TestValue {
@@ -484,7 +446,7 @@ mod tests {
     #[dialog_common::test]
     async fn publish_on_clone_visible_from_original() -> anyhow::Result<()> {
         let provider = Volatile::new();
-        let original: Cell<TestValue> = Cell::new(test_subject(), "local", "shared-reverse");
+        let original: Cell<TestValue> = test_cell("shared-reverse");
         let clone = original.clone();
 
         let value = TestValue {

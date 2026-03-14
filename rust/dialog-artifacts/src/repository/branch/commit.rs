@@ -7,7 +7,6 @@ use dialog_storage::Blake3Hash;
 use futures_util::{StreamExt, TryStreamExt};
 use std::collections::HashSet;
 
-use super::state::BranchState;
 use super::{Branch, Index};
 use crate::artifacts::{Artifact, Cause, Datum, Instruction};
 use crate::repository::archive::ContentAddressedStore;
@@ -19,13 +18,13 @@ use crate::{
 };
 
 /// Command struct for committing instructions to a branch.
-pub struct Commit<I> {
-    branch: Branch,
+pub struct Commit<'a, I> {
+    branch: &'a Branch,
     instructions: I,
 }
 
-impl<I> Commit<I> {
-    pub(super) fn new(branch: Branch, instructions: I) -> Self {
+impl<'a, I> Commit<'a, I> {
+    pub(super) fn new(branch: &'a Branch, instructions: I) -> Self {
         Self {
             branch,
             instructions,
@@ -33,12 +32,12 @@ impl<I> Commit<I> {
     }
 }
 
-impl<I> Commit<I>
+impl<I> Commit<'_, I>
 where
     I: futures_util::Stream<Item = Instruction> + ConditionalSend,
 {
-    /// Execute the commit operation, returning the updated branch and tree hash.
-    pub async fn perform<Env>(self, env: &Env) -> Result<(Branch, Blake3Hash), DialogArtifactsError>
+    /// Execute the commit operation, returning the tree hash.
+    pub async fn perform<Env>(self, env: &Env) -> Result<Blake3Hash, DialogArtifactsError>
     where
         Env: Provider<archive_fx::Get>
             + Provider<archive_fx::Put>
@@ -152,7 +151,7 @@ where
         let tree_reference = NodeReference::from(tree_hash);
 
         // Calculate new period and moment
-        let issuer_did = branch.issuer.did();
+        let issuer_did = branch.issuer().did();
         let (period, moment) = {
             let base_period = *base_revision.period();
             let base_moment = *base_revision.moment();
@@ -168,35 +167,27 @@ where
         let new_revision = Revision {
             issuer: issuer_did,
             tree: tree_reference,
-            cause: HashSet::from([base_revision.edition().map_err(|e| {
-                DialogArtifactsError::Storage(format!("Failed to create edition: {:?}", e))
-            })?]),
+            cause: HashSet::from([base_revision.tree().clone()]),
             period,
             moment,
         };
 
-        // Update branch state
-        let new_state = BranchState {
-            revision: new_revision,
-            ..branch.state()
-        };
-
-        // Publish updated state
+        // Publish updated revision
         branch
-            .cell
-            .publish(new_state, env)
+            .revision
+            .publish(new_revision, env)
             .await
             .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
 
-        Ok((branch, tree_hash))
+        Ok(tree_hash)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::Branch;
     use super::super::tests::{test_issuer, test_subject};
     use crate::artifacts::{Artifact, ArtifactSelector, Instruction};
+    use crate::repository::Repository;
     use dialog_prolly_tree::EMPT_TREE_HASH;
     use dialog_storage::provider::Volatile;
     use futures_util::{StreamExt, stream};
@@ -205,9 +196,8 @@ mod tests {
     async fn it_commits_and_selects() -> anyhow::Result<()> {
         let env = Volatile::new();
 
-        let branch = Branch::open("main", test_issuer().await, test_subject())
-            .perform(&env)
-            .await?;
+        let repo = Repository::new(test_issuer().await, test_subject());
+        let branch = repo.open_branch("main").perform(&env).await?;
 
         let artifact = Artifact {
             the: "user/name".parse()?,
@@ -218,7 +208,7 @@ mod tests {
 
         let instructions = stream::iter(vec![Instruction::Assert(artifact.clone())]);
 
-        let (branch, hash) = branch.commit(instructions).perform(&env).await?;
+        let hash = branch.commit(instructions).perform(&env).await?;
         assert_ne!(hash, EMPT_TREE_HASH);
 
         // Select should find the artifact

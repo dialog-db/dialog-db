@@ -1,199 +1,39 @@
+//! Archive capabilities and CAS adapters.
+//!
+//! - [`Archive`] — pre-attenuated `Subject → Archive` capability wrapper
+//! - [`store`] — CAS adapter bridging capabilities with prolly tree storage
+//! - [`fallback`] — fallback store that reads local, falls back to remote
+
 /// Fallback store that reads from local, falls back to remote.
 pub mod fallback;
+/// CAS adapter bridging capabilities with prolly tree's ContentAddressedStorage.
+pub mod store;
 
-use async_trait::async_trait;
-use dialog_capability::{Capability, Provider};
-use dialog_common::ConditionalSync;
-use dialog_effects::archive::{Catalog, Get, Put};
-use dialog_storage::{
-    Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder,
-};
-use serde::{Serialize, de::DeserializeOwned};
-use std::fmt::Debug;
+pub use store::ContentAddressedStore;
 
-/// CAS (Content-Addressed Storage) adapter that bridges the capability system
-/// with the prolly tree's `ContentAddressedStorage` trait.
+use dialog_capability::{Capability, Subject};
+use dialog_effects::archive as fx;
+
+/// Pre-attenuated archive capability (`Subject → Archive`).
 ///
-/// Borrows `&Env` — no `Arc<Mutex>` needed because `Provider::execute` takes
-/// `&self`. Created on the stack inside `perform()` methods, passed to tree
-/// operations by reference, and dropped when those operations complete.
-pub struct ContentAddressedStore<'a, Env> {
-    env: &'a Env,
-    encoder: CborEncoder,
-    catalog: Capability<Catalog>,
-}
+/// Wraps `Capability<fx::Archive>` so callers can further attenuate with a
+/// `Catalog` and then invoke `Get`/`Put`.
+#[derive(Debug, Clone)]
+pub struct Archive(Capability<fx::Archive>);
 
-impl<Env> Clone for ContentAddressedStore<'_, Env> {
-    fn clone(&self) -> Self {
-        Self {
-            env: self.env,
-            encoder: self.encoder.clone(),
-            catalog: self.catalog.clone(),
-        }
-    }
-}
-
-impl<'a, Env> ContentAddressedStore<'a, Env> {
-    /// Create a new ContentAddressedStore that delegates storage operations to
-    /// capability effects on the given environment.
-    pub fn new(env: &'a Env, catalog: Capability<Catalog>) -> Self {
-        Self {
-            env,
-            encoder: CborEncoder,
-            catalog,
-        }
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> ContentAddressedStorage for ContentAddressedStore<'_, Env>
-where
-    Env: Provider<Get> + Provider<Put> + ConditionalSync + 'static,
-{
-    type Hash = Blake3Hash;
-    type Error = DialogStorageError;
-
-    async fn read<T>(&self, hash: &Self::Hash) -> Result<Option<T>, Self::Error>
-    where
-        T: DeserializeOwned + ConditionalSync,
-    {
-        let effect = self.catalog.clone().invoke(Get::new(*hash));
-
-        let result: Result<Option<Vec<u8>>, _> = effect.perform(self.env).await;
-        let result = result.map_err(|e| DialogStorageError::StorageBackend(e.to_string()))?;
-
-        match result {
-            Some(bytes) => {
-                let value: T = self
-                    .encoder
-                    .decode(&bytes)
-                    .await
-                    .map_err(|e| DialogStorageError::DecodeFailed(e.to_string()))?;
-                Ok(Some(value))
-            }
-            None => Ok(None),
-        }
+impl Archive {
+    /// Create a new archive capability for the given subject.
+    pub fn new(subject: Subject) -> Self {
+        Self(subject.attenuate(fx::Archive))
     }
 
-    async fn write<T>(&mut self, block: &T) -> Result<Self::Hash, Self::Error>
-    where
-        T: Serialize + ConditionalSync + Debug,
-    {
-        let (hash, bytes) = self.encoder.encode(block).await?;
-
-        let effect = self.catalog.clone().invoke(Put::new(hash, bytes.clone()));
-
-        let result: Result<(), _> = effect.perform(self.env).await;
-        result.map_err(|e| DialogStorageError::StorageBackend(e.to_string()))?;
-
-        Ok(hash)
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> Encoder for ContentAddressedStore<'_, Env>
-where
-    Env: ConditionalSync + 'static,
-{
-    type Bytes = Vec<u8>;
-    type Hash = Blake3Hash;
-    type Error = DialogStorageError;
-
-    async fn encode<T>(&self, block: &T) -> Result<(Self::Hash, Self::Bytes), Self::Error>
-    where
-        T: Serialize + ConditionalSync + Debug,
-    {
-        self.encoder.encode(block).await
+    /// Create a catalog-scoped capability for content-addressed storage.
+    pub fn catalog(&self, name: &str) -> Capability<fx::Catalog> {
+        self.0.clone().attenuate(fx::Catalog::new(name))
     }
 
-    async fn decode<T>(&self, bytes: &[u8]) -> Result<T, Self::Error>
-    where
-        T: DeserializeOwned + ConditionalSync,
-    {
-        self.encoder.decode(bytes).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use dialog_capability::{Did, Subject};
-    use dialog_effects::archive::Archive;
-    use dialog_storage::provider::Volatile;
-
-    fn test_catalog(name: &str) -> Capability<Catalog> {
-        let did: Did = "did:test:archive-cas".parse().unwrap();
-        Subject::from(did)
-            .attenuate(Archive)
-            .attenuate(Catalog::new(name))
-    }
-
-    #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-    struct TestBlock {
-        value: u32,
-        label: String,
-    }
-
-    #[dialog_common::test]
-    async fn it_writes_and_reads_block() -> anyhow::Result<()> {
-        let env = Volatile::new();
-        let mut archive = ContentAddressedStore::new(&env, test_catalog("index"));
-
-        let block = TestBlock {
-            value: 42,
-            label: "hello".into(),
-        };
-
-        let hash = archive.write(&block).await?;
-        let result: Option<TestBlock> = archive.read(&hash).await?;
-
-        assert_eq!(result, Some(block));
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    async fn it_returns_none_for_missing_hash() -> anyhow::Result<()> {
-        let env = Volatile::new();
-        let archive = ContentAddressedStore::new(&env, test_catalog("index"));
-
-        let missing_hash = [0u8; 32];
-        let result: Option<TestBlock> = archive.read(&missing_hash).await?;
-
-        assert!(result.is_none());
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    async fn it_isolates_catalogs() -> anyhow::Result<()> {
-        let env = Volatile::new();
-
-        let block = TestBlock {
-            value: 99,
-            label: "isolated".into(),
-        };
-
-        // Write to catalog "a"
-        let hash = {
-            let mut archive = ContentAddressedStore::new(&env, test_catalog("a"));
-            archive.write(&block).await?
-        };
-
-        // Read from catalog "b" — should not find it
-        {
-            let archive = ContentAddressedStore::new(&env, test_catalog("b"));
-            let result: Option<TestBlock> = archive.read(&hash).await?;
-            assert!(result.is_none());
-        }
-
-        // Read from catalog "a" — should find it
-        {
-            let archive = ContentAddressedStore::new(&env, test_catalog("a"));
-            let result: Option<TestBlock> = archive.read(&hash).await?;
-            assert_eq!(result, Some(block));
-        }
-
-        Ok(())
+    /// The index catalog used for search tree node storage.
+    pub fn index(&self) -> Capability<fx::Catalog> {
+        self.catalog("index")
     }
 }

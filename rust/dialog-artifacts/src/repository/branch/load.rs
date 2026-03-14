@@ -1,27 +1,28 @@
-use dialog_capability::{Did, Provider, Subject};
+use dialog_capability::{Did, Provider};
 use dialog_effects::memory as memory_fx;
 
 use super::Branch;
-use super::memory;
-use super::state::{BranchName, BranchState};
-use crate::repository::cell::CellOr;
-use crate::repository::credentials::Credentials;
+use super::state::UpstreamState;
+use crate::repository::cell::{Cell, CellOr};
 use crate::repository::error::RepositoryError;
+use crate::repository::memory::{Authorization, Memory, Trace};
 use crate::repository::revision::Revision;
 
 /// Command to load an existing branch, returning an error if not found.
 pub struct Load {
-    name: BranchName,
-    issuer: Credentials,
+    session: Authorization,
     subject: Did,
+    memory: Memory,
+    trace: Trace,
 }
 
 impl Load {
-    pub(super) fn new(name: BranchName, issuer: Credentials, subject: Did) -> Self {
+    pub(crate) fn new(session: Authorization, subject: Did, memory: Memory, trace: Trace) -> Self {
         Self {
-            name,
-            issuer,
+            session,
             subject,
+            memory,
+            trace,
         }
     }
 }
@@ -32,42 +33,44 @@ impl Load {
     where
         Env: Provider<memory_fx::Resolve>,
     {
-        let default_state = BranchState::new(Revision::new(self.issuer.did()));
-        let mem = memory::Memory::new(Subject::from(self.subject), self.name.clone());
-        let cell: CellOr<BranchState> = mem.cell().or(default_state);
-        cell.resolve(env).await?;
-        if cell.inner().read_with(|opt| opt.is_none()) {
-            return Err(RepositoryError::BranchNotFound { name: self.name });
+        let default_revision = Revision::new(self.session.did());
+        let revision: CellOr<Revision> = self.trace.cell("revision").or(default_revision);
+        revision.resolve(env).await?;
+
+        if revision.inner().read_with(|opt| opt.is_none()) {
+            return Err(RepositoryError::BranchNotFound {
+                name: self.trace.name().clone(),
+            });
         }
+
+        let upstream: Cell<Option<UpstreamState>> = self.trace.cell("upstream");
+        upstream.resolve(env).await?;
+
         Ok(Branch {
-            name: self.name,
-            issuer: self.issuer,
-            cell,
+            session: self.session,
+            subject: self.subject,
+            memory: self.memory,
+            trace: self.trace,
+            revision,
+            upstream,
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::Branch;
     use super::super::tests::{test_issuer, test_subject};
+    use crate::repository::Repository;
     use crate::repository::error::RepositoryError;
     use dialog_storage::provider::Volatile;
 
     #[dialog_common::test]
     async fn it_loads_existing_branch() -> anyhow::Result<()> {
         let env = Volatile::new();
-        let issuer = test_issuer().await;
+        let repo = Repository::new(test_issuer().await, test_subject());
 
-        // First open creates
-        let _ = Branch::open("main", issuer.clone(), test_subject())
-            .perform(&env)
-            .await?;
-
-        // Load should find it
-        let branch = Branch::load("main", issuer, test_subject())
-            .perform(&env)
-            .await?;
+        let _ = repo.open_branch("main").perform(&env).await?;
+        let branch = repo.load_branch("main").perform(&env).await?;
 
         assert_eq!(branch.name().as_str(), "main");
         Ok(())
@@ -76,10 +79,9 @@ mod tests {
     #[dialog_common::test]
     async fn it_fails_loading_missing_branch() -> anyhow::Result<()> {
         let env = Volatile::new();
+        let repo = Repository::new(test_issuer().await, test_subject());
 
-        let result = Branch::load("nonexistent", test_issuer().await, test_subject())
-            .perform(&env)
-            .await;
+        let result = repo.load_branch("nonexistent").perform(&env).await;
 
         assert!(matches!(
             result,

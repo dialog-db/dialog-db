@@ -7,12 +7,12 @@ use super::Branch;
 use super::state::{BranchName, UpstreamState};
 use crate::repository::error::RepositoryError;
 use crate::repository::remote::SiteName;
-use crate::repository::remote::{RemoteBranch, RemoteSite};
+use crate::repository::remote::RemoteBranch;
 use crate::repository::revision::Revision;
 
 /// Command struct for fetching the upstream branch's current revision.
 ///
-/// Borrows `&Branch` (non-consuming). Reads `branch.state().upstream` to
+/// Borrows `&Branch` (non-consuming). Reads the branch's upstream to
 /// dispatch to local or remote fetch logic.
 ///
 /// Does NOT modify local state — only reads from upstream.
@@ -35,22 +35,21 @@ impl Fetch<'_> {
         Env: Provider<memory_fx::Resolve>
             + Provider<RemoteInvocation<memory_fx::Resolve, RemoteAddress>>,
     {
-        let state = self.branch.state();
         let upstream =
-            state
-                .upstream
-                .as_ref()
+            self.branch
+                .upstream()
                 .ok_or_else(|| RepositoryError::BranchHasNoUpstream {
-                    name: self.branch.name(),
+                    name: self.branch.name().clone(),
                 })?;
 
-        match upstream {
-            UpstreamState::Local { branch: name } => fetch_local(self.branch, name, env).await,
+        match &upstream {
+            UpstreamState::Local { branch: name, .. } => fetch_local(self.branch, name, env).await,
             UpstreamState::Remote {
                 name,
                 branch: branch_name,
                 subject,
-            } => fetch_remote(name, branch_name, subject, env).await,
+                ..
+            } => fetch_remote(self.branch, name, branch_name, subject, env).await,
         }
     }
 }
@@ -66,10 +65,7 @@ async fn fetch_local<Env>(
 where
     Env: Provider<memory_fx::Resolve>,
 {
-    let issuer = branch.issuer().clone();
-    let subject = branch.subject().clone();
-
-    let upstream = Branch::load(upstream_name.clone(), issuer, subject)
+    let upstream = branch.load_branch(upstream_name.clone())
         .perform(env)
         .await?;
 
@@ -81,6 +77,7 @@ where
 /// Does NOT modify local state. Looks up credentials from the persisted
 /// `RemoteSite` configuration.
 async fn fetch_remote<Env>(
+    branch: &Branch,
     remote: &SiteName,
     upstream_branch_name: &BranchName,
     upstream_subject: &dialog_capability::Did,
@@ -90,7 +87,9 @@ where
     Env: Provider<memory_fx::Resolve>
         + Provider<RemoteInvocation<memory_fx::Resolve, RemoteAddress>>,
 {
-    let remote_site = RemoteSite::load(remote, upstream_subject, env).await?;
+    let remote_site = branch.load_remote(remote.clone())
+        .perform(env)
+        .await?;
 
     let remote_branch = RemoteBranch::new(
         remote_site.name().clone(),
@@ -104,22 +103,22 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::Branch;
     use super::super::tests::{test_issuer, test_subject};
     use crate::artifacts::{Artifact, Instruction};
+    use crate::repository::Repository;
     use crate::repository::branch::state::UpstreamState;
+    use crate::repository::node_reference::NodeReference;
     use dialog_storage::provider::Volatile;
     use futures_util::stream;
 
     #[dialog_common::test]
     async fn it_fetches_local_upstream_revision() -> anyhow::Result<()> {
         let env = Volatile::new();
-        let issuer = test_issuer().await;
 
-        let main = Branch::open("main", issuer.clone(), test_subject())
-            .perform(&env)
-            .await?;
-        let (main, _) = main
+        let repo = Repository::new(test_issuer().await, test_subject());
+
+        let main = repo.open_branch("main").perform(&env).await?;
+        let _hash = main
             .commit(stream::iter(vec![Instruction::Assert(Artifact {
                 the: "user/name".parse()?,
                 of: "user:main".parse()?,
@@ -130,12 +129,11 @@ mod tests {
             .await?;
         let main_revision = main.revision();
 
-        let feature = Branch::open("feature", issuer, test_subject())
-            .perform(&env)
-            .await?;
+        let feature = repo.open_branch("feature").perform(&env).await?;
         feature
             .set_upstream(UpstreamState::Local {
                 branch: "main".into(),
+                tree: NodeReference::default(),
             })
             .perform(&env)
             .await?;
@@ -151,12 +149,11 @@ mod tests {
     #[dialog_common::test]
     async fn it_does_not_modify_local_state_on_fetch() -> anyhow::Result<()> {
         let env = Volatile::new();
-        let issuer = test_issuer().await;
 
-        let main = Branch::open("main", issuer.clone(), test_subject())
-            .perform(&env)
-            .await?;
-        let (_main, _) = main
+        let repo = Repository::new(test_issuer().await, test_subject());
+
+        let main = repo.open_branch("main").perform(&env).await?;
+        let _hash = main
             .commit(stream::iter(vec![Instruction::Assert(Artifact {
                 the: "user/name".parse()?,
                 of: "user:main".parse()?,
@@ -166,12 +163,11 @@ mod tests {
             .perform(&env)
             .await?;
 
-        let feature = Branch::open("feature", issuer, test_subject())
-            .perform(&env)
-            .await?;
+        let feature = repo.open_branch("feature").perform(&env).await?;
         feature
             .set_upstream(UpstreamState::Local {
                 branch: "main".into(),
+                tree: NodeReference::default(),
             })
             .perform(&env)
             .await?;
