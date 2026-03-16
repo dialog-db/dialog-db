@@ -1,6 +1,5 @@
 use crate::{
-    Authority, Authorization, Capability, Constraint, DialogCapabilityPerformError, Effect,
-    Provider,
+    Authorization, Capability, Constraint, DialogCapabilityPerformError, Effect, Issuer, Provider,
 };
 use dialog_common::{ConditionalSend, ConditionalSync};
 use std::{
@@ -88,7 +87,7 @@ impl<Ok, E: Error, Fx: Effect<Output = Result<Ok, E>> + Constraint, A: Authoriza
     pub async fn perform<Env>(self, env: &Env) -> Result<Ok, DialogCapabilityPerformError<E>>
     where
         Env: Provider<Self>
-            + Authority<Signature = A::Signature>
+            + Issuer<Signature = A::Signature>
             + Clone
             + ConditionalSend
             + ConditionalSync,

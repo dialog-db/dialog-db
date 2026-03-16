@@ -179,7 +179,7 @@ pub mod tests {
     use crate::capability::archive;
     use crate::ucan::delegation::helpers::create_delegation;
     use anyhow;
-    use dialog_capability::{Authority, Authorization, Did, Principal, Subject};
+    use dialog_capability::{Authorization, Did, Issuer, Principal, Subject};
     use dialog_common::Blake3Hash;
     use dialog_credentials::{Ed25519KeyResolver, Ed25519Signer};
     use dialog_ucan::promise::Promised;
@@ -242,7 +242,7 @@ pub mod tests {
             self.signer.sign(payload).await
         }
     }
-    impl Authority for Session {
+    impl Issuer for Session {
         type Signature = Ed25519Signature;
     }
 

@@ -6,7 +6,7 @@
 pub use dialog_effects::storage::*;
 
 use async_trait::async_trait;
-use dialog_capability::{Authority, Provider};
+use dialog_capability::{Issuer, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_s3_credentials::capability::storage::{
     Delete as AuthorizeDelete, Get as AuthorizeGet, Set as AuthorizeSet,
@@ -17,9 +17,9 @@ use super::{Hasher, RequestDescriptorExt, S3};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer> Provider<Get> for S3<Issuer>
+impl<I> Provider<Get> for S3<I>
 where
-    Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
+    I: Issuer<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
     async fn execute(&self, input: Capability<Get>) -> Result<Option<Vec<u8>>, StorageError> {
         // Build the authorization capability
@@ -67,9 +67,9 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer> Provider<Set> for S3<Issuer>
+impl<I> Provider<Set> for S3<I>
 where
-    Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
+    I: Issuer<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
     async fn execute(&self, input: Capability<Set>) -> Result<(), StorageError> {
         let Set { key, value } = Set::of(&input);
@@ -115,9 +115,9 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer> Provider<Delete> for S3<Issuer>
+impl<I> Provider<Delete> for S3<I>
 where
-    Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
+    I: Issuer<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
     async fn execute(&self, input: Capability<Delete>) -> Result<(), StorageError> {
         // Build the authorization capability

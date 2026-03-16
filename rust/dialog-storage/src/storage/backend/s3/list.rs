@@ -7,7 +7,7 @@
 //! [ListObjectsV2]: https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html
 
 use async_trait::async_trait;
-use dialog_capability::{Authority, Capability, Provider, Subject};
+use dialog_capability::{Issuer, Capability, Provider, Subject};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_s3_credentials::capability::storage::List as AuthorizeList;
 use dialog_varsig::eddsa::Ed25519Signature;
@@ -60,10 +60,10 @@ struct S3Error {
     message: Option<String>,
 }
 
-impl<Issuer> Bucket<Issuer>
+impl<I> Bucket<I>
 where
-    Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
-    super::S3<Issuer>: Provider<storage::List>,
+    I: Issuer<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
+    super::S3<I>: Provider<storage::List>,
 {
     /// List objects in the bucket with the configured path prefix.
     ///
@@ -81,7 +81,7 @@ where
     /// ```no_run
     /// # use dialog_storage::s3::{S3, Bucket};
     /// # async fn example(
-    /// #     s3: S3<impl dialog_capability::Authority<Signature = dialog_varsig::eddsa::Ed25519Signature> + Clone + Send + Sync>,
+    /// #     s3: S3<impl dialog_capability::Issuer<Signature = dialog_varsig::eddsa::Ed25519Signature> + Clone + Send + Sync>,
     /// # ) -> Result<(), Box<dyn std::error::Error>> {
     /// let subject: dialog_capability::Did = "did:key:zMySubject".parse().unwrap();
     /// let bucket = Bucket::new(s3, subject, "my-store");
@@ -127,9 +127,9 @@ where
 // Provider<storage::List> implementation for S3
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer> Provider<storage::List> for S3<Issuer>
+impl<I> Provider<storage::List> for S3<I>
 where
-    Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
+    I: Issuer<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
     async fn execute(
         &self,

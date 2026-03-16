@@ -199,8 +199,8 @@ pub use provider::*;
 mod router;
 pub use router::*;
 
-mod authority;
-pub use authority::*;
+mod issuer;
+pub use issuer::*;
 
 mod authorization;
 pub use authorization::*;

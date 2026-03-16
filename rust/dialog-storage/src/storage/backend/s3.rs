@@ -19,7 +19,7 @@
 //! use dialog_storage::s3::{Address, S3, S3Credentials};
 //! use dialog_storage::capability::{storage, Subject};
 //!
-//! # async fn example(issuer: impl dialog_capability::Authority<Signature = dialog_varsig::eddsa::Ed25519Signature> + Clone + Send + Sync) -> Result<(), Box<dyn std::error::Error>> {
+//! # async fn example(issuer: impl dialog_capability::Issuer<Signature = dialog_varsig::eddsa::Ed25519Signature> + Clone + Send + Sync) -> Result<(), Box<dyn std::error::Error>> {
 //! let address = Address::new(
 //!     "https://s3.us-east-1.amazonaws.com",
 //!     "us-east-1",
@@ -48,7 +48,7 @@
 //! use dialog_storage::s3::{Address, S3Credentials, S3};
 //! use dialog_storage::capability::{storage, Subject};
 //!
-//! # async fn example(issuer: impl dialog_capability::Authority<Signature = dialog_varsig::eddsa::Ed25519Signature> + Clone + Send + Sync) -> Result<(), Box<dyn std::error::Error>> {
+//! # async fn example(issuer: impl dialog_capability::Issuer<Signature = dialog_varsig::eddsa::Ed25519Signature> + Clone + Send + Sync) -> Result<(), Box<dyn std::error::Error>> {
 //! let address = Address::new(
 //!     "https://s3.us-east-1.amazonaws.com",
 //!     "us-east-1",
@@ -81,7 +81,7 @@
 //! ```no_run
 //! use dialog_storage::s3::{Address, S3Credentials, S3};
 //!
-//! # fn example(issuer: impl dialog_capability::Authority<Signature = dialog_varsig::eddsa::Ed25519Signature> + Clone + Send + Sync) -> Result<(), Box<dyn std::error::Error>> {
+//! # fn example(issuer: impl dialog_capability::Issuer<Signature = dialog_varsig::eddsa::Ed25519Signature> + Clone + Send + Sync) -> Result<(), Box<dyn std::error::Error>> {
 //! let address = Address::new(
 //!     "https://account-id.r2.cloudflarestorage.com",
 //!     "auto",
@@ -103,7 +103,7 @@
 //! ```no_run
 //! use dialog_storage::s3::{Address, S3Credentials, S3};
 //!
-//! # fn example(issuer: impl dialog_capability::Authority<Signature = dialog_varsig::eddsa::Ed25519Signature> + Clone + Send + Sync) -> Result<(), Box<dyn std::error::Error>> {
+//! # fn example(issuer: impl dialog_capability::Issuer<Signature = dialog_varsig::eddsa::Ed25519Signature> + Clone + Send + Sync) -> Result<(), Box<dyn std::error::Error>> {
 //! let address = Address::new("http://localhost:9000", "us-east-1", "my-bucket");
 //! let credentials = S3Credentials::private(address, "minioadmin", "minioadmin")?;
 //! let bucket = S3::from_s3(credentials, issuer);
@@ -121,7 +121,7 @@
 
 use async_trait::async_trait;
 use dialog_capability::{
-    Ability, Access, Authority, Authorized, Capability, Claim, Did, Effect, Principal, Provider,
+    Ability, Access, Authorized, Capability, Claim, Did, Effect, Issuer, Principal, Provider,
     Subject,
 };
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -255,7 +255,7 @@ pub trait Authorizer: Clone + std::fmt::Debug + Send + Sync {
 /// UCAN-based delegated authorization.
 ///
 /// The `Issuer` type parameter represents the authority that signs requests.
-/// For simple S3 usage, this can be any type implementing `Authority`.
+/// For simple S3 usage, this can be any type implementing `Issuer`.
 /// For UCAN-based access, this would typically be an `Ed25519Signer` from dialog-credentials.
 #[derive(Debug, Clone)]
 pub struct S3<Issuer> {
@@ -284,30 +284,30 @@ impl<Issuer: Clone> S3<Issuer> {
 }
 
 // Implement Principal for S3 by delegating to the issuer
-impl<Issuer: Principal> Principal for S3<Issuer> {
+impl<I: Principal> Principal for S3<I> {
     fn did(&self) -> Did {
         self.issuer.did()
     }
 }
 
 // Implement Signer for S3 by delegating to the issuer
-impl<Issuer: Authority + ConditionalSync> dialog_capability::Signer<Issuer::Signature>
-    for S3<Issuer>
+impl<I: Issuer + ConditionalSync> dialog_capability::Signer<I::Signature>
+    for S3<I>
 {
-    async fn sign(&self, payload: &[u8]) -> Result<Issuer::Signature, signature::Error> {
+    async fn sign(&self, payload: &[u8]) -> Result<I::Signature, signature::Error> {
         self.issuer.sign(payload).await
     }
 }
 
-// Implement Authority for S3 by delegating to the issuer
-impl<Issuer: Authority + ConditionalSync> Authority for S3<Issuer> {
-    type Signature = Issuer::Signature;
+// Implement Issuer for S3 by delegating to the issuer
+impl<I: Issuer + ConditionalSync> Issuer for S3<I> {
+    type Signature = I::Signature;
 }
 
 // Implement Access for S3 by delegating to credentials
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer: ConditionalSend + ConditionalSync> Access for S3<Issuer> {
+impl<I: ConditionalSend + ConditionalSync> Access for S3<I> {
     type Authorization = dialog_s3_credentials::Authorization;
     type Error = AccessError;
 
@@ -322,9 +322,9 @@ impl<Issuer: ConditionalSend + ConditionalSync> Access for S3<Issuer> {
 // Implement Provider<Authorized<...>> for S3 by delegating to credentials
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer, Do> Provider<Authorized<Do, dialog_s3_credentials::Authorization>> for S3<Issuer>
+impl<I, Do> Provider<Authorized<Do, dialog_s3_credentials::Authorization>> for S3<I>
 where
-    Issuer: ConditionalSend + ConditionalSync,
+    I: ConditionalSend + ConditionalSync,
     Do: Effect<Output = Result<AuthorizedRequest, AccessError>> + 'static,
     Capability<Do>: ConditionalSend + S3Request,
 {
@@ -347,7 +347,7 @@ where
 /// use dialog_storage::s3::{S3, S3Credentials, Address, Bucket};
 /// use dialog_storage::StorageBackend;
 ///
-/// # async fn example(s3: S3<impl dialog_capability::Authority<Signature = dialog_varsig::eddsa::Ed25519Signature> + Clone + Send + Sync>) -> Result<(), Box<dyn std::error::Error>> {
+/// # async fn example(s3: S3<impl dialog_capability::Issuer<Signature = dialog_varsig::eddsa::Ed25519Signature> + Clone + Send + Sync>) -> Result<(), Box<dyn std::error::Error>> {
 /// let subject: dialog_capability::Did = "did:key:zMySubject".parse().unwrap();
 /// let storage = Bucket::new(s3, subject, "my-store");
 /// storage.set(b"key".to_vec(), b"value".to_vec()).await?;
@@ -400,9 +400,9 @@ impl<Issuer: Clone> Bucket<Issuer> {
     }
 }
 
-impl<Issuer> Bucket<Issuer>
+impl<I> Bucket<I>
 where
-    Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
+    I: Issuer<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
     /// Delete a value by key.
     ///
@@ -411,7 +411,7 @@ where
     /// ```no_run
     /// # use dialog_storage::s3::{S3, S3Credentials, Address, Bucket};
     /// # use dialog_storage::StorageBackend;
-    /// # async fn example(mut bucket: Bucket<impl dialog_capability::Authority<Signature = dialog_varsig::eddsa::Ed25519Signature> + Clone + Send + Sync>) -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn example(mut bucket: Bucket<impl dialog_capability::Issuer<Signature = dialog_varsig::eddsa::Ed25519Signature> + Clone + Send + Sync>) -> Result<(), Box<dyn std::error::Error>> {
     /// bucket.set(b"key".to_vec(), b"value".to_vec()).await?;
     ///
     /// // Then delete it
@@ -435,30 +435,30 @@ where
 }
 
 // Forward Principal trait to the underlying bucket
-impl<Issuer: Principal> Principal for Bucket<Issuer> {
+impl<I: Principal> Principal for Bucket<I> {
     fn did(&self) -> Did {
         self.bucket.did()
     }
 }
 
 // Forward Signer trait to the underlying bucket
-impl<Issuer: Authority + ConditionalSync> dialog_capability::Signer<Issuer::Signature>
-    for Bucket<Issuer>
+impl<I: Issuer + ConditionalSync> dialog_capability::Signer<I::Signature>
+    for Bucket<I>
 {
-    async fn sign(&self, payload: &[u8]) -> Result<Issuer::Signature, signature::Error> {
+    async fn sign(&self, payload: &[u8]) -> Result<I::Signature, signature::Error> {
         self.bucket.sign(payload).await
     }
 }
 
-// Forward Authority trait to the underlying bucket
-impl<Issuer: Authority + ConditionalSync> Authority for Bucket<Issuer> {
-    type Signature = Issuer::Signature;
+// Forward Issuer trait to the underlying bucket
+impl<I: Issuer + ConditionalSync> Issuer for Bucket<I> {
+    type Signature = I::Signature;
 }
 
 // Forward Access trait to the underlying bucket
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer: ConditionalSend + ConditionalSync> Access for Bucket<Issuer> {
+impl<I: ConditionalSend + ConditionalSync> Access for Bucket<I> {
     type Authorization = dialog_s3_credentials::Authorization;
     type Error = AccessError;
 
@@ -473,9 +473,9 @@ impl<Issuer: ConditionalSend + ConditionalSync> Access for Bucket<Issuer> {
 // Forward Provider<Authorized<...>> to the underlying bucket
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer, Do> Provider<Authorized<Do, dialog_s3_credentials::Authorization>> for Bucket<Issuer>
+impl<I, Do> Provider<Authorized<Do, dialog_s3_credentials::Authorization>> for Bucket<I>
 where
-    Issuer: ConditionalSend + ConditionalSync,
+    I: ConditionalSend + ConditionalSync,
     Do: Effect<Output = Result<AuthorizedRequest, AccessError>> + 'static,
     Capability<Do>: ConditionalSend + S3Request,
 {
@@ -490,9 +490,9 @@ where
 // Implement StorageBackend for Bucket
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer> StorageBackend for Bucket<Issuer>
+impl<I> StorageBackend for Bucket<I>
 where
-    Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
+    I: Issuer<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
     type Key = Vec<u8>;
     type Value = Vec<u8>;
@@ -532,9 +532,9 @@ where
 // Implement TransactionalMemoryBackend for Bucket
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer> TransactionalMemoryBackend for Bucket<Issuer>
+impl<I> TransactionalMemoryBackend for Bucket<I>
 where
-    Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
+    I: Issuer<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
     type Address = Vec<u8>;
     type Value = Vec<u8>;

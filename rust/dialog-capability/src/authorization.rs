@@ -2,7 +2,7 @@
 //!
 //! The `Authorization` trait represents proof of authority over a capability.
 
-use crate::{Authority, DialogCapabilityAuthorizationError, Did, Signature};
+use crate::{DialogCapabilityAuthorizationError, Did, Issuer, Signature};
 use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
 
@@ -30,7 +30,7 @@ pub trait Authorization: Sized + ConditionalSend {
 
     /// Creates authorized invocation by signing with the provided authority.
     async fn invoke<
-        A: Authority<Signature = Self::Signature> + Clone + ConditionalSend + ConditionalSync,
+        A: Issuer<Signature = Self::Signature> + Clone + ConditionalSend + ConditionalSync,
     >(
         &self,
         authority: &A,

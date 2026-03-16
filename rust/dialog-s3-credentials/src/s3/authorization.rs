@@ -3,7 +3,7 @@ use crate::AuthorizedRequest;
 use crate::capability::{AccessError, S3Request};
 
 use async_trait::async_trait;
-use dialog_capability::{Authority, Authorization, DialogCapabilityAuthorizationError, Did};
+use dialog_capability::{Issuer, Authorization, DialogCapabilityAuthorizationError, Did};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_varsig::eddsa::Ed25519Signature;
 
@@ -57,7 +57,7 @@ impl Authorization for S3Authorization {
     }
 
     async fn invoke<
-        A: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
+        A: Issuer<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
     >(
         &self,
         authority: &A,

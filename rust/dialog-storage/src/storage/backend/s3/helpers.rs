@@ -8,7 +8,7 @@
 //! - Server implementation (native-only, in the `server` submodule)
 //! - UCAN access service (native-only, requires `ucan` feature)
 //! - Test issuer types for capability-based testing
-use dialog_capability::{Authority, Did, Principal, Signer};
+use dialog_capability::{Did, Issuer, Principal, Signer};
 use dialog_varsig::eddsa::Ed25519Signature;
 use serde::{Deserialize, Serialize};
 
@@ -52,7 +52,7 @@ pub struct UcanS3Address {
     pub secret_access_key: String,
 }
 
-/// A simple test session that implements [`Authority`] and [`Principal`].
+/// A simple test session that implements [`Issuer`] and [`Principal`].
 ///
 /// This is useful for testing capability-based S3 operations where an issuer
 /// is required but actual cryptographic signing is not needed (S3 uses its
@@ -95,13 +95,13 @@ impl Signer<Ed25519Signature> for Session {
     }
 }
 
-impl Authority for Session {
+impl Issuer for Session {
     type Signature = Ed25519Signature;
 }
 
 /// Re-export [`dialog_credentials::Ed25519Signer`] for UCAN-based S3 operations.
 ///
-/// This signer implements [`Authority`], [`Principal`], and [`Signer`] and can be
+/// This signer implements [`Issuer`], [`Principal`], and [`Signer`] and can be
 /// used directly as the `Issuer` type parameter for [`super::S3`] and [`super::Bucket`].
 #[cfg(feature = "ucan")]
 pub use dialog_credentials::Ed25519Signer;

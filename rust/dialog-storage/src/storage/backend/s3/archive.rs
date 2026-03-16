@@ -6,7 +6,7 @@
 pub use dialog_effects::archive::*;
 
 use async_trait::async_trait;
-use dialog_capability::{Authority, Provider};
+use dialog_capability::{Issuer, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_s3_credentials::capability::archive::{Get as AuthorizeGet, Put as AuthorizePut};
 use dialog_varsig::eddsa::Ed25519Signature;
@@ -15,9 +15,9 @@ use super::{Hasher, RequestDescriptorExt, S3};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer> Provider<Get> for S3<Issuer>
+impl<I> Provider<Get> for S3<I>
 where
-    Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
+    I: Issuer<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
     async fn execute(&self, input: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
         // Build the authorization capability
@@ -28,7 +28,7 @@ where
                 digest: Get::of(&input).digest.clone(),
             });
 
-        // Acquire authorization and perform using self (which implements Access + Authority)
+        // Acquire authorization and perform using self (which implements Access + Issuer)
         let authorized = capability
             .acquire(self)
             .await
@@ -65,9 +65,9 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer> Provider<Put> for S3<Issuer>
+impl<I> Provider<Put> for S3<I>
 where
-    Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
+    I: Issuer<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
     async fn execute(&self, input: Capability<Put>) -> Result<(), ArchiveError> {
         let Put { content, digest } = Put::of(&input);

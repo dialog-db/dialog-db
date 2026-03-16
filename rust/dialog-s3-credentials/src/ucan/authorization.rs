@@ -7,7 +7,7 @@ use super::{DelegationChain, InvocationChain};
 use crate::capability::{AccessError, AuthorizedRequest, S3Request};
 use async_trait::async_trait;
 use dialog_capability::{
-    Authority, Authorization, Capability, DialogCapabilityAuthorizationError, Did, Effect,
+    Issuer, Authorization, Capability, DialogCapabilityAuthorizationError, Did, Effect,
     Provider, ucan::Parameters,
 };
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -50,7 +50,7 @@ pub fn parameters_to_args(parameters: Parameters) -> Args {
 ///
 /// This enum represents authorization in two forms:
 /// - `Owned`: The subject is the same as the audience (self-authorization)
-/// - `Delegated`: Authority is proven through a UCAN delegation chain
+/// - `Delegated`: Issuer is proven through a UCAN delegation chain
 #[derive(Debug, Clone)]
 pub enum UcanAuthorization {
     /// Self-authorization where subject == audience.
@@ -242,7 +242,7 @@ impl Authorization for UcanAuthorization {
     }
 
     async fn invoke<
-        A: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
+        A: Issuer<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
     >(
         &self,
         authority: &A,

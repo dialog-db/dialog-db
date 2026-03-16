@@ -3,8 +3,8 @@
 //! When the `ucan` feature is enabled this module provides IPLD parameter
 //! collection utilities for UCAN invocations.
 //!
-//! The core bridging is automatic: any type implementing [`Authority`](crate::Authority)
-//! automatically satisfies `dialog_ucan::Issuer<A::Signature>` because `Authority`
+//! The core bridging is automatic: any type implementing [`Issuer`](crate::Issuer)
+//! automatically satisfies `dialog_ucan::Issuer<A::Signature>` because `Issuer`
 //! extends `dialog_varsig::Principal + dialog_varsig::Signer<Self::Signature>`, and
 //! `dialog_ucan::Issuer<S>` has a blanket impl for `Signer<S> + Principal`.
 
