@@ -51,7 +51,7 @@ use syn::{parse_macro_input, Attribute, Data, DeriveInput, Expr, Fields, Lit, Me
 /// - `PersonAttributes`: Fluent query builder with type-safe attribute matchers
 /// - `PERSON_NAME`: Static attribute constant for the name field
 /// - `PERSON_BIRTHDAY`: Static attribute constant for the birthday field
-#[proc_macro_derive(Concept)]
+#[proc_macro_derive(Concept, attributes(dialog))]
 pub fn derive_concept(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
@@ -139,7 +139,11 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
         }
 
         let field_type = &field.ty;
-        let field_name_lit = syn::LitStr::new(&field_name_str, proc_macro2::Span::call_site());
+
+        // Check for #[dialog(rename = "...")] to override the string key
+        let effective_name_str =
+            parse_dialog_rename_attribute(&field.attrs).unwrap_or_else(|| field_name_str.clone());
+        let field_name_lit = syn::LitStr::new(&effective_name_str, proc_macro2::Span::call_site());
 
         // Store field name and type for later use in reconstruction
         field_names.push(field_name);
@@ -181,7 +185,7 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
             &format!(
                 "{}_{}",
                 namespace.replace(".", "_").to_uppercase(),
-                field_name_str.to_uppercase()
+                effective_name_str.to_uppercase()
             ),
             field_name.span(),
         );
@@ -1054,7 +1058,7 @@ fn parse_derived_attribute(attrs: &[Attribute]) -> Option<usize> {
 /// - `cardinality()` - Returns cardinality (One or Many)
 /// - `value()` - Returns reference to the wrapped value
 /// - `selector()` - Returns the full attribute selector (namespace/name)
-#[proc_macro_derive(Attribute, attributes(cardinality, namespace))]
+#[proc_macro_derive(Attribute, attributes(cardinality, namespace, dialog))]
 pub fn derive_attribute(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
@@ -1096,8 +1100,9 @@ pub fn derive_attribute(input: TokenStream) -> TokenStream {
     // Check if namespace is explicitly specified
     let explicit_namespace = parse_namespace_attribute(&input.attrs);
 
-    // Extract attribute name (convert PascalCase/snake_case to kebab-case)
-    let attr_name = to_kebab_case(&struct_name.to_string());
+    // Extract attribute name: use #[dialog(rename = "...")] if present, otherwise kebab-case from struct name
+    let attr_name = parse_dialog_rename_attribute(&input.attrs)
+        .unwrap_or_else(|| to_kebab_case(&struct_name.to_string()));
     let attr_name_lit = syn::LitStr::new(&attr_name, proc_macro2::Span::call_site());
 
     // Extract doc comments
@@ -1384,4 +1389,41 @@ fn parse_cardinality_attribute(attrs: &[Attribute]) -> proc_macro2::TokenStream 
 
     // Default to One
     quote! { dialog_query::attribute::Cardinality::One }
+}
+
+/// Parse the #[dialog(rename = "...")] attribute
+///
+/// Supports:
+/// - `#[dialog(rename = "type")]` - rename to a specific string
+///
+/// Returns `Some(name)` if rename is specified, `None` to use default
+fn parse_dialog_rename_attribute(attrs: &[Attribute]) -> Option<String> {
+    for attr in attrs {
+        if attr.path().is_ident("dialog") {
+            let mut rename_value = None;
+
+            let result = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("rename") {
+                    let value = meta.value()?;
+                    let lit: Lit = value.parse()?;
+                    if let Lit::Str(lit_str) = lit {
+                        rename_value = Some(lit_str.value());
+                        Ok(())
+                    } else {
+                        Err(meta.error("rename value must be a string literal"))
+                    }
+                } else {
+                    Err(meta.error("unknown dialog attribute parameter; expected `rename`"))
+                }
+            });
+
+            match result {
+                Ok(()) => return rename_value,
+                Err(e) => {
+                    panic!("Error parsing dialog attribute: {}", e);
+                }
+            }
+        }
+    }
+    None
 }
