@@ -1367,4 +1367,183 @@ mod tests {
 
         Ok(())
     }
+
+    // -- Tests migrated from tests/dialog_rename_test.rs --
+
+    mod item {
+        use crate::Attribute;
+
+        /// The type of item
+        #[derive(Attribute, Clone, PartialEq)]
+        pub struct Kind(pub String);
+
+        /// Name of the item
+        #[derive(Attribute, Clone, PartialEq)]
+        pub struct Name(pub String);
+    }
+
+    #[dialog_common::test]
+    fn it_derives_attribute_name_as_kebab_case() {
+        // Kind struct should derive name from struct name via kebab-case
+        assert_eq!(item::Kind::descriptor().name(), "kind");
+    }
+
+    #[dialog_common::test]
+    fn it_preserves_attribute_metadata() {
+        assert_eq!(item::Kind::descriptor().domain(), "item");
+        assert_eq!(item::Kind::descriptor().description(), "The type of item");
+        assert_eq!(item::Kind::descriptor().cardinality(), Cardinality::One,);
+    }
+
+    #[dialog_common::test]
+    fn it_formats_attribute_selector() {
+        assert_eq!(item::Kind::the().to_string(), "item/kind");
+    }
+
+    #[dialog_common::test]
+    fn it_leaves_unrenamed_attribute_unchanged() {
+        // Name without rename should behave normally
+        assert_eq!(item::Name::descriptor().name(), "name");
+        assert_eq!(item::Name::descriptor().domain(), "item");
+    }
+
+    // -- Concept field rename tests --
+
+    #[derive(Concept, Debug, Clone, PartialEq)]
+    pub struct Item {
+        pub this: Entity,
+
+        /// Name of the item
+        pub name: item::Name,
+
+        /// Type of the item
+        #[dialog(rename = "type")]
+        pub kind: item::Kind,
+    }
+
+    #[dialog_common::test]
+    fn it_renames_concept_field_in_descriptor() {
+        let descriptor: ConceptDescriptor = ItemQuery::default().into();
+        let attrs: Vec<_> = descriptor.with().iter().collect();
+
+        assert_eq!(attrs.len(), 2);
+
+        // Find the attributes by key — concept field rename maps "kind" field to "type" key
+        let name_attr = attrs.iter().find(|(k, _)| *k == "name");
+        let type_attr = attrs.iter().find(|(k, _)| *k == "type");
+
+        assert!(name_attr.is_some(), "Should have 'name' key in descriptor");
+        assert!(
+            type_attr.is_some(),
+            "Should have 'type' key (from renamed field) in descriptor",
+        );
+
+        // The 'type' key should point to the item/kind attribute (attribute name is "kind")
+        assert_eq!(type_attr.unwrap().1.name(), "kind");
+        assert_eq!(type_attr.unwrap().1.domain(), "item");
+    }
+
+    #[dialog_common::test]
+    fn it_renames_concept_field_in_query_struct() {
+        // Query struct should still use the Rust field name
+        let query = ItemQuery {
+            this: Term::var("item"),
+            name: Term::var("item_name"),
+            kind: Term::var("item_kind"),
+        };
+
+        // But when converted to Parameters, the key should be the renamed value
+        let params: Parameters = query.into();
+        assert!(
+            params.get("type").is_some(),
+            "Parameters should have 'type' key from renamed field",
+        );
+        assert!(
+            params.get("kind").is_none(),
+            "Parameters should NOT have 'kind' key (the Rust field name)",
+        );
+        assert!(
+            params.get("name").is_some(),
+            "Parameters should have 'name' key for unrenamed field",
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_uses_renamed_value_in_default_query() {
+        // Default Query should create Term::var with the renamed string
+        let query = ItemQuery::default();
+
+        // The 'kind' field should have a variable named "type"
+        match &query.kind {
+            Term::Variable { name, .. } => {
+                assert_eq!(
+                    name.as_deref(),
+                    Some("type"),
+                    "Default variable name should use renamed value",
+                );
+            }
+            _ => panic!("Expected variable term"),
+        }
+
+        // The 'name' field should have a variable named "name" (unrenamed)
+        match &query.name {
+            Term::Variable { name, .. } => {
+                assert_eq!(name.as_deref(), Some("name"));
+            }
+            _ => panic!("Expected variable term"),
+        }
+    }
+
+    #[dialog_common::test]
+    fn it_uses_renamed_value_in_terms() {
+        // Terms method should still use Rust field name but produce renamed variable
+        let term = ItemTerms::kind();
+        match &term {
+            Term::Variable { name, .. } => {
+                assert_eq!(
+                    name.as_deref(),
+                    Some("type"),
+                    "Terms method should produce variable with renamed name",
+                );
+            }
+            _ => panic!("Expected variable term"),
+        }
+    }
+
+    // -- Combined: concept field rename with normal attribute --
+
+    mod task {
+        use crate::Attribute;
+
+        /// The reference identifier
+        #[derive(Attribute, Clone, PartialEq)]
+        pub struct Reference(pub String);
+
+        /// Task title
+        #[derive(Attribute, Clone, PartialEq)]
+        pub struct Title(pub String);
+    }
+
+    #[derive(Concept, Debug, Clone, PartialEq)]
+    pub struct Task {
+        pub this: Entity,
+        pub title: task::Title,
+        #[dialog(rename = "ref")]
+        pub reference: task::Reference,
+    }
+
+    #[dialog_common::test]
+    fn it_combines_concept_rename_with_attribute() {
+        // Attribute name is derived from struct name (no rename on attributes)
+        assert_eq!(task::Reference::descriptor().name(), "reference");
+        assert_eq!(task::Reference::the().to_string(), "task/reference");
+
+        // Concept descriptor should have "ref" key (concept field rename)
+        let descriptor: ConceptDescriptor = TaskQuery::default().into();
+        let attrs: Vec<_> = descriptor.with().iter().collect();
+        let ref_attr = attrs.iter().find(|(k, _)| *k == "ref");
+        assert!(ref_attr.is_some(), "Should have 'ref' key in descriptor");
+        // The attribute descriptor's name is still "reference" (no attribute rename)
+        assert_eq!(ref_attr.unwrap().1.name(), "reference");
+    }
 }
