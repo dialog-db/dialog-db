@@ -173,7 +173,7 @@ pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///     role: Term::var("role"),
 /// };
 /// ```
-#[proc_macro_derive(Concept)]
+#[proc_macro_derive(Concept, attributes(dialog))]
 pub fn derive_concept(input: TokenStream) -> TokenStream {
     query::concept::derive(input)
 }
@@ -362,7 +362,7 @@ pub fn derive_formula(input: TokenStream) -> TokenStream {
 /// // Create attribute values
 /// let name = employee::Name("Alice".to_string());
 /// ```
-#[proc_macro_derive(Attribute, attributes(cardinality, domain, namespace))]
+#[proc_macro_derive(Attribute, attributes(cardinality, domain, namespace, dialog))]
 pub fn derive_attribute(input: TokenStream) -> TokenStream {
     query::attribute::derive(input)
 }

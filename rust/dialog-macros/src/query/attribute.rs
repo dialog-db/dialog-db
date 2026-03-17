@@ -39,7 +39,8 @@ use quote::quote;
 use syn::{Data, DeriveInput, Fields, parse_macro_input};
 
 use super::helpers::{
-    extract_doc_comments, parse_cardinality_attribute, parse_domain_attribute, to_kebab_case,
+    extract_doc_comments, parse_cardinality_attribute, parse_dialog_rename_attribute,
+    parse_domain_attribute, to_kebab_case,
 };
 
 pub fn derive(input: TokenStream) -> TokenStream {
@@ -84,9 +85,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
     // from module_path!() at compile time (see domain_static_decl below).
     let explicit_domain = parse_domain_attribute(&input.attrs);
 
-    // Convert struct name to kebab-case for the attribute name.
+    // Use #[dialog(rename = "...")] if present, otherwise kebab-case from struct name.
     // e.g. FullName → "full-name", created_at → "created-at"
-    let attr_name = to_kebab_case(&struct_name.to_string());
+    let attr_name = parse_dialog_rename_attribute(&input.attrs)
+        .unwrap_or_else(|| to_kebab_case(&struct_name.to_string()));
     let attr_name_lit = syn::LitStr::new(&attr_name, proc_macro2::Span::call_site());
 
     // Extract doc comments
