@@ -1,0 +1,57 @@
+use crate::Entity;
+use crate::EvaluationError;
+use crate::concept::descriptor::ConceptDescriptor;
+use crate::concept::query::ConceptRules;
+use crate::rule::deductive::DeductiveRule;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+
+/// Thread-safe registry of deductive rules, keyed by the conclusion entity.
+///
+/// Both [`Session`](super::Session) and [`QuerySession`](super::QuerySession)
+/// hold a `RuleRegistry`. When a concept query needs rules, the registry
+/// returns a [`ConceptRules`](crate::concept::application::ConceptRules)
+/// bundle containing the default rule (derived from the concept's
+/// attributes) plus any explicitly installed rules, together with a
+/// per-adornment plan cache.
+///
+/// Cloning a registry is cheap — the underlying `HashMap` is wrapped in
+/// `Arc<RwLock<…>>` so all clones share the same rule set and caches.
+#[derive(Debug, Clone, Default)]
+pub struct RuleRegistry {
+    rules: Arc<RwLock<HashMap<Entity, ConceptRules>>>,
+}
+
+impl RuleRegistry {
+    /// Creates an empty rule registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a deductive rule, deduplicating by equality.
+    /// Invalidates cached plans for the affected concept entity.
+    pub fn register(&mut self, rule: DeductiveRule) -> Result<(), EvaluationError> {
+        let entity = rule.conclusion().this();
+        self.rules
+            .write()
+            .map_err(|e| EvaluationError::Store(e.to_string()))?
+            .entry(entity)
+            .or_insert_with(|| ConceptRules::new(rule.conclusion()))
+            .install(rule);
+        Ok(())
+    }
+
+    /// Acquire rules for the given concept. Creates the default rule from
+    /// the predicate's attributes on first access — so this always returns
+    /// a ConceptRules regardless of whether any rules were explicitly installed.
+    pub fn acquire(&self, predicate: &ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
+        let entity = predicate.this();
+        Ok(self
+            .rules
+            .write()
+            .map_err(|e| EvaluationError::Store(e.to_string()))?
+            .entry(entity)
+            .or_insert_with(|| ConceptRules::new(predicate))
+            .clone())
+    }
+}

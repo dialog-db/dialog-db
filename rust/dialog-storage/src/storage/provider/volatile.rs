@@ -46,7 +46,7 @@ type ArchiveKey = (String, String);
 type MemoryKey = (String, String);
 
 /// A session holds the in-memory storage for a single subject.
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct Session {
     /// Content-addressed blob storage keyed by (catalog, digest).
     archive: HashMap<ArchiveKey, Vec<u8>>,
@@ -58,7 +58,7 @@ struct Session {
 ///
 /// A simple provider that stores all data in memory. Each subject DID gets its
 /// own session with separate archive and memory storage. Data is not persisted.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Volatile {
     sessions: HashMap<Did, Session>,
 }

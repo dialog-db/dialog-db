@@ -26,10 +26,13 @@ members = [
     "rust/dialog-dbsp",
     "rust/dialog-encoding",
     "rust/dialog-prolly-tree",
+    "rust/dialog-query",
+    "rust/dialog-search-tree",
     "rust/dialog-storage",
     "rust/dialog-s3-credentials",
     "rust/dialog-ucan",
     "rust/dialog-varsig",
+    "rust/dialog-blobs",
 ]
 resolver = "2"
 
@@ -37,30 +40,42 @@ resolver = "2"
 version = "0.1.0"
 authors = ["The Meiosys Project Authors"]
 license = "MPL-2.0"
+edition = "2024"
 
 [workspace.dependencies]
 anyhow = "1"
 arbitrary = { version = "1", features = ["derive"] }
 arrayref = "0.3"
+async-signature = "0.5"
 async-stream = "0.3"
 async-trait = "0.1"
 base58 = "0.2"
 base64 = "0.22"
 blake3 = "1"
 brotli = "8"
+bytes = "1"
+chrono = "0.4"
 clap = "4"
 clap_derive = "4"
 console_error_panic_hook = "0.1"
 convert_case = "0.6"
+indexmap = "2.0"
 csv-async = { version = "1", features = ["tokio"] }
+dashmap = "6"
+dirs = "5"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 futures = "0.3"
 futures-core = "0.3"
 futures-util = "0.3"
+hashbrown = "0.16"
+hmac = "0.12"
+http-body-util = "0.1"
+hyper = "1"
+hyper-util = "0.1"
 ipld-core = { version = "0.4", features = ["serde"] }
 # getrandom = "0.3"
 getrandom = "0.2"
-getrandom_04 = { package = "getrandom", version = "0.4" }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 itertools = "0.14"
 js-sys = "0.3"
 k256 = "0.13"
@@ -68,16 +83,24 @@ leb128 = "0.2"
 leptos = "0.8"
 leptos_meta = "0.8"
 leptos_router = "0.8"
+md5 = "0.8"
 nom = "7"
 nom-unicode = "0.3"
 nonempty = "0.11"
+parking_lot = "0.12"
 p256 = "0.13"
 p384 = "0.13"
 p521 = "0.13"
+paste = "1.0"
+pidlock = "0.1"
 pretty_assertions = "1"
+proc-macro2 = "1"
 proptest = "1"
+quickcheck = { version = ">=1.0, <1.1", default-features = false }
 proptest-arbitrary-interop = "0.1"
 ptree = "0.5"
+quick-xml = "0.37"
+quote = "1"
 rand = "0.8"
 rand_core = "0.6"
 rand_chacha = "0.3"
@@ -89,6 +112,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 rexie = "0.6"
 rkyv = "0.8"
 rsa = "0.9"
+s3s = "0.13"
 serde = "1"
 serde-value = "0.7"
 serde-big-array = "0.5"
@@ -98,15 +122,24 @@ serde_ipld_dagjson = "0.2"
 serde_json = "1"
 sha2 = "0.10"
 sieve-cache = "1"
+signature = "2.2"
+stable_deref_trait = "1"
 static_assertions = "1"
-tempfile = "3"
+syn = "2"
+# Pin tempfile <3.22: newer versions widen getrandom to >=0.3,<0.5 which
+# resolves to getrandom 0.4 and pulls in a third version. 3.21.x uses ^0.3.
+tempfile = ">=3, <3.22"
 test-log = "0.2"
 testresult = "0.4"
 thiserror = "2"
 throbber-widgets-tui = "0.8"
 tokio = "1"
+tokio-stream = "0.1"
+tokio-test = "0.4"
+tokio-util = { version = "0.7", features = ["io"] }
+tower = "0.5"
+tower-http = "0.6"
 tracing = "0.1"
-signature = "2.2"
 dialog-ucan = { path = "./rust/dialog-ucan" }
 dialog-varsig = { path = "./rust/dialog-varsig" }
 ucan = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "main", package = "ucan" }
@@ -116,9 +149,11 @@ url = { version = "2", features = ["serde"] }
 wasm-bindgen = "=0.2.108"
 wasm-bindgen-futures = "0.4"
 wasm-bindgen-test = "0.3"
+wasm-streams = "0.4"
 web-sys = "0.3"
 web-time = "1"
 zerocopy = "0.8"
+zerocopy-derive = "0.8"
 
 [workspace.dependencies.dialog-artifacts]
 path = "./rust/dialog-artifacts"
@@ -147,8 +182,14 @@ path = "./rust/dialog-effects"
 [workspace.dependencies.dialog-macros]
 path = "./rust/dialog-macros"
 
+[workspace.dependencies.dialog-query]
+path = "./rust/dialog-query"
+
 [workspace.dependencies.dialog-s3-credentials]
 path = "./rust/dialog-s3-credentials"
+
+[workspace.dependencies.dialog-blobs]
+path = "./rust/dialog-blobs"
 
 # [patch.crates-io]
 # # TODO: https://github.com/gwierzchowski/csv-async/issues/27

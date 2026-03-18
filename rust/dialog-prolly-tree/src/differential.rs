@@ -882,6 +882,9 @@ mod tests {
         Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
     >;
 
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_service_worker);
+
     #[dialog_common::test]
     async fn test_differentiate_identical_trees() {
         let backend = MemoryStorageBackend::default();
@@ -902,7 +905,7 @@ mod tests {
         let changes = tree2.differentiate(&tree1);
         pin_mut!(changes);
         let mut count = 0;
-        while let Some(_) = changes.next().await {
+        while changes.next().await.is_some() {
             count += 1;
         }
 
@@ -1523,7 +1526,7 @@ mod tests {
         let changes = tree2.differentiate(&tree1);
         pin_mut!(changes);
         let mut count = 0;
-        while let Some(_) = changes.next().await {
+        while changes.next().await.is_some() {
             count += 1;
         }
 
@@ -1688,7 +1691,7 @@ mod tests {
         for i in 0..20 {
             target.set(vec![i], vec![i * 3]).await.unwrap();
         }
-        let target_hash = target.hash().unwrap().clone();
+        let target_hash = *target.hash().unwrap();
 
         // Set up different start state
         for i in 10..30 {

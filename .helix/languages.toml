@@ -1,0 +1,10 @@
+[language-server.rust-analyzer.config]
+# cargo.target = "wasm32-unknown-unknown"
+cargo.features = ["integration-tests", "ucan"]
+
+# If you want all features enabled instead:
+# cargo.allFeatures = true
+
+# You can also set build target for check/clippy specifically:
+# check.target = "wasm32-unknown-unknown"
+

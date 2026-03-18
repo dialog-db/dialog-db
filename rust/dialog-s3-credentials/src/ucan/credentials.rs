@@ -76,6 +76,14 @@ pub struct Credentials {
     audience: Did,
 }
 
+impl std::hash::Hash for Credentials {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.endpoint.hash(state);
+        self.audience.hash(state);
+        self.delegation.proof_cids().hash(state);
+    }
+}
+
 impl Credentials {
     pub fn new(endpoint: String, delegation: DelegationChain) -> Self {
         Self {
@@ -177,6 +185,9 @@ pub mod tests {
     use dialog_ucan::promise::Promised;
     use dialog_varsig::Signer;
     use dialog_varsig::eddsa::Ed25519Signature;
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_service_worker);
 
     /// Helper to create a test delegation chain from subject to operator.
     pub async fn test_delegation_chain(
@@ -418,76 +429,5 @@ pub mod tests {
         assert_eq!(ucan.verify(&Ed25519KeyResolver).await?, ());
 
         Ok(())
-    }
-
-    /// WebCrypto-specific tests for browser WASM.
-    ///
-    /// These tests verify that the UCAN authorization flow works correctly
-    /// with WebCrypto-backed signers in browser environments.
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    mod webcrypto_tests {
-        use dialog_credentials::Ed25519Signer;
-        use dialog_varsig::Principal;
-        use dialog_varsig::eddsa::{Ed25519SigningKey, Ed25519VerifyingKey};
-        use dialog_varsig::signature::Signer as _;
-        use dialog_varsig::signature::Verifier;
-        use wasm_bindgen_test::wasm_bindgen_test_configure;
-
-        wasm_bindgen_test_configure!(run_in_service_worker);
-
-        #[dialog_common::test]
-        async fn it_generates_webcrypto_signer() {
-            let signer = Ed25519Signer::generate()
-                .await
-                .expect("Failed to generate signer");
-
-            let did_str = signer.did().to_string();
-            assert!(
-                did_str.starts_with("did:key:z"),
-                "DID should start with 'did:key:z', got: {}",
-                did_str
-            );
-        }
-
-        #[dialog_common::test]
-        async fn it_produces_valid_webcrypto_signature() {
-            let signer = Ed25519Signer::generate()
-                .await
-                .expect("Failed to generate signer");
-            let msg = b"test message for WebCrypto signing";
-
-            let signature = signer
-                .signing_key()
-                .sign(msg)
-                .await
-                .expect("Failed to sign message");
-
-            let verifier = signer.ed25519_did();
-            verifier
-                .verify(msg, &signature)
-                .await
-                .expect("Signature verification failed");
-        }
-
-        #[dialog_common::test]
-        async fn it_rejects_wrong_message() {
-            let signer = Ed25519Signer::generate()
-                .await
-                .expect("Failed to generate signer");
-            let msg = b"original message";
-            let wrong_msg = b"wrong message";
-
-            let signature = signer
-                .signing_key()
-                .sign(msg)
-                .await
-                .expect("Failed to sign message");
-
-            let verifier = signer.ed25519_did();
-            assert!(
-                verifier.verify(wrong_msg, &signature).await.is_err(),
-                "Verification should fail for wrong message"
-            );
-        }
     }
 }

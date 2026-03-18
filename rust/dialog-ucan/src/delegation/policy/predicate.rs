@@ -688,112 +688,112 @@ mod tests {
 
         #[test_log::test]
         fn test_concrete() -> TestResult {
-            let got = glob(&"hello world", &"hello world");
+            let got = glob("hello world", "hello world");
             assert!(got);
             Ok(())
         }
 
         #[test_log::test]
         fn test_concrete_fail() -> TestResult {
-            let got = glob(&"hello world", &"NOPE");
+            let got = glob("hello world", "NOPE");
             assert!(!got);
             Ok(())
         }
 
         #[test_log::test]
         fn test_empty_pattern_fail() -> TestResult {
-            let got = glob(&"hello world", &"");
+            let got = glob("hello world", "");
             assert!(!got);
             Ok(())
         }
 
         #[test_log::test]
         fn test_escaped_star() -> TestResult {
-            let got = glob(&"*", &r#"\*"#);
+            let got = glob("*", r#"\*"#);
             assert!(got);
             Ok(())
         }
 
         #[test_log::test]
         fn test_inner_escaped_star() -> TestResult {
-            let got = glob(&"hello, * world*", &r#"hello*\**\*"#);
+            let got = glob("hello, * world*", r#"hello*\**\*"#);
             assert!(got);
             Ok(())
         }
 
         #[test_log::test]
         fn test_empty_string_fail() -> TestResult {
-            let got = glob(&"", &"NOPE");
+            let got = glob("", "NOPE");
             assert!(!got);
             Ok(())
         }
 
         #[test_log::test]
         fn test_left_star() -> TestResult {
-            let got = glob(&"hello world", &"*world");
+            let got = glob("hello world", "*world");
             assert!(got);
             Ok(())
         }
 
         #[test_log::test]
         fn test_left_star_failure() -> TestResult {
-            let got = glob(&"hello world", &"*NOPE");
+            let got = glob("hello world", "*NOPE");
             assert!(!got);
             Ok(())
         }
 
         #[test_log::test]
         fn test_right_star() -> TestResult {
-            let got = glob(&"hello world", &"hello*");
+            let got = glob("hello world", "hello*");
             assert!(got);
             Ok(())
         }
 
         #[test_log::test]
         fn test_right_star_failure() -> TestResult {
-            let got = glob(&"hello world", &"NOPE*");
+            let got = glob("hello world", "NOPE*");
             assert!(!got);
             Ok(())
         }
 
         #[test_log::test]
         fn test_only_star() -> TestResult {
-            let got = glob(&"hello world", &"*");
+            let got = glob("hello world", "*");
             assert!(got);
             Ok(())
         }
 
         #[test_log::test]
         fn test_two_stars() -> TestResult {
-            let got = glob(&"hello world", &"* *");
+            let got = glob("hello world", "* *");
             assert!(got);
             Ok(())
         }
 
         #[test_log::test]
         fn test_two_stars_fail() -> TestResult {
-            let got = glob(&"hello world", &"*@*");
+            let got = glob("hello world", "*@*");
             assert!(!got);
             Ok(())
         }
 
         #[test_log::test]
         fn test_multiple_inner_stars() -> TestResult {
-            let got = glob(&"hello world", &"h*l*o*w*r*d");
+            let got = glob("hello world", "h*l*o*w*r*d");
             assert!(got);
             Ok(())
         }
 
         #[test_log::test]
         fn test_multiple_inner_stars_fail() -> TestResult {
-            let got = glob(&"hello world", &"a*b*c*d*e*f");
+            let got = glob("hello world", "a*b*c*d*e*f");
             assert!(!got);
             Ok(())
         }
 
         #[test_log::test]
         fn test_concrete_with_multiple_inner_stars() -> TestResult {
-            let got = glob(&"hello world", &"hello* *world");
+            let got = glob("hello world", "hello* *world");
             assert!(got);
             Ok(())
         }
@@ -842,7 +842,7 @@ mod tests {
 
         #[test_log::test]
         fn test_eq_try_null() -> TestResult {
-            let p = Predicate::Equal(Select::from_str(".not_from?").unwrap(), Ipld::Null.into());
+            let p = Predicate::Equal(Select::from_str(".not_from?").unwrap(), Ipld::Null);
 
             assert!(p.run(&email())?);
             Ok(())
@@ -850,7 +850,7 @@ mod tests {
 
         #[test_log::test]
         fn test_eq_dot_field_ending_try_null() -> TestResult {
-            let p = Predicate::Equal(Select::from_str(".from.not?").unwrap(), Ipld::Null.into());
+            let p = Predicate::Equal(Select::from_str(".from.not?").unwrap(), Ipld::Null);
 
             assert!(p.run(&email())?);
             Ok(())
@@ -858,7 +858,7 @@ mod tests {
 
         #[test_log::test]
         fn test_eq_dot_field_inner_try_null() -> TestResult {
-            let p = Predicate::Equal(Select::from_str(".nope?.not").unwrap(), Ipld::Null.into());
+            let p = Predicate::Equal(Select::from_str(".nope?.not").unwrap(), Ipld::Null);
 
             assert!(p.run(&email())?);
             Ok(())
@@ -866,7 +866,7 @@ mod tests {
 
         #[test_log::test]
         fn test_eq_root_try_not_null() -> TestResult {
-            let p = Predicate::Equal(Select::from_str(".?").unwrap(), Ipld::Null.into());
+            let p = Predicate::Equal(Select::from_str(".?").unwrap(), Ipld::Null);
 
             assert!(!p.run(&email())?);
             Ok(())
@@ -885,7 +885,7 @@ mod tests {
 
         #[test_log::test]
         fn test_eq_nested_try_null() -> TestResult {
-            let p = Predicate::Equal(Select::from_str(".from?.not?").unwrap(), Ipld::Null.into());
+            let p = Predicate::Equal(Select::from_str(".from?.not?").unwrap(), Ipld::Null);
 
             assert!(p.run(&email())?);
             Ok(())

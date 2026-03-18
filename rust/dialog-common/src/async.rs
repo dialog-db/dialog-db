@@ -251,6 +251,9 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_service_worker);
+
     #[dialog_macros::test]
     async fn it_returns_future_output_from_spawn() {
         let result = spawn(async { 42 }).await.unwrap();
