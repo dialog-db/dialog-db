@@ -1,7 +1,7 @@
 //! UCAN-based authorization via external access service.
 //!
-//! This module provides [`Credentials`], which implements [`Provider<storage::*>`]
-//! by delegating authorization to an external access service. The service
+//! This module provides [`Credentials`], which implements [`credential::Remote`]
+//! for delegating authorization to an external access service. The service
 //! validates UCAN invocations and returns pre-signed URLs for S3 operations.
 //!
 //! # Overview
@@ -30,29 +30,19 @@
 //! ```
 
 use super::{DelegationChain, InvocationChain, UcanInvocation};
-use crate::capability::{AccessError, AuthorizedRequest};
-use async_trait::async_trait;
+use crate::capability::AuthorizedRequest;
 use dialog_capability::{
-    Access, Authorized, Capability, Constraint, Did, Provider, credential, ucan::parameters,
+    Authorization, Capability, Constraint, Did, Provider, credential, ucan::parameters,
 };
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_ucan::InvocationBuilder;
 
 /// UCAN-based authorizer that delegates to an external access service.
 ///
-/// This authorizer implements [`Provider<storage::*>`] by:
+/// Implements [`credential::Remote`] with the following lifecycle:
 ///
-/// 1. Extracting the subject DID from the request URL path (first path segment)
-/// 2. Looking up the delegation chain for that subject
-/// 3. Building a UCAN invocation signed by the operator
-/// 4. Sending the invocation to the access service
-/// 5. Returning the pre-signed URL from the service's 307 redirect response
-///
-/// # Multi-Subject Support
-///
-/// A single `Credentials` can hold delegations for multiple subjects,
-/// allowing access to data across different authorization domains without
-/// needing separate authorizer instances.
+/// 1. `Authorize`: builds and signs a UCAN invocation → `UcanInvocation`
+/// 2. `Redeem`: POSTs the invocation to the access service → `AuthorizedRequest`
 ///
 /// # Example
 ///
@@ -71,7 +61,6 @@ pub struct Credentials {
     /// The access service URL to POST invocations to.
     endpoint: String,
     /// The delegation chain proving authority from subject to operator.
-    /// Order: first delegation's `aud` matches operator, last delegation's `iss` matches subject.
     delegation: DelegationChain,
     /// Cached DID of the operator (audience of first delegation).
     audience: Did,
@@ -104,119 +93,147 @@ impl Credentials {
         &self.endpoint
     }
 
+    /// Returns the access service URL as a &String reference.
+    pub fn endpoint_string(&self) -> &String {
+        &self.endpoint
+    }
+
     /// Returns the delegation chain.
     pub fn delegation(&self) -> &DelegationChain {
         &self.delegation
     }
 }
 
-/// Implement Access trait for Credentials.
-///
-/// This allows Credentials to authorize capability claims by building
-/// fully signed UCAN invocations. The env provides credential effects
-/// for identity discovery and signing.
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
-#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
-impl<C> Access<C> for Credentials
-where
-    C: Constraint + Clone + ConditionalSend + 'static,
-    Capability<C>: ConditionalSend,
-{
-    type Authorization = AuthorizedRequest;
-    type Error = AccessError;
+impl credential::Remote for Credentials {
+    type Authorization = DelegationChain;
+    type Permit = UcanInvocation;
+    type Access = AuthorizedRequest;
+    type Address = String;
 
-    async fn authorize<Env>(
-        &self,
-        capability: Capability<C>,
-        env: &Env,
-    ) -> Result<Authorized<C, AuthorizedRequest>, Self::Error>
-    where
-        Env: Provider<credential::Identify> + Provider<credential::Sign> + ConditionalSync,
-    {
-        use super::authorization::{CredentialBridge, parameters_to_args};
+    fn address(&self) -> &String {
+        &self.endpoint
+    }
 
-        let credentials = self;
-        let subject_did = capability.subject().clone();
-        let ability = capability.ability();
-        let params = parameters(&capability);
-
-        // Discover the operator's DID via credential::Identify effect.
-        let identify_cap = credential::Subject::from(subject_did.clone())
-            .attenuate(credential::Credential)
-            .invoke(credential::Identify);
-        let authority_did: Did =
-            <Env as Provider<credential::Identify>>::execute(env, identify_cap)
-                .await
-                .map_err(|e| AccessError::Configuration(e.to_string()))?;
-
-        // Self-authorization: when subject == authority, no delegation needed.
-        let (delegation, proofs) = if subject_did == authority_did {
-            (None, vec![])
-        } else {
-            // Delegated: verify authority matches the delegation chain audience.
-            let chain_audience = credentials.delegation.audience();
-            if &authority_did != chain_audience {
-                return Err(AccessError::Configuration(format!(
-                    "Authority '{}' does not match delegation chain audience '{}'",
-                    authority_did, chain_audience
-                )));
-            }
-            (
-                Some(credentials.delegation.clone()),
-                credentials.delegation.proof_cids().into(),
-            )
-        };
-
-        // Build and sign the UCAN invocation using credential effects.
-        let bridge = CredentialBridge::new(env, subject_did.clone())
-            .await
-            .map_err(|e| AccessError::Invocation(e.to_string()))?;
-
-        let command: Vec<String> = ability
-            .trim_start_matches('/')
-            .split('/')
-            .map(|s| s.to_string())
-            .collect();
-
-        let args = parameters_to_args(params);
-
-        let invocation = InvocationBuilder::new()
-            .issuer(bridge)
-            .audience(&subject_did)
-            .subject(&subject_did)
-            .command(command)
-            .arguments(args)
-            .proofs(proofs)
-            .try_build()
-            .await
-            .map_err(|e| AccessError::Invocation(format!("{:?}", e)))?;
-
-        let delegations = delegation
-            .map(|c| c.delegations().clone())
-            .unwrap_or_default();
-
-        let chain = InvocationChain::new(invocation, delegations);
-
-        let invocation = UcanInvocation {
-            endpoint: credentials.endpoint.clone(),
-            chain: Box::new(chain),
-            subject: subject_did,
-            ability,
-        };
-
-        // Presign immediately — POST the UCAN invocation to the access service
-        let authorized_request = invocation.grant().await?;
-
-        Ok(Authorized::new(capability, authorized_request))
+    fn authorization(&self) -> &DelegationChain {
+        &self.delegation
     }
 }
 
+/// Build a UCAN authorize result from delegation chain, endpoint, and capability.
+///
+/// This helper is used by env types that implement `Provider<Authorize<C, Credentials>>`.
+/// It requires the env to provide `Provider<credential::Identify>` and
+/// `Provider<credential::Sign>` for UCAN signing.
+pub async fn authorize<C, Env>(
+    env: &Env,
+    delegation_chain: DelegationChain,
+    endpoint: String,
+    capability: Capability<C>,
+) -> Result<Authorization<C, UcanInvocation>, credential::AuthorizeError>
+where
+    C: Constraint + Clone + ConditionalSend + 'static,
+    Capability<C>: ConditionalSend,
+    Env: Provider<credential::Identify> + Provider<credential::Sign> + ConditionalSync,
+{
+    use super::authorization::{CredentialBridge, parameters_to_args};
+
+    let subject_did = capability.subject().clone();
+    let ability = capability.ability();
+    let params = parameters(&capability);
+
+    // Discover the operator's DID via credential::Identify effect.
+    let identify_cap = credential::Subject::from(subject_did.clone())
+        .attenuate(credential::Credential)
+        .invoke(credential::Identify);
+    let authority_did: Did = <Env as Provider<credential::Identify>>::execute(env, identify_cap)
+        .await
+        .map_err(|e| credential::AuthorizeError::Configuration(e.to_string()))?;
+
+    // Self-authorization: when subject == authority, no delegation needed.
+    let (delegation, proofs) = if subject_did == authority_did {
+        (None, vec![])
+    } else {
+        // Delegated: verify authority matches the delegation chain audience.
+        let chain_audience = delegation_chain.audience();
+        if &authority_did != chain_audience {
+            return Err(credential::AuthorizeError::Configuration(format!(
+                "Authority '{}' does not match delegation chain audience '{}'",
+                authority_did, chain_audience
+            )));
+        }
+        (
+            Some(delegation_chain.clone()),
+            delegation_chain.proof_cids().into(),
+        )
+    };
+
+    // Build and sign the UCAN invocation using credential effects.
+    let bridge = CredentialBridge::new(env, subject_did.clone())
+        .await
+        .map_err(|e| credential::AuthorizeError::Configuration(e.to_string()))?;
+
+    let command: Vec<String> = ability
+        .trim_start_matches('/')
+        .split('/')
+        .map(|s| s.to_string())
+        .collect();
+
+    let args = parameters_to_args(params);
+
+    let invocation = InvocationBuilder::new()
+        .issuer(bridge)
+        .audience(&subject_did)
+        .subject(&subject_did)
+        .command(command)
+        .arguments(args)
+        .proofs(proofs)
+        .try_build()
+        .await
+        .map_err(|e| credential::AuthorizeError::Denied(format!("{:?}", e)))?;
+
+    let delegations = delegation
+        .map(|c| c.delegations().clone())
+        .unwrap_or_default();
+
+    let chain = InvocationChain::new(invocation, delegations);
+
+    let ucan_invocation = UcanInvocation {
+        endpoint,
+        chain: Box::new(chain),
+        subject: subject_did,
+        ability,
+    };
+
+    Ok(Authorization::new(capability, ucan_invocation))
+}
+
+/// Redeem a UCAN invocation by POSTing to the access service.
+///
+/// This helper is used by env types that implement `Provider<Redeem<C, Credentials>>`.
+pub async fn redeem<C>(
+    input: credential::Redeem<C, Credentials>,
+) -> Result<Authorization<C, AuthorizedRequest>, credential::RedeemError>
+where
+    C: Constraint + Clone + 'static,
+{
+    let (capability, ucan_invocation) = input.authorization.into_parts();
+
+    let authorized_request = ucan_invocation
+        .grant()
+        .await
+        .map_err(|e| credential::RedeemError::Service(e.to_string()))?;
+
+    Ok(Authorization::new(capability, authorized_request))
+}
+
 #[cfg(test)]
+#[allow(dead_code)]
 pub mod tests {
     use super::*;
     use crate::ucan::delegation::helpers::create_delegation;
-    use dialog_capability::{Capability, Constraint, Did, Principal, Provider, credential};
-    use dialog_common::{ConditionalSend, ConditionalSync};
+    use async_trait::async_trait;
+    use dialog_capability::{Capability, Constraint, Did, Policy, Principal, Provider, credential};
+    use dialog_common::ConditionalSend;
     use dialog_credentials::Ed25519Signer;
     use dialog_varsig::Signer;
     use dialog_varsig::eddsa::Ed25519Signature;
@@ -252,29 +269,13 @@ pub mod tests {
                 credentials,
             }
         }
-    }
 
-    #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
-    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
-    impl<C> Access<C> for Session
-    where
-        C: Constraint + Clone + ConditionalSend + 'static,
-        Capability<C>: ConditionalSend,
-    {
-        type Authorization = AuthorizedRequest;
-        type Error = AccessError;
-
-        async fn authorize<Env>(
-            &self,
-            capability: Capability<C>,
-            env: &Env,
-        ) -> Result<Authorized<C, Self::Authorization>, Self::Error>
-        where
-            Env: Provider<credential::Identify> + Provider<credential::Sign> + ConditionalSync,
-        {
-            self.credentials.authorize(capability, env).await
+        /// Get a reference to the credentials.
+        pub fn credentials(&self) -> &Credentials {
+            &self.credentials
         }
     }
+
     impl Principal for Session {
         fn did(&self) -> Did {
             self.signer.did()
@@ -312,4 +313,35 @@ pub mod tests {
         }
     }
 
+    /// Session implements Provider<Authorize> for UCAN credentials.
+    #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
+    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
+    impl<C> Provider<credential::Authorize<C, Credentials>> for Session
+    where
+        C: Constraint + Clone + ConditionalSend + 'static,
+        Capability<C>: ConditionalSend,
+    {
+        async fn execute(
+            &self,
+            input: credential::Authorize<C, Credentials>,
+        ) -> Result<Authorization<C, UcanInvocation>, credential::AuthorizeError> {
+            super::authorize(self, input.authorization, input.address, input.capability).await
+        }
+    }
+
+    /// Session implements Provider<Redeem> for UCAN credentials.
+    #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
+    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
+    impl<C> Provider<credential::Redeem<C, Credentials>> for Session
+    where
+        C: Constraint + Clone + ConditionalSend + 'static,
+        Capability<C>: ConditionalSend,
+    {
+        async fn execute(
+            &self,
+            input: credential::Redeem<C, Credentials>,
+        ) -> Result<Authorization<C, AuthorizedRequest>, credential::RedeemError> {
+            super::redeem(input).await
+        }
+    }
 }

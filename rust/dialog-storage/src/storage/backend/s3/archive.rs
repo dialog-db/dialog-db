@@ -1,24 +1,24 @@
 //! Archive capability types and Provider implementations for S3 backend.
 //!
 //! Re-exports archive types from [`dialog_effects`] and implements
-//! `Provider<Authorized<Fx, AuthorizedRequest>>` for [`S3`].
+//! `Provider<Authorization<Fx, AuthorizedRequest>>` for [`S3`].
 
 pub use dialog_effects::archive::*;
 
 use async_trait::async_trait;
-use dialog_capability::{Authorized, Provider};
+use dialog_capability::{Authorization, Provider};
 use dialog_s3_credentials::AuthorizedRequest;
 
 use super::{RequestDescriptorExt, S3};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<Authorized<Get, AuthorizedRequest>> for S3 {
+impl Provider<Authorization<Get, AuthorizedRequest>> for S3 {
     async fn execute(
         &self,
-        authorized: Authorized<Get, AuthorizedRequest>,
+        authorized: Authorization<Get, AuthorizedRequest>,
     ) -> Result<Option<Vec<u8>>, ArchiveError> {
-        let request = authorized.into_authorization();
+        let request = authorized.into_site();
 
         let client = reqwest::Client::new();
         let response = request
@@ -46,13 +46,13 @@ impl Provider<Authorized<Get, AuthorizedRequest>> for S3 {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<Authorized<Put, AuthorizedRequest>> for S3 {
+impl Provider<Authorization<Put, AuthorizedRequest>> for S3 {
     async fn execute(
         &self,
-        authorized: Authorized<Put, AuthorizedRequest>,
+        authorized: Authorization<Put, AuthorizedRequest>,
     ) -> Result<(), ArchiveError> {
         let content = Put::of(authorized.capability()).content.clone();
-        let request = authorized.into_authorization();
+        let request = authorized.into_site();
 
         let client = reqwest::Client::new();
         let response = request

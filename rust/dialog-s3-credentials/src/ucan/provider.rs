@@ -370,11 +370,9 @@ fn parse_checksum(args: &BTreeMap<String, Promised>) -> Result<crate::Checksum, 
 mod tests {
     use super::*;
     use crate::ucan::InvocationChain;
-    use crate::ucan::credentials::tests::{Session, test_delegation_chain};
-    use crate::ucan::Credentials;
     use crate::{Address, s3};
     use base58::ToBase58;
-    use dialog_capability::{Access, Principal};
+    use dialog_capability::Principal;
     use dialog_common::Blake3Hash;
     use dialog_credentials::Ed25519Signer;
     use dialog_ucan::DelegationBuilder;

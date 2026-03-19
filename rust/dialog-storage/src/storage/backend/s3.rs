@@ -202,7 +202,7 @@ impl From<AccessError> for S3StorageError {
 ///
 /// This type holds S3 credentials and can execute pre-authorized capabilities
 /// by presigning HTTP requests. Authorization (identity verification, signing)
-/// is handled externally by the caller before handing `Authorized<...>` values
+/// is handled externally by the caller before handing `Authorization<...>` values
 /// to S3 for HTTP execution.
 #[derive(Debug, Clone)]
 pub struct S3 {
@@ -228,7 +228,7 @@ impl S3 {
     }
 }
 
-// Provider<Authorized<Fx, Authorization>> impls for application-level effects
+// Provider<Authorization<Fx, AuthorizedRequest>> impls for application-level effects
 // live in the submodules: archive.rs, memory.rs, storage.rs.
 // Each impl presigns the request, executes HTTP, and interprets the response.
 
@@ -297,8 +297,6 @@ impl Bucket {
         &self.bucket
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {

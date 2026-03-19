@@ -21,7 +21,7 @@ pub struct PublicCredentials {
     /// S3 address (endpoint, region, bucket)
     address: Address,
     /// Parsed endpoint URL
-    endpoint: Url,
+    pub(crate) endpoint: Url,
     /// Whether to use path-style URLs
     path_style: bool,
 }
@@ -161,7 +161,7 @@ pub struct PrivateCredentials {
     /// S3 address (endpoint, region, bucket)
     address: Address,
     /// Parsed endpoint URL
-    endpoint: Url,
+    pub(crate) endpoint: Url,
     /// Whether to use path-style URLs
     path_style: bool,
 }

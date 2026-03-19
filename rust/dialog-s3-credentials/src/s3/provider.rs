@@ -1,35 +1,86 @@
-//! Provider and Access implementations for S3 credentials.
+//! Remote and Provider implementations for S3 credentials.
 //!
 //! S3 credentials can directly grant authorization by presigning requests.
-//! The `Access` impl produces `AuthorizedRequest` (the presigned URL) directly.
+//! The `Remote` impl produces `AuthorizedRequest` (the presigned URL) directly.
 
 use async_trait::async_trait;
-use dialog_capability::{Access, Authorized, Capability, Constraint, Provider, credential};
-use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_capability::{Authorization, Capability, Constraint, Provider, credential};
 
 use super::Credentials;
-use crate::capability::{AccessError, AuthorizedRequest, S3Request};
+use crate::capability::{AuthorizedRequest, S3Request};
 
+/// Intermediate proof for S3 authorization.
+///
+/// S3 presigning doesn't need an external service, so the "proof" step
+/// simply wraps the credentials ready for presigning in the redeem step.
+#[derive(Debug, Clone)]
+pub struct S3Permit {
+    pub(crate) credentials: Credentials,
+}
+
+impl S3Permit {
+    /// Get the underlying credentials.
+    pub fn credentials(&self) -> &Credentials {
+        &self.credentials
+    }
+}
+
+impl credential::Remote for Credentials {
+    type Authorization = Credentials;
+    type Permit = S3Permit;
+    type Access = AuthorizedRequest;
+    type Address = url::Url;
+
+    fn address(&self) -> &url::Url {
+        match self {
+            Credentials::Public(c) => &c.endpoint,
+            Credentials::Private(c) => &c.endpoint,
+        }
+    }
+
+    fn authorization(&self) -> &Credentials {
+        self
+    }
+}
+
+/// Provider for the Authorize step: wraps credentials into an S3Permit.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<C> Access<C> for Credentials
+impl<C> Provider<credential::Authorize<C, Credentials>> for Credentials
 where
-    C: Constraint + Clone + ConditionalSend + 'static,
-    Capability<C>: ConditionalSend + S3Request,
+    C: Constraint + Clone + 'static,
+    Capability<C>: S3Request,
 {
-    type Authorization = AuthorizedRequest;
-    type Error = AccessError;
-
-    async fn authorize<Env>(
+    async fn execute(
         &self,
-        capability: Capability<C>,
-        _env: &Env,
-    ) -> Result<Authorized<C, AuthorizedRequest>, Self::Error>
-    where
-        Env: Provider<credential::Identify> + Provider<credential::Sign> + ConditionalSync,
-    {
-        let authorized_request = self.grant(&capability).await?;
-        Ok(Authorized::new(capability, authorized_request))
+        input: credential::Authorize<C, Credentials>,
+    ) -> Result<Authorization<C, S3Permit>, credential::AuthorizeError> {
+        let permit = S3Permit {
+            credentials: input.authorization.clone(),
+        };
+        Ok(Authorization::new(input.capability, permit))
+    }
+}
+
+/// Provider for the Redeem step: presigns the URL using the S3 credentials.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<C> Provider<credential::Redeem<C, Credentials>> for Credentials
+where
+    C: Constraint + Clone + 'static,
+    Capability<C>: S3Request,
+{
+    async fn execute(
+        &self,
+        input: credential::Redeem<C, Credentials>,
+    ) -> Result<Authorization<C, AuthorizedRequest>, credential::RedeemError> {
+        let (capability, permit) = input.authorization.into_parts();
+        let authorized_request = permit
+            .credentials
+            .grant(&capability)
+            .await
+            .map_err(|e| credential::RedeemError::Rejected(e.to_string()))?;
+        Ok(Authorization::new(capability, authorized_request))
     }
 }
 
@@ -41,31 +92,8 @@ mod tests {
     use base58::ToBase58;
     use dialog_capability::{Did, Subject, did};
 
-    /// Test environment that satisfies the `Provider<credential::Identify>` and
-    /// `Provider<credential::Sign>` bounds required by `authorize`.
-    /// S3 credentials never actually use these, so the impls panic if called.
-    struct NoopEnv;
-
-    #[async_trait]
-    impl Provider<credential::Identify> for NoopEnv {
-        async fn execute(
-            &self,
-            _input: Capability<credential::Identify>,
-        ) -> Result<Did, credential::CredentialError> {
-            unreachable!("S3 credentials do not use credential effects")
-        }
-    }
-
-    #[async_trait]
-    impl Provider<credential::Sign> for NoopEnv {
-        async fn execute(
-            &self,
-            _input: Capability<credential::Sign>,
-        ) -> Result<Vec<u8>, credential::CredentialError> {
-            unreachable!("S3 credentials do not use credential effects")
-        }
-    }
-
+    /// Test environment that satisfies the Provider bounds for Authorize and Redeem.
+    /// S3 credentials implement these directly, so we use the credentials themselves.
     fn test_subject() -> Did {
         did!("key:zTestSubject")
     }
@@ -100,6 +128,39 @@ mod tests {
         Credentials::public(address).unwrap()
     }
 
+    /// Helper to authorize a capability using the new Remote flow.
+    async fn authorize<C>(creds: &Credentials, capability: Capability<C>) -> AuthorizedRequest
+    where
+        C: Constraint + Clone + 'static,
+        Capability<C>: S3Request,
+    {
+        use credential::Remote;
+        // Use the Provider impls directly since the capability is already built.
+        let authorize_input = credential::Authorize::<C, Credentials> {
+            authorization: creds.authorization().clone(),
+            address: creds.address().clone(),
+            capability,
+        };
+        let authorization: Authorization<C, S3Permit> = <Credentials as Provider<
+            credential::Authorize<C, Credentials>,
+        >>::execute(creds, authorize_input)
+        .await
+        .unwrap();
+
+        let redeem_input = credential::Redeem::<C, Credentials> {
+            authorization,
+            address: creds.address().clone(),
+        };
+        let result = <Credentials as Provider<credential::Redeem<C, Credentials>>>::execute(
+            creds,
+            redeem_input,
+        )
+        .await
+        .unwrap();
+
+        result.into_site()
+    }
+
     #[dialog_common::test]
     async fn it_generates_correct_url_for_storage_get() {
         let creds = public_creds();
@@ -110,8 +171,7 @@ mod tests {
             .attenuate(storage::Store::new("index"))
             .invoke(storage::Get::new(key));
 
-        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
-        let req = authorized.into_authorization();
+        let req = authorize(&creds, capability).await;
 
         assert_eq!(req.method, "GET");
         assert_eq!(
@@ -135,8 +195,7 @@ mod tests {
             .attenuate(storage::Store::new("blob"))
             .invoke(storage::Get::new(binary_key));
 
-        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
-        let req = authorized.into_authorization();
+        let req = authorize(&creds, capability).await;
 
         assert_eq!(req.method, "GET");
         assert!(req.url.path().contains(&binary_key.to_base58()));
@@ -154,8 +213,7 @@ mod tests {
             .attenuate(storage::Store::new("blob"))
             .invoke(storage::Set::new(key, checksum));
 
-        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
-        let req = authorized.into_authorization();
+        let req = authorize(&creds, capability).await;
 
         assert_eq!(req.method, "PUT");
         assert_eq!(
@@ -183,8 +241,7 @@ mod tests {
             .attenuate(storage::Store::new("index"))
             .invoke(storage::Delete::new(key));
 
-        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
-        let req = authorized.into_authorization();
+        let req = authorize(&creds, capability).await;
 
         assert_eq!(req.method, "DELETE");
         assert_eq!(
@@ -202,8 +259,7 @@ mod tests {
             .attenuate(storage::Store::new("index"))
             .invoke(storage::List::new(None));
 
-        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
-        let req = authorized.into_authorization();
+        let req = authorize(&creds, capability).await;
 
         assert_eq!(req.method, "GET");
 
@@ -231,8 +287,7 @@ mod tests {
             .attenuate(storage::Store::new("data"))
             .invoke(storage::List::new(Some(token.to_string())));
 
-        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
-        let req = authorized.into_authorization();
+        let req = authorize(&creds, capability).await;
 
         let query: Vec<(String, String)> = req
             .url
@@ -254,8 +309,7 @@ mod tests {
             .attenuate(memory::Cell::new("main"))
             .invoke(memory::Resolve);
 
-        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
-        let req = authorized.into_authorization();
+        let req = authorize(&creds, capability).await;
 
         assert_eq!(req.method, "GET");
         assert_eq!(
@@ -278,8 +332,7 @@ mod tests {
                 when: None,
             });
 
-        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
-        let req = authorized.into_authorization();
+        let req = authorize(&creds, capability).await;
 
         assert_eq!(req.method, "PUT");
         assert_eq!(
@@ -309,8 +362,7 @@ mod tests {
                 when: Some(prior_etag),
             });
 
-        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
-        let req = authorized.into_authorization();
+        let req = authorize(&creds, capability).await;
 
         assert_eq!(req.method, "PUT");
         assert!(
@@ -330,8 +382,7 @@ mod tests {
             .attenuate(memory::Cell::new("temp"))
             .invoke(memory::Retract::new("etag-to-match"));
 
-        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
-        let req = authorized.into_authorization();
+        let req = authorize(&creds, capability).await;
 
         assert_eq!(req.method, "DELETE");
         assert_eq!(
@@ -350,8 +401,7 @@ mod tests {
             .attenuate(archive::Catalog::new("blobs"))
             .invoke(archive::Get::new(digest));
 
-        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
-        let req = authorized.into_authorization();
+        let req = authorize(&creds, capability).await;
 
         assert_eq!(req.method, "GET");
         assert_eq!(
@@ -371,8 +421,7 @@ mod tests {
             .attenuate(archive::Catalog::new("index"))
             .invoke(archive::Put::new(digest, checksum));
 
-        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
-        let req = authorized.into_authorization();
+        let req = authorize(&creds, capability).await;
 
         assert_eq!(req.method, "PUT");
         assert_eq!(
@@ -396,8 +445,7 @@ mod tests {
             .attenuate(storage::Store::new("data"))
             .invoke(storage::Get::new(key));
 
-        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
-        let req = authorized.into_authorization();
+        let req = authorize(&creds, capability).await;
 
         assert_eq!(req.method, "GET");
 
@@ -425,8 +473,7 @@ mod tests {
             .attenuate(storage::Store::new("uploads"))
             .invoke(storage::Set::new(key, checksum));
 
-        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
-        let req = authorized.into_authorization();
+        let req = authorize(&creds, capability).await;
 
         assert_eq!(req.method, "PUT");
 
@@ -453,8 +500,7 @@ mod tests {
             .attenuate(storage::Store::new("files"))
             .invoke(storage::List::new(None));
 
-        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
-        let req = authorized.into_authorization();
+        let req = authorize(&creds, capability).await;
 
         assert_eq!(req.method, "GET");
 
@@ -479,8 +525,7 @@ mod tests {
             .attenuate(storage::Store::new("test"))
             .invoke(storage::Get::new(b"key"));
 
-        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
-        let req = authorized.into_authorization();
+        let req = authorize(&creds, capability).await;
 
         assert!(req.url.host_str().unwrap().starts_with("my-bucket."));
     }
@@ -494,8 +539,7 @@ mod tests {
             .attenuate(storage::Store::new("test"))
             .invoke(storage::Get::new(b"key"));
 
-        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
-        let req = authorized.into_authorization();
+        let req = authorize(&creds, capability).await;
 
         assert_eq!(req.url.host_str().unwrap(), "localhost");
         assert!(req.url.path().starts_with("/test-bucket/"));
@@ -512,8 +556,7 @@ mod tests {
                 .attenuate(storage::Store::new(store_name))
                 .invoke(storage::Get::new(b"key"));
 
-            let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
-            let req = authorized.into_authorization();
+            let req = authorize(&creds, capability).await;
 
             if store_name.is_empty() {
                 assert!(req.url.path().contains(&format!("/{}/", TEST_SUBJECT)));
@@ -539,8 +582,7 @@ mod tests {
                 .attenuate(archive::Catalog::new(catalog_name))
                 .invoke(archive::Get::new(digest));
 
-            let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
-            let req = authorized.into_authorization();
+            let req = authorize(&creds, capability).await;
 
             assert!(
                 req.url

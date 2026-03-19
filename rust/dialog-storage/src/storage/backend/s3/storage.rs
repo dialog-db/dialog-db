@@ -1,25 +1,25 @@
 //! Storage capability types and Provider implementations for S3 backend.
 //!
 //! Re-exports storage types from [`dialog_effects`] and implements
-//! `Provider<Authorized<Fx, AuthorizedRequest>>` for [`S3`].
+//! `Provider<Authorization<Fx, AuthorizedRequest>>` for [`S3`].
 //! Each impl executes the presigned HTTP request and interprets the response.
 
 pub use dialog_effects::storage::*;
 
 use async_trait::async_trait;
-use dialog_capability::{Authorized, Provider};
+use dialog_capability::{Authorization, Provider};
 use dialog_s3_credentials::AuthorizedRequest;
 
 use super::{RequestDescriptorExt, S3};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<Authorized<Get, AuthorizedRequest>> for S3 {
+impl Provider<Authorization<Get, AuthorizedRequest>> for S3 {
     async fn execute(
         &self,
-        authorized: Authorized<Get, AuthorizedRequest>,
+        authorized: Authorization<Get, AuthorizedRequest>,
     ) -> Result<Option<Vec<u8>>, StorageError> {
-        let request = authorized.into_authorization();
+        let request = authorized.into_site();
 
         let client = reqwest::Client::new();
         let response = request
@@ -47,13 +47,13 @@ impl Provider<Authorized<Get, AuthorizedRequest>> for S3 {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<Authorized<Set, AuthorizedRequest>> for S3 {
+impl Provider<Authorization<Set, AuthorizedRequest>> for S3 {
     async fn execute(
         &self,
-        authorized: Authorized<Set, AuthorizedRequest>,
+        authorized: Authorization<Set, AuthorizedRequest>,
     ) -> Result<(), StorageError> {
         let value = Set::of(authorized.capability()).value.clone();
-        let request = authorized.into_authorization();
+        let request = authorized.into_site();
 
         let client = reqwest::Client::new();
         let response = request
@@ -76,12 +76,12 @@ impl Provider<Authorized<Set, AuthorizedRequest>> for S3 {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<Authorized<Delete, AuthorizedRequest>> for S3 {
+impl Provider<Authorization<Delete, AuthorizedRequest>> for S3 {
     async fn execute(
         &self,
-        authorized: Authorized<Delete, AuthorizedRequest>,
+        authorized: Authorization<Delete, AuthorizedRequest>,
     ) -> Result<(), StorageError> {
-        let request = authorized.into_authorization();
+        let request = authorized.into_site();
 
         let client = reqwest::Client::new();
         let response = request

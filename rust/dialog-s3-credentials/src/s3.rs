@@ -5,11 +5,11 @@
 //! - [`Credentials::Public`] - No signing for public buckets
 //! - [`Credentials::Private`] - AWS SigV4 signing with access key and secret
 //!
-//! Both variants implement [`Access`](dialog_common::capability::Access) and
-//! [`Provider`](dialog_common::capability::Provider) for capability-based authorization.
+//! Both variants implement [`Remote`](dialog_capability::credential::Remote) and
+//! [`Provider`](dialog_capability::Provider) for capability-based authorization.
 
 mod credentials;
-mod provider;
+pub mod provider;
 
 pub use crate::Address;
 pub use credentials::{Credentials, PrivateCredentials, PublicCredentials};

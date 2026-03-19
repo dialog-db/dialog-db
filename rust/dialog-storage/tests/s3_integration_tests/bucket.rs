@@ -2,11 +2,14 @@
 
 #![cfg(feature = "s3-integration-tests")]
 
-use dialog_capability::{Access, Did};
-use dialog_effects::memory::prelude::*;
+use dialog_capability::Did;
+use dialog_capability::credential::Remote;
+use dialog_effects::memory::prelude::{
+    CellExt, MemoryExt, SpaceExt, SubjectExt as MemorySubjectExt,
+};
 use dialog_effects::memory::{MemoryError, Publication};
 use dialog_effects::storage::StorageError;
-use dialog_effects::storage::prelude::*;
+use dialog_effects::storage::prelude::{StorageExt, StoreExt, SubjectExt as StorageSubjectExt};
 use dialog_s3_credentials::Address;
 use dialog_storage::s3::{S3, S3Credentials, S3StorageError, helpers::Session};
 
@@ -126,6 +129,7 @@ impl TestBucket {
         result.map_err(|e| S3StorageError::ServiceError(e.to_string()))
     }
 
+    #[allow(dead_code)]
     pub async fn retract(
         &self,
         space: &str,

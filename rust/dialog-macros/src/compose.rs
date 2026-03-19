@@ -86,14 +86,13 @@ fn generate_compose(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream
             let mut effects = Vec::new();
             for attr in &field.attrs {
                 if attr.path().is_ident("provide")
-                    && let Ok(paths) =
-                        attr.parse_args_with(|input: syn::parse::ParseStream| {
-                            let paths = syn::punctuated::Punctuated::<
+                    && let Ok(paths) = attr.parse_args_with(|input: syn::parse::ParseStream| {
+                        let paths = syn::punctuated::Punctuated::<
                                 syn::Path,
                                 syn::Token![,],
                             >::parse_terminated(input)?;
-                            Ok(paths.into_iter().collect::<Vec<_>>())
-                        })
+                        Ok(paths.into_iter().collect::<Vec<_>>())
+                    })
                 {
                     effects.extend(paths);
                 }

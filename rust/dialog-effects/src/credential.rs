@@ -13,7 +13,9 @@
 //!         +-- Sign { payload } -> Effect -> Result<Vec<u8>, CredentialError>
 //! ```
 
-pub use dialog_capability::credential::{Credential, CredentialError, Identify, Sign, SignCapability};
+pub use dialog_capability::credential::{
+    Credential, CredentialError, Identify, Sign, SignCapability,
+};
 pub use dialog_capability::{Capability, Did, Subject};
 
 /// Trait for types that can provide credential operations.

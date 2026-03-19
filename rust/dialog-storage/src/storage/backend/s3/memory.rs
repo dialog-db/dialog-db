@@ -1,24 +1,24 @@
 //! Memory capability types and Provider implementations for S3 backend.
 //!
 //! Re-exports memory types from [`dialog_effects`] and implements
-//! `Provider<Authorized<Fx, AuthorizedRequest>>` for [`S3`].
+//! `Provider<Authorization<Fx, AuthorizedRequest>>` for [`S3`].
 
 pub use dialog_effects::memory::*;
 
 use async_trait::async_trait;
-use dialog_capability::{Authorized, Provider};
+use dialog_capability::{Authorization, Provider};
 use dialog_s3_credentials::AuthorizedRequest;
 
 use super::{RequestDescriptorExt, S3};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<Authorized<Resolve, AuthorizedRequest>> for S3 {
+impl Provider<Authorization<Resolve, AuthorizedRequest>> for S3 {
     async fn execute(
         &self,
-        authorized: Authorized<Resolve, AuthorizedRequest>,
+        authorized: Authorization<Resolve, AuthorizedRequest>,
     ) -> Result<Option<Publication>, MemoryError> {
-        let request = authorized.into_authorization();
+        let request = authorized.into_site();
 
         let client = reqwest::Client::new();
         let response = request
@@ -57,17 +57,17 @@ impl Provider<Authorized<Resolve, AuthorizedRequest>> for S3 {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<Authorized<Publish, AuthorizedRequest>> for S3 {
+impl Provider<Authorization<Publish, AuthorizedRequest>> for S3 {
     async fn execute(
         &self,
-        authorized: Authorized<Publish, AuthorizedRequest>,
+        authorized: Authorization<Publish, AuthorizedRequest>,
     ) -> Result<Vec<u8>, MemoryError> {
         let content = Publish::of(authorized.capability()).content.clone();
         let when = Publish::of(authorized.capability())
             .when
             .as_ref()
             .map(|b| String::from_utf8_lossy(b).to_string());
-        let request = authorized.into_authorization();
+        let request = authorized.into_site();
 
         let client = reqwest::Client::new();
         let response = request
@@ -103,14 +103,13 @@ impl Provider<Authorized<Publish, AuthorizedRequest>> for S3 {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<Authorized<Retract, AuthorizedRequest>> for S3 {
+impl Provider<Authorization<Retract, AuthorizedRequest>> for S3 {
     async fn execute(
         &self,
-        authorized: Authorized<Retract, AuthorizedRequest>,
+        authorized: Authorization<Retract, AuthorizedRequest>,
     ) -> Result<(), MemoryError> {
-        let when =
-            String::from_utf8_lossy(&Retract::of(authorized.capability()).when).to_string();
-        let request = authorized.into_authorization();
+        let when = String::from_utf8_lossy(&Retract::of(authorized.capability()).when).to_string();
+        let request = authorized.into_site();
 
         let client = reqwest::Client::new();
         let response = request

@@ -1,19 +1,21 @@
 use crate::{
-    Ability, Access, Authorized, Capability, Constraint, Did, Effect, Policy, Provider, credential,
+    Ability, Authorization, Capability, Constraint, Did, Effect, Policy, Provider,
+    credential::{AcquireError, Authorize, Redeem, Remote},
 };
 use dialog_common::{ConditionalSend, ConditionalSync};
 
-/// A capability chain being built with credentials attached.
+/// A capability chain being built with a remote resource attached.
 ///
-/// Created by [`Access::claim`]. Mirrors [`Capability`]'s chain-building
+/// Created via [`Remote::claim`]. Mirrors [`Capability`]'s chain-building
 /// methods (`.attenuate()`, `.invoke()`) while carrying a reference to the
-/// credentials. When the chain reaches an [`Effect`], call `.acquire()` to
-/// authorize and get an [`Authorized`] capability ready for execution.
+/// resource. When the chain reaches an [`Effect`], call `.acquire()` to
+/// authorize and get an [`Authorization`] ready for execution.
 ///
 /// # Example
 ///
 /// ```no_run
 /// # use dialog_capability::*;
+/// # use dialog_capability::credential::Remote;
 /// # use serde::{Serialize, Deserialize};
 /// # #[derive(Debug, Clone, Serialize, Deserialize)] struct Storage;
 /// # impl Attenuation for Storage { type Of = Subject; }
@@ -21,26 +23,29 @@ use dialog_common::{ConditionalSend, ConditionalSync};
 /// # impl Policy for Store { type Of = Storage; }
 /// # #[derive(Debug, Clone, Serialize, Deserialize)] struct Get { key: Vec<u8> }
 /// # impl Effect for Get { type Of = Store; type Output = Option<Vec<u8>>; }
-/// # async fn example<A: Access<Get>>(credentials: A, session: impl Provider<credential::Identify> + Provider<credential::Sign> + Sync + Send) -> Result<(), Box<dyn std::error::Error>> where A::Error: 'static {
-/// let authorized = credentials
+/// # async fn example<R: Remote>(resource: &R, env: impl Provider<credential::Authorize<Get, R>> + Provider<credential::Redeem<Get, R>> + Sync + Send) -> Result<(), Box<dyn std::error::Error>> {
+/// let authorization = resource
 ///     .claim(did!("key:z6Mkk89bC3JrVqKie71YEcc5M1SMVxuCgNx6zLZ8SYJsxALi"))
 ///     .attenuate(Storage)
 ///     .attenuate(Store { name: "index".into() })
 ///     .invoke(Get { key: b"my-key".to_vec() })
-///     .acquire(&session)
+///     .acquire(&env)
 ///     .await?;
 /// # Ok(())
 /// # }
 /// ```
-pub struct Claim<'a, A: ?Sized, T: Constraint> {
-    access: &'a A,
+pub struct Claim<'a, R: ?Sized, T: Constraint> {
+    resource: &'a R,
     capability: Capability<T>,
 }
 
-impl<'a, A: ?Sized, T: Constraint> Claim<'a, A, T> {
-    /// Create a new claim from an access provider and capability.
-    pub fn new(access: &'a A, capability: Capability<T>) -> Self {
-        Self { access, capability }
+impl<'a, R: ?Sized, T: Constraint> Claim<'a, R, T> {
+    /// Create a new claim from a remote resource and capability.
+    pub fn new(resource: &'a R, capability: Capability<T>) -> Self {
+        Self {
+            resource,
+            capability,
+        }
     }
 
     /// Get the inner capability.
@@ -48,9 +53,9 @@ impl<'a, A: ?Sized, T: Constraint> Claim<'a, A, T> {
         &self.capability
     }
 
-    /// Get the access provider.
-    pub fn access(&self) -> &A {
-        self.access
+    /// Get the remote resource.
+    pub fn resource(&self) -> &R {
+        self.resource
     }
 
     /// Consume and return the inner capability.
@@ -59,70 +64,85 @@ impl<'a, A: ?Sized, T: Constraint> Claim<'a, A, T> {
     }
 
     /// Attenuate this claim with a policy or attenuation.
-    pub fn attenuate<U>(self, value: U) -> Claim<'a, A, U>
+    pub fn attenuate<U>(self, value: U) -> Claim<'a, R, U>
     where
         U: Policy<Of = T>,
         T::Capability: Ability,
     {
         Claim {
-            access: self.access,
+            resource: self.resource,
             capability: self.capability.attenuate(value),
         }
     }
 
     /// Invoke an effect on this claim.
-    pub fn invoke<Fx>(self, fx: Fx) -> Claim<'a, A, Fx>
+    pub fn invoke<Fx>(self, fx: Fx) -> Claim<'a, R, Fx>
     where
         Fx: Effect<Of = T>,
         T::Capability: Ability,
     {
         Claim {
-            access: self.access,
+            resource: self.resource,
             capability: self.capability.invoke(fx),
         }
     }
 }
 
-impl<'a, A, Fx> Claim<'a, A, Fx>
+impl<'a, R, Fx> Claim<'a, R, Fx>
 where
     Fx: Effect,
-    A: Access<Fx>,
+    R: Remote,
 {
-    /// Authorize the capability, returning an [`Authorized`] ready for execution.
-    pub async fn acquire<Env>(self, env: &Env) -> Result<Authorized<Fx, A::Authorization>, A::Error>
+    /// Authorize the capability via the two-step Authorize → Redeem pipeline.
+    ///
+    /// Returns an [`Authorization<Fx, R::Access>`] ready for execution via
+    /// [`Authorization::perform`].
+    pub async fn acquire<Env>(self, env: &Env) -> Result<Authorization<Fx, R::Access>, AcquireError>
     where
-        Env: Provider<credential::Identify>
-            + Provider<credential::Sign>
+        Env: Provider<Authorize<Fx, R>>
+            + Provider<Redeem<Fx, R>>
             + ConditionalSend
             + ConditionalSync,
     {
-        self.access.authorize(self.capability, env).await
+        let authorize = Authorize::<Fx, R> {
+            authorization: self.resource.authorization().clone(),
+            address: self.resource.address().clone(),
+            capability: self.capability,
+        };
+        let authorization = <Env as Provider<Authorize<Fx, R>>>::execute(env, authorize).await?;
+
+        let redeem = Redeem::<Fx, R> {
+            authorization,
+            address: self.resource.address().clone(),
+        };
+        let result = <Env as Provider<Redeem<Fx, R>>>::execute(env, redeem).await?;
+        Ok(result)
     }
 
     /// Authorize and execute the capability in one step.
     ///
-    /// Combines [`acquire`](Self::acquire) and [`Authorized::perform`] into a
-    /// single call. Requires the environment to provide both credential effects
-    /// (for authorization) and effect execution (for the actual operation).
+    /// Combines [`acquire`](Self::acquire) and [`Authorization::perform`] into
+    /// a single call. Requires the environment to provide both authorization
+    /// effects and effect execution.
     ///
     /// The effect's output must be a `Result` whose error type can absorb
-    /// authorization errors via `From<A::Error>`.
+    /// acquire errors via `From<AcquireError>`.
     pub async fn perform<Env, T, E>(self, env: &Env) -> Result<T, E>
     where
-        Env: Provider<credential::Identify>
-            + Provider<credential::Sign>
-            + Provider<Authorized<Fx, A::Authorization>>
+        Env: Provider<Authorize<Fx, R>>
+            + Provider<Redeem<Fx, R>>
+            + Provider<Authorization<Fx, R::Access>>
             + ConditionalSend
             + ConditionalSync,
         Fx: Effect<Output = Result<T, E>>,
-        E: From<A::Error>,
+        E: From<AcquireError>,
     {
-        let authorized = self.acquire(env).await?;
-        authorized.perform(env).await
+        let authorization = self.acquire(env).await?;
+        authorization.perform(env).await
     }
 }
 
-impl<'a, A: ?Sized, T: Constraint> Claim<'a, A, T>
+impl<'a, R: ?Sized, T: Constraint> Claim<'a, R, T>
 where
     T::Capability: Ability,
 {

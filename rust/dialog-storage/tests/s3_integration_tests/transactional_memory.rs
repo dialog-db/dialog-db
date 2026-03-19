@@ -50,9 +50,7 @@ async fn it_publishes_and_resolves_value() -> anyhow::Result<()> {
     let cell = &bucket::unique("test-key-rw");
 
     // Publish (first write, no prior edition)
-    let edition = backend
-        .publish(space, cell, encode(&data), None)
-        .await?;
+    let edition = backend.publish(space, cell, encode(&data), None).await?;
 
     // Resolve and verify
     let publication = backend.resolve(space, cell).await?;

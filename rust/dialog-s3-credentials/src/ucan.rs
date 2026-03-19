@@ -22,7 +22,7 @@ mod provider;
 
 pub use authorization::UcanInvocation;
 pub use container::Container;
-pub use credentials::Credentials;
+pub use credentials::{Credentials, authorize, redeem};
 pub use delegation::DelegationChain;
 pub use invocation::InvocationChain;
 pub use provider::UcanAuthorizer;

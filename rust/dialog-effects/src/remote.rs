@@ -2,7 +2,7 @@
 //!
 //! [`RemoteInvocation`] pairs a [`Capability`] with an address, allowing
 //! providers to route effects to a remote site at a given address. It implements
-//! [`Invocation`] following the same pattern as [`Authorized`] and allows
+//! [`Invocation`] following the same pattern as [`Authorization`] and allows
 //! performing capabilities on addressed sites. Effectively it's a routing
 //! mechanism for dispatching to a provider that corresponds to a specific
 //! address.

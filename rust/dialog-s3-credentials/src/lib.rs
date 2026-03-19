@@ -14,9 +14,10 @@
 //! # Example
 //!
 //! ```no_run
-//! use dialog_s3_credentials::{Address, s3, capability};
-//! use dialog_s3_credentials::capability::storage::{Storage, Store, Get, Set};
-//! use dialog_capability::{Access, Subject, did};
+//! use dialog_s3_credentials::{Address, s3};
+//! use dialog_s3_credentials::capability::storage::{Storage, Store, Get};
+//! use dialog_capability::{Subject, credential, did};
+//! use dialog_capability::credential::Remote;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create address for S3 bucket
@@ -36,27 +37,17 @@
 //!     "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 //! )?;
 //!
-//! // Build capability chain: Subject -> Storage -> Store -> Get
-//! let capability = Subject::from(subject)
+//! // Build a claim and authorize to get a presigned URL.
+//! // S3 credentials serve as their own env for the Authorize/Redeem pipeline.
+//! let authorization = credentials
+//!     .claim(subject)
 //!     .attenuate(Storage)
 //!     .attenuate(Store::new("index"))
-//!     .invoke(Get::new(b"my-key"));
+//!     .invoke(Get::new(b"my-key"))
+//!     .acquire(&credentials)
+//!     .await?;
 //!
-//! // Authorize the capability to get a presigned URL.
-//! // S3 credentials don't use env, but the API requires it for UCAN support.
-//! # struct Env;
-//! # use dialog_capability::{Provider, credential};
-//! # use async_trait::async_trait;
-//! # #[async_trait] impl Provider<credential::Identify> for Env {
-//! #     async fn execute(&self, _: dialog_capability::Capability<credential::Identify>) -> Result<dialog_capability::Did, credential::CredentialError> { unimplemented!() }
-//! # }
-//! # #[async_trait] impl Provider<credential::Sign> for Env {
-//! #     async fn execute(&self, _: dialog_capability::Capability<credential::Sign>) -> Result<Vec<u8>, credential::CredentialError> { unimplemented!() }
-//! # }
-//! # let env = Env;
-//! let authorized = credentials.authorize(capability, &env).await?;
-//!
-//! println!("Presigned URL: {}", authorized.authorization().url);
+//! println!("Presigned URL: {}", authorization.site().url);
 //! # Ok(())
 //! # }
 //! ```
