@@ -20,7 +20,7 @@ pub mod delegation;
 mod invocation;
 mod provider;
 
-pub use authorization::UcanAuthorization;
+pub use authorization::UcanInvocation;
 pub use container::Container;
 pub use credentials::Credentials;
 pub use delegation::DelegationChain;

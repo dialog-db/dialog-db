@@ -371,10 +371,10 @@ mod tests {
     use super::*;
     use crate::ucan::InvocationChain;
     use crate::ucan::credentials::tests::{Session, test_delegation_chain};
-    use crate::ucan::{Credentials, UcanAuthorization};
+    use crate::ucan::Credentials;
     use crate::{Address, s3};
     use base58::ToBase58;
-    use dialog_capability::{Authorization, Principal};
+    use dialog_capability::{Access, Principal};
     use dialog_common::Blake3Hash;
     use dialog_credentials::Ed25519Signer;
     use dialog_ucan::DelegationBuilder;
@@ -639,41 +639,32 @@ mod tests {
         let credentials =
             s3::Credentials::private(address, "access-key-id", "secret-access-key").unwrap();
 
-        let provider = UcanAuthorizer::new(credentials);
+        let authorizer = UcanAuthorizer::new(credentials);
 
-        let credentials = Credentials::new(
-            "https://access.ucan.com".into(),
-            test_delegation_chain(&operator, &operator, &["archive"]).await,
-        );
+        let digest = Blake3Hash::hash(b"hello");
+        let args = BTreeMap::from([
+            ("catalog".to_string(), Promised::String("blobs".into())),
+            (
+                "digest".to_string(),
+                Promised::Bytes(digest.as_bytes().into()),
+            ),
+        ]);
 
-        let session = Session::open(credentials, &[0u8; 32]).await;
+        let payload = build_test_container(
+            &operator,
+            &operator,
+            vec!["archive".into(), "get".into()],
+            args,
+        )
+        .await;
 
-        let read = Subject::from(session.did())
-            .attenuate(archive::Archive)
-            .attenuate(archive::Catalog {
-                catalog: "blobs".into(),
-            })
-            .invoke(archive::Get {
-                digest: Blake3Hash::hash(b"hello"),
-            })
-            .acquire(&session)
-            .await?;
-
-        let authorization = read.authorization().invoke(&session).await?;
-        let ucan = match authorization {
-            UcanAuthorization::Invocation { chain, .. } => chain,
-            _ => panic!("expected invocation"),
-        };
-
-        let payload = ucan.to_bytes()?;
-
-        let authorization = provider.authorize(&payload).await?;
+        let authorization = authorizer.authorize(&payload).await?;
         assert_eq!(
             authorization.url.path(),
             format!(
                 "/{}/blobs/{}",
                 operator.did(),
-                Blake3Hash::hash(b"hello").as_bytes().to_base58()
+                digest.as_bytes().to_base58()
             )
         );
 

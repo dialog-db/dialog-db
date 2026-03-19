@@ -1,8 +1,9 @@
 //! Concrete environment composition for the repository layer.
 //!
-//! Uses [`Environment<Local, Remote>`] to compose local storage with a
-//! remote network provider. The [`Network`] router handles unified address
-//! dispatch via its generated [`NetworkAddress`] enum.
+//! Uses [`Environment<Local, Remote, Credentials>`] to compose local storage,
+//! remote network provider, and credential capabilities. The [`Network`]
+//! router handles unified address dispatch via its generated [`NetworkAddress`]
+//! enum.
 
 #[cfg(any(test, feature = "helpers"))]
 use dialog_storage::provider::Volatile;
@@ -16,17 +17,22 @@ pub use dialog_storage::provider::network::NetworkAddress;
 use crate::repository::credentials::Credentials;
 
 /// Concrete address type for remote operations.
-pub type RemoteAddress = NetworkAddress<Credentials>;
+pub type RemoteAddress = NetworkAddress;
 
-/// Native environment: filesystem local storage with network remote.
+/// Native environment: filesystem local storage with network remote
+/// and operator credentials.
 #[cfg(not(target_arch = "wasm32"))]
-pub type NativeEnvironment<Issuer> = Environment<FileSystem, Network<Issuer>>;
+pub type NativeEnvironment = Environment<FileSystem, Network, Credentials>;
 
-/// Web environment: IndexedDB local storage with network remote.
+/// Web environment: IndexedDB local storage with network remote
+/// and operator credentials.
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-pub type WebEnvironment<Issuer> = Environment<dialog_storage::provider::IndexedDb, Network<Issuer>>;
+pub type WebEnvironment = Environment<dialog_storage::provider::IndexedDb, Network, Credentials>;
 
 /// Test environment: in-memory local storage with emulated remote keyed by
 /// the generated [`NetworkAddress`].
+///
+/// Uses `()` for credentials by default. For tests that need credential
+/// effects, use `Environment<Volatile, Route<RemoteAddress>, Credentials>`.
 #[cfg(any(test, feature = "helpers"))]
 pub type TestEnvironment = Environment<Volatile, Route<RemoteAddress>>;

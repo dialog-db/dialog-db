@@ -1,9 +1,6 @@
 use crate::{
-    Ability, Access, Authorized, Claim, Constrained, Constraint, Did, Effect, Policy,
-    PolicyBuilder, Provider, Selector,
+    Ability, Constrained, Constraint, Did, Effect, Policy, PolicyBuilder, Provider, Selector,
 };
-use dialog_common::ConditionalSend;
-use dialog_varsig::Principal;
 
 /// Newtype wrapper for describing a capability chain from the constraint type.
 /// It enables defining convenience methods for working with that capability.
@@ -62,29 +59,6 @@ impl<T: Constraint> Capability<T> {
             constraint: fx,
             capability: self.0,
         })
-    }
-
-    /// Acquire authorization for this capability from an access provider.
-    ///
-    /// This method uses the `Access` trait to find authorization proofs for
-    /// the capability claim, returning an `Authorized` bundle that pairs the
-    /// capability with its authorization proof.
-    pub async fn acquire<A: Access + Principal>(
-        self,
-        access: &A,
-    ) -> Result<Authorized<T, A::Authorization>, A::Error>
-    where
-        Self: ConditionalSend + Clone + 'static,
-    {
-        let capability = self.clone();
-        let authorization = access
-            .claim(Claim {
-                capability,
-                audience: access.did(),
-            })
-            .await?;
-
-        Ok(Authorized::new(self.clone(), authorization))
     }
 }
 

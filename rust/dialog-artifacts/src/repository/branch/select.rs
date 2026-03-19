@@ -6,9 +6,9 @@ use futures_util::Stream;
 use std::ops::Range;
 
 use super::Index;
-use crate::repository::archive::Archive;
 use crate::artifacts::selector::Constrained;
 use crate::artifacts::{Artifact, ArtifactSelector, Datum, MatchCandidate};
+use crate::repository::archive::Archive;
 use crate::repository::archive::ContentAddressedStore;
 use crate::repository::revision::Revision;
 use crate::{
@@ -24,7 +24,11 @@ pub struct Select {
 }
 
 impl Select {
-    pub(super) fn new(subject: Did, revision: Revision, selector: ArtifactSelector<Constrained>) -> Self {
+    pub(super) fn new(
+        subject: Did,
+        revision: Revision,
+        selector: ArtifactSelector<Constrained>,
+    ) -> Self {
         Self {
             subject,
             revision,

@@ -7,9 +7,8 @@
 //! - Address types (available on all platforms for deserialization in WASM tests)
 //! - Server implementation (native-only, in the `server` submodule)
 //! - UCAN access service (native-only, requires `ucan` feature)
-//! - Test issuer types for capability-based testing
-use dialog_capability::{Did, Issuer, Principal, Signer};
-use dialog_varsig::eddsa::Ed25519Signature;
+//! - Test operator types for capability-based testing
+use dialog_capability::{Capability, Did, Principal, Provider, credential};
 use serde::{Deserialize, Serialize};
 
 /// S3 test server connection info with credentials, passed to inner tests.
@@ -52,9 +51,9 @@ pub struct UcanS3Address {
     pub secret_access_key: String,
 }
 
-/// A simple test session that implements [`Issuer`] and [`Principal`].
+/// A simple test session that implements [`Principal`] and credential effects.
 ///
-/// This is useful for testing capability-based S3 operations where an issuer
+/// This is useful for testing capability-based operations where an operator
 /// is required but actual cryptographic signing is not needed (S3 uses its
 /// own SigV4 signing).
 ///
@@ -62,12 +61,8 @@ pub struct UcanS3Address {
 ///
 /// ```no_run
 /// use dialog_storage::s3::helpers::Session;
-/// use dialog_storage::s3::{S3, S3Credentials, Address};
 ///
-/// let address = Address::new("http://localhost:9000", "us-east-1", "bucket");
-/// let credentials = S3Credentials::public(address).unwrap();
-/// let issuer = Session::new("did:key:zTestIssuer".parse::<dialog_capability::Did>().unwrap());
-/// let bucket = S3::from_s3(credentials, issuer);
+/// let session = Session::new("did:key:zTestIssuer".parse::<dialog_capability::Did>().unwrap());
 /// ```
 #[derive(Debug, Clone)]
 pub struct Session {
@@ -87,22 +82,31 @@ impl Principal for Session {
     }
 }
 
-impl Signer<Ed25519Signature> for Session {
-    async fn sign(&self, _payload: &[u8]) -> Result<Ed25519Signature, signature::Error> {
-        // S3 direct access uses SigV4 signing, not external signatures.
-        // The signature is never verified — S3 uses its own SigV4 auth.
-        Ok(Ed25519Signature::from_bytes([0u8; 64]))
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<credential::Identify> for Session {
+    async fn execute(
+        &self,
+        _input: Capability<credential::Identify>,
+    ) -> Result<Did, credential::CredentialError> {
+        Ok(self.did.clone())
     }
 }
 
-impl Issuer for Session {
-    type Signature = Ed25519Signature;
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<credential::Sign> for Session {
+    async fn execute(
+        &self,
+        _input: Capability<credential::Sign>,
+    ) -> Result<Vec<u8>, credential::CredentialError> {
+        // S3 direct access uses SigV4 signing, not external signatures.
+        // The signature is never verified -- S3 uses its own SigV4 auth.
+        Ok(vec![0u8; 64])
+    }
 }
 
-/// Re-export [`dialog_credentials::Ed25519Signer`] for UCAN-based S3 operations.
-///
-/// This signer implements [`Issuer`], [`Principal`], and [`Signer`] and can be
-/// used directly as the `Issuer` type parameter for [`super::S3`] and [`super::Bucket`].
+/// Re-export [`dialog_credentials::Ed25519Signer`] for UCAN-based operations.
 #[cfg(feature = "ucan")]
 pub use dialog_credentials::Ed25519Signer;
 

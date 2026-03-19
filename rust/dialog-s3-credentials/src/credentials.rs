@@ -1,11 +1,10 @@
-use super::Authorization;
 use super::s3;
 #[cfg(feature = "ucan")]
 use super::ucan;
 use crate::capability::{AccessError, AuthorizedRequest, S3Request};
 use async_trait::async_trait;
-use dialog_capability::{Ability, Access, Authorized, Capability, Claim, Effect, Provider};
-use dialog_common::ConditionalSend;
+use dialog_capability::{Access, Authorized, Capability, Constraint, credential};
+use dialog_common::{ConditionalSend, ConditionalSync};
 
 /// Unified credentials enum supporting multiple authorization backends.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -41,40 +40,32 @@ impl From<ucan::Credentials> for Credentials {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Access for Credentials {
-    type Authorization = Authorization;
-    type Error = AccessError;
-
-    async fn claim<C: Ability + Clone + ConditionalSend + 'static>(
-        &self,
-        claim: Claim<C>,
-    ) -> Result<Self::Authorization, Self::Error> {
-        let result = match self {
-            Self::S3(credentials) => Authorization::S3(credentials.claim(claim).await?),
-            #[cfg(feature = "ucan")]
-            Self::Ucan(credentials) => Authorization::Ucan(credentials.claim(claim).await?),
-        };
-
-        Ok(result)
-    }
-}
-
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Do> Provider<Authorized<Do, Authorization>> for Credentials
+impl<C> Access<C> for Credentials
 where
-    Do: Effect<Output = Result<AuthorizedRequest, AccessError>> + 'static,
-    Capability<Do>: ConditionalSend + S3Request,
+    C: Constraint + Clone + ConditionalSend + 'static,
+    Capability<C>: ConditionalSend + S3Request,
 {
-    async fn execute(
+    type Authorization = AuthorizedRequest;
+    type Error = AccessError;
+
+    async fn authorize<Env>(
         &self,
-        authorized: Authorized<Do, Authorization>,
-    ) -> Result<AuthorizedRequest, AccessError> {
-        authorized
-            .authorization()
-            .grant(authorized.capability())
-            .await
+        capability: Capability<C>,
+        env: &Env,
+    ) -> Result<Authorized<C, AuthorizedRequest>, Self::Error>
+    where
+        Env: dialog_capability::Provider<credential::Identify>
+            + dialog_capability::Provider<credential::Sign>
+            + ConditionalSync,
+    {
+        match self {
+            Self::S3(credentials) => credentials.authorize(capability, env).await.map_err(Into::into),
+            #[cfg(feature = "ucan")]
+            Self::Ucan(credentials) => {
+                credentials.authorize(capability, env).await.map_err(Into::into)
+            }
+        }
     }
 }

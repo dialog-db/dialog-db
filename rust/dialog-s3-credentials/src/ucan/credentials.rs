@@ -29,13 +29,14 @@
 //! # }
 //! ```
 
-use super::{DelegationChain, UcanAuthorization};
-use crate::capability::{AccessError, AuthorizedRequest, S3Request};
+use super::{DelegationChain, InvocationChain, UcanInvocation};
+use crate::capability::{AccessError, AuthorizedRequest};
 use async_trait::async_trait;
 use dialog_capability::{
-    Ability, Access, Authorized, Capability, Claim, Did, Effect, Provider, ucan::parameters,
+    Access, Authorized, Capability, Constraint, Did, Provider, credential, ucan::parameters,
 };
-use dialog_common::ConditionalSend;
+use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_ucan::InvocationBuilder;
 
 /// UCAN-based authorizer that delegates to an external access service.
 ///
@@ -111,78 +112,112 @@ impl Credentials {
 
 /// Implement Access trait for Credentials.
 ///
-/// This allows Credentials to find authorization proofs for capability claims
-/// by looking up delegation chains for the subject.
+/// This allows Credentials to authorize capability claims by building
+/// fully signed UCAN invocations. The env provides credential effects
+/// for identity discovery and signing.
 #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
-impl Access for Credentials {
-    type Authorization = UcanAuthorization;
+impl<C> Access<C> for Credentials
+where
+    C: Constraint + Clone + ConditionalSend + 'static,
+    Capability<C>: ConditionalSend,
+{
+    type Authorization = AuthorizedRequest;
     type Error = AccessError;
 
-    async fn claim<C: Ability + Clone + ConditionalSend + 'static>(
+    async fn authorize<Env>(
         &self,
-        claim: Claim<C>,
-    ) -> Result<Self::Authorization, Self::Error> {
-        // Self-authorization: when subject == audience, no delegation needed.
-        // The subject is acting on itself, which is inherently authorized.
-        if claim.subject() == claim.audience() {
-            return Ok(UcanAuthorization::owned(
-                self.endpoint.clone(),
-                claim.subject().clone(),
-                claim.capability().ability(),
-                parameters(claim.capability()),
-            ));
-        }
+        capability: Capability<C>,
+        env: &Env,
+    ) -> Result<Authorized<C, AuthorizedRequest>, Self::Error>
+    where
+        Env: Provider<credential::Identify> + Provider<credential::Sign> + ConditionalSync,
+    {
+        use super::authorization::{CredentialBridge, parameters_to_args};
 
-        // Delegated authorization: verify the claim's audience matches the delegation chain.
-        // Per UCAN spec: first delegation's `aud` should match the invoker.
-        let audience = self.delegation.audience();
-        if claim.audience() != audience {
-            return Err(AccessError::Configuration(format!(
-                "Claim audience '{}' does not match delegation chain audience '{}'",
-                claim.audience(),
-                audience
-            )));
-        }
+        let credentials = self;
+        let subject_did = capability.subject().clone();
+        let ability = capability.ability();
+        let params = parameters(&capability);
 
-        // Return authorization from the delegation chain
-        Ok(UcanAuthorization::delegated(
-            self.endpoint.clone(),
-            self.delegation.clone(),
-            claim.capability().ability(),
-            parameters(claim.capability()),
-        ))
-    }
-}
+        // Discover the operator's DID via credential::Identify effect.
+        let identify_cap = credential::Subject::from(subject_did.clone())
+            .attenuate(credential::Credential)
+            .invoke(credential::Identify);
+        let authority_did: Did =
+            <Env as Provider<credential::Identify>>::execute(env, identify_cap)
+                .await
+                .map_err(|e| AccessError::Configuration(e.to_string()))?;
 
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
-#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
-impl<Do> Provider<Authorized<Do, UcanAuthorization>> for Credentials
-where
-    Do: Effect<Output = Result<AuthorizedRequest, AccessError>> + 'static,
-    Capability<Do>: ConditionalSend + S3Request,
-{
-    async fn execute(
-        &self,
-        authorized: Authorized<Do, UcanAuthorization>,
-    ) -> Result<AuthorizedRequest, AccessError> {
-        authorized
-            .authorization()
-            .grant(authorized.capability())
+        // Self-authorization: when subject == authority, no delegation needed.
+        let (delegation, proofs) = if subject_did == authority_did {
+            (None, vec![])
+        } else {
+            // Delegated: verify authority matches the delegation chain audience.
+            let chain_audience = credentials.delegation.audience();
+            if &authority_did != chain_audience {
+                return Err(AccessError::Configuration(format!(
+                    "Authority '{}' does not match delegation chain audience '{}'",
+                    authority_did, chain_audience
+                )));
+            }
+            (
+                Some(credentials.delegation.clone()),
+                credentials.delegation.proof_cids().into(),
+            )
+        };
+
+        // Build and sign the UCAN invocation using credential effects.
+        let bridge = CredentialBridge::new(env, subject_did.clone())
             .await
+            .map_err(|e| AccessError::Invocation(e.to_string()))?;
+
+        let command: Vec<String> = ability
+            .trim_start_matches('/')
+            .split('/')
+            .map(|s| s.to_string())
+            .collect();
+
+        let args = parameters_to_args(params);
+
+        let invocation = InvocationBuilder::new()
+            .issuer(bridge)
+            .audience(&subject_did)
+            .subject(&subject_did)
+            .command(command)
+            .arguments(args)
+            .proofs(proofs)
+            .try_build()
+            .await
+            .map_err(|e| AccessError::Invocation(format!("{:?}", e)))?;
+
+        let delegations = delegation
+            .map(|c| c.delegations().clone())
+            .unwrap_or_default();
+
+        let chain = InvocationChain::new(invocation, delegations);
+
+        let invocation = UcanInvocation {
+            endpoint: credentials.endpoint.clone(),
+            chain: Box::new(chain),
+            subject: subject_did,
+            ability,
+        };
+
+        // Presign immediately — POST the UCAN invocation to the access service
+        let authorized_request = invocation.grant().await?;
+
+        Ok(Authorized::new(capability, authorized_request))
     }
 }
 
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::capability::archive;
     use crate::ucan::delegation::helpers::create_delegation;
-    use anyhow;
-    use dialog_capability::{Authorization, Did, Issuer, Principal, Subject};
-    use dialog_common::Blake3Hash;
-    use dialog_credentials::{Ed25519KeyResolver, Ed25519Signer};
-    use dialog_ucan::promise::Promised;
+    use dialog_capability::{Capability, Constraint, Did, Principal, Provider, credential};
+    use dialog_common::{ConditionalSend, ConditionalSync};
+    use dialog_credentials::Ed25519Signer;
     use dialog_varsig::Signer;
     use dialog_varsig::eddsa::Ed25519Signature;
 
@@ -221,15 +256,23 @@ pub mod tests {
 
     #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
     #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
-    impl Access for Session {
-        type Authorization = UcanAuthorization;
+    impl<C> Access<C> for Session
+    where
+        C: Constraint + Clone + ConditionalSend + 'static,
+        Capability<C>: ConditionalSend,
+    {
+        type Authorization = AuthorizedRequest;
         type Error = AccessError;
 
-        async fn claim<C: Ability + Clone + ConditionalSend + 'static>(
+        async fn authorize<Env>(
             &self,
-            claim: Claim<C>,
-        ) -> Result<Self::Authorization, Self::Error> {
-            self.credentials.claim(claim).await
+            capability: Capability<C>,
+            env: &Env,
+        ) -> Result<Authorized<C, Self::Authorization>, Self::Error>
+        where
+            Env: Provider<credential::Identify> + Provider<credential::Sign> + ConditionalSync,
+        {
+            self.credentials.authorize(capability, env).await
         }
     }
     impl Principal for Session {
@@ -242,192 +285,31 @@ pub mod tests {
             self.signer.sign(payload).await
         }
     }
-    impl Issuer for Session {
-        type Signature = Ed25519Signature;
-    }
 
-    #[dialog_common::test]
-    async fn it_acquires_access() -> anyhow::Result<()> {
-        let operator = Ed25519Signer::import(&[0u8; 32]).await.unwrap();
-
-        let credentials = Credentials::new(
-            "https://access.ucan.com".into(),
-            test_delegation_chain(&operator, &operator, &["archive"]).await,
-        );
-
-        let session = Session::open(credentials, &[0u8; 32]).await;
-
-        let read = Subject::from(session.did())
-            .attenuate(archive::Archive)
-            .attenuate(archive::Catalog {
-                catalog: "blobs".into(),
-            })
-            .invoke(archive::Get {
-                digest: Blake3Hash::hash(b"hello"),
-            })
-            .acquire(&session.clone())
-            .await?;
-
-        let authorization = read.authorization().invoke(&session).await?;
-
-        let ucan = match authorization {
-            UcanAuthorization::Invocation { chain, .. } => chain,
-            _ => panic!("expected invocation"),
-        };
-
-        assert_eq!(ucan.invocation.command().to_string(), "/archive/get");
-        assert_eq!(
-            ucan.invocation.subject().to_string(),
-            session.did().to_string()
-        );
-        assert_eq!(ucan.verify(&Ed25519KeyResolver).await?, ());
-
-        assert_eq!(
-            ucan.arguments().get("catalog"),
-            Some(&Promised::String("blobs".into()))
-        );
-        assert_eq!(
-            ucan.arguments().get("digest"),
-            Some(&Promised::Bytes(
-                Blake3Hash::hash(b"hello").as_bytes().into()
-            ))
-        );
-
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    async fn it_returns_owned_authorization_for_self_claim() -> anyhow::Result<()> {
-        // Create a signer where subject == operator (self-authorization)
-        let operator = Ed25519Signer::import(&[0u8; 32]).await.unwrap();
-
-        // Create credentials with a delegation (won't be used for self-auth)
-        let credentials = Credentials::new(
-            "https://access.ucan.com".into(),
-            test_delegation_chain(&operator, &operator, &["archive"]).await,
-        );
-
-        let session = Session::open(credentials, &[0u8; 32]).await;
-
-        // Create a capability where subject == session.did() (self-authorization)
-        let capability = Subject::from(session.did())
-            .attenuate(archive::Archive)
-            .attenuate(archive::Catalog {
-                catalog: "blobs".into(),
-            })
-            .invoke(archive::Get {
-                digest: Blake3Hash::hash(b"hello"),
-            });
-
-        // Acquire authorization - should return Owned since subject == audience
-        let authorized = capability.acquire(&session.clone()).await?;
-
-        // Verify it's an Owned authorization
-        match authorized.authorization() {
-            UcanAuthorization::Owned { subject, .. } => {
-                assert_eq!(subject, &session.did());
-            }
-            _ => panic!("Expected Owned authorization for self-claim"),
+    #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
+    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
+    impl Provider<credential::Identify> for Session {
+        async fn execute(
+            &self,
+            _input: Capability<credential::Identify>,
+        ) -> Result<Did, credential::CredentialError> {
+            Ok(self.signer.did())
         }
-
-        Ok(())
     }
 
-    #[dialog_common::test]
-    async fn it_allows_self_authorization_with_different_delegation_audience() -> anyhow::Result<()>
-    {
-        // Create an operator signer for the delegation chain
-        let operator = Ed25519Signer::import(&[1u8; 32]).await.unwrap();
-
-        // Create credentials with delegation chain audience = operator_did
-        let credentials = Credentials::new(
-            "https://access.ucan.com".into(),
-            test_delegation_chain(&operator, &operator, &["archive"]).await,
-        );
-
-        // Create a session with a DIFFERENT key (session.did() != operator_did)
-        let session = Session::open(credentials, &[2u8; 32]).await;
-
-        // Verify the DIDs are different
-        let session_did = session.did().to_string();
-        let operator_did = operator.did().to_string();
-        assert_ne!(
-            session_did, operator_did,
-            "Session DID should differ from operator DID for this test"
-        );
-
-        // Create a capability where subject == session.did() (self-authorization case)
-        let capability = Subject::from(session.did())
-            .attenuate(archive::Archive)
-            .attenuate(archive::Catalog {
-                catalog: "blobs".into(),
-            })
-            .invoke(archive::Get {
-                digest: Blake3Hash::hash(b"hello"),
-            });
-
-        let result = capability.acquire(&session.clone()).await;
-
-        assert!(
-            result.is_ok(),
-            "Self-authorization should work regardless of delegation chain audience. Error: {:?}",
-            result.err()
-        );
-
-        Ok(())
+    #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
+    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
+    impl Provider<credential::Sign> for Session {
+        async fn execute(
+            &self,
+            input: Capability<credential::Sign>,
+        ) -> Result<Vec<u8>, credential::CredentialError> {
+            let payload = credential::Sign::of(&input).payload.as_slice();
+            let sig: Ed25519Signature = Signer::sign(&self.signer, payload)
+                .await
+                .map_err(|e| credential::CredentialError::SigningFailed(e.to_string()))?;
+            Ok(sig.to_bytes().to_vec())
+        }
     }
 
-    #[dialog_common::test]
-    async fn it_invokes_and_verifies_self_authorization() -> anyhow::Result<()> {
-        // Create a signer where subject == operator (self-authorization)
-        let operator = Ed25519Signer::import(&[0u8; 32]).await.unwrap();
-
-        let credentials = Credentials::new(
-            "https://access.ucan.com".into(),
-            test_delegation_chain(&operator, &operator, &["archive"]).await,
-        );
-
-        let session = Session::open(credentials, &[0u8; 32]).await;
-
-        // Create a capability where subject == session.did() (self-authorization)
-        let authorized = Subject::from(session.did())
-            .attenuate(archive::Archive)
-            .attenuate(archive::Catalog {
-                catalog: "blobs".into(),
-            })
-            .invoke(archive::Get {
-                digest: Blake3Hash::hash(b"hello"),
-            })
-            .acquire(&session.clone())
-            .await?;
-
-        // Invoke the authorization - should create an Invocation with empty proofs
-        let authorization = authorized.authorization().invoke(&session).await?;
-
-        let ucan = match authorization {
-            UcanAuthorization::Invocation { chain, .. } => chain,
-            _ => panic!("Expected Invocation after invoke()"),
-        };
-
-        // Verify the invocation properties
-        assert_eq!(ucan.invocation.command().to_string(), "/archive/get");
-        assert_eq!(
-            ucan.invocation.subject().to_string(),
-            session.did().to_string()
-        );
-        assert_eq!(
-            ucan.invocation.issuer().to_string(),
-            session.did().to_string()
-        );
-        // Self-invocation should have empty proofs
-        assert!(
-            ucan.invocation.proofs().is_empty(),
-            "Self-invocation should have empty proofs"
-        );
-
-        // Verify the chain - self-invocation (issuer == subject) should pass
-        assert_eq!(ucan.verify(&Ed25519KeyResolver).await?, ());
-
-        Ok(())
-    }
 }

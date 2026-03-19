@@ -92,7 +92,44 @@ impl S3Request for Capability<Put> {
             Put::of(self).digest.as_bytes().to_base58()
         )
     }
-    fn checksum(&self) -> Option<&Checksum> {
-        Some(&Put::of(self).checksum)
+    fn checksum(&self) -> Option<Checksum> {
+        Some(Put::of(self).checksum.clone())
+    }
+}
+
+impl S3Request for Capability<dialog_effects::archive::Get> {
+    fn method(&self) -> &'static str {
+        "GET"
+    }
+    fn path(&self) -> String {
+        format!(
+            "{}/{}/{}",
+            self.subject(),
+            Catalog::of(self).catalog,
+            dialog_effects::archive::Get::of(self)
+                .digest
+                .as_bytes()
+                .to_base58()
+        )
+    }
+}
+
+impl S3Request for Capability<dialog_effects::archive::Put> {
+    fn method(&self) -> &'static str {
+        "PUT"
+    }
+    fn path(&self) -> String {
+        format!(
+            "{}/{}/{}",
+            self.subject(),
+            Catalog::of(self).catalog,
+            dialog_effects::archive::Put::of(self)
+                .digest
+                .as_bytes()
+                .to_base58()
+        )
+    }
+    fn checksum(&self) -> Option<Checksum> {
+        Some(crate::Hasher::Sha256.checksum(&dialog_effects::archive::Put::of(self).content))
     }
 }

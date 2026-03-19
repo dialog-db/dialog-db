@@ -6,8 +6,8 @@ use dialog_effects::remote::RemoteInvocation;
 use super::Branch;
 use super::state::{BranchName, UpstreamState};
 use crate::repository::error::RepositoryError;
-use crate::repository::remote::SiteName;
 use crate::repository::remote::RemoteBranch;
+use crate::repository::remote::SiteName;
 use crate::repository::revision::Revision;
 
 /// Command struct for fetching the upstream branch's current revision.
@@ -65,7 +65,8 @@ async fn fetch_local<Env>(
 where
     Env: Provider<memory_fx::Resolve>,
 {
-    let upstream = branch.load_branch(upstream_name.clone())
+    let upstream = branch
+        .load_branch(upstream_name.clone())
         .perform(env)
         .await?;
 
@@ -87,9 +88,7 @@ where
     Env: Provider<memory_fx::Resolve>
         + Provider<RemoteInvocation<memory_fx::Resolve, RemoteAddress>>,
 {
-    let remote_site = branch.load_remote(remote.clone())
-        .perform(env)
-        .await?;
+    let remote_site = branch.load_remote(remote.clone()).perform(env).await?;
 
     let remote_branch = RemoteBranch::new(
         remote_site.name().clone(),

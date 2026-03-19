@@ -3,6 +3,7 @@ use crate::ProviderRoute;
 /// Derive macro that generates [`Router`] impl and
 /// `Provider<RemoteInvocation<Fx, Address>>` impls for composite structs whose
 /// fields each route to a different address type.
+pub use dialog_macros::Provider;
 pub use dialog_macros::Router;
 
 /// Trait for composite types that route remote invocations to
@@ -22,11 +23,11 @@ pub use dialog_macros::Router;
 ///
 /// ```rust,ignore
 /// #[derive(dialog_capability::Router)]
-/// pub struct Network<Issuer> {
+/// pub struct Network {
 ///     #[cfg(feature = "s3")]
-///     s3: s3::Route<Issuer>,
+///     s3: route::Route<s3::Credentials, s3::Connection>,
 ///     #[cfg(feature = "ucan")]
-///     ucan: ucan::Route<Issuer>,
+///     ucan: route::Route<ucan::Credentials, ucan::Connection>,
 /// }
 /// // Generates: NetworkAddress enum, Router impl, ProviderRoute blanket,
 /// // and Provider<RemoteInvocation<Fx, NetworkAddress>> dispatch.

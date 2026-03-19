@@ -10,8 +10,8 @@ use super::Branch;
 use super::novelty::novelty;
 use super::state::{BranchName, UpstreamState};
 use crate::repository::error::RepositoryError;
-use crate::repository::remote::SiteName;
 use crate::repository::remote::RemoteBranch;
+use crate::repository::remote::SiteName;
 use crate::repository::revision::Revision;
 
 /// Command struct for pushing local changes to an upstream branch.
@@ -82,7 +82,8 @@ where
         + ConditionalSync
         + 'static,
 {
-    let upstream = branch.load_branch(upstream_name.clone())
+    let upstream = branch
+        .load_branch(upstream_name.clone())
         .perform(env)
         .await?;
 
@@ -126,9 +127,7 @@ where
         + ConditionalSync
         + 'static,
 {
-    let remote_site = branch.load_remote(remote.clone())
-        .perform(env)
-        .await?;
+    let remote_site = branch.load_remote(remote.clone()).perform(env).await?;
 
     let remote_branch = RemoteBranch::new(
         remote_site.name().clone(),

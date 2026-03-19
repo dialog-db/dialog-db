@@ -67,8 +67,8 @@ impl S3Request for Capability<Publish> {
             &Cell::of(self).cell
         )
     }
-    fn checksum(&self) -> Option<&Checksum> {
-        Some(&Publish::of(self).checksum)
+    fn checksum(&self) -> Option<Checksum> {
+        Some(Publish::of(self).checksum.clone())
     }
     fn precondition(&self) -> Precondition {
         match &Publish::of(self).when {
@@ -111,5 +111,61 @@ impl S3Request for Capability<Retract> {
     }
     fn precondition(&self) -> Precondition {
         Precondition::IfMatch(Retract::of(self).when.clone())
+    }
+}
+
+impl S3Request for Capability<dialog_effects::memory::Resolve> {
+    fn method(&self) -> &'static str {
+        "GET"
+    }
+    fn path(&self) -> String {
+        format!(
+            "{}/{}/{}",
+            self.subject(),
+            &Space::of(self).space,
+            &Cell::of(self).cell
+        )
+    }
+}
+
+impl S3Request for Capability<dialog_effects::memory::Publish> {
+    fn method(&self) -> &'static str {
+        "PUT"
+    }
+    fn path(&self) -> String {
+        format!(
+            "{}/{}/{}",
+            self.subject(),
+            &Space::of(self).space,
+            &Cell::of(self).cell
+        )
+    }
+    fn checksum(&self) -> Option<Checksum> {
+        Some(crate::Hasher::Sha256.checksum(&dialog_effects::memory::Publish::of(self).content))
+    }
+    fn precondition(&self) -> Precondition {
+        match &dialog_effects::memory::Publish::of(self).when {
+            Some(edition) => Precondition::IfMatch(String::from_utf8_lossy(edition).to_string()),
+            None => Precondition::IfNoneMatch,
+        }
+    }
+}
+
+impl S3Request for Capability<dialog_effects::memory::Retract> {
+    fn method(&self) -> &'static str {
+        "DELETE"
+    }
+    fn path(&self) -> String {
+        format!(
+            "{}/{}/{}",
+            self.subject(),
+            &Space::of(self).space,
+            &Cell::of(self).cell
+        )
+    }
+    fn precondition(&self) -> Precondition {
+        Precondition::IfMatch(
+            String::from_utf8_lossy(&dialog_effects::memory::Retract::of(self).when).to_string(),
+        )
     }
 }

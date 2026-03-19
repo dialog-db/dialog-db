@@ -103,17 +103,31 @@ impl Repository {
     /// Open (load or create) a branch.
     pub fn open_branch(&self, name: impl Into<branch::BranchName>) -> branch::Open {
         let trace = self.memory.trace(name);
-        branch::Open::new(self.session.clone(), self.subject.clone(), self.memory.clone(), trace)
+        branch::Open::new(
+            self.session.clone(),
+            self.subject.clone(),
+            self.memory.clone(),
+            trace,
+        )
     }
 
     /// Load an existing branch (error if not found).
     pub fn load_branch(&self, name: impl Into<branch::BranchName>) -> branch::Load {
         let trace = self.memory.trace(name);
-        branch::Load::new(self.session.clone(), self.subject.clone(), self.memory.clone(), trace)
+        branch::Load::new(
+            self.session.clone(),
+            self.subject.clone(),
+            self.memory.clone(),
+            trace,
+        )
     }
 
     /// Add a new remote site to this repository.
-    pub fn add_remote(&self, name: impl Into<remote::SiteName>, address: RemoteAddress) -> remote::site::Open {
+    pub fn add_remote(
+        &self,
+        name: impl Into<remote::SiteName>,
+        address: RemoteAddress,
+    ) -> remote::site::Open {
         remote::site::Open::new(name, address, self.memory.space("site"))
     }
 

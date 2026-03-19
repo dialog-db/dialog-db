@@ -83,8 +83,8 @@ impl S3Request for Capability<Set> {
             Set::of(self).key.to_base58()
         )
     }
-    fn checksum(&self) -> Option<&Checksum> {
-        Some(&Set::of(self).checksum)
+    fn checksum(&self) -> Option<Checksum> {
+        Some(Set::of(self).checksum.clone())
     }
 }
 
@@ -158,6 +158,75 @@ impl S3Request for Capability<List> {
         ];
 
         if let Some(token) = &List::of(self).continuation_token {
+            params.push(("continuation-token".to_owned(), token.clone()));
+        }
+
+        Some(params)
+    }
+}
+
+impl S3Request for Capability<dialog_effects::storage::Get> {
+    fn method(&self) -> &'static str {
+        "GET"
+    }
+    fn path(&self) -> String {
+        format!(
+            "{}/{}/{}",
+            self.subject(),
+            Store::of(self).store,
+            dialog_effects::storage::Get::of(self).key.to_base58()
+        )
+    }
+}
+
+impl S3Request for Capability<dialog_effects::storage::Set> {
+    fn method(&self) -> &'static str {
+        "PUT"
+    }
+    fn path(&self) -> String {
+        format!(
+            "{}/{}/{}",
+            self.subject(),
+            Store::of(self).store,
+            dialog_effects::storage::Set::of(self).key.to_base58()
+        )
+    }
+    fn checksum(&self) -> Option<Checksum> {
+        Some(crate::Hasher::Sha256.checksum(&dialog_effects::storage::Set::of(self).value))
+    }
+}
+
+impl S3Request for Capability<dialog_effects::storage::Delete> {
+    fn method(&self) -> &'static str {
+        "DELETE"
+    }
+    fn path(&self) -> String {
+        format!(
+            "{}/{}/{}",
+            self.subject(),
+            Store::of(self).store,
+            dialog_effects::storage::Delete::of(self).key.to_base58()
+        )
+    }
+}
+
+impl S3Request for Capability<dialog_effects::storage::List> {
+    fn method(&self) -> &'static str {
+        "GET"
+    }
+    fn path(&self) -> String {
+        String::new()
+    }
+    fn params(&self) -> Option<Vec<(String, String)>> {
+        let mut params = vec![
+            ("list-type".to_owned(), "2".to_owned()),
+            (
+                "prefix".to_owned(),
+                format!("{}/{}", self.subject(), &Store::of(self).store),
+            ),
+        ];
+
+        if let Some(token) = &dialog_effects::storage::List::of(self).continuation_token {
             params.push(("continuation-token".to_owned(), token.clone()));
         }
 

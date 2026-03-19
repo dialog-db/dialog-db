@@ -1,11 +1,6 @@
-use crate::{
-    Authorization, Capability, Constraint, DialogCapabilityPerformError, Effect, Issuer, Provider,
-};
+use crate::{Capability, Constraint, Effect, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
-use std::{
-    error::Error,
-    fmt::{Debug, Formatter},
-};
+use std::fmt::{Debug, Formatter};
 
 /// A capability paired with its authorization proof.
 ///
@@ -14,13 +9,13 @@ use std::{
 /// implementations.
 ///
 /// - `C` is the constraint type (e.g., `storage::Get`)
-/// - `A` is the authorization type (e.g., `UcanAuthorization`)
-pub struct Authorized<C: Constraint, A: Authorization> {
+/// - `A` is the authorization type (e.g., `AuthorizedRequest`)
+pub struct Authorized<C: Constraint, A> {
     capability: Capability<C>,
     authorization: A,
 }
 
-impl<C: Constraint, A: Authorization + Clone> Clone for Authorized<C, A>
+impl<C: Constraint, A: Clone> Clone for Authorized<C, A>
 where
     C::Capability: Clone,
 {
@@ -32,7 +27,7 @@ where
     }
 }
 
-impl<C: Constraint + Debug, A: Authorization + Debug> Debug for Authorized<C, A>
+impl<C: Constraint + Debug, A: Debug> Debug for Authorized<C, A>
 where
     C::Capability: Debug,
 {
@@ -44,7 +39,7 @@ where
     }
 }
 
-impl<C: Constraint, A: Authorization> Authorized<C, A> {
+impl<C: Constraint, A> Authorized<C, A> {
     /// Create a new authorized capability.
     pub fn new(capability: Capability<C>, authorization: A) -> Self {
         Self {
@@ -79,28 +74,15 @@ impl<C: Constraint, A: Authorization> Authorized<C, A> {
     }
 }
 
-impl<Ok, E: Error, Fx: Effect<Output = Result<Ok, E>> + Constraint, A: Authorization>
-    Authorized<Fx, A>
-{
-    /// Perform the invocation directly without authorization verification.
-    /// For operations that require authorization, use `acquire` first.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Ok, DialogCapabilityPerformError<E>>
+impl<Fx: Effect + Constraint, A> Authorized<Fx, A> {
+    /// Perform the authorized capability.
+    ///
+    /// The authorization proof was already fully formed during `acquire`,
+    /// so this just delegates to the env's `Provider<Authorized<Fx, A>>`.
+    pub async fn perform<Env>(self, env: &Env) -> Fx::Output
     where
-        Env: Provider<Self>
-            + Issuer<Signature = A::Signature>
-            + Clone
-            + ConditionalSend
-            + ConditionalSync,
+        Env: Provider<Self> + ConditionalSend + ConditionalSync,
     {
-        match self.authorization.invoke(env).await {
-            Ok(authorization) => env
-                .execute(Authorized {
-                    capability: self.capability,
-                    authorization,
-                })
-                .await
-                .map_err(DialogCapabilityPerformError::Execution),
-            Err(e) => Err(DialogCapabilityPerformError::Authorization(e)),
-        }
+        env.execute(self).await
     }
 }

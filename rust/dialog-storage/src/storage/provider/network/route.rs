@@ -1,8 +1,7 @@
-//! Generic route that binds an issuer to a resource pool.
+//! Generic route that caches connections by address.
 //!
-//! Callers only pass an address in their invocations. The [`Route`]
-//! combines the held issuer with the incoming address to open the
-//! resource via [`Resource::open`], then caches the connection by
+//! Callers pass an address in their invocations. The [`Route`]
+//! opens a connection via [`Resource::open`], then caches it by
 //! address in a [`Pool`].
 
 use std::convert::Infallible;
@@ -14,49 +13,50 @@ use dialog_capability::{Capability, Constraint, Effect, Provider, ProviderRoute}
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::remote::RemoteInvocation;
 
-/// A route that holds an issuer and caches connections by address.
+/// A route that caches connections by address.
 ///
 /// Implements [`ProviderRoute`] with `Address = Address` so callers
-/// just pass their address/credentials in [`RemoteInvocation`]s — the
-/// issuer is injected internally when opening new connections.
+/// just pass their address/credentials in [`RemoteInvocation`]s.
 ///
-/// The `Connection` type must implement `Resource<(Address, Issuer)>` so
-/// that new connections can be opened from the (address, issuer) pair.
+/// The `Connection` type must implement `Resource<Address>` so
+/// that new connections can be opened from the address.
 ///
 /// Connections are cached in `Arc` wrappers so they can be cloned out of the
 /// pool's `RwLock` before any `.await` points.
 ///
 /// [`RemoteInvocation`]: dialog_effects::remote::RemoteInvocation
-pub struct Route<Issuer, Address, Connection> {
-    issuer: Issuer,
+pub struct Route<Address, Connection> {
     connections: Pool<Address, Arc<Connection>>,
 }
 
-impl<Issuer, Address, Connection> Route<Issuer, Address, Connection> {
-    /// Create a new route with the given issuer.
-    pub fn new(issuer: Issuer) -> Self {
+impl<Address, Connection> Route<Address, Connection> {
+    /// Create a new route.
+    pub fn new() -> Self {
         Self {
-            issuer,
             connections: Pool::new(),
         }
     }
 }
 
-impl<Issuer, Address, Connection> ProviderRoute for Route<Issuer, Address, Connection> {
+impl<Address, Connection> Default for Route<Address, Connection> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<Address, Connection> ProviderRoute for Route<Address, Connection> {
     type Address = Address;
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Issuer, Address, Connection, Fx> Provider<RemoteInvocation<Fx, Address>>
-    for Route<Issuer, Address, Connection>
+impl<Address, Connection, Fx> Provider<RemoteInvocation<Fx, Address>> for Route<Address, Connection>
 where
     Fx: Effect + 'static,
     Fx::Of: Constraint,
     Capability<Fx>: ConditionalSend,
-    Issuer: Clone + ConditionalSend + ConditionalSync + 'static,
     Address: Clone + Eq + Hash + ConditionalSend + ConditionalSync + 'static,
-    Connection: Resource<(Address, Issuer), Error = Infallible>
+    Connection: Resource<Address, Error = Infallible>
         + Provider<Fx>
         + ConditionalSend
         + ConditionalSync
@@ -70,8 +70,7 @@ where
             Some(conn) => conn,
             None => {
                 // Open a new connection with no lock held during the await.
-                let new_conn = match Connection::open(&(address.clone(), self.issuer.clone())).await
-                {
+                let new_conn = match Connection::open(&address).await {
                     Ok(c) => Arc::new(c),
                     Err(error) => match error {},
                 };
@@ -111,9 +110,6 @@ mod tests {
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     struct TestCredentials(String);
 
-    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-    struct TestIssuer(String);
-
     struct MockConnection {
         data: HashMap<String, Vec<u8>>,
     }
@@ -129,10 +125,10 @@ mod tests {
 
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    impl Resource<(TestCredentials, TestIssuer)> for MockConnection {
+    impl Resource<TestCredentials> for MockConnection {
         type Error = Infallible;
 
-        async fn open(_address: &(TestCredentials, TestIssuer)) -> Result<Self, Self::Error> {
+        async fn open(_address: &TestCredentials) -> Result<Self, Self::Error> {
             Ok(MockConnection {
                 data: HashMap::new(),
             })
@@ -141,8 +137,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_routes_and_caches_connections() {
-        let route: Route<TestIssuer, TestCredentials, MockConnection> =
-            Route::new(TestIssuer("issuer-1".into()));
+        let route: Route<TestCredentials, MockConnection> = Route::new();
 
         let creds = TestCredentials("site-a".into());
 

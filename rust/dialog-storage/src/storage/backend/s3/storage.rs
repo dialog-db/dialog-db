@@ -1,49 +1,29 @@
 //! Storage capability types and Provider implementations for S3 backend.
 //!
 //! Re-exports storage types from [`dialog_effects`] and implements
-//! `Provider<Get>`, `Provider<Set>`, and `Provider<Delete>` for [`S3`].
+//! `Provider<Authorized<Fx, AuthorizedRequest>>` for [`S3`].
+//! Each impl executes the presigned HTTP request and interprets the response.
 
 pub use dialog_effects::storage::*;
 
 use async_trait::async_trait;
-use dialog_capability::{Issuer, Provider};
-use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_s3_credentials::capability::storage::{
-    Delete as AuthorizeDelete, Get as AuthorizeGet, Set as AuthorizeSet,
-};
-use dialog_varsig::eddsa::Ed25519Signature;
+use dialog_capability::{Authorized, Provider};
+use dialog_s3_credentials::AuthorizedRequest;
 
-use super::{Hasher, RequestDescriptorExt, S3};
+use super::{RequestDescriptorExt, S3};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<I> Provider<Get> for S3<I>
-where
-    I: Issuer<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
-{
-    async fn execute(&self, input: Capability<Get>) -> Result<Option<Vec<u8>>, StorageError> {
-        // Build the authorization capability
-        let capability = Subject::from(input.subject().clone())
-            .attenuate(Storage)
-            .attenuate(Store::of(&input).clone())
-            .invoke(AuthorizeGet {
-                key: Get::of(&input).key.clone(),
-            });
-
-        // Acquire authorization and perform
-        let authorized = capability
-            .acquire(self)
-            .await
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
-
-        let authorization = authorized
-            .perform(self)
-            .await
-            .map_err(|e| StorageError::Storage(format!("{:?}", e)))?;
+impl Provider<Authorized<Get, AuthorizedRequest>> for S3 {
+    async fn execute(
+        &self,
+        authorized: Authorized<Get, AuthorizedRequest>,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        let request = authorized.into_authorization();
 
         let client = reqwest::Client::new();
-        let builder = authorization.into_request(&client);
-        let response = builder
+        let response = request
+            .into_request(&client)
             .send()
             .await
             .map_err(|e| StorageError::Storage(e.to_string()))?;
@@ -67,37 +47,18 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<I> Provider<Set> for S3<I>
-where
-    I: Issuer<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
-{
-    async fn execute(&self, input: Capability<Set>) -> Result<(), StorageError> {
-        let Set { key, value } = Set::of(&input);
-        let checksum = Hasher::Sha256.checksum(value);
-
-        // Build the authorization capability
-        let capability = Subject::from(input.subject().clone())
-            .attenuate(Storage)
-            .attenuate(Store::of(&input).clone())
-            .invoke(AuthorizeSet {
-                key: key.clone(),
-                checksum,
-            });
-
-        // Acquire authorization and perform
-        let authorized = capability
-            .acquire(self)
-            .await
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
-
-        let authorization = authorized
-            .perform(self)
-            .await
-            .map_err(|e| StorageError::Storage(format!("{:?}", e)))?;
+impl Provider<Authorized<Set, AuthorizedRequest>> for S3 {
+    async fn execute(
+        &self,
+        authorized: Authorized<Set, AuthorizedRequest>,
+    ) -> Result<(), StorageError> {
+        let value = Set::of(authorized.capability()).value.clone();
+        let request = authorized.into_authorization();
 
         let client = reqwest::Client::new();
-        let builder = authorization.into_request(&client).body(value.to_vec());
-        let response = builder
+        let response = request
+            .into_request(&client)
+            .body(value)
             .send()
             .await
             .map_err(|e| StorageError::Storage(e.to_string()))?;
@@ -115,33 +76,16 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<I> Provider<Delete> for S3<I>
-where
-    I: Issuer<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
-{
-    async fn execute(&self, input: Capability<Delete>) -> Result<(), StorageError> {
-        // Build the authorization capability
-        let capability = Subject::from(input.subject().clone())
-            .attenuate(Storage)
-            .attenuate(Store::of(&input).clone())
-            .invoke(AuthorizeDelete {
-                key: Delete::of(&input).key.clone(),
-            });
-
-        // Acquire authorization and perform
-        let authorized = capability
-            .acquire(self)
-            .await
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
-
-        let authorization = authorized
-            .perform(self)
-            .await
-            .map_err(|e| StorageError::Storage(format!("{:?}", e)))?;
+impl Provider<Authorized<Delete, AuthorizedRequest>> for S3 {
+    async fn execute(
+        &self,
+        authorized: Authorized<Delete, AuthorizedRequest>,
+    ) -> Result<(), StorageError> {
+        let request = authorized.into_authorization();
 
         let client = reqwest::Client::new();
-        let builder = authorization.into_request(&client);
-        let response = builder
+        let response = request
+            .into_request(&client)
             .send()
             .await
             .map_err(|e| StorageError::Storage(e.to_string()))?;

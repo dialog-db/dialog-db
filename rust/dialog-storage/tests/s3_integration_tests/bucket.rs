@@ -2,7 +2,13 @@
 
 #![cfg(feature = "s3-integration-tests")]
 
-use dialog_storage::s3::{Address, Bucket, S3, S3Credentials, Session};
+use dialog_capability::{Access, Did};
+use dialog_effects::memory::prelude::*;
+use dialog_effects::memory::{MemoryError, Publication};
+use dialog_effects::storage::StorageError;
+use dialog_effects::storage::prelude::*;
+use dialog_s3_credentials::Address;
+use dialog_storage::s3::{S3, S3Credentials, S3StorageError, helpers::Session};
 
 /// Adds timestamp to the given string to make it unique
 pub fn unique(base: &str) -> String {
@@ -13,11 +19,137 @@ pub fn unique(base: &str) -> String {
     format!("{}-{}", base, millis)
 }
 
-/// Helper to create an S3 backend from environment variables.
-///
-/// Uses `option_env!` instead of `env!` so that `cargo check --tests --all-features`
-/// doesn't fail when the R2S3_* environment variables aren't set at compile time.
-pub fn open() -> Bucket<Session> {
+/// Test context with S3 backend, credentials, subject, and session for integration tests.
+pub struct TestBucket {
+    pub s3: S3,
+    pub credentials: S3Credentials,
+    pub subject: Did,
+    pub session: Session,
+    pub store: String,
+}
+
+impl TestBucket {
+    pub fn at(&self, path: &str) -> Self {
+        TestBucket {
+            s3: self.s3.clone(),
+            credentials: self.credentials.clone(),
+            subject: self.subject.clone(),
+            session: self.session.clone(),
+            store: format!("{}/{}", self.store, path),
+        }
+    }
+
+    pub async fn set(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), S3StorageError> {
+        let authorized = self
+            .credentials
+            .claim(self.subject.clone())
+            .storage()
+            .store(&self.store)
+            .set(key, value)
+            .acquire(&self.session)
+            .await
+            .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?;
+
+        let result: Result<(), StorageError> = authorized.perform(&self.s3).await;
+        result.map_err(|e| S3StorageError::ServiceError(e.to_string()))
+    }
+
+    pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, S3StorageError> {
+        let authorized = self
+            .credentials
+            .claim(self.subject.clone())
+            .storage()
+            .store(&self.store)
+            .get(key)
+            .acquire(&self.session)
+            .await
+            .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?;
+
+        let result: Result<Option<Vec<u8>>, StorageError> = authorized.perform(&self.s3).await;
+        result.map_err(|e| S3StorageError::ServiceError(e.to_string()))
+    }
+
+    pub async fn delete(&self, key: &[u8]) -> Result<(), S3StorageError> {
+        let authorized = self
+            .credentials
+            .claim(self.subject.clone())
+            .storage()
+            .store(&self.store)
+            .delete(key)
+            .acquire(&self.session)
+            .await
+            .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?;
+
+        let result: Result<(), StorageError> = authorized.perform(&self.s3).await;
+        result.map_err(|e| S3StorageError::ServiceError(e.to_string()))
+    }
+
+    pub async fn resolve(
+        &self,
+        space: &str,
+        cell: &str,
+    ) -> Result<Option<Publication>, S3StorageError> {
+        let authorized = self
+            .credentials
+            .claim(self.subject.clone())
+            .memory()
+            .space(space)
+            .cell(cell)
+            .resolve()
+            .acquire(&self.session)
+            .await
+            .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?;
+
+        let result: Result<Option<Publication>, MemoryError> = authorized.perform(&self.s3).await;
+        result.map_err(|e| S3StorageError::ServiceError(e.to_string()))
+    }
+
+    pub async fn publish(
+        &self,
+        space: &str,
+        cell: &str,
+        content: Vec<u8>,
+        when: Option<Vec<u8>>,
+    ) -> Result<Vec<u8>, S3StorageError> {
+        let authorized = self
+            .credentials
+            .claim(self.subject.clone())
+            .memory()
+            .space(space)
+            .cell(cell)
+            .publish(content, when)
+            .acquire(&self.session)
+            .await
+            .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?;
+
+        let result: Result<Vec<u8>, MemoryError> = authorized.perform(&self.s3).await;
+        result.map_err(|e| S3StorageError::ServiceError(e.to_string()))
+    }
+
+    pub async fn retract(
+        &self,
+        space: &str,
+        cell: &str,
+        when: Vec<u8>,
+    ) -> Result<(), S3StorageError> {
+        let authorized = self
+            .credentials
+            .claim(self.subject.clone())
+            .memory()
+            .space(space)
+            .cell(cell)
+            .retract(when)
+            .acquire(&self.session)
+            .await
+            .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?;
+
+        let result: Result<(), MemoryError> = authorized.perform(&self.s3).await;
+        result.map_err(|e| S3StorageError::ServiceError(e.to_string()))
+    }
+}
+
+/// Helper to create an S3 test context from environment variables.
+pub fn open() -> TestBucket {
     #![allow(clippy::option_env_unwrap)]
     let address = Address::new(
         option_env!("R2S3_ENDPOINT").expect("R2S3_ENDPOINT not set"),
@@ -25,8 +157,7 @@ pub fn open() -> Bucket<Session> {
         option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set"),
     );
 
-    // Use the bucket name as subject by default for integration tests
-    let subject: dialog_capability::Did = option_env!("R2S3_SUBJECT")
+    let subject: Did = option_env!("R2S3_SUBJECT")
         .unwrap_or("did:key:zTestSubject")
         .parse()
         .expect("Invalid DID in R2S3_SUBJECT");
@@ -38,10 +169,18 @@ pub fn open() -> Bucket<Session> {
     )
     .expect("Failed to create credentials");
 
-    let s3 = S3::from_s3(credentials, Session::new(subject.clone()));
-    Bucket::new(s3, subject, "integration-tests")
+    let s3 = S3::from_s3(credentials.clone());
+    let session = Session::new(subject.clone());
+
+    TestBucket {
+        s3,
+        credentials,
+        subject,
+        session,
+        store: "integration-tests".to_string(),
+    }
 }
 
-pub fn open_unique_at(base: &str) -> Bucket<Session> {
-    open().at(unique(base))
+pub fn open_unique_at(base: &str) -> TestBucket {
+    open().at(&unique(base))
 }

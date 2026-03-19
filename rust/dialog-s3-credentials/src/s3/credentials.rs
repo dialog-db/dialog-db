@@ -268,7 +268,7 @@ impl PrivateCredentials {
         build_url(&self.endpoint, self.address.bucket(), path, self.path_style)
     }
 
-    /// Generates an signed URL
+    /// Generates a signed URL
     async fn grant<R: S3Request>(&self, request: &R) -> Result<AuthorizedRequest, AccessError> {
         let time = current_time();
         let timestamp = time.format("%Y%m%dT%H%M%SZ").to_string();

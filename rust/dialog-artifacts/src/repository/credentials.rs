@@ -1,6 +1,6 @@
 use std::hash::{Hash, Hasher};
 
-use dialog_capability::{Authority, Did, Principal};
+use dialog_capability::{Capability, Did, Issuer, Policy, Principal, Provider, credential};
 use dialog_credentials::{Ed25519Signer, Ed25519Verifier};
 use dialog_varsig::Signer as VarsigSigner;
 use dialog_varsig::eddsa::Ed25519Signature;
@@ -73,6 +73,32 @@ impl VarsigSigner<Ed25519Signature> for Credentials {
     }
 }
 
-impl Authority for Credentials {
+impl Issuer for Credentials {
     type Signature = Ed25519Signature;
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<credential::Identify> for Credentials {
+    async fn execute(
+        &self,
+        _input: Capability<credential::Identify>,
+    ) -> Result<Did, credential::CredentialError> {
+        Ok(Principal::did(self))
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<credential::Sign> for Credentials {
+    async fn execute(
+        &self,
+        input: Capability<credential::Sign>,
+    ) -> Result<Vec<u8>, credential::CredentialError> {
+        let payload = credential::Sign::of(&input).payload.as_slice();
+        let sig: Ed25519Signature = VarsigSigner::sign(self, payload)
+            .await
+            .map_err(|e| credential::CredentialError::SigningFailed(e.to_string()))?;
+        Ok(sig.to_bytes().to_vec())
+    }
 }

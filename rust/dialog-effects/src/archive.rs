@@ -147,6 +147,8 @@ impl PutCapability for Capability<Put> {
     }
 }
 
+pub mod prelude;
+
 /// Errors that can occur during archive operations.
 #[derive(Debug, Error)]
 pub enum ArchiveError {

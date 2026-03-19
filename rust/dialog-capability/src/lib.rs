@@ -150,9 +150,8 @@
 //! |------|------|
 //! | [`Ability`] | Trait providing `subject()` and `ability()` |
 //! | [`Provider<I>`] | Executes capabilities |
-//! | [`Authorization`] | Proof of delegated authority |
-//! | [`Delegation<C, A>`] | Grants capability to another principal |
-//! | [`Access`] | Looks up authorization proofs |
+//! | [`Access`] | Authorizes capabilities with credentials |
+//! | [`Authorized`] | Capability paired with authorization proof |
 
 mod error;
 pub use error::*;
@@ -202,8 +201,7 @@ pub use router::*;
 mod issuer;
 pub use issuer::*;
 
-mod authorization;
-pub use authorization::*;
+pub mod credential;
 
 mod access;
 pub use access::*;
@@ -216,6 +214,3 @@ pub use authorized::*;
 
 mod invocation;
 pub use invocation::*;
-
-mod delegation;
-pub use delegation::*;

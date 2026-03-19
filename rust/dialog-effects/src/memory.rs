@@ -217,6 +217,8 @@ impl RetractCapability for Capability<Retract> {
     }
 }
 
+pub mod prelude;
+
 /// Errors that can occur during memory operations.
 #[derive(Debug, Error)]
 pub enum MemoryError {

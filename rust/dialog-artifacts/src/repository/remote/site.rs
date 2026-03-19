@@ -64,9 +64,7 @@ impl Open {
 
         cell.resolve(env).await?;
         if cell.get().is_some() {
-            return Err(RepositoryError::RemoteAlreadyExists {
-                remote: self.name,
-            });
+            return Err(RepositoryError::RemoteAlreadyExists { remote: self.name });
         }
 
         cell.publish(self.address.clone(), env).await?;
@@ -105,9 +103,7 @@ impl Load {
                 name: self.name,
                 address,
             }),
-            None => Err(RepositoryError::RemoteNotFound {
-                remote: self.name,
-            }),
+            None => Err(RepositoryError::RemoteNotFound { remote: self.name }),
         }
     }
 }
@@ -133,9 +129,7 @@ mod tests {
     }
 
     async fn test_repo() -> Repository {
-        let issuer = Credentials::from_passphrase("test")
-            .await
-            .unwrap();
+        let issuer = Credentials::from_passphrase("test").await.unwrap();
         let subject = "did:test:remote-site".parse().unwrap();
         Repository::new(issuer, subject)
     }

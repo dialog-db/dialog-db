@@ -1,47 +1,28 @@
 //! Archive capability types and Provider implementations for S3 backend.
 //!
 //! Re-exports archive types from [`dialog_effects`] and implements
-//! `Provider<Get>` and `Provider<Put>` for [`S3`].
+//! `Provider<Authorized<Fx, AuthorizedRequest>>` for [`S3`].
 
 pub use dialog_effects::archive::*;
 
 use async_trait::async_trait;
-use dialog_capability::{Issuer, Provider};
-use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_s3_credentials::capability::archive::{Get as AuthorizeGet, Put as AuthorizePut};
-use dialog_varsig::eddsa::Ed25519Signature;
+use dialog_capability::{Authorized, Provider};
+use dialog_s3_credentials::AuthorizedRequest;
 
-use super::{Hasher, RequestDescriptorExt, S3};
+use super::{RequestDescriptorExt, S3};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<I> Provider<Get> for S3<I>
-where
-    I: Issuer<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
-{
-    async fn execute(&self, input: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
-        // Build the authorization capability
-        let capability = Subject::from(input.subject().clone())
-            .attenuate(Archive)
-            .attenuate(Catalog::of(&input).clone())
-            .invoke(AuthorizeGet {
-                digest: Get::of(&input).digest.clone(),
-            });
-
-        // Acquire authorization and perform using self (which implements Access + Issuer)
-        let authorized = capability
-            .acquire(self)
-            .await
-            .map_err(|e| ArchiveError::AuthorizationError(e.to_string()))?;
-
-        let authorization = authorized
-            .perform(self)
-            .await
-            .map_err(|e| ArchiveError::ExecutionError(format!("{:?}", e)))?;
+impl Provider<Authorized<Get, AuthorizedRequest>> for S3 {
+    async fn execute(
+        &self,
+        authorized: Authorized<Get, AuthorizedRequest>,
+    ) -> Result<Option<Vec<u8>>, ArchiveError> {
+        let request = authorized.into_authorization();
 
         let client = reqwest::Client::new();
-        let builder = authorization.into_request(&client);
-        let response = builder
+        let response = request
+            .into_request(&client)
             .send()
             .await
             .map_err(|e| ArchiveError::Io(e.to_string()))?;
@@ -65,37 +46,18 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<I> Provider<Put> for S3<I>
-where
-    I: Issuer<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
-{
-    async fn execute(&self, input: Capability<Put>) -> Result<(), ArchiveError> {
-        let Put { content, digest } = Put::of(&input);
-        let checksum = Hasher::Sha256.checksum(content);
-
-        // Build the authorization capability
-        let capability = Subject::from(input.subject().clone())
-            .attenuate(Archive)
-            .attenuate(Catalog::of(&input).clone())
-            .invoke(AuthorizePut {
-                digest: digest.clone(),
-                checksum,
-            });
-
-        // Acquire authorization and perform
-        let authorized = capability
-            .acquire(self)
-            .await
-            .map_err(|e| ArchiveError::AuthorizationError(e.to_string()))?;
-
-        let authorization = authorized
-            .perform(self)
-            .await
-            .map_err(|e| ArchiveError::ExecutionError(format!("{:?}", e)))?;
+impl Provider<Authorized<Put, AuthorizedRequest>> for S3 {
+    async fn execute(
+        &self,
+        authorized: Authorized<Put, AuthorizedRequest>,
+    ) -> Result<(), ArchiveError> {
+        let content = Put::of(authorized.capability()).content.clone();
+        let request = authorized.into_authorization();
 
         let client = reqwest::Client::new();
-        let builder = authorization.into_request(&client).body(content.to_vec());
-        let response = builder
+        let response = request
+            .into_request(&client)
+            .body(content)
             .send()
             .await
             .map_err(|e| ArchiveError::Io(e.to_string()))?;

@@ -155,7 +155,7 @@ pub trait S3Request: ConditionalSend + ConditionalSync {
     fn path(&self) -> String;
 
     /// The checksum of the body, if any.
-    fn checksum(&self) -> Option<&Checksum> {
+    fn checksum(&self) -> Option<Checksum> {
         None
     }
 

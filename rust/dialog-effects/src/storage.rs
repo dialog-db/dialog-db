@@ -223,6 +223,8 @@ impl ListCapability for Capability<List> {
     }
 }
 
+pub mod prelude;
+
 /// Errors that can occur during storage operations.
 #[derive(Debug, Error)]
 pub enum StorageError {

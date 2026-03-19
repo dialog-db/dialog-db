@@ -123,11 +123,19 @@ impl Branch {
     /// Load a sibling branch by name (shares this branch's memory and credentials).
     pub fn load_branch(&self, name: impl Into<BranchName>) -> Load {
         let trace = self.memory.trace(name);
-        Load::new(self.session.clone(), self.subject.clone(), self.memory.clone(), trace)
+        Load::new(
+            self.session.clone(),
+            self.subject.clone(),
+            self.memory.clone(),
+            trace,
+        )
     }
 
     /// Load a remote site by name (shares this branch's memory).
-    pub fn load_remote(&self, name: impl Into<super::remote::SiteName>) -> super::remote::site::Load {
+    pub fn load_remote(
+        &self,
+        name: impl Into<super::remote::SiteName>,
+    ) -> super::remote::site::Load {
         super::remote::site::Load::new(name, self.memory.space("site"))
     }
 

@@ -1,14 +1,13 @@
-//! Integration tests for TransactionalMemory with S3 backend using local mock server.
+//! Integration tests for memory CAS (Compare-And-Swap) operations with S3 backend.
 //!
-//! These tests verify that TransactionalMemory works correctly with the S3 backend,
-//! including CAS (Compare-And-Swap) semantics and conflict detection.
+//! These tests verify that memory resolve/publish/retract work correctly with the S3 backend,
+//! including CAS semantics and conflict detection.
 //!
 //! Run with: `cargo test -p dialog-storage --features s3-integration-tests --test s3_integration_tests`
 
 #![cfg(feature = "s3-integration-tests")]
 
 use super::bucket;
-use dialog_storage::TransactionalMemory;
 use serde::{Deserialize, Serialize};
 
 #[cfg(target_arch = "wasm32")]
@@ -20,115 +19,132 @@ struct TestData {
     value: u32,
 }
 
+fn encode(data: &TestData) -> Vec<u8> {
+    serde_json::to_vec(data).unwrap()
+}
+
+fn decode(bytes: &[u8]) -> TestData {
+    serde_json::from_slice(bytes).unwrap()
+}
+
 #[dialog_common::test]
-async fn it_opens_non_existent_memory() -> anyhow::Result<()> {
-    let mut backend = bucket::open_unique_at("it_opens_non_existent_memory");
-    let memory: TransactionalMemory<TestData, _> = TransactionalMemory::new();
+async fn it_resolves_non_existent_cell() -> anyhow::Result<()> {
+    let backend = bucket::open_unique_at("it_resolves_non_existent_cell");
 
-    let cell = memory.open(b"test-key".to_vec(), &mut backend).await?;
+    let result = backend.resolve("did:key:zUser", "test-key").await?;
+    assert!(result.is_none());
 
-    assert!(cell.read().is_none());
     Ok(())
 }
 
 #[dialog_common::test]
-async fn it_writes_and_reads_value() -> anyhow::Result<()> {
-    let mut backend = bucket::open_unique_at("it_writes_and_reads_value");
-    let memory: TransactionalMemory<TestData, _> = TransactionalMemory::new();
-
-    let cell = memory.open(b"test-key-rw".to_vec(), &mut backend).await?;
+async fn it_publishes_and_resolves_value() -> anyhow::Result<()> {
+    let backend = bucket::open_unique_at("it_publishes_and_resolves_value");
 
     let data = TestData {
         name: "test".to_string(),
         value: 42,
     };
 
-    cell.replace(Some(data.clone()), &mut backend).await?;
+    let space = "did:key:zSpace";
+    let cell = &bucket::unique("test-key-rw");
 
-    assert_eq!(cell.read(), Some(data.clone()));
+    // Publish (first write, no prior edition)
+    let edition = backend
+        .publish(space, cell, encode(&data), None)
+        .await?;
 
-    // Open again to verify persistence
-    let cell2 = memory.open(b"test-key-rw".to_vec(), &mut backend).await?;
-    assert_eq!(cell2.read(), Some(data));
+    // Resolve and verify
+    let publication = backend.resolve(space, cell).await?;
+    assert!(publication.is_some());
+    let publication = publication.unwrap();
+    assert_eq!(decode(&publication.content), data);
+    assert_eq!(publication.edition, edition);
+
     Ok(())
 }
 
 #[dialog_common::test]
 async fn it_updates_existing_value() -> anyhow::Result<()> {
-    let mut backend = bucket::open_unique_at("it_updates_existing_value");
-    let memory: TransactionalMemory<TestData, _> = TransactionalMemory::new();
+    let backend = bucket::open_unique_at("it_updates_existing_value");
 
-    let cell = memory
-        .open(b"test-update-key".to_vec(), &mut backend)
-        .await?;
+    let space = "did:key:zSpace";
+    let cell = &bucket::unique("test-update-key");
 
     let initial_data = TestData {
         name: "initial".to_string(),
         value: 1,
     };
 
-    cell.replace(Some(initial_data), &mut backend).await?;
+    let edition1 = backend
+        .publish(space, cell, encode(&initial_data), None)
+        .await?;
 
     let updated_data = TestData {
         name: "updated".to_string(),
         value: 2,
     };
 
-    cell.replace(Some(updated_data.clone()), &mut backend)
+    let edition2 = backend
+        .publish(space, cell, encode(&updated_data), Some(edition1))
         .await?;
 
-    assert_eq!(cell.read(), Some(updated_data.clone()));
+    // Resolve and verify the update
+    let publication = backend.resolve(space, cell).await?;
+    assert!(publication.is_some());
+    let publication = publication.unwrap();
+    assert_eq!(decode(&publication.content), updated_data);
+    assert_eq!(publication.edition, edition2);
 
-    // Open again to verify the update persisted
-    let cell2 = memory
-        .open(b"test-update-key".to_vec(), &mut backend)
-        .await?;
-    assert_eq!(cell2.read(), Some(updated_data));
     Ok(())
 }
 
 #[dialog_common::test]
 async fn it_detects_cas_conflict() -> anyhow::Result<()> {
-    let mut backend = bucket::open_unique_at("it_detects_cas_conflict");
-    let memory1: TransactionalMemory<TestData, _> = TransactionalMemory::new();
-    let memory2: TransactionalMemory<TestData, _> = TransactionalMemory::new();
+    let backend = bucket::open_unique_at("it_detects_cas_conflict");
 
-    // Create initial value with cell1
-    let cell1 = memory1.open(b"test-cas-key".to_vec(), &mut backend).await?;
+    let space = "did:key:zSpace";
+    let cell = &bucket::unique("test-cas-key");
 
     let initial_data = TestData {
         name: "initial".to_string(),
         value: 1,
     };
 
-    cell1
-        .replace(Some(initial_data.clone()), &mut backend)
+    // Publish initial value
+    let edition1 = backend
+        .publish(space, cell, encode(&initial_data), None)
         .await?;
 
-    // Open cell2 from different memory - gets the current state
-    let cell2 = memory2.open(b"test-cas-key".to_vec(), &mut backend).await?;
-
-    // cell1 updates the value
+    // Update with correct edition (simulating cell1)
     let updated_by_cell1 = TestData {
         name: "updated_by_cell1".to_string(),
         value: 10,
     };
-    cell1
-        .replace(Some(updated_by_cell1.clone()), &mut backend)
+    let _edition2 = backend
+        .publish(
+            space,
+            cell,
+            encode(&updated_by_cell1),
+            Some(edition1.clone()),
+        )
         .await?;
 
-    // cell2 tries to update with stale edition - should fail
+    // Try to update with stale edition (simulating cell2 with old edition)
     let updated_by_cell2 = TestData {
         name: "updated_by_cell2".to_string(),
         value: 20,
     };
-    let result = cell2.replace(Some(updated_by_cell2), &mut backend).await;
+    let result = backend
+        .publish(space, cell, encode(&updated_by_cell2), Some(edition1))
+        .await;
 
     assert!(result.is_err(), "CAS should fail due to edition mismatch");
 
     // Verify the value is still what cell1 set
-    let cell3 = memory1.open(b"test-cas-key".to_vec(), &mut backend).await?;
-    assert_eq!(cell3.read(), Some(updated_by_cell1));
+    let publication = backend.resolve(space, cell).await?;
+    assert!(publication.is_some());
+    assert_eq!(decode(&publication.unwrap().content), updated_by_cell1);
 
     Ok(())
 }

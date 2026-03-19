@@ -8,12 +8,10 @@
 //! Both variants implement [`Access`](dialog_common::capability::Access) and
 //! [`Provider`](dialog_common::capability::Provider) for capability-based authorization.
 
-mod authorization;
 mod credentials;
 mod provider;
 
 pub use crate::Address;
-pub use authorization::S3Authorization;
 pub use credentials::{Credentials, PrivateCredentials, PublicCredentials};
 use url::Url;
 

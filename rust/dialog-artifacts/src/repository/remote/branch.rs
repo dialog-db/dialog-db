@@ -6,10 +6,10 @@ use dialog_effects::remote::RemoteInvocation;
 use dialog_storage::{Blake3Hash, CborEncoder, Encoder};
 
 use crate::DialogArtifactsError;
-use crate::repository::branch::BranchName;
 use crate::repository::archive::Archive;
-use crate::repository::memory::Memory;
+use crate::repository::branch::BranchName;
 use crate::repository::error::RepositoryError;
+use crate::repository::memory::Memory;
 use crate::repository::node_reference::NodeReference;
 use crate::repository::revision::Revision;
 
@@ -30,12 +30,7 @@ pub struct RemoteBranch {
 
 impl RemoteBranch {
     /// Create a new remote branch cursor.
-    pub fn new(
-        remote: SiteName,
-        address: RemoteAddress,
-        subject: Did,
-        branch: BranchName,
-    ) -> Self {
+    pub fn new(remote: SiteName, address: RemoteAddress, subject: Did, branch: BranchName) -> Self {
         Self {
             remote,
             address,

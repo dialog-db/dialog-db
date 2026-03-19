@@ -11,6 +11,7 @@
 //! here rather than in the crates that use them.
 
 use proc_macro::TokenStream;
+mod compose;
 mod provider;
 mod query;
 mod router;
@@ -378,11 +379,11 @@ pub fn derive_attribute(input: TokenStream) -> TokenStream {
 ///
 /// ```rust,ignore
 /// #[derive(Router)]
-/// pub struct Network<Issuer> {
+/// pub struct Network {
 ///     #[cfg(feature = "s3")]
-///     s3: Router<s3::Address, s3::Connection<Issuer>>,
+///     s3: route::Route<s3::Credentials, s3::Connection>,
 ///     #[cfg(feature = "ucan")]
-///     ucan: Router<ucan::Address, ucan::Connection<Issuer>>,
+///     ucan: route::Route<ucan::Credentials, ucan::Connection>,
 /// }
 /// ```
 ///
@@ -393,4 +394,28 @@ pub fn derive_attribute(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(Router, attributes(route))]
 pub fn router(input: TokenStream) -> TokenStream {
     router::generate(input)
+}
+
+/// Derive macro that generates `Provider<Fx>` impls for composite structs
+/// where each field is annotated with `#[provide(...)]` listing the effects
+/// it handles.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// #[derive(Provider)]
+/// pub struct Env {
+///     #[provide(archive::Get, archive::Put)]
+///     local: FileSystem,
+///     #[provide(credential::Identify, credential::Sign)]
+///     credentials: KeyStore,
+/// }
+/// ```
+///
+/// This generates concrete `Provider<archive::Get>`, `Provider<archive::Put>`,
+/// `Provider<credential::Identify>`, and `Provider<credential::Sign>` impls,
+/// each delegating to the annotated field.
+#[proc_macro_derive(Provider, attributes(provide))]
+pub fn derive_provider(input: TokenStream) -> TokenStream {
+    compose::generate(input)
 }

@@ -1,20 +1,13 @@
 //! S3 ListObjectsV2 operations.
 //!
 //! This module provides the [`ListResult`] response type for listing objects
-//! in an S3 bucket using the [ListObjectsV2] API, as well as the
-//! `Provider<storage::List>` implementation for [`S3`].
+//! in an S3 bucket using the [ListObjectsV2] API, as well as XML parsing utilities.
 //!
 //! [ListObjectsV2]: https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html
 
-use async_trait::async_trait;
-use dialog_capability::{Issuer, Capability, Provider, Subject};
-use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_s3_credentials::capability::storage::List as AuthorizeList;
-use dialog_varsig::eddsa::Ed25519Signature;
 use serde::Deserialize;
 
-use super::{Bucket, RequestDescriptorExt, S3, S3StorageError};
-use crate::capability::storage;
+use super::S3StorageError;
 
 /// Response from S3 ListObjectsV2 API.
 #[derive(Debug)]
@@ -27,7 +20,6 @@ pub struct ListResult {
     pub next_continuation_token: Option<String>,
 }
 
-/// Root element of ListObjectsV2 XML response.
 #[derive(Debug, Deserialize)]
 #[serde(rename = "ListBucketResult")]
 struct ListBucketResult {
@@ -39,18 +31,12 @@ struct ListBucketResult {
     next_continuation_token: Option<String>,
 }
 
-/// Individual object entry in the listing.
 #[derive(Debug, Deserialize)]
 struct Contents {
     #[serde(rename = "Key")]
     key: String,
 }
 
-/// S3 error response XML structure.
-///
-/// S3 returns `<Error>` XML responses for bucket-level errors like `NoSuchBucket`
-/// or `AccessDenied`. We parse these to provide more informative error messages
-/// than just treating them as serialization errors.
 #[derive(Debug, Deserialize)]
 #[serde(rename = "Error")]
 struct S3Error {
@@ -58,130 +44,6 @@ struct S3Error {
     code: String,
     #[serde(rename = "Message")]
     message: Option<String>,
-}
-
-impl<I> Bucket<I>
-where
-    I: Issuer<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
-    super::S3<I>: Provider<storage::List>,
-{
-    /// List objects in the bucket with the configured path prefix.
-    ///
-    /// Returns object keys (encoded S3 keys, not decoded).
-    /// Use `continuation_token` for pagination when `is_truncated` is true.
-    ///
-    /// # Prefix behavior
-    ///
-    /// S3 treats `prefix` as a filter, not a path. Listing with a non-existent prefix
-    /// returns 200 OK with an empty `ListBucketResult` (zero keys). This is standard
-    /// S3 behavior - the prefix simply filters which keys are returned.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use dialog_storage::s3::{S3, Bucket};
-    /// # async fn example(
-    /// #     s3: S3<impl dialog_capability::Issuer<Signature = dialog_varsig::eddsa::Ed25519Signature> + Clone + Send + Sync>,
-    /// # ) -> Result<(), Box<dyn std::error::Error>> {
-    /// let subject: dialog_capability::Did = "did:key:zMySubject".parse().unwrap();
-    /// let bucket = Bucket::new(s3, subject, "my-store");
-    ///
-    /// // List all objects in the store
-    /// let result = bucket.list(None).await?;
-    /// for key in result.keys {
-    ///     println!("Found key: {}", key);
-    /// }
-    ///
-    /// // Handle pagination
-    /// if result.is_truncated {
-    ///     let next_page = bucket.list(result.next_continuation_token.as_deref()).await?;
-    ///     // Process next_page...
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn list(
-        &self,
-        continuation_token: Option<&str>,
-    ) -> Result<ListResult, S3StorageError> {
-        // Build the list capability
-        let capability = Subject::from(self.subject().clone())
-            .attenuate(storage::Storage)
-            .attenuate(storage::Store::new(self.path()))
-            .invoke(storage::List::new(continuation_token.map(String::from)));
-
-        // Execute the capability using the Provider trait
-        let result = capability
-            .perform(&self.bucket.clone())
-            .await
-            .map_err(|e| S3StorageError::ServiceError(e.to_string()))?;
-
-        Ok(ListResult {
-            keys: result.keys,
-            is_truncated: result.is_truncated,
-            next_continuation_token: result.next_continuation_token,
-        })
-    }
-}
-
-// Provider<storage::List> implementation for S3
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<I> Provider<storage::List> for S3<I>
-where
-    I: Issuer<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
-{
-    async fn execute(
-        &self,
-        input: Capability<storage::List>,
-    ) -> Result<storage::ListResult, storage::StorageError> {
-        // Build the authorization capability
-        let store: &storage::Store = input.policy();
-        let list: &storage::List = input.policy();
-        let capability = Subject::from(input.subject().clone())
-            .attenuate(storage::Storage)
-            .attenuate(store.clone())
-            .invoke(AuthorizeList::new(list.continuation_token.clone()));
-
-        // Acquire authorization and perform
-        let authorized = capability
-            .acquire(self)
-            .await
-            .map_err(|e| storage::StorageError::Storage(e.to_string()))?;
-
-        let authorization = authorized
-            .perform(self)
-            .await
-            .map_err(|e| storage::StorageError::Storage(format!("{:?}", e)))?;
-
-        let client = reqwest::Client::new();
-        let builder = authorization.into_request(&client);
-        let response = builder
-            .send()
-            .await
-            .map_err(|e| storage::StorageError::Storage(e.to_string()))?;
-
-        if response.status().is_success() {
-            let body = response
-                .text()
-                .await
-                .map_err(|e| storage::StorageError::Storage(e.to_string()))?;
-
-            // Parse the XML response
-            parse_list_response(&body)
-                .map(|result| storage::ListResult {
-                    keys: result.keys,
-                    is_truncated: result.is_truncated,
-                    next_continuation_token: result.next_continuation_token,
-                })
-                .map_err(|e| storage::StorageError::Storage(e.to_string()))
-        } else {
-            Err(storage::StorageError::Storage(format!(
-                "Failed to list objects: {}",
-                response.status()
-            )))
-        }
-    }
 }
 
 /// Parse the S3 ListObjectsV2 XML response.
@@ -290,7 +152,6 @@ mod tests {
 
     #[dialog_common::test]
     fn it_errors_on_unexpected_xml_structure() {
-        // XML is valid but doesn't have the expected ListBucketResult root element.
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
             <SomeUnknownElement>
                 <Foo>bar</Foo>
@@ -308,7 +169,6 @@ mod tests {
 
     #[dialog_common::test]
     fn it_errors_on_wrong_root_element() {
-        // Valid XML structure but wrong root element name - should error.
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
             <WrongRootElement>
                 <IsTruncated>false</IsTruncated>
@@ -329,7 +189,6 @@ mod tests {
 
     #[dialog_common::test]
     fn it_errors_on_non_xml_input() {
-        // Not XML at all - should error
         let xml = "this is not xml at all { json: maybe? }";
 
         let result = parse_list_response(xml);
@@ -340,7 +199,6 @@ mod tests {
 
     #[dialog_common::test]
     fn it_parses_no_such_bucket_error() {
-        // S3 returns an Error XML when bucket doesn't exist.
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
             <Error>
                 <Code>NoSuchBucket</Code>
@@ -362,7 +220,6 @@ mod tests {
 
     #[dialog_common::test]
     fn it_parses_access_denied_error() {
-        // S3 returns an Error XML when access is denied.
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
             <Error>
                 <Code>AccessDenied</Code>

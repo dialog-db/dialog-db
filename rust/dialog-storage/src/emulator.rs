@@ -4,7 +4,7 @@
 //! implementations that replace real I/O with in-memory [`Volatile`](crate::provider::volatile::Volatile)
 //! storage. The wrapper itself holds no extra state — capability-specific
 //! modules supply the actual impls, e.g.
-//! `impl Provider<RemoteInvocation<Fx, Address>> for Emulator<Network<Issuer>>`
+//! `impl Provider<RemoteInvocation<Fx, Address>> for Emulator<Network>`
 //! routes every address to its own in-memory store.
 
 /// Transparent wrapper that opts `T` into in-memory behaviour.

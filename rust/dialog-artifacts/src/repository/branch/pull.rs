@@ -38,10 +38,7 @@ impl<'a> PullLocal<'a> {
 impl PullLocal<'_> {
     /// Execute the pull operation, returning the new revision (or None if
     /// no changes).
-    pub async fn perform<Env>(
-        self,
-        env: &Env,
-    ) -> Result<Option<Revision>, DialogArtifactsError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, DialogArtifactsError>
     where
         Env: Provider<archive_fx::Get>
             + Provider<archive_fx::Put>
@@ -74,10 +71,7 @@ impl Pull<'_> {
     /// For local upstreams, loads the upstream branch revision and performs
     /// a three-way merge. For remote upstreams, resolves the remote revision
     /// and merges using FallbackStore.
-    pub async fn perform<Env>(
-        self,
-        env: &Env,
-    ) -> Result<Option<Revision>, DialogArtifactsError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, DialogArtifactsError>
     where
         Env: Provider<archive_fx::Get>
             + Provider<archive_fx::Put>
@@ -94,7 +88,9 @@ impl Pull<'_> {
 
         match upstream {
             UpstreamState::Local { branch: id, .. } => {
-                let upstream_branch = self.branch.load_branch(id)
+                let upstream_branch = self
+                    .branch
+                    .load_branch(id)
                     .perform(env)
                     .await
                     .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
@@ -176,7 +172,10 @@ where
         if let Some(upstream) = branch.upstream() {
             branch
                 .upstream
-                .publish(Some(upstream.with_tree(upstream_revision.tree.clone())), env)
+                .publish(
+                    Some(upstream.with_tree(upstream_revision.tree.clone())),
+                    env,
+                )
                 .await
                 .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
         }
@@ -201,7 +200,10 @@ where
         if let Some(upstream) = branch.upstream() {
             branch
                 .upstream
-                .publish(Some(upstream.with_tree(upstream_revision.tree.clone())), env)
+                .publish(
+                    Some(upstream.with_tree(upstream_revision.tree.clone())),
+                    env,
+                )
                 .await
                 .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
         }
@@ -232,7 +234,8 @@ where
         + ConditionalSync
         + 'static,
 {
-    let remote_site = branch.load_remote(remote.clone())
+    let remote_site = branch
+        .load_remote(remote.clone())
         .perform(env)
         .await
         .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
@@ -303,7 +306,10 @@ where
         if let Some(upstream) = branch.upstream() {
             branch
                 .upstream
-                .publish(Some(upstream.with_tree(upstream_revision.tree.clone())), env)
+                .publish(
+                    Some(upstream.with_tree(upstream_revision.tree.clone())),
+                    env,
+                )
                 .await
                 .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
         }
@@ -328,7 +334,10 @@ where
         if let Some(upstream) = branch.upstream() {
             branch
                 .upstream
-                .publish(Some(upstream.with_tree(upstream_revision.tree.clone())), env)
+                .publish(
+                    Some(upstream.with_tree(upstream_revision.tree.clone())),
+                    env,
+                )
                 .await
                 .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
         }

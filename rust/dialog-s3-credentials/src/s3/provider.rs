@@ -1,46 +1,35 @@
 //! Provider and Access implementations for S3 credentials.
 //!
-//! This module implements the capability-based authorization flow for direct S3 access.
-//! S3 credentials self-issue authorization when they own the bucket (subject DID matches).
+//! S3 credentials can directly grant authorization by presigning requests.
+//! The `Access` impl produces `AuthorizedRequest` (the presigned URL) directly.
 
 use async_trait::async_trait;
-use dialog_capability::{Ability, Access, Capability, Claim, Effect, Provider};
-use dialog_common::ConditionalSend;
+use dialog_capability::{Access, Authorized, Capability, Constraint, Provider, credential};
+use dialog_common::{ConditionalSend, ConditionalSync};
 
-use super::{Credentials, S3Authorization};
+use super::Credentials;
 use crate::capability::{AccessError, AuthorizedRequest, S3Request};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Access for Credentials {
-    type Authorization = S3Authorization;
+impl<C> Access<C> for Credentials
+where
+    C: Constraint + Clone + ConditionalSend + 'static,
+    Capability<C>: ConditionalSend + S3Request,
+{
+    type Authorization = AuthorizedRequest;
     type Error = AccessError;
 
-    async fn claim<C: Ability + Clone + ConditionalSend + 'static>(
+    async fn authorize<Env>(
         &self,
-        claim: Claim<C>,
-    ) -> Result<Self::Authorization, Self::Error> {
-        // Authorization captures credentials so that pre-signed URL can
-        // be issued when requested
-        Ok(S3Authorization::new(
-            self.clone(),
-            claim.subject().clone(),
-            claim.audience().clone(),
-            claim.ability(),
-        ))
-    }
-}
-
-/// Blanket implementation provider ability to
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Do> Provider<Do> for Credentials
-where
-    Do: Effect<Output = Result<AuthorizedRequest, AccessError>> + 'static,
-    Capability<Do>: ConditionalSend + S3Request,
-{
-    async fn execute(&self, capability: Capability<Do>) -> Result<AuthorizedRequest, AccessError> {
-        self.grant(&capability).await
+        capability: Capability<C>,
+        _env: &Env,
+    ) -> Result<Authorized<C, AuthorizedRequest>, Self::Error>
+    where
+        Env: Provider<credential::Identify> + Provider<credential::Sign> + ConditionalSync,
+    {
+        let authorized_request = self.grant(&capability).await?;
+        Ok(Authorized::new(capability, authorized_request))
     }
 }
 
@@ -51,6 +40,31 @@ mod tests {
     use crate::capability::{archive, memory, storage};
     use base58::ToBase58;
     use dialog_capability::{Did, Subject, did};
+
+    /// Test environment that satisfies the `Provider<credential::Identify>` and
+    /// `Provider<credential::Sign>` bounds required by `authorize`.
+    /// S3 credentials never actually use these, so the impls panic if called.
+    struct NoopEnv;
+
+    #[async_trait]
+    impl Provider<credential::Identify> for NoopEnv {
+        async fn execute(
+            &self,
+            _input: Capability<credential::Identify>,
+        ) -> Result<Did, credential::CredentialError> {
+            unreachable!("S3 credentials do not use credential effects")
+        }
+    }
+
+    #[async_trait]
+    impl Provider<credential::Sign> for NoopEnv {
+        async fn execute(
+            &self,
+            _input: Capability<credential::Sign>,
+        ) -> Result<Vec<u8>, credential::CredentialError> {
+            unreachable!("S3 credentials do not use credential effects")
+        }
+    }
 
     fn test_subject() -> Did {
         did!("key:zTestSubject")
@@ -96,7 +110,8 @@ mod tests {
             .attenuate(storage::Store::new("index"))
             .invoke(storage::Get::new(key));
 
-        let req = capability.perform(&creds).await.unwrap();
+        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
+        let req = authorized.into_authorization();
 
         assert_eq!(req.method, "GET");
         assert_eq!(
@@ -120,10 +135,10 @@ mod tests {
             .attenuate(storage::Store::new("blob"))
             .invoke(storage::Get::new(binary_key));
 
-        let req = capability.perform(&creds).await.unwrap();
+        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
+        let req = authorized.into_authorization();
 
         assert_eq!(req.method, "GET");
-        // Binary key should be base58 encoded in path
         assert!(req.url.path().contains(&binary_key.to_base58()));
     }
 
@@ -139,7 +154,8 @@ mod tests {
             .attenuate(storage::Store::new("blob"))
             .invoke(storage::Set::new(key, checksum));
 
-        let req = capability.perform(&creds).await.unwrap();
+        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
+        let req = authorized.into_authorization();
 
         assert_eq!(req.method, "PUT");
         assert_eq!(
@@ -147,14 +163,12 @@ mod tests {
             format!("/{}/blob/{}", TEST_SUBJECT, key.to_base58())
         );
 
-        // Should have checksum header
         let checksum_header = req
             .headers
             .iter()
             .find(|(k, _)| k == "x-amz-checksum-sha256");
         assert!(checksum_header.is_some(), "Should have checksum header");
 
-        // Verify checksum value is base64 encoded
         let (_, value) = checksum_header.unwrap();
         assert!(!value.is_empty());
     }
@@ -169,7 +183,8 @@ mod tests {
             .attenuate(storage::Store::new("index"))
             .invoke(storage::Delete::new(key));
 
-        let req = capability.perform(&creds).await.unwrap();
+        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
+        let req = authorized.into_authorization();
 
         assert_eq!(req.method, "DELETE");
         assert_eq!(
@@ -187,11 +202,11 @@ mod tests {
             .attenuate(storage::Store::new("index"))
             .invoke(storage::List::new(None));
 
-        let req = capability.perform(&creds).await.unwrap();
+        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
+        let req = authorized.into_authorization();
 
         assert_eq!(req.method, "GET");
 
-        // Should have list-type=2 query param
         let query: Vec<(String, String)> = req
             .url
             .query_pairs()
@@ -199,7 +214,6 @@ mod tests {
             .collect();
         assert!(query.iter().any(|(k, v)| k == "list-type" && v == "2"));
 
-        // Should have prefix query param
         let prefix = query.iter().find(|(k, _)| k == "prefix");
         assert!(prefix.is_some());
         let (_, prefix_value) = prefix.unwrap();
@@ -217,7 +231,8 @@ mod tests {
             .attenuate(storage::Store::new("data"))
             .invoke(storage::List::new(Some(token.to_string())));
 
-        let req = capability.perform(&creds).await.unwrap();
+        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
+        let req = authorized.into_authorization();
 
         let query: Vec<(String, String)> = req
             .url
@@ -239,7 +254,8 @@ mod tests {
             .attenuate(memory::Cell::new("main"))
             .invoke(memory::Resolve);
 
-        let req = capability.perform(&creds).await.unwrap();
+        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
+        let req = authorized.into_authorization();
 
         assert_eq!(req.method, "GET");
         assert_eq!(
@@ -259,10 +275,11 @@ mod tests {
             .attenuate(memory::Cell::new("head"))
             .invoke(memory::Publish {
                 checksum,
-                when: None, // No prior edition - creating new cell
+                when: None,
             });
 
-        let req = capability.perform(&creds).await.unwrap();
+        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
+        let req = authorized.into_authorization();
 
         assert_eq!(req.method, "PUT");
         assert_eq!(
@@ -270,7 +287,6 @@ mod tests {
             format!("/{}/did:key:zSpace/head", TEST_SUBJECT)
         );
 
-        // Should have checksum header
         assert!(
             req.headers
                 .iter()
@@ -293,7 +309,8 @@ mod tests {
                 when: Some(prior_etag),
             });
 
-        let req = capability.perform(&creds).await.unwrap();
+        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
+        let req = authorized.into_authorization();
 
         assert_eq!(req.method, "PUT");
         assert!(
@@ -313,7 +330,8 @@ mod tests {
             .attenuate(memory::Cell::new("temp"))
             .invoke(memory::Retract::new("etag-to-match"));
 
-        let req = capability.perform(&creds).await.unwrap();
+        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
+        let req = authorized.into_authorization();
 
         assert_eq!(req.method, "DELETE");
         assert_eq!(
@@ -332,7 +350,8 @@ mod tests {
             .attenuate(archive::Catalog::new("blobs"))
             .invoke(archive::Get::new(digest));
 
-        let req = capability.perform(&creds).await.unwrap();
+        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
+        let req = authorized.into_authorization();
 
         assert_eq!(req.method, "GET");
         assert_eq!(
@@ -352,7 +371,8 @@ mod tests {
             .attenuate(archive::Catalog::new("index"))
             .invoke(archive::Put::new(digest, checksum));
 
-        let req = capability.perform(&creds).await.unwrap();
+        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
+        let req = authorized.into_authorization();
 
         assert_eq!(req.method, "PUT");
         assert_eq!(
@@ -376,11 +396,11 @@ mod tests {
             .attenuate(storage::Store::new("data"))
             .invoke(storage::Get::new(key));
 
-        let req = capability.perform(&creds).await.unwrap();
+        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
+        let req = authorized.into_authorization();
 
         assert_eq!(req.method, "GET");
 
-        // Should have AWS signature query params
         let query: Vec<(String, String)> = req
             .url
             .query_pairs()
@@ -405,11 +425,11 @@ mod tests {
             .attenuate(storage::Store::new("uploads"))
             .invoke(storage::Set::new(key, checksum));
 
-        let req = capability.perform(&creds).await.unwrap();
+        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
+        let req = authorized.into_authorization();
 
         assert_eq!(req.method, "PUT");
 
-        // Should have signature
         let query: Vec<(String, String)> = req
             .url
             .query_pairs()
@@ -417,7 +437,6 @@ mod tests {
             .collect();
         assert!(query.iter().any(|(k, _)| k == "X-Amz-Signature"));
 
-        // Should have checksum header
         assert!(
             req.headers
                 .iter()
@@ -434,7 +453,8 @@ mod tests {
             .attenuate(storage::Store::new("files"))
             .invoke(storage::List::new(None));
 
-        let req = capability.perform(&creds).await.unwrap();
+        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
+        let req = authorized.into_authorization();
 
         assert_eq!(req.method, "GET");
 
@@ -444,11 +464,9 @@ mod tests {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
 
-        // Should have list params
         assert!(query.iter().any(|(k, v)| k == "list-type" && v == "2"));
         assert!(query.iter().any(|(k, _)| k == "prefix"));
 
-        // Should have signature
         assert!(query.iter().any(|(k, _)| k == "X-Amz-Signature"));
     }
 
@@ -461,9 +479,9 @@ mod tests {
             .attenuate(storage::Store::new("test"))
             .invoke(storage::Get::new(b"key"));
 
-        let req = capability.perform(&creds).await.unwrap();
+        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
+        let req = authorized.into_authorization();
 
-        // Virtual hosted style: bucket is in the hostname
         assert!(req.url.host_str().unwrap().starts_with("my-bucket."));
     }
 
@@ -476,9 +494,9 @@ mod tests {
             .attenuate(storage::Store::new("test"))
             .invoke(storage::Get::new(b"key"));
 
-        let req = capability.perform(&creds).await.unwrap();
+        let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
+        let req = authorized.into_authorization();
 
-        // Path style: bucket is in the path
         assert_eq!(req.url.host_str().unwrap(), "localhost");
         assert!(req.url.path().starts_with("/test-bucket/"));
     }
@@ -494,7 +512,8 @@ mod tests {
                 .attenuate(storage::Store::new(store_name))
                 .invoke(storage::Get::new(b"key"));
 
-            let req = capability.perform(&creds).await.unwrap();
+            let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
+            let req = authorized.into_authorization();
 
             if store_name.is_empty() {
                 assert!(req.url.path().contains(&format!("/{}/", TEST_SUBJECT)));
@@ -520,7 +539,8 @@ mod tests {
                 .attenuate(archive::Catalog::new(catalog_name))
                 .invoke(archive::Get::new(digest));
 
-            let req = capability.perform(&creds).await.unwrap();
+            let authorized = creds.authorize(capability, &NoopEnv).await.unwrap();
+            let req = authorized.into_authorization();
 
             assert!(
                 req.url

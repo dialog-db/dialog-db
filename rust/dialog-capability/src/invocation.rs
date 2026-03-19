@@ -1,4 +1,4 @@
-use crate::{Authorization, Authorized, Capability, Constraint, Effect};
+use crate::{Authorized, Capability, Constraint, Effect};
 
 /// Trait for types that can be invoked via a Provider.
 ///
@@ -26,7 +26,6 @@ impl<Fx, A> Invocation for Authorized<Fx, A>
 where
     Fx: Effect,
     Fx::Of: Constraint,
-    A: Authorization,
 {
     type Input = Authorized<Fx, A>;
     type Output = Fx::Output;

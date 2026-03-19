@@ -16,7 +16,7 @@
 //! ```no_run
 //! use dialog_s3_credentials::{Address, s3, capability};
 //! use dialog_s3_credentials::capability::storage::{Storage, Store, Get, Set};
-//! use dialog_capability::{Capability, Subject, did};
+//! use dialog_capability::{Access, Subject, did};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create address for S3 bucket
@@ -36,24 +36,32 @@
 //!     "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 //! )?;
 //!
-//! // Build capability chain: Subject -> Storage -> Store -> access::storage::Get
-//! // Uses capability types for hierarchy, access types for effects (Claim impl)
+//! // Build capability chain: Subject -> Storage -> Store -> Get
 //! let capability = Subject::from(subject)
 //!     .attenuate(Storage)
 //!     .attenuate(Store::new("index"))
 //!     .invoke(Get::new(b"my-key"));
 //!
-//! // Sign the capability to get a presigned URL
-//! let permission = capability.perform(&credentials).await?;
-
+//! // Authorize the capability to get a presigned URL.
+//! // S3 credentials don't use env, but the API requires it for UCAN support.
+//! # struct Env;
+//! # use dialog_capability::{Provider, credential};
+//! # use async_trait::async_trait;
+//! # #[async_trait] impl Provider<credential::Identify> for Env {
+//! #     async fn execute(&self, _: dialog_capability::Capability<credential::Identify>) -> Result<dialog_capability::Did, credential::CredentialError> { unimplemented!() }
+//! # }
+//! # #[async_trait] impl Provider<credential::Sign> for Env {
+//! #     async fn execute(&self, _: dialog_capability::Capability<credential::Sign>) -> Result<Vec<u8>, credential::CredentialError> { unimplemented!() }
+//! # }
+//! # let env = Env;
+//! let authorized = credentials.authorize(capability, &env).await?;
 //!
-//! println!("Presigned URL: {}", permission.url);
+//! println!("Presigned URL: {}", authorized.authorization().url);
 //! # Ok(())
 //! # }
 //! ```
 
 mod address;
-mod authorization;
 pub mod capability;
 mod checksum;
 mod credentials;
@@ -63,7 +71,6 @@ pub mod s3;
 pub mod ucan;
 
 pub use address::*;
-pub use authorization::*;
 pub use capability::{AccessError, Acl, AuthorizedRequest, Precondition, S3Request};
 pub use capability::{archive, memory, storage};
 pub use checksum::*;

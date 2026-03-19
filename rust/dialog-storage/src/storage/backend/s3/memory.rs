@@ -1,57 +1,33 @@
 //! Memory capability types and Provider implementations for S3 backend.
 //!
 //! Re-exports memory types from [`dialog_effects`] and implements
-//! `Provider<Resolve>`, `Provider<Publish>`, and `Provider<Retract>` for [`S3`].
+//! `Provider<Authorized<Fx, AuthorizedRequest>>` for [`S3`].
 
 pub use dialog_effects::memory::*;
 
 use async_trait::async_trait;
-use dialog_capability::{Issuer, Provider};
-use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_s3_credentials::capability::memory::{
-    Publish as AuthorizePublish, Resolve as AuthorizeResolve, Retract as AuthorizeRetract,
-};
-use dialog_varsig::eddsa::Ed25519Signature;
+use dialog_capability::{Authorized, Provider};
+use dialog_s3_credentials::AuthorizedRequest;
 
-use super::{Hasher, RequestDescriptorExt, S3};
+use super::{RequestDescriptorExt, S3};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<I> Provider<Resolve> for S3<I>
-where
-    I: Issuer<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
-{
+impl Provider<Authorized<Resolve, AuthorizedRequest>> for S3 {
     async fn execute(
         &self,
-        input: Capability<Resolve>,
+        authorized: Authorized<Resolve, AuthorizedRequest>,
     ) -> Result<Option<Publication>, MemoryError> {
-        // Build the authorization capability
-        let capability = Subject::from(input.subject().clone())
-            .attenuate(Memory)
-            .attenuate(Space::of(&input).clone())
-            .attenuate(Cell::of(&input).clone())
-            .invoke(AuthorizeResolve);
-
-        // Acquire authorization and perform
-        let authorized = capability
-            .acquire(self)
-            .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
-
-        let authorization = authorized
-            .perform(self)
-            .await
-            .map_err(|e| MemoryError::Storage(format!("{:?}", e)))?;
+        let request = authorized.into_authorization();
 
         let client = reqwest::Client::new();
-        let builder = authorization.into_request(&client);
-        let response = builder
+        let response = request
+            .into_request(&client)
             .send()
             .await
             .map_err(|e| MemoryError::Storage(e.to_string()))?;
 
         if response.status().is_success() {
-            // Extract ETag from response headers as the edition
             let edition = response
                 .headers()
                 .get("etag")
@@ -81,48 +57,28 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<I> Provider<Publish> for S3<I>
-where
-    I: Issuer<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
-{
-    async fn execute(&self, input: Capability<Publish>) -> Result<Vec<u8>, MemoryError> {
-        let Publish { content, when } = Publish::of(&input);
-        let when = when
+impl Provider<Authorized<Publish, AuthorizedRequest>> for S3 {
+    async fn execute(
+        &self,
+        authorized: Authorized<Publish, AuthorizedRequest>,
+    ) -> Result<Vec<u8>, MemoryError> {
+        let content = Publish::of(authorized.capability()).content.clone();
+        let when = Publish::of(authorized.capability())
+            .when
             .as_ref()
             .map(|b| String::from_utf8_lossy(b).to_string());
-        let checksum = Hasher::Sha256.checksum(content);
-
-        // Build the authorization capability
-        let capability = Subject::from(input.subject().clone())
-            .attenuate(Memory)
-            .attenuate(Space::of(&input).clone())
-            .attenuate(Cell::of(&input).clone())
-            .invoke(AuthorizePublish {
-                checksum,
-                when: when.clone(),
-            });
-
-        // Acquire authorization and perform
-        let authorized = capability
-            .acquire(self)
-            .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
-
-        let authorization = authorized
-            .perform(self)
-            .await
-            .map_err(|e| MemoryError::Storage(format!("{:?}", e)))?;
+        let request = authorized.into_authorization();
 
         let client = reqwest::Client::new();
-        let builder = authorization.into_request(&client).body(content.to_vec());
-        let response = builder
+        let response = request
+            .into_request(&client)
+            .body(content)
             .send()
             .await
             .map_err(|e| MemoryError::Storage(e.to_string()))?;
 
         match response.status() {
             status if status.is_success() => {
-                // Extract new ETag from response as the new edition
                 let new_edition = response
                     .headers()
                     .get("etag")
@@ -147,35 +103,18 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<I> Provider<Retract> for S3<I>
-where
-    I: Issuer<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
-{
-    async fn execute(&self, input: Capability<Retract>) -> Result<(), MemoryError> {
-        let Retract { when } = Retract::of(&input);
-        let when = String::from_utf8_lossy(when).to_string();
-
-        // Build the authorization capability
-        let capability = Subject::from(input.subject().clone())
-            .attenuate(Memory)
-            .attenuate(Space::of(&input).clone())
-            .attenuate(Cell::of(&input).clone())
-            .invoke(AuthorizeRetract { when: when.clone() });
-
-        // Acquire authorization and perform
-        let authorized = capability
-            .acquire(self)
-            .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
-
-        let authorization = authorized
-            .perform(self)
-            .await
-            .map_err(|e| MemoryError::Storage(format!("{:?}", e)))?;
+impl Provider<Authorized<Retract, AuthorizedRequest>> for S3 {
+    async fn execute(
+        &self,
+        authorized: Authorized<Retract, AuthorizedRequest>,
+    ) -> Result<(), MemoryError> {
+        let when =
+            String::from_utf8_lossy(&Retract::of(authorized.capability()).when).to_string();
+        let request = authorized.into_authorization();
 
         let client = reqwest::Client::new();
-        let builder = authorization.into_request(&client);
-        let response = builder
+        let response = request
+            .into_request(&client)
             .send()
             .await
             .map_err(|e| MemoryError::Storage(e.to_string()))?;
