@@ -19,6 +19,7 @@ mod credentials;
 pub mod delegation;
 mod invocation;
 mod provider;
+pub mod site;
 
 pub use authorization::UcanInvocation;
 pub use container::Container;

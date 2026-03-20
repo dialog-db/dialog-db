@@ -5,7 +5,7 @@
 //! use dialog_effects::archive::prelude::*;
 //! ```
 
-use dialog_capability::{Capability, Claim, Did, Subject};
+use dialog_capability::{AuthorizationRequest, Capability, Claim, Did, Subject};
 use dialog_common::Blake3Hash;
 
 use super::{Archive, Catalog, Get, Put};
@@ -39,6 +39,13 @@ impl<'a, A: ?Sized> SubjectExt for Claim<'a, A, Subject> {
     }
 }
 
+impl<'a, S: ?Sized> SubjectExt for AuthorizationRequest<'a, S, Subject> {
+    type Archive = AuthorizationRequest<'a, S, Archive>;
+    fn archive(self) -> AuthorizationRequest<'a, S, Archive> {
+        self.attenuate(Archive)
+    }
+}
+
 /// Extension methods for scoping archive to a named catalog.
 pub trait ArchiveExt {
     /// The resulting catalog chain type.
@@ -57,6 +64,13 @@ impl ArchiveExt for Capability<Archive> {
 impl<'a, A: ?Sized> ArchiveExt for Claim<'a, A, Archive> {
     type Catalog = Claim<'a, A, Catalog>;
     fn catalog(self, name: impl Into<String>) -> Claim<'a, A, Catalog> {
+        self.attenuate(Catalog::new(name))
+    }
+}
+
+impl<'a, S: ?Sized> ArchiveExt for AuthorizationRequest<'a, S, Archive> {
+    type Catalog = AuthorizationRequest<'a, S, Catalog>;
+    fn catalog(self, name: impl Into<String>) -> AuthorizationRequest<'a, S, Catalog> {
         self.attenuate(Catalog::new(name))
     }
 }
@@ -95,6 +109,23 @@ impl<'a, A: ?Sized> CatalogExt for Claim<'a, A, Catalog> {
     }
 
     fn put(self, digest: impl Into<Blake3Hash>, content: impl Into<Vec<u8>>) -> Claim<'a, A, Put> {
+        self.invoke(Put::new(digest, content))
+    }
+}
+
+impl<'a, S: ?Sized> CatalogExt for AuthorizationRequest<'a, S, Catalog> {
+    type Get = AuthorizationRequest<'a, S, Get>;
+    type Put = AuthorizationRequest<'a, S, Put>;
+
+    fn get(self, digest: impl Into<Blake3Hash>) -> AuthorizationRequest<'a, S, Get> {
+        self.invoke(Get::new(digest))
+    }
+
+    fn put(
+        self,
+        digest: impl Into<Blake3Hash>,
+        content: impl Into<Vec<u8>>,
+    ) -> AuthorizationRequest<'a, S, Put> {
         self.invoke(Put::new(digest, content))
     }
 }

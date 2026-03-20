@@ -10,9 +10,11 @@
 
 mod credentials;
 pub mod provider;
+pub mod site;
 
 pub use crate::Address;
 pub use credentials::{Credentials, PrivateCredentials, PublicCredentials};
+pub use site::S3Site;
 use url::Url;
 
 /// Determine if path-style URLs should be used by default for this endpoint.

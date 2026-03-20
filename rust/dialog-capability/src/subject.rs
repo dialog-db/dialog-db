@@ -1,7 +1,8 @@
 pub use dialog_varsig::Did;
 pub use dialog_varsig::did;
 
-use crate::{Capability, Constrained, Policy};
+use crate::site::Site;
+use crate::{AuthorizationRequest, Capability, Constrained, Policy};
 
 /// The subject (resource) - anchors the capability chain.
 ///
@@ -26,5 +27,10 @@ impl Subject {
             constraint: value,
             capability: self,
         })
+    }
+
+    /// Attach a site to this subject, creating an [`AuthorizationRequest`].
+    pub fn at<S: Site>(self, site: &S) -> AuthorizationRequest<'_, S, Self> {
+        AuthorizationRequest::new(site, Capability::<Self>::new(self))
     }
 }

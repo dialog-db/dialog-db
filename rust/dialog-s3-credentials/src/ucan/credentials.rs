@@ -104,21 +104,6 @@ impl Credentials {
     }
 }
 
-impl credential::Remote for Credentials {
-    type Authorization = DelegationChain;
-    type Permit = UcanInvocation;
-    type Access = AuthorizedRequest;
-    type Address = String;
-
-    fn address(&self) -> &String {
-        &self.endpoint
-    }
-
-    fn authorization(&self) -> &DelegationChain {
-        &self.delegation
-    }
-}
-
 /// Build a UCAN authorize result from delegation chain, endpoint, and capability.
 ///
 /// This helper is used by env types that implement `Provider<Authorize<C, Credentials>>`.
@@ -209,9 +194,9 @@ where
 
 /// Redeem a UCAN invocation by POSTing to the access service.
 ///
-/// This helper is used by env types that implement `Provider<Redeem<C, Credentials>>`.
+/// This helper is used by env types that implement `Provider<Redeem<C, UcanSite>>`.
 pub async fn redeem<C>(
-    input: credential::Redeem<C, Credentials>,
+    input: credential::Redeem<C, crate::ucan::site::UcanSite>,
 ) -> Result<Authorization<C, AuthorizedRequest>, credential::RedeemError>
 where
     C: Constraint + Clone + 'static,
@@ -313,33 +298,39 @@ pub mod tests {
         }
     }
 
-    /// Session implements Provider<Authorize> for UCAN credentials.
+    /// Session implements Provider<Authorize> for UCAN site.
     #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
     #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
-    impl<C> Provider<credential::Authorize<C, Credentials>> for Session
+    impl<C> Provider<credential::Authorize<C, crate::ucan::site::UcanSite>> for Session
     where
         C: Constraint + Clone + ConditionalSend + 'static,
         Capability<C>: ConditionalSend,
     {
         async fn execute(
             &self,
-            input: credential::Authorize<C, Credentials>,
+            input: credential::Authorize<C, crate::ucan::site::UcanSite>,
         ) -> Result<Authorization<C, UcanInvocation>, credential::AuthorizeError> {
-            super::authorize(self, input.authorization, input.address, input.capability).await
+            super::authorize(
+                self,
+                self.credentials.delegation().clone(),
+                input.site.endpoint().to_string(),
+                input.capability,
+            )
+            .await
         }
     }
 
-    /// Session implements Provider<Redeem> for UCAN credentials.
+    /// Session implements Provider<Redeem> for UCAN site.
     #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
     #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
-    impl<C> Provider<credential::Redeem<C, Credentials>> for Session
+    impl<C> Provider<credential::Redeem<C, crate::ucan::site::UcanSite>> for Session
     where
         C: Constraint + Clone + ConditionalSend + 'static,
         Capability<C>: ConditionalSend,
     {
         async fn execute(
             &self,
-            input: credential::Redeem<C, Credentials>,
+            input: credential::Redeem<C, crate::ucan::site::UcanSite>,
         ) -> Result<Authorization<C, AuthorizedRequest>, credential::RedeemError> {
             super::redeem(input).await
         }

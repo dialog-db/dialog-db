@@ -151,7 +151,8 @@
 //! | [`Ability`] | Trait providing `subject()` and `ability()` |
 //! | [`Provider<I>`] | Executes capabilities |
 //! | [`Authorization`] | Capability paired with authorization proof |
-//! | [`credential::Remote`] | Trait for credential types requiring authorization |
+//! | [`AuthorizationRequest`] | Capability paired with a site for authorization |
+//! | [`site::Site`] | Trait for site configuration types |
 
 mod error;
 pub use error::*;
@@ -201,6 +202,8 @@ pub use router::*;
 mod issuer;
 pub use issuer::*;
 
+pub mod site;
+
 pub mod credential;
 
 mod authorization;
@@ -208,6 +211,9 @@ pub use authorization::*;
 
 mod claim;
 pub use claim::*;
+
+mod authorization_request;
+pub use authorization_request::*;
 
 mod invocation;
 pub use invocation::*;

@@ -3,7 +3,7 @@
 #![cfg(feature = "s3-integration-tests")]
 
 use dialog_capability::Did;
-use dialog_capability::credential::Remote;
+use dialog_capability::Subject;
 use dialog_effects::memory::prelude::{
     CellExt, MemoryExt, SpaceExt, SubjectExt as MemorySubjectExt,
 };
@@ -11,6 +11,7 @@ use dialog_effects::memory::{MemoryError, Publication};
 use dialog_effects::storage::StorageError;
 use dialog_effects::storage::prelude::{StorageExt, StoreExt, SubjectExt as StorageSubjectExt};
 use dialog_s3_credentials::Address;
+use dialog_s3_credentials::s3::S3Site;
 use dialog_storage::s3::{S3, S3Credentials, S3StorageError, helpers::Session};
 
 /// Adds timestamp to the given string to make it unique
@@ -26,6 +27,7 @@ pub fn unique(base: &str) -> String {
 pub struct TestBucket {
     pub s3: S3,
     pub credentials: S3Credentials,
+    pub site: S3Site,
     pub subject: Did,
     pub session: Session,
     pub store: String,
@@ -36,6 +38,7 @@ impl TestBucket {
         TestBucket {
             s3: self.s3.clone(),
             credentials: self.credentials.clone(),
+            site: self.site.clone(),
             subject: self.subject.clone(),
             session: self.session.clone(),
             store: format!("{}/{}", self.store, path),
@@ -43,9 +46,8 @@ impl TestBucket {
     }
 
     pub async fn set(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), S3StorageError> {
-        let authorized = self
-            .credentials
-            .claim(self.subject.clone())
+        let authorized = Subject::from(self.subject.clone())
+            .at(&self.site)
             .storage()
             .store(&self.store)
             .set(key, value)
@@ -58,9 +60,8 @@ impl TestBucket {
     }
 
     pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, S3StorageError> {
-        let authorized = self
-            .credentials
-            .claim(self.subject.clone())
+        let authorized = Subject::from(self.subject.clone())
+            .at(&self.site)
             .storage()
             .store(&self.store)
             .get(key)
@@ -73,9 +74,8 @@ impl TestBucket {
     }
 
     pub async fn delete(&self, key: &[u8]) -> Result<(), S3StorageError> {
-        let authorized = self
-            .credentials
-            .claim(self.subject.clone())
+        let authorized = Subject::from(self.subject.clone())
+            .at(&self.site)
             .storage()
             .store(&self.store)
             .delete(key)
@@ -92,9 +92,8 @@ impl TestBucket {
         space: &str,
         cell: &str,
     ) -> Result<Option<Publication>, S3StorageError> {
-        let authorized = self
-            .credentials
-            .claim(self.subject.clone())
+        let authorized = Subject::from(self.subject.clone())
+            .at(&self.site)
             .memory()
             .space(space)
             .cell(cell)
@@ -114,9 +113,8 @@ impl TestBucket {
         content: Vec<u8>,
         when: Option<Vec<u8>>,
     ) -> Result<Vec<u8>, S3StorageError> {
-        let authorized = self
-            .credentials
-            .claim(self.subject.clone())
+        let authorized = Subject::from(self.subject.clone())
+            .at(&self.site)
             .memory()
             .space(space)
             .cell(cell)
@@ -136,9 +134,8 @@ impl TestBucket {
         cell: &str,
         when: Vec<u8>,
     ) -> Result<(), S3StorageError> {
-        let authorized = self
-            .credentials
-            .claim(self.subject.clone())
+        let authorized = Subject::from(self.subject.clone())
+            .at(&self.site)
             .memory()
             .space(space)
             .cell(cell)
@@ -167,18 +164,20 @@ pub fn open() -> TestBucket {
         .expect("Invalid DID in R2S3_SUBJECT");
 
     let credentials = S3Credentials::private(
-        address,
+        address.clone(),
         option_env!("R2S3_ACCESS_KEY_ID").expect("R2S3_ACCESS_KEY_ID not set"),
         option_env!("R2S3_SECRET_ACCESS_KEY").expect("R2S3_SECRET_ACCESS_KEY not set"),
     )
     .expect("Failed to create credentials");
 
+    let site = S3Site::new(address).expect("Failed to create S3 site");
     let s3 = S3::from_s3(credentials.clone());
     let session = Session::new(subject.clone());
 
     TestBucket {
         s3,
         credentials,
+        site,
         subject,
         session,
         store: "integration-tests".to_string(),

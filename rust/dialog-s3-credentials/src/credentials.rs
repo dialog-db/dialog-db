@@ -3,7 +3,7 @@ use super::s3;
 use super::ucan;
 use crate::capability::AuthorizedRequest;
 use crate::s3::provider::S3Permit;
-use dialog_capability::credential;
+use dialog_capability::site::{RemoteSite, Site};
 
 /// Unified credentials enum supporting multiple authorization backends.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -49,17 +49,32 @@ pub enum UnifiedProof {
     Ucan(ucan::UcanInvocation),
 }
 
-impl credential::Remote for Credentials {
-    type Authorization = Credentials;
+/// Unified site type that dispatches to S3 or UCAN backends.
+#[derive(Debug, Clone)]
+pub enum UnifiedSite {
+    /// Direct S3 site.
+    S3(s3::S3Site),
+    /// UCAN-delegated site.
+    #[cfg(feature = "ucan")]
+    Ucan(ucan::site::UcanSite),
+}
+
+impl Site for UnifiedSite {
     type Permit = UnifiedProof;
     type Access = AuthorizedRequest;
-    type Address = Credentials;
+}
 
-    fn address(&self) -> &Credentials {
-        self
+impl RemoteSite for UnifiedSite {}
+
+impl From<s3::S3Site> for UnifiedSite {
+    fn from(site: s3::S3Site) -> Self {
+        Self::S3(site)
     }
+}
 
-    fn authorization(&self) -> &Credentials {
-        self
+#[cfg(feature = "ucan")]
+impl From<ucan::site::UcanSite> for UnifiedSite {
+    fn from(site: ucan::site::UcanSite) -> Self {
+        Self::Ucan(site)
     }
 }

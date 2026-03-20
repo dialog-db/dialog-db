@@ -19,6 +19,9 @@ use dialog_common::ConditionalSend;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+// Re-export Site types for consumers that use credential types
+pub use crate::site::{Local, RemoteSite};
+
 /// Root attenuation for credential operations.
 ///
 /// Attaches to Subject and provides the `/credential` ability path segment.
@@ -84,77 +87,50 @@ pub enum CredentialError {
     NotFound(String),
 }
 
-/// A remote resource requiring authorization to access.
-///
-/// Implemented by concrete credential types (e.g., `s3::Credentials`,
-/// `ucan::Credentials`). The associated types track the authorization
-/// lifecycle from authorization through permit to final access.
-pub trait Remote: ConditionalSend + 'static {
-    /// The authorization material (e.g., the credentials themselves for S3,
-    /// a delegation chain for UCAN).
-    type Authorization: Clone + ConditionalSend;
+use crate::site::Site;
 
-    /// Intermediate permit produced by `Authorize` (e.g., `S3Permit`,
-    /// `UcanInvocation`). Redeemed into final `Access`.
-    type Permit: ConditionalSend;
-
-    /// Final access token produced by `Redeem` (e.g., `AuthorizedRequest`).
-    type Access: ConditionalSend;
-
-    /// Service address (e.g., S3 endpoint URL, access service URL).
-    type Address: Clone + ConditionalSend;
-
-    /// Get the service address.
-    fn address(&self) -> &Self::Address;
-
-    /// Get the authorization material.
-    fn authorization(&self) -> &Self::Authorization;
-
-    /// Start building a capability chain with these credentials.
-    ///
-    /// Returns a [`Claim`] rooted at the given subject. Use `.attenuate()`
-    /// and `.invoke()` to build the chain, then `.acquire()` to authorize.
-    fn claim(&self, subject: impl Into<Subject>) -> crate::Claim<'_, Self, Subject>
-    where
-        Self: Sized,
-    {
-        crate::Claim::new(self, Capability::new(subject.into()))
-    }
-}
-
-/// Request to authorize a capability against a remote resource `R`.
+/// Request to authorize a capability against a site `S`.
 ///
 /// This is the first step of the authorization pipeline. The environment
-/// receives authorization material and a capability, and produces an
-/// `Authorization<Fx, R::Permit>`.
-pub struct Authorize<Fx: Constraint, R: Remote> {
-    /// The authorization material from the resource.
-    pub authorization: R::Authorization,
-    /// The service address.
-    pub address: R::Address,
+/// receives the site configuration and a capability, and produces an
+/// `Authorization<Fx, S::Permit>`.
+pub struct Authorize<Fx: Constraint, S: Site> {
+    /// The site configuration.
+    pub site: S,
     /// The capability to authorize.
     pub capability: Capability<Fx>,
 }
 
-impl<Fx: Constraint, R: Remote> Invocation for Authorize<Fx, R> {
+impl<Fx: Constraint, S: Site> Invocation for Authorize<Fx, S> {
     type Input = Self;
-    type Output = Result<Authorization<Fx, R::Permit>, AuthorizeError>;
+    type Output = Result<Authorization<Fx, S::Permit>, AuthorizeError>;
 }
 
 /// Redeem a permit into final access.
 ///
 /// This is the second step of the authorization pipeline. The environment
-/// takes the intermediate permit and produces an `Authorization<Fx, R::Access>`.
-pub struct Redeem<Fx: Constraint, R: Remote> {
+/// takes the intermediate permit and produces an `Authorization<Fx, S::Access>`.
+pub struct Redeem<Fx: Constraint, S: Site> {
     /// The intermediate authorization (capability + permit).
-    pub authorization: Authorization<Fx, R::Permit>,
-    /// The service address.
-    pub address: R::Address,
+    pub authorization: Authorization<Fx, S::Permit>,
+    /// The site configuration.
+    pub site: S,
 }
 
-impl<Fx: Constraint, R: Remote> Invocation for Redeem<Fx, R> {
+impl<Fx: Constraint, S: Site> Invocation for Redeem<Fx, S> {
     type Input = Self;
-    type Output = Result<Authorization<Fx, R::Access>, RedeemError>;
+    type Output = Result<Authorization<Fx, S::Access>, RedeemError>;
+}
+
+/// Import credential material into the environment's credential store.
+pub struct Import<Material> {
+    /// The credential material to import.
+    pub material: Material,
+}
+
+impl<Material: ConditionalSend + 'static> Invocation for Import<Material> {
+    type Input = Self;
+    type Output = Result<(), CredentialError>;
 }
 
 /// Error during the authorize step.

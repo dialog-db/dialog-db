@@ -1,5 +1,6 @@
 use crate::{
-    Ability, Constrained, Constraint, Did, Effect, Policy, PolicyBuilder, Provider, Selector,
+    Ability, AuthorizationRequest, Constrained, Constraint, Did, Effect, Policy, PolicyBuilder,
+    Provider, Selector, site::Site,
 };
 
 /// Newtype wrapper for describing a capability chain from the constraint type.
@@ -45,6 +46,14 @@ impl<T: Constraint> Capability<T> {
         T::Capability: Ability,
     {
         self.0.ability()
+    }
+
+    /// Attach a site to this capability, creating an [`AuthorizationRequest`].
+    ///
+    /// The site can be attached at any point in the chain — before or after
+    /// attenuations and effects.
+    pub fn at<S: Site>(self, site: &S) -> AuthorizationRequest<'_, S, T> {
+        AuthorizationRequest::new(site, self)
     }
 
     /// Creates an invocation of the effect derived from this capability.

@@ -12,7 +12,7 @@ use dialog_capability::{
     Authorization, Capability, Constraint, Did, Principal, Provider, credential,
 };
 use dialog_s3_credentials::capability::{AuthorizedRequest, S3Request};
-use dialog_s3_credentials::s3::{Credentials as S3Credentials, provider::S3Permit};
+use dialog_s3_credentials::s3::{S3Site, provider::S3Permit};
 use serde::{Deserialize, Serialize};
 
 /// S3 test server connection info with credentials, passed to inner tests.
@@ -113,36 +113,38 @@ impl Provider<credential::Sign> for Session {
 /// Session delegates S3 authorization to the credentials themselves.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<C> Provider<credential::Authorize<C, S3Credentials>> for Session
+impl<C> Provider<credential::Authorize<C, S3Site>> for Session
 where
     C: Constraint + Clone + 'static,
     Capability<C>: S3Request,
 {
     async fn execute(
         &self,
-        input: credential::Authorize<C, S3Credentials>,
+        _input: credential::Authorize<C, S3Site>,
     ) -> Result<Authorization<C, S3Permit>, credential::AuthorizeError> {
-        let creds = input.authorization.clone();
-        <S3Credentials as Provider<credential::Authorize<C, S3Credentials>>>::execute(&creds, input)
-            .await
+        Err(credential::AuthorizeError::Configuration(
+            "Session does not hold S3 credentials directly; use S3Credentials as Provider instead"
+                .to_string(),
+        ))
     }
 }
 
 /// Session delegates S3 redemption to the credentials themselves.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<C> Provider<credential::Redeem<C, S3Credentials>> for Session
+impl<C> Provider<credential::Redeem<C, S3Site>> for Session
 where
     C: Constraint + Clone + 'static,
     Capability<C>: S3Request,
 {
     async fn execute(
         &self,
-        input: credential::Redeem<C, S3Credentials>,
+        _input: credential::Redeem<C, S3Site>,
     ) -> Result<Authorization<C, AuthorizedRequest>, credential::RedeemError> {
-        let creds = input.authorization.site().credentials().clone();
-        <S3Credentials as Provider<credential::Redeem<C, S3Credentials>>>::execute(&creds, input)
-            .await
+        Err(credential::RedeemError::Rejected(
+            "Session does not hold S3 credentials directly; use S3Credentials as Provider instead"
+                .to_string(),
+        ))
     }
 }
 

@@ -17,7 +17,6 @@
 //! use dialog_s3_credentials::{Address, s3};
 //! use dialog_s3_credentials::capability::storage::{Storage, Store, Get};
 //! use dialog_capability::{Subject, credential, did};
-//! use dialog_capability::credential::Remote;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create address for S3 bucket
@@ -30,17 +29,17 @@
 //! // Subject DID identifies whose data we're accessing (used as path prefix)
 //! let subject = did!("key:zSubject");
 //!
-//! // Create credentials (public or private)
+//! // Create site config and credentials separately
+//! let site = s3::S3Site::new(address.clone())?;
 //! let credentials = s3::Credentials::private(
 //!     address,
 //!     "AKIAIOSFODNN7EXAMPLE",
 //!     "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 //! )?;
 //!
-//! // Build a claim and authorize to get a presigned URL.
-//! // S3 credentials serve as their own env for the Authorize/Redeem pipeline.
-//! let authorization = credentials
-//!     .claim(subject)
+//! // Build an authorization request using .at(&site) and authorize.
+//! let authorization = Subject::from(subject)
+//!     .at(&site)
 //!     .attenuate(Storage)
 //!     .attenuate(Store::new("index"))
 //!     .invoke(Get::new(b"my-key"))
