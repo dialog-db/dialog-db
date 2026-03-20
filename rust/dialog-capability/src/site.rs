@@ -1,30 +1,30 @@
 //! Site trait for declaring authorization requirements.
 //!
 //! A [`Site`] represents pure configuration for a target location — no
-//! credential material. It declares what intermediate and final authorization
-//! types it needs via associated types.
-//!
-//! [`RemoteSite`] marks sites that require the full Authorize → Redeem
-//! pipeline. [`Local`] represents direct local access.
+//! credential material. It declares what access format it uses and what
+//! invocation type it produces via a GAT.
 
+use crate::access::{Access, LocalAccess};
+use crate::authorization::Authorized;
+use crate::command::Command;
+use crate::effect::Effect;
+use crate::{Capability, Constraint};
 use dialog_common::ConditionalSend;
 
 /// Pure site configuration — no credential material.
 ///
 /// Implemented by types that describe where an operation should be directed.
-/// The associated types track the authorization lifecycle:
-///
-/// - `Permit`: intermediate proof produced by the Authorize step
-/// - `Access`: final access token produced by the Redeem step
+/// The `Invocation` GAT declares what type `acquire` produces for each effect.
 pub trait Site: Clone + ConditionalSend + 'static {
-    /// Intermediate permit produced by the Authorize step.
-    type Permit: ConditionalSend;
-    /// Final access token produced by the Redeem step.
-    type Access: ConditionalSend;
-}
+    /// The access format this site uses.
+    type Access: Access;
 
-/// Marker for sites requiring remote authorization (Authorize → Redeem pipeline).
-pub trait RemoteSite: Site {}
+    /// The invocation type produced by `acquire` for a given effect.
+    type Invocation<Fx: Effect>: Command<Output = Fx::Output> + From<Authorized<Fx, Self::Access>>;
+
+    /// Extract the access context from this site.
+    fn access(&self) -> Self::Access;
+}
 
 /// Local site — no remote backend needed.
 ///
@@ -33,6 +33,40 @@ pub trait RemoteSite: Site {}
 pub struct Local;
 
 impl Site for Local {
-    type Permit = Local;
-    type Access = Local;
+    type Access = LocalAccess;
+    type Invocation<Fx: Effect> = Allowed<Fx>;
+
+    fn access(&self) -> LocalAccess {
+        LocalAccess
+    }
+}
+
+/// An allowed local invocation — wraps a bare capability after permission check.
+pub struct Allowed<Fx: Effect>(pub Capability<Fx>);
+
+impl<Fx: Effect> Allowed<Fx>
+where
+    Fx::Of: Constraint,
+{
+    /// Perform the allowed capability against a provider.
+    pub async fn perform<Env>(self, env: &Env) -> Fx::Output
+    where
+        Env: crate::Provider<Fx>,
+    {
+        env.execute(self.0).await
+    }
+}
+
+impl<Fx: Effect> Command for Allowed<Fx>
+where
+    Fx::Of: Constraint,
+{
+    type Input = Capability<Fx>;
+    type Output = Fx::Output;
+}
+
+impl<Fx: Effect> From<Authorized<Fx, LocalAccess>> for Allowed<Fx> {
+    fn from(auth: Authorized<Fx, LocalAccess>) -> Self {
+        Allowed(auth.capability)
+    }
 }

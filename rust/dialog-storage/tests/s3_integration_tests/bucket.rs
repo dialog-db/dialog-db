@@ -53,7 +53,9 @@ impl TestBucket {
             .set(key, value)
             .acquire(&self.session)
             .await
-            .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?;
+            .map_err(|e: dialog_capability::credential::AuthorizeError| {
+                S3StorageError::AuthorizationError(e.to_string())
+            })?;
 
         let result: Result<(), StorageError> = authorized.perform(&self.s3).await;
         result.map_err(|e| S3StorageError::ServiceError(e.to_string()))
@@ -67,7 +69,9 @@ impl TestBucket {
             .get(key)
             .acquire(&self.session)
             .await
-            .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?;
+            .map_err(|e: dialog_capability::credential::AuthorizeError| {
+                S3StorageError::AuthorizationError(e.to_string())
+            })?;
 
         let result: Result<Option<Vec<u8>>, StorageError> = authorized.perform(&self.s3).await;
         result.map_err(|e| S3StorageError::ServiceError(e.to_string()))
@@ -81,7 +85,9 @@ impl TestBucket {
             .delete(key)
             .acquire(&self.session)
             .await
-            .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?;
+            .map_err(|e: dialog_capability::credential::AuthorizeError| {
+                S3StorageError::AuthorizationError(e.to_string())
+            })?;
 
         let result: Result<(), StorageError> = authorized.perform(&self.s3).await;
         result.map_err(|e| S3StorageError::ServiceError(e.to_string()))
@@ -100,7 +106,9 @@ impl TestBucket {
             .resolve()
             .acquire(&self.session)
             .await
-            .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?;
+            .map_err(|e: dialog_capability::credential::AuthorizeError| {
+                S3StorageError::AuthorizationError(e.to_string())
+            })?;
 
         let result: Result<Option<Publication>, MemoryError> = authorized.perform(&self.s3).await;
         result.map_err(|e| S3StorageError::ServiceError(e.to_string()))
@@ -121,7 +129,9 @@ impl TestBucket {
             .publish(content, when)
             .acquire(&self.session)
             .await
-            .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?;
+            .map_err(|e: dialog_capability::credential::AuthorizeError| {
+                S3StorageError::AuthorizationError(e.to_string())
+            })?;
 
         let result: Result<Vec<u8>, MemoryError> = authorized.perform(&self.s3).await;
         result.map_err(|e| S3StorageError::ServiceError(e.to_string()))
@@ -142,7 +152,9 @@ impl TestBucket {
             .retract(when)
             .acquire(&self.session)
             .await
-            .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?;
+            .map_err(|e: dialog_capability::credential::AuthorizeError| {
+                S3StorageError::AuthorizationError(e.to_string())
+            })?;
 
         let result: Result<(), MemoryError> = authorized.perform(&self.s3).await;
         result.map_err(|e| S3StorageError::ServiceError(e.to_string()))

@@ -1,19 +1,22 @@
 //! Provider implementations for S3 site authorization.
 //!
 //! S3 credentials can directly grant authorization by presigning requests.
-//! The `Authorize` step wraps credentials into an `S3Permit`, and
-//! `Redeem` presigns the URL using those credentials.
+//! The `Authorize` step reads the S3Access context, uses credentials to
+//! presign, and produces an `Authorized<Fx, S3Access>` ready for conversion
+//! to `S3Invocation<Fx>`.
 
 use async_trait::async_trait;
-use dialog_capability::{Authorization, Capability, Constraint, Provider, credential};
+use dialog_capability::authorization::Authorized;
+use dialog_capability::{Capability, Constraint, Effect, Provider, credential};
 
 use super::Credentials;
-use crate::capability::{AuthorizedRequest, S3Request};
+use super::site::S3Access;
+use crate::capability::S3Request;
 
 /// Intermediate proof for S3 authorization.
 ///
 /// S3 presigning doesn't need an external service, so the "proof" step
-/// simply wraps the credentials ready for presigning in the redeem step.
+/// simply wraps the credentials ready for presigning in the authorize step.
 #[derive(Debug, Clone)]
 pub struct S3Permit {
     pub(crate) credentials: Credentials,
@@ -26,46 +29,32 @@ impl S3Permit {
     }
 }
 
-/// Provider for the Authorize step: wraps credentials into an S3Permit.
+/// Provider for the Authorize step: presigns the URL using S3 credentials.
 ///
-/// S3 credentials serve as their own env for the Authorize step.
+/// S3 credentials serve as their own env for the Authorize step. One provider
+/// covers ALL sites using `S3Access`.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<C> Provider<credential::Authorize<C, super::S3Site>> for Credentials
+impl<C> Provider<credential::Authorize<C, S3Access>> for Credentials
 where
-    C: Constraint + Clone + 'static,
+    C: Effect + Clone + 'static,
+    C::Of: Constraint,
     Capability<C>: S3Request,
 {
     async fn execute(
         &self,
-        input: credential::Authorize<C, super::S3Site>,
-    ) -> Result<Authorization<C, S3Permit>, credential::AuthorizeError> {
-        let permit = S3Permit {
-            credentials: self.clone(),
-        };
-        Ok(Authorization::new(input.capability, permit))
-    }
-}
-
-/// Provider for the Redeem step: presigns the URL using the S3 credentials.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<C> Provider<credential::Redeem<C, super::S3Site>> for Credentials
-where
-    C: Constraint + Clone + 'static,
-    Capability<C>: S3Request,
-{
-    async fn execute(
-        &self,
-        input: credential::Redeem<C, super::S3Site>,
-    ) -> Result<Authorization<C, AuthorizedRequest>, credential::RedeemError> {
-        let (capability, permit) = input.authorization.into_parts();
-        let authorized_request = permit
-            .credentials
-            .grant(&capability)
+        input: credential::Authorize<C, S3Access>,
+    ) -> Result<Authorized<C, S3Access>, credential::AuthorizeError> {
+        let authorized_request = self
+            .grant(&input.capability)
             .await
-            .map_err(|e| credential::RedeemError::Rejected(e.to_string()))?;
-        Ok(Authorization::new(capability, authorized_request))
+            .map_err(|e| credential::AuthorizeError::Denied(e.to_string()))?;
+
+        Ok(Authorized {
+            capability: input.capability,
+            access: input.access,
+            authorization: authorized_request,
+        })
     }
 }
 
@@ -73,9 +62,9 @@ where
 mod tests {
     use super::*;
     use crate::Address;
-    use crate::capability::{archive, memory, storage};
+    use crate::capability::{AuthorizedRequest, archive, memory, storage};
     use base58::ToBase58;
-    use dialog_capability::{Did, Subject, did};
+    use dialog_capability::{Did, Effect, Subject, did};
 
     fn test_subject() -> Did {
         did!("key:zTestSubject")
@@ -134,39 +123,27 @@ mod tests {
         Credentials::public(address).unwrap()
     }
 
-    /// Helper to authorize a capability using the Site-based flow.
+    /// Helper to authorize a capability using the new Access-based flow.
     async fn authorize<C>(
         creds: &Credentials,
-        _site: &super::super::S3Site,
+        site: &super::super::S3Site,
         capability: Capability<C>,
     ) -> AuthorizedRequest
     where
-        C: Constraint + Clone + 'static,
+        C: Effect + Clone + 'static,
         Capability<C>: S3Request,
     {
-        let authorize_input = credential::Authorize::<C, super::super::S3Site> {
-            site: _site.clone(),
-            capability,
-        };
-        let authorization: Authorization<C, S3Permit> = <Credentials as Provider<
-            credential::Authorize<C, super::super::S3Site>,
-        >>::execute(creds, authorize_input)
+        use dialog_capability::site::Site;
+        let access = site.access();
+        let authorize_input = credential::Authorize::<C, S3Access> { capability, access };
+        let authorized = <Credentials as Provider<credential::Authorize<C, S3Access>>>::execute(
+            creds,
+            authorize_input,
+        )
         .await
         .unwrap();
 
-        let redeem_input = credential::Redeem::<C, super::super::S3Site> {
-            authorization,
-            site: _site.clone(),
-        };
-        let result =
-            <Credentials as Provider<credential::Redeem<C, super::super::S3Site>>>::execute(
-                creds,
-                redeem_input,
-            )
-            .await
-            .unwrap();
-
-        result.into_site()
+        authorized.authorization
     }
 
     #[dialog_common::test]

@@ -149,9 +149,8 @@
 //! | Type | Role |
 //! |------|------|
 //! | [`Ability`] | Trait providing `subject()` and `ability()` |
-//! | [`Provider<I>`] | Executes capabilities |
-//! | [`Authorization`] | Capability paired with authorization proof |
-//! | [`AuthorizationRequest`] | Capability paired with a site for authorization |
+//! | [`Provider<C>`] | Executes commands |
+//! | [`Authorized`] | Capability paired with access context and authorization proof |
 //! | [`site::Site`] | Trait for site configuration types |
 
 mod error;
@@ -196,24 +195,20 @@ pub use capability::*;
 mod provider;
 pub use provider::*;
 
-mod router;
-pub use router::*;
-
 mod issuer;
 pub use issuer::*;
+
+/// Derive macro that generates `Provider<Fx>` impls for composite structs.
+pub use dialog_macros::Provider;
+
+pub mod access;
 
 pub mod site;
 
 pub mod credential;
 
-mod authorization;
+pub mod authorization;
 pub use authorization::*;
 
-mod claim;
-pub use claim::*;
-
-mod authorization_request;
-pub use authorization_request::*;
-
-mod invocation;
-pub use invocation::*;
+pub mod command;
+pub use command::*;

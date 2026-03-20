@@ -1,7 +1,11 @@
 //! `#[derive(Provider)]` macro implementation.
 //!
-//! Generates `Provider<Fx>` impls for composite structs where each field
-//! is annotated with `#[provide(...)]` listing the effects it handles.
+//! Generates `Provider<C>` impls for composite structs where each field
+//! is annotated with `#[provide(...)]` listing the commands it handles.
+//!
+//! Works with any `Command` type — both `Effect` types (which implement
+//! `Command` via blanket impl) and explicit `Command` types like
+//! `S3Invocation<archive::Get>` or `Authorize<Fx, S3Access>`.
 //!
 //! # Example
 //!
@@ -12,6 +16,8 @@
 //!     local: FileSystem,
 //!     #[provide(credential::Identify, credential::Sign)]
 //!     credentials: KeyStore,
+//!     #[provide(S3Invocation<archive::Get>, S3Invocation<archive::Put>)]
+//!     remote: S3,
 //! }
 //! ```
 //!
@@ -20,14 +26,9 @@
 //! impl Provider<archive::Get> for Env
 //! where FileSystem: Provider<archive::Get> { ... }
 //!
-//! impl Provider<archive::Put> for Env
-//! where FileSystem: Provider<archive::Put> { ... }
-//!
-//! impl Provider<credential::Identify> for Env
-//! where KeyStore: Provider<credential::Identify> { ... }
-//!
-//! impl Provider<credential::Sign> for Env
-//! where KeyStore: Provider<credential::Sign> { ... }
+//! impl Provider<S3Invocation<archive::Get>> for Env
+//! where S3: Provider<S3Invocation<archive::Get>> { ... }
+//! // etc.
 //! ```
 
 use proc_macro::TokenStream;
@@ -45,7 +46,7 @@ pub fn generate(input: TokenStream) -> TokenStream {
 struct ProvideField<'a> {
     field_name: &'a syn::Ident,
     field_ty: &'a syn::Type,
-    effects: Vec<syn::Path>,
+    commands: Vec<syn::Type>,
     cfg_attrs: Vec<&'a syn::Attribute>,
 }
 
@@ -82,30 +83,29 @@ fn generate_compose(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream
                 .filter(|attr| attr.path().is_ident("cfg"))
                 .collect();
 
-            // Look for #[provide(...)] attribute
-            let mut effects = Vec::new();
+            let mut commands = Vec::new();
             for attr in &field.attrs {
                 if attr.path().is_ident("provide")
-                    && let Ok(paths) = attr.parse_args_with(|input: syn::parse::ParseStream| {
-                        let paths = syn::punctuated::Punctuated::<
-                                syn::Path,
+                    && let Ok(types) = attr.parse_args_with(|input: syn::parse::ParseStream| {
+                        let types = syn::punctuated::Punctuated::<
+                                syn::Type,
                                 syn::Token![,],
                             >::parse_terminated(input)?;
-                        Ok(paths.into_iter().collect::<Vec<_>>())
+                        Ok(types.into_iter().collect::<Vec<_>>())
                     })
                 {
-                    effects.extend(paths);
+                    commands.extend(types);
                 }
             }
 
-            if effects.is_empty() {
+            if commands.is_empty() {
                 return None;
             }
 
             Some(ProvideField {
                 field_name,
                 field_ty,
-                effects,
+                commands,
                 cfg_attrs,
             })
         })
@@ -118,35 +118,34 @@ fn generate_compose(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream
         })
         .unwrap_or_default();
 
-    // Generate one Provider<Effect> impl per effect per field
+    // Generate one Provider<C> impl per command per field
     let mut provider_impls = Vec::new();
     for pf in &provide_fields {
         let field_name = pf.field_name;
         let field_ty = pf.field_ty;
         let cfg_attrs = &pf.cfg_attrs;
 
-        for effect in &pf.effects {
+        for command in &pf.commands {
             provider_impls.push(quote! {
                 #(#cfg_attrs)*
                 #[allow(clippy::absolute_paths)]
                 #[cfg_attr(not(target_arch = "wasm32"), ::async_trait::async_trait)]
                 #[cfg_attr(target_arch = "wasm32", ::async_trait::async_trait(?Send))]
-                impl #impl_generics ::dialog_capability::Provider<#effect>
+                impl #impl_generics ::dialog_capability::Provider<#command>
                     for #struct_name #ty_generics
                 where
                     #existing_predicates
-                    #effect: ::dialog_capability::Effect,
-                    <#effect as ::dialog_capability::Effect>::Of: ::dialog_capability::Constraint,
-                    ::dialog_capability::Capability<#effect>: ::dialog_common::ConditionalSend,
-                    #field_ty: ::dialog_capability::Provider<#effect>
+                    #command: ::dialog_capability::Command,
+                    <#command as ::dialog_capability::Command>::Input: ::dialog_common::ConditionalSend,
+                    #field_ty: ::dialog_capability::Provider<#command>
                         + ::dialog_common::ConditionalSync,
                     Self: ::dialog_common::ConditionalSend + ::dialog_common::ConditionalSync,
                 {
                     async fn execute(
                         &self,
-                        input: ::dialog_capability::Capability<#effect>,
-                    ) -> <#effect as ::dialog_capability::Effect>::Output {
-                        <#field_ty as ::dialog_capability::Provider<#effect>>::execute(
+                        input: <#command as ::dialog_capability::Command>::Input,
+                    ) -> <#command as ::dialog_capability::Command>::Output {
+                        <#field_ty as ::dialog_capability::Provider<#command>>::execute(
                             &self.#field_name, input
                         ).await
                     }

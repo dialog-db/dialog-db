@@ -1,8 +1,10 @@
 use dialog_capability::{Did, Provider};
 use dialog_effects::memory as memory_fx;
+use dialog_s3_credentials::s3::S3Site;
 
 use super::state::SiteName;
 use crate::RemoteAddress;
+use crate::environment::to_s3_site;
 use crate::repository::cell::Cell;
 use crate::repository::error::RepositoryError;
 use crate::repository::memory::Space;
@@ -12,7 +14,8 @@ use super::repository::RemoteRepository;
 /// A loaded remote site configuration.
 ///
 /// Represents a named remote (like git's "origin") that has been loaded from
-/// or persisted to memory.
+/// or persisted to memory. Stores both the serializable address (for persistence)
+/// and the derived site configuration (for execution).
 ///
 /// Call [`.repository(subject)`](RemoteSite::repository) to get a cursor into
 /// a specific repository at this site.
@@ -20,6 +23,7 @@ use super::repository::RemoteRepository;
 pub struct RemoteSite {
     name: SiteName,
     address: RemoteAddress,
+    site: S3Site,
 }
 
 impl RemoteSite {
@@ -28,14 +32,19 @@ impl RemoteSite {
         &self.name
     }
 
-    /// The address for this remote.
+    /// The serializable address configuration for this remote.
     pub fn address(&self) -> &RemoteAddress {
         &self.address
     }
 
+    /// The site configuration for remote operations.
+    pub fn site(&self) -> &S3Site {
+        &self.site
+    }
+
     /// Get a cursor into a specific repository at this remote site.
     pub fn repository(&self, subject: Did) -> RemoteRepository {
-        RemoteRepository::new(self.name.clone(), self.address.clone(), subject)
+        RemoteRepository::new(self.name.clone(), self.site.clone(), subject)
     }
 }
 
@@ -69,9 +78,13 @@ impl Open {
 
         cell.publish(self.address.clone(), env).await?;
 
+        let site = to_s3_site(&self.address)
+            .map_err(|e| RepositoryError::StorageError(format!("Invalid remote address: {}", e)))?;
+
         Ok(RemoteSite {
             name: self.name,
             address: self.address,
+            site,
         })
     }
 }
@@ -99,10 +112,16 @@ impl Load {
 
         cell.resolve(env).await?;
         match cell.get() {
-            Some(address) => Ok(RemoteSite {
-                name: self.name,
-                address,
-            }),
+            Some(address) => {
+                let site = to_s3_site(&address).map_err(|e| {
+                    RepositoryError::StorageError(format!("Invalid remote address: {}", e))
+                })?;
+                Ok(RemoteSite {
+                    name: self.name,
+                    address,
+                    site,
+                })
+            }
             None => Err(RepositoryError::RemoteNotFound { remote: self.name }),
         }
     }

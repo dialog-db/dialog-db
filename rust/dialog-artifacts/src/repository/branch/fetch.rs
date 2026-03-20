@@ -1,7 +1,7 @@
-use crate::RemoteAddress;
-use dialog_capability::Provider;
+use dialog_capability::{Provider, credential::Authorize};
+use dialog_common::ConditionalSync;
 use dialog_effects::memory as memory_fx;
-use dialog_effects::remote::RemoteInvocation;
+use dialog_s3_credentials::s3::site::{S3Access, S3Invocation};
 
 use super::Branch;
 use super::state::{BranchName, UpstreamState};
@@ -33,7 +33,9 @@ impl Fetch<'_> {
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, RepositoryError>
     where
         Env: Provider<memory_fx::Resolve>
-            + Provider<RemoteInvocation<memory_fx::Resolve, RemoteAddress>>,
+            + Provider<Authorize<memory_fx::Resolve, S3Access>>
+            + Provider<S3Invocation<memory_fx::Resolve>>
+            + ConditionalSync,
     {
         let upstream =
             self.branch
@@ -86,13 +88,15 @@ async fn fetch_remote<Env>(
 ) -> Result<Option<Revision>, RepositoryError>
 where
     Env: Provider<memory_fx::Resolve>
-        + Provider<RemoteInvocation<memory_fx::Resolve, RemoteAddress>>,
+        + Provider<Authorize<memory_fx::Resolve, S3Access>>
+        + Provider<S3Invocation<memory_fx::Resolve>>
+        + ConditionalSync,
 {
     let remote_site = branch.load_remote(remote.clone()).perform(env).await?;
 
     let remote_branch = RemoteBranch::new(
         remote_site.name().clone(),
-        remote_site.address().clone(),
+        remote_site.site().clone(),
         upstream_subject.clone(),
         upstream_branch_name.clone(),
     );

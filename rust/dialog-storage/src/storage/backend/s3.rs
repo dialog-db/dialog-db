@@ -228,9 +228,9 @@ impl S3 {
     }
 }
 
-// Provider<Authorization<Fx, AuthorizedRequest>> impls for application-level effects
+// Provider<S3Invocation<Fx>> impls for application-level effects
 // live in the submodules: archive.rs, memory.rs, storage.rs.
-// Each impl presigns the request, executes HTTP, and interprets the response.
+// Each impl executes the presigned HTTP request and interprets the response.
 
 /// A scoped S3 storage bucket with subject and namespace path.
 ///

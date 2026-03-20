@@ -1,10 +1,9 @@
-use crate::RemoteAddress;
-use dialog_capability::Provider;
+use dialog_capability::{Provider, credential::Authorize};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
-use dialog_effects::remote::RemoteInvocation;
 use dialog_prolly_tree::{EMPT_TREE_HASH, Tree};
+use dialog_s3_credentials::s3::site::{S3Access, S3Invocation};
 use std::collections::HashSet;
 
 use super::Branch;
@@ -77,8 +76,10 @@ impl Pull<'_> {
             + Provider<archive_fx::Put>
             + Provider<memory_fx::Resolve>
             + Provider<memory_fx::Publish>
-            + Provider<RemoteInvocation<archive_fx::Get, RemoteAddress>>
-            + Provider<RemoteInvocation<memory_fx::Resolve, RemoteAddress>>
+            + Provider<Authorize<archive_fx::Get, S3Access>>
+            + Provider<S3Invocation<archive_fx::Get>>
+            + Provider<Authorize<memory_fx::Resolve, S3Access>>
+            + Provider<S3Invocation<memory_fx::Resolve>>
             + ConditionalSync
             + 'static,
     {
@@ -229,8 +230,10 @@ where
         + Provider<archive_fx::Put>
         + Provider<memory_fx::Resolve>
         + Provider<memory_fx::Publish>
-        + Provider<RemoteInvocation<archive_fx::Get, RemoteAddress>>
-        + Provider<RemoteInvocation<memory_fx::Resolve, RemoteAddress>>
+        + Provider<Authorize<archive_fx::Get, S3Access>>
+        + Provider<S3Invocation<archive_fx::Get>>
+        + Provider<Authorize<memory_fx::Resolve, S3Access>>
+        + Provider<S3Invocation<memory_fx::Resolve>>
         + ConditionalSync
         + 'static,
 {
@@ -242,7 +245,7 @@ where
 
     let remote_branch = RemoteBranch::new(
         remote_site.name().clone(),
-        remote_site.address().clone(),
+        remote_site.site().clone(),
         upstream_subject.clone(),
         upstream_branch_name.clone(),
     );

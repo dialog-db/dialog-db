@@ -5,7 +5,7 @@
 //! use dialog_effects::memory::prelude::*;
 //! ```
 
-use dialog_capability::{AuthorizationRequest, Capability, Claim, Did, Subject};
+use dialog_capability::{Capability, Did, Subject, site::Site};
 
 use super::{Cell, Memory, Publish, Resolve, Retract, Space};
 
@@ -31,16 +31,9 @@ impl SubjectExt for Did {
     }
 }
 
-impl<'a, A: ?Sized> SubjectExt for Claim<'a, A, Subject> {
-    type Memory = Claim<'a, A, Memory>;
-    fn memory(self) -> Claim<'a, A, Memory> {
-        self.attenuate(Memory)
-    }
-}
-
-impl<'a, S: ?Sized> SubjectExt for AuthorizationRequest<'a, S, Subject> {
-    type Memory = AuthorizationRequest<'a, S, Memory>;
-    fn memory(self) -> AuthorizationRequest<'a, S, Memory> {
+impl<S: Site> SubjectExt for Capability<Subject, S> {
+    type Memory = Capability<Memory, S>;
+    fn memory(self) -> Capability<Memory, S> {
         self.attenuate(Memory)
     }
 }
@@ -53,23 +46,9 @@ pub trait MemoryExt {
     fn space(self, name: impl Into<String>) -> Self::Space;
 }
 
-impl MemoryExt for Capability<Memory> {
-    type Space = Capability<Space>;
-    fn space(self, name: impl Into<String>) -> Capability<Space> {
-        self.attenuate(Space::new(name))
-    }
-}
-
-impl<'a, A: ?Sized> MemoryExt for Claim<'a, A, Memory> {
-    type Space = Claim<'a, A, Space>;
-    fn space(self, name: impl Into<String>) -> Claim<'a, A, Space> {
-        self.attenuate(Space::new(name))
-    }
-}
-
-impl<'a, S: ?Sized> MemoryExt for AuthorizationRequest<'a, S, Memory> {
-    type Space = AuthorizationRequest<'a, S, Space>;
-    fn space(self, name: impl Into<String>) -> AuthorizationRequest<'a, S, Space> {
+impl<S: Site> MemoryExt for Capability<Memory, S> {
+    type Space = Capability<Space, S>;
+    fn space(self, name: impl Into<String>) -> Capability<Space, S> {
         self.attenuate(Space::new(name))
     }
 }
@@ -82,23 +61,9 @@ pub trait SpaceExt {
     fn cell(self, name: impl Into<String>) -> Self::Cell;
 }
 
-impl SpaceExt for Capability<Space> {
-    type Cell = Capability<Cell>;
-    fn cell(self, name: impl Into<String>) -> Capability<Cell> {
-        self.attenuate(Cell::new(name))
-    }
-}
-
-impl<'a, A: ?Sized> SpaceExt for Claim<'a, A, Space> {
-    type Cell = Claim<'a, A, Cell>;
-    fn cell(self, name: impl Into<String>) -> Claim<'a, A, Cell> {
-        self.attenuate(Cell::new(name))
-    }
-}
-
-impl<'a, S: ?Sized> SpaceExt for AuthorizationRequest<'a, S, Space> {
-    type Cell = AuthorizationRequest<'a, S, Cell>;
-    fn cell(self, name: impl Into<String>) -> AuthorizationRequest<'a, S, Cell> {
+impl<S: Site> SpaceExt for Capability<Space, S> {
+    type Cell = Capability<Cell, S>;
+    fn cell(self, name: impl Into<String>) -> Capability<Cell, S> {
         self.attenuate(Cell::new(name))
     }
 }
@@ -119,60 +84,20 @@ pub trait CellExt {
     fn retract(self, when: impl Into<Vec<u8>>) -> Self::Retract;
 }
 
-impl CellExt for Capability<Cell> {
-    type Resolve = Capability<Resolve>;
-    type Publish = Capability<Publish>;
-    type Retract = Capability<Retract>;
+impl<S: Site> CellExt for Capability<Cell, S> {
+    type Resolve = Capability<Resolve, S>;
+    type Publish = Capability<Publish, S>;
+    type Retract = Capability<Retract, S>;
 
-    fn resolve(self) -> Capability<Resolve> {
+    fn resolve(self) -> Capability<Resolve, S> {
         self.invoke(Resolve)
     }
 
-    fn publish(self, content: impl Into<Vec<u8>>, when: Option<Vec<u8>>) -> Capability<Publish> {
+    fn publish(self, content: impl Into<Vec<u8>>, when: Option<Vec<u8>>) -> Capability<Publish, S> {
         self.invoke(Publish::new(content, when))
     }
 
-    fn retract(self, when: impl Into<Vec<u8>>) -> Capability<Retract> {
-        self.invoke(Retract::new(when))
-    }
-}
-
-impl<'a, A: ?Sized> CellExt for Claim<'a, A, Cell> {
-    type Resolve = Claim<'a, A, Resolve>;
-    type Publish = Claim<'a, A, Publish>;
-    type Retract = Claim<'a, A, Retract>;
-
-    fn resolve(self) -> Claim<'a, A, Resolve> {
-        self.invoke(Resolve)
-    }
-
-    fn publish(self, content: impl Into<Vec<u8>>, when: Option<Vec<u8>>) -> Claim<'a, A, Publish> {
-        self.invoke(Publish::new(content, when))
-    }
-
-    fn retract(self, when: impl Into<Vec<u8>>) -> Claim<'a, A, Retract> {
-        self.invoke(Retract::new(when))
-    }
-}
-
-impl<'a, S: ?Sized> CellExt for AuthorizationRequest<'a, S, Cell> {
-    type Resolve = AuthorizationRequest<'a, S, Resolve>;
-    type Publish = AuthorizationRequest<'a, S, Publish>;
-    type Retract = AuthorizationRequest<'a, S, Retract>;
-
-    fn resolve(self) -> AuthorizationRequest<'a, S, Resolve> {
-        self.invoke(Resolve)
-    }
-
-    fn publish(
-        self,
-        content: impl Into<Vec<u8>>,
-        when: Option<Vec<u8>>,
-    ) -> AuthorizationRequest<'a, S, Publish> {
-        self.invoke(Publish::new(content, when))
-    }
-
-    fn retract(self, when: impl Into<Vec<u8>>) -> AuthorizationRequest<'a, S, Retract> {
+    fn retract(self, when: impl Into<Vec<u8>>) -> Capability<Retract, S> {
         self.invoke(Retract::new(when))
     }
 }

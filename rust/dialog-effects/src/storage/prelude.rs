@@ -5,7 +5,7 @@
 //! use dialog_effects::storage::prelude::*;
 //! ```
 
-use dialog_capability::{AuthorizationRequest, Capability, Claim, Did, Subject};
+use dialog_capability::{Capability, Did, Subject, site::Site};
 
 use super::{Delete, Get, List, Set, Storage, Store};
 
@@ -31,16 +31,9 @@ impl SubjectExt for Did {
     }
 }
 
-impl<'a, A: ?Sized> SubjectExt for Claim<'a, A, Subject> {
-    type Storage = Claim<'a, A, Storage>;
-    fn storage(self) -> Claim<'a, A, Storage> {
-        self.attenuate(Storage)
-    }
-}
-
-impl<'a, S: ?Sized> SubjectExt for AuthorizationRequest<'a, S, Subject> {
-    type Storage = AuthorizationRequest<'a, S, Storage>;
-    fn storage(self) -> AuthorizationRequest<'a, S, Storage> {
+impl<S: Site> SubjectExt for Capability<Subject, S> {
+    type Storage = Capability<Storage, S>;
+    fn storage(self) -> Capability<Storage, S> {
         self.attenuate(Storage)
     }
 }
@@ -53,23 +46,9 @@ pub trait StorageExt {
     fn store(self, name: impl Into<String>) -> Self::Store;
 }
 
-impl StorageExt for Capability<Storage> {
-    type Store = Capability<Store>;
-    fn store(self, name: impl Into<String>) -> Capability<Store> {
-        self.attenuate(Store::new(name))
-    }
-}
-
-impl<'a, A: ?Sized> StorageExt for Claim<'a, A, Storage> {
-    type Store = Claim<'a, A, Store>;
-    fn store(self, name: impl Into<String>) -> Claim<'a, A, Store> {
-        self.attenuate(Store::new(name))
-    }
-}
-
-impl<'a, S: ?Sized> StorageExt for AuthorizationRequest<'a, S, Storage> {
-    type Store = AuthorizationRequest<'a, S, Store>;
-    fn store(self, name: impl Into<String>) -> AuthorizationRequest<'a, S, Store> {
+impl<S: Site> StorageExt for Capability<Storage, S> {
+    type Store = Capability<Store, S>;
+    fn store(self, name: impl Into<String>) -> Capability<Store, S> {
         self.attenuate(Store::new(name))
     }
 }
@@ -94,75 +73,25 @@ pub trait StoreExt {
     fn list(self, continuation_token: Option<String>) -> Self::List;
 }
 
-impl StoreExt for Capability<Store> {
-    type Get = Capability<Get>;
-    type Set = Capability<Set>;
-    type Delete = Capability<Delete>;
-    type List = Capability<List>;
+impl<S: Site> StoreExt for Capability<Store, S> {
+    type Get = Capability<Get, S>;
+    type Set = Capability<Set, S>;
+    type Delete = Capability<Delete, S>;
+    type List = Capability<List, S>;
 
-    fn get(self, key: impl Into<Vec<u8>>) -> Capability<Get> {
+    fn get(self, key: impl Into<Vec<u8>>) -> Capability<Get, S> {
         self.invoke(Get::new(key))
     }
 
-    fn set(self, key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Capability<Set> {
+    fn set(self, key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Capability<Set, S> {
         self.invoke(Set::new(key, value))
     }
 
-    fn delete(self, key: impl Into<Vec<u8>>) -> Capability<Delete> {
+    fn delete(self, key: impl Into<Vec<u8>>) -> Capability<Delete, S> {
         self.invoke(Delete::new(key))
     }
 
-    fn list(self, continuation_token: Option<String>) -> Capability<List> {
-        self.invoke(List::new(continuation_token))
-    }
-}
-
-impl<'a, A: ?Sized> StoreExt for Claim<'a, A, Store> {
-    type Get = Claim<'a, A, Get>;
-    type Set = Claim<'a, A, Set>;
-    type Delete = Claim<'a, A, Delete>;
-    type List = Claim<'a, A, List>;
-
-    fn get(self, key: impl Into<Vec<u8>>) -> Claim<'a, A, Get> {
-        self.invoke(Get::new(key))
-    }
-
-    fn set(self, key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Claim<'a, A, Set> {
-        self.invoke(Set::new(key, value))
-    }
-
-    fn delete(self, key: impl Into<Vec<u8>>) -> Claim<'a, A, Delete> {
-        self.invoke(Delete::new(key))
-    }
-
-    fn list(self, continuation_token: Option<String>) -> Claim<'a, A, List> {
-        self.invoke(List::new(continuation_token))
-    }
-}
-
-impl<'a, S: ?Sized> StoreExt for AuthorizationRequest<'a, S, Store> {
-    type Get = AuthorizationRequest<'a, S, Get>;
-    type Set = AuthorizationRequest<'a, S, Set>;
-    type Delete = AuthorizationRequest<'a, S, Delete>;
-    type List = AuthorizationRequest<'a, S, List>;
-
-    fn get(self, key: impl Into<Vec<u8>>) -> AuthorizationRequest<'a, S, Get> {
-        self.invoke(Get::new(key))
-    }
-
-    fn set(
-        self,
-        key: impl Into<Vec<u8>>,
-        value: impl Into<Vec<u8>>,
-    ) -> AuthorizationRequest<'a, S, Set> {
-        self.invoke(Set::new(key, value))
-    }
-
-    fn delete(self, key: impl Into<Vec<u8>>) -> AuthorizationRequest<'a, S, Delete> {
-        self.invoke(Delete::new(key))
-    }
-
-    fn list(self, continuation_token: Option<String>) -> AuthorizationRequest<'a, S, List> {
+    fn list(self, continuation_token: Option<String>) -> Capability<List, S> {
         self.invoke(List::new(continuation_token))
     }
 }

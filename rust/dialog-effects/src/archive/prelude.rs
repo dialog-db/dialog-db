@@ -5,7 +5,7 @@
 //! use dialog_effects::archive::prelude::*;
 //! ```
 
-use dialog_capability::{AuthorizationRequest, Capability, Claim, Did, Subject};
+use dialog_capability::{Capability, Did, Subject, site::Site};
 use dialog_common::Blake3Hash;
 
 use super::{Archive, Catalog, Get, Put};
@@ -32,16 +32,9 @@ impl SubjectExt for Did {
     }
 }
 
-impl<'a, A: ?Sized> SubjectExt for Claim<'a, A, Subject> {
-    type Archive = Claim<'a, A, Archive>;
-    fn archive(self) -> Claim<'a, A, Archive> {
-        self.attenuate(Archive)
-    }
-}
-
-impl<'a, S: ?Sized> SubjectExt for AuthorizationRequest<'a, S, Subject> {
-    type Archive = AuthorizationRequest<'a, S, Archive>;
-    fn archive(self) -> AuthorizationRequest<'a, S, Archive> {
+impl<S: Site> SubjectExt for Capability<Subject, S> {
+    type Archive = Capability<Archive, S>;
+    fn archive(self) -> Capability<Archive, S> {
         self.attenuate(Archive)
     }
 }
@@ -54,23 +47,9 @@ pub trait ArchiveExt {
     fn catalog(self, name: impl Into<String>) -> Self::Catalog;
 }
 
-impl ArchiveExt for Capability<Archive> {
-    type Catalog = Capability<Catalog>;
-    fn catalog(self, name: impl Into<String>) -> Capability<Catalog> {
-        self.attenuate(Catalog::new(name))
-    }
-}
-
-impl<'a, A: ?Sized> ArchiveExt for Claim<'a, A, Archive> {
-    type Catalog = Claim<'a, A, Catalog>;
-    fn catalog(self, name: impl Into<String>) -> Claim<'a, A, Catalog> {
-        self.attenuate(Catalog::new(name))
-    }
-}
-
-impl<'a, S: ?Sized> ArchiveExt for AuthorizationRequest<'a, S, Archive> {
-    type Catalog = AuthorizationRequest<'a, S, Catalog>;
-    fn catalog(self, name: impl Into<String>) -> AuthorizationRequest<'a, S, Catalog> {
+impl<S: Site> ArchiveExt for Capability<Archive, S> {
+    type Catalog = Capability<Catalog, S>;
+    fn catalog(self, name: impl Into<String>) -> Capability<Catalog, S> {
         self.attenuate(Catalog::new(name))
     }
 }
@@ -87,45 +66,15 @@ pub trait CatalogExt {
     fn put(self, digest: impl Into<Blake3Hash>, content: impl Into<Vec<u8>>) -> Self::Put;
 }
 
-impl CatalogExt for Capability<Catalog> {
-    type Get = Capability<Get>;
-    type Put = Capability<Put>;
+impl<S: Site> CatalogExt for Capability<Catalog, S> {
+    type Get = Capability<Get, S>;
+    type Put = Capability<Put, S>;
 
-    fn get(self, digest: impl Into<Blake3Hash>) -> Capability<Get> {
+    fn get(self, digest: impl Into<Blake3Hash>) -> Capability<Get, S> {
         self.invoke(Get::new(digest))
     }
 
-    fn put(self, digest: impl Into<Blake3Hash>, content: impl Into<Vec<u8>>) -> Capability<Put> {
-        self.invoke(Put::new(digest, content))
-    }
-}
-
-impl<'a, A: ?Sized> CatalogExt for Claim<'a, A, Catalog> {
-    type Get = Claim<'a, A, Get>;
-    type Put = Claim<'a, A, Put>;
-
-    fn get(self, digest: impl Into<Blake3Hash>) -> Claim<'a, A, Get> {
-        self.invoke(Get::new(digest))
-    }
-
-    fn put(self, digest: impl Into<Blake3Hash>, content: impl Into<Vec<u8>>) -> Claim<'a, A, Put> {
-        self.invoke(Put::new(digest, content))
-    }
-}
-
-impl<'a, S: ?Sized> CatalogExt for AuthorizationRequest<'a, S, Catalog> {
-    type Get = AuthorizationRequest<'a, S, Get>;
-    type Put = AuthorizationRequest<'a, S, Put>;
-
-    fn get(self, digest: impl Into<Blake3Hash>) -> AuthorizationRequest<'a, S, Get> {
-        self.invoke(Get::new(digest))
-    }
-
-    fn put(
-        self,
-        digest: impl Into<Blake3Hash>,
-        content: impl Into<Vec<u8>>,
-    ) -> AuthorizationRequest<'a, S, Put> {
+    fn put(self, digest: impl Into<Blake3Hash>, content: impl Into<Vec<u8>>) -> Capability<Put, S> {
         self.invoke(Put::new(digest, content))
     }
 }

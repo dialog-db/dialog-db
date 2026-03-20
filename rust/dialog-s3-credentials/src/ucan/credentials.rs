@@ -30,9 +30,9 @@
 //! ```
 
 use super::{DelegationChain, InvocationChain, UcanInvocation};
-use crate::capability::AuthorizedRequest;
+use crate::ucan::site::UcanAccess;
 use dialog_capability::{
-    Authorization, Capability, Constraint, Did, Provider, credential, ucan::parameters,
+    Capability, Constraint, Did, Provider, authorization::Authorized, credential, ucan::parameters,
 };
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_ucan::InvocationBuilder;
@@ -106,7 +106,7 @@ impl Credentials {
 
 /// Build a UCAN authorize result from delegation chain, endpoint, and capability.
 ///
-/// This helper is used by env types that implement `Provider<Authorize<C, Credentials>>`.
+/// This helper is used by env types that implement `Provider<Authorize<C, UcanAccess>>`.
 /// It requires the env to provide `Provider<credential::Identify>` and
 /// `Provider<credential::Sign>` for UCAN signing.
 pub async fn authorize<C, Env>(
@@ -114,7 +114,7 @@ pub async fn authorize<C, Env>(
     delegation_chain: DelegationChain,
     endpoint: String,
     capability: Capability<C>,
-) -> Result<Authorization<C, UcanInvocation>, credential::AuthorizeError>
+) -> Result<Authorized<C, UcanAccess>, credential::AuthorizeError>
 where
     C: Constraint + Clone + ConditionalSend + 'static,
     Capability<C>: ConditionalSend,
@@ -183,32 +183,17 @@ where
     let chain = InvocationChain::new(invocation, delegations);
 
     let ucan_invocation = UcanInvocation {
-        endpoint,
+        endpoint: endpoint.clone(),
         chain: Box::new(chain),
         subject: subject_did,
         ability,
     };
 
-    Ok(Authorization::new(capability, ucan_invocation))
-}
-
-/// Redeem a UCAN invocation by POSTing to the access service.
-///
-/// This helper is used by env types that implement `Provider<Redeem<C, UcanSite>>`.
-pub async fn redeem<C>(
-    input: credential::Redeem<C, crate::ucan::site::UcanSite>,
-) -> Result<Authorization<C, AuthorizedRequest>, credential::RedeemError>
-where
-    C: Constraint + Clone + 'static,
-{
-    let (capability, ucan_invocation) = input.authorization.into_parts();
-
-    let authorized_request = ucan_invocation
-        .grant()
-        .await
-        .map_err(|e| credential::RedeemError::Service(e.to_string()))?;
-
-    Ok(Authorization::new(capability, authorized_request))
+    Ok(Authorized {
+        capability,
+        access: UcanAccess { endpoint },
+        authorization: ucan_invocation,
+    })
 }
 
 #[cfg(test)]
@@ -216,8 +201,12 @@ where
 pub mod tests {
     use super::*;
     use crate::ucan::delegation::helpers::create_delegation;
+    use crate::ucan::site::UcanAccess;
     use async_trait::async_trait;
-    use dialog_capability::{Capability, Constraint, Did, Policy, Principal, Provider, credential};
+    use dialog_capability::{
+        Capability, Constraint, Did, Effect, Policy, Principal, Provider,
+        authorization::Authorized, credential,
+    };
     use dialog_common::ConditionalSend;
     use dialog_credentials::Ed25519Signer;
     use dialog_varsig::Signer;
@@ -298,41 +287,26 @@ pub mod tests {
         }
     }
 
-    /// Session implements Provider<Authorize> for UCAN site.
+    /// Session implements Provider<Authorize> for UCAN access.
     #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
     #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
-    impl<C> Provider<credential::Authorize<C, crate::ucan::site::UcanSite>> for Session
+    impl<C> Provider<credential::Authorize<C, UcanAccess>> for Session
     where
-        C: Constraint + Clone + ConditionalSend + 'static,
+        C: Effect + Constraint + Clone + ConditionalSend + 'static,
+        C::Of: Constraint,
         Capability<C>: ConditionalSend,
     {
         async fn execute(
             &self,
-            input: credential::Authorize<C, crate::ucan::site::UcanSite>,
-        ) -> Result<Authorization<C, UcanInvocation>, credential::AuthorizeError> {
+            input: credential::Authorize<C, UcanAccess>,
+        ) -> Result<Authorized<C, UcanAccess>, credential::AuthorizeError> {
             super::authorize(
                 self,
                 self.credentials.delegation().clone(),
-                input.site.endpoint().to_string(),
+                input.access.endpoint.clone(),
                 input.capability,
             )
             .await
-        }
-    }
-
-    /// Session implements Provider<Redeem> for UCAN site.
-    #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
-    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
-    impl<C> Provider<credential::Redeem<C, crate::ucan::site::UcanSite>> for Session
-    where
-        C: Constraint + Clone + ConditionalSend + 'static,
-        Capability<C>: ConditionalSend,
-    {
-        async fn execute(
-            &self,
-            input: credential::Redeem<C, crate::ucan::site::UcanSite>,
-        ) -> Result<Authorization<C, AuthorizedRequest>, credential::RedeemError> {
-            super::redeem(input).await
         }
     }
 }

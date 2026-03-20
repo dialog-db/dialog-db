@@ -1,15 +1,14 @@
 use async_trait::async_trait;
-use dialog_capability::{Capability, Provider};
+use dialog_capability::{Capability, Provider, credential::Authorize};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Catalog, Get, Put};
-use dialog_effects::remote::RemoteInvocation;
+use dialog_s3_credentials::s3::site::{S3Access, S3Invocation};
 use dialog_storage::{
     Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::fmt::Debug;
 
-use crate::RemoteAddress;
 use crate::repository::remote::RemoteBranch;
 
 /// A content-addressed store that reads from local first, falls back to remote.
@@ -56,7 +55,8 @@ impl<Env> ContentAddressedStorage for FallbackStore<'_, Env>
 where
     Env: Provider<Get>
         + Provider<Put>
-        + Provider<RemoteInvocation<Get, RemoteAddress>>
+        + Provider<Authorize<Get, S3Access>>
+        + Provider<S3Invocation<Get>>
         + ConditionalSync
         + 'static,
 {

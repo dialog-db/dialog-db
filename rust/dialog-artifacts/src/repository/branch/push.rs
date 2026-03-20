@@ -1,9 +1,8 @@
-use crate::RemoteAddress;
-use dialog_capability::Provider;
+use dialog_capability::{Provider, credential::Authorize};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
-use dialog_effects::remote::RemoteInvocation;
+use dialog_s3_credentials::s3::site::{S3Access, S3Invocation};
 use futures_util::{StreamExt, TryStreamExt};
 
 use super::Branch;
@@ -39,9 +38,12 @@ impl Push<'_> {
             + Provider<archive_fx::Put>
             + Provider<memory_fx::Resolve>
             + Provider<memory_fx::Publish>
-            + Provider<RemoteInvocation<archive_fx::Put, RemoteAddress>>
-            + Provider<RemoteInvocation<memory_fx::Resolve, RemoteAddress>>
-            + Provider<RemoteInvocation<memory_fx::Publish, RemoteAddress>>
+            + Provider<Authorize<archive_fx::Put, S3Access>>
+            + Provider<S3Invocation<archive_fx::Put>>
+            + Provider<Authorize<memory_fx::Resolve, S3Access>>
+            + Provider<S3Invocation<memory_fx::Resolve>>
+            + Provider<Authorize<memory_fx::Publish, S3Access>>
+            + Provider<S3Invocation<memory_fx::Publish>>
             + ConditionalSync
             + 'static,
     {
@@ -121,9 +123,12 @@ where
         + Provider<archive_fx::Put>
         + Provider<memory_fx::Resolve>
         + Provider<memory_fx::Publish>
-        + Provider<RemoteInvocation<archive_fx::Put, RemoteAddress>>
-        + Provider<RemoteInvocation<memory_fx::Resolve, RemoteAddress>>
-        + Provider<RemoteInvocation<memory_fx::Publish, RemoteAddress>>
+        + Provider<Authorize<archive_fx::Put, S3Access>>
+        + Provider<S3Invocation<archive_fx::Put>>
+        + Provider<Authorize<memory_fx::Resolve, S3Access>>
+        + Provider<S3Invocation<memory_fx::Resolve>>
+        + Provider<Authorize<memory_fx::Publish, S3Access>>
+        + Provider<S3Invocation<memory_fx::Publish>>
         + ConditionalSync
         + 'static,
 {
@@ -131,7 +136,7 @@ where
 
     let remote_branch = RemoteBranch::new(
         remote_site.name().clone(),
-        remote_site.address().clone(),
+        remote_site.site().clone(),
         upstream_subject.clone(),
         upstream_branch_name.clone(),
     );

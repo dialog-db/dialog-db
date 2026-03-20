@@ -37,8 +37,8 @@
 //!     "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 //! )?;
 //!
-//! // Build an authorization request using .at(&site) and authorize.
-//! let authorization = Subject::from(subject)
+//! // Build a capability, acquire authorization, then use the presigned request.
+//! let invocation = Subject::from(subject)
 //!     .at(&site)
 //!     .attenuate(Storage)
 //!     .attenuate(Store::new("index"))
@@ -46,7 +46,7 @@
 //!     .acquire(&credentials)
 //!     .await?;
 //!
-//! println!("Presigned URL: {}", authorization.site().url);
+//! println!("Presigned URL: {}", invocation.request.url);
 //! # Ok(())
 //! # }
 //! ```

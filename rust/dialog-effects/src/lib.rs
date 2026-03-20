@@ -29,7 +29,6 @@ pub mod archive;
 pub mod credential;
 pub mod environment;
 pub mod memory;
-pub mod remote;
 pub mod storage;
 
 // Re-export capability primitives for convenience

@@ -1,8 +1,8 @@
 //! Credential capability hierarchy and remote resource authorization.
 //!
 //! Provides identity and signing operations scoped to a repository subject,
-//! plus the [`Remote`] trait for credential types that require
-//! multi-step authorization (authorize → redeem → perform).
+//! plus the [`Authorize`] command for authorizing capabilities against
+//! an access format.
 //!
 //! # Capability Hierarchy
 //!
@@ -13,14 +13,15 @@
 //!         +-- Sign { payload } -> Effect -> Result<Vec<u8>, CredentialError>
 //! ```
 
+use crate::access::Access;
+use crate::authorization::Authorized;
 pub use crate::{Attenuation, Capability, Did, Effect, Policy, Subject};
-use crate::{Authorization, Constraint, Invocation};
+use crate::{Command, Constraint};
 use dialog_common::ConditionalSend;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-// Re-export Site types for consumers that use credential types
-pub use crate::site::{Local, RemoteSite};
+pub use crate::site::Local;
 
 /// Root attenuation for credential operations.
 ///
@@ -87,39 +88,24 @@ pub enum CredentialError {
     NotFound(String),
 }
 
-use crate::site::Site;
-
-/// Request to authorize a capability against a site `S`.
+/// Request to authorize a capability.
 ///
-/// This is the first step of the authorization pipeline. The environment
-/// receives the site configuration and a capability, and produces an
-/// `Authorization<Fx, S::Permit>`.
-pub struct Authorize<Fx: Constraint, S: Site> {
-    /// The site configuration.
-    pub site: S,
+/// Parameterized by access format, not site. One provider covers ALL sites
+/// sharing the same access format.
+pub struct Authorize<Fx: Constraint, A: Access> {
     /// The capability to authorize.
     pub capability: Capability<Fx>,
+    /// The access context (carries addressing info).
+    pub access: A,
 }
 
-impl<Fx: Constraint, S: Site> Invocation for Authorize<Fx, S> {
+impl<Fx, A: Access> Command for Authorize<Fx, A>
+where
+    Fx: Effect,
+    Fx::Of: Constraint,
+{
     type Input = Self;
-    type Output = Result<Authorization<Fx, S::Permit>, AuthorizeError>;
-}
-
-/// Redeem a permit into final access.
-///
-/// This is the second step of the authorization pipeline. The environment
-/// takes the intermediate permit and produces an `Authorization<Fx, S::Access>`.
-pub struct Redeem<Fx: Constraint, S: Site> {
-    /// The intermediate authorization (capability + permit).
-    pub authorization: Authorization<Fx, S::Permit>,
-    /// The site configuration.
-    pub site: S,
-}
-
-impl<Fx: Constraint, S: Site> Invocation for Redeem<Fx, S> {
-    type Input = Self;
-    type Output = Result<Authorization<Fx, S::Access>, RedeemError>;
+    type Output = Result<Authorized<Fx, A>, AuthorizeError>;
 }
 
 /// Import credential material into the environment's credential store.
@@ -128,7 +114,7 @@ pub struct Import<Material> {
     pub material: Material,
 }
 
-impl<Material: ConditionalSend + 'static> Invocation for Import<Material> {
+impl<Material: ConditionalSend + 'static> Command for Import<Material> {
     type Input = Self;
     type Output = Result<(), CredentialError>;
 }
@@ -143,30 +129,6 @@ pub enum AuthorizeError {
     /// Configuration error (e.g., missing delegation chain).
     #[error("Authorization configuration error: {0}")]
     Configuration(String),
-}
-
-/// Error during the redeem step.
-#[derive(Debug, Error)]
-pub enum RedeemError {
-    /// The access service rejected the proof.
-    #[error("Redeem failed: {0}")]
-    Rejected(String),
-
-    /// Transport or service error during redemption.
-    #[error("Redeem service error: {0}")]
-    Service(String),
-}
-
-/// Error during the full acquire pipeline (authorize + redeem).
-#[derive(Debug, Error)]
-pub enum AcquireError {
-    /// Error during the authorize step.
-    #[error(transparent)]
-    Authorize(#[from] AuthorizeError),
-
-    /// Error during the redeem step.
-    #[error(transparent)]
-    Redeem(#[from] RedeemError),
 }
 
 #[cfg(test)]

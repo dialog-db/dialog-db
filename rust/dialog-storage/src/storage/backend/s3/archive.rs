@@ -1,27 +1,26 @@
 //! Archive capability types and Provider implementations for S3 backend.
 //!
 //! Re-exports archive types from [`dialog_effects`] and implements
-//! `Provider<Authorization<Fx, AuthorizedRequest>>` for [`S3`].
+//! `Provider<S3Invocation<Fx>>` for [`S3`].
 
 pub use dialog_effects::archive::*;
 
 use async_trait::async_trait;
-use dialog_capability::{Authorization, Provider};
-use dialog_s3_credentials::AuthorizedRequest;
+use dialog_capability::Provider;
+use dialog_s3_credentials::s3::site::S3Invocation;
 
 use super::{RequestDescriptorExt, S3};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<Authorization<Get, AuthorizedRequest>> for S3 {
+impl Provider<S3Invocation<Get>> for S3 {
     async fn execute(
         &self,
-        authorized: Authorization<Get, AuthorizedRequest>,
+        invocation: S3Invocation<Get>,
     ) -> Result<Option<Vec<u8>>, ArchiveError> {
-        let request = authorized.into_site();
-
         let client = reqwest::Client::new();
-        let response = request
+        let response = invocation
+            .request
             .into_request(&client)
             .send()
             .await
@@ -46,16 +45,13 @@ impl Provider<Authorization<Get, AuthorizedRequest>> for S3 {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<Authorization<Put, AuthorizedRequest>> for S3 {
-    async fn execute(
-        &self,
-        authorized: Authorization<Put, AuthorizedRequest>,
-    ) -> Result<(), ArchiveError> {
-        let content = Put::of(authorized.capability()).content.clone();
-        let request = authorized.into_site();
+impl Provider<S3Invocation<Put>> for S3 {
+    async fn execute(&self, invocation: S3Invocation<Put>) -> Result<(), ArchiveError> {
+        let content = Put::of(&invocation.capability).content.clone();
 
         let client = reqwest::Client::new();
-        let response = request
+        let response = invocation
+            .request
             .into_request(&client)
             .body(content)
             .send()
