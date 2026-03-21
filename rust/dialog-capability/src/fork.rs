@@ -75,28 +75,28 @@ where
     /// Authorize the capability and build a `ForkInvocation`.
     ///
     /// 1. Authorizes via `Provider<credential::Authorize<Fx, S::Format>>`
-    /// 2. Looks up credentials via `Provider<credential::Get<S::Credentials>>`
+    /// 2. Looks up credentials via `Provider<credential::Retrieve<S::Credentials>>`
     /// 3. Builds `ForkInvocation { address, credentials, authorization }`
     pub async fn acquire<Env>(self, env: &Env) -> Result<ForkInvocation<S, Fx>, AuthorizeError>
     where
         Fx: Clone,
         Capability<Fx>: Ability + Clone + ConditionalSend,
         credential::Authorize<Fx, S::Format>: ConditionalSend + 'static,
-        credential::Get<S::Credentials>: ConditionalSend + 'static,
+        credential::Retrieve<S::Credentials>: ConditionalSend + 'static,
         Env: Provider<credential::Authorize<Fx, S::Format>>
-            + Provider<credential::Get<S::Credentials>>,
+            + Provider<credential::Retrieve<S::Credentials>>,
     {
         let authorize_cap = build_authorize_cap::<Fx, S::Format>(self.capability.clone());
         let authorization =
             <Env as Provider<credential::Authorize<Fx, S::Format>>>::execute(env, authorize_cap)
                 .await?;
 
-        let get_cap = build_get_cap::<S::Credentials>(
+        let get_cap = build_retrieve_cap::<S::Credentials>(
             self.capability.subject().clone(),
             self.address.credential_address(),
         );
         let credentials: S::Credentials =
-            <Env as Provider<credential::Get<S::Credentials>>>::execute(env, get_cap)
+            <Env as Provider<credential::Retrieve<S::Credentials>>>::execute(env, get_cap)
                 .await
                 .map_err(|e: CredentialError| AuthorizeError::Configuration(e.to_string()))?;
 
@@ -113,9 +113,9 @@ where
         Fx: Clone,
         Capability<Fx>: Ability + Clone + ConditionalSend,
         credential::Authorize<Fx, S::Format>: ConditionalSend + 'static,
-        credential::Get<S::Credentials>: ConditionalSend + 'static,
+        credential::Retrieve<S::Credentials>: ConditionalSend + 'static,
         Env: Provider<credential::Authorize<Fx, S::Format>>
-            + Provider<credential::Get<S::Credentials>>
+            + Provider<credential::Retrieve<S::Credentials>>
             + Provider<Fork<S, Fx>>,
     {
         let invocation = self.acquire(env).await?;
@@ -169,11 +169,11 @@ where
         .invoke(credential::Authorize::<Fx, F>::new(capability))
 }
 
-/// Build a `Capability<credential::Get<C>>` for looking up credentials.
-fn build_get_cap<C>(
+/// Build a `Capability<credential::Retrieve<C>>` for retrieving credentials.
+fn build_retrieve_cap<C>(
     did: crate::Did,
     address: credential::Address<C>,
-) -> Capability<credential::Get<C>>
+) -> Capability<credential::Retrieve<C>>
 where
     C: serde::Serialize + serde::de::DeserializeOwned + ConditionalSend + 'static,
 {
@@ -181,5 +181,5 @@ where
     Subject::from(did)
         .attenuate(credential::Credential)
         .attenuate(credential::Profile::default())
-        .invoke(credential::Get { address })
+        .invoke(credential::Retrieve { address })
 }

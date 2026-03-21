@@ -15,8 +15,8 @@
 use dialog_capability::Capability;
 use dialog_capability::Provider;
 use dialog_capability::credential::{
-    Authorization, AuthorizationFormat, Authorize, AuthorizeError, CredentialError, Get, Import,
-    Set,
+    Authorization, AuthorizationFormat, Authorize, AuthorizeError, CredentialError, Import,
+    Retrieve, Save,
 };
 use dialog_capability::{Constraint, Effect};
 
@@ -64,35 +64,36 @@ where
     }
 }
 
-// Route Get<C> to self.credentials for any credential type.
+// Route Retrieve<C> to self.local for any credential type.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Local, Credentials, Remote, C> Provider<Get<C>> for Environment<Local, Credentials, Remote>
+impl<Local, Credentials, Remote, C> Provider<Retrieve<C>>
+    for Environment<Local, Credentials, Remote>
 where
     C: serde::Serialize + serde::de::DeserializeOwned + dialog_common::ConditionalSend + 'static,
-    Capability<Get<C>>: dialog_common::ConditionalSend,
-    Get<C>: dialog_common::ConditionalSend + 'static,
-    Credentials: Provider<Get<C>> + dialog_common::ConditionalSync,
+    Capability<Retrieve<C>>: dialog_common::ConditionalSend,
+    Retrieve<C>: dialog_common::ConditionalSend + 'static,
+    Local: Provider<Retrieve<C>> + dialog_common::ConditionalSync,
     Self: dialog_common::ConditionalSend + dialog_common::ConditionalSync,
 {
-    async fn execute(&self, input: Capability<Get<C>>) -> Result<C, CredentialError> {
-        self.credentials.execute(input).await
+    async fn execute(&self, input: Capability<Retrieve<C>>) -> Result<C, CredentialError> {
+        self.local.execute(input).await
     }
 }
 
-// Route Set<C> to self.credentials for any credential type.
+// Route Save<C> to self.local for any credential type.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Local, Credentials, Remote, C> Provider<Set<C>> for Environment<Local, Credentials, Remote>
+impl<Local, Credentials, Remote, C> Provider<Save<C>> for Environment<Local, Credentials, Remote>
 where
     C: serde::Serialize + serde::de::DeserializeOwned + dialog_common::ConditionalSend + 'static,
-    Capability<Set<C>>: dialog_common::ConditionalSend,
-    Set<C>: dialog_common::ConditionalSend + 'static,
-    Credentials: Provider<Set<C>> + dialog_common::ConditionalSync,
+    Capability<Save<C>>: dialog_common::ConditionalSend,
+    Save<C>: dialog_common::ConditionalSend + 'static,
+    Local: Provider<Save<C>> + dialog_common::ConditionalSync,
     Self: dialog_common::ConditionalSend + dialog_common::ConditionalSync,
 {
-    async fn execute(&self, input: Capability<Set<C>>) -> Result<(), CredentialError> {
-        self.credentials.execute(input).await
+    async fn execute(&self, input: Capability<Save<C>>) -> Result<(), CredentialError> {
+        self.local.execute(input).await
     }
 }
 

@@ -43,7 +43,7 @@ pub trait Attenuation: Sized + Caveat {
     fn attenuation() -> &'static str {
         let full = std::any::type_name::<Self>();
         // Strip generic parameters first, then take the last path segment.
-        // e.g., "crate::credential::Get<alloc::string::String>" → "Get"
+        // e.g., "crate::credential::Retrieve<alloc::string::String>" → "Retrieve"
         let without_generics = match full.find('<') {
             Some(pos) => &full[..pos],
             None => full,

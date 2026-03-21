@@ -141,13 +141,13 @@ where
     }
 }
 
-/// Session implements Provider<Get<Option<S3Credentials>>> for credential lookup.
+/// Session implements Provider<Retrieve<Option<S3Credentials>>> for credential lookup.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<credential::Get<Option<S3Credentials>>> for Session {
+impl Provider<credential::Retrieve<Option<S3Credentials>>> for Session {
     async fn execute(
         &self,
-        _input: Capability<credential::Get<Option<S3Credentials>>>,
+        _input: Capability<credential::Retrieve<Option<S3Credentials>>>,
     ) -> Result<Option<S3Credentials>, credential::CredentialError> {
         Ok(self.s3_credentials.clone())
     }

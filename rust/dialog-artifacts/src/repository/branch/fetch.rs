@@ -37,7 +37,7 @@ impl<Store: Clone> Fetch<'_, Store> {
     where
         Env: Provider<memory_fx::Resolve>
             + Provider<Authorize<memory_fx::Resolve, Allow>>
-            + Provider<credential::Get<Option<S3Credentials>>>
+            + Provider<credential::Retrieve<Option<S3Credentials>>>
             + Provider<Fork<S3, memory_fx::Resolve>>
             + ConditionalSync,
     {
@@ -93,7 +93,7 @@ async fn fetch_remote<Store, Env>(
 where
     Env: Provider<memory_fx::Resolve>
         + Provider<Authorize<memory_fx::Resolve, Allow>>
-        + Provider<credential::Get<Option<S3Credentials>>>
+        + Provider<credential::Retrieve<Option<S3Credentials>>>
         + Provider<Fork<S3, memory_fx::Resolve>>
         + ConditionalSync,
 {

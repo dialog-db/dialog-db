@@ -59,7 +59,7 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Authorize<Get, Allow>>
-        + Provider<credential::Get<Option<S3Credentials>>>
+        + Provider<credential::Retrieve<Option<S3Credentials>>>
         + Provider<Fork<S3, Get>>
         + ConditionalSync
         + 'static,

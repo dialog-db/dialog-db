@@ -84,7 +84,7 @@ impl RemoteBranch {
     pub async fn resolve<Env>(&self, env: &Env) -> Result<Option<Revision>, RepositoryError>
     where
         Env: Provider<Authorize<memory_fx::Resolve, Allow>>
-            + Provider<credential::Get<Option<S3Credentials>>>
+            + Provider<credential::Retrieve<Option<S3Credentials>>>
             + Provider<Fork<S3, memory_fx::Resolve>>
             + ConditionalSync,
     {
@@ -130,7 +130,7 @@ impl RemoteBranch {
     where
         Env: Provider<Authorize<memory_fx::Resolve, Allow>>
             + Provider<Authorize<memory_fx::Publish, Allow>>
-            + Provider<credential::Get<Option<S3Credentials>>>
+            + Provider<credential::Retrieve<Option<S3Credentials>>>
             + Provider<Fork<S3, memory_fx::Resolve>>
             + Provider<Fork<S3, memory_fx::Publish>>
             + ConditionalSync,
@@ -192,7 +192,7 @@ impl RemoteBranch {
     ) -> Result<(), DialogArtifactsError>
     where
         Env: Provider<Authorize<archive_fx::Put, Allow>>
-            + Provider<credential::Get<Option<S3Credentials>>>
+            + Provider<credential::Retrieve<Option<S3Credentials>>>
             + Provider<Fork<S3, archive_fx::Put>>
             + ConditionalSync,
     {
@@ -220,7 +220,7 @@ impl RemoteBranch {
     ) -> Result<Option<Vec<u8>>, DialogArtifactsError>
     where
         Env: Provider<Authorize<archive_fx::Get, Allow>>
-            + Provider<credential::Get<Option<S3Credentials>>>
+            + Provider<credential::Retrieve<Option<S3Credentials>>>
             + Provider<Fork<S3, archive_fx::Get>>
             + ConditionalSync,
     {

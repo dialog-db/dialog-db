@@ -170,15 +170,15 @@ impl<C> PartialEq for Address<C> {
     }
 }
 
-/// Get credentials from the credential store by address.
+/// Retrieve credentials from the credential store by address.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(bound(deserialize = ""))]
-pub struct Get<C> {
+pub struct Retrieve<C> {
     /// The address to look up.
     pub address: Address<C>,
 }
 
-impl<C> Effect for Get<C>
+impl<C> Effect for Retrieve<C>
 where
     C: Serialize + DeserializeOwned + ConditionalSend + 'static,
 {
@@ -186,17 +186,17 @@ where
     type Output = Result<C, CredentialError>;
 }
 
-/// Store credentials in the credential store at an address.
+/// Save credentials to the credential store at an address.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(bound(deserialize = "C: DeserializeOwned"))]
-pub struct Set<C: Serialize> {
+pub struct Save<C: Serialize> {
     /// The address to store at.
     pub address: Address<C>,
     /// The credentials to store.
     pub credentials: C,
 }
 
-impl<C> Effect for Set<C>
+impl<C> Effect for Save<C>
 where
     C: Serialize + DeserializeOwned + ConditionalSend + 'static,
 {
@@ -385,27 +385,27 @@ mod tests {
     }
 
     #[test]
-    fn it_builds_get_claim_path() {
+    fn it_builds_retrieve_claim_path() {
         let claim = Subject::from(did!("key:zSpace"))
             .attenuate(Credential)
             .attenuate(Profile::new("default"))
-            .invoke(Get::<String> {
+            .invoke(Retrieve::<String> {
                 address: Address::new("s3://my-bucket"),
             });
 
-        assert_eq!(claim.ability(), "/credential/get");
+        assert_eq!(claim.ability(), "/credential/retrieve");
     }
 
     #[test]
-    fn it_builds_set_claim_path() {
+    fn it_builds_save_claim_path() {
         let claim = Subject::from(did!("key:zSpace"))
             .attenuate(Credential)
             .attenuate(Profile::new("default"))
-            .invoke(Set {
+            .invoke(Save {
                 address: Address::new("s3://my-bucket"),
                 credentials: "secret-key".to_string(),
             });
 
-        assert_eq!(claim.ability(), "/credential/set");
+        assert_eq!(claim.ability(), "/credential/save");
     }
 }

@@ -44,7 +44,7 @@ impl<Store: Clone> Push<'_, Store> {
             + Provider<Authorize<archive_fx::Put, Allow>>
             + Provider<Authorize<memory_fx::Resolve, Allow>>
             + Provider<Authorize<memory_fx::Publish, Allow>>
-            + Provider<credential::Get<Option<S3Credentials>>>
+            + Provider<credential::Retrieve<Option<S3Credentials>>>
             + Provider<Fork<S3, archive_fx::Put>>
             + Provider<Fork<S3, memory_fx::Resolve>>
             + Provider<Fork<S3, memory_fx::Publish>>
@@ -130,7 +130,7 @@ where
         + Provider<Authorize<archive_fx::Put, Allow>>
         + Provider<Authorize<memory_fx::Resolve, Allow>>
         + Provider<Authorize<memory_fx::Publish, Allow>>
-        + Provider<credential::Get<Option<S3Credentials>>>
+        + Provider<credential::Retrieve<Option<S3Credentials>>>
         + Provider<Fork<S3, archive_fx::Put>>
         + Provider<Fork<S3, memory_fx::Resolve>>
         + Provider<Fork<S3, memory_fx::Publish>>

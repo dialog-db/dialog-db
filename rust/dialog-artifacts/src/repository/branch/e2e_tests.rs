@@ -79,10 +79,10 @@ where
 // Credential lookup — return None (public access).
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<credential::Get<Option<S3Credentials>>> for TestEnv {
+impl Provider<credential::Retrieve<Option<S3Credentials>>> for TestEnv {
     async fn execute(
         &self,
-        _input: Capability<credential::Get<Option<S3Credentials>>>,
+        _input: Capability<credential::Retrieve<Option<S3Credentials>>>,
     ) -> Result<Option<S3Credentials>, credential::CredentialError> {
         Ok(None)
     }
@@ -256,7 +256,7 @@ async fn setup_repo_with_remote(
 ) -> anyhow::Result<(Repository<()>, super::Branch<()>)> {
     let repo = Repository::new(test_issuer().await, test_subject());
 
-    let site_address = RemoteAddress::S3(test_address(), None);
+    let site_address = RemoteAddress::S3(test_address());
     let _site = repo
         .add_remote("origin", site_address)
         .perform(&env.local)

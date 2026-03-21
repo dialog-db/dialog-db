@@ -16,11 +16,9 @@ use crate::repository::credentials::Credentials;
 pub use crate::repository::remote::address::RemoteAddress;
 
 /// Extract the [`Address`] from a [`RemoteAddress`].
-///
-/// Pulls out the S3 address from the credentials bundle.
 pub fn to_s3_address(remote: &RemoteAddress) -> Result<Address, dialog_remote_s3::AccessError> {
     match remote {
-        RemoteAddress::S3(addr, _) => Ok(addr.clone()),
+        RemoteAddress::S3(addr) => Ok(addr.clone()),
         #[cfg(feature = "ucan")]
         RemoteAddress::Ucan(_) => Err(dialog_remote_s3::AccessError::Configuration(
             "UCAN credentials cannot be converted to an S3 address directly".to_string(),

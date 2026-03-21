@@ -40,6 +40,7 @@
 //! ```
 
 mod archive;
+mod credential;
 mod memory;
 
 use dialog_capability::Did;

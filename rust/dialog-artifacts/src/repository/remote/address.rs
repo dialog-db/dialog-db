@@ -1,22 +1,22 @@
 //! Serializable remote address configuration.
 //!
-//! [`RemoteAddress`] carries both the address (endpoint/bucket/region) and
-//! authentication material needed for the remote backend.
+//! [`RemoteAddress`] carries the address (endpoint/bucket/region) for the
+//! remote backend. Credentials are stored separately in the credential store.
 
 use std::hash::{Hash, Hasher};
 use std::mem;
 
 use dialog_remote_s3::Address;
-use dialog_remote_s3::s3::S3Credentials;
 
 /// Serializable remote address configuration.
 ///
-/// Carries both the address (endpoint/bucket/region) and authentication
-/// material needed for the remote backend.
+/// Carries the address (endpoint/bucket/region) for the remote backend.
+/// Credentials are stored separately in the credential store and resolved
+/// via `Provider<credential::Retrieve<...>>` during remote operations.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum RemoteAddress {
-    /// Direct S3 access: address + optional SigV4 credentials.
-    S3(Address, Option<S3Credentials>),
+    /// Direct S3 access: address (endpoint/region/bucket).
+    S3(Address),
     /// UCAN-based authorization via external access service.
     #[cfg(feature = "ucan")]
     Ucan(dialog_remote_ucan_s3::Credentials),
@@ -26,9 +26,8 @@ impl Hash for RemoteAddress {
     fn hash<H: Hasher>(&self, state: &mut H) {
         mem::discriminant(self).hash(state);
         match self {
-            Self::S3(addr, c) => {
+            Self::S3(addr) => {
                 addr.hash(state);
-                c.hash(state);
             }
             #[cfg(feature = "ucan")]
             Self::Ucan(c) => c.hash(state),

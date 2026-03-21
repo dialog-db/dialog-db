@@ -143,7 +143,7 @@ mod tests {
             "us-east-1",
             "my-bucket",
         );
-        RemoteAddress::S3(s3_addr, None)
+        RemoteAddress::S3(s3_addr)
     }
 
     async fn test_repo() -> Repository<()> {

@@ -10,6 +10,7 @@
 //! Each subject DID maps to a `Session` containing:
 //! - `archive` - HashMap keyed by (catalog, digest) for content-addressed storage
 //! - `memory` - HashMap keyed by (space, cell) for transactional memory
+//! - `credentials` - HashMap keyed by address ID for credential storage
 //!
 //! # Example
 //!
@@ -34,6 +35,7 @@
 //! ```
 
 mod archive;
+mod credential;
 mod memory;
 
 use dialog_capability::Did;
@@ -53,6 +55,8 @@ struct Session {
     archive: HashMap<ArchiveKey, Vec<u8>>,
     /// Transactional memory storage keyed by (space, cell).
     memory: HashMap<MemoryKey, Vec<u8>>,
+    /// Credential storage keyed by address ID.
+    credentials: HashMap<String, Vec<u8>>,
 }
 
 /// Volatile in-memory storage provider.

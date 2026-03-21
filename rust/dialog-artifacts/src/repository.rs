@@ -158,7 +158,7 @@ mod tests {
 
     fn test_address() -> RemoteAddress {
         let s3_addr = Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "bucket");
-        RemoteAddress::S3(s3_addr, None)
+        RemoteAddress::S3(s3_addr)
     }
 
     #[dialog_common::test]
