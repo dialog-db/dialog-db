@@ -13,6 +13,8 @@
 //!
 //! `From<RemoteBranch> for UpstreamState` enables ergonomic `set_upstream`.
 
+/// Serializable remote address configuration.
+pub mod address;
 /// Remote branch cursor with resolve/publish/upload operations.
 pub mod branch;
 /// Remote repository cursor (site + subject).

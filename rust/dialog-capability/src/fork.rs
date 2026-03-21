@@ -7,13 +7,10 @@
 //! the address, credentials, and authorization needed for execution.
 
 use crate::command::Command;
-use crate::credential::Authorization;
-use crate::credential::{
-    Addressable, Authorize, AuthorizeError, Credential, CredentialError, Get, Profile,
-};
+use crate::credential::{self, Addressable, Authorization, AuthorizeError, CredentialError};
 use crate::effect::Effect;
-use crate::site::Site;
-use crate::{Capability, Constraint, Provider, Subject};
+use crate::site::{Site, SiteAddress};
+use crate::{Ability, Capability, Constraint, Provider};
 use dialog_common::ConditionalSend;
 use std::marker::PhantomData;
 
@@ -30,15 +27,17 @@ pub struct ForkInvocation<S: Site, Fx: Effect> {
     pub authorization: Authorization<Fx, S::Format>,
 }
 
-/// Fork is the Command type used in `Provider<Fork<S, Fx>>` bounds.
+/// Fork pairs a capability with a site address for remote execution.
 ///
-/// `S` appears first so that impls like `Provider<Fork<S3, Fx>>` satisfy
-/// the orphan rule (local type `S3` before uncovered `Fx`).
+/// Created by `.fork(&address)` on a capability chain. Use `acquire` to
+/// authorize and build a `ForkInvocation`, or `perform` to do both in one step.
+///
+/// Also serves as the `Command` type for `Provider<Fork<S, Fx>>` bounds,
+/// with `S` first so that impls like `Provider<Fork<S3, Fx>>` satisfy
+/// the orphan rule.
 pub struct Fork<S: Site, Fx: Effect> {
-    /// The capability to execute remotely.
-    pub capability: Capability<Fx>,
-    /// The target site address.
-    pub address: S::Address,
+    capability: Capability<Fx>,
+    address: S::Address,
     _site: PhantomData<S>,
 }
 
@@ -50,14 +49,77 @@ where
     type Output = Fx::Output;
 }
 
-impl<Fx: Effect> Capability<Fx> {
-    /// Fork this capability to a remote site for execution.
-    pub fn fork<S: Site>(self, address: &S::Address) -> Fork<S, Fx> {
-        Fork {
-            capability: self,
-            address: address.clone(),
+impl<S, Fx> Fork<S, Fx>
+where
+    S: Site,
+    Fx: Effect,
+    Fx::Of: Constraint,
+{
+    /// Create a Fork from a capability and a site address.
+    pub fn new(capability: Capability<Fx>, address: S::Address) -> Self {
+        Self {
+            capability,
+            address,
             _site: PhantomData,
         }
+    }
+
+    /// Create a Fork, inferring the site type from the address.
+    pub fn at(capability: Capability<Fx>, address: &S::Address) -> Self
+    where
+        S::Address: SiteAddress<Site = S>,
+    {
+        Self::new(capability, address.clone())
+    }
+
+    /// Authorize the capability and build a `ForkInvocation`.
+    ///
+    /// 1. Authorizes via `Provider<credential::Authorize<Fx, S::Format>>`
+    /// 2. Looks up credentials via `Provider<credential::Get<S::Credentials>>`
+    /// 3. Builds `ForkInvocation { address, credentials, authorization }`
+    pub async fn acquire<Env>(self, env: &Env) -> Result<ForkInvocation<S, Fx>, AuthorizeError>
+    where
+        Fx: Clone,
+        Capability<Fx>: Ability + Clone + ConditionalSend,
+        credential::Authorize<Fx, S::Format>: ConditionalSend + 'static,
+        credential::Get<S::Credentials>: ConditionalSend + 'static,
+        Env: Provider<credential::Authorize<Fx, S::Format>>
+            + Provider<credential::Get<S::Credentials>>,
+    {
+        let authorize_cap = build_authorize_cap::<Fx, S::Format>(self.capability.clone());
+        let authorization =
+            <Env as Provider<credential::Authorize<Fx, S::Format>>>::execute(env, authorize_cap)
+                .await?;
+
+        let get_cap = build_get_cap::<S::Credentials>(
+            self.capability.subject().clone(),
+            self.address.credential_address(),
+        );
+        let credentials: S::Credentials =
+            <Env as Provider<credential::Get<S::Credentials>>>::execute(env, get_cap)
+                .await
+                .map_err(|e: CredentialError| AuthorizeError::Configuration(e.to_string()))?;
+
+        Ok(ForkInvocation {
+            address: self.address,
+            credentials,
+            authorization,
+        })
+    }
+
+    /// Authorize, resolve credentials, and execute in one step.
+    pub async fn perform<Env>(self, env: &Env) -> Result<Fx::Output, AuthorizeError>
+    where
+        Fx: Clone,
+        Capability<Fx>: Ability + Clone + ConditionalSend,
+        credential::Authorize<Fx, S::Format>: ConditionalSend + 'static,
+        credential::Get<S::Credentials>: ConditionalSend + 'static,
+        Env: Provider<credential::Authorize<Fx, S::Format>>
+            + Provider<credential::Get<S::Credentials>>
+            + Provider<Fork<S, Fx>>,
+    {
+        let invocation = self.acquire(env).await?;
+        Ok(invocation.perform(env).await)
     }
 }
 
@@ -88,51 +150,36 @@ pub enum ForkError {
     Credential(#[from] CredentialError),
 }
 
-impl<S, Fx> Fork<S, Fx>
+/// Build a `Capability<credential::Authorize<Fx, F>>` from a `Capability<Fx>`.
+fn build_authorize_cap<Fx, F>(
+    capability: Capability<Fx>,
+) -> Capability<credential::Authorize<Fx, F>>
 where
     Fx: Effect,
     Fx::Of: Constraint,
-    S: Site,
+    F: credential::AuthorizationFormat,
+    Capability<Fx>: Ability + ConditionalSend,
+    credential::Authorize<Fx, F>: ConditionalSend + 'static,
 {
-    /// Authorize, resolve credentials, build ForkInvocation, and execute.
-    ///
-    /// Dispatches through `Provider<Fork<S, Fx>>`, which allows each site
-    /// type to define its own routing through the environment.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Fx::Output, ForkError>
-    where
-        Env: Provider<Authorize<Fx, S::Format>>
-            + Provider<Get<S::Credentials>>
-            + Provider<Fork<S, Fx>>,
-        Capability<Fx>: ConditionalSend,
-        Authorize<Fx, S::Format>: ConditionalSend + 'static,
-        Get<S::Credentials>: ConditionalSend + 'static,
-    {
-        let subject = self.capability.subject().clone();
+    use crate::Subject;
+    let did = capability.subject().clone();
+    Subject::from(did)
+        .attenuate(credential::Credential)
+        .attenuate(credential::Profile::default())
+        .invoke(credential::Authorize::<Fx, F>::new(capability))
+}
 
-        // Step 1: Authorize for this site's format
-        let authorized = Subject::from(subject.clone())
-            .attenuate(Credential)
-            .attenuate(Profile::default())
-            .invoke(Authorize::<Fx, S::Format>::new(self.capability))
-            .perform(env)
-            .await?;
-
-        // Step 2: Resolve credentials for this site
-        let credentials = Subject::from(subject)
-            .attenuate(Credential)
-            .attenuate(Profile::default())
-            .invoke(Get {
-                address: self.address.credential_address(),
-            })
-            .perform(env)
-            .await?;
-
-        // Step 3: Build ForkInvocation and dispatch
-        let invocation = ForkInvocation {
-            address: self.address,
-            credentials,
-            authorization: authorized,
-        };
-        Ok(<Env as Provider<Fork<S, Fx>>>::execute(env, invocation).await)
-    }
+/// Build a `Capability<credential::Get<C>>` for looking up credentials.
+fn build_get_cap<C>(
+    did: crate::Did,
+    address: credential::Address<C>,
+) -> Capability<credential::Get<C>>
+where
+    C: serde::Serialize + serde::de::DeserializeOwned + ConditionalSend + 'static,
+{
+    use crate::Subject;
+    Subject::from(did)
+        .attenuate(credential::Credential)
+        .attenuate(credential::Profile::default())
+        .invoke(credential::Get { address })
 }

@@ -1,5 +1,5 @@
 use dialog_capability::Did;
-use dialog_s3_credentials::Address;
+use dialog_remote_s3::Address;
 
 use super::SiteName;
 use super::branch::RemoteBranch;

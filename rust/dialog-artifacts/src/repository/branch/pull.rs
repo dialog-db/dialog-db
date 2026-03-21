@@ -5,8 +5,8 @@ use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
 use dialog_prolly_tree::{EMPT_TREE_HASH, Tree};
-use dialog_s3_credentials::s3::S3Credentials;
-use dialog_storage::s3::S3;
+use dialog_remote_s3::S3;
+use dialog_remote_s3::S3Credentials;
 use std::collections::HashSet;
 
 use super::Branch;

@@ -3,8 +3,8 @@ use dialog_capability::fork::Fork;
 use dialog_capability::{Provider, credential};
 use dialog_common::ConditionalSync;
 use dialog_effects::memory as memory_fx;
-use dialog_s3_credentials::s3::S3Credentials;
-use dialog_storage::s3::S3;
+use dialog_remote_s3::S3;
+use dialog_remote_s3::S3Credentials;
 
 use super::Branch;
 use super::state::{BranchName, UpstreamState};

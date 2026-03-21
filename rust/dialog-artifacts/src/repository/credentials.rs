@@ -7,9 +7,9 @@ use dialog_capability::{
 };
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::{Ed25519Signer, Ed25519Verifier};
-use dialog_s3_credentials::s3::S3Credentials;
+use dialog_remote_s3::S3Credentials;
 #[cfg(feature = "ucan")]
-use dialog_s3_credentials::ucan::DelegationChain;
+use dialog_remote_ucan_s3::DelegationChain;
 use dialog_varsig::Signer as VarsigSigner;
 use dialog_varsig::eddsa::Ed25519Signature;
 

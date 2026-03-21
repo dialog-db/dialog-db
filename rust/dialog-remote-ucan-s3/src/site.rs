@@ -1,19 +1,19 @@
-//! UCAN site configuration — marker trait + address type.
+//! UCAN site configuration -- marker trait + address type.
 
 use dialog_capability::Constraint;
 use dialog_capability::credential::{self, AuthorizationFormat};
 use dialog_capability::site::Site;
 
-use super::UcanInvocation;
+use crate::UcanInvocation;
 
-/// UCAN authorization format — produces a signed invocation chain.
+/// UCAN authorization format -- produces a signed invocation chain.
 pub struct UcanFormat;
 
 impl AuthorizationFormat for UcanFormat {
     type Authorization<Fx: Constraint> = UcanInvocation;
 }
 
-/// UCAN credentials — serialized invocation material.
+/// UCAN credentials -- serialized invocation material.
 ///
 /// This is the credential type resolved from the credential store
 /// for UCAN-based sites. Contains serialized UCAN container bytes.
@@ -26,7 +26,7 @@ pub struct UcanCredentials {
     pub endpoint: String,
 }
 
-/// UCAN site address — wraps the access service endpoint.
+/// UCAN site address -- wraps the access service endpoint.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UcanAddress {
     /// The access service endpoint URL.
@@ -55,7 +55,7 @@ impl credential::Addressable<UcanCredentials> for UcanAddress {
 
 /// UCAN site configuration for delegated authorization.
 ///
-/// A marker type — no fields. Address info lives in `UcanAddress`.
+/// A marker type -- no fields. Address info lives in `UcanAddress`.
 #[derive(Debug, Clone, Copy)]
 pub struct UcanSite;
 
@@ -64,4 +64,3 @@ impl Site for UcanSite {
     type Format = UcanFormat;
     type Address = UcanAddress;
 }
-

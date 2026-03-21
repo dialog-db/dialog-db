@@ -4,8 +4,8 @@ use dialog_capability::{Provider, credential};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
-use dialog_s3_credentials::s3::S3Credentials;
-use dialog_storage::s3::S3;
+use dialog_remote_s3::S3;
+use dialog_remote_s3::S3Credentials;
 use futures_util::{StreamExt, TryStreamExt};
 
 use super::Branch;

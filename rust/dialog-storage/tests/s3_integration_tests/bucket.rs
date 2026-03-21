@@ -10,9 +10,7 @@ use dialog_effects::memory::prelude::{
 use dialog_effects::memory::{MemoryError, Publication};
 use dialog_effects::storage::StorageError;
 use dialog_effects::storage::prelude::{StorageExt, StoreExt, SubjectExt as StorageSubjectExt};
-use dialog_s3_credentials::Address;
-use dialog_s3_credentials::s3::S3Credentials;
-use dialog_storage::s3::{S3, S3StorageError, helpers::Session};
+use dialog_remote_s3::{S3, S3Address, S3Credentials, S3StorageError, helpers::Session};
 
 /// Adds timestamp to the given string to make it unique
 pub fn unique(base: &str) -> String {
@@ -26,7 +24,7 @@ pub fn unique(base: &str) -> String {
 /// Test context with S3 backend, credentials, subject, and session for integration tests.
 pub struct TestBucket {
     pub s3: S3,
-    pub address: Address,
+    pub address: S3Address,
     pub subject: Did,
     pub session: Session,
     pub store: String,
@@ -48,7 +46,7 @@ impl TestBucket {
             .storage()
             .store(&self.store)
             .set(key, value)
-            .fork::<S3>(&self.address)
+            .fork(&self.address)
             .acquire(&self.session)
             .await
             .map_err(|e: dialog_capability::credential::AuthorizeError| {
@@ -64,7 +62,7 @@ impl TestBucket {
             .storage()
             .store(&self.store)
             .get(key)
-            .fork::<S3>(&self.address)
+            .fork(&self.address)
             .acquire(&self.session)
             .await
             .map_err(|e: dialog_capability::credential::AuthorizeError| {
@@ -80,7 +78,7 @@ impl TestBucket {
             .storage()
             .store(&self.store)
             .delete(key)
-            .fork::<S3>(&self.address)
+            .fork(&self.address)
             .acquire(&self.session)
             .await
             .map_err(|e: dialog_capability::credential::AuthorizeError| {
@@ -101,7 +99,7 @@ impl TestBucket {
             .space(space)
             .cell(cell)
             .resolve()
-            .fork::<S3>(&self.address)
+            .fork(&self.address)
             .acquire(&self.session)
             .await
             .map_err(|e: dialog_capability::credential::AuthorizeError| {
@@ -124,7 +122,7 @@ impl TestBucket {
             .space(space)
             .cell(cell)
             .publish(content, when)
-            .fork::<S3>(&self.address)
+            .fork(&self.address)
             .acquire(&self.session)
             .await
             .map_err(|e: dialog_capability::credential::AuthorizeError| {
@@ -147,7 +145,7 @@ impl TestBucket {
             .space(space)
             .cell(cell)
             .retract(when)
-            .fork::<S3>(&self.address)
+            .fork(&self.address)
             .acquire(&self.session)
             .await
             .map_err(|e: dialog_capability::credential::AuthorizeError| {
@@ -162,7 +160,7 @@ impl TestBucket {
 /// Helper to create an S3 test context from environment variables.
 pub fn open() -> TestBucket {
     #![allow(clippy::option_env_unwrap)]
-    let address = Address::new(
+    let address = S3Address::new(
         option_env!("R2S3_ENDPOINT").expect("R2S3_ENDPOINT not set"),
         option_env!("R2S3_REGION").expect("R2S3_REGION not set"),
         option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set"),

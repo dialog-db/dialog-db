@@ -14,7 +14,7 @@
 //! ## Usage
 //!
 //! `S3` is a stateless HTTP executor. Credentials and address travel
-//! inside `ForkInvocation<Fx, S3>`, which is produced by `SiteInvocation::acquire`.
+//! inside `ForkInvocation<Fx, S3>`, which is produced by `Fork::acquire`.
 //!
 //! ```no_run
 //! use dialog_storage::s3::S3;
@@ -35,14 +35,12 @@ use dialog_capability::credential::Allow;
 use dialog_capability::site::Site;
 use thiserror::Error;
 
-// Re-export core types from dialog-s3-credentials crate
-pub use dialog_s3_credentials::{
-    AccessError, Address, AuthorizedRequest, Checksum, Credentials, Hasher,
-};
+// Re-export core types from dialog-remote-s3 crate
+pub use dialog_remote_s3::{AccessError, Address, AuthorizedRequest, Checksum, Hasher};
 // Re-export S3-specific credentials type for direct use
-pub use dialog_s3_credentials::s3::S3Credentials;
+pub use dialog_remote_s3::s3::S3Credentials;
 // Use access module types for direct S3 authorization
-pub use dialog_s3_credentials::capability::{Precondition, S3Request};
+pub use dialog_remote_s3::capability::{Precondition, S3Request};
 
 use crate::DialogStorageError;
 

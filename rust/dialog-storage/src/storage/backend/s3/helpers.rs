@@ -10,7 +10,7 @@
 //! - Test operator types for capability-based testing
 use dialog_capability::credential::{Allow, Authorization};
 use dialog_capability::{Capability, Did, Principal, Provider, credential};
-use dialog_s3_credentials::s3::S3Credentials;
+use dialog_remote_s3::s3::S3Credentials;
 use serde::{Deserialize, Serialize};
 
 /// S3 test server connection info with credentials, passed to inner tests.

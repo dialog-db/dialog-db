@@ -4,9 +4,7 @@ use dialog_capability::{Did, Provider, credential};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
-use dialog_s3_credentials::Address;
-use dialog_s3_credentials::s3::S3Credentials;
-use dialog_storage::s3::S3;
+use dialog_remote_s3::{S3, S3Address, S3Credentials};
 use dialog_storage::{Blake3Hash, CborEncoder, Encoder};
 
 use crate::DialogArtifactsError;
@@ -27,17 +25,22 @@ use super::UpstreamState;
 #[derive(Debug, Clone)]
 pub struct RemoteBranch {
     remote: SiteName,
-    address: Address,
+    address: S3Address,
     subject: Did,
     branch: BranchName,
 }
 
 impl RemoteBranch {
     /// Create a new remote branch cursor.
-    pub fn new(remote: SiteName, address: Address, subject: Did, branch: BranchName) -> Self {
+    pub fn new(
+        remote: SiteName,
+        address: impl Into<S3Address>,
+        subject: Did,
+        branch: BranchName,
+    ) -> Self {
         Self {
             remote,
-            address,
+            address: address.into(),
             subject,
             branch,
         }
@@ -49,7 +52,7 @@ impl RemoteBranch {
     }
 
     /// The S3 address for this remote.
-    pub fn address(&self) -> &Address {
+    pub fn address(&self) -> &S3Address {
         &self.address
     }
 
@@ -88,7 +91,7 @@ impl RemoteBranch {
         let capability = self
             .cell_capability()
             .invoke(memory_fx::Resolve)
-            .fork::<S3>(&self.address);
+            .fork(&self.address);
 
         let invocation = capability.acquire(env).await.map_err(|e| {
             RepositoryError::StorageError(format!("Remote authorize failed: {}", e))
@@ -138,7 +141,7 @@ impl RemoteBranch {
         let resolve_invocation = cell_cap
             .clone()
             .invoke(memory_fx::Resolve)
-            .fork::<S3>(&self.address)
+            .fork(&self.address)
             .acquire(env)
             .await
             .map_err(|e| {
@@ -163,7 +166,7 @@ impl RemoteBranch {
 
         let publish_invocation = cell_cap
             .invoke(memory_fx::Publish::new(content, edition))
-            .fork::<S3>(&self.address)
+            .fork(&self.address)
             .acquire(env)
             .await
             .map_err(|e| {
@@ -196,7 +199,7 @@ impl RemoteBranch {
         let catalog = self.archive().index();
         let invocation = catalog
             .invoke(archive_fx::Put::new(hash, bytes))
-            .fork::<S3>(&self.address)
+            .fork(&self.address)
             .acquire(env)
             .await
             .map_err(|e| {
@@ -224,7 +227,7 @@ impl RemoteBranch {
         let catalog = self.archive().index();
         let invocation = catalog
             .invoke(archive_fx::Get::new(hash))
-            .fork::<S3>(&self.address)
+            .fork(&self.address)
             .acquire(env)
             .await
             .map_err(|e| {
@@ -251,16 +254,14 @@ impl From<RemoteBranch> for UpstreamState {
 
 #[cfg(test)]
 mod tests {
-    use dialog_s3_credentials::Address;
-
     use super::*;
 
     fn test_subject() -> Did {
         "did:test:remote-branch".parse().unwrap()
     }
 
-    fn test_address() -> Address {
-        Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "bucket")
+    fn test_address() -> S3Address {
+        S3Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "bucket")
     }
 
     #[test]

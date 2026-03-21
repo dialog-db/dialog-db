@@ -17,7 +17,7 @@
 //! # Example
 //!
 //! ```rust
-//! use dialog_s3_credentials::ucan::{Credentials, DelegationChain};
+//! use dialog_remote_ucan_s3::{Credentials, DelegationChain};
 //!
 //! // Create credentials with an endpoint and delegation chain
 //! // (delegation_chain would be obtained from a UCAN delegation)
@@ -29,22 +29,23 @@
 //! # }
 //! ```
 
-use super::{DelegationChain, InvocationChain, UcanInvocation};
+use crate::UcanInvocation;
 use dialog_capability::{Capability, Constraint, Did, Provider, credential, ucan::parameters};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_ucan::InvocationBuilder;
+use dialog_ucan::{DelegationChain, InvocationChain};
 
 /// UCAN-based authorizer that delegates to an external access service.
 ///
 /// Implements [`credential::Remote`] with the following lifecycle:
 ///
-/// 1. `Authorize`: builds and signs a UCAN invocation → `UcanInvocation`
-/// 2. `Redeem`: POSTs the invocation to the access service → `AuthorizedRequest`
+/// 1. `Authorize`: builds and signs a UCAN invocation -> `UcanInvocation`
+/// 2. `Redeem`: POSTs the invocation to the access service -> `AuthorizedRequest`
 ///
 /// # Example
 ///
 /// ```rust
-/// use dialog_s3_credentials::ucan::{Credentials, DelegationChain};
+/// use dialog_remote_ucan_s3::{Credentials, DelegationChain};
 ///
 /// # fn example(delegation_chain: DelegationChain) {
 /// let credentials = Credentials::new(
@@ -117,7 +118,7 @@ where
     Capability<C>: ConditionalSend,
     Env: Provider<credential::Identify> + Provider<credential::Sign> + ConditionalSync,
 {
-    use super::authorization::{CredentialBridge, parameters_to_args};
+    use crate::authorization::{CredentialBridge, parameters_to_args};
 
     let subject_did = capability.subject().clone();
     let ability = capability.ability();
@@ -198,7 +199,7 @@ where
 #[allow(dead_code)]
 pub mod tests {
     use super::*;
-    use crate::ucan::delegation::helpers::create_delegation;
+    use crate::test_helpers::create_delegation;
     use async_trait::async_trait;
     use dialog_capability::{
         Capability, Constraint, Did, Effect, Policy, Principal, Provider, credential,

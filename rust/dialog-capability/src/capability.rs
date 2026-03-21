@@ -1,7 +1,8 @@
-use crate::site::Site;
+use crate::fork::Fork;
+use crate::site::{Site, SiteAddress};
 use crate::{
     Ability, Constrained, Constraint, Did, Effect, Policy, PolicyBuilder, Provider, Selector,
-    SiteInvocation, Subject, credential,
+    Subject, credential,
 };
 use dialog_common::ConditionalSend;
 use std::fmt::{Debug, Formatter};
@@ -141,12 +142,15 @@ impl<Fx: Effect> Capability<Fx> {
 
     /// Attach a site address to this capability for remote execution.
     ///
-    /// Returns a `SiteInvocation` that can be authorized and executed.
-    pub fn at<S: Site>(self, address: &S::Address) -> SiteInvocation<Fx, S>
+    /// Returns a [`Fork`] that can be authorized (`.acquire()`) or
+    /// authorized and executed in one step (`.perform()`).
+    ///
+    /// The site type is inferred from the address via [`SiteAddress`].
+    pub fn fork<A: SiteAddress>(self, address: &A) -> Fork<A::Site, Fx>
     where
         Fx::Of: Constraint,
     {
-        SiteInvocation::new(self, address.clone())
+        Fork::new(self, address.clone())
     }
 }
 

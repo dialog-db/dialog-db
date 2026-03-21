@@ -10,6 +10,15 @@ use dialog_common::ConditionalSend;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+/// Associates an address type with its corresponding site.
+///
+/// This trait allows inferring the site type from an address type,
+/// enabling ergonomic `.fork(address)` calls without explicit site type parameters.
+pub trait SiteAddress: Clone + ConditionalSend + 'static {
+    /// The site type this address belongs to.
+    type Site: Site<Address = Self>;
+}
+
 /// Pure site marker — declares types needed for remote execution.
 ///
 /// No methods. Configuration (address, credentials) is carried by
@@ -39,4 +48,3 @@ impl Site for Local {
     type Format = Allow;
     type Address = ();
 }
-

@@ -26,15 +26,15 @@
 //!
 //! The delegation chain forms an authority path:
 //! ```text
-//! Subject (root) → Delegation[n-1] → ... → Delegation[0] → Invocation.issuer
+//! Subject (root) -> Delegation[n-1] -> ... -> Delegation[0] -> Invocation.issuer
 //! ```
 //!
 //! # Example
 //!
 //! ```rust,no_run
-//! use dialog_s3_credentials::ucan::UcanAuthorizer;
-//! use dialog_s3_credentials::s3::S3Credentials;
-//! use dialog_s3_credentials::Address;
+//! use dialog_remote_ucan_s3::UcanAuthorizer;
+//! use dialog_remote_s3::s3::S3Credentials;
+//! use dialog_remote_s3::Address;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create address for S3 bucket
@@ -62,13 +62,13 @@
 
 use std::collections::BTreeMap;
 
-use super::InvocationChain;
-use crate::Address;
-use crate::capability::{AccessError, AuthorizedRequest};
-use crate::capability::{archive, memory, storage};
-use crate::s3::S3Credentials;
 use dialog_capability::{Capability, Did, Subject};
 use dialog_credentials::Ed25519KeyResolver;
+use dialog_remote_s3::Address;
+use dialog_remote_s3::capability::{AccessError, AuthorizedRequest};
+use dialog_remote_s3::capability::{archive, memory, storage};
+use dialog_remote_s3::s3::S3Credentials;
+use dialog_ucan::InvocationChain;
 use dialog_ucan::promise::Promised;
 
 /// UCAN authorizer that wraps credentials and handles UCAN invocations.
@@ -113,8 +113,12 @@ impl UcanAuthorizer {
     /// 3. Validates policy predicates on each delegation
     pub async fn authorize(&self, container: &[u8]) -> Result<AuthorizedRequest, AccessError> {
         // Parse and verify the invocation chain
-        let chain = InvocationChain::try_from(container)?;
-        chain.verify(&Ed25519KeyResolver).await?;
+        let chain = InvocationChain::try_from(container)
+            .map_err(|e| AccessError::Invocation(e.to_string()))?;
+        chain
+            .verify(&Ed25519KeyResolver)
+            .await
+            .map_err(|e| AccessError::Invocation(e.to_string()))?;
 
         // Extract command path and arguments
         let command = chain.command();
@@ -246,35 +250,25 @@ fn get_bytes_arg(args: &BTreeMap<String, Promised>, key: &str) -> Result<Vec<u8>
     }
 }
 
-// Storage command parsers
-
-fn parse_storage_get(
-    args: &BTreeMap<String, Promised>,
-) -> Result<crate::capability::storage::Get, AccessError> {
+fn parse_storage_get(args: &BTreeMap<String, Promised>) -> Result<storage::Get, AccessError> {
     let key = get_bytes_arg(args, "key")?;
-    Ok(crate::capability::storage::Get::new(key))
+    Ok(storage::Get::new(key))
 }
 
-fn parse_storage_set(
-    args: &BTreeMap<String, Promised>,
-) -> Result<crate::capability::storage::Set, AccessError> {
+fn parse_storage_set(args: &BTreeMap<String, Promised>) -> Result<storage::Set, AccessError> {
     let key = get_bytes_arg(args, "key")?;
     let checksum = parse_checksum(args)?;
-    Ok(crate::capability::storage::Set::new(key, checksum))
+    Ok(storage::Set::new(key, checksum))
 }
 
-fn parse_storage_delete(
-    args: &BTreeMap<String, Promised>,
-) -> Result<crate::capability::storage::Delete, AccessError> {
+fn parse_storage_delete(args: &BTreeMap<String, Promised>) -> Result<storage::Delete, AccessError> {
     let key = get_bytes_arg(args, "key")?;
-    Ok(crate::capability::storage::Delete::new(key))
+    Ok(storage::Delete::new(key))
 }
 
-fn parse_storage_list(
-    args: &BTreeMap<String, Promised>,
-) -> Result<crate::capability::storage::List, AccessError> {
+fn parse_storage_list(args: &BTreeMap<String, Promised>) -> Result<storage::List, AccessError> {
     let continuation_token = get_optional_string_arg(args, "continuation_token")?;
-    Ok(crate::capability::storage::List::new(continuation_token))
+    Ok(storage::List::new(continuation_token))
 }
 
 /// Build a storage capability from subject, args, and effect.
@@ -293,25 +287,23 @@ where
         .invoke(effect))
 }
 
-// Memory command builders
-
 fn build_memory_resolve_capability(
     subject_did: &Did,
     args: &BTreeMap<String, Promised>,
-) -> Result<Capability<crate::capability::memory::Resolve>, AccessError> {
+) -> Result<Capability<memory::Resolve>, AccessError> {
     let space = get_string_arg(args, "space")?;
     let cell = get_string_arg(args, "cell")?;
     Ok(Subject::from(subject_did.clone())
         .attenuate(memory::Memory)
         .attenuate(memory::Space::new(space))
         .attenuate(memory::Cell::new(cell))
-        .invoke(crate::capability::memory::Resolve))
+        .invoke(memory::Resolve))
 }
 
 fn build_memory_publish_capability(
     subject_did: &Did,
     args: &BTreeMap<String, Promised>,
-) -> Result<Capability<crate::capability::memory::Publish>, AccessError> {
+) -> Result<Capability<memory::Publish>, AccessError> {
     let space = get_string_arg(args, "space")?;
     let cell = get_string_arg(args, "cell")?;
     let when = get_optional_string_arg(args, "when")?;
@@ -320,13 +312,13 @@ fn build_memory_publish_capability(
         .attenuate(memory::Memory)
         .attenuate(memory::Space::new(space))
         .attenuate(memory::Cell::new(cell))
-        .invoke(crate::capability::memory::Publish { checksum, when }))
+        .invoke(memory::Publish { checksum, when }))
 }
 
 fn build_memory_retract_capability(
     subject_did: &Did,
     args: &BTreeMap<String, Promised>,
-) -> Result<Capability<crate::capability::memory::Retract>, AccessError> {
+) -> Result<Capability<memory::Retract>, AccessError> {
     let space = get_string_arg(args, "space")?;
     let cell = get_string_arg(args, "cell")?;
     let when = get_string_arg(args, "when")?;
@@ -334,15 +326,13 @@ fn build_memory_retract_capability(
         .attenuate(memory::Memory)
         .attenuate(memory::Space::new(space))
         .attenuate(memory::Cell::new(cell))
-        .invoke(crate::capability::memory::Retract::new(when)))
+        .invoke(memory::Retract::new(when)))
 }
-
-// Archive command builders
 
 fn build_archive_get_capability(
     subject_did: &Did,
     args: &BTreeMap<String, Promised>,
-) -> Result<Capability<crate::capability::archive::Get>, AccessError> {
+) -> Result<Capability<archive::Get>, AccessError> {
     let catalog = get_string_arg(args, "catalog")?;
     let digest = get_bytes_arg(args, "digest")?;
     let digest_arr: [u8; 32] = digest
@@ -352,13 +342,13 @@ fn build_archive_get_capability(
     Ok(Subject::from(subject_did.clone())
         .attenuate(archive::Archive)
         .attenuate(archive::Catalog::new(catalog))
-        .invoke(crate::capability::archive::Get::new(digest_hash)))
+        .invoke(archive::Get::new(digest_hash)))
 }
 
 fn build_archive_put_capability(
     subject_did: &Did,
     args: &BTreeMap<String, Promised>,
-) -> Result<Capability<crate::capability::archive::Put>, AccessError> {
+) -> Result<Capability<archive::Put>, AccessError> {
     let catalog = get_string_arg(args, "catalog")?;
     let digest = get_bytes_arg(args, "digest")?;
     let digest_arr: [u8; 32] = digest
@@ -369,15 +359,17 @@ fn build_archive_put_capability(
     Ok(Subject::from(subject_did.clone())
         .attenuate(archive::Archive)
         .attenuate(archive::Catalog::new(catalog))
-        .invoke(crate::capability::archive::Put::new(digest_hash, checksum)))
+        .invoke(archive::Put::new(digest_hash, checksum)))
 }
 
 /// Parse checksum from arguments.
 ///
 /// Expects multihash bytes: `<code><length><digest>`
-fn parse_checksum(args: &BTreeMap<String, Promised>) -> Result<crate::Checksum, AccessError> {
+fn parse_checksum(
+    args: &BTreeMap<String, Promised>,
+) -> Result<dialog_remote_s3::Checksum, AccessError> {
     match args.get("checksum") {
-        Some(Promised::Bytes(bytes)) => crate::Checksum::try_from(bytes.clone())
+        Some(Promised::Bytes(bytes)) => dialog_remote_s3::Checksum::try_from(bytes.clone())
             .map_err(|e| AccessError::Invocation(format!("Invalid multihash checksum: {}", e))),
         Some(_) => Err(AccessError::Invocation(
             "checksum must be multihash bytes".to_string(),
@@ -391,14 +383,15 @@ fn parse_checksum(args: &BTreeMap<String, Promised>) -> Result<crate::Checksum, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ucan::InvocationChain;
-    use crate::{Address, s3};
     use base58::ToBase58;
     use dialog_capability::Principal;
     use dialog_common::Blake3Hash;
     use dialog_credentials::Ed25519Signer;
+    use dialog_remote_s3::Address;
+    use dialog_remote_s3::s3;
     use dialog_ucan::DelegationBuilder;
     use dialog_ucan::InvocationBuilder;
+    use dialog_ucan::InvocationChain;
     use dialog_ucan::subject::Subject as DelegatedSubject;
     use std::collections::BTreeMap;
 
@@ -450,8 +443,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_acquires_and_performs_storage_get() {
-        use crate::{Address, s3::S3Credentials};
-
         let subject_signer = test_signer().await;
 
         let address = Address::new(
@@ -486,8 +477,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_acquires_and_performs_storage_set() {
-        use crate::{Address, s3::S3Credentials};
-
         let subject_signer = test_signer().await;
 
         let address = Address::new(
@@ -527,8 +516,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_acquires_and_performs_memory_resolve() {
-        use crate::{Address, s3::S3Credentials};
-
         let subject_signer = test_signer().await;
 
         let address = Address::new(
@@ -568,8 +555,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_acquires_and_performs_archive_get() {
-        use crate::{Address, s3::S3Credentials};
-
         let subject_signer = test_signer().await;
 
         let address = Address::new(
@@ -603,8 +588,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_acquires_and_performs_archive_put() {
-        use crate::{Address, s3::S3Credentials};
-
         let subject_signer = test_signer().await;
 
         let address = Address::new(
@@ -712,8 +695,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_authorizes_self_invocation_for_storage_get() {
-        use crate::{Address, s3::S3Credentials};
-
         let signer = test_signer().await;
 
         let address = Address::new(
@@ -751,8 +732,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_authorizes_self_invocation_for_storage_set() {
-        use crate::{Address, s3::S3Credentials};
-
         let signer = test_signer().await;
 
         let address = Address::new(
@@ -795,8 +774,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_authorizes_self_invocation_for_archive_get() {
-        use crate::{Address, s3::S3Credentials};
-
         let signer = test_signer().await;
 
         let address = Address::new(

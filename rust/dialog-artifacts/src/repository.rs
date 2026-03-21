@@ -144,7 +144,7 @@ mod tests {
     use super::*;
     use crate::artifacts::{Artifact, Instruction};
     use crate::repository::node_reference::NodeReference;
-    use dialog_s3_credentials::Address;
+    use dialog_remote_s3::Address;
     use dialog_storage::provider::Volatile;
     use futures_util::stream;
 

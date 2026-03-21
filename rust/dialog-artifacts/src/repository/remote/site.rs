@@ -1,6 +1,6 @@
 use dialog_capability::{Did, Provider};
 use dialog_effects::memory as memory_fx;
-use dialog_s3_credentials::Address;
+use dialog_remote_s3::Address;
 
 use super::state::SiteName;
 use crate::RemoteAddress;
@@ -129,7 +129,7 @@ impl Load {
 
 #[cfg(test)]
 mod tests {
-    use dialog_s3_credentials::Address;
+    use dialog_remote_s3::Address;
     use dialog_storage::provider::Volatile;
 
     use crate::RemoteAddress;

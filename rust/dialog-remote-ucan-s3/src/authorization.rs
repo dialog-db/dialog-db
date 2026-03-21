@@ -4,17 +4,17 @@
 //! credential effects into UCAN's `Principal` + `Signer` interface, and
 //! helper functions for building UCAN invocation arguments.
 
-use crate::AccessError;
 use dialog_capability::{
     DialogCapabilityAuthorizationError, Did, Provider, credential, ucan::Parameters,
 };
 use dialog_common::ConditionalSync;
+use dialog_remote_s3::AccessError;
 use dialog_ucan::promise::Promised;
 use dialog_varsig::eddsa::Ed25519Signature;
 use ipld_core::ipld::Ipld;
 use std::collections::BTreeMap;
 
-use super::InvocationChain;
+use dialog_ucan::InvocationChain;
 
 pub type Args = BTreeMap<String, Promised>;
 
@@ -139,8 +139,11 @@ impl UcanInvocation {
 
     /// POST the signed invocation to the access service and get back
     /// a presigned URL for the S3 operation.
-    pub async fn grant(&self) -> Result<crate::AuthorizedRequest, AccessError> {
-        let ucan = self.chain.to_bytes()?;
+    pub async fn grant(&self) -> Result<dialog_remote_s3::AuthorizedRequest, AccessError> {
+        let ucan = self
+            .chain
+            .to_bytes()
+            .map_err(|e| AccessError::Invocation(e.to_string()))?;
 
         let response = reqwest::Client::new()
             .post(&self.endpoint)

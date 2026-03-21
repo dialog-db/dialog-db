@@ -3,11 +3,12 @@ use dialog_capability::{Capability, Constraint, Did, Effect, Provider, credentia
 use dialog_common::ConditionalSend;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
-use dialog_s3_credentials::Address;
-use dialog_s3_credentials::s3::S3Credentials;
+use dialog_remote_s3::Address;
+use dialog_remote_s3::S3;
+use dialog_remote_s3::S3Credentials;
 use dialog_storage::provider::Volatile;
-use dialog_storage::s3::S3;
 
+use crate::environment::RemoteAddress;
 use crate::repository::Repository;
 use crate::repository::branch::state::UpstreamState;
 use crate::repository::node_reference::NodeReference;
@@ -255,7 +256,7 @@ async fn setup_repo_with_remote(
 ) -> anyhow::Result<(Repository<()>, super::Branch<()>)> {
     let repo = Repository::new(test_issuer().await, test_subject());
 
-    let site_address = dialog_s3_credentials::Credentials::S3(test_address(), None);
+    let site_address = RemoteAddress::S3(test_address(), None);
     let _site = repo
         .add_remote("origin", site_address)
         .perform(&env.local)

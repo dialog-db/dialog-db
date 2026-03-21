@@ -43,7 +43,7 @@ impl<Store> SetUpstream<'_, Store> {
 
 #[cfg(test)]
 mod tests {
-    use dialog_s3_credentials::Address;
+    use dialog_remote_s3::Address;
     use dialog_storage::provider::Volatile;
 
     use crate::repository::branch::state::UpstreamState;

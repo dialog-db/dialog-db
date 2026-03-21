@@ -10,7 +10,6 @@
 //!
 //! - [`s3::S3Credentials`] - Direct S3 authentication (SigV4 signed)
 //! - [`Address`] - S3 endpoint/bucket/region + URL building + request authorization
-//! - [`ucan::Credentials`] - UCAN-based authorization via external access service (requires `ucan` feature)
 //!
 //! # Example
 //!
@@ -51,14 +50,9 @@
 mod address;
 pub mod capability;
 mod checksum;
-mod credentials;
 pub mod s3;
-
-#[cfg(feature = "ucan")]
-pub mod ucan;
 
 pub use address::*;
 pub use capability::{AccessError, Acl, AuthorizedRequest, Precondition, S3Request};
 pub use capability::{archive, memory, storage};
 pub use checksum::*;
-pub use credentials::*;

@@ -6,9 +6,9 @@
 
 use super::{LocalS3, UcanS3Address};
 use dialog_common::helpers::{Provider, Service};
-use dialog_s3_credentials::Address;
-use dialog_s3_credentials::s3::S3Credentials;
-use dialog_s3_credentials::ucan::UcanAuthorizer;
+use dialog_remote_s3::Address;
+use dialog_remote_s3::s3::S3Credentials;
+use dialog_remote_ucan_s3::UcanAuthorizer;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::{Method, Request, Response, StatusCode};
