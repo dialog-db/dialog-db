@@ -67,11 +67,13 @@ where
     ) -> Result<CredentialBridge<'a, Env>, DialogCapabilityAuthorizationError> {
         let identify_cap = credential::Subject::from(subject.clone())
             .attenuate(credential::Credential)
+            .attenuate(credential::Profile::default())
             .invoke(credential::Identify);
 
-        let did: Did = <Env as Provider<credential::Identify>>::execute(env, identify_cap)
+        let detail = <Env as Provider<credential::Identify>>::execute(env, identify_cap)
             .await
             .map_err(|e| DialogCapabilityAuthorizationError::Serialization(e.to_string()))?;
+        let did = detail.operator;
 
         Ok(CredentialBridge {
             env,
@@ -94,6 +96,7 @@ where
     async fn sign(&self, payload: &[u8]) -> Result<Ed25519Signature, signature::Error> {
         let sign_cap = credential::Subject::from(self.subject.clone())
             .attenuate(credential::Credential)
+            .attenuate(credential::Profile::default())
             .invoke(credential::Sign::new(payload));
 
         let bytes = self

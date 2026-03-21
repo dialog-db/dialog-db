@@ -18,13 +18,13 @@ use crate::{
 };
 
 /// Command struct for committing instructions to a branch.
-pub struct Commit<'a, I> {
-    branch: &'a Branch,
+pub struct Commit<'a, Store, I> {
+    branch: &'a Branch<Store>,
     instructions: I,
 }
 
-impl<'a, I> Commit<'a, I> {
-    pub(super) fn new(branch: &'a Branch, instructions: I) -> Self {
+impl<'a, Store, I> Commit<'a, Store, I> {
+    pub(super) fn new(branch: &'a Branch<Store>, instructions: I) -> Self {
         Self {
             branch,
             instructions,
@@ -32,7 +32,7 @@ impl<'a, I> Commit<'a, I> {
     }
 }
 
-impl<I> Commit<'_, I>
+impl<Store, I> Commit<'_, Store, I>
 where
     I: futures_util::Stream<Item = Instruction> + ConditionalSend,
 {

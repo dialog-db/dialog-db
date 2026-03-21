@@ -10,6 +10,8 @@ use std::fmt::{Debug, Formatter};
 ///
 /// When `At = Local` (default), this behaves like a bare capability.
 /// When `At` is a remote site, `.acquire()` produces site-specific invocations.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = ""))]
 pub struct Capability<T: Constraint, At: Site = Local> {
     can: T::Capability,
     at: At,
@@ -169,10 +171,7 @@ impl<Fx: Effect, At: Site> Capability<Fx, At> {
     }
 }
 
-impl<T: Constraint, At: Site> Ability for Capability<T, At>
-where
-    T::Capability: Ability,
-{
+impl<T: Constraint, At: Site> Ability for Capability<T, At> {
     fn subject(&self) -> &Did {
         self.can.subject()
     }

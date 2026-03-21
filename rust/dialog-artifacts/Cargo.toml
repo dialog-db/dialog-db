@@ -17,7 +17,7 @@ csv = ["dep:csv-async"]
 integration-tests = ["dialog-common/integration-tests"]
 # Enable web integration tests
 web-integration-tests = ["dialog-common/web-integration-tests"]
-ucan = ["dialog-storage/ucan"]
+ucan = ["dialog-storage/ucan", "dialog-s3-credentials/ucan"]
 
 [dependencies]
 dialog-capability = { workspace = true }

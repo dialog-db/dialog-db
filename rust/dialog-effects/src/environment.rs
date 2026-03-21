@@ -58,6 +58,26 @@ where
     }
 }
 
+// Route Import<Material> to self.credentials for any material type.
+use dialog_capability::Capability;
+use dialog_capability::credential::{CredentialError, Import};
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<Local, Credentials, Remote, Material> Provider<Import<Material>>
+    for Environment<Local, Credentials, Remote>
+where
+    Material:
+        serde::Serialize + serde::de::DeserializeOwned + dialog_common::ConditionalSend + 'static,
+    Capability<Import<Material>>: dialog_common::ConditionalSend,
+    Credentials: Provider<Import<Material>> + dialog_common::ConditionalSync,
+    Self: dialog_common::ConditionalSend + dialog_common::ConditionalSync,
+{
+    async fn execute(&self, input: Capability<Import<Material>>) -> Result<(), CredentialError> {
+        self.credentials.execute(input).await
+    }
+}
+
 impl<Local> Environment<Local> {
     /// Create a new environment from a local provider (no credentials).
     pub fn new(local: Local) -> Self {

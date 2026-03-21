@@ -1,11 +1,13 @@
 use crate::{Constrained, Did, Policy, PolicyBuilder, Subject};
 use convert_case::{Case, Casing};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 /// Trait for representing an abstract capability (subject + ability path).
 ///
 /// Implemented by `Subject` and all the `Constrained<P, Of>` chains
 /// that stem from it.
-pub trait Ability: Sized {
+pub trait Ability: Sized + Serialize + DeserializeOwned {
     /// Subject of this capability in `did:key` format which is both a resource
     /// and a root issuer of this capability.
     fn subject(&self) -> &Did;

@@ -41,7 +41,7 @@ impl Memory {
     }
 
     /// Create a session for the given issuer — `credential/{issuer.did()}/...`
-    pub fn credentials(&self, issuer: Credentials) -> Authorization {
+    pub fn credentials<Store>(&self, issuer: Credentials<Store>) -> Authorization<Store> {
         let space = self
             .0
             .clone()
@@ -77,20 +77,29 @@ impl Trace {
     }
 }
 
-/// Issuer session — `Credentials` + `Capability<fx::Space>` scoped to
+/// Issuer session — `Credentials<Store>` + `Capability<fx::Space>` scoped to
 /// `credential/{issuer.did()}`.
 ///
 /// Carries the issuer credentials and provides typed cell accessors
 /// for credential storage.
-#[derive(Debug, Clone)]
-pub struct Authorization {
-    issuer: Credentials,
+#[derive(Debug)]
+pub struct Authorization<Store> {
+    issuer: Credentials<Store>,
     space: Capability<fx::Space>,
 }
 
-impl Authorization {
+impl<Store: Clone> Clone for Authorization<Store> {
+    fn clone(&self) -> Self {
+        Self {
+            issuer: self.issuer.clone(),
+            space: self.space.clone(),
+        }
+    }
+}
+
+impl<Store> Authorization<Store> {
     /// The issuer credentials.
-    pub fn issuer(&self) -> &Credentials {
+    pub fn issuer(&self) -> &Credentials<Store> {
         &self.issuer
     }
 

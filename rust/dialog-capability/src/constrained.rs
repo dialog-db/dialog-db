@@ -23,6 +23,7 @@ use crate::{
 ///     .attenuate(Storage);
 /// ```
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = ""))]
 pub struct Constrained<P: Policy, Of: Ability> {
     /// The policy/ability being added.
     pub constraint: P,

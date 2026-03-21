@@ -9,15 +9,20 @@ use crate::repository::memory::{Authorization, Memory, Trace};
 use crate::repository::revision::Revision;
 
 /// Command to open a branch, creating it with defaults if it doesn't exist.
-pub struct Open {
-    session: Authorization,
+pub struct Open<Store> {
+    session: Authorization<Store>,
     subject: Did,
     memory: Memory,
     trace: Trace,
 }
 
-impl Open {
-    pub(crate) fn new(session: Authorization, subject: Did, memory: Memory, trace: Trace) -> Self {
+impl<Store> Open<Store> {
+    pub(crate) fn new(
+        session: Authorization<Store>,
+        subject: Did,
+        memory: Memory,
+        trace: Trace,
+    ) -> Self {
         Self {
             session,
             subject,
@@ -27,9 +32,9 @@ impl Open {
     }
 }
 
-impl Open {
+impl<Store> Open<Store> {
     /// Execute the open operation.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Branch, RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<Branch<Store>, RepositoryError>
     where
         Env: Provider<memory_fx::Resolve> + Provider<memory_fx::Publish>,
     {

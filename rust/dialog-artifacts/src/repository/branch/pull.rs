@@ -20,13 +20,13 @@ use crate::repository::revision::Revision;
 ///
 /// This performs a three-way merge between the current branch, the base
 /// (last sync point), and the upstream revision.
-pub struct PullLocal<'a> {
-    branch: &'a Branch,
+pub struct PullLocal<'a, Store> {
+    branch: &'a Branch<Store>,
     upstream_revision: Revision,
 }
 
-impl<'a> PullLocal<'a> {
-    pub(super) fn new(branch: &'a Branch, upstream_revision: Revision) -> Self {
+impl<'a, Store> PullLocal<'a, Store> {
+    pub(super) fn new(branch: &'a Branch<Store>, upstream_revision: Revision) -> Self {
         Self {
             branch,
             upstream_revision,
@@ -34,7 +34,7 @@ impl<'a> PullLocal<'a> {
     }
 }
 
-impl PullLocal<'_> {
+impl<Store> PullLocal<'_, Store> {
     /// Execute the pull operation, returning the new revision (or None if
     /// no changes).
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, DialogArtifactsError>
@@ -54,17 +54,17 @@ impl PullLocal<'_> {
 ///
 /// Borrows `&Branch`. Reads the branch's upstream to determine whether
 /// to pull from a local or remote upstream.
-pub struct Pull<'a> {
-    branch: &'a Branch,
+pub struct Pull<'a, Store> {
+    branch: &'a Branch<Store>,
 }
 
-impl<'a> Pull<'a> {
-    pub(super) fn new(branch: &'a Branch) -> Self {
+impl<'a, Store> Pull<'a, Store> {
+    pub(super) fn new(branch: &'a Branch<Store>) -> Self {
         Self { branch }
     }
 }
 
-impl Pull<'_> {
+impl<Store: Clone> Pull<'_, Store> {
     /// Execute the pull operation.
     ///
     /// For local upstreams, loads the upstream branch revision and performs
@@ -111,8 +111,8 @@ impl Pull<'_> {
 /// Perform a three-way merge from a local upstream revision.
 ///
 /// Returns the new revision (or None if no changes).
-async fn pull_local<Env>(
-    branch: &Branch,
+async fn pull_local<Store, Env>(
+    branch: &Branch<Store>,
     upstream_revision: Revision,
     env: &Env,
 ) -> Result<Option<Revision>, DialogArtifactsError>
@@ -218,8 +218,8 @@ where
 /// Uses `FallbackStore` so that reads can fall through to the remote
 /// when the local archive doesn't have the blocks. Looks up credentials
 /// from the persisted `RemoteSite` configuration.
-async fn pull_remote<Env>(
-    branch: &Branch,
+async fn pull_remote<Store: Clone, Env>(
+    branch: &Branch<Store>,
     remote: &SiteName,
     upstream_branch_name: &super::state::BranchName,
     upstream_subject: &dialog_capability::Did,

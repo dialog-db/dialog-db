@@ -91,8 +91,12 @@ impl Provider<credential::Identify> for Session {
     async fn execute(
         &self,
         _input: Capability<credential::Identify>,
-    ) -> Result<Did, credential::CredentialError> {
-        Ok(self.did.clone())
+    ) -> Result<credential::Identity, credential::CredentialError> {
+        Ok(credential::Identity {
+            profile: self.did.clone(),
+            operator: self.did.clone(),
+            account: None,
+        })
     }
 }
 

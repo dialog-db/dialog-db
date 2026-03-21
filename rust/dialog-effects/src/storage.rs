@@ -6,12 +6,12 @@
 //!
 //! ```text
 //! Subject (repository DID)
-//!   └── Storage (ability: /storage)
-//!         └── Store { store: String }
-//!               ├── Get { key } → Effect → Result<Option<Bytes>, StorageError>
-//!               ├── Set { key, value } → Effect → Result<(), StorageError>
-//!               ├── Delete { key } → Effect → Result<(), StorageError>
-//!               └── List { continuation_token } → Effect → Result<ListResult, StorageError>
+//! └── Storage (ability: /storage)
+//!     └── Store { store: String }
+//!         ├── Get { key } → Effect → Result<Option<Bytes>, StorageError>
+//!         ├── Set { key, value } → Effect → Result<(), StorageError>
+//!         ├── Delete { key } → Effect → Result<(), StorageError>
+//!         └── List { continuation_token } → Effect → Result<ListResult, StorageError>
 //! ```
 
 pub use dialog_capability::{Attenuation, Capability, Effect, Policy, Subject};

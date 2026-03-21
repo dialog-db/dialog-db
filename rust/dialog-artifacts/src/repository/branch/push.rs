@@ -17,17 +17,17 @@ use crate::repository::revision::Revision;
 ///
 /// Borrows `&Branch` (non-consuming). Reads the branch's upstream to
 /// dispatch to local or remote push logic.
-pub struct Push<'a> {
-    branch: &'a Branch,
+pub struct Push<'a, Store> {
+    branch: &'a Branch<Store>,
 }
 
-impl<'a> Push<'a> {
-    pub(super) fn new(branch: &'a Branch) -> Self {
+impl<'a, Store> Push<'a, Store> {
+    pub(super) fn new(branch: &'a Branch<Store>) -> Self {
         Self { branch }
     }
 }
 
-impl Push<'_> {
+impl<Store: Clone> Push<'_, Store> {
     /// Execute the push operation.
     ///
     /// Returns `Some(revision)` on success, `None` if the push could not
@@ -71,8 +71,8 @@ impl Push<'_> {
 /// Fast-forward: if the upstream's tree matches our base (it hasn't diverged),
 /// reset upstream to our revision and return success.
 /// Diverged: return `Ok(None)`.
-async fn push_local<Env>(
-    branch: &Branch,
+async fn push_local<Store: Clone, Env>(
+    branch: &Branch<Store>,
     upstream_name: &BranchName,
     env: &Env,
 ) -> Result<Option<Revision>, RepositoryError>
@@ -111,8 +111,8 @@ where
 /// 3. Compute novel nodes via `novelty()`
 /// 4. Read each node's raw bytes from local archive, upload to remote
 /// 5. Publish revision to remote
-async fn push_remote<Env>(
-    branch: &Branch,
+async fn push_remote<Store, Env>(
+    branch: &Branch<Store>,
     remote: &SiteName,
     upstream_branch_name: &BranchName,
     upstream_subject: &dialog_capability::Did,

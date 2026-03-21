@@ -53,16 +53,16 @@ pub use revision::*;
 /// let branch = repo.open_branch("main").perform(&env).await?;
 /// repo.add_remote("origin", address).perform(&env).await?;
 /// ```
-pub struct Repository {
-    session: Authorization,
+pub struct Repository<Store> {
+    session: Authorization<Store>,
     subject: Did,
     memory: Memory,
     archive: Archive,
 }
 
-impl Repository {
+impl<Store> Repository<Store> {
     /// Create a repository for the given issuer and subject.
-    pub fn new(issuer: Credentials, subject: Did) -> Self {
+    pub fn new(issuer: Credentials<Store>, subject: Did) -> Self {
         let cap_subject = Subject::from(subject.clone());
         let memory = Memory::new(cap_subject.clone());
         let session = memory.credentials(issuer);
@@ -76,12 +76,12 @@ impl Repository {
     }
 
     /// The issuer credentials.
-    pub fn issuer(&self) -> &Credentials {
+    pub fn issuer(&self) -> &Credentials<Store> {
         self.session.issuer()
     }
 
     /// The issuer authorization (credentials + scoped credential space).
-    pub fn authorization(&self) -> &Authorization {
+    pub fn authorization(&self) -> &Authorization<Store> {
         &self.session
     }
 
@@ -100,28 +100,6 @@ impl Repository {
         &self.archive
     }
 
-    /// Open (load or create) a branch.
-    pub fn open_branch(&self, name: impl Into<branch::BranchName>) -> branch::Open {
-        let trace = self.memory.trace(name);
-        branch::Open::new(
-            self.session.clone(),
-            self.subject.clone(),
-            self.memory.clone(),
-            trace,
-        )
-    }
-
-    /// Load an existing branch (error if not found).
-    pub fn load_branch(&self, name: impl Into<branch::BranchName>) -> branch::Load {
-        let trace = self.memory.trace(name);
-        branch::Load::new(
-            self.session.clone(),
-            self.subject.clone(),
-            self.memory.clone(),
-            trace,
-        )
-    }
-
     /// Add a new remote site to this repository.
     pub fn add_remote(
         &self,
@@ -134,6 +112,30 @@ impl Repository {
     /// Load an existing remote site from this repository.
     pub fn load_remote(&self, name: impl Into<SiteName>) -> remote::site::Load {
         remote::site::Load::new(name, self.memory.space("site"))
+    }
+}
+
+impl<Store: Clone> Repository<Store> {
+    /// Open (load or create) a branch.
+    pub fn open_branch(&self, name: impl Into<branch::BranchName>) -> branch::Open<Store> {
+        let trace = self.memory.trace(name);
+        branch::Open::new(
+            self.session.clone(),
+            self.subject.clone(),
+            self.memory.clone(),
+            trace,
+        )
+    }
+
+    /// Load an existing branch (error if not found).
+    pub fn load_branch(&self, name: impl Into<branch::BranchName>) -> branch::Load<Store> {
+        let trace = self.memory.trace(name);
+        branch::Load::new(
+            self.session.clone(),
+            self.subject.clone(),
+            self.memory.clone(),
+            trace,
+        )
     }
 }
 
@@ -151,8 +153,8 @@ mod tests {
         "did:test:repository".parse().unwrap()
     }
 
-    async fn test_issuer() -> Credentials {
-        Credentials::from_passphrase("test").await.unwrap()
+    async fn test_issuer() -> Credentials<()> {
+        Credentials::from_passphrase("test", ()).await.unwrap()
     }
 
     fn test_address() -> RemoteAddress {

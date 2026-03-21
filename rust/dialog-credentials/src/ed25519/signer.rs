@@ -149,8 +149,13 @@ impl Provider<credential::Identify> for Ed25519Signer {
     async fn execute(
         &self,
         _input: Capability<credential::Identify>,
-    ) -> Result<Did, credential::CredentialError> {
-        Ok(self.did())
+    ) -> Result<credential::Identity, credential::CredentialError> {
+        let did = self.did();
+        Ok(credential::Identity {
+            profile: did.clone(),
+            operator: did,
+            account: None,
+        })
     }
 }
 

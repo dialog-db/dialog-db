@@ -111,7 +111,7 @@ impl Credentials {
 /// `Provider<credential::Sign>` for UCAN signing.
 pub async fn authorize<C, Env>(
     env: &Env,
-    delegation_chain: DelegationChain,
+    delegation_chain: Option<DelegationChain>,
     endpoint: String,
     capability: Capability<C>,
 ) -> Result<Authorized<C, UcanAccess>, credential::AuthorizeError>
@@ -124,32 +124,39 @@ where
 
     let subject_did = capability.subject().clone();
     let ability = capability.ability();
-    let params = parameters(&capability);
+    let params = parameters(&*capability);
 
     // Discover the operator's DID via credential::Identify effect.
     let identify_cap = credential::Subject::from(subject_did.clone())
         .attenuate(credential::Credential)
+        .attenuate(credential::Profile::default())
         .invoke(credential::Identify);
-    let authority_did: Did = <Env as Provider<credential::Identify>>::execute(env, identify_cap)
+    let detail = <Env as Provider<credential::Identify>>::execute(env, identify_cap)
         .await
         .map_err(|e| credential::AuthorizeError::Configuration(e.to_string()))?;
+    let authority_did = detail.operator;
 
     // Self-authorization: when subject == authority, no delegation needed.
     let (delegation, proofs) = if subject_did == authority_did {
         (None, vec![])
     } else {
-        // Delegated: verify authority matches the delegation chain audience.
-        let chain_audience = delegation_chain.audience();
+        // Delegated: need a delegation chain.
+        let chain = delegation_chain.ok_or_else(|| {
+            credential::AuthorizeError::Configuration(format!(
+                "No delegation chain for subject '{}' (authority '{}')",
+                subject_did, authority_did
+            ))
+        })?;
+        // Verify authority matches the delegation chain audience.
+        let chain_audience = chain.audience();
         if &authority_did != chain_audience {
             return Err(credential::AuthorizeError::Configuration(format!(
                 "Authority '{}' does not match delegation chain audience '{}'",
                 authority_did, chain_audience
             )));
         }
-        (
-            Some(delegation_chain.clone()),
-            delegation_chain.proof_cids().into(),
-        )
+        let proofs = chain.proof_cids().into();
+        (Some(chain), proofs)
     };
 
     // Build and sign the UCAN invocation using credential effects.
@@ -267,8 +274,13 @@ pub mod tests {
         async fn execute(
             &self,
             _input: Capability<credential::Identify>,
-        ) -> Result<Did, credential::CredentialError> {
-            Ok(self.signer.did())
+        ) -> Result<credential::Identity, credential::CredentialError> {
+            let did = self.signer.did();
+            Ok(credential::Identity {
+                profile: did.clone(),
+                operator: did,
+                account: None,
+            })
         }
     }
 
@@ -302,7 +314,7 @@ pub mod tests {
         ) -> Result<Authorized<C, UcanAccess>, credential::AuthorizeError> {
             super::authorize(
                 self,
-                self.credentials.delegation().clone(),
+                Some(self.credentials.delegation().clone()),
                 input.access.endpoint.clone(),
                 input.capability,
             )

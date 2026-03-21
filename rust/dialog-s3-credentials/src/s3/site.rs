@@ -64,7 +64,7 @@ impl<Fx: Effect> From<Authorized<Fx, S3Access>> for S3Invocation<Fx> {
 ///
 /// Contains the endpoint and addressing info needed to build S3 URLs.
 /// No credential material — that lives in the environment's credential store.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct S3Site {
     /// S3 address (endpoint, region, bucket).
     pub(crate) address: Address,

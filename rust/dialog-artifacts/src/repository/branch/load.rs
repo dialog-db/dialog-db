@@ -9,15 +9,20 @@ use crate::repository::memory::{Authorization, Memory, Trace};
 use crate::repository::revision::Revision;
 
 /// Command to load an existing branch, returning an error if not found.
-pub struct Load {
-    session: Authorization,
+pub struct Load<Store> {
+    session: Authorization<Store>,
     subject: Did,
     memory: Memory,
     trace: Trace,
 }
 
-impl Load {
-    pub(crate) fn new(session: Authorization, subject: Did, memory: Memory, trace: Trace) -> Self {
+impl<Store> Load<Store> {
+    pub(crate) fn new(
+        session: Authorization<Store>,
+        subject: Did,
+        memory: Memory,
+        trace: Trace,
+    ) -> Self {
         Self {
             session,
             subject,
@@ -27,9 +32,9 @@ impl Load {
     }
 }
 
-impl Load {
+impl<Store> Load<Store> {
     /// Execute the load operation.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Branch, RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<Branch<Store>, RepositoryError>
     where
         Env: Provider<memory_fx::Resolve>,
     {

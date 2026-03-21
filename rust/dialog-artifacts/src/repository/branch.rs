@@ -49,16 +49,16 @@ pub type Index = Tree<GeometricDistribution, Key, State<Datum>, Blake3Hash>;
 ///
 /// Holds a `Trace` (scoped to `trace/{branch}/local`) plus separate cells
 /// for revision and upstream state.
-pub struct Branch {
+pub struct Branch<Store> {
     subject: Did,
     memory: Memory,
-    session: Authorization,
+    session: Authorization<Store>,
     trace: Trace,
     revision: CellOr<Revision>,
     upstream: Cell<Option<UpstreamState>>,
 }
 
-impl Debug for Branch {
+impl<Store> Debug for Branch<Store> {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.debug_struct("Branch")
             .field("name", self.trace.name())
@@ -67,7 +67,7 @@ impl Debug for Branch {
     }
 }
 
-impl Branch {
+impl<Store> Branch<Store> {
     /// Returns the branch name.
     pub fn name(&self) -> &BranchName {
         self.trace.name()
@@ -89,12 +89,12 @@ impl Branch {
     }
 
     /// Returns the issuer credentials.
-    pub fn issuer(&self) -> &Credentials {
+    pub fn issuer(&self) -> &Credentials<Store> {
         self.session.issuer()
     }
 
     /// Returns the authorization (credentials + scoped credential space).
-    pub fn authorization(&self) -> &Authorization {
+    pub fn authorization(&self) -> &Authorization<Store> {
         &self.session
     }
 
@@ -119,9 +119,9 @@ impl Branch {
     }
 }
 
-impl Branch {
+impl<Store: Clone> Branch<Store> {
     /// Load a sibling branch by name (shares this branch's memory and credentials).
-    pub fn load_branch(&self, name: impl Into<BranchName>) -> Load {
+    pub fn load_branch(&self, name: impl Into<BranchName>) -> Load<Store> {
         let trace = self.memory.trace(name);
         Load::new(
             self.session.clone(),
@@ -130,7 +130,9 @@ impl Branch {
             trace,
         )
     }
+}
 
+impl<Store> Branch<Store> {
     /// Load a remote site by name (shares this branch's memory).
     pub fn load_remote(
         &self,
@@ -140,7 +142,7 @@ impl Branch {
     }
 
     /// Create a command to commit instructions to this branch.
-    pub fn commit<I>(&self, instructions: I) -> Commit<'_, I> {
+    pub fn commit<I>(&self, instructions: I) -> Commit<'_, Store, I> {
         Commit::new(self, instructions)
     }
 
@@ -150,7 +152,7 @@ impl Branch {
     }
 
     /// Create a command to reset the branch to a given revision.
-    pub fn reset(&self, revision: Revision) -> Reset<'_> {
+    pub fn reset(&self, revision: Revision) -> Reset<'_, Store> {
         Reset::new(self, revision)
     }
 
@@ -159,7 +161,7 @@ impl Branch {
     /// This performs a three-way merge using an explicitly provided
     /// upstream revision. For auto-dispatching based on the branch's
     /// configured upstream, use [`pull_upstream`](Branch::pull_upstream).
-    pub fn pull(&self, upstream_revision: Revision) -> PullLocal<'_> {
+    pub fn pull(&self, upstream_revision: Revision) -> PullLocal<'_, Store> {
         PullLocal::new(self, upstream_revision)
     }
 
@@ -167,14 +169,14 @@ impl Branch {
     ///
     /// Reads the branch's upstream and dispatches to local or remote
     /// pull logic automatically.
-    pub fn pull_upstream(&self) -> Pull<'_> {
+    pub fn pull_upstream(&self) -> Pull<'_, Store> {
         Pull::new(self)
     }
 
     /// Create a command to fetch the upstream branch's current revision.
     ///
     /// Does NOT modify local state — only reads from upstream.
-    pub fn fetch(&self) -> Fetch<'_> {
+    pub fn fetch(&self) -> Fetch<'_, Store> {
         Fetch::new(self)
     }
 
@@ -182,7 +184,7 @@ impl Branch {
     ///
     /// Reads the upstream configuration from branch state and dispatches
     /// to local or remote push logic.
-    pub fn push(&self) -> Push<'_> {
+    pub fn push(&self) -> Push<'_, Store> {
         Push::new(self)
     }
 
@@ -190,7 +192,7 @@ impl Branch {
     ///
     /// Accepts both `UpstreamState` and `RemoteBranch` directly via
     /// `impl Into<UpstreamState>`.
-    pub fn set_upstream(&self, upstream: impl Into<UpstreamState>) -> SetUpstream<'_> {
+    pub fn set_upstream(&self, upstream: impl Into<UpstreamState>) -> SetUpstream<'_, Store> {
         SetUpstream::new(self, upstream.into())
     }
 }
@@ -205,7 +207,7 @@ mod tests {
         "did:test:branch-cap".parse().unwrap()
     }
 
-    pub async fn test_issuer() -> Credentials {
-        Credentials::from_passphrase("test").await.unwrap()
+    pub async fn test_issuer() -> Credentials<()> {
+        Credentials::from_passphrase("test", ()).await.unwrap()
     }
 }

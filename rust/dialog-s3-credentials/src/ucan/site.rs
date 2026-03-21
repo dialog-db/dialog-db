@@ -54,7 +54,7 @@ impl<Fx: Effect> From<Authorized<Fx, UcanAccess>> for UcanTypedInvocation<Fx> {
 ///
 /// Contains the access service endpoint. Credentials (delegation chain)
 /// are managed by the environment's credential store.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UcanSite {
     /// The access service URL to POST invocations to.
     pub(crate) endpoint: String,

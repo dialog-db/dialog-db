@@ -16,17 +16,17 @@ use crate::repository::revision::Revision;
 /// dispatch to local or remote fetch logic.
 ///
 /// Does NOT modify local state — only reads from upstream.
-pub struct Fetch<'a> {
-    branch: &'a Branch,
+pub struct Fetch<'a, Store> {
+    branch: &'a Branch<Store>,
 }
 
-impl<'a> Fetch<'a> {
-    pub(super) fn new(branch: &'a Branch) -> Self {
+impl<'a, Store> Fetch<'a, Store> {
+    pub(super) fn new(branch: &'a Branch<Store>) -> Self {
         Self { branch }
     }
 }
 
-impl Fetch<'_> {
+impl<Store: Clone> Fetch<'_, Store> {
     /// Execute the fetch operation, returning the upstream revision.
     ///
     /// Returns `None` if the upstream has no revision yet.
@@ -59,8 +59,8 @@ impl Fetch<'_> {
 /// Fetch the current revision from a local upstream branch.
 ///
 /// Does NOT modify local state.
-async fn fetch_local<Env>(
-    branch: &Branch,
+async fn fetch_local<Store: Clone, Env>(
+    branch: &Branch<Store>,
     upstream_name: &BranchName,
     env: &Env,
 ) -> Result<Option<Revision>, RepositoryError>
@@ -79,8 +79,8 @@ where
 ///
 /// Does NOT modify local state. Looks up credentials from the persisted
 /// `RemoteSite` configuration.
-async fn fetch_remote<Env>(
-    branch: &Branch,
+async fn fetch_remote<Store, Env>(
+    branch: &Branch<Store>,
     remote: &SiteName,
     upstream_branch_name: &BranchName,
     upstream_subject: &dialog_capability::Did,

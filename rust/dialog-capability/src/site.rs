@@ -15,7 +15,9 @@ use dialog_common::ConditionalSend;
 ///
 /// Implemented by types that describe where an operation should be directed.
 /// The `Invocation` GAT declares what type `acquire` produces for each effect.
-pub trait Site: Clone + ConditionalSend + 'static {
+pub trait Site:
+    Clone + ConditionalSend + serde::Serialize + serde::de::DeserializeOwned + 'static
+{
     /// The access format this site uses.
     type Access: Access;
 
@@ -29,7 +31,7 @@ pub trait Site: Clone + ConditionalSend + 'static {
 /// Local site — no remote backend needed.
 ///
 /// Used for operations that execute directly without remote authorization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Local;
 
 impl Site for Local {

@@ -147,8 +147,8 @@ mod tests {
         RemoteAddress::S3(S3Credentials::public(s3_addr).unwrap())
     }
 
-    async fn test_repo() -> Repository {
-        let issuer = Credentials::from_passphrase("test").await.unwrap();
+    async fn test_repo() -> Repository<()> {
+        let issuer = Credentials::from_passphrase("test", ()).await.unwrap();
         let subject = "did:test:remote-site".parse().unwrap();
         Repository::new(issuer, subject)
     }

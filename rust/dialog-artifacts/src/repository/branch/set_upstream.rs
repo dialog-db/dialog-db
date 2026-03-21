@@ -6,18 +6,18 @@ use super::state::UpstreamState;
 use crate::repository::error::RepositoryError;
 
 /// Command struct for setting a branch's upstream.
-pub struct SetUpstream<'a> {
-    branch: &'a Branch,
+pub struct SetUpstream<'a, Store> {
+    branch: &'a Branch<Store>,
     upstream: UpstreamState,
 }
 
-impl<'a> SetUpstream<'a> {
-    pub(super) fn new(branch: &'a Branch, upstream: UpstreamState) -> Self {
+impl<'a, Store> SetUpstream<'a, Store> {
+    pub(super) fn new(branch: &'a Branch<Store>, upstream: UpstreamState) -> Self {
         Self { branch, upstream }
     }
 }
 
-impl SetUpstream<'_> {
+impl<Store> SetUpstream<'_, Store> {
     /// Execute the set_upstream operation.
     pub async fn perform<Env>(self, env: &Env) -> Result<(), RepositoryError>
     where

@@ -42,11 +42,11 @@ pub fn to_s3_site(address: &RemoteAddress) -> Result<S3Site, dialog_s3_credentia
 
 /// Native environment: filesystem local storage with operator credentials.
 #[cfg(not(target_arch = "wasm32"))]
-pub type NativeEnvironment = Environment<FileSystem, Credentials>;
+pub type NativeEnvironment = Environment<FileSystem, Credentials<()>>;
 
 /// Web environment: IndexedDB local storage with operator credentials.
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-pub type WebEnvironment = Environment<dialog_storage::provider::IndexedDb, Credentials>;
+pub type WebEnvironment = Environment<dialog_storage::provider::IndexedDb, Credentials<()>>;
 
 /// Test environment: in-memory local storage, no credentials.
 #[cfg(any(test, feature = "helpers"))]

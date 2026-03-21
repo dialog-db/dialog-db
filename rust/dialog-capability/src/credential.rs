@@ -7,10 +7,12 @@
 //! # Capability Hierarchy
 //!
 //! ```text
-//! Subject (repository DID)
-//!   +-- Credential (ability: /credential)
-//!         +-- Identify -> Effect -> Result<Did, CredentialError>
-//!         +-- Sign { payload } -> Effect -> Result<Vec<u8>, CredentialError>
+//! Subject (operator DID)
+//! └── Credential (ability: /credential)
+//!     └── Profile { profile: String }  (policy, scopes to named profile)
+//!         ├── Identify -> Effect -> Result<Identity, CredentialError>
+//!         ├── Sign { payload } -> Effect -> Result<Vec<u8>, CredentialError>
+//!         └── Import<M> { material: M } -> Effect -> Result<(), CredentialError>
 //! ```
 
 use crate::access::Access;
@@ -18,6 +20,7 @@ use crate::authorization::Authorized;
 pub use crate::{Attenuation, Capability, Did, Effect, Policy, Subject};
 use crate::{Command, Constraint};
 use dialog_common::ConditionalSend;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -33,13 +36,55 @@ impl Attenuation for Credential {
     type Of = Subject;
 }
 
-/// Identify operation — returns the operator's DID.
+/// Profile policy that scopes credential operations to a named profile.
+///
+/// A profile is a named user identity on a specific device (e.g. "default",
+/// "work", "personal"), each with its own ed25519 keypair.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Profile {
+    /// The profile name.
+    pub profile: String,
+}
+
+impl Profile {
+    /// Create a new Profile policy.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            profile: name.into(),
+        }
+    }
+}
+
+impl Default for Profile {
+    fn default() -> Self {
+        Self {
+            profile: "default".to_string(),
+        }
+    }
+}
+
+impl Policy for Profile {
+    type Of = Credential;
+}
+
+/// The active credential session: profile, operator, and optional account.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Identity {
+    /// The profile's DID (device-local persistent identity).
+    pub profile: Did,
+    /// The operator's DID (ephemeral session key).
+    pub operator: Did,
+    /// The account's DID (optional cross-device recovery identity).
+    pub account: Option<Did>,
+}
+
+/// Identify operation — returns the credential detail for the active session.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Identify;
 
 impl Effect for Identify {
-    type Of = Credential;
-    type Output = Result<Did, CredentialError>;
+    type Of = Profile;
+    type Output = Result<Identity, CredentialError>;
 }
 
 /// Sign operation — signs a payload using the operator's key.
@@ -60,7 +105,7 @@ impl Sign {
 }
 
 impl Effect for Sign {
-    type Of = Credential;
+    type Of = Profile;
     type Output = Result<Vec<u8>, CredentialError>;
 }
 
@@ -108,14 +153,17 @@ where
     type Output = Result<Authorized<Fx, A>, AuthorizeError>;
 }
 
-/// Import credential material into the environment's credential store.
-pub struct Import<Material> {
+/// Import credential material into the credential store.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Import<Material: Serialize> {
     /// The credential material to import.
     pub material: Material,
 }
 
-impl<Material: ConditionalSend + 'static> Command for Import<Material> {
-    type Input = Self;
+impl<Material: Serialize + DeserializeOwned + ConditionalSend + 'static> Effect
+    for Import<Material>
+{
+    type Of = Profile;
     type Output = Result<(), CredentialError>;
 }
 
@@ -145,9 +193,20 @@ mod tests {
     }
 
     #[test]
+    fn it_builds_profile_claim_path() {
+        let claim = Subject::from(did!("key:zSpace"))
+            .attenuate(Credential)
+            .attenuate(Profile::new("default"));
+
+        assert_eq!(claim.subject(), &did!("key:zSpace"));
+        assert_eq!(claim.ability(), "/credential");
+    }
+
+    #[test]
     fn it_builds_identify_claim_path() {
         let claim = Subject::from(did!("key:zSpace"))
             .attenuate(Credential)
+            .attenuate(Profile::new("default"))
             .invoke(Identify);
 
         assert_eq!(claim.ability(), "/credential/identify");
@@ -157,6 +216,7 @@ mod tests {
     fn it_builds_sign_claim_path() {
         let claim = Subject::from(did!("key:zSpace"))
             .attenuate(Credential)
+            .attenuate(Profile::new("default"))
             .invoke(Sign::new(b"hello"));
 
         assert_eq!(claim.ability(), "/credential/sign");
@@ -166,6 +226,7 @@ mod tests {
     fn it_extracts_payload_from_sign() {
         let cap = Subject::from(did!("key:zSpace"))
             .attenuate(Credential)
+            .attenuate(Profile::new("default"))
             .invoke(Sign::new(b"payload"));
 
         assert_eq!(cap.payload(), b"payload");
