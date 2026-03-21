@@ -43,8 +43,7 @@ impl<Store> SetUpstream<'_, Store> {
 
 #[cfg(test)]
 mod tests {
-    use dialog_s3_credentials::Address as S3Address;
-    use dialog_s3_credentials::s3::S3Site;
+    use dialog_s3_credentials::Address;
     use dialog_storage::provider::Volatile;
 
     use crate::repository::branch::state::UpstreamState;
@@ -93,11 +92,10 @@ mod tests {
         let repo = Repository::new(test_issuer().await, test_subject());
         let branch = repo.open_branch("main").perform(&env).await?;
 
-        let s3_addr = S3Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "bucket");
-        let site = S3Site::new(s3_addr).unwrap();
+        let address = Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "bucket");
         let remote_branch = RemoteBranch::new(
             "origin".into(),
-            site,
+            address,
             "did:test:remote-repo".parse()?,
             "main".into(),
         );

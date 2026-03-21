@@ -9,33 +9,27 @@ use dialog_storage::provider::Volatile;
 
 pub use dialog_effects::environment::Environment;
 
-use dialog_s3_credentials::s3::S3Site;
+use dialog_s3_credentials::Address;
 
 use crate::repository::credentials::Credentials;
 
 /// Serializable remote address configuration.
 ///
-/// Stored in memory cells. Convert to an [`S3Site`](dialog_s3_credentials::s3::S3Site)
-/// for execution via [`to_s3_site`].
+/// Stored in memory cells. The S3 variant carries both the [`Address`]
+/// (endpoint/bucket/region) and optional [`S3Credentials`] for authentication.
 pub type RemoteAddress = dialog_s3_credentials::Credentials;
 
-/// Convert a [`RemoteAddress`] to an [`S3Site`] for capability execution.
+/// Extract the [`Address`] from a [`RemoteAddress`].
 ///
-/// Extracts the addressing info (endpoint, region, bucket) from the
-/// serialized credentials and builds a pure site configuration.
-pub fn to_s3_site(address: &RemoteAddress) -> Result<S3Site, dialog_s3_credentials::AccessError> {
-    match address {
-        RemoteAddress::S3(s3_creds) => {
-            let addr = dialog_s3_credentials::Address::new(
-                s3_creds.endpoint(),
-                s3_creds.region(),
-                s3_creds.bucket(),
-            );
-            S3Site::new(addr)
-        }
+/// Pulls out the S3 address from the credentials bundle.
+pub fn to_s3_address(
+    remote: &RemoteAddress,
+) -> Result<Address, dialog_s3_credentials::AccessError> {
+    match remote {
+        RemoteAddress::S3(addr, _) => Ok(addr.clone()),
         #[cfg(feature = "ucan")]
         RemoteAddress::Ucan(_) => Err(dialog_s3_credentials::AccessError::Configuration(
-            "UCAN credentials cannot be converted to an S3 site directly".to_string(),
+            "UCAN credentials cannot be converted to an S3 address directly".to_string(),
         )),
     }
 }

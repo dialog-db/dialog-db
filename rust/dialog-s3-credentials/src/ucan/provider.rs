@@ -33,7 +33,7 @@
 //!
 //! ```rust,no_run
 //! use dialog_s3_credentials::ucan::UcanAuthorizer;
-//! use dialog_s3_credentials::s3::Credentials;
+//! use dialog_s3_credentials::s3::S3Credentials;
 //! use dialog_s3_credentials::Address;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -45,14 +45,13 @@
 //! );
 //!
 //! // Create underlying credentials for S3 access
-//! let s3_credentials = Credentials::private(
-//!     address,
+//! let s3_credentials = S3Credentials::new(
 //!     "access-key-id",
 //!     "secret-access-key",
-//! )?;
+//! );
 //!
 //! // Wrap with UCAN authorizer
-//! let authorizer = UcanAuthorizer::new(s3_credentials);
+//! let authorizer = UcanAuthorizer::new(address, Some(s3_credentials));
 //!
 //! // Handle incoming UCAN container
 //! let container_bytes: Vec<u8> = vec![]; // UCAN container from request
@@ -64,9 +63,10 @@
 use std::collections::BTreeMap;
 
 use super::InvocationChain;
+use crate::Address;
 use crate::capability::{AccessError, AuthorizedRequest};
 use crate::capability::{archive, memory, storage};
-use crate::s3::Credentials;
+use crate::s3::S3Credentials;
 use dialog_capability::{Capability, Did, Subject};
 use dialog_credentials::Ed25519KeyResolver;
 use dialog_ucan::promise::Promised;
@@ -80,13 +80,17 @@ use dialog_ucan::promise::Promised;
 /// 4. Delegates to wrapped credentials for presigned URLs
 #[derive(Debug, Clone)]
 pub struct UcanAuthorizer {
-    credentials: Credentials,
+    address: Address,
+    credentials: Option<S3Credentials>,
 }
 
 impl UcanAuthorizer {
-    /// Create a new UCAN authorizer wrapping the given credentials.
-    pub fn new(credentials: Credentials) -> Self {
-        Self { credentials }
+    /// Create a new UCAN authorizer wrapping the given address and credentials.
+    pub fn new(address: Address, credentials: Option<S3Credentials>) -> Self {
+        Self {
+            address,
+            credentials,
+        }
     }
 
     /// Authorize a UCAN container.
@@ -128,46 +132,64 @@ impl UcanAuthorizer {
             ["storage", "get"] => {
                 let effect = parse_storage_get(args)?;
                 let capability = build_storage_capability(subject_did, args, effect)?;
-                self.credentials.grant(&capability).await
+                self.address
+                    .authorize(&capability, self.credentials.as_ref())
+                    .await
             }
             ["storage", "set"] => {
                 let effect = parse_storage_set(args)?;
                 let capability = build_storage_capability(subject_did, args, effect)?;
-                self.credentials.grant(&capability).await
+                self.address
+                    .authorize(&capability, self.credentials.as_ref())
+                    .await
             }
             ["storage", "delete"] => {
                 let effect = parse_storage_delete(args)?;
                 let capability = build_storage_capability(subject_did, args, effect)?;
-                self.credentials.grant(&capability).await
+                self.address
+                    .authorize(&capability, self.credentials.as_ref())
+                    .await
             }
             ["storage", "list"] => {
                 let effect = parse_storage_list(args)?;
                 let capability = build_storage_capability(subject_did, args, effect)?;
-                self.credentials.grant(&capability).await
+                self.address
+                    .authorize(&capability, self.credentials.as_ref())
+                    .await
             }
 
             // Memory commands
             ["memory", "resolve"] => {
                 let capability = build_memory_resolve_capability(subject_did, args)?;
-                self.credentials.grant(&capability).await
+                self.address
+                    .authorize(&capability, self.credentials.as_ref())
+                    .await
             }
             ["memory", "publish"] => {
                 let capability = build_memory_publish_capability(subject_did, args)?;
-                self.credentials.grant(&capability).await
+                self.address
+                    .authorize(&capability, self.credentials.as_ref())
+                    .await
             }
             ["memory", "retract"] => {
                 let capability = build_memory_retract_capability(subject_did, args)?;
-                self.credentials.grant(&capability).await
+                self.address
+                    .authorize(&capability, self.credentials.as_ref())
+                    .await
             }
 
             // Archive commands
             ["archive", "get"] => {
                 let capability = build_archive_get_capability(subject_did, args)?;
-                self.credentials.grant(&capability).await
+                self.address
+                    .authorize(&capability, self.credentials.as_ref())
+                    .await
             }
             ["archive", "put"] => {
                 let capability = build_archive_put_capability(subject_did, args)?;
-                self.credentials.grant(&capability).await
+                self.address
+                    .authorize(&capability, self.credentials.as_ref())
+                    .await
             }
 
             _ => Err(AccessError::Invocation(format!(
@@ -428,7 +450,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_acquires_and_performs_storage_get() {
-        use crate::{Address, s3::Credentials};
+        use crate::{Address, s3::S3Credentials};
 
         let subject_signer = test_signer().await;
 
@@ -437,10 +459,9 @@ mod tests {
             "us-east-1",
             "test-bucket",
         );
-        let credentials =
-            Credentials::private(address, "access-key-id", "secret-access-key").unwrap();
+        let credentials = S3Credentials::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(credentials);
+        let authorizer = UcanAuthorizer::new(address, Some(credentials));
 
         let operator_signer = Ed25519Signer::import(&[1u8; 32]).await.unwrap();
 
@@ -465,7 +486,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_acquires_and_performs_storage_set() {
-        use crate::{Address, s3::Credentials};
+        use crate::{Address, s3::S3Credentials};
 
         let subject_signer = test_signer().await;
 
@@ -474,10 +495,9 @@ mod tests {
             "us-east-1",
             "test-bucket",
         );
-        let credentials =
-            Credentials::private(address, "access-key-id", "secret-access-key").unwrap();
+        let credentials = S3Credentials::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(credentials);
+        let authorizer = UcanAuthorizer::new(address, Some(credentials));
 
         let operator_signer = Ed25519Signer::import(&[1u8; 32]).await.unwrap();
 
@@ -507,7 +527,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_acquires_and_performs_memory_resolve() {
-        use crate::{Address, s3::Credentials};
+        use crate::{Address, s3::S3Credentials};
 
         let subject_signer = test_signer().await;
 
@@ -516,10 +536,9 @@ mod tests {
             "us-east-1",
             "test-bucket",
         );
-        let credentials =
-            Credentials::private(address, "access-key-id", "secret-access-key").unwrap();
+        let credentials = S3Credentials::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(credentials);
+        let authorizer = UcanAuthorizer::new(address, Some(credentials));
 
         let operator_signer = Ed25519Signer::import(&[1u8; 32]).await.unwrap();
 
@@ -549,7 +568,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_acquires_and_performs_archive_get() {
-        use crate::{Address, s3::Credentials};
+        use crate::{Address, s3::S3Credentials};
 
         let subject_signer = test_signer().await;
 
@@ -558,10 +577,9 @@ mod tests {
             "us-east-1",
             "test-bucket",
         );
-        let credentials =
-            Credentials::private(address, "access-key-id", "secret-access-key").unwrap();
+        let credentials = S3Credentials::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(credentials);
+        let authorizer = UcanAuthorizer::new(address, Some(credentials));
 
         let operator_signer = Ed25519Signer::import(&[1u8; 32]).await.unwrap();
 
@@ -585,7 +603,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_acquires_and_performs_archive_put() {
-        use crate::{Address, s3::Credentials};
+        use crate::{Address, s3::S3Credentials};
 
         let subject_signer = test_signer().await;
 
@@ -594,10 +612,9 @@ mod tests {
             "us-east-1",
             "test-bucket",
         );
-        let credentials =
-            Credentials::private(address, "access-key-id", "secret-access-key").unwrap();
+        let credentials = S3Credentials::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(credentials);
+        let authorizer = UcanAuthorizer::new(address, Some(credentials));
 
         let operator_signer = Ed25519Signer::import(&[1u8; 32]).await.unwrap();
 
@@ -634,10 +651,9 @@ mod tests {
             "us-east-1",
             "test-bucket",
         );
-        let credentials =
-            s3::Credentials::private(address, "access-key-id", "secret-access-key").unwrap();
+        let credentials = s3::S3Credentials::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(credentials);
+        let authorizer = UcanAuthorizer::new(address, Some(credentials));
 
         let digest = Blake3Hash::hash(b"hello");
         let args = BTreeMap::from([
@@ -696,7 +712,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_authorizes_self_invocation_for_storage_get() {
-        use crate::{Address, s3::Credentials};
+        use crate::{Address, s3::S3Credentials};
 
         let signer = test_signer().await;
 
@@ -705,10 +721,9 @@ mod tests {
             "us-east-1",
             "test-bucket",
         );
-        let credentials =
-            Credentials::private(address, "access-key-id", "secret-access-key").unwrap();
+        let credentials = S3Credentials::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(credentials);
+        let authorizer = UcanAuthorizer::new(address, Some(credentials));
 
         let mut args = BTreeMap::new();
         args.insert("store".to_string(), Promised::String("index".to_string()));
@@ -736,7 +751,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_authorizes_self_invocation_for_storage_set() {
-        use crate::{Address, s3::Credentials};
+        use crate::{Address, s3::S3Credentials};
 
         let signer = test_signer().await;
 
@@ -745,10 +760,9 @@ mod tests {
             "us-east-1",
             "test-bucket",
         );
-        let credentials =
-            Credentials::private(address, "access-key-id", "secret-access-key").unwrap();
+        let credentials = S3Credentials::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(credentials);
+        let authorizer = UcanAuthorizer::new(address, Some(credentials));
 
         // Multihash format: [code, length, ...digest]
         // SHA-256 code is 0x12, length is 0x20 (32 bytes)
@@ -781,7 +795,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_authorizes_self_invocation_for_archive_get() {
-        use crate::{Address, s3::Credentials};
+        use crate::{Address, s3::S3Credentials};
 
         let signer = test_signer().await;
 
@@ -790,10 +804,9 @@ mod tests {
             "us-east-1",
             "test-bucket",
         );
-        let credentials =
-            Credentials::private(address, "access-key-id", "secret-access-key").unwrap();
+        let credentials = S3Credentials::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(credentials);
+        let authorizer = UcanAuthorizer::new(address, Some(credentials));
 
         let mut args = BTreeMap::new();
         args.insert("catalog".to_string(), Promised::String("blobs".to_string()));

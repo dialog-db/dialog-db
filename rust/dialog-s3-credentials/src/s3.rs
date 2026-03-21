@@ -1,20 +1,14 @@
 //! S3 credential types for direct AWS SigV4 signing.
 //!
-//! This module provides [`Credentials`] for S3 access:
-//!
-//! - [`Credentials::Public`] - No signing for public buckets
-//! - [`Credentials::Private`] - AWS SigV4 signing with access key and secret
-//!
-//! Both variants implement [`Remote`](dialog_capability::credential::Remote) and
-//! [`Provider`](dialog_capability::Provider) for capability-based authorization.
+//! This module provides [`S3Credentials`] for authenticated S3 access.
+//! Use `Option<S3Credentials>` where `None` means public/unsigned access.
 
-mod credentials;
+pub(crate) mod credentials;
 pub mod provider;
 pub mod site;
 
 pub use crate::Address;
-pub use credentials::{Credentials, PrivateCredentials, PublicCredentials};
-pub use site::S3Site;
+pub use credentials::S3Credentials;
 use url::Url;
 
 /// Determine if path-style URLs should be used by default for this endpoint.

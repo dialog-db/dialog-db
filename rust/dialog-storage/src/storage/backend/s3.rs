@@ -11,76 +11,15 @@
 //!
 //! # Examples
 //!
-//! ## Public Access (No Authentication)
+//! ## Usage
+//!
+//! `S3` is a stateless HTTP executor. Credentials and address travel
+//! inside `ForkInvocation<Fx, S3>`, which is produced by `SiteInvocation::acquire`.
 //!
 //! ```no_run
-//! use dialog_storage::s3::{Address, S3, S3Credentials};
+//! use dialog_storage::s3::S3;
 //!
-//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let address = Address::new(
-//!     "https://s3.us-east-1.amazonaws.com",
-//!     "us-east-1",
-//!     "my-bucket",
-//! );
-//! let credentials = S3Credentials::public(address)?;
-//! let s3 = S3::from_s3(credentials);
-//! # Ok(())
-//! # }
-//! ```
-//!
-//! ## Authorized Access (Credentials based Authentication)
-//!
-//! ```no_run
-//! use dialog_storage::s3::{Address, S3Credentials, S3};
-//!
-//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let address = Address::new(
-//!     "https://s3.us-east-1.amazonaws.com",
-//!     "us-east-1",
-//!     "my-bucket",
-//! );
-//! let credentials = S3Credentials::private(
-//!     address,
-//!     std::env::var("AWS_ACCESS_KEY_ID")?,
-//!     std::env::var("AWS_SECRET_ACCESS_KEY")?,
-//! )?;
-//! let s3 = S3::from_s3(credentials);
-//! # Ok(())
-//! # }
-//! ```
-//!
-//! ## Cloudflare R2
-//!
-//! ```no_run
-//! use dialog_storage::s3::{Address, S3Credentials, S3};
-//!
-//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let address = Address::new(
-//!     "https://account-id.r2.cloudflarestorage.com",
-//!     "auto",
-//!     "my-bucket",
-//! );
-//! let credentials = S3Credentials::private(
-//!     address,
-//!     std::env::var("R2_ACCESS_KEY_ID")?,
-//!     std::env::var("R2_SECRET_ACCESS_KEY")?,
-//! )?;
-//! let s3 = S3::from_s3(credentials);
-//! # Ok(())
-//! # }
-//! ```
-//!
-//! ## Local Development (MinIO)
-//!
-//! ```no_run
-//! use dialog_storage::s3::{Address, S3Credentials, S3};
-//!
-//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let address = Address::new("http://localhost:9000", "us-east-1", "my-bucket");
-//! let credentials = S3Credentials::private(address, "minioadmin", "minioadmin")?;
-//! let s3 = S3::from_s3(credentials);
-//! # Ok(())
-//! # }
+//! let s3 = S3;
 //! ```
 //!
 //! # Key Encoding
@@ -92,6 +31,8 @@
 //! - Path separators (`/`) preserve the S3 key hierarchy
 
 use dialog_capability::Did;
+use dialog_capability::credential::Allow;
+use dialog_capability::site::Site;
 use thiserror::Error;
 
 // Re-export core types from dialog-s3-credentials crate
@@ -99,7 +40,7 @@ pub use dialog_s3_credentials::{
     AccessError, Address, AuthorizedRequest, Checksum, Credentials, Hasher,
 };
 // Re-export S3-specific credentials type for direct use
-pub use dialog_s3_credentials::s3::Credentials as S3Credentials;
+pub use dialog_s3_credentials::s3::S3Credentials;
 // Use access module types for direct S3 authorization
 pub use dialog_s3_credentials::capability::{Precondition, S3Request};
 
@@ -198,39 +139,23 @@ impl From<AccessError> for S3StorageError {
     }
 }
 
-/// S3-backed HTTP execution layer for authorized requests.
+/// S3 HTTP execution layer.
 ///
-/// This type holds S3 credentials and can execute pre-authorized capabilities
-/// by presigning HTTP requests. Authorization (identity verification, signing)
-/// is handled externally by the caller before handing `Authorization<...>` values
-/// to S3 for HTTP execution.
-#[derive(Debug, Clone)]
-pub struct S3 {
-    credentials: Credentials,
-}
+/// A stateless executor that presigns and dispatches `ForkInvocation<Fx, S3>` requests
+/// via HTTP. The invocation carries the address, credentials, and capability —
+/// `S3` just performs the HTTP round-trip.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct S3;
 
-impl S3 {
-    /// Create a new S3 with the given credentials.
-    pub fn new(credentials: Credentials) -> Self {
-        Self { credentials }
-    }
-
-    /// Create a new S3 from S3 credentials.
-    pub fn from_s3(credentials: dialog_s3_credentials::s3::Credentials) -> Self {
-        Self {
-            credentials: Credentials::S3(credentials),
-        }
-    }
-
-    /// Get a reference to the credentials.
-    pub fn credentials(&self) -> &Credentials {
-        &self.credentials
-    }
-}
-
-// Provider<S3Invocation<Fx>> impls for application-level effects
+// Provider<Fork<Fx, S3>> impls for application-level effects
 // live in the submodules: archive.rs, memory.rs, storage.rs.
-// Each impl executes the presigned HTTP request and interprets the response.
+
+/// S3 implements `Site` with `Option<S3Credentials>` for credentials.
+impl Site for S3 {
+    type Credentials = Option<S3Credentials>;
+    type Format = Allow;
+    type Address = Address;
+}
 
 /// A scoped S3 storage bucket with subject and namespace path.
 ///
@@ -239,16 +164,10 @@ impl S3 {
 /// # Example
 ///
 /// ```no_run
-/// use dialog_storage::s3::{S3, S3Credentials, Address, Bucket};
+/// use dialog_storage::s3::{S3, Bucket};
 ///
-/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let address = Address::new("http://localhost:9000", "us-east-1", "my-bucket");
-/// let credentials = S3Credentials::public(address)?;
-/// let s3 = S3::from_s3(credentials);
 /// let subject: dialog_capability::Did = "did:key:zMySubject".parse().unwrap();
-/// let bucket = Bucket::new(s3, subject, "my-store");
-/// # Ok(())
-/// # }
+/// let bucket = Bucket::new(S3, subject, "my-store");
 /// ```
 #[derive(Debug, Clone)]
 pub struct Bucket {
@@ -286,7 +205,7 @@ impl Bucket {
     /// Create a new scoped bucket with a different path (nested namespace).
     pub fn at(&self, path: impl Into<String>) -> Self {
         Self {
-            bucket: self.bucket.clone(),
+            bucket: self.bucket,
             subject: self.subject.clone(),
             path: format!("{}/{}", self.path, path.into()),
         }
@@ -301,16 +220,10 @@ impl Bucket {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dialog_s3_credentials::s3::Credentials as S3Credentials;
 
     #[allow(dead_code)]
     fn test_address() -> Address {
         Address::new("https://s3.amazonaws.com", "us-east-1", "bucket")
-    }
-
-    #[allow(dead_code)]
-    fn test_credentials() -> S3Credentials {
-        S3Credentials::public(test_address()).unwrap()
     }
 
     #[dialog_common::test]
@@ -395,33 +308,28 @@ mod tests {
         use super::*;
 
         #[dialog_common::test]
-        fn it_creates_virtual_hosted_style_credentials() {
+        fn it_creates_address_for_virtual_hosted() {
             let address = Address::new("https://s3.amazonaws.com", "us-east-1", "my-bucket");
-            let _credentials = S3Credentials::public(address).unwrap();
+            assert!(!address.path_style());
         }
 
         #[dialog_common::test]
-        fn it_creates_path_style_credentials_for_localhost() {
+        fn it_creates_path_style_for_localhost() {
             let address = Address::new("http://localhost:9000", "us-east-1", "bucket");
-            let _credentials = S3Credentials::public(address).unwrap();
+            assert!(address.path_style());
         }
 
         #[dialog_common::test]
         fn it_allows_forcing_path_style() {
-            let address = Address::new("https://custom-s3.example.com", "us-east-1", "bucket");
-            let _credentials = S3Credentials::public(address).unwrap().with_path_style();
+            let address = Address::new("https://custom-s3.example.com", "us-east-1", "bucket")
+                .with_path_style();
+            assert!(address.path_style());
         }
 
         #[dialog_common::test]
-        fn it_creates_r2_credentials() {
+        fn it_creates_r2_address() {
             let address = Address::new("https://abc123.r2.cloudflarestorage.com", "auto", "bucket");
-            let _credentials = S3Credentials::public(address).unwrap();
-        }
-
-        #[dialog_common::test]
-        fn it_creates_private_credentials() {
-            let address = Address::new("http://localhost:9000", "us-east-1", "bucket");
-            let _credentials = S3Credentials::private(address, "access-key", "secret-key").unwrap();
+            assert!(!address.path_style());
         }
     }
 }

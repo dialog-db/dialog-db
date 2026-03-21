@@ -1,5 +1,5 @@
 use dialog_capability::Did;
-use dialog_s3_credentials::s3::S3Site;
+use dialog_s3_credentials::Address;
 
 use super::SiteName;
 use super::branch::RemoteBranch;
@@ -8,29 +8,29 @@ use crate::repository::branch::BranchName;
 /// A cursor pointing to a specific repository at a remote site.
 ///
 /// Created by [`RemoteSite::repository`](super::site::RemoteSite::repository).
-/// Holds the remote name, site configuration, and subject DID identifying the repository.
+/// Holds the remote name, S3 address, and subject DID identifying the repository.
 ///
 /// Call [`.branch(name)`](RemoteRepository::branch) to get a cursor into a
 /// specific branch within this repository.
 #[derive(Debug, Clone)]
 pub struct RemoteRepository {
     remote: SiteName,
-    site: S3Site,
+    address: Address,
     subject: Did,
 }
 
 impl RemoteRepository {
-    pub(super) fn new(remote: SiteName, site: S3Site, subject: Did) -> Self {
+    pub(super) fn new(remote: SiteName, address: Address, subject: Did) -> Self {
         Self {
             remote,
-            site,
+            address,
             subject,
         }
     }
 
-    /// The site configuration for remote operations.
-    pub fn site(&self) -> &S3Site {
-        &self.site
+    /// The S3 address for remote operations.
+    pub fn address(&self) -> &Address {
+        &self.address
     }
 
     /// The subject DID of the repository.
@@ -47,7 +47,7 @@ impl RemoteRepository {
     pub fn branch(&self, name: impl Into<BranchName>) -> RemoteBranch {
         RemoteBranch::new(
             self.remote.clone(),
-            self.site.clone(),
+            self.address.clone(),
             self.subject.clone(),
             name.into(),
         )

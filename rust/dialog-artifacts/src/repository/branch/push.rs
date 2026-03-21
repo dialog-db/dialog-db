@@ -1,8 +1,11 @@
-use dialog_capability::{Provider, credential::Authorize};
+use dialog_capability::credential::{Allow, Authorize};
+use dialog_capability::fork::Fork;
+use dialog_capability::{Provider, credential};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
-use dialog_s3_credentials::s3::site::{S3Access, S3Invocation};
+use dialog_s3_credentials::s3::S3Credentials;
+use dialog_storage::s3::S3;
 use futures_util::{StreamExt, TryStreamExt};
 
 use super::Branch;
@@ -38,12 +41,13 @@ impl<Store: Clone> Push<'_, Store> {
             + Provider<archive_fx::Put>
             + Provider<memory_fx::Resolve>
             + Provider<memory_fx::Publish>
-            + Provider<Authorize<archive_fx::Put, S3Access>>
-            + Provider<S3Invocation<archive_fx::Put>>
-            + Provider<Authorize<memory_fx::Resolve, S3Access>>
-            + Provider<S3Invocation<memory_fx::Resolve>>
-            + Provider<Authorize<memory_fx::Publish, S3Access>>
-            + Provider<S3Invocation<memory_fx::Publish>>
+            + Provider<Authorize<archive_fx::Put, Allow>>
+            + Provider<Authorize<memory_fx::Resolve, Allow>>
+            + Provider<Authorize<memory_fx::Publish, Allow>>
+            + Provider<credential::Get<Option<S3Credentials>>>
+            + Provider<Fork<S3, archive_fx::Put>>
+            + Provider<Fork<S3, memory_fx::Resolve>>
+            + Provider<Fork<S3, memory_fx::Publish>>
             + ConditionalSync
             + 'static,
     {
@@ -123,12 +127,13 @@ where
         + Provider<archive_fx::Put>
         + Provider<memory_fx::Resolve>
         + Provider<memory_fx::Publish>
-        + Provider<Authorize<archive_fx::Put, S3Access>>
-        + Provider<S3Invocation<archive_fx::Put>>
-        + Provider<Authorize<memory_fx::Resolve, S3Access>>
-        + Provider<S3Invocation<memory_fx::Resolve>>
-        + Provider<Authorize<memory_fx::Publish, S3Access>>
-        + Provider<S3Invocation<memory_fx::Publish>>
+        + Provider<Authorize<archive_fx::Put, Allow>>
+        + Provider<Authorize<memory_fx::Resolve, Allow>>
+        + Provider<Authorize<memory_fx::Publish, Allow>>
+        + Provider<credential::Get<Option<S3Credentials>>>
+        + Provider<Fork<S3, archive_fx::Put>>
+        + Provider<Fork<S3, memory_fx::Resolve>>
+        + Provider<Fork<S3, memory_fx::Publish>>
         + ConditionalSync
         + 'static,
 {
@@ -136,7 +141,7 @@ where
 
     let remote_branch = RemoteBranch::new(
         remote_site.name().clone(),
-        remote_site.site().clone(),
+        remote_site.s3_address().clone(),
         upstream_subject.clone(),
         upstream_branch_name.clone(),
     );

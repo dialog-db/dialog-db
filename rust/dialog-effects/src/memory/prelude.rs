@@ -5,7 +5,7 @@
 //! use dialog_effects::memory::prelude::*;
 //! ```
 
-use dialog_capability::{Capability, Did, Subject, site::Site};
+use dialog_capability::{Capability, Did, Subject};
 
 use super::{Cell, Memory, Publish, Resolve, Retract, Space};
 
@@ -31,13 +31,6 @@ impl SubjectExt for Did {
     }
 }
 
-impl<S: Site> SubjectExt for Capability<Subject, S> {
-    type Memory = Capability<Memory, S>;
-    fn memory(self) -> Capability<Memory, S> {
-        self.attenuate(Memory)
-    }
-}
-
 /// Extension methods for scoping memory to a named space.
 pub trait MemoryExt {
     /// The resulting space chain type.
@@ -46,9 +39,9 @@ pub trait MemoryExt {
     fn space(self, name: impl Into<String>) -> Self::Space;
 }
 
-impl<S: Site> MemoryExt for Capability<Memory, S> {
-    type Space = Capability<Space, S>;
-    fn space(self, name: impl Into<String>) -> Capability<Space, S> {
+impl MemoryExt for Capability<Memory> {
+    type Space = Capability<Space>;
+    fn space(self, name: impl Into<String>) -> Capability<Space> {
         self.attenuate(Space::new(name))
     }
 }
@@ -61,9 +54,9 @@ pub trait SpaceExt {
     fn cell(self, name: impl Into<String>) -> Self::Cell;
 }
 
-impl<S: Site> SpaceExt for Capability<Space, S> {
-    type Cell = Capability<Cell, S>;
-    fn cell(self, name: impl Into<String>) -> Capability<Cell, S> {
+impl SpaceExt for Capability<Space> {
+    type Cell = Capability<Cell>;
+    fn cell(self, name: impl Into<String>) -> Capability<Cell> {
         self.attenuate(Cell::new(name))
     }
 }
@@ -84,20 +77,20 @@ pub trait CellExt {
     fn retract(self, when: impl Into<Vec<u8>>) -> Self::Retract;
 }
 
-impl<S: Site> CellExt for Capability<Cell, S> {
-    type Resolve = Capability<Resolve, S>;
-    type Publish = Capability<Publish, S>;
-    type Retract = Capability<Retract, S>;
+impl CellExt for Capability<Cell> {
+    type Resolve = Capability<Resolve>;
+    type Publish = Capability<Publish>;
+    type Retract = Capability<Retract>;
 
-    fn resolve(self) -> Capability<Resolve, S> {
+    fn resolve(self) -> Capability<Resolve> {
         self.invoke(Resolve)
     }
 
-    fn publish(self, content: impl Into<Vec<u8>>, when: Option<Vec<u8>>) -> Capability<Publish, S> {
+    fn publish(self, content: impl Into<Vec<u8>>, when: Option<Vec<u8>>) -> Capability<Publish> {
         self.invoke(Publish::new(content, when))
     }
 
-    fn retract(self, when: impl Into<Vec<u8>>) -> Capability<Retract, S> {
+    fn retract(self, when: impl Into<Vec<u8>>) -> Capability<Retract> {
         self.invoke(Retract::new(when))
     }
 }

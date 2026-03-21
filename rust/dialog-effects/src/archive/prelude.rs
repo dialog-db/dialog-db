@@ -5,7 +5,7 @@
 //! use dialog_effects::archive::prelude::*;
 //! ```
 
-use dialog_capability::{Capability, Did, Subject, site::Site};
+use dialog_capability::{Capability, Did, Subject};
 use dialog_common::Blake3Hash;
 
 use super::{Archive, Catalog, Get, Put};
@@ -32,13 +32,6 @@ impl SubjectExt for Did {
     }
 }
 
-impl<S: Site> SubjectExt for Capability<Subject, S> {
-    type Archive = Capability<Archive, S>;
-    fn archive(self) -> Capability<Archive, S> {
-        self.attenuate(Archive)
-    }
-}
-
 /// Extension methods for scoping archive to a named catalog.
 pub trait ArchiveExt {
     /// The resulting catalog chain type.
@@ -47,9 +40,9 @@ pub trait ArchiveExt {
     fn catalog(self, name: impl Into<String>) -> Self::Catalog;
 }
 
-impl<S: Site> ArchiveExt for Capability<Archive, S> {
-    type Catalog = Capability<Catalog, S>;
-    fn catalog(self, name: impl Into<String>) -> Capability<Catalog, S> {
+impl ArchiveExt for Capability<Archive> {
+    type Catalog = Capability<Catalog>;
+    fn catalog(self, name: impl Into<String>) -> Capability<Catalog> {
         self.attenuate(Catalog::new(name))
     }
 }
@@ -66,15 +59,15 @@ pub trait CatalogExt {
     fn put(self, digest: impl Into<Blake3Hash>, content: impl Into<Vec<u8>>) -> Self::Put;
 }
 
-impl<S: Site> CatalogExt for Capability<Catalog, S> {
-    type Get = Capability<Get, S>;
-    type Put = Capability<Put, S>;
+impl CatalogExt for Capability<Catalog> {
+    type Get = Capability<Get>;
+    type Put = Capability<Put>;
 
-    fn get(self, digest: impl Into<Blake3Hash>) -> Capability<Get, S> {
+    fn get(self, digest: impl Into<Blake3Hash>) -> Capability<Get> {
         self.invoke(Get::new(digest))
     }
 
-    fn put(self, digest: impl Into<Blake3Hash>, content: impl Into<Vec<u8>>) -> Capability<Put, S> {
+    fn put(self, digest: impl Into<Blake3Hash>, content: impl Into<Vec<u8>>) -> Capability<Put> {
         self.invoke(Put::new(digest, content))
     }
 }

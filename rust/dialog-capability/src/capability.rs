@@ -1,73 +1,57 @@
+use crate::site::Site;
 use crate::{
     Ability, Constrained, Constraint, Did, Effect, Policy, PolicyBuilder, Provider, Selector,
-    Subject,
-    credential::{Authorize, AuthorizeError, Credential, Profile},
-    site::{Local, Site},
+    SiteInvocation, Subject, credential,
 };
-use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_common::ConditionalSend;
 use std::fmt::{Debug, Formatter};
 
-/// Capability chain with an optional site parameter.
+/// Capability chain — wraps a fully-typed constraint chain.
 ///
-/// When `At = Local` (default), this behaves like a bare capability.
-/// When `At` is a remote site, `.acquire()` produces site-specific invocations.
+/// `Capability<T>` carries the chain from `Subject` through attenuations,
+/// policies, and effects down to `T`. Use `.perform(&env)` to execute
+/// effect capabilities locally.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(bound(deserialize = ""))]
-pub struct Capability<T: Constraint, At: Site = Local> {
+pub struct Capability<T: Constraint> {
     can: T::Capability,
-    at: At,
 }
 
-impl<T: Constraint, At: Site> Clone for Capability<T, At>
+impl<T: Constraint> Clone for Capability<T>
 where
     T::Capability: Clone,
-    At: Clone,
 {
     fn clone(&self) -> Self {
         Self {
             can: self.can.clone(),
-            at: self.at.clone(),
         }
     }
 }
 
-impl<T: Constraint, At: Site> Debug for Capability<T, At>
+impl<T: Constraint> Debug for Capability<T>
 where
     T::Capability: Debug,
-    At: Debug,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Capability")
             .field("can", &self.can)
-            .field("at", &self.at)
             .finish()
     }
 }
 
-impl<T: Constraint, At: Site> Capability<T, At> {
+impl<T: Constraint> Capability<T> {
+    /// Create a new Capability wrapping the capability chain.
+    pub fn new(capability: T::Capability) -> Self {
+        Self { can: capability }
+    }
+
     /// Get the inner capability chain.
     pub fn into_inner(self) -> T::Capability {
         self.can
     }
 
-    /// Get a reference to the site.
-    pub fn site(&self) -> &At {
-        &self.at
-    }
-
-    /// Consume and return both parts.
-    pub fn into_parts(self) -> (Capability<T>, At) {
-        (
-            Capability {
-                can: self.can,
-                at: Local,
-            },
-            self.at,
-        )
-    }
-
     /// Attenuate this capability with another policy/attenuation.
-    pub fn attenuate<U>(self, value: U) -> Capability<U, At>
+    pub fn attenuate<U>(self, value: U) -> Capability<U>
     where
         U: Policy<Of = T>,
         T::Capability: Ability,
@@ -77,12 +61,11 @@ impl<T: Constraint, At: Site> Capability<T, At> {
                 constraint: value,
                 capability: self.can,
             },
-            at: self.at,
         }
     }
 
     /// Creates an invocation of the effect derived from this capability.
-    pub fn invoke<Fx>(self, fx: Fx) -> Capability<Fx, At>
+    pub fn invoke<Fx>(self, fx: Fx) -> Capability<Fx>
     where
         Fx: Effect<Of = T>,
         T::Capability: Ability,
@@ -92,7 +75,6 @@ impl<T: Constraint, At: Site> Capability<T, At> {
                 constraint: fx,
                 capability: self.can,
             },
-            at: self.at,
         }
     }
 
@@ -113,25 +95,7 @@ impl<T: Constraint, At: Site> Capability<T, At> {
     }
 }
 
-impl<T: Constraint> Capability<T, Local> {
-    /// Create a new Capability wrapping the capability chain.
-    pub fn new(capability: T::Capability) -> Self {
-        Self {
-            can: capability,
-            at: Local,
-        }
-    }
-
-    /// Attach a site to this capability.
-    pub fn at<S: Site>(self, site: &S) -> Capability<T, S> {
-        Capability {
-            can: self.can,
-            at: site.clone(),
-        }
-    }
-}
-
-impl<T: Policy + Constraint, At: Site> Capability<T, At> {
+impl<T: Policy + Constraint> Capability<T> {
     /// Extract a policy or ability from this chain.
     pub fn policy<U, Index>(&self) -> &U
     where
@@ -141,45 +105,52 @@ impl<T: Policy + Constraint, At: Site> Capability<T, At> {
     }
 }
 
-/// Implementation for effect capabilities — perform directly (local only).
-impl<Fx: Effect> Capability<Fx, Local> {
-    /// Perform the invocation directly without authorization verification.
-    /// For operations that require authorization, use `acquire` first.
+/// Perform — only for effect capabilities.
+impl<Fx: Effect> Capability<Fx> {
+    /// Perform the invocation directly against a provider.
     pub async fn perform<Env>(self, env: &Env) -> Fx::Output
     where
         Env: Provider<Fx>,
     {
         env.execute(self).await
     }
-}
 
-/// acquire — only for effects, produces site-specific invocation.
-impl<Fx: Effect, At: Site> Capability<Fx, At> {
-    /// Authorize the capability and produce a site-specific invocation.
-    pub async fn acquire<Env>(self, env: &Env) -> Result<At::Invocation<Fx>, AuthorizeError>
+    /// Authorize this capability for a specific site's authorization format.
+    ///
+    /// Builds a credential authorization chain and executes it.
+    /// Returns `Authorization<Fx, S::Format>`.
+    pub async fn acquire<S, Env>(
+        self,
+        env: &Env,
+    ) -> Result<credential::Authorization<Fx, S::Format>, credential::AuthorizeError>
     where
-        Env: Provider<Authorize<Fx, At::Access>> + ConditionalSync,
-        Capability<Fx>: ConditionalSend,
-        At::Access: ConditionalSend,
-        Authorize<Fx, At::Access>: ConditionalSend + 'static,
+        Fx: Clone,
+        Fx::Of: Constraint,
+        S: Site,
+        Self: Ability + ConditionalSend,
+        credential::Authorize<Fx, S::Format>: ConditionalSend + 'static,
+        Env: Provider<credential::Authorize<Fx, S::Format>>,
     {
-        let subject = self.can.subject().clone();
-        let access = self.at.access();
-        let capability = Capability {
-            can: self.can,
-            at: Local,
-        };
-        let authorize = Subject::from(subject)
-            .attenuate(Credential)
-            .attenuate(Profile::default())
-            .invoke(Authorize { capability, access });
-        let authorized =
-            <Env as Provider<Authorize<Fx, At::Access>>>::execute(env, authorize).await?;
-        Ok(authorized.into())
+        let did = self.subject().clone();
+        let authorize_cap = Subject::from(did)
+            .attenuate(credential::Credential)
+            .attenuate(credential::Profile::default())
+            .invoke(credential::Authorize::<Fx, S::Format>::new(self));
+        <Env as Provider<credential::Authorize<Fx, S::Format>>>::execute(env, authorize_cap).await
+    }
+
+    /// Attach a site address to this capability for remote execution.
+    ///
+    /// Returns a `SiteInvocation` that can be authorized and executed.
+    pub fn at<S: Site>(self, address: &S::Address) -> SiteInvocation<Fx, S>
+    where
+        Fx::Of: Constraint,
+    {
+        SiteInvocation::new(self, address.clone())
     }
 }
 
-impl<T: Constraint, At: Site> Ability for Capability<T, At> {
+impl<T: Constraint> Ability for Capability<T> {
     fn subject(&self) -> &Did {
         self.can.subject()
     }
@@ -193,7 +164,7 @@ impl<T: Constraint, At: Site> Ability for Capability<T, At> {
     }
 }
 
-impl<T: Constraint, At: Site> std::ops::Deref for Capability<T, At> {
+impl<T: Constraint> std::ops::Deref for Capability<T> {
     type Target = T::Capability;
 
     fn deref(&self) -> &Self::Target {
@@ -201,7 +172,7 @@ impl<T: Constraint, At: Site> std::ops::Deref for Capability<T, At> {
     }
 }
 
-impl<T: Constraint, At: Site> AsRef<T::Capability> for Capability<T, At> {
+impl<T: Constraint> AsRef<T::Capability> for Capability<T> {
     fn as_ref(&self) -> &T::Capability {
         &self.can
     }

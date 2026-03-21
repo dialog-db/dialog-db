@@ -7,7 +7,7 @@
 use super::{LocalS3, UcanS3Address};
 use dialog_common::helpers::{Provider, Service};
 use dialog_s3_credentials::Address;
-use dialog_s3_credentials::s3::Credentials;
+use dialog_s3_credentials::s3::S3Credentials;
 use dialog_s3_credentials::ucan::UcanAuthorizer;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -45,12 +45,14 @@ impl UcanAccessServer {
         // Create S3 credentials for the authorizer
         // Note: The subject here is a placeholder since UcanAuthorizer uses
         // the subject from the UCAN invocation's capability chain
-        let address = Address::new(&s3_server.endpoint, "us-east-1", bucket);
-        let s3_credentials =
-            Credentials::private(address, access_key, secret_key)?.with_path_style();
+        let address = Address::new(&s3_server.endpoint, "us-east-1", bucket).with_path_style();
+        let s3_credentials = S3Credentials::new(access_key, secret_key);
 
         // Use UcanAuthorizer from ucan/provider.rs
-        let authorizer = Arc::new(RwLock::new(UcanAuthorizer::new(s3_credentials)));
+        let authorizer = Arc::new(RwLock::new(UcanAuthorizer::new(
+            address,
+            Some(s3_credentials),
+        )));
 
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;

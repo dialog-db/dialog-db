@@ -8,10 +8,9 @@
 //! - Server implementation (native-only, in the `server` submodule)
 //! - UCAN access service (native-only, requires `ucan` feature)
 //! - Test operator types for capability-based testing
-use dialog_capability::authorization::Authorized;
-use dialog_capability::{Capability, Did, Effect, Principal, Provider, credential};
-use dialog_s3_credentials::capability::S3Request;
-use dialog_s3_credentials::s3::site::S3Access;
+use dialog_capability::credential::{Allow, Authorization};
+use dialog_capability::{Capability, Did, Principal, Provider, credential};
+use dialog_s3_credentials::s3::S3Credentials;
 use serde::{Deserialize, Serialize};
 
 /// S3 test server connection info with credentials, passed to inner tests.
@@ -70,12 +69,22 @@ pub struct UcanS3Address {
 #[derive(Debug, Clone)]
 pub struct Session {
     did: Did,
+    s3_credentials: Option<S3Credentials>,
 }
 
 impl Session {
     /// Create a new test session with the given DID.
     pub fn new(did: impl Into<Did>) -> Self {
-        Self { did: did.into() }
+        Self {
+            did: did.into(),
+            s3_credentials: None,
+        }
+    }
+
+    /// Attach S3 credentials to this session for site-based authorization.
+    pub fn with_s3_credentials(mut self, credentials: S3Credentials) -> Self {
+        self.s3_credentials = Some(credentials);
+        self
     }
 }
 
@@ -113,23 +122,34 @@ impl Provider<credential::Sign> for Session {
     }
 }
 
-/// Session delegates S3 authorization to the credentials themselves.
+/// Session implements Provider<Authorize<C, Allow>> for simple authorization.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<C> Provider<credential::Authorize<C, S3Access>> for Session
+impl<C> Provider<credential::Authorize<C, Allow>> for Session
 where
-    C: Effect + Clone + 'static,
-    Capability<C>: S3Request,
-    credential::Authorize<C, S3Access>: dialog_common::ConditionalSend + 'static,
+    C: dialog_capability::Effect + Clone + 'static,
+    C::Of: dialog_capability::Constraint,
+    Capability<C>: dialog_common::ConditionalSend,
+    credential::Authorize<C, Allow>: dialog_common::ConditionalSend + 'static,
 {
     async fn execute(
         &self,
-        _input: Capability<credential::Authorize<C, S3Access>>,
-    ) -> Result<Authorized<C, S3Access>, credential::AuthorizeError> {
-        Err(credential::AuthorizeError::Configuration(
-            "Session does not hold S3 credentials directly; use S3Credentials as Provider instead"
-                .to_string(),
-        ))
+        input: Capability<credential::Authorize<C, Allow>>,
+    ) -> Result<Authorization<C, Allow>, credential::AuthorizeError> {
+        let authorize = input.into_inner().constraint;
+        Ok(Authorization::new(authorize.capability, ()))
+    }
+}
+
+/// Session implements Provider<Get<Option<S3Credentials>>> for credential lookup.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<credential::Get<Option<S3Credentials>>> for Session {
+    async fn execute(
+        &self,
+        _input: Capability<credential::Get<Option<S3Credentials>>>,
+    ) -> Result<Option<S3Credentials>, credential::CredentialError> {
+        Ok(self.s3_credentials.clone())
     }
 }
 

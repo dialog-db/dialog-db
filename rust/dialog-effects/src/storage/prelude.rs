@@ -5,7 +5,7 @@
 //! use dialog_effects::storage::prelude::*;
 //! ```
 
-use dialog_capability::{Capability, Did, Subject, site::Site};
+use dialog_capability::{Capability, Did, Subject};
 
 use super::{Delete, Get, List, Set, Storage, Store};
 
@@ -31,13 +31,6 @@ impl SubjectExt for Did {
     }
 }
 
-impl<S: Site> SubjectExt for Capability<Subject, S> {
-    type Storage = Capability<Storage, S>;
-    fn storage(self) -> Capability<Storage, S> {
-        self.attenuate(Storage)
-    }
-}
-
 /// Extension methods for scoping storage to a named store.
 pub trait StorageExt {
     /// The resulting store chain type.
@@ -46,9 +39,9 @@ pub trait StorageExt {
     fn store(self, name: impl Into<String>) -> Self::Store;
 }
 
-impl<S: Site> StorageExt for Capability<Storage, S> {
-    type Store = Capability<Store, S>;
-    fn store(self, name: impl Into<String>) -> Capability<Store, S> {
+impl StorageExt for Capability<Storage> {
+    type Store = Capability<Store>;
+    fn store(self, name: impl Into<String>) -> Capability<Store> {
         self.attenuate(Store::new(name))
     }
 }
@@ -73,25 +66,25 @@ pub trait StoreExt {
     fn list(self, continuation_token: Option<String>) -> Self::List;
 }
 
-impl<S: Site> StoreExt for Capability<Store, S> {
-    type Get = Capability<Get, S>;
-    type Set = Capability<Set, S>;
-    type Delete = Capability<Delete, S>;
-    type List = Capability<List, S>;
+impl StoreExt for Capability<Store> {
+    type Get = Capability<Get>;
+    type Set = Capability<Set>;
+    type Delete = Capability<Delete>;
+    type List = Capability<List>;
 
-    fn get(self, key: impl Into<Vec<u8>>) -> Capability<Get, S> {
+    fn get(self, key: impl Into<Vec<u8>>) -> Capability<Get> {
         self.invoke(Get::new(key))
     }
 
-    fn set(self, key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Capability<Set, S> {
+    fn set(self, key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Capability<Set> {
         self.invoke(Set::new(key, value))
     }
 
-    fn delete(self, key: impl Into<Vec<u8>>) -> Capability<Delete, S> {
+    fn delete(self, key: impl Into<Vec<u8>>) -> Capability<Delete> {
         self.invoke(Delete::new(key))
     }
 
-    fn list(self, continuation_token: Option<String>) -> Capability<List, S> {
+    fn list(self, continuation_token: Option<String>) -> Capability<List> {
         self.invoke(List::new(continuation_token))
     }
 }

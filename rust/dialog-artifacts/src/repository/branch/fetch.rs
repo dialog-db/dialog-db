@@ -1,7 +1,10 @@
-use dialog_capability::{Provider, credential::Authorize};
+use dialog_capability::credential::{Allow, Authorize};
+use dialog_capability::fork::Fork;
+use dialog_capability::{Provider, credential};
 use dialog_common::ConditionalSync;
 use dialog_effects::memory as memory_fx;
-use dialog_s3_credentials::s3::site::{S3Access, S3Invocation};
+use dialog_s3_credentials::s3::S3Credentials;
+use dialog_storage::s3::S3;
 
 use super::Branch;
 use super::state::{BranchName, UpstreamState};
@@ -33,8 +36,9 @@ impl<Store: Clone> Fetch<'_, Store> {
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, RepositoryError>
     where
         Env: Provider<memory_fx::Resolve>
-            + Provider<Authorize<memory_fx::Resolve, S3Access>>
-            + Provider<S3Invocation<memory_fx::Resolve>>
+            + Provider<Authorize<memory_fx::Resolve, Allow>>
+            + Provider<credential::Get<Option<S3Credentials>>>
+            + Provider<Fork<S3, memory_fx::Resolve>>
             + ConditionalSync,
     {
         let upstream =
@@ -88,15 +92,16 @@ async fn fetch_remote<Store, Env>(
 ) -> Result<Option<Revision>, RepositoryError>
 where
     Env: Provider<memory_fx::Resolve>
-        + Provider<Authorize<memory_fx::Resolve, S3Access>>
-        + Provider<S3Invocation<memory_fx::Resolve>>
+        + Provider<Authorize<memory_fx::Resolve, Allow>>
+        + Provider<credential::Get<Option<S3Credentials>>>
+        + Provider<Fork<S3, memory_fx::Resolve>>
         + ConditionalSync,
 {
     let remote_site = branch.load_remote(remote.clone()).perform(env).await?;
 
     let remote_branch = RemoteBranch::new(
         remote_site.name().clone(),
-        remote_site.site().clone(),
+        remote_site.s3_address().clone(),
         upstream_subject.clone(),
         upstream_branch_name.clone(),
     );

@@ -30,10 +30,7 @@
 //! ```
 
 use super::{DelegationChain, InvocationChain, UcanInvocation};
-use crate::ucan::site::UcanAccess;
-use dialog_capability::{
-    Capability, Constraint, Did, Provider, authorization::Authorized, credential, ucan::parameters,
-};
+use dialog_capability::{Capability, Constraint, Did, Provider, credential, ucan::parameters};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_ucan::InvocationBuilder;
 
@@ -104,9 +101,9 @@ impl Credentials {
     }
 }
 
-/// Build a UCAN authorize result from delegation chain, endpoint, and capability.
+/// Build a UCAN invocation from delegation chain, endpoint, and capability.
 ///
-/// This helper is used by env types that implement `Provider<Authorize<C, UcanAccess>>`.
+/// This helper builds and signs a UCAN invocation for the given capability.
 /// It requires the env to provide `Provider<credential::Identify>` and
 /// `Provider<credential::Sign>` for UCAN signing.
 pub async fn authorize<C, Env>(
@@ -114,7 +111,7 @@ pub async fn authorize<C, Env>(
     delegation_chain: Option<DelegationChain>,
     endpoint: String,
     capability: Capability<C>,
-) -> Result<Authorized<C, UcanAccess>, credential::AuthorizeError>
+) -> Result<UcanInvocation, credential::AuthorizeError>
 where
     C: Constraint + Clone + ConditionalSend + 'static,
     Capability<C>: ConditionalSend,
@@ -189,17 +186,11 @@ where
 
     let chain = InvocationChain::new(invocation, delegations);
 
-    let ucan_invocation = UcanInvocation {
-        endpoint: endpoint.clone(),
+    Ok(UcanInvocation {
+        endpoint,
         chain: Box::new(chain),
         subject: subject_did,
         ability,
-    };
-
-    Ok(Authorized {
-        capability,
-        access: UcanAccess { endpoint },
-        authorization: ucan_invocation,
     })
 }
 
@@ -208,11 +199,9 @@ where
 pub mod tests {
     use super::*;
     use crate::ucan::delegation::helpers::create_delegation;
-    use crate::ucan::site::UcanAccess;
     use async_trait::async_trait;
     use dialog_capability::{
-        Capability, Constraint, Did, Effect, Policy, Principal, Provider,
-        authorization::Authorized, credential,
+        Capability, Constraint, Did, Effect, Policy, Principal, Provider, credential,
     };
     use dialog_common::ConditionalSend;
     use dialog_credentials::Ed25519Signer;
@@ -299,28 +288,23 @@ pub mod tests {
         }
     }
 
-    /// Session implements Provider<Authorize> for UCAN access.
+    /// Session implements Provider<Authorize<C, Local>> for local authorization.
     #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
     #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
-    impl<C> Provider<credential::Authorize<C, UcanAccess>> for Session
+    impl<C> Provider<credential::Authorize<C>> for Session
     where
         C: Effect + Constraint + Clone + ConditionalSend + 'static,
         C::Of: Constraint,
         Capability<C>: ConditionalSend,
-        credential::Authorize<C, UcanAccess>: ConditionalSend + 'static,
+        credential::Authorize<C>: ConditionalSend + 'static,
     {
         async fn execute(
             &self,
-            input: Capability<credential::Authorize<C, UcanAccess>>,
-        ) -> Result<Authorized<C, UcanAccess>, credential::AuthorizeError> {
+            input: Capability<credential::Authorize<C>>,
+        ) -> Result<credential::Authorization<C, credential::Allow>, credential::AuthorizeError>
+        {
             let authorize = input.into_inner().constraint;
-            super::authorize(
-                self,
-                Some(self.credentials.delegation().clone()),
-                authorize.access.endpoint.clone(),
-                authorize.capability,
-            )
-            .await
+            Ok(credential::Authorization::new(authorize.capability, ()))
         }
     }
 }

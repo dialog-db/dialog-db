@@ -1,73 +1,16 @@
-//! Provider implementations for S3 site authorization.
+//! Provider implementations for S3 site.
 //!
-//! S3 credentials can directly grant authorization by presigning requests.
-//! The `Authorize` step reads the S3Access context, uses credentials to
-//! presign, and produces an `Authorized<Fx, S3Access>` ready for conversion
-//! to `S3Invocation<Fx>`.
-
-use async_trait::async_trait;
-use dialog_capability::authorization::Authorized;
-use dialog_capability::{Capability, Constraint, Effect, Provider, credential};
-
-use super::Credentials;
-use super::site::S3Access;
-use crate::capability::S3Request;
-
-/// Intermediate proof for S3 authorization.
-///
-/// S3 presigning doesn't need an external service, so the "proof" step
-/// simply wraps the credentials ready for presigning in the authorize step.
-#[derive(Debug, Clone)]
-pub struct S3Permit {
-    pub(crate) credentials: Credentials,
-}
-
-impl S3Permit {
-    /// Get the underlying credentials.
-    pub fn credentials(&self) -> &Credentials {
-        &self.credentials
-    }
-}
-
-/// Provider for the Authorize step: presigns the URL using S3 credentials.
-///
-/// S3 credentials serve as their own env for the Authorize step. One provider
-/// covers ALL sites using `S3Access`.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<C> Provider<credential::Authorize<C, S3Access>> for Credentials
-where
-    C: Effect + Clone + 'static,
-    C::Of: Constraint,
-    Capability<C>: S3Request,
-    Capability<C>: dialog_common::ConditionalSend,
-    credential::Authorize<C, S3Access>: dialog_common::ConditionalSend + 'static,
-{
-    async fn execute(
-        &self,
-        input: Capability<credential::Authorize<C, S3Access>>,
-    ) -> Result<Authorized<C, S3Access>, credential::AuthorizeError> {
-        let authorize = input.into_inner().constraint;
-        let authorized_request = self
-            .grant(&authorize.capability)
-            .await
-            .map_err(|e| credential::AuthorizeError::Denied(e.to_string()))?;
-
-        Ok(Authorized {
-            capability: authorize.capability,
-            access: authorize.access,
-            authorization: authorized_request,
-        })
-    }
-}
+//! S3 credentials presign requests via `Address::authorize()`.
+//! The old `S3Permit` type is removed — credential resolution happens
+//! through `ForkInvocation` at execution time.
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::Address;
-    use crate::capability::{AuthorizedRequest, archive, memory, storage};
+    use crate::capability::{AuthorizedRequest, S3Request, archive, memory, storage};
+    use crate::s3::S3Credentials;
     use base58::ToBase58;
-    use dialog_capability::{Did, Effect, Subject, did};
+    use dialog_capability::{Capability, Did, Effect, Subject, did};
 
     fn test_subject() -> Did {
         did!("key:zTestSubject")
@@ -75,89 +18,41 @@ mod tests {
 
     const TEST_SUBJECT: &str = "did:key:zTestSubject";
 
-    fn public_site() -> super::super::S3Site {
-        let address = Address::new(
+    fn test_address() -> Address {
+        Address::new(
             "https://s3.us-east-1.amazonaws.com",
             "us-east-1",
             "my-bucket",
-        );
-        super::super::S3Site::new(address).unwrap()
+        )
     }
 
-    fn public_creds() -> Credentials {
-        let address = Address::new(
-            "https://s3.us-east-1.amazonaws.com",
-            "us-east-1",
-            "my-bucket",
-        );
-        Credentials::public(address).unwrap()
+    fn localhost_address() -> Address {
+        Address::new("http://localhost:9000", "us-east-1", "test-bucket")
     }
 
-    fn private_creds() -> Credentials {
-        let address = Address::new(
-            "https://s3.us-east-1.amazonaws.com",
-            "us-east-1",
-            "my-bucket",
-        );
-        Credentials::private(
-            address,
+    fn private_creds() -> S3Credentials {
+        S3Credentials::new(
             "AKIAIOSFODNN7EXAMPLE",
             "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
         )
-        .unwrap()
     }
 
-    fn private_site() -> super::super::S3Site {
-        let address = Address::new(
-            "https://s3.us-east-1.amazonaws.com",
-            "us-east-1",
-            "my-bucket",
-        );
-        super::super::S3Site::new(address).unwrap()
-    }
-
-    fn localhost_site() -> super::super::S3Site {
-        let address = Address::new("http://localhost:9000", "us-east-1", "test-bucket");
-        super::super::S3Site::new(address).unwrap()
-    }
-
-    fn localhost_creds() -> Credentials {
-        let address = Address::new("http://localhost:9000", "us-east-1", "test-bucket");
-        Credentials::public(address).unwrap()
-    }
-
-    /// Helper to authorize a capability using the new Access-based flow.
-    async fn authorize<C>(
-        creds: &Credentials,
-        site: &super::super::S3Site,
-        capability: Capability<C>,
+    /// Helper to presign a capability using Address + optional credentials.
+    async fn presign<C>(
+        address: &Address,
+        creds: Option<&S3Credentials>,
+        capability: &Capability<C>,
     ) -> AuthorizedRequest
     where
         C: Effect + Clone + 'static,
         Capability<C>: S3Request,
-        credential::Authorize<C, S3Access>: dialog_common::ConditionalSend + 'static,
     {
-        use dialog_capability::site::Site;
-        let access = site.access();
-        let subject = capability.subject().clone();
-        let authorize_cap = Subject::from(subject)
-            .attenuate(credential::Credential)
-            .attenuate(credential::Profile::default())
-            .invoke(credential::Authorize::<C, S3Access> { capability, access });
-        let authorized = <Credentials as Provider<credential::Authorize<C, S3Access>>>::execute(
-            creds,
-            authorize_cap,
-        )
-        .await
-        .unwrap();
-
-        authorized.authorization
+        address.authorize(capability, creds).await.unwrap()
     }
 
     #[dialog_common::test]
     async fn it_generates_correct_url_for_storage_get() {
-        let creds = public_creds();
-        let site = public_site();
+        let address = test_address();
         let key = b"test-key";
 
         let capability = Subject::from(test_subject())
@@ -165,7 +60,7 @@ mod tests {
             .attenuate(storage::Store::new("index"))
             .invoke(storage::Get::new(key));
 
-        let req = authorize(&creds, &site, capability).await;
+        let req = presign(&address, None, &capability).await;
 
         assert_eq!(req.method, "GET");
         assert_eq!(
@@ -177,8 +72,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_handles_binary_key_for_storage_get() {
-        let creds = public_creds();
-        let site = public_site();
+        let address = test_address();
         let binary_key: [u8; 32] = [
             0xde, 0xad, 0xbe, 0xef, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99,
             0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
@@ -190,7 +84,7 @@ mod tests {
             .attenuate(storage::Store::new("blob"))
             .invoke(storage::Get::new(binary_key));
 
-        let req = authorize(&creds, &site, capability).await;
+        let req = presign(&address, None, &capability).await;
 
         assert_eq!(req.method, "GET");
         assert!(req.url.path().contains(&binary_key.to_base58()));
@@ -198,8 +92,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_generates_correct_url_and_checksum_for_storage_set() {
-        let creds = public_creds();
-        let site = public_site();
+        let address = test_address();
         let key = b"my-key";
         let checksum_bytes = [0x12u8; 32];
         let checksum = crate::Checksum::Sha256(checksum_bytes);
@@ -209,7 +102,7 @@ mod tests {
             .attenuate(storage::Store::new("blob"))
             .invoke(storage::Set::new(key, checksum));
 
-        let req = authorize(&creds, &site, capability).await;
+        let req = presign(&address, None, &capability).await;
 
         assert_eq!(req.method, "PUT");
         assert_eq!(
@@ -229,8 +122,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_generates_correct_url_for_storage_delete() {
-        let creds = public_creds();
-        let site = public_site();
+        let address = test_address();
         let key = b"key-to-delete";
 
         let capability = Subject::from(test_subject())
@@ -238,7 +130,7 @@ mod tests {
             .attenuate(storage::Store::new("index"))
             .invoke(storage::Delete::new(key));
 
-        let req = authorize(&creds, &site, capability).await;
+        let req = presign(&address, None, &capability).await;
 
         assert_eq!(req.method, "DELETE");
         assert_eq!(
@@ -249,15 +141,14 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_generates_correct_query_params_for_storage_list() {
-        let creds = public_creds();
-        let site = public_site();
+        let address = test_address();
 
         let capability = Subject::from(test_subject())
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("index"))
             .invoke(storage::List::new(None));
 
-        let req = authorize(&creds, &site, capability).await;
+        let req = presign(&address, None, &capability).await;
 
         assert_eq!(req.method, "GET");
 
@@ -277,8 +168,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_handles_continuation_token_for_storage_list() {
-        let creds = public_creds();
-        let site = public_site();
+        let address = test_address();
         let token = "next-page-token-abc123";
 
         let capability = Subject::from(test_subject())
@@ -286,7 +176,7 @@ mod tests {
             .attenuate(storage::Store::new("data"))
             .invoke(storage::List::new(Some(token.to_string())));
 
-        let req = authorize(&creds, &site, capability).await;
+        let req = presign(&address, None, &capability).await;
 
         let query: Vec<(String, String)> = req
             .url
@@ -300,8 +190,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_generates_correct_url_for_memory_resolve() {
-        let creds = public_creds();
-        let site = public_site();
+        let address = test_address();
 
         let capability = Subject::from(test_subject())
             .attenuate(memory::Memory)
@@ -309,7 +198,7 @@ mod tests {
             .attenuate(memory::Cell::new("main"))
             .invoke(memory::Resolve);
 
-        let req = authorize(&creds, &site, capability).await;
+        let req = presign(&address, None, &capability).await;
 
         assert_eq!(req.method, "GET");
         assert_eq!(
@@ -320,8 +209,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_publishes_memory_without_prior_edition() {
-        let creds = public_creds();
-        let site = public_site();
+        let address = test_address();
         let checksum = crate::Checksum::Sha256([0xab; 32]);
 
         let capability = Subject::from(test_subject())
@@ -333,7 +221,7 @@ mod tests {
                 when: None,
             });
 
-        let req = authorize(&creds, &site, capability).await;
+        let req = presign(&address, None, &capability).await;
 
         assert_eq!(req.method, "PUT");
         assert_eq!(
@@ -350,10 +238,9 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_publishes_memory_with_prior_edition() {
-        let creds = public_creds();
-        let site = public_site();
+        let address = test_address();
         let checksum = crate::Checksum::Sha256([0xcd; 32]);
-        let prior_etag = "abc123etag".to_string();
+        let _prior_etag = "abc123etag".to_string();
 
         let capability = Subject::from(test_subject())
             .attenuate(memory::Memory)
@@ -361,10 +248,10 @@ mod tests {
             .attenuate(memory::Cell::new("main"))
             .invoke(memory::Publish {
                 checksum,
-                when: Some(prior_etag),
+                when: Some(_prior_etag),
             });
 
-        let req = authorize(&creds, &site, capability).await;
+        let req = presign(&address, None, &capability).await;
 
         assert_eq!(req.method, "PUT");
         assert!(
@@ -376,8 +263,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_generates_correct_url_for_memory_retract() {
-        let creds = public_creds();
-        let site = public_site();
+        let address = test_address();
 
         let capability = Subject::from(test_subject())
             .attenuate(memory::Memory)
@@ -385,7 +271,7 @@ mod tests {
             .attenuate(memory::Cell::new("temp"))
             .invoke(memory::Retract::new("etag-to-match"));
 
-        let req = authorize(&creds, &site, capability).await;
+        let req = presign(&address, None, &capability).await;
 
         assert_eq!(req.method, "DELETE");
         assert_eq!(
@@ -396,8 +282,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_generates_correct_url_for_archive_get() {
-        let creds = public_creds();
-        let site = public_site();
+        let address = test_address();
         let digest: [u8; 32] = [0x42; 32];
 
         let capability = Subject::from(test_subject())
@@ -405,7 +290,7 @@ mod tests {
             .attenuate(archive::Catalog::new("blobs"))
             .invoke(archive::Get::new(digest));
 
-        let req = authorize(&creds, &site, capability).await;
+        let req = presign(&address, None, &capability).await;
 
         assert_eq!(req.method, "GET");
         assert_eq!(
@@ -416,8 +301,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_generates_correct_url_and_checksum_for_archive_put() {
-        let creds = public_creds();
-        let site = public_site();
+        let address = test_address();
         let digest: [u8; 32] = [0x99; 32];
         let checksum = crate::Checksum::Sha256([0x11; 32]);
 
@@ -426,7 +310,7 @@ mod tests {
             .attenuate(archive::Catalog::new("index"))
             .invoke(archive::Put::new(digest, checksum));
 
-        let req = authorize(&creds, &site, capability).await;
+        let req = presign(&address, None, &capability).await;
 
         assert_eq!(req.method, "PUT");
         assert_eq!(
@@ -442,8 +326,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_generates_signed_url_for_get_with_private_creds() {
+        let address = test_address();
         let creds = private_creds();
-        let site = private_site();
         let key = b"signed-key";
 
         let capability = Subject::from(test_subject())
@@ -451,7 +335,7 @@ mod tests {
             .attenuate(storage::Store::new("data"))
             .invoke(storage::Get::new(key));
 
-        let req = authorize(&creds, &site, capability).await;
+        let req = presign(&address, Some(&creds), &capability).await;
 
         assert_eq!(req.method, "GET");
 
@@ -470,8 +354,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_generates_signed_url_for_put_with_private_creds() {
+        let address = test_address();
         let creds = private_creds();
-        let site = private_site();
         let key = b"upload-key";
         let checksum = crate::Checksum::Sha256([0xff; 32]);
 
@@ -480,7 +364,7 @@ mod tests {
             .attenuate(storage::Store::new("uploads"))
             .invoke(storage::Set::new(key, checksum));
 
-        let req = authorize(&creds, &site, capability).await;
+        let req = presign(&address, Some(&creds), &capability).await;
 
         assert_eq!(req.method, "PUT");
 
@@ -500,15 +384,15 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_generates_signed_url_for_list_with_private_creds() {
+        let address = test_address();
         let creds = private_creds();
-        let site = private_site();
 
         let capability = Subject::from(test_subject())
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("files"))
             .invoke(storage::List::new(None));
 
-        let req = authorize(&creds, &site, capability).await;
+        let req = presign(&address, Some(&creds), &capability).await;
 
         assert_eq!(req.method, "GET");
 
@@ -526,30 +410,28 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_uses_virtual_hosted_style_for_aws() {
-        let creds = public_creds();
-        let site = public_site();
+        let address = test_address();
 
         let capability = Subject::from(test_subject())
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("test"))
             .invoke(storage::Get::new(b"key"));
 
-        let req = authorize(&creds, &site, capability).await;
+        let req = presign(&address, None, &capability).await;
 
         assert!(req.url.host_str().unwrap().starts_with("my-bucket."));
     }
 
     #[dialog_common::test]
     async fn it_uses_path_style_for_localhost() {
-        let creds = localhost_creds();
-        let site = localhost_site();
+        let address = localhost_address();
 
         let capability = Subject::from(test_subject())
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("test"))
             .invoke(storage::Get::new(b"key"));
 
-        let req = authorize(&creds, &site, capability).await;
+        let req = presign(&address, None, &capability).await;
 
         assert_eq!(req.url.host_str().unwrap(), "localhost");
         assert!(req.url.path().starts_with("/test-bucket/"));
@@ -557,8 +439,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_supports_different_store_names() {
-        let creds = public_creds();
-        let site = public_site();
+        let address = test_address();
         let stores = ["index", "blob", "metadata", "cache", ""];
 
         for store_name in stores {
@@ -567,7 +448,7 @@ mod tests {
                 .attenuate(storage::Store::new(store_name))
                 .invoke(storage::Get::new(b"key"));
 
-            let req = authorize(&creds, &site, capability).await;
+            let req = presign(&address, None, &capability).await;
 
             if store_name.is_empty() {
                 assert!(req.url.path().contains(&format!("/{}/", TEST_SUBJECT)));
@@ -583,8 +464,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_supports_different_catalog_names() {
-        let creds = public_creds();
-        let site = public_site();
+        let address = test_address();
         let catalogs = ["blobs", "index", "refs"];
         let digest: [u8; 32] = [0x55; 32];
 
@@ -594,7 +474,7 @@ mod tests {
                 .attenuate(archive::Catalog::new(catalog_name))
                 .invoke(archive::Get::new(digest));
 
-            let req = authorize(&creds, &site, capability).await;
+            let req = presign(&address, None, &capability).await;
 
             assert!(
                 req.url

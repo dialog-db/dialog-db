@@ -1,8 +1,7 @@
 //! Credential capability hierarchy and remote resource authorization.
 //!
-//! Provides identity and signing operations scoped to a repository subject,
-//! plus the [`Authorize`] command for authorizing capabilities against
-//! an access format.
+//! Provides identity, signing, and credential store operations scoped to a
+//! repository subject via the [`Profile`] policy.
 //!
 //! # Capability Hierarchy
 //!
@@ -12,19 +11,36 @@
 //!     └── Profile { profile: String }  (policy, scopes to named profile)
 //!         ├── Identify -> Effect -> Result<Identity, CredentialError>
 //!         ├── Sign { payload } -> Effect -> Result<Vec<u8>, CredentialError>
+//!         ├── Authorize<Fx, S> { capability } -> Effect -> Result<S::Authorization<Fx>, AuthorizeError>
+//!         ├── Get<C> { address } -> Effect -> Result<C, CredentialError>
+//!         ├── Set<C> { address, credentials } -> Effect -> Result<(), CredentialError>
 //!         └── Import<M> { material: M } -> Effect -> Result<(), CredentialError>
 //! ```
 
 use crate::Constraint;
-use crate::access::Access;
-use crate::authorization::Authorized;
 pub use crate::{Attenuation, Capability, Did, Effect, Policy, Subject};
 use dialog_common::ConditionalSend;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::marker::PhantomData;
 use thiserror::Error;
 
 pub use crate::site::Local;
+
+/// Trait for types that can provide a credential lookup address.
+///
+/// Implemented by site address types to connect addresses to their
+/// corresponding credential type for lookup in the credential store.
+pub trait Addressable<C> {
+    /// Get the credential address for looking up credentials.
+    fn credential_address(&self) -> Address<C>;
+}
+
+impl Addressable<()> for () {
+    fn credential_address(&self) -> Address<()> {
+        Address::new("local")
+    }
+}
 
 /// Root attenuation for credential operations.
 ///
@@ -121,6 +137,73 @@ impl SignCapability for Capability<Sign> {
     }
 }
 
+/// A typed address for looking up credentials in the credential store.
+///
+/// The phantom type `C` ties the address to a specific credential type,
+/// ensuring type-safe lookups.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Address<C> {
+    /// The identifier for this credential (e.g., endpoint URL, bucket name).
+    pub id: String,
+    #[serde(skip)]
+    _credentials: PhantomData<C>,
+}
+
+impl<C> Address<C> {
+    /// Create a new address with the given identifier.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            _credentials: PhantomData,
+        }
+    }
+
+    /// Get the address identifier.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl<C> PartialEq for Address<C> {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+/// Get credentials from the credential store by address.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(bound(deserialize = ""))]
+pub struct Get<C> {
+    /// The address to look up.
+    pub address: Address<C>,
+}
+
+impl<C> Effect for Get<C>
+where
+    C: Serialize + DeserializeOwned + ConditionalSend + 'static,
+{
+    type Of = Profile;
+    type Output = Result<C, CredentialError>;
+}
+
+/// Store credentials in the credential store at an address.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(bound(deserialize = "C: DeserializeOwned"))]
+pub struct Set<C: Serialize> {
+    /// The address to store at.
+    pub address: Address<C>,
+    /// The credentials to store.
+    pub credentials: C,
+}
+
+impl<C> Effect for Set<C>
+where
+    C: Serialize + DeserializeOwned + ConditionalSend + 'static,
+{
+    type Of = Profile;
+    type Output = Result<(), CredentialError>;
+}
+
 /// Errors that can occur during credential operations.
 #[derive(Debug, Error)]
 pub enum CredentialError {
@@ -133,29 +216,93 @@ pub enum CredentialError {
     NotFound(String),
 }
 
-/// Request to authorize a capability for a given access format.
+/// Trait describing the format of authorization material.
 ///
-/// Parameterized by access format, not site. One provider covers ALL sites
-/// sharing the same access format.
-#[derive(Serialize, Deserialize)]
-#[serde(bound(deserialize = ""))]
-pub struct Authorize<Fx: Constraint, A: Access> {
-    /// The capability to authorize.
-    pub capability: Capability<Fx>,
-    /// The access context (carries addressing info).
-    pub access: A,
+/// Different authorization schemes produce different proof types:
+/// - [`Allow`]: no extra material (`Authorization<Fx> = ()`)
+/// - UCAN format: a signed invocation chain
+pub trait AuthorizationFormat: ConditionalSend + 'static {
+    /// The authorization material produced for a given capability.
+    type Authorization<Fx: Constraint>: ConditionalSend;
 }
 
-impl<Fx, A: Access> Effect for Authorize<Fx, A>
+/// Simple authorization format — permission granted, no extra material.
+///
+/// Used by sites that don't need format-specific authorization (e.g., S3
+/// direct access, local operations).
+pub struct Allow;
+
+impl AuthorizationFormat for Allow {
+    type Authorization<Fx: Constraint> = ();
+}
+
+/// An authorized capability paired with format-specific authorization material.
+///
+/// Produced by `Provider<Authorize<Fx, F>>`. Carries both the authorized
+/// capability and the format-specific proof.
+pub struct Authorization<Fx: Constraint, F: AuthorizationFormat> {
+    /// The authorized capability.
+    pub capability: Capability<Fx>,
+    /// The format-specific authorization material.
+    pub authorization: F::Authorization<Fx>,
+}
+
+impl<Fx: Constraint, F: AuthorizationFormat> Authorization<Fx, F> {
+    /// Create a new authorization from a capability and format-specific material.
+    pub fn new(capability: Capability<Fx>, authorization: F::Authorization<Fx>) -> Self {
+        Self {
+            capability,
+            authorization,
+        }
+    }
+
+    /// Unwrap the authorized capability, discarding the proof.
+    pub fn into_inner(self) -> Capability<Fx> {
+        self.capability
+    }
+}
+
+impl<Fx: Constraint, F: AuthorizationFormat> std::ops::Deref for Authorization<Fx, F> {
+    type Target = Capability<Fx>;
+    fn deref(&self) -> &Self::Target {
+        &self.capability
+    }
+}
+
+/// Request to authorize a capability for a specific authorization format.
+///
+/// The format's `Authorization<Fx>` GAT determines what the authorization
+/// produces — e.g., `()` for `Allow`, or `UcanInvocation` for UCAN.
+#[derive(Serialize, Deserialize)]
+#[serde(bound(deserialize = ""))]
+pub struct Authorize<Fx: Constraint, F: AuthorizationFormat = Allow> {
+    /// The capability to authorize.
+    pub capability: Capability<Fx>,
+    /// The target format (used for routing to the correct provider).
+    #[serde(skip)]
+    _format: PhantomData<F>,
+}
+
+impl<Fx: Constraint, F: AuthorizationFormat> Authorize<Fx, F> {
+    /// Create a new authorization request for the given capability and format.
+    pub fn new(capability: Capability<Fx>) -> Self {
+        Self {
+            capability,
+            _format: PhantomData,
+        }
+    }
+}
+
+impl<Fx, F> Effect for Authorize<Fx, F>
 where
     Fx: Effect,
     Fx::Of: Constraint,
+    F: AuthorizationFormat,
     Capability<Fx>: ConditionalSend,
-    A: ConditionalSend,
     Self: ConditionalSend + 'static,
 {
     type Of = Profile;
-    type Output = Result<Authorized<Fx, A>, AuthorizeError>;
+    type Output = Result<Authorization<Fx, F>, AuthorizeError>;
 }
 
 /// Import credential material into the credential store.
@@ -235,5 +382,30 @@ mod tests {
             .invoke(Sign::new(b"payload"));
 
         assert_eq!(cap.payload(), b"payload");
+    }
+
+    #[test]
+    fn it_builds_get_claim_path() {
+        let claim = Subject::from(did!("key:zSpace"))
+            .attenuate(Credential)
+            .attenuate(Profile::new("default"))
+            .invoke(Get::<String> {
+                address: Address::new("s3://my-bucket"),
+            });
+
+        assert_eq!(claim.ability(), "/credential/get");
+    }
+
+    #[test]
+    fn it_builds_set_claim_path() {
+        let claim = Subject::from(did!("key:zSpace"))
+            .attenuate(Credential)
+            .attenuate(Profile::new("default"))
+            .invoke(Set {
+                address: Address::new("s3://my-bucket"),
+                credentials: "secret-key".to_string(),
+            });
+
+        assert_eq!(claim.ability(), "/credential/set");
     }
 }

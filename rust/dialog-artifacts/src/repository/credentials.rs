@@ -1,17 +1,15 @@
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
-use dialog_capability::authorization::Authorized;
+use dialog_capability::credential::Authorization;
 use dialog_capability::{
     Capability, Constraint, Did, Effect, Issuer, Policy, Principal, Provider, credential,
 };
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::{Ed25519Signer, Ed25519Verifier};
-use dialog_s3_credentials::capability::S3Request;
-use dialog_s3_credentials::s3::Credentials as S3Credentials;
-use dialog_s3_credentials::s3::site::S3Access;
+use dialog_s3_credentials::s3::S3Credentials;
 #[cfg(feature = "ucan")]
-use dialog_s3_credentials::ucan::{DelegationChain, UcanAccess, authorize as ucan_authorize};
+use dialog_s3_credentials::ucan::DelegationChain;
 use dialog_varsig::Signer as VarsigSigner;
 use dialog_varsig::eddsa::Ed25519Signature;
 
@@ -184,64 +182,22 @@ impl<Store: ConditionalSync> Provider<credential::Sign> for Credentials<Store> {
     }
 }
 
-// S3 Authorization: delegate to the store.
+// Authorization: delegate to the store.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Store, Fx> Provider<credential::Authorize<Fx, S3Access>> for Credentials<Store>
+impl<Store, Fx> Provider<credential::Authorize<Fx>> for Credentials<Store>
 where
     Fx: Effect + Clone + 'static,
     Fx::Of: Constraint,
-    Capability<Fx>: S3Request,
-    credential::Authorize<Fx, S3Access>: ConditionalSend + 'static,
-    Store: Provider<credential::Authorize<Fx, S3Access>> + ConditionalSync,
-{
-    async fn execute(
-        &self,
-        input: Capability<credential::Authorize<Fx, S3Access>>,
-    ) -> Result<Authorized<Fx, S3Access>, credential::AuthorizeError> {
-        self.store.execute(input).await
-    }
-}
-
-// UCAN Authorization: check in-memory delegations first, then delegate to store.
-#[cfg(feature = "ucan")]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Store: ConditionalSync, Fx> Provider<credential::Authorize<Fx, UcanAccess>>
-    for Credentials<Store>
-where
-    Fx: Effect + Constraint + Clone + ConditionalSend + 'static,
-    Fx::Of: Constraint,
     Capability<Fx>: ConditionalSend,
-    credential::Authorize<Fx, UcanAccess>: ConditionalSend + 'static,
+    credential::Authorize<Fx>: ConditionalSend + 'static,
+    Store: Provider<credential::Authorize<Fx>> + ConditionalSync,
 {
     async fn execute(
         &self,
-        input: Capability<credential::Authorize<Fx, UcanAccess>>,
-    ) -> Result<Authorized<Fx, UcanAccess>, credential::AuthorizeError> {
-        let authorize = input.into_inner().constraint;
-        let authority_did = &self.did;
-        let endpoint = authorize.access.endpoint.clone();
-        let subject_did = authorize.capability.subject().clone();
-
-        let delegation = if subject_did == *authority_did {
-            None
-        } else {
-            let chain = self
-                .delegations
-                .iter()
-                .find(|c| c.audience() == authority_did)
-                .cloned()
-                .ok_or_else(|| {
-                    credential::AuthorizeError::Configuration(format!(
-                        "No delegation chain for audience '{}'",
-                        authority_did
-                    ))
-                })?;
-            Some(chain)
-        };
-
-        ucan_authorize(self, delegation, endpoint, authorize.capability).await
+        input: Capability<credential::Authorize<Fx>>,
+    ) -> Result<Authorization<Fx, credential::Allow>, credential::AuthorizeError> {
+        self.store.execute(input).await
     }
 }
 

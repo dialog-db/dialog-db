@@ -1,26 +1,34 @@
 //! Memory capability types and Provider implementations for S3 backend.
 //!
 //! Re-exports memory types from [`dialog_effects`] and implements
-//! `Provider<S3Invocation<Fx>>` for [`S3`].
+//! `Provider<Fork<S3, Fx>>` for [`S3`].
 
 pub use dialog_effects::memory::*;
 
 use async_trait::async_trait;
 use dialog_capability::Provider;
-use dialog_s3_credentials::s3::site::S3Invocation;
+use dialog_capability::fork::{Fork, ForkInvocation};
 
 use super::{RequestDescriptorExt, S3};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<S3Invocation<Resolve>> for S3 {
+impl Provider<Fork<S3, Resolve>> for S3 {
     async fn execute(
         &self,
-        invocation: S3Invocation<Resolve>,
+        invocation: ForkInvocation<S3, Resolve>,
     ) -> Result<Option<Publication>, MemoryError> {
+        let request = invocation
+            .address
+            .authorize(
+                &invocation.authorization.capability,
+                invocation.credentials.as_ref(),
+            )
+            .await
+            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+
         let client = reqwest::Client::new();
-        let response = invocation
-            .request
+        let response = request
             .into_request(&client)
             .send()
             .await
@@ -56,17 +64,30 @@ impl Provider<S3Invocation<Resolve>> for S3 {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<S3Invocation<Publish>> for S3 {
-    async fn execute(&self, invocation: S3Invocation<Publish>) -> Result<Vec<u8>, MemoryError> {
-        let content = Publish::of(&invocation.capability).content.clone();
-        let when = Publish::of(&invocation.capability)
+impl Provider<Fork<S3, Publish>> for S3 {
+    async fn execute(
+        &self,
+        invocation: ForkInvocation<S3, Publish>,
+    ) -> Result<Vec<u8>, MemoryError> {
+        let content = Publish::of(&invocation.authorization.capability)
+            .content
+            .clone();
+        let when = Publish::of(&invocation.authorization.capability)
             .when
             .as_ref()
             .map(|b| String::from_utf8_lossy(b).to_string());
 
+        let request = invocation
+            .address
+            .authorize(
+                &invocation.authorization.capability,
+                invocation.credentials.as_ref(),
+            )
+            .await
+            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+
         let client = reqwest::Client::new();
-        let response = invocation
-            .request
+        let response = request
             .into_request(&client)
             .body(content)
             .send()
@@ -99,13 +120,22 @@ impl Provider<S3Invocation<Publish>> for S3 {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<S3Invocation<Retract>> for S3 {
-    async fn execute(&self, invocation: S3Invocation<Retract>) -> Result<(), MemoryError> {
-        let when = String::from_utf8_lossy(&Retract::of(&invocation.capability).when).to_string();
+impl Provider<Fork<S3, Retract>> for S3 {
+    async fn execute(&self, invocation: ForkInvocation<S3, Retract>) -> Result<(), MemoryError> {
+        let when = String::from_utf8_lossy(&Retract::of(&invocation.authorization.capability).when)
+            .to_string();
+
+        let request = invocation
+            .address
+            .authorize(
+                &invocation.authorization.capability,
+                invocation.credentials.as_ref(),
+            )
+            .await
+            .map_err(|e| MemoryError::Storage(e.to_string()))?;
 
         let client = reqwest::Client::new();
-        let response = invocation
-            .request
+        let response = request
             .into_request(&client)
             .send()
             .await

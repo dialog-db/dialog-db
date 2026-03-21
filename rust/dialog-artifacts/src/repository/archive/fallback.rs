@@ -1,8 +1,11 @@
 use async_trait::async_trait;
-use dialog_capability::{Capability, Provider, credential::Authorize};
+use dialog_capability::credential::{Allow, Authorize};
+use dialog_capability::fork::Fork;
+use dialog_capability::{Capability, Provider, credential};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Catalog, Get, Put};
-use dialog_s3_credentials::s3::site::{S3Access, S3Invocation};
+use dialog_s3_credentials::s3::S3Credentials;
+use dialog_storage::s3::S3;
 use dialog_storage::{
     Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder,
 };
@@ -55,8 +58,9 @@ impl<Env> ContentAddressedStorage for FallbackStore<'_, Env>
 where
     Env: Provider<Get>
         + Provider<Put>
-        + Provider<Authorize<Get, S3Access>>
-        + Provider<S3Invocation<Get>>
+        + Provider<Authorize<Get, Allow>>
+        + Provider<credential::Get<Option<S3Credentials>>>
+        + Provider<Fork<S3, Get>>
         + ConditionalSync
         + 'static,
 {

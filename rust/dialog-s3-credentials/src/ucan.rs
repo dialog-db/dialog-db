@@ -27,7 +27,7 @@ pub use credentials::{Credentials, authorize};
 pub use delegation::DelegationChain;
 pub use invocation::InvocationChain;
 pub use provider::UcanAuthorizer;
-pub use site::{UcanAccess, UcanSite, UcanTypedInvocation};
+pub use site::{UcanAddress, UcanCredentials, UcanFormat, UcanSite};
 
 /// Test helpers for creating UCAN delegations.
 /// Only available with the `helpers` feature.

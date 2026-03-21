@@ -1,12 +1,12 @@
-use dialog_capability::authorization::Authorized;
+use dialog_capability::fork::{Fork, ForkInvocation};
 use dialog_capability::{Capability, Constraint, Did, Effect, Provider, credential};
 use dialog_common::ConditionalSend;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
-use dialog_s3_credentials::capability::S3Request;
-use dialog_s3_credentials::s3::site::{S3Access, S3Invocation};
-use dialog_s3_credentials::{Address, s3};
+use dialog_s3_credentials::Address;
+use dialog_s3_credentials::s3::S3Credentials;
 use dialog_storage::provider::Volatile;
+use dialog_storage::s3::S3;
 
 use crate::repository::Repository;
 use crate::repository::branch::state::UpstreamState;
@@ -27,24 +27,16 @@ fn test_address() -> Address {
     Address::new("http://localhost:9999", "us-east-1", "test-bucket")
 }
 
-fn test_s3_creds() -> s3::Credentials {
-    s3::Credentials::public(test_address())
-        .unwrap()
-        .with_path_style()
-}
-
-/// In-memory remote that implements S3 authorization and invocation
+/// In-memory remote that implements Fork<S3, Fx> authorization and invocation
 /// backed by a Volatile store, suitable for e2e testing without HTTP.
 struct InMemoryRemote {
     store: Volatile,
-    s3_creds: s3::Credentials,
 }
 
 impl InMemoryRemote {
     fn new() -> Self {
         Self {
             store: Volatile::new(),
-            s3_creds: test_s3_creds(),
         }
     }
 }
@@ -64,60 +56,79 @@ impl TestEnv {
     }
 }
 
-// Authorize by delegating to s3::Credentials (presigning).
+// Authorize — grant authorization for any capability (test stub).
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<C> Provider<credential::Authorize<C, S3Access>> for TestEnv
+impl<C> Provider<credential::Authorize<C, credential::Allow>> for TestEnv
 where
     C: Effect + Clone + 'static,
     C::Of: Constraint,
-    Capability<C>: S3Request,
-    credential::Authorize<C, S3Access>: ConditionalSend + 'static,
+    Capability<C>: ConditionalSend,
+    credential::Authorize<C, credential::Allow>: ConditionalSend + 'static,
 {
     async fn execute(
         &self,
-        input: Capability<credential::Authorize<C, S3Access>>,
-    ) -> Result<Authorized<C, S3Access>, credential::AuthorizeError> {
-        self.remote.s3_creds.execute(input).await
+        input: Capability<credential::Authorize<C, credential::Allow>>,
+    ) -> Result<credential::Authorization<C, credential::Allow>, credential::AuthorizeError> {
+        let authorize = input.into_inner().constraint;
+        Ok(credential::Authorization::new(authorize.capability, ()))
     }
 }
 
-// S3Invocation handlers — execute against remote Volatile store.
+// Credential lookup — return None (public access).
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<credential::Get<Option<S3Credentials>>> for TestEnv {
+    async fn execute(
+        &self,
+        _input: Capability<credential::Get<Option<S3Credentials>>>,
+    ) -> Result<Option<S3Credentials>, credential::CredentialError> {
+        Ok(None)
+    }
+}
+
+// Fork<S3, Fx> handlers — execute against remote Volatile store.
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<S3Invocation<archive_fx::Get>> for TestEnv {
+impl Provider<Fork<S3, archive_fx::Get>> for TestEnv {
     async fn execute(
         &self,
-        invocation: S3Invocation<archive_fx::Get>,
+        invocation: ForkInvocation<S3, archive_fx::Get>,
     ) -> Result<Option<Vec<u8>>, archive_fx::ArchiveError> {
-        <Volatile as Provider<archive_fx::Get>>::execute(&self.remote.store, invocation.capability)
-            .await
+        <Volatile as Provider<archive_fx::Get>>::execute(
+            &self.remote.store,
+            invocation.authorization.capability,
+        )
+        .await
     }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<S3Invocation<archive_fx::Put>> for TestEnv {
+impl Provider<Fork<S3, archive_fx::Put>> for TestEnv {
     async fn execute(
         &self,
-        invocation: S3Invocation<archive_fx::Put>,
+        invocation: ForkInvocation<S3, archive_fx::Put>,
     ) -> Result<(), archive_fx::ArchiveError> {
-        <Volatile as Provider<archive_fx::Put>>::execute(&self.remote.store, invocation.capability)
-            .await
+        <Volatile as Provider<archive_fx::Put>>::execute(
+            &self.remote.store,
+            invocation.authorization.capability,
+        )
+        .await
     }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<S3Invocation<memory_fx::Resolve>> for TestEnv {
+impl Provider<Fork<S3, memory_fx::Resolve>> for TestEnv {
     async fn execute(
         &self,
-        invocation: S3Invocation<memory_fx::Resolve>,
+        invocation: ForkInvocation<S3, memory_fx::Resolve>,
     ) -> Result<Option<memory_fx::Publication>, memory_fx::MemoryError> {
         <Volatile as Provider<memory_fx::Resolve>>::execute(
             &self.remote.store,
-            invocation.capability,
+            invocation.authorization.capability,
         )
         .await
     }
@@ -125,14 +136,14 @@ impl Provider<S3Invocation<memory_fx::Resolve>> for TestEnv {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<S3Invocation<memory_fx::Publish>> for TestEnv {
+impl Provider<Fork<S3, memory_fx::Publish>> for TestEnv {
     async fn execute(
         &self,
-        invocation: S3Invocation<memory_fx::Publish>,
+        invocation: ForkInvocation<S3, memory_fx::Publish>,
     ) -> Result<Vec<u8>, memory_fx::MemoryError> {
         <Volatile as Provider<memory_fx::Publish>>::execute(
             &self.remote.store,
-            invocation.capability,
+            invocation.authorization.capability,
         )
         .await
     }
@@ -140,14 +151,14 @@ impl Provider<S3Invocation<memory_fx::Publish>> for TestEnv {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<S3Invocation<memory_fx::Retract>> for TestEnv {
+impl Provider<Fork<S3, memory_fx::Retract>> for TestEnv {
     async fn execute(
         &self,
-        invocation: S3Invocation<memory_fx::Retract>,
+        invocation: ForkInvocation<S3, memory_fx::Retract>,
     ) -> Result<(), memory_fx::MemoryError> {
         <Volatile as Provider<memory_fx::Retract>>::execute(
             &self.remote.store,
-            invocation.capability,
+            invocation.authorization.capability,
         )
         .await
     }
@@ -244,11 +255,7 @@ async fn setup_repo_with_remote(
 ) -> anyhow::Result<(Repository<()>, super::Branch<()>)> {
     let repo = Repository::new(test_issuer().await, test_subject());
 
-    let site_address = dialog_s3_credentials::Credentials::S3(
-        s3::Credentials::public(test_address())
-            .unwrap()
-            .with_path_style(),
-    );
+    let site_address = dialog_s3_credentials::Credentials::S3(test_address(), None);
     let _site = repo
         .add_remote("origin", site_address)
         .perform(&env.local)

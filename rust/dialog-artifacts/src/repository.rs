@@ -144,8 +144,7 @@ mod tests {
     use super::*;
     use crate::artifacts::{Artifact, Instruction};
     use crate::repository::node_reference::NodeReference;
-    use dialog_s3_credentials::Address as S3Address;
-    use dialog_s3_credentials::s3::Credentials as S3Credentials;
+    use dialog_s3_credentials::Address;
     use dialog_storage::provider::Volatile;
     use futures_util::stream;
 
@@ -158,8 +157,8 @@ mod tests {
     }
 
     fn test_address() -> RemoteAddress {
-        let s3_addr = S3Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "bucket");
-        RemoteAddress::S3(S3Credentials::public(s3_addr).unwrap())
+        let s3_addr = Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "bucket");
+        RemoteAddress::S3(s3_addr, None)
     }
 
     #[dialog_common::test]

@@ -6,16 +6,18 @@
 //! - `Remote` — remote invocations (S3, UCAN, etc.)
 //!
 //! Local and credential effects are routed via `#[derive(Provider)]`.
-//! [`Authorize`] is routed to `Credentials` via a blanket impl.
-//! Remote invocations (site-specific types like `S3Invocation<Fx>`) are
-//! routed to `Remote` via blanket impls defined alongside each site type.
+//! [`Authorize`] and credential store effects are routed to `Credentials`
+//! via blanket impls. Remote invocations (`Fork<S, Fx>`) are routed to
+//! `Remote` via blanket impls defined alongside each site type.
 //!
 //! [`Authorize`]: dialog_capability::credential::Authorize
 
+use dialog_capability::Capability;
 use dialog_capability::Provider;
-use dialog_capability::access::Access;
-use dialog_capability::authorization::Authorized;
-use dialog_capability::credential::{Authorize, AuthorizeError};
+use dialog_capability::credential::{
+    Authorization, AuthorizationFormat, Authorize, AuthorizeError, CredentialError, Get, Import,
+    Set,
+};
 use dialog_capability::{Constraint, Effect};
 
 /// Generic environment that delegates:
@@ -40,32 +42,61 @@ pub struct Environment<Local, Credentials = (), Remote = ()> {
     pub remote: Remote,
 }
 
-// Route Authorize<Fx, A> to self.credentials for any access format.
+// Route Authorize<Fx, F> to self.credentials.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Local, Credentials, Remote, Fx, A> Provider<Authorize<Fx, A>>
+impl<Local, Credentials, Remote, Fx, F> Provider<Authorize<Fx, F>>
     for Environment<Local, Credentials, Remote>
 where
     Fx: Effect + 'static,
     Fx::Of: Constraint,
-    A: Access + dialog_common::ConditionalSend,
+    F: AuthorizationFormat,
     Capability<Fx>: dialog_common::ConditionalSend,
-    Authorize<Fx, A>: dialog_common::ConditionalSend + 'static,
-    Credentials: Provider<Authorize<Fx, A>> + dialog_common::ConditionalSync,
+    Authorize<Fx, F>: dialog_common::ConditionalSend + 'static,
+    Credentials: Provider<Authorize<Fx, F>> + dialog_common::ConditionalSync,
     Self: dialog_common::ConditionalSend + dialog_common::ConditionalSync,
 {
     async fn execute(
         &self,
-        input: Capability<Authorize<Fx, A>>,
-    ) -> Result<Authorized<Fx, A>, AuthorizeError> {
+        input: Capability<Authorize<Fx, F>>,
+    ) -> Result<Authorization<Fx, F>, AuthorizeError> {
+        self.credentials.execute(input).await
+    }
+}
+
+// Route Get<C> to self.credentials for any credential type.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<Local, Credentials, Remote, C> Provider<Get<C>> for Environment<Local, Credentials, Remote>
+where
+    C: serde::Serialize + serde::de::DeserializeOwned + dialog_common::ConditionalSend + 'static,
+    Capability<Get<C>>: dialog_common::ConditionalSend,
+    Get<C>: dialog_common::ConditionalSend + 'static,
+    Credentials: Provider<Get<C>> + dialog_common::ConditionalSync,
+    Self: dialog_common::ConditionalSend + dialog_common::ConditionalSync,
+{
+    async fn execute(&self, input: Capability<Get<C>>) -> Result<C, CredentialError> {
+        self.credentials.execute(input).await
+    }
+}
+
+// Route Set<C> to self.credentials for any credential type.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<Local, Credentials, Remote, C> Provider<Set<C>> for Environment<Local, Credentials, Remote>
+where
+    C: serde::Serialize + serde::de::DeserializeOwned + dialog_common::ConditionalSend + 'static,
+    Capability<Set<C>>: dialog_common::ConditionalSend,
+    Set<C>: dialog_common::ConditionalSend + 'static,
+    Credentials: Provider<Set<C>> + dialog_common::ConditionalSync,
+    Self: dialog_common::ConditionalSend + dialog_common::ConditionalSync,
+{
+    async fn execute(&self, input: Capability<Set<C>>) -> Result<(), CredentialError> {
         self.credentials.execute(input).await
     }
 }
 
 // Route Import<Material> to self.credentials for any material type.
-use dialog_capability::Capability;
-use dialog_capability::credential::{CredentialError, Import};
-
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<Local, Credentials, Remote, Material> Provider<Import<Material>>
@@ -112,5 +143,23 @@ impl<Local, Credentials, Remote> Environment<Local, Credentials, Remote> {
             credentials,
             remote,
         }
+    }
+}
+
+// Route Fork<S, Fx> to Environment's remote field for all site types.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<Local, Credentials, Remote, S, Fx> Provider<dialog_capability::fork::Fork<S, Fx>>
+    for Environment<Local, Credentials, Remote>
+where
+    S: dialog_capability::site::Site,
+    Fx: Effect + 'static,
+    Fx::Of: Constraint,
+    dialog_capability::fork::ForkInvocation<S, Fx>: dialog_common::ConditionalSend,
+    Remote: Provider<dialog_capability::fork::Fork<S, Fx>> + dialog_common::ConditionalSync,
+    Self: dialog_common::ConditionalSend + dialog_common::ConditionalSync,
+{
+    async fn execute(&self, input: dialog_capability::fork::ForkInvocation<S, Fx>) -> Fx::Output {
+        self.remote.execute(input).await
     }
 }
