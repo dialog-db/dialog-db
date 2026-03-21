@@ -12,7 +12,7 @@ use super::UcanInvocation;
 ///
 /// This is the access format for UCAN-based authorization. It carries
 /// the endpoint URL needed by the Authorize provider.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UcanAccess {
     /// The access service URL to POST invocations to.
     pub endpoint: String,

@@ -120,10 +120,11 @@ impl<C> Provider<credential::Authorize<C, S3Access>> for Session
 where
     C: Effect + Clone + 'static,
     Capability<C>: S3Request,
+    credential::Authorize<C, S3Access>: dialog_common::ConditionalSend + 'static,
 {
     async fn execute(
         &self,
-        _input: credential::Authorize<C, S3Access>,
+        _input: Capability<credential::Authorize<C, S3Access>>,
     ) -> Result<Authorized<C, S3Access>, credential::AuthorizeError> {
         Err(credential::AuthorizeError::Configuration(
             "Session does not hold S3 credentials directly; use S3Credentials as Provider instead"

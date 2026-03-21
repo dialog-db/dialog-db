@@ -1,9 +1,10 @@
 use crate::{
     Ability, Constrained, Constraint, Did, Effect, Policy, PolicyBuilder, Provider, Selector,
-    credential::{Authorize, AuthorizeError},
+    Subject,
+    credential::{Authorize, AuthorizeError, Credential, Profile},
     site::{Local, Site},
 };
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSend, ConditionalSync};
 use std::fmt::{Debug, Formatter};
 
 /// Capability chain with an optional site parameter.
@@ -158,13 +159,20 @@ impl<Fx: Effect, At: Site> Capability<Fx, At> {
     pub async fn acquire<Env>(self, env: &Env) -> Result<At::Invocation<Fx>, AuthorizeError>
     where
         Env: Provider<Authorize<Fx, At::Access>> + ConditionalSync,
+        Capability<Fx>: ConditionalSend,
+        At::Access: ConditionalSend,
+        Authorize<Fx, At::Access>: ConditionalSend + 'static,
     {
+        let subject = self.can.subject().clone();
         let access = self.at.access();
         let capability = Capability {
             can: self.can,
             at: Local,
         };
-        let authorize = Authorize { capability, access };
+        let authorize = Subject::from(subject)
+            .attenuate(Credential)
+            .attenuate(Profile::default())
+            .invoke(Authorize { capability, access });
         let authorized =
             <Env as Provider<Authorize<Fx, At::Access>>>::execute(env, authorize).await?;
         Ok(authorized.into())

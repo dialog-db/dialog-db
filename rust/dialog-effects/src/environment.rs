@@ -48,12 +48,16 @@ impl<Local, Credentials, Remote, Fx, A> Provider<Authorize<Fx, A>>
 where
     Fx: Effect + 'static,
     Fx::Of: Constraint,
-    A: Access,
-    Authorize<Fx, A>: dialog_common::ConditionalSend,
+    A: Access + dialog_common::ConditionalSend,
+    Capability<Fx>: dialog_common::ConditionalSend,
+    Authorize<Fx, A>: dialog_common::ConditionalSend + 'static,
     Credentials: Provider<Authorize<Fx, A>> + dialog_common::ConditionalSync,
     Self: dialog_common::ConditionalSend + dialog_common::ConditionalSync,
 {
-    async fn execute(&self, input: Authorize<Fx, A>) -> Result<Authorized<Fx, A>, AuthorizeError> {
+    async fn execute(
+        &self,
+        input: Capability<Authorize<Fx, A>>,
+    ) -> Result<Authorized<Fx, A>, AuthorizeError> {
         self.credentials.execute(input).await
     }
 }

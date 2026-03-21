@@ -15,10 +15,10 @@
 //!         └── Import<M> { material: M } -> Effect -> Result<(), CredentialError>
 //! ```
 
+use crate::Constraint;
 use crate::access::Access;
 use crate::authorization::Authorized;
 pub use crate::{Attenuation, Capability, Did, Effect, Policy, Subject};
-use crate::{Command, Constraint};
 use dialog_common::ConditionalSend;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -133,10 +133,12 @@ pub enum CredentialError {
     NotFound(String),
 }
 
-/// Request to authorize a capability.
+/// Request to authorize a capability for a given access format.
 ///
 /// Parameterized by access format, not site. One provider covers ALL sites
 /// sharing the same access format.
+#[derive(Serialize, Deserialize)]
+#[serde(bound(deserialize = ""))]
 pub struct Authorize<Fx: Constraint, A: Access> {
     /// The capability to authorize.
     pub capability: Capability<Fx>,
@@ -144,12 +146,15 @@ pub struct Authorize<Fx: Constraint, A: Access> {
     pub access: A,
 }
 
-impl<Fx, A: Access> Command for Authorize<Fx, A>
+impl<Fx, A: Access> Effect for Authorize<Fx, A>
 where
     Fx: Effect,
     Fx::Of: Constraint,
+    Capability<Fx>: ConditionalSend,
+    A: ConditionalSend,
+    Self: ConditionalSend + 'static,
 {
-    type Input = Self;
+    type Of = Profile;
     type Output = Result<Authorized<Fx, A>, AuthorizeError>;
 }
 

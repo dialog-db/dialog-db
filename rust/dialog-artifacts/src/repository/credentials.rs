@@ -5,18 +5,15 @@ use dialog_capability::authorization::Authorized;
 use dialog_capability::{
     Capability, Constraint, Did, Effect, Issuer, Policy, Principal, Provider, credential,
 };
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::{Ed25519Signer, Ed25519Verifier};
 use dialog_s3_credentials::capability::S3Request;
 use dialog_s3_credentials::s3::Credentials as S3Credentials;
 use dialog_s3_credentials::s3::site::S3Access;
-use dialog_varsig::Signer as VarsigSigner;
-use dialog_varsig::eddsa::Ed25519Signature;
-
-#[cfg(feature = "ucan")]
-use dialog_common::ConditionalSend;
 #[cfg(feature = "ucan")]
 use dialog_s3_credentials::ucan::{DelegationChain, UcanAccess, authorize as ucan_authorize};
+use dialog_varsig::Signer as VarsigSigner;
+use dialog_varsig::eddsa::Ed25519Signature;
 
 use super::RepositoryError;
 
@@ -195,11 +192,12 @@ where
     Fx: Effect + Clone + 'static,
     Fx::Of: Constraint,
     Capability<Fx>: S3Request,
+    credential::Authorize<Fx, S3Access>: ConditionalSend + 'static,
     Store: Provider<credential::Authorize<Fx, S3Access>> + ConditionalSync,
 {
     async fn execute(
         &self,
-        input: credential::Authorize<Fx, S3Access>,
+        input: Capability<credential::Authorize<Fx, S3Access>>,
     ) -> Result<Authorized<Fx, S3Access>, credential::AuthorizeError> {
         self.store.execute(input).await
     }
@@ -215,14 +213,16 @@ where
     Fx: Effect + Constraint + Clone + ConditionalSend + 'static,
     Fx::Of: Constraint,
     Capability<Fx>: ConditionalSend,
+    credential::Authorize<Fx, UcanAccess>: ConditionalSend + 'static,
 {
     async fn execute(
         &self,
-        input: credential::Authorize<Fx, UcanAccess>,
+        input: Capability<credential::Authorize<Fx, UcanAccess>>,
     ) -> Result<Authorized<Fx, UcanAccess>, credential::AuthorizeError> {
+        let authorize = input.into_inner().constraint;
         let authority_did = &self.did;
-        let endpoint = input.access.endpoint.clone();
-        let subject_did = input.capability.subject().clone();
+        let endpoint = authorize.access.endpoint.clone();
+        let subject_did = authorize.capability.subject().clone();
 
         let delegation = if subject_did == *authority_did {
             None
@@ -241,7 +241,7 @@ where
             Some(chain)
         };
 
-        ucan_authorize(self, delegation, endpoint, input.capability).await
+        ucan_authorize(self, delegation, endpoint, authorize.capability).await
     }
 }
 

@@ -14,7 +14,7 @@ use url::Url;
 ///
 /// The Authorize provider reads the address from this value and uses its own
 /// credentials to presign the request.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct S3Access {
     /// S3 address (endpoint, region, bucket).
     pub address: Address,

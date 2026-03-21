@@ -40,19 +40,22 @@ where
     C: Effect + Clone + 'static,
     C::Of: Constraint,
     Capability<C>: S3Request,
+    Capability<C>: dialog_common::ConditionalSend,
+    credential::Authorize<C, S3Access>: dialog_common::ConditionalSend + 'static,
 {
     async fn execute(
         &self,
-        input: credential::Authorize<C, S3Access>,
+        input: Capability<credential::Authorize<C, S3Access>>,
     ) -> Result<Authorized<C, S3Access>, credential::AuthorizeError> {
+        let authorize = input.into_inner().constraint;
         let authorized_request = self
-            .grant(&input.capability)
+            .grant(&authorize.capability)
             .await
             .map_err(|e| credential::AuthorizeError::Denied(e.to_string()))?;
 
         Ok(Authorized {
-            capability: input.capability,
-            access: input.access,
+            capability: authorize.capability,
+            access: authorize.access,
             authorization: authorized_request,
         })
     }
@@ -132,13 +135,18 @@ mod tests {
     where
         C: Effect + Clone + 'static,
         Capability<C>: S3Request,
+        credential::Authorize<C, S3Access>: dialog_common::ConditionalSend + 'static,
     {
         use dialog_capability::site::Site;
         let access = site.access();
-        let authorize_input = credential::Authorize::<C, S3Access> { capability, access };
+        let subject = capability.subject().clone();
+        let authorize_cap = Subject::from(subject)
+            .attenuate(credential::Credential)
+            .attenuate(credential::Profile::default())
+            .invoke(credential::Authorize::<C, S3Access> { capability, access });
         let authorized = <Credentials as Provider<credential::Authorize<C, S3Access>>>::execute(
             creds,
-            authorize_input,
+            authorize_cap,
         )
         .await
         .unwrap();

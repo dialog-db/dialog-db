@@ -307,16 +307,18 @@ pub mod tests {
         C: Effect + Constraint + Clone + ConditionalSend + 'static,
         C::Of: Constraint,
         Capability<C>: ConditionalSend,
+        credential::Authorize<C, UcanAccess>: ConditionalSend + 'static,
     {
         async fn execute(
             &self,
-            input: credential::Authorize<C, UcanAccess>,
+            input: Capability<credential::Authorize<C, UcanAccess>>,
         ) -> Result<Authorized<C, UcanAccess>, credential::AuthorizeError> {
+            let authorize = input.into_inner().constraint;
             super::authorize(
                 self,
                 Some(self.credentials.delegation().clone()),
-                input.access.endpoint.clone(),
-                input.capability,
+                authorize.access.endpoint.clone(),
+                authorize.capability,
             )
             .await
         }

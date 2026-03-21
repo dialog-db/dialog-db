@@ -1,5 +1,6 @@
 use dialog_capability::authorization::Authorized;
-use dialog_capability::{Capability, Did, Effect, Provider, credential};
+use dialog_capability::{Capability, Constraint, Did, Effect, Provider, credential};
+use dialog_common::ConditionalSend;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
 use dialog_s3_credentials::capability::S3Request;
@@ -69,12 +70,13 @@ impl TestEnv {
 impl<C> Provider<credential::Authorize<C, S3Access>> for TestEnv
 where
     C: Effect + Clone + 'static,
-    C::Of: dialog_capability::Constraint,
+    C::Of: Constraint,
     Capability<C>: S3Request,
+    credential::Authorize<C, S3Access>: ConditionalSend + 'static,
 {
     async fn execute(
         &self,
-        input: credential::Authorize<C, S3Access>,
+        input: Capability<credential::Authorize<C, S3Access>>,
     ) -> Result<Authorized<C, S3Access>, credential::AuthorizeError> {
         self.remote.s3_creds.execute(input).await
     }
