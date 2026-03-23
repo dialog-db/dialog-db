@@ -1,11 +1,8 @@
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
-use dialog_capability::credential::Authorization;
-use dialog_capability::{
-    Capability, Constraint, Did, Effect, Issuer, Policy, Principal, Provider, credential,
-};
-use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_capability::{Capability, Did, Issuer, Policy, Principal, Provider, credential};
+use dialog_common::ConditionalSync;
 use dialog_credentials::{Ed25519Signer, Ed25519Verifier};
 use dialog_remote_s3::S3Credentials;
 #[cfg(feature = "ucan")]
@@ -179,25 +176,6 @@ impl<Store: ConditionalSync> Provider<credential::Sign> for Credentials<Store> {
             .await
             .map_err(|e| credential::CredentialError::SigningFailed(e.to_string()))?;
         Ok(sig.to_bytes().to_vec())
-    }
-}
-
-// Authorization: delegate to the store.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Store, Fx> Provider<credential::Authorize<Fx>> for Credentials<Store>
-where
-    Fx: Effect + 'static,
-    Fx::Of: Constraint,
-    Capability<Fx>: ConditionalSend,
-    credential::Authorize<Fx>: ConditionalSend + 'static,
-    Store: Provider<credential::Authorize<Fx>> + ConditionalSync,
-{
-    async fn execute(
-        &self,
-        input: Capability<credential::Authorize<Fx>>,
-    ) -> Result<Authorization<Fx, credential::Allow>, credential::AuthorizeError> {
-        self.store.execute(input).await
     }
 }
 

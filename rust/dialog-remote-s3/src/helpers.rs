@@ -7,7 +7,6 @@
 //! - Address types (available on all platforms for deserialization in WASM tests)
 //! - Server implementation (native-only, in the `server` submodule)
 //! - Test operator types for capability-based testing
-use dialog_capability::credential::{Allow, Authorization};
 use dialog_capability::{Capability, Did, Principal, Provider, credential};
 
 use crate::s3::S3Credentials;
@@ -102,25 +101,6 @@ impl Provider<credential::Sign> for Session {
         // S3 direct access uses SigV4 signing, not external signatures.
         // The signature is never verified -- S3 uses its own SigV4 auth.
         Ok(vec![0u8; 64])
-    }
-}
-
-/// Session implements Provider<Authorize<C, Allow>> for simple authorization.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<C> Provider<credential::Authorize<C, Allow>> for Session
-where
-    C: dialog_capability::Effect + 'static,
-    C::Of: dialog_capability::Constraint,
-    Capability<C>: dialog_common::ConditionalSend,
-    credential::Authorize<C, Allow>: dialog_common::ConditionalSend + 'static,
-{
-    async fn execute(
-        &self,
-        input: Capability<credential::Authorize<C, Allow>>,
-    ) -> Result<Authorization<C, Allow>, credential::AuthorizeError> {
-        let authorize = input.into_inner().constraint;
-        Ok(Authorization::new(authorize.capability, ()))
     }
 }
 

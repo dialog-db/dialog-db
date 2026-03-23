@@ -63,6 +63,36 @@ where
     }
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<C> Provider<credential::List<C>> for Volatile
+where
+    C: Serialize + DeserializeOwned + ConditionalSend + 'static,
+{
+    async fn execute(
+        &self,
+        input: Capability<credential::List<C>>,
+    ) -> Result<Vec<credential::Address<C>>, CredentialError> {
+        let subject = input.subject().into();
+        let prefix = credential::List::<C>::of(&input).prefix.id().to_string();
+
+        let sessions = self.sessions.read();
+        let addresses = sessions
+            .get(&subject)
+            .map(|session| {
+                session
+                    .credentials
+                    .keys()
+                    .filter(|key| key.starts_with(&prefix))
+                    .map(|key| credential::Address::new(key.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(addresses)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

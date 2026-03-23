@@ -19,7 +19,7 @@ pub enum RemoteAddress {
     S3(Address),
     /// UCAN-based authorization via external access service.
     #[cfg(feature = "ucan")]
-    Ucan(dialog_remote_ucan_s3::Credentials),
+    Ucan(dialog_remote_ucan_s3::UcanAddress),
 }
 
 impl Hash for RemoteAddress {

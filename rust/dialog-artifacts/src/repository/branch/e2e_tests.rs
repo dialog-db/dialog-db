@@ -1,6 +1,5 @@
 use dialog_capability::fork::{Fork, ForkInvocation};
-use dialog_capability::{Capability, Constraint, Did, Effect, Provider, credential};
-use dialog_common::ConditionalSend;
+use dialog_capability::{Capability, Did, Provider, credential};
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
 use dialog_remote_s3::Address;
@@ -54,25 +53,6 @@ impl TestEnv {
             local: Volatile::new(),
             remote: InMemoryRemote::new(),
         }
-    }
-}
-
-// Authorize — grant authorization for any capability (test stub).
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<C> Provider<credential::Authorize<C, credential::Allow>> for TestEnv
-where
-    C: Effect + 'static,
-    C::Of: Constraint,
-    Capability<C>: ConditionalSend,
-    credential::Authorize<C, credential::Allow>: ConditionalSend + 'static,
-{
-    async fn execute(
-        &self,
-        input: Capability<credential::Authorize<C, credential::Allow>>,
-    ) -> Result<credential::Authorization<C, credential::Allow>, credential::AuthorizeError> {
-        let authorize = input.into_inner().constraint;
-        Ok(credential::Authorization::new(authorize.capability, ()))
     }
 }
 

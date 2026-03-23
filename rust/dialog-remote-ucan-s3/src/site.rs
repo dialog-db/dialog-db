@@ -1,33 +1,13 @@
 //! UCAN site configuration -- marker trait + address type.
 
-use dialog_capability::Constraint;
-use dialog_capability::credential::{self, AuthorizationFormat};
+use dialog_capability::credential::{self, Addressable};
 use dialog_capability::site::Site;
 
-use crate::UcanInvocation;
-
-/// UCAN authorization format -- produces a signed invocation chain.
-pub struct UcanFormat;
-
-impl AuthorizationFormat for UcanFormat {
-    type Authorization<Fx: Constraint> = UcanInvocation;
-}
-
-/// UCAN credentials -- serialized invocation material.
-///
-/// This is the credential type resolved from the credential store
-/// for UCAN-based sites. Contains serialized UCAN container bytes.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct UcanCredentials {
-    /// Serialized UCAN container bytes (invocation + delegation chain).
-    #[serde(with = "serde_bytes")]
-    pub container: Vec<u8>,
-    /// The access service endpoint URL.
-    pub endpoint: String,
-}
+// Re-export UCAN types from dialog-capability for convenience.
+pub use dialog_capability::ucan::{Ucan, UcanInvocation};
 
 /// UCAN site address -- wraps the access service endpoint.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct UcanAddress {
     /// The access service endpoint URL.
     pub endpoint: String,
@@ -45,10 +25,47 @@ impl UcanAddress {
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
+
+    /// POST the signed invocation to the access service endpoint and get back
+    /// a presigned URL for the S3 operation.
+    pub async fn authorize(
+        &self,
+        invocation: &UcanInvocation,
+    ) -> Result<dialog_remote_s3::AuthorizedRequest, dialog_remote_s3::AccessError> {
+        let ucan = invocation
+            .to_bytes()
+            .map_err(|e| dialog_remote_s3::AccessError::Invocation(e.to_string()))?;
+
+        let response = reqwest::Client::new()
+            .post(&self.endpoint)
+            .header("Content-Type", "application/cbor")
+            .body(ucan)
+            .send()
+            .await
+            .map_err(|e| dialog_remote_s3::AccessError::Service(e.to_string()))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(dialog_remote_s3::AccessError::Service(format!(
+                "Access service returned {}: {}",
+                status, body
+            )));
+        }
+
+        let body = response
+            .bytes()
+            .await
+            .map_err(|e| dialog_remote_s3::AccessError::Service(e.to_string()))?;
+
+        serde_ipld_dagcbor::from_slice(&body).map_err(|e| {
+            dialog_remote_s3::AccessError::Service(format!("Failed to decode response: {}", e))
+        })
+    }
 }
 
-impl credential::Addressable<UcanCredentials> for UcanAddress {
-    fn credential_address(&self) -> credential::Address<UcanCredentials> {
+impl Addressable<()> for UcanAddress {
+    fn credential_address(&self) -> credential::Address<()> {
         credential::Address::new(&self.endpoint)
     }
 }
@@ -60,7 +77,7 @@ impl credential::Addressable<UcanCredentials> for UcanAddress {
 pub struct UcanSite;
 
 impl Site for UcanSite {
-    type Credentials = UcanCredentials;
-    type Format = UcanFormat;
+    type Credentials = ();
+    type Format = Ucan;
     type Address = UcanAddress;
 }

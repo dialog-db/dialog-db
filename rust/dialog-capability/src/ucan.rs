@@ -1,39 +1,36 @@
-//! UCAN bridge types.
+//! UCAN bridge types and authorization utilities.
 //!
-//! When the `ucan` feature is enabled this module provides IPLD parameter
-//! collection utilities for UCAN invocations.
+//! When the `ucan` feature is enabled this module provides:
 //!
-//! The core bridging is automatic: any type implementing [`Issuer`](crate::Issuer)
-//! automatically satisfies `dialog_ucan::Issuer<A::Signature>` because `Issuer`
-//! extends `dialog_varsig::Principal + dialog_varsig::Signer<Self::Signature>`, and
-//! `dialog_ucan::Issuer<S>` has a blanket impl for `Signer<S> + Principal`.
+//! - IPLD parameter collection from capability chains
+//! - [`Ucan`] — authorization format producing signed UCAN invocations
+//! - [`UcanInvocation`] — a signed UCAN invocation (the authorization proof)
+//! - [`Issuer`] — adapts credential effects to UCAN's Signer interface
+//! - [`authorize`] — builds a UCAN invocation from a capability and delegation chain
 
-use crate::{Ability, PolicyBuilder};
-use ipld_core::ipld::Ipld;
-use ipld_core::serde::to_ipld;
-use serde::Serialize;
-use std::collections::BTreeMap;
+mod authorize;
+pub mod claim;
+pub mod delegation;
+mod invocation;
+pub mod issuer;
+mod parameters;
 
-/// IPLD-based parameter map for UCAN invocations.
-pub type Parameters = BTreeMap<String, Ipld>;
+pub use authorize::authorize;
+pub use claim::claim;
+pub use delegation::import_delegation_chain;
+pub use invocation::UcanInvocation;
+pub use issuer::Issuer;
+pub use parameters::{Args, Parameters, parameters, parameters_to_args};
 
-/// Builder that collects caveats as IPLD parameters.
-struct ParametersBuilder(Parameters);
+use crate::Constraint;
+use crate::credential::AuthorizationFormat;
 
-impl PolicyBuilder for ParametersBuilder {
-    fn push<T: Serialize>(&mut self, caveat: &T) {
-        if let Ok(Ipld::Map(map)) = to_ipld(caveat) {
-            self.0.extend(map);
-        }
-    }
-}
-
-/// Collect parameters from a capability into an IPLD map.
+/// UCAN authorization format — produces a signed invocation chain.
 ///
-/// This function iterates over all caveats in the capability chain,
-/// serializes each to IPLD, and merges their fields into a single map.
-pub fn parameters<T: Ability>(capability: &T) -> Parameters {
-    let mut builder = ParametersBuilder(Parameters::new());
-    capability.constrain(&mut builder);
-    builder.0
+/// Used with [`credential::Authorize<Fx, Ucan>`](crate::credential::Authorize)
+/// to produce [`UcanInvocation`] as the authorization proof.
+pub struct Ucan;
+
+impl AuthorizationFormat for Ucan {
+    type Authorization<Fx: Constraint> = UcanInvocation;
 }

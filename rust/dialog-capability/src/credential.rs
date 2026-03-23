@@ -12,8 +12,9 @@
 //!         ├── Identify -> Effect -> Result<Identity, CredentialError>
 //!         ├── Sign { payload } -> Effect -> Result<Vec<u8>, CredentialError>
 //!         ├── Authorize<Fx, S> { capability } -> Effect -> Result<S::Authorization<Fx>, AuthorizeError>
-//!         ├── Get<C> { address } -> Effect -> Result<C, CredentialError>
-//!         ├── Set<C> { address, credentials } -> Effect -> Result<(), CredentialError>
+//!         ├── Retrieve<C> { address } -> Effect -> Result<C, CredentialError>
+//!         ├── Save<C> { address, credentials } -> Effect -> Result<(), CredentialError>
+//!         ├── List<C> { prefix } -> Effect -> Result<Vec<Address<C>>, CredentialError>
 //!         └── Import<M> { material: M } -> Effect -> Result<(), CredentialError>
 //! ```
 
@@ -319,6 +320,34 @@ where
     type Output = Result<Authorization<Fx, F>, AuthorizeError>;
 }
 
+/// List credential addresses by prefix.
+///
+/// Returns all addresses whose ID starts with the given prefix.
+/// Use [`Retrieve`] to fetch the credential at each returned address.
+#[derive(Debug, Clone, Serialize, Deserialize, crate::Claim)]
+#[serde(bound(deserialize = ""))]
+pub struct List<C> {
+    /// The prefix to match against address IDs.
+    pub prefix: Address<C>,
+}
+
+impl<C> List<C> {
+    /// Create a new list query with the given prefix.
+    pub fn new(prefix: impl Into<String>) -> Self {
+        Self {
+            prefix: Address::new(prefix),
+        }
+    }
+}
+
+impl<C> Effect for List<C>
+where
+    C: Serialize + DeserializeOwned + ConditionalSend + 'static,
+{
+    type Of = Profile;
+    type Output = Result<Vec<Address<C>>, CredentialError>;
+}
+
 /// Import credential material into the credential store.
 #[derive(Debug, Clone, Serialize, Deserialize, crate::Claim)]
 pub struct Import<Material: Serialize> {
@@ -343,6 +372,26 @@ pub enum AuthorizeError {
     /// Configuration error (e.g., missing delegation chain).
     #[error("Authorization configuration error: {0}")]
     Configuration(String),
+}
+
+/// Blanket impl: any type can authorize with `Allow` format (no proof needed).
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<Env, Fx> crate::Provider<Authorize<Fx, Allow>> for Env
+where
+    Fx: crate::Effect + 'static,
+    Fx::Of: Constraint,
+    Capability<Fx>: ConditionalSend,
+    Authorize<Fx, Allow>: ConditionalSend + 'static,
+    Env: ConditionalSend + dialog_common::ConditionalSync,
+{
+    async fn execute(
+        &self,
+        input: Capability<Authorize<Fx, Allow>>,
+    ) -> Result<Authorization<Fx, Allow>, AuthorizeError> {
+        let auth_request = input.into_inner().constraint;
+        Ok(Authorization::new(auth_request.capability, ()))
+    }
 }
 
 #[cfg(test)]
