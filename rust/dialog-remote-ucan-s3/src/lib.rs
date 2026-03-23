@@ -14,11 +14,13 @@
 
 mod authorization;
 pub mod credentials;
+pub mod delegation;
 mod provider;
 pub mod site;
 
 pub use authorization::UcanInvocation;
 pub use credentials::{Credentials, authorize};
+pub use delegation::{UcanSession, authorize_ucan, import_delegation_chain};
 pub use provider::UcanAuthorizer;
 pub use site::{UcanAddress, UcanCredentials, UcanFormat, UcanSite};
 

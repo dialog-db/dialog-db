@@ -34,7 +34,11 @@ pub struct Environment<Local, Credentials = (), Remote = ()> {
         crate::archive::Put,
         crate::memory::Resolve,
         crate::memory::Publish,
-        crate::memory::Retract
+        crate::memory::Retract,
+        crate::storage::Get,
+        crate::storage::Set,
+        crate::storage::Delete,
+        crate::storage::List
     )]
     /// Provider for local storage effects.
     pub local: Local,

@@ -37,6 +37,7 @@
 mod archive;
 mod credential;
 mod memory;
+mod storage;
 
 use dialog_capability::Did;
 use parking_lot::RwLock;
@@ -48,6 +49,9 @@ type ArchiveKey = (String, String);
 /// Memory key: (space, cell)
 type MemoryKey = (String, String);
 
+/// Storage key: (store, key_bytes)
+type StorageKey = (String, Vec<u8>);
+
 /// A session holds the in-memory storage for a single subject.
 #[derive(Default, Debug)]
 struct Session {
@@ -57,6 +61,8 @@ struct Session {
     memory: HashMap<MemoryKey, Vec<u8>>,
     /// Credential storage keyed by address ID.
     credentials: HashMap<String, Vec<u8>>,
+    /// Key-value storage keyed by (store, key).
+    storage: HashMap<StorageKey, Vec<u8>>,
 }
 
 /// Volatile in-memory storage provider.

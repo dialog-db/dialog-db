@@ -41,6 +41,7 @@ getrandom = { workspace = true, features = ["js"] }
 anyhow = { workspace = true }
 async-signature = { workspace = true }
 dialog-common = { workspace = true, features = ["helpers"] }
+dialog-storage = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
 wasm-bindgen-test = { workspace = true }

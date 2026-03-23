@@ -1157,6 +1157,7 @@ dependencies = [
  "dialog-credentials",
  "dialog-effects",
  "dialog-remote-s3",
+ "dialog-storage",
  "dialog-ucan",
  "dialog-varsig",
  "getrandom 0.2.16",
