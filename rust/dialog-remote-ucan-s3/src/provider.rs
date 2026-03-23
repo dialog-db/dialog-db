@@ -62,14 +62,207 @@
 
 use std::collections::BTreeMap;
 
-use dialog_capability::{Capability, Did, Subject};
+use dialog_capability::{Capability, Constraint, Did, Policy};
 use dialog_credentials::Ed25519KeyResolver;
+use dialog_effects::{archive, memory, storage};
 use dialog_remote_s3::Address;
 use dialog_remote_s3::capability::{AccessError, AuthorizedRequest};
-use dialog_remote_s3::capability::{archive, memory, storage};
 use dialog_remote_s3::s3::S3Credentials;
 use dialog_ucan::InvocationChain;
 use dialog_ucan::promise::Promised;
+use ipld_core::ipld::Ipld;
+use serde::de::DeserializeOwned;
+
+// Generic deserialization from UCAN args
+
+type Args = BTreeMap<String, Promised>;
+
+/// Deserialize a typed struct from UCAN args via IPLD round-trip.
+///
+/// Converts `Promised` values to IPLD, then uses `ipld_core::serde::from_ipld`
+/// to deserialize the target type. Unknown fields are ignored, so this works
+/// on the flat args map containing fields from all capability chain layers.
+fn deserialize_from_args<T: DeserializeOwned>(args: &Args) -> Result<T, AccessError> {
+    let ipld_map: BTreeMap<String, Ipld> = args
+        .iter()
+        .map(|(k, v)| {
+            Ipld::try_from(v)
+                .map(|ipld| (k.clone(), ipld))
+                .map_err(|e| {
+                    AccessError::Invocation(format!("Unresolved promise for '{}': {}", k, e))
+                })
+        })
+        .collect::<Result<_, _>>()?;
+
+    ipld_core::serde::from_ipld(Ipld::Map(ipld_map))
+        .map_err(|e| AccessError::Invocation(format!("Failed to deserialize: {}", e)))
+}
+
+/// Build a storage capability from UCAN args: `Subject -> Storage -> Store -> Claim`.
+fn storage_claim_from_args<C>(subject: &Did, args: &Args) -> Result<Capability<C>, AccessError>
+where
+    C: Policy<Of = storage::Store> + DeserializeOwned,
+    <C as Constraint>::Capability: dialog_capability::Ability,
+{
+    let store: storage::Store = deserialize_from_args(args)?;
+    let claim: C = deserialize_from_args(args)?;
+    Ok(dialog_capability::Subject::from(subject.clone())
+        .attenuate(storage::Storage)
+        .attenuate(store)
+        .attenuate(claim))
+}
+
+/// Build a memory capability from UCAN args: `Subject -> Memory -> Space -> Cell -> Claim`.
+fn memory_claim_from_args<C>(subject: &Did, args: &Args) -> Result<Capability<C>, AccessError>
+where
+    C: Policy<Of = memory::Cell> + DeserializeOwned,
+    <C as Constraint>::Capability: dialog_capability::Ability,
+{
+    let space: memory::Space = deserialize_from_args(args)?;
+    let cell: memory::Cell = deserialize_from_args(args)?;
+    let claim: C = deserialize_from_args(args)?;
+    Ok(dialog_capability::Subject::from(subject.clone())
+        .attenuate(memory::Memory)
+        .attenuate(space)
+        .attenuate(cell)
+        .attenuate(claim))
+}
+
+/// Build an archive capability from UCAN args: `Subject -> Archive -> Catalog -> Claim`.
+fn archive_claim_from_args<C>(subject: &Did, args: &Args) -> Result<Capability<C>, AccessError>
+where
+    C: Policy<Of = archive::Catalog> + DeserializeOwned,
+    <C as Constraint>::Capability: dialog_capability::Ability,
+{
+    let catalog: archive::Catalog = deserialize_from_args(args)?;
+    let claim: C = deserialize_from_args(args)?;
+    Ok(dialog_capability::Subject::from(subject.clone())
+        .attenuate(archive::Archive)
+        .attenuate(catalog)
+        .attenuate(claim))
+}
+
+/// Maps an execution effect type to its claim type that can be
+/// reconstructed from UCAN args.
+///
+/// The `Claim` associated type is the authorization-safe representation
+/// whose `Capability<Claim>` implements `S3Request`.
+trait FromUcanArgs {
+    /// The claim type for this effect (either Self or a generated {Name}Claim).
+    type Claim: Constraint;
+
+    /// Reconstruct a capability from UCAN args.
+    fn capability_from_args(
+        subject: &Did,
+        args: &Args,
+    ) -> Result<Capability<Self::Claim>, AccessError>;
+}
+
+impl FromUcanArgs for storage::Get {
+    type Claim = storage::Get;
+    fn capability_from_args(
+        subject: &Did,
+        args: &Args,
+    ) -> Result<Capability<Self::Claim>, AccessError> {
+        storage_claim_from_args(subject, args)
+    }
+}
+impl FromUcanArgs for storage::Set {
+    type Claim = storage::SetClaim;
+    fn capability_from_args(
+        subject: &Did,
+        args: &Args,
+    ) -> Result<Capability<Self::Claim>, AccessError> {
+        storage_claim_from_args(subject, args)
+    }
+}
+impl FromUcanArgs for storage::Delete {
+    type Claim = storage::Delete;
+    fn capability_from_args(
+        subject: &Did,
+        args: &Args,
+    ) -> Result<Capability<Self::Claim>, AccessError> {
+        storage_claim_from_args(subject, args)
+    }
+}
+impl FromUcanArgs for storage::List {
+    type Claim = storage::List;
+    fn capability_from_args(
+        subject: &Did,
+        args: &Args,
+    ) -> Result<Capability<Self::Claim>, AccessError> {
+        storage_claim_from_args(subject, args)
+    }
+}
+impl FromUcanArgs for memory::Resolve {
+    type Claim = memory::Resolve;
+    fn capability_from_args(
+        subject: &Did,
+        args: &Args,
+    ) -> Result<Capability<Self::Claim>, AccessError> {
+        let space: memory::Space = deserialize_from_args(args)?;
+        let cell: memory::Cell = deserialize_from_args(args)?;
+        Ok(dialog_capability::Subject::from(subject.clone())
+            .attenuate(memory::Memory)
+            .attenuate(space)
+            .attenuate(cell)
+            .attenuate(memory::Resolve))
+    }
+}
+impl FromUcanArgs for memory::Publish {
+    type Claim = memory::PublishClaim;
+    fn capability_from_args(
+        subject: &Did,
+        args: &Args,
+    ) -> Result<Capability<Self::Claim>, AccessError> {
+        memory_claim_from_args(subject, args)
+    }
+}
+impl FromUcanArgs for memory::Retract {
+    type Claim = memory::RetractClaim;
+    fn capability_from_args(
+        subject: &Did,
+        args: &Args,
+    ) -> Result<Capability<Self::Claim>, AccessError> {
+        memory_claim_from_args(subject, args)
+    }
+}
+impl FromUcanArgs for archive::Get {
+    type Claim = archive::Get;
+    fn capability_from_args(
+        subject: &Did,
+        args: &Args,
+    ) -> Result<Capability<Self::Claim>, AccessError> {
+        archive_claim_from_args(subject, args)
+    }
+}
+impl FromUcanArgs for archive::Put {
+    type Claim = archive::PutClaim;
+    fn capability_from_args(
+        subject: &Did,
+        args: &Args,
+    ) -> Result<Capability<Self::Claim>, AccessError> {
+        archive_claim_from_args(subject, args)
+    }
+}
+
+/// Dispatch UCAN command to the appropriate `FromUcanArgs` handler and authorize
+/// the resulting capability directly against the S3 address.
+macro_rules! dispatch {
+    ($self:expr, $subject:expr, $args:expr, $segments:expr, {
+        $( [$seg1:literal, $seg2:literal] => $fx:ty ),+ $(,)?
+    }) => {
+        match $segments {
+            $(
+                [$seg1, $seg2] => {
+                    let capability = <$fx as FromUcanArgs>::capability_from_args($subject, $args)?;
+                    $self.address.authorize(&capability, $self.credentials.as_ref()).await
+                }
+            )+
+            _ => Err(AccessError::Invocation(format!("Unknown command: {:?}", $segments)))
+        }
+    };
+}
 
 /// UCAN authorizer that wraps credentials and handles UCAN invocations.
 ///
@@ -127,256 +320,19 @@ impl UcanAuthorizer {
         // Get subject DID from the invocation
         let subject_did = chain.subject();
 
-        // 5. Dispatch based on command path
-        // Command format: ["storage", "get"] or ["memory", "resolve"] etc.
         let command_segments: Vec<&str> = command.0.iter().map(|s| s.as_str()).collect();
 
-        match command_segments.as_slice() {
-            // Storage commands
-            ["storage", "get"] => {
-                let effect = parse_storage_get(args)?;
-                let capability = build_storage_capability(subject_did, args, effect)?;
-                self.address
-                    .authorize(&capability, self.credentials.as_ref())
-                    .await
-            }
-            ["storage", "set"] => {
-                let effect = parse_storage_set(args)?;
-                let capability = build_storage_capability(subject_did, args, effect)?;
-                self.address
-                    .authorize(&capability, self.credentials.as_ref())
-                    .await
-            }
-            ["storage", "delete"] => {
-                let effect = parse_storage_delete(args)?;
-                let capability = build_storage_capability(subject_did, args, effect)?;
-                self.address
-                    .authorize(&capability, self.credentials.as_ref())
-                    .await
-            }
-            ["storage", "list"] => {
-                let effect = parse_storage_list(args)?;
-                let capability = build_storage_capability(subject_did, args, effect)?;
-                self.address
-                    .authorize(&capability, self.credentials.as_ref())
-                    .await
-            }
-
-            // Memory commands
-            ["memory", "resolve"] => {
-                let capability = build_memory_resolve_capability(subject_did, args)?;
-                self.address
-                    .authorize(&capability, self.credentials.as_ref())
-                    .await
-            }
-            ["memory", "publish"] => {
-                let capability = build_memory_publish_capability(subject_did, args)?;
-                self.address
-                    .authorize(&capability, self.credentials.as_ref())
-                    .await
-            }
-            ["memory", "retract"] => {
-                let capability = build_memory_retract_capability(subject_did, args)?;
-                self.address
-                    .authorize(&capability, self.credentials.as_ref())
-                    .await
-            }
-
-            // Archive commands
-            ["archive", "get"] => {
-                let capability = build_archive_get_capability(subject_did, args)?;
-                self.address
-                    .authorize(&capability, self.credentials.as_ref())
-                    .await
-            }
-            ["archive", "put"] => {
-                let capability = build_archive_put_capability(subject_did, args)?;
-                self.address
-                    .authorize(&capability, self.credentials.as_ref())
-                    .await
-            }
-
-            _ => Err(AccessError::Invocation(format!(
-                "Unknown command: {:?}",
-                command_segments
-            ))),
-        }
-    }
-}
-
-/// Get a string field from arguments.
-fn get_string_arg(args: &BTreeMap<String, Promised>, key: &str) -> Result<String, AccessError> {
-    match args.get(key) {
-        Some(Promised::String(s)) => Ok(s.clone()),
-        Some(_) => Err(AccessError::Invocation(format!(
-            "Expected string for '{}' argument",
-            key
-        ))),
-        None => Err(AccessError::Invocation(format!(
-            "Missing '{}' argument",
-            key
-        ))),
-    }
-}
-
-/// Get an optional string field from arguments.
-fn get_optional_string_arg(
-    args: &BTreeMap<String, Promised>,
-    key: &str,
-) -> Result<Option<String>, AccessError> {
-    match args.get(key) {
-        Some(Promised::String(s)) => Ok(Some(s.clone())),
-        Some(Promised::Null) => Ok(None),
-        Some(_) => Err(AccessError::Invocation(format!(
-            "Expected string or null for '{}' argument",
-            key
-        ))),
-        None => Ok(None),
-    }
-}
-
-/// Get a bytes field from arguments.
-fn get_bytes_arg(args: &BTreeMap<String, Promised>, key: &str) -> Result<Vec<u8>, AccessError> {
-    match args.get(key) {
-        Some(Promised::Bytes(b)) => Ok(b.clone()),
-        Some(_) => Err(AccessError::Invocation(format!(
-            "Expected bytes for '{}' argument",
-            key
-        ))),
-        None => Err(AccessError::Invocation(format!(
-            "Missing '{}' argument",
-            key
-        ))),
-    }
-}
-
-fn parse_storage_get(args: &BTreeMap<String, Promised>) -> Result<storage::Get, AccessError> {
-    let key = get_bytes_arg(args, "key")?;
-    Ok(storage::Get::new(key))
-}
-
-fn parse_storage_set(args: &BTreeMap<String, Promised>) -> Result<storage::Set, AccessError> {
-    let key = get_bytes_arg(args, "key")?;
-    let checksum = parse_checksum(args)?;
-    Ok(storage::Set::new(key, checksum))
-}
-
-fn parse_storage_delete(args: &BTreeMap<String, Promised>) -> Result<storage::Delete, AccessError> {
-    let key = get_bytes_arg(args, "key")?;
-    Ok(storage::Delete::new(key))
-}
-
-fn parse_storage_list(args: &BTreeMap<String, Promised>) -> Result<storage::List, AccessError> {
-    let continuation_token = get_optional_string_arg(args, "continuation_token")?;
-    Ok(storage::List::new(continuation_token))
-}
-
-/// Build a storage capability from subject, args, and effect.
-fn build_storage_capability<E>(
-    subject_did: &Did,
-    args: &BTreeMap<String, Promised>,
-    effect: E,
-) -> Result<Capability<E>, AccessError>
-where
-    E: dialog_capability::Effect<Of = storage::Store>,
-{
-    let store_name = get_string_arg(args, "store")?;
-    Ok(Subject::from(subject_did.clone())
-        .attenuate(storage::Storage)
-        .attenuate(storage::Store::new(store_name))
-        .invoke(effect))
-}
-
-fn build_memory_resolve_capability(
-    subject_did: &Did,
-    args: &BTreeMap<String, Promised>,
-) -> Result<Capability<memory::Resolve>, AccessError> {
-    let space = get_string_arg(args, "space")?;
-    let cell = get_string_arg(args, "cell")?;
-    Ok(Subject::from(subject_did.clone())
-        .attenuate(memory::Memory)
-        .attenuate(memory::Space::new(space))
-        .attenuate(memory::Cell::new(cell))
-        .invoke(memory::Resolve))
-}
-
-fn build_memory_publish_capability(
-    subject_did: &Did,
-    args: &BTreeMap<String, Promised>,
-) -> Result<Capability<memory::Publish>, AccessError> {
-    let space = get_string_arg(args, "space")?;
-    let cell = get_string_arg(args, "cell")?;
-    let when = get_optional_string_arg(args, "when")?;
-    let checksum = parse_checksum(args)?;
-    Ok(Subject::from(subject_did.clone())
-        .attenuate(memory::Memory)
-        .attenuate(memory::Space::new(space))
-        .attenuate(memory::Cell::new(cell))
-        .invoke(memory::Publish { checksum, when }))
-}
-
-fn build_memory_retract_capability(
-    subject_did: &Did,
-    args: &BTreeMap<String, Promised>,
-) -> Result<Capability<memory::Retract>, AccessError> {
-    let space = get_string_arg(args, "space")?;
-    let cell = get_string_arg(args, "cell")?;
-    let when = get_string_arg(args, "when")?;
-    Ok(Subject::from(subject_did.clone())
-        .attenuate(memory::Memory)
-        .attenuate(memory::Space::new(space))
-        .attenuate(memory::Cell::new(cell))
-        .invoke(memory::Retract::new(when)))
-}
-
-fn build_archive_get_capability(
-    subject_did: &Did,
-    args: &BTreeMap<String, Promised>,
-) -> Result<Capability<archive::Get>, AccessError> {
-    let catalog = get_string_arg(args, "catalog")?;
-    let digest = get_bytes_arg(args, "digest")?;
-    let digest_arr: [u8; 32] = digest
-        .try_into()
-        .map_err(|_| AccessError::Invocation("digest must be 32 bytes".to_string()))?;
-    let digest_hash = dialog_common::Blake3Hash::from(digest_arr);
-    Ok(Subject::from(subject_did.clone())
-        .attenuate(archive::Archive)
-        .attenuate(archive::Catalog::new(catalog))
-        .invoke(archive::Get::new(digest_hash)))
-}
-
-fn build_archive_put_capability(
-    subject_did: &Did,
-    args: &BTreeMap<String, Promised>,
-) -> Result<Capability<archive::Put>, AccessError> {
-    let catalog = get_string_arg(args, "catalog")?;
-    let digest = get_bytes_arg(args, "digest")?;
-    let digest_arr: [u8; 32] = digest
-        .try_into()
-        .map_err(|_| AccessError::Invocation("digest must be 32 bytes".to_string()))?;
-    let digest_hash = dialog_common::Blake3Hash::from(digest_arr);
-    let checksum = parse_checksum(args)?;
-    Ok(Subject::from(subject_did.clone())
-        .attenuate(archive::Archive)
-        .attenuate(archive::Catalog::new(catalog))
-        .invoke(archive::Put::new(digest_hash, checksum)))
-}
-
-/// Parse checksum from arguments.
-///
-/// Expects multihash bytes: `<code><length><digest>`
-fn parse_checksum(
-    args: &BTreeMap<String, Promised>,
-) -> Result<dialog_remote_s3::Checksum, AccessError> {
-    match args.get("checksum") {
-        Some(Promised::Bytes(bytes)) => dialog_remote_s3::Checksum::try_from(bytes.clone())
-            .map_err(|e| AccessError::Invocation(format!("Invalid multihash checksum: {}", e))),
-        Some(_) => Err(AccessError::Invocation(
-            "checksum must be multihash bytes".to_string(),
-        )),
-        None => Err(AccessError::Invocation(
-            "Missing checksum argument".to_string(),
-        )),
+        dispatch!(self, subject_did, args, command_segments.as_slice(), {
+            ["storage", "get"]     => dialog_effects::storage::Get,
+            ["storage", "set"]     => dialog_effects::storage::Set,
+            ["storage", "delete"]  => dialog_effects::storage::Delete,
+            ["storage", "list"]    => dialog_effects::storage::List,
+            ["memory", "resolve"]  => dialog_effects::memory::Resolve,
+            ["memory", "publish"]  => dialog_effects::memory::Publish,
+            ["memory", "retract"]  => dialog_effects::memory::Retract,
+            ["archive", "get"]     => dialog_effects::archive::Get,
+            ["archive", "put"]     => dialog_effects::archive::Put,
+        })
     }
 }
 
@@ -548,7 +504,7 @@ mod tests {
         .await;
 
         let result = authorizer.authorize(&container).await;
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "memory/resolve failed: {:?}", result);
         let descriptor = result.unwrap();
         assert_eq!(descriptor.method, "GET");
     }

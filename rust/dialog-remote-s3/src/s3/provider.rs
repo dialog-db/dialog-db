@@ -4,13 +4,18 @@
 //! The old `S3Permit` type is removed — credential resolution happens
 //! through `ForkInvocation` at execution time.
 
+pub mod archive;
+pub mod memory;
+pub mod storage;
+
 #[cfg(test)]
 mod tests {
     use crate::Address;
-    use crate::capability::{AuthorizedRequest, S3Request, archive, memory, storage};
+    use crate::capability::{AuthorizedRequest, S3Request};
     use crate::s3::S3Credentials;
     use base58::ToBase58;
-    use dialog_capability::{Capability, Did, Effect, Subject, did};
+    use dialog_capability::{Capability, Constraint, Did, Subject, did};
+    use dialog_effects::{archive, memory, storage};
 
     fn test_subject() -> Did {
         did!("key:zTestSubject")
@@ -44,7 +49,7 @@ mod tests {
         capability: &Capability<C>,
     ) -> AuthorizedRequest
     where
-        C: Effect + Clone + 'static,
+        C: Constraint + 'static,
         Capability<C>: S3Request,
     {
         address.authorize(capability, creds).await.unwrap()
@@ -100,7 +105,10 @@ mod tests {
         let capability = Subject::from(test_subject())
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("blob"))
-            .invoke(storage::Set::new(key, checksum));
+            .attenuate(storage::SetClaim {
+                key: key.to_vec(),
+                checksum,
+            });
 
         let req = presign(&address, None, &capability).await;
 
@@ -216,7 +224,7 @@ mod tests {
             .attenuate(memory::Memory)
             .attenuate(memory::Space::new("did:key:zSpace"))
             .attenuate(memory::Cell::new("head"))
-            .invoke(memory::Publish {
+            .attenuate(memory::PublishClaim {
                 checksum,
                 when: None,
             });
@@ -246,7 +254,7 @@ mod tests {
             .attenuate(memory::Memory)
             .attenuate(memory::Space::new("did:key:zSpace"))
             .attenuate(memory::Cell::new("main"))
-            .invoke(memory::Publish {
+            .attenuate(memory::PublishClaim {
                 checksum,
                 when: Some(_prior_etag),
             });
@@ -269,7 +277,9 @@ mod tests {
             .attenuate(memory::Memory)
             .attenuate(memory::Space::new("did:key:zOwner"))
             .attenuate(memory::Cell::new("temp"))
-            .invoke(memory::Retract::new("etag-to-match"));
+            .attenuate(memory::RetractClaim {
+                when: "etag-to-match".to_string(),
+            });
 
         let req = presign(&address, None, &capability).await;
 
@@ -308,7 +318,10 @@ mod tests {
         let capability = Subject::from(test_subject())
             .attenuate(archive::Archive)
             .attenuate(archive::Catalog::new("index"))
-            .invoke(archive::Put::new(digest, checksum));
+            .attenuate(archive::PutClaim {
+                digest: digest.into(),
+                checksum,
+            });
 
         let req = presign(&address, None, &capability).await;
 
@@ -362,7 +375,10 @@ mod tests {
         let capability = Subject::from(test_subject())
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("uploads"))
-            .invoke(storage::Set::new(key, checksum));
+            .attenuate(storage::SetClaim {
+                key: key.to_vec(),
+                checksum,
+            });
 
         let req = presign(&address, Some(&creds), &capability).await;
 

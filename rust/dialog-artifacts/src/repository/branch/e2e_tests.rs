@@ -62,7 +62,7 @@ impl TestEnv {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<C> Provider<credential::Authorize<C, credential::Allow>> for TestEnv
 where
-    C: Effect + Clone + 'static,
+    C: Effect + 'static,
     C::Of: Constraint,
     Capability<C>: ConditionalSend,
     credential::Authorize<C, credential::Allow>: ConditionalSend + 'static,

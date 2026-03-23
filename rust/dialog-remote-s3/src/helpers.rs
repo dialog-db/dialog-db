@@ -110,7 +110,7 @@ impl Provider<credential::Sign> for Session {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<C> Provider<credential::Authorize<C, Allow>> for Session
 where
-    C: dialog_capability::Effect + Clone + 'static,
+    C: dialog_capability::Effect + 'static,
     C::Of: dialog_capability::Constraint,
     Capability<C>: dialog_common::ConditionalSend,
     credential::Authorize<C, Allow>: dialog_common::ConditionalSend + 'static,
@@ -141,13 +141,13 @@ macro_rules! impl_fork_provider {
     ($fx:ty, $output:ty) => {
         #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
         #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-        impl Provider<dialog_capability::fork::Fork<crate::site::S3, $fx>> for Session {
+        impl Provider<dialog_capability::fork::Fork<crate::s3::S3, $fx>> for Session {
             async fn execute(
                 &self,
-                invocation: dialog_capability::fork::ForkInvocation<crate::site::S3, $fx>,
+                invocation: dialog_capability::fork::ForkInvocation<crate::s3::S3, $fx>,
             ) -> $output {
-                let s3 = crate::site::S3;
-                <crate::site::S3 as Provider<dialog_capability::fork::Fork<crate::site::S3, $fx>>>::execute(&s3, invocation).await
+                let s3 = crate::s3::S3;
+                <crate::s3::S3 as Provider<dialog_capability::fork::Fork<crate::s3::S3, $fx>>>::execute(&s3, invocation).await
             }
         }
     };

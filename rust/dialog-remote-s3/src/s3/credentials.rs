@@ -287,8 +287,8 @@ fn current_time() -> DateTime<Utc> {
 mod tests {
     use super::*;
     use crate::Checksum;
-    use crate::capability::storage::{Get, Set, Storage, Store};
     use dialog_capability::{Capability, Subject, did};
+    use dialog_effects::storage::{self, Storage, Store};
 
     fn test_subject() -> dialog_capability::Did {
         did!("key:zTestSubject")
@@ -307,19 +307,26 @@ mod tests {
     }
 
     /// Helper to build a storage Get capability.
-    fn get_capability(store: &str, key: &[u8]) -> Capability<Get> {
+    fn get_capability(store: &str, key: &[u8]) -> Capability<storage::Get> {
         Subject::from(test_subject())
             .attenuate(Storage)
             .attenuate(Store::new(store))
-            .invoke(Get::new(key))
+            .invoke(storage::Get::new(key))
     }
 
-    /// Helper to build a storage Set capability.
-    fn set_capability(store: &str, key: &[u8], checksum: Checksum) -> Capability<Set> {
+    /// Helper to build a storage SetClaim capability (with checksum).
+    fn set_capability(
+        store: &str,
+        key: &[u8],
+        checksum: Checksum,
+    ) -> Capability<storage::SetClaim> {
         Subject::from(test_subject())
             .attenuate(Storage)
             .attenuate(Store::new(store))
-            .invoke(Set::new(key, checksum))
+            .attenuate(storage::SetClaim {
+                key: key.to_vec(),
+                checksum,
+            })
     }
 
     #[dialog_common::test]

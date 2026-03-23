@@ -17,8 +17,8 @@
 //!         └── Import<M> { material: M } -> Effect -> Result<(), CredentialError>
 //! ```
 
-use crate::Constraint;
 pub use crate::{Attenuation, Capability, Did, Effect, Policy, Subject};
+use crate::{Claim, Constraint};
 use dialog_common::ConditionalSend;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -95,7 +95,7 @@ pub struct Identity {
 }
 
 /// Identify operation — returns the credential detail for the active session.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, crate::Claim)]
 pub struct Identify;
 
 impl Effect for Identify {
@@ -104,7 +104,7 @@ impl Effect for Identify {
 }
 
 /// Sign operation — signs a payload using the operator's key.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, crate::Claim)]
 pub struct Sign {
     /// The payload to sign.
     #[serde(with = "serde_bytes")]
@@ -171,7 +171,7 @@ impl<C> PartialEq for Address<C> {
 }
 
 /// Retrieve credentials from the credential store by address.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, crate::Claim)]
 #[serde(bound(deserialize = ""))]
 pub struct Retrieve<C> {
     /// The address to look up.
@@ -187,7 +187,7 @@ where
 }
 
 /// Save credentials to the credential store at an address.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, crate::Claim)]
 #[serde(bound(deserialize = "C: DeserializeOwned"))]
 pub struct Save<C: Serialize> {
     /// The address to store at.
@@ -293,6 +293,20 @@ impl<Fx: Constraint, F: AuthorizationFormat> Authorize<Fx, F> {
     }
 }
 
+impl<Fx, F> Claim for Authorize<Fx, F>
+where
+    Fx: Effect,
+    Fx::Of: Constraint,
+    F: AuthorizationFormat,
+    Capability<Fx>: ConditionalSend,
+    Self: ConditionalSend + 'static,
+{
+    type Claim = Self;
+    fn claim(self) -> Self {
+        self
+    }
+}
+
 impl<Fx, F> Effect for Authorize<Fx, F>
 where
     Fx: Effect,
@@ -306,7 +320,7 @@ where
 }
 
 /// Import credential material into the credential store.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, crate::Claim)]
 pub struct Import<Material: Serialize> {
     /// The credential material to import.
     pub material: Material,

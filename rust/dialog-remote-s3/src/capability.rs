@@ -1,88 +1,38 @@
-//! Capability-based access control for S3 storage operations.
+//! S3 request translation for capabilities.
 //!
-//! This module defines a hierarchical capability system for authorizing S3 operations.
-//! Capabilities are built by chaining attenuations from a subject (resource owner) down
-//! to a specific operation (effect).
+//! This module provides [`S3Request`] implementations for capability types
+//! defined in [`dialog_effects`], enabling them to be translated into
+//! presigned S3 URLs.
 //!
-//! # Capability Hierarchy
+//! Effect types and their claim types from `dialog_effects` are used directly —
+//! this module only provides the S3-specific request translation.
 //!
-//! Capabilities form a chain: `Subject` → `Attenuation` → `Policy` → `Effect`
-//!
-//! - **Subject**: The resource owner, identified by a DID (e.g., `did:key:z6Mk...`)
-//! - **Attenuation**: Narrows scope to a domain (e.g., `Storage`, `Memory`, `Archive`)
-//! - **Policy**: Further constrains within that domain (e.g., `Store::new("index")`)
-//! - **Effect**: The actual operation to perform (e.g., `Get`, `Set`, `Delete`)
-//!
-//! # Example: Storage Operations
+//! # Example
 //!
 //! ```
 //! use dialog_capability::{Subject, did};
-//! use dialog_remote_s3::capability::storage::{Storage, Store, Get, Set};
-//! use dialog_remote_s3::Checksum;
+//! use dialog_effects::storage::{Storage, Store, Get, Set};
 //!
 //! let subject = did!("key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK");
 //!
 //! // Build a capability to get a value from the "index" store
 //! let get_capability = Subject::from(subject.clone())
-//!     .attenuate(Storage)              // Domain: storage operations
-//!     .attenuate(Store::new("index"))  // Policy: only the "index" store
-//!     .invoke(Get::new(b"my-key"));    // Effect: get this specific key
+//!     .attenuate(Storage)
+//!     .attenuate(Store::new("index"))
+//!     .invoke(Get::new(b"my-key"));
 //!
 //! // Build a capability to set a value in the "blob" store
-//! let checksum = Checksum::Sha256([0u8; 32]);
 //! let set_capability = Subject::from(subject)
 //!     .attenuate(Storage)
 //!     .attenuate(Store::new("blob"))
-//!     .invoke(Set::new(b"my-key", checksum));
-//! ```
-//!
-//! # Example: Memory Operations (CAS cells)
-//!
-//! ```
-//! use dialog_capability::{Subject, did};
-//! use dialog_remote_s3::capability::memory::{Memory, Space, Cell, Resolve, Publish};
-//! use dialog_remote_s3::Checksum;
-//!
-//! let subject = did!("key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK");
-//! let user = "did:key:z6Mkuser...";
-//!
-//! // Resolve (read) a memory cell
-//! let resolve = Subject::from(subject.clone())
-//!     .attenuate(Memory)              // Domain: memory operations
-//!     .attenuate(Space::new(user))    // Policy: user's namespace
-//!     .attenuate(Cell::new("main"))   // Policy: specific cell name
-//!     .invoke(Resolve);               // Effect: read the cell
-//!
-//! // Publish (write) to a memory cell with CAS semantics
-//! let checksum = Checksum::Sha256([0u8; 32]);
-//! let publish = Subject::from(subject)
-//!     .attenuate(Memory)
-//!     .attenuate(Space::new(user))
-//!     .attenuate(Cell::new("main"))
-//!     .invoke(Publish {
-//!         checksum,
-//!         when: Some("previous-etag".to_string()), // CAS: only if etag matches
-//!     });
-//! ```
-//!
-//! # Executing Capabilities
-//!
-//! Once built, capabilities can be executed against a provider (credentials):
-//!
-//! ```ignore
-//! // With S3 credentials
-//! let result = get_capability.perform(&s3_credentials).await?;
-//!
-//! // Result is an AuthorizedRequest with presigned URL and headers
-//! println!("URL: {}", result.url);
-//! println!("Method: {}", result.method);
+//!     .invoke(Set::new(b"my-key", b"my-value"));
 //! ```
 //!
 //! # Submodules
 //!
-//! - [`storage`]: Key-value storage operations (`Get`, `Set`, `Delete`, `List`)
-//! - [`memory`]: CAS memory cells (`Resolve`, `Publish`, `Retract`)
-//! - [`archive`]: Content-addressed archive (`Get`, `Put`)
+//! - [`storage`]: `S3Request` impls for storage capabilities
+//! - [`memory`]: `S3Request` impls for memory capabilities
+//! - [`archive`]: `S3Request` impls for archive capabilities
 
 use super::checksum::Checksum;
 use chrono::{DateTime, Utc};

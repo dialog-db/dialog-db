@@ -10,7 +10,7 @@
 //!
 //! ```rust
 //! # mod example {
-//! use dialog_capability::{did, Subject, Did, Ability, Attenuation, Policy, Effect};
+//! use dialog_capability::{did, Subject, Did, Ability, Attenuation, Policy, Effect, Claim};
 //! use serde::{Serialize, Deserialize};
 //!
 //! // Attenuation: narrows ability (adds "/storage" to path) and adds parameters
@@ -28,7 +28,7 @@
 //! }
 //!
 //! // Effect: narrows ability (adds "/get"), and is invocable
-//! #[derive(Debug, Clone, Serialize, Deserialize)]
+//! #[derive(Debug, Clone, Serialize, Deserialize, Claim)]
 //! struct Get { key: Vec<u8> }
 //! impl Effect for Get {
 //!     type Of = Store;
@@ -153,6 +153,9 @@
 //! | [`Authorized`] | Capability paired with access context and authorization proof |
 //! | [`site::Site`] | Trait for site configuration types |
 
+// Allow `#[derive(Claim)]` to resolve `::dialog_capability::Claim` inside this crate.
+extern crate self as dialog_capability;
+
 mod error;
 pub use error::*;
 
@@ -180,6 +183,9 @@ pub use policy::*;
 mod attenuation;
 pub use attenuation::*;
 
+mod claim;
+pub use claim::*;
+
 mod effect;
 pub use effect::*;
 
@@ -200,6 +206,9 @@ pub use issuer::*;
 
 /// Derive macro that generates `Provider<Fx>` impls for composite structs.
 pub use dialog_macros::Provider;
+
+/// Derive macro that generates `Claim` trait impls for effect types.
+pub use dialog_macros::Claim;
 
 pub mod access;
 

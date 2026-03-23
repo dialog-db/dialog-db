@@ -4,7 +4,7 @@ use dialog_capability::{Did, Provider, credential};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
-use dialog_remote_s3::{S3, S3Address, S3Credentials};
+use dialog_remote_s3::{Address, S3, S3Credentials};
 use dialog_storage::{Blake3Hash, CborEncoder, Encoder};
 
 use crate::DialogArtifactsError;
@@ -25,7 +25,7 @@ use super::UpstreamState;
 #[derive(Debug, Clone)]
 pub struct RemoteBranch {
     remote: SiteName,
-    address: S3Address,
+    address: Address,
     subject: Did,
     branch: BranchName,
 }
@@ -34,7 +34,7 @@ impl RemoteBranch {
     /// Create a new remote branch cursor.
     pub fn new(
         remote: SiteName,
-        address: impl Into<S3Address>,
+        address: impl Into<Address>,
         subject: Did,
         branch: BranchName,
     ) -> Self {
@@ -52,7 +52,7 @@ impl RemoteBranch {
     }
 
     /// The S3 address for this remote.
-    pub fn address(&self) -> &S3Address {
+    pub fn address(&self) -> &Address {
         &self.address
     }
 
@@ -260,8 +260,8 @@ mod tests {
         "did:test:remote-branch".parse().unwrap()
     }
 
-    fn test_address() -> S3Address {
-        S3Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "bucket")
+    fn test_address() -> Address {
+        Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "bucket")
     }
 
     #[test]

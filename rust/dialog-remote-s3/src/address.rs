@@ -199,6 +199,11 @@ impl dialog_capability::credential::Addressable<Option<S3Credentials>> for Addre
     }
 }
 
+/// `Address` is the canonical address type for the `S3` site.
+impl dialog_capability::site::SiteAddress for Address {
+    type Site = crate::s3::S3;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

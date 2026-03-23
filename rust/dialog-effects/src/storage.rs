@@ -14,7 +14,8 @@
 //!         └── List { continuation_token } → Effect → Result<ListResult, StorageError>
 //! ```
 
-pub use dialog_capability::{Attenuation, Capability, Effect, Policy, Subject};
+pub use dialog_capability::{Attenuation, Capability, Claim, Effect, Policy, Subject};
+use dialog_common::Checksum;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -50,7 +51,7 @@ impl Policy for Store {
 }
 
 /// Get operation - retrieves a value by key.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Claim)]
 pub struct Get {
     /// The key to look up.
     #[serde(with = "serde_bytes")]
@@ -88,13 +89,14 @@ impl GetCapability for Capability<Get> {
 }
 
 /// Set operation - sets a value for a key.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Claim)]
 pub struct Set {
     /// The key to update.
     #[serde(with = "serde_bytes")]
     pub key: Vec<u8>,
     /// The value to set.
     #[serde(with = "serde_bytes")]
+    #[claim(into = Checksum, with = Checksum::sha256, rename = checksum)]
     pub value: Vec<u8>,
 }
 
@@ -111,6 +113,13 @@ impl Set {
 impl Effect for Set {
     type Of = Store;
     type Output = Result<(), StorageError>;
+}
+
+impl Attenuation for SetClaim {
+    type Of = Store;
+    fn attenuation() -> &'static str {
+        "set"
+    }
 }
 
 /// Extension trait for `Capability<Set>` to access its fields.
@@ -138,7 +147,7 @@ impl SetCapability for Capability<Set> {
 }
 
 /// Delete operation - removes a key.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Claim)]
 pub struct Delete {
     /// The key to delete.
     #[serde(with = "serde_bytes")]
@@ -176,7 +185,7 @@ impl DeleteCapability for Capability<Delete> {
 }
 
 /// List operation - lists keys in a store.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Claim)]
 pub struct List {
     /// Continuation token for pagination.
     pub continuation_token: Option<String>,

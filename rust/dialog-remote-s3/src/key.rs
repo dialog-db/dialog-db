@@ -8,7 +8,7 @@
 
 use base58::{FromBase58, ToBase58};
 
-use crate::site::S3StorageError;
+use crate::s3::S3StorageError;
 
 /// S3-safe key encoding that preserves path structure.
 ///

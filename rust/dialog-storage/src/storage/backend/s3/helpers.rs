@@ -127,7 +127,7 @@ impl Provider<credential::Sign> for Session {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<C> Provider<credential::Authorize<C, Allow>> for Session
 where
-    C: dialog_capability::Effect + Clone + 'static,
+    C: dialog_capability::Effect + 'static,
     C::Of: dialog_capability::Constraint,
     Capability<C>: dialog_common::ConditionalSend,
     credential::Authorize<C, Allow>: dialog_common::ConditionalSend + 'static,

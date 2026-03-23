@@ -13,7 +13,7 @@
 //!
 //! ```no_run
 //! use dialog_remote_s3::{Address, S3Credentials};
-//! use dialog_remote_s3::capability::storage::{Storage, Store, Get};
+//! use dialog_effects::storage::{Storage, Store, Get};
 //! use dialog_capability::{Subject, did};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -50,7 +50,6 @@ pub mod capability;
 mod checksum;
 mod key;
 pub mod s3;
-pub mod site;
 
 #[cfg(feature = "list")]
 #[allow(dead_code)]
@@ -65,7 +64,7 @@ pub use capability::{archive, memory, storage};
 pub use checksum::*;
 
 // Re-export site types at crate root
-pub use site::{Bucket, RequestDescriptorExt, S3, S3Address, S3StorageError};
+pub use s3::{Bucket, RequestDescriptorExt, S3, S3StorageError};
 
 // Re-export S3Credentials at crate root for convenience
 pub use s3::S3Credentials;

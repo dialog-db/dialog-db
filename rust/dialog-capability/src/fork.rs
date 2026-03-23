@@ -79,7 +79,6 @@ where
     /// 3. Builds `ForkInvocation { address, credentials, authorization }`
     pub async fn acquire<Env>(self, env: &Env) -> Result<ForkInvocation<S, Fx>, AuthorizeError>
     where
-        Fx: Clone,
         Capability<Fx>: Ability + Clone + ConditionalSend,
         credential::Authorize<Fx, S::Format>: ConditionalSend + 'static,
         credential::Retrieve<S::Credentials>: ConditionalSend + 'static,
@@ -110,7 +109,6 @@ where
     /// Authorize, resolve credentials, and execute in one step.
     pub async fn perform<Env>(self, env: &Env) -> Result<Fx::Output, AuthorizeError>
     where
-        Fx: Clone,
         Capability<Fx>: Ability + Clone + ConditionalSend,
         credential::Authorize<Fx, S::Format>: ConditionalSend + 'static,
         credential::Retrieve<S::Credentials>: ConditionalSend + 'static,

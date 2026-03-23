@@ -187,7 +187,7 @@ impl<Store: ConditionalSync> Provider<credential::Sign> for Credentials<Store> {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<Store, Fx> Provider<credential::Authorize<Fx>> for Credentials<Store>
 where
-    Fx: Effect + Clone + 'static,
+    Fx: Effect + 'static,
     Fx::Of: Constraint,
     Capability<Fx>: ConditionalSend,
     credential::Authorize<Fx>: ConditionalSend + 'static,

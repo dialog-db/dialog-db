@@ -11,6 +11,7 @@
 //! here rather than in the crates that use them.
 
 use proc_macro::TokenStream;
+mod claim;
 mod compose;
 mod provider;
 mod query;
@@ -394,6 +395,31 @@ pub fn derive_attribute(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(Router, attributes(route))]
 pub fn router(input: TokenStream) -> TokenStream {
     router::generate(input)
+}
+
+/// Derive macro that generates a `Claim` trait impl for effect types.
+///
+/// For types with no `#[claim(into = ...)]` annotations, `Claim::Claim = Self`
+/// (the authorization shape is identical to the execution shape).
+///
+/// For types with annotated fields, a parallel `{Name}Claim` struct is
+/// generated where annotated fields use the target type via `From` conversion.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// #[derive(Debug, Clone, Serialize, Deserialize, Claim)]
+/// pub struct Put {
+///     pub digest: Blake3Hash,
+///     #[claim(into = Checksum)]
+///     pub content: Vec<u8>,
+/// }
+/// // Generates PutClaim { digest: Blake3Hash, content: Checksum }
+/// // and impl Claim for Put { type Claim = PutClaim; ... }
+/// ```
+#[proc_macro_derive(Claim, attributes(claim))]
+pub fn derive_claim(input: TokenStream) -> TokenStream {
+    claim::derive(input)
 }
 
 /// Derive macro that generates `Provider<Fx>` impls for composite structs

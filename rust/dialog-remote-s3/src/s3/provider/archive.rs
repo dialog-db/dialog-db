@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use dialog_capability::Provider;
 use dialog_capability::fork::{Fork, ForkInvocation};
 
-use super::{RequestDescriptorExt, S3};
+use crate::s3::{RequestDescriptorExt, S3};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]

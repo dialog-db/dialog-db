@@ -40,7 +40,7 @@ use dialog_ucan::{DelegationChain, InvocationChain};
 /// Implements [`credential::Remote`] with the following lifecycle:
 ///
 /// 1. `Authorize`: builds and signs a UCAN invocation -> `UcanInvocation`
-/// 2. `Redeem`: POSTs the invocation to the access service -> `AuthorizedRequest`
+/// 2. The invocation is POSTed to the access service -> `AuthorizedRequest`
 ///
 /// # Example
 ///
@@ -294,7 +294,7 @@ pub mod tests {
     #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
     impl<C> Provider<credential::Authorize<C>> for Session
     where
-        C: Effect + Constraint + Clone + ConditionalSend + 'static,
+        C: Effect + Constraint + ConditionalSend + 'static,
         C::Of: Constraint,
         Capability<C>: ConditionalSend,
         credential::Authorize<C>: ConditionalSend + 'static,

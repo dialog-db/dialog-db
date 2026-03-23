@@ -59,7 +59,7 @@ mod tests {
         type Of = Level1;
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, crate::Claim)]
     struct Level3 {
         name: String,
     }

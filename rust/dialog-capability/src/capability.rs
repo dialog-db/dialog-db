@@ -125,7 +125,6 @@ impl<Fx: Effect> Capability<Fx> {
         env: &Env,
     ) -> Result<credential::Authorization<Fx, S::Format>, credential::AuthorizeError>
     where
-        Fx: Clone,
         Fx::Of: Constraint,
         S: Site,
         Self: Ability + ConditionalSend,
@@ -210,7 +209,7 @@ mod tests {
     }
 
     /// An effect that operates on Catalog
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, crate::Claim)]
     struct Get {
         digest: Vec<u8>,
     }
@@ -239,7 +238,7 @@ mod tests {
     }
 
     /// An effect under Store
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, crate::Claim)]
     struct Lookup {
         key: Vec<u8>,
     }
