@@ -1,8 +1,8 @@
-//! Provider implementations for S3 site.
+//! Provider implementations for S3 sites.
 //!
-//! S3 credentials presign requests via `Address::authorize()`.
-//! The old `S3Permit` type is removed — credential resolution happens
-//! through `ForkInvocation` at execution time.
+//! Each module provides two layers:
+//! - `Provider<Authorized<Fx>>` on `Http` — shared HTTP execution (used by S3 and UCAN)
+//! - `Provider<Fork<S3, Fx>>` on `S3` — SigV4 authorization, then delegates to `Http`
 
 pub mod archive;
 pub mod memory;
@@ -11,7 +11,8 @@ pub mod storage;
 #[cfg(test)]
 mod tests {
     use crate::Address;
-    use crate::capability::{AuthorizedRequest, S3Request};
+    use crate::capability::Access;
+    use crate::permit::Permit;
     use crate::s3::S3Credentials;
     use base58::ToBase58;
     use dialog_capability::{Capability, Constraint, Did, Subject, did};
@@ -43,10 +44,10 @@ mod tests {
     }
 
     /// Helper to presign a capability using Address (credentials on address).
-    async fn presign<C>(address: &Address, capability: &Capability<C>) -> AuthorizedRequest
+    async fn presign<C>(address: &Address, capability: &Capability<C>) -> Permit
     where
         C: Constraint + 'static,
-        Capability<C>: S3Request,
+        Capability<C>: Access,
     {
         address.authorize(capability).await.unwrap()
     }

@@ -19,7 +19,7 @@ use dialog_capability::site::Site;
 use thiserror::Error;
 use url::Url;
 
-use crate::AuthorizedRequest;
+use crate::Permit;
 
 /// Extension trait for RequestDescriptor to convert to reqwest RequestBuilder.
 pub trait RequestDescriptorExt {
@@ -27,7 +27,7 @@ pub trait RequestDescriptorExt {
     fn into_request(self, client: &reqwest::Client) -> reqwest::RequestBuilder;
 }
 
-impl RequestDescriptorExt for AuthorizedRequest {
+impl RequestDescriptorExt for Permit {
     fn into_request(self, client: &reqwest::Client) -> reqwest::RequestBuilder {
         let mut builder = match self.method.as_str() {
             "GET" => client.get(self.url),
@@ -88,11 +88,11 @@ impl From<crate::AccessError> for S3StorageError {
     }
 }
 
-/// S3 HTTP execution layer.
+/// S3 direct-access site.
 ///
-/// A stateless executor that presigns and dispatches `ForkInvocation<S3, Fx>` requests
-/// via HTTP. The invocation carries the address, credentials, and capability —
-/// `S3` just performs the HTTP round-trip.
+/// Combines SigV4 credential signing with HTTP execution. Fork provider impls
+/// authorize via `Address::authorize` then delegate to [`Http`] for the
+/// actual HTTP round-trip.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct S3;
 

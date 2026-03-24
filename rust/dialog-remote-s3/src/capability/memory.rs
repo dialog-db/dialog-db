@@ -1,14 +1,14 @@
 //! Memory S3 request implementations.
 //!
-//! This module provides `S3Request` implementations for memory (CAS cell)
+//! This module provides `Access` implementations for memory (CAS cell)
 //! capabilities, enabling them to be translated into presigned S3 URLs.
 
-use super::{Precondition, S3Request};
+use super::{Access, Precondition};
 use crate::Checksum;
 use dialog_capability::{Capability, Policy};
 use dialog_effects::memory::{self, Cell, Space};
 
-impl S3Request for Capability<memory::Resolve> {
+impl Access for Capability<memory::Resolve> {
     fn method(&self) -> &'static str {
         "GET"
     }
@@ -22,7 +22,7 @@ impl S3Request for Capability<memory::Resolve> {
     }
 }
 
-impl S3Request for Capability<memory::Publish> {
+impl Access for Capability<memory::Publish> {
     fn method(&self) -> &'static str {
         "PUT"
     }
@@ -45,7 +45,7 @@ impl S3Request for Capability<memory::Publish> {
     }
 }
 
-impl S3Request for Capability<memory::PublishClaim> {
+impl Access for Capability<memory::PublishClaim> {
     fn method(&self) -> &'static str {
         "PUT"
     }
@@ -68,7 +68,7 @@ impl S3Request for Capability<memory::PublishClaim> {
     }
 }
 
-impl S3Request for Capability<memory::Retract> {
+impl Access for Capability<memory::Retract> {
     fn method(&self) -> &'static str {
         "DELETE"
     }
@@ -85,7 +85,7 @@ impl S3Request for Capability<memory::Retract> {
     }
 }
 
-impl S3Request for Capability<memory::RetractClaim> {
+impl Access for Capability<memory::RetractClaim> {
     fn method(&self) -> &'static str {
         "DELETE"
     }

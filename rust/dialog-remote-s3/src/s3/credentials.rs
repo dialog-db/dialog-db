@@ -6,7 +6,8 @@
 //! - `None` → public/unsigned access
 //! - `Some(S3Credentials)` → private access with SigV4 signing
 
-use crate::capability::{AuthorizedRequest, Precondition, S3Request};
+use crate::capability::{Access, Precondition};
+use crate::permit::Permit;
 use crate::{AccessError, Address};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
@@ -67,11 +68,11 @@ impl S3Credentials {
     }
 
     /// Generates a signed URL using the given address for endpoint/region/bucket info.
-    pub(crate) async fn grant<R: S3Request>(
+    pub(crate) async fn grant<R: Access>(
         &self,
         request: &R,
         address: &Address,
-    ) -> Result<AuthorizedRequest, AccessError> {
+    ) -> Result<Permit, AccessError> {
         let time = current_time();
         let timestamp = time.format("%Y%m%dT%H%M%SZ").to_string();
         let date = &timestamp[0..8];
@@ -196,7 +197,7 @@ impl S3Credentials {
             query.append_pair("X-Amz-Signature", &signature.to_string());
         }
 
-        Ok(AuthorizedRequest {
+        Ok(Permit {
             url,
             method: request.method().to_string(),
             headers,

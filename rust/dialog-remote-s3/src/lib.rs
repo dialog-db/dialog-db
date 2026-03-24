@@ -46,9 +46,12 @@
 //! ```
 
 mod address;
+mod authorized;
 pub mod capability;
 mod checksum;
+mod error;
 mod key;
+mod permit;
 pub mod s3;
 
 #[cfg(feature = "list")]
@@ -59,9 +62,12 @@ mod list;
 pub mod helpers;
 
 pub use address::*;
-pub use capability::{AccessError, Acl, AuthorizedRequest, Precondition, S3Request};
+pub use authorized::Authorized;
+pub use capability::{Access, Acl, Precondition};
 pub use capability::{archive, memory, storage};
 pub use checksum::*;
+pub use error::AccessError;
+pub use permit::Permit;
 
 // Re-export site types at crate root
 pub use s3::{Bucket, RequestDescriptorExt, S3, S3StorageError};

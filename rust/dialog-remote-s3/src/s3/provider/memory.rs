@@ -1,14 +1,14 @@
-//! Memory capability types and Provider implementations for S3 backend.
+//! Memory capability providers for S3.
 //!
-//! Re-exports memory types from [`dialog_effects`] and implements
-//! `Provider<Fork<S3, Fx>>` for [`S3`].
-
-pub use dialog_effects::memory::*;
+//! Each effect is paired: `Provider<Fork<S3, Fx>>` authorizes via SigV4,
+//! then delegates to `Provider<Authorized<Fx>>` for HTTP execution.
 
 use async_trait::async_trait;
-use dialog_capability::Provider;
 use dialog_capability::fork::{Fork, ForkInvocation};
+use dialog_capability::{Policy, Provider};
+use dialog_effects::memory::*;
 
+use crate::Authorized;
 use crate::s3::{RequestDescriptorExt, S3};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -18,14 +18,30 @@ impl Provider<Fork<S3, Resolve>> for S3 {
         &self,
         invocation: ForkInvocation<S3, Resolve>,
     ) -> Result<Option<Publication>, MemoryError> {
-        let request = invocation
+        let permit = invocation
             .address
             .authorize(&invocation.authorization.capability)
             .await
             .map_err(|e| MemoryError::Storage(e.to_string()))?;
 
+        <S3 as Provider<Authorized<Resolve>>>::execute(
+            self,
+            Authorized::new(permit, invocation.authorization.capability),
+        )
+        .await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Provider<Authorized<Resolve>> for S3 {
+    async fn execute(
+        &self,
+        input: Authorized<Resolve>,
+    ) -> Result<Option<Publication>, MemoryError> {
         let client = reqwest::Client::new();
-        let response = request
+        let response = input
+            .permit
             .into_request(&client)
             .send()
             .await
@@ -66,22 +82,33 @@ impl Provider<Fork<S3, Publish>> for S3 {
         &self,
         invocation: ForkInvocation<S3, Publish>,
     ) -> Result<Vec<u8>, MemoryError> {
-        let content = Publish::of(&invocation.authorization.capability)
-            .content
-            .clone();
-        let when = Publish::of(&invocation.authorization.capability)
-            .when
-            .as_ref()
-            .map(|b| String::from_utf8_lossy(b).to_string());
-
-        let request = invocation
+        let permit = invocation
             .address
             .authorize(&invocation.authorization.capability)
             .await
             .map_err(|e| MemoryError::Storage(e.to_string()))?;
 
+        <S3 as Provider<Authorized<Publish>>>::execute(
+            self,
+            Authorized::new(permit, invocation.authorization.capability),
+        )
+        .await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Provider<Authorized<Publish>> for S3 {
+    async fn execute(&self, input: Authorized<Publish>) -> Result<Vec<u8>, MemoryError> {
+        let content = Publish::of(&input.capability).content.clone();
+        let when = Publish::of(&input.capability)
+            .when
+            .as_ref()
+            .map(|b| String::from_utf8_lossy(b).to_string());
+
         let client = reqwest::Client::new();
-        let response = request
+        let response = input
+            .permit
             .into_request(&client)
             .body(content)
             .send()
@@ -116,17 +143,29 @@ impl Provider<Fork<S3, Publish>> for S3 {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<Fork<S3, Retract>> for S3 {
     async fn execute(&self, invocation: ForkInvocation<S3, Retract>) -> Result<(), MemoryError> {
-        let when = String::from_utf8_lossy(&Retract::of(&invocation.authorization.capability).when)
-            .to_string();
-
-        let request = invocation
+        let permit = invocation
             .address
             .authorize(&invocation.authorization.capability)
             .await
             .map_err(|e| MemoryError::Storage(e.to_string()))?;
 
+        <S3 as Provider<Authorized<Retract>>>::execute(
+            self,
+            Authorized::new(permit, invocation.authorization.capability),
+        )
+        .await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Provider<Authorized<Retract>> for S3 {
+    async fn execute(&self, input: Authorized<Retract>) -> Result<(), MemoryError> {
+        let when = String::from_utf8_lossy(&Retract::of(&input.capability).when).to_string();
+
         let client = reqwest::Client::new();
-        let response = request
+        let response = input
+            .permit
             .into_request(&client)
             .send()
             .await

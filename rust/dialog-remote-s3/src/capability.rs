@@ -1,6 +1,6 @@
 //! S3 request translation for capabilities.
 //!
-//! This module provides [`S3Request`] implementations for capability types
+//! This module provides [`Access`] implementations for capability types
 //! defined in [`dialog_effects`], enabling them to be translated into
 //! presigned S3 URLs.
 //!
@@ -30,16 +30,13 @@
 //!
 //! # Submodules
 //!
-//! - [`storage`]: `S3Request` impls for storage capabilities
-//! - [`memory`]: `S3Request` impls for memory capabilities
-//! - [`archive`]: `S3Request` impls for archive capabilities
+//! - [`storage`]: `Access` impls for storage capabilities
+//! - [`memory`]: `Access` impls for memory capabilities
+//! - [`archive`]: `Access` impls for archive capabilities
 
 use super::checksum::Checksum;
 use chrono::{DateTime, Utc};
 use dialog_common::{ConditionalSend, ConditionalSync};
-use serde::{Deserialize, Serialize};
-use thiserror::Error;
-use url::Url;
 
 /// Default URL expiration: 1 hour.
 pub const DEFAULT_EXPIRES: u64 = 3600;
@@ -47,40 +44,6 @@ pub const DEFAULT_EXPIRES: u64 = 3600;
 pub mod archive;
 pub mod memory;
 pub mod storage;
-
-/// Error type for authorization operations.
-#[derive(Debug, Error)]
-pub enum AccessError {
-    /// No delegation found for the subject.
-    #[error("No delegation for subject: {0}")]
-    NoDelegation(String),
-
-    /// Failed to build the invocation.
-    #[error("Invocation error: {0}")]
-    Invocation(String),
-
-    /// Access service returned an error.
-    #[error("Access service error: {0}")]
-    Service(String),
-
-    /// Invalid configuration.
-    #[error("Configuration error: {0}")]
-    Configuration(String),
-}
-
-/// Describes an HTTP request to perform an authorized operation.
-///
-/// This is the result of authorizing a claim - it contains all the
-/// information needed to make the actual HTTP request.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct AuthorizedRequest {
-    /// The presigned URL to use.
-    pub url: Url,
-    /// HTTP method (GET, PUT, DELETE).
-    pub method: String,
-    /// Headers to include in the request.
-    pub headers: Vec<(String, String)>,
-}
 
 /// Precondition for conditional S3 operations (CAS semantics).
 #[derive(Debug, Clone)]
@@ -97,7 +60,7 @@ pub enum Precondition {
 /// S3 requests. Providing convenient way for creating authorizations in
 /// form of presigned URLs + headers.
 ///
-pub trait S3Request: ConditionalSend + ConditionalSync {
+pub trait Access: ConditionalSend + ConditionalSync {
     /// The HTTP method for this request.
     fn method(&self) -> &'static str;
 

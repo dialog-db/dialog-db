@@ -30,7 +30,7 @@ impl UcanAddress {
     pub async fn authorize(
         &self,
         invocation: &UcanInvocation,
-    ) -> Result<dialog_remote_s3::AuthorizedRequest, dialog_remote_s3::AccessError> {
+    ) -> Result<dialog_remote_s3::Permit, dialog_remote_s3::AccessError> {
         let ucan = invocation
             .to_bytes()
             .map_err(|e| dialog_remote_s3::AccessError::Invocation(e.to_string()))?;

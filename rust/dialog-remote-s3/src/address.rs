@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::AccessError;
-use crate::capability::{AuthorizedRequest, S3Request};
+use crate::capability::Access;
+use crate::permit::Permit;
 use crate::s3::S3Credentials;
 
 /// Address for S3-compatible storage.
@@ -154,10 +155,7 @@ impl Address {
     ///
     /// - No credentials → public/unsigned access (no SigV4 signing)
     /// - With credentials → private access with SigV4 signing
-    pub async fn authorize<R: S3Request>(
-        &self,
-        request: &R,
-    ) -> Result<AuthorizedRequest, AccessError> {
+    pub async fn authorize<R: Access>(&self, request: &R) -> Result<Permit, AccessError> {
         match &self.credentials {
             None => self.build_unsigned_request(request).await,
             Some(creds) => creds.grant(request, self).await,
@@ -165,10 +163,7 @@ impl Address {
     }
 
     /// Build an unsigned request for public access.
-    async fn build_unsigned_request<R: S3Request>(
-        &self,
-        request: &R,
-    ) -> Result<AuthorizedRequest, AccessError> {
+    async fn build_unsigned_request<R: Access>(&self, request: &R) -> Result<Permit, AccessError> {
         use crate::capability::Precondition;
 
         let path = request.path();
@@ -199,7 +194,7 @@ impl Address {
             Precondition::None => {}
         }
 
-        Ok(AuthorizedRequest {
+        Ok(Permit {
             url,
             method: request.method().to_string(),
             headers,

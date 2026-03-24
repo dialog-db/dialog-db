@@ -1,15 +1,15 @@
 //! Storage S3 request implementations.
 //!
-//! This module provides `S3Request` implementations for storage capabilities,
+//! This module provides `Access` implementations for storage capabilities,
 //! enabling them to be translated into presigned S3 URLs.
 
-use super::S3Request;
+use super::Access;
 use crate::Checksum;
 use base58::ToBase58;
 use dialog_capability::{Capability, Policy};
 use dialog_effects::storage::{self, Store};
 
-impl S3Request for Capability<storage::Get> {
+impl Access for Capability<storage::Get> {
     fn method(&self) -> &'static str {
         "GET"
     }
@@ -23,7 +23,7 @@ impl S3Request for Capability<storage::Get> {
     }
 }
 
-impl S3Request for Capability<storage::Set> {
+impl Access for Capability<storage::Set> {
     fn method(&self) -> &'static str {
         "PUT"
     }
@@ -40,7 +40,7 @@ impl S3Request for Capability<storage::Set> {
     }
 }
 
-impl S3Request for Capability<storage::SetClaim> {
+impl Access for Capability<storage::SetClaim> {
     fn method(&self) -> &'static str {
         "PUT"
     }
@@ -57,7 +57,7 @@ impl S3Request for Capability<storage::SetClaim> {
     }
 }
 
-impl S3Request for Capability<storage::Delete> {
+impl Access for Capability<storage::Delete> {
     fn method(&self) -> &'static str {
         "DELETE"
     }
@@ -71,7 +71,7 @@ impl S3Request for Capability<storage::Delete> {
     }
 }
 
-impl S3Request for Capability<storage::List> {
+impl Access for Capability<storage::List> {
     fn method(&self) -> &'static str {
         "GET"
     }
