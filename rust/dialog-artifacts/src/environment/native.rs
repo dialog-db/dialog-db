@@ -3,7 +3,9 @@
 use std::io::ErrorKind;
 use std::path::Path;
 
-use dialog_credentials::{Ed25519Signer, OpenedProfile, key::KeyExport};
+use dialog_credentials::{Ed25519Signer, key::KeyExport};
+
+use crate::Credentials;
 use dialog_storage::provider::FileSystem;
 use tokio::fs;
 
@@ -11,7 +13,7 @@ use super::{Environment, OpenError, Remote};
 use crate::Operator;
 
 /// Native environment with opened profile credentials and remote dispatch.
-pub type NativeEnvironment = Environment<OpenedProfile, FileSystem, Remote>;
+pub type NativeEnvironment = Environment<Credentials, FileSystem, Remote>;
 
 /// Open a fully-configured native environment from a profile descriptor.
 ///
@@ -38,7 +40,7 @@ pub async fn open(profile: crate::Profile) -> Result<NativeEnvironment, OpenErro
 
     let profile_signer = load_or_create_profile_key(&profile.name, &dialog_dir).await?;
     let operator = derive_operator(&profile_signer, &profile.operator).await?;
-    let credentials = OpenedProfile::new(&profile.name, profile_signer, operator);
+    let credentials = Credentials::new(&profile.name, profile_signer, operator);
 
     Ok(Environment::new(credentials, storage, Remote))
 }

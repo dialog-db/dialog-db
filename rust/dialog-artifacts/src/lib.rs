@@ -75,9 +75,9 @@ pub use uri::*;
 pub mod environment;
 pub use environment::*;
 
-/// Profile configuration for opening an environment.
-pub mod profile;
-pub use profile::{Operator, Profile};
+/// Credentials, profile configuration, and operator strategy.
+pub mod credentials;
+pub use credentials::{Credentials, Operator, Profile};
 
 /// Remote dispatch for fork invocations.
 pub mod remote;

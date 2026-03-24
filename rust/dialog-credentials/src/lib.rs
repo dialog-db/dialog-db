@@ -10,11 +10,8 @@
 //! [`Issuer`]: dialog_capability::Issuer
 
 pub mod key;
-pub mod profile;
 
 #[cfg(feature = "ed25519")]
 pub mod ed25519;
 #[cfg(feature = "ed25519")]
 pub use ed25519::*;
-
-pub use profile::OpenedProfile;

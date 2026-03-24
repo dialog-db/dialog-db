@@ -1,13 +1,15 @@
 //! Web environment — IndexedDb storage with profile credentials.
 
-use dialog_credentials::{Ed25519Signer, OpenedProfile};
+use dialog_credentials::Ed25519Signer;
+
+use crate::Credentials;
 use dialog_storage::provider::IndexedDb;
 
 use super::{Environment, OpenError, Remote};
 use crate::Operator;
 
 /// Web environment with opened profile credentials and remote dispatch.
-pub type WebEnvironment = Environment<OpenedProfile, IndexedDb, Remote>;
+pub type WebEnvironment = Environment<Credentials, IndexedDb, Remote>;
 
 /// Open a fully-configured web environment from a profile descriptor.
 pub async fn open(profile: crate::Profile) -> Result<WebEnvironment, OpenError> {
@@ -29,7 +31,7 @@ pub async fn open(profile: crate::Profile) -> Result<WebEnvironment, OpenError> 
         }
     };
 
-    let credentials = OpenedProfile::new(&profile.name, profile_key, operator);
+    let credentials = Credentials::new(&profile.name, profile_key, operator);
 
     Ok(Environment::new(credentials, storage, Remote))
 }

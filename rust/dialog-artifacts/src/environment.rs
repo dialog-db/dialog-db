@@ -3,9 +3,10 @@
 //! Use [`open`] to bootstrap a fully-configured environment from a
 //! [`Profile`](crate::Profile) descriptor.
 
-pub use dialog_effects::environment::Environment;
-
 mod error;
+mod provider;
+
+pub use provider::Environment;
 
 use crate::remote::Remote;
 

@@ -27,7 +27,6 @@
 
 pub mod archive;
 pub mod credential;
-pub mod environment;
 pub mod memory;
 pub mod storage;
 
