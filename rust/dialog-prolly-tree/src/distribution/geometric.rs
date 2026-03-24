@@ -1,6 +1,6 @@
-use dialog_storage::HashType;
-
 use crate::KeyType;
+use dialog_storage::HashType;
+use std::mem::size_of;
 
 use super::{Distribution, Rank};
 
@@ -85,7 +85,7 @@ where
 ///
 /// # Algorithm
 ///
-/// 1. Extract the first 8 bytes of `bytes` as a little-endian `u64` prefix.
+/// 1. Extract the first set of bytes of `bytes` as a little-endian `u64` prefix.
 ///    Since Blake3 output is uniformly distributed, this prefix is uniformly
 ///    distributed in `[0, u64::MAX]`.
 ///
@@ -101,14 +101,14 @@ where
 /// Rank 1 is the most common (probability `1 - 1/m`), and each successive rank
 /// is `m` times rarer.
 pub(crate) fn compute_geometric_rank(bytes: &[u8], m: u32) -> Rank {
-    // Extract the first 8 bytes of the hash as a u64 prefix.
+    // Extract the first set of bytes of the hash as a u64 prefix.
     // Little-endian is used for consistency with the hash output byte order
     // (the choice of endianness doesn't affect uniformity, but must be
     // deterministic for consistent tree structure).
     let prefix = u64::from_le_bytes(
-        bytes[0..8]
+        bytes[0..size_of::<u64>()]
             .try_into()
-            .expect("hash must be at least 8 bytes"),
+            .expect("hash must be at least u64 size"),
     );
 
     // Start with rank 1 (the "base" level — most keys land here).

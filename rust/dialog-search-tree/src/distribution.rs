@@ -4,6 +4,7 @@ pub type Rank = u32;
 /// Geometric distribution for computing node ranks.
 pub mod geometric {
     use dialog_common::Blake3Hash;
+    use std::mem::size_of;
 
     use super::Rank;
 
@@ -34,7 +35,7 @@ pub mod geometric {
     /// Compute the rank of a hash using a threshold-based geometric
     /// distribution.
     ///
-    /// The first 8 bytes of the hash are interpreted as a little-endian `u64`
+    /// The first set of bytes of the hash are interpreted as a little-endian `u64`
     /// prefix, uniformly distributed in `[0, u64::MAX]`. The rank is
     /// determined by how many geometrically decreasing thresholds
     /// (`u64::MAX / m`, `u64::MAX / m²`, ...) the prefix falls below.
@@ -45,9 +46,9 @@ pub mod geometric {
         let bytes = hash.as_bytes();
 
         let prefix = u64::from_le_bytes(
-            bytes[0..8]
+            bytes[0..size_of::<u64>()]
                 .try_into()
-                .expect("hash must be at least 8 bytes"),
+                .expect("hash must be at least u64 size"),
         );
 
         let mut rank: Rank = 1;
