@@ -14,7 +14,7 @@ pub use crate::Address;
 pub use credentials::S3Credentials;
 
 use dialog_capability::Did;
-use dialog_capability::credential::Allow;
+use dialog_capability::access::Allow;
 use dialog_capability::site::Site;
 use thiserror::Error;
 use url::Url;
@@ -97,7 +97,7 @@ impl From<crate::AccessError> for S3StorageError {
 pub struct S3;
 
 impl Site for S3 {
-    type Format = Allow;
+    type Protocol = Allow;
     type Address = crate::Address;
 }
 

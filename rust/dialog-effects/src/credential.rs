@@ -1,19 +1,17 @@
 //! Credential capability hierarchy.
 //!
-//! Re-exports core credential types from [`dialog_capability::credential`].
+//! Re-exports core credential types from [`dialog_capability::credential`]
+//! and authority types from [`dialog_capability::authority`].
 //!
 //! # Capability Hierarchy
 //!
 //! ```text
 //! Subject
 //!   +-- Credential (ability: /credential)
-//!         +-- Identify -> Effect -> Result<Identity, CredentialError>
-//!         +-- Sign { payload } -> Effect -> Result<Vec<u8>, CredentialError>
+//!         +-- Retrieve / Save / List / Import
 //! ```
 
-pub use dialog_capability::credential::{
-    Credential, CredentialError, Identify, Identity, Sign, SignCapability,
-};
+pub use dialog_capability::credential::{Credential, CredentialError};
 pub use dialog_capability::{Capability, Did, Subject};
 
 #[cfg(test)]
@@ -26,23 +24,5 @@ mod tests {
         let claim = Subject::from(did!("key:zSpace")).attenuate(Credential);
         assert_eq!(claim.subject(), &did!("key:zSpace"));
         assert_eq!(claim.ability(), "/credential");
-    }
-
-    #[test]
-    fn it_builds_identify_claim_path() {
-        let claim = Subject::from(did!("key:zSpace"))
-            .attenuate(Credential)
-            .invoke(Identify);
-
-        assert_eq!(claim.ability(), "/credential/identify");
-    }
-
-    #[test]
-    fn it_builds_sign_claim_path() {
-        let claim = Subject::from(did!("key:zSpace"))
-            .attenuate(Credential)
-            .invoke(Sign::new(b"hello"));
-
-        assert_eq!(claim.ability(), "/credential/sign");
     }
 }

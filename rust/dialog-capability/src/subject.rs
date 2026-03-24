@@ -1,7 +1,7 @@
 pub use dialog_varsig::Did;
 pub use dialog_varsig::did;
 
-use crate::{Capability, Constrained, Policy};
+use crate::{Capability, Constrained, Effect, Policy};
 
 /// The subject (resource) - anchors the capability chain.
 ///
@@ -24,6 +24,17 @@ impl Subject {
     {
         Capability::new(Constrained {
             constraint: value,
+            capability: self,
+        })
+    }
+
+    /// Create an invocable capability directly on this subject.
+    pub fn invoke<Fx>(self, fx: Fx) -> Capability<Fx>
+    where
+        Fx: Effect<Of = Self>,
+    {
+        Capability::new(Constrained {
+            constraint: fx,
             capability: self,
         })
     }

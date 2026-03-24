@@ -7,7 +7,7 @@
 //! - Address types (available on all platforms for deserialization in WASM tests)
 //! - Server implementation (native-only, in the `server` submodule)
 //! - Test operator types for capability-based testing
-use dialog_capability::{Capability, Did, Principal, Provider, credential};
+use dialog_capability::{Capability, Did, Principal, Provider, Subject, authority, credential};
 
 use serde::{Deserialize, Serialize};
 
@@ -66,25 +66,24 @@ impl Principal for Session {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<credential::Identify> for Session {
+impl Provider<authority::Identify> for Session {
     async fn execute(
         &self,
-        _input: Capability<credential::Identify>,
-    ) -> Result<credential::Identity, credential::CredentialError> {
-        Ok(credential::Identity {
-            profile: self.did.clone(),
-            operator: self.did.clone(),
-            account: None,
-        })
+        input: Capability<authority::Identify>,
+    ) -> Result<authority::Authority, credential::CredentialError> {
+        let subject_did = input.subject().clone();
+        Ok(Subject::from(subject_did)
+            .attenuate(authority::Profile::local(self.did.clone()))
+            .attenuate(authority::Operator::new(self.did.clone())))
     }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<credential::Sign> for Session {
+impl Provider<authority::Sign> for Session {
     async fn execute(
         &self,
-        _input: Capability<credential::Sign>,
+        _input: Capability<authority::Sign>,
     ) -> Result<Vec<u8>, credential::CredentialError> {
         // S3 direct access uses SigV4 signing, not external signatures.
         // The signature is never verified -- S3 uses its own SigV4 auth.

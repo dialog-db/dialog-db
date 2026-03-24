@@ -70,6 +70,6 @@ impl UcanAddress {
 pub struct UcanSite;
 
 impl Site for UcanSite {
-    type Format = Ucan;
+    type Protocol = Ucan;
     type Address = UcanAddress;
 }

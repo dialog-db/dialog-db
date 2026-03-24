@@ -6,7 +6,7 @@
 //! No methods — all execution logic lives in [`Fork`](crate::fork::Fork)
 //! and [`Provider`](crate::Provider) impls.
 
-use crate::credential::{Allow, AuthorizationFormat};
+use crate::access::{Allow, Protocol};
 use dialog_common::ConditionalSend;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -28,11 +28,11 @@ pub trait SiteAddress: Serialize + DeserializeOwned + Clone + ConditionalSend + 
 /// Credentials are the address's concern — e.g. S3 `Address` carries
 /// `Option<S3Credentials>` directly.
 pub trait Site: Clone + ConditionalSend + 'static {
-    /// The authorization format this site requires.
+    /// The access protocol used by this site
     ///
     /// - `Allow` for sites that just need permission (S3, Local)
     /// - UCAN format for sites that need a signed invocation chain
-    type Format: AuthorizationFormat;
+    type Protocol: Protocol;
 
     /// The address type for this site (serializable for storage/transport).
     type Address: Serialize + DeserializeOwned + Clone + ConditionalSend + 'static;
@@ -45,6 +45,6 @@ pub trait Site: Clone + ConditionalSend + 'static {
 pub struct Local;
 
 impl Site for Local {
-    type Format = Allow;
+    type Protocol = Allow;
     type Address = ();
 }

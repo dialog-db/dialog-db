@@ -1,5 +1,5 @@
 use dialog_capability::fork::{Fork, ForkInvocation};
-use dialog_capability::{Capability, Did, Provider, credential};
+use dialog_capability::{Capability, Did, Provider, Subject, authority, credential};
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
 use dialog_remote_s3::Address;
@@ -187,26 +187,25 @@ impl Provider<memory_fx::Retract> for TestEnv {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<credential::Identify> for TestEnv {
+impl Provider<authority::Identify> for TestEnv {
     async fn execute(
         &self,
-        _input: Capability<credential::Identify>,
-    ) -> Result<credential::Identity, credential::CredentialError> {
+        input: Capability<authority::Identify>,
+    ) -> Result<authority::Authority, credential::CredentialError> {
         let did = test_subject();
-        Ok(credential::Identity {
-            profile: did.clone(),
-            operator: did,
-            account: None,
-        })
+        let subject_did = input.subject().clone();
+        Ok(Subject::from(subject_did)
+            .attenuate(authority::Profile::local(did.clone()))
+            .attenuate(authority::Operator::new(did)))
     }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<credential::Sign> for TestEnv {
+impl Provider<authority::Sign> for TestEnv {
     async fn execute(
         &self,
-        _input: Capability<credential::Sign>,
+        _input: Capability<authority::Sign>,
     ) -> Result<Vec<u8>, credential::CredentialError> {
         Ok(vec![0u8; 64])
     }

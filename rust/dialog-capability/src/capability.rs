@@ -1,8 +1,9 @@
+use crate::access;
 use crate::fork::Fork;
 use crate::site::{Site, SiteAddress};
 use crate::{
     Ability, Constrained, Constraint, Did, Effect, Policy, PolicyBuilder, Provider, Selector,
-    Subject, credential,
+    Subject,
 };
 use dialog_common::ConditionalSend;
 use std::fmt::{Debug, Formatter};
@@ -118,24 +119,24 @@ impl<Fx: Effect> Capability<Fx> {
 
     /// Authorize this capability for a specific site's authorization format.
     ///
-    /// Builds a credential authorization chain and executes it.
+    /// Builds an access authorization chain and executes it.
     /// Returns `Authorization<Fx, S::Format>`.
     pub async fn acquire<S, Env>(
         self,
         env: &Env,
-    ) -> Result<credential::Authorization<Fx, S::Format>, credential::AuthorizeError>
+    ) -> Result<access::Authorization<Fx, S::Protocol>, access::AuthorizeError>
     where
         Fx::Of: Constraint,
         S: Site,
         Self: Ability + ConditionalSend,
-        credential::Authorize<Fx, S::Format>: ConditionalSend + 'static,
-        Env: Provider<credential::Authorize<Fx, S::Format>>,
+        access::Authorize<Fx, S::Protocol>: ConditionalSend + 'static,
+        Env: Provider<access::Authorize<Fx, S::Protocol>>,
     {
         let did = self.subject().clone();
         let authorize_cap = Subject::from(did)
-            .attenuate(credential::Credential)
-            .invoke(credential::Authorize::<Fx, S::Format>::new(self));
-        <Env as Provider<credential::Authorize<Fx, S::Format>>>::execute(env, authorize_cap).await
+            .attenuate(access::Access)
+            .invoke(access::Authorize::<Fx, S::Protocol>::new(self));
+        <Env as Provider<access::Authorize<Fx, S::Protocol>>>::execute(env, authorize_cap).await
     }
 
     /// Attach a site address to this capability for remote execution.

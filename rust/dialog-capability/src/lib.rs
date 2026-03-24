@@ -150,7 +150,7 @@
 //! |------|------|
 //! | [`Ability`] | Trait providing `subject()` and `ability()` |
 //! | [`Provider<C>`] | Executes commands |
-//! | [`Authorized`] | Capability paired with access context and authorization proof |
+//! | [`access::Authorization`] | Capability paired with format-specific authorization proof |
 //! | [`site::Site`] | Trait for site configuration types |
 
 // Allow `#[derive(Claim)]` to resolve `::dialog_capability::Claim` inside this crate.
@@ -212,12 +212,11 @@ pub use dialog_macros::Claim;
 
 pub mod access;
 
+pub mod authority;
+
 pub mod site;
 
 pub mod credential;
-
-pub mod authorization;
-pub use authorization::*;
 
 pub mod command;
 pub use command::*;

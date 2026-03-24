@@ -14,13 +14,11 @@
 //! to find all delegations granted to an operator for a given subject.
 //! Entries where `issuer == subject` are direct grants (no further chain needed).
 
-use crate::credential::{self, Authorization, AuthorizeError};
-use crate::{Capability, Constraint, Did, Provider};
-use dialog_common::{ConditionalSend, ConditionalSync};
+use crate::credential;
+use crate::{Capability, Did, Provider};
+use dialog_common::ConditionalSync;
 use dialog_ucan::DelegationChain;
 use dialog_ucan::subject::Subject;
-
-use super::Ucan;
 
 pub fn delegation_prefix(audience: &Did, subject: &Did) -> String {
     format!("ucan/{}/{}/", audience, subject)
@@ -95,32 +93,6 @@ where
     Ok(())
 }
 
-/// Blanket impl: any type providing the base credential effects
-/// can authorize UCAN capabilities.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Env, Fx> Provider<credential::Authorize<Fx, Ucan>> for Env
-where
-    Fx: crate::Effect + 'static,
-    Fx::Of: Constraint,
-    Fx: Clone + ConditionalSend,
-    Capability<Fx>: crate::Ability + Clone + ConditionalSend + ConditionalSync,
-    credential::Authorize<Fx, Ucan>: ConditionalSend + 'static,
-    Env: Provider<credential::Identify>
-        + Provider<credential::Sign>
-        + Provider<credential::List<Vec<u8>>>
-        + Provider<credential::Retrieve<Vec<u8>>>
-        + ConditionalSync,
-{
-    async fn execute(
-        &self,
-        input: Capability<credential::Authorize<Fx, Ucan>>,
-    ) -> Result<Authorization<Fx, Ucan>, AuthorizeError> {
-        let auth_request = input.into_inner().constraint;
-        super::authorize::authorize(self, auth_request.capability).await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,8 +105,9 @@ mod tests {
     // Minimal test provider that stores credentials in-memory using HashMaps
     // (no dependency on dialog-storage or Volatile)
     mod test_provider {
+        use crate::authority;
         use crate::credential::{self, CredentialError};
-        use crate::{Capability, Policy, Provider};
+        use crate::{Capability, Policy, Provider, Subject};
         use async_trait::async_trait;
         use dialog_common::ConditionalSend;
         use serde::Serialize;
@@ -242,29 +215,28 @@ mod tests {
 
         #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
         #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-        impl Provider<credential::Identify> for TestStore {
+        impl Provider<authority::Identify> for TestStore {
             async fn execute(
                 &self,
-                _input: Capability<credential::Identify>,
-            ) -> Result<credential::Identity, CredentialError> {
+                input: Capability<authority::Identify>,
+            ) -> Result<authority::Authority, CredentialError> {
                 let did = dialog_varsig::Principal::did(&self.signer);
-                Ok(credential::Identity {
-                    profile: did.clone(),
-                    operator: did.clone(),
-                    account: None,
-                })
+                let subject_did = input.subject().clone();
+                Ok(Subject::from(subject_did)
+                    .attenuate(authority::Profile::local(did.clone()))
+                    .attenuate(authority::Operator::new(did)))
             }
         }
 
         #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
         #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-        impl Provider<credential::Sign> for TestStore {
+        impl Provider<authority::Sign> for TestStore {
             async fn execute(
                 &self,
-                input: Capability<credential::Sign>,
+                input: Capability<authority::Sign>,
             ) -> Result<Vec<u8>, CredentialError> {
                 use dialog_varsig::Signer;
-                let payload = credential::Sign::of(&input).payload.clone();
+                let payload = authority::Sign::of(&input).payload.clone();
                 let sig = self
                     .signer
                     .sign(&payload)

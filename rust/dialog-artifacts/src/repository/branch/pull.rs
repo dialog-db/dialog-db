@@ -1,6 +1,6 @@
-use dialog_capability::credential::{Allow, Authorize};
+use dialog_capability::access::{Allow, Authorize};
 use dialog_capability::fork::Fork;
-use dialog_capability::{Provider, Subject, credential};
+use dialog_capability::{Policy, Provider, Subject, authority};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
@@ -45,7 +45,7 @@ impl PullLocal<'_> {
             + Provider<archive_fx::Put>
             + Provider<memory_fx::Resolve>
             + Provider<memory_fx::Publish>
-            + Provider<credential::Identify>
+            + Provider<authority::Identify>
             + ConditionalSync
             + 'static,
     {
@@ -79,7 +79,7 @@ impl Pull<'_> {
             + Provider<archive_fx::Put>
             + Provider<memory_fx::Resolve>
             + Provider<memory_fx::Publish>
-            + Provider<credential::Identify>
+            + Provider<authority::Identify>
             + Provider<Authorize<archive_fx::Get, Allow>>
             + Provider<Authorize<memory_fx::Resolve, Allow>>
             + Provider<Fork<S3, archive_fx::Get>>
@@ -128,7 +128,7 @@ where
         + Provider<archive_fx::Put>
         + Provider<memory_fx::Resolve>
         + Provider<memory_fx::Publish>
-        + Provider<credential::Identify>
+        + Provider<authority::Identify>
         + ConditionalSync
         + 'static,
 {
@@ -196,17 +196,15 @@ where
 
         Ok(Some(upstream_revision))
     } else {
-        let identify_cap = Subject::from(branch.subject().clone())
-            .attenuate(credential::Credential)
-            .invoke(credential::Identify);
-        let identity = <Env as Provider<credential::Identify>>::execute(env, identify_cap)
+        let identify_cap = Subject::from(branch.subject().clone()).invoke(authority::Identify);
+        let auth = <Env as Provider<authority::Identify>>::execute(env, identify_cap)
             .await
             .map_err(|e| DialogArtifactsError::Storage(format!("Identify failed: {}", e)))?;
 
         let branch_period = branch_revision.as_ref().map(|r| r.period).unwrap_or(0);
 
         let new_revision = Revision {
-            issuer: identity.operator,
+            issuer: authority::Operator::of(&auth).operator.clone(),
             tree: NodeReference::from(hash),
             cause: HashSet::from([upstream_revision.tree().clone()]),
             period: upstream_revision.period.max(branch_period) + 1,
@@ -251,7 +249,7 @@ where
         + Provider<archive_fx::Put>
         + Provider<memory_fx::Resolve>
         + Provider<memory_fx::Publish>
-        + Provider<credential::Identify>
+        + Provider<authority::Identify>
         + Provider<Authorize<archive_fx::Get, Allow>>
         + Provider<Authorize<memory_fx::Resolve, Allow>>
         + Provider<Fork<S3, archive_fx::Get>>
@@ -346,17 +344,15 @@ where
 
         Ok(Some(upstream_revision))
     } else {
-        let identify_cap = Subject::from(branch.subject().clone())
-            .attenuate(credential::Credential)
-            .invoke(credential::Identify);
-        let identity = <Env as Provider<credential::Identify>>::execute(env, identify_cap)
+        let identify_cap = Subject::from(branch.subject().clone()).invoke(authority::Identify);
+        let auth = <Env as Provider<authority::Identify>>::execute(env, identify_cap)
             .await
             .map_err(|e| DialogArtifactsError::Storage(format!("Identify failed: {}", e)))?;
 
         let branch_period = branch_revision.as_ref().map(|r| r.period).unwrap_or(0);
 
         let new_revision = Revision {
-            issuer: identity.operator,
+            issuer: authority::Operator::of(&auth).operator.clone(),
             tree: NodeReference::from(hash),
             cause: HashSet::from([upstream_revision.tree().clone()]),
             period: upstream_revision.period.max(branch_period) + 1,

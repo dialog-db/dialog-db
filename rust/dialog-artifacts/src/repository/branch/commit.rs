@@ -1,4 +1,4 @@
-use dialog_capability::{Provider, Subject, credential};
+use dialog_capability::{Policy, Provider, Subject, authority};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
@@ -43,7 +43,7 @@ where
             + Provider<archive_fx::Put>
             + Provider<memory_fx::Resolve>
             + Provider<memory_fx::Publish>
-            + Provider<credential::Identify>
+            + Provider<authority::Identify>
             + ConditionalSync
             + 'static,
     {
@@ -157,13 +157,11 @@ where
         let tree_reference = NodeReference::from(tree_hash);
 
         // Discover operator identity from the environment
-        let identify_cap = Subject::from(branch.subject().clone())
-            .attenuate(credential::Credential)
-            .invoke(credential::Identify);
-        let identity = <Env as Provider<credential::Identify>>::execute(env, identify_cap)
+        let identify_cap = Subject::from(branch.subject().clone()).invoke(authority::Identify);
+        let auth = <Env as Provider<authority::Identify>>::execute(env, identify_cap)
             .await
             .map_err(|e| DialogArtifactsError::Storage(format!("Identify failed: {}", e)))?;
-        let issuer_did = identity.operator;
+        let issuer_did = authority::Operator::of(&auth).operator.clone();
 
         // Calculate new period and moment
         let (period, moment, cause) = match &base_revision {

@@ -139,41 +139,6 @@ impl Issuer for Ed25519Signer {
     type Signature = Ed25519Signature;
 }
 
-// Credential effect providers — allow Ed25519Signer to be used as an
-// operator for capability-based systems that use credential effects.
-use dialog_capability::{Capability, Policy, Provider, credential};
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<credential::Identify> for Ed25519Signer {
-    async fn execute(
-        &self,
-        _input: Capability<credential::Identify>,
-    ) -> Result<credential::Identity, credential::CredentialError> {
-        let did = self.did();
-        Ok(credential::Identity {
-            profile: did.clone(),
-            operator: did,
-            account: None,
-        })
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<credential::Sign> for Ed25519Signer {
-    async fn execute(
-        &self,
-        input: Capability<credential::Sign>,
-    ) -> Result<Vec<u8>, credential::CredentialError> {
-        let payload = credential::Sign::of(&input).payload.as_slice();
-        let sig: Ed25519Signature = Signer::sign(self, payload)
-            .await
-            .map_err(|e| credential::CredentialError::SigningFailed(e.to_string()))?;
-        Ok(sig.to_bytes().to_vec())
-    }
-}
-
 impl Serialize for Ed25519Signer {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

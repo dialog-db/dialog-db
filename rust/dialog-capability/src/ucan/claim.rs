@@ -4,8 +4,10 @@
 //! back to a subject for a given capability, then builds a signed
 //! UCAN invocation proving the operator's authority.
 
-use crate::credential::{self, AuthorizeError};
-use crate::{Ability, Capability, Constraint, Did, Provider};
+use crate::access::AuthorizeError;
+use crate::authority;
+use crate::credential;
+use crate::{Ability, Capability, Constraint, Did, Policy, Provider};
 use dialog_common::ConditionalSync;
 use dialog_ucan::command::Command;
 use dialog_ucan::{Delegation, DelegationChain, InvocationBuilder, InvocationChain};
@@ -43,7 +45,7 @@ pub async fn claim<C, Env>(
 where
     C: Constraint,
     Capability<C>: Ability,
-    Env: Provider<credential::Sign>
+    Env: Provider<authority::Sign>
         + Provider<credential::List<Vec<u8>>>
         + Provider<credential::Retrieve<Vec<u8>>>
         + ConditionalSync,
@@ -52,7 +54,9 @@ where
     let ability = capability.ability();
     let params = parameters(capability);
 
-    let operator_did = issuer.cached_did.clone();
+    let operator_did = authority::Operator::of(issuer.capability())
+        .operator
+        .clone();
 
     // Find delegation chain (or None if self-authorized)
     let delegation_chain = if subject_did == operator_did {
@@ -307,7 +311,7 @@ fn build_chain(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::credential;
+    use crate::authority;
     use dialog_ucan::DelegationChain;
     use dialog_ucan::command::Command;
     use dialog_ucan::delegation::builder::DelegationBuilder;
@@ -325,8 +329,9 @@ mod tests {
 
     mod test_provider {
         use crate::Policy;
+        use crate::authority;
         use crate::credential::{self, CredentialError};
-        use crate::{Capability, Provider};
+        use crate::{Capability, Provider, Subject};
         use async_trait::async_trait;
         use dialog_common::ConditionalSend;
         use serde::Serialize;
@@ -434,29 +439,28 @@ mod tests {
 
         #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
         #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-        impl Provider<credential::Identify> for TestStore {
+        impl Provider<authority::Identify> for TestStore {
             async fn execute(
                 &self,
-                _input: Capability<credential::Identify>,
-            ) -> Result<credential::Identity, CredentialError> {
+                input: Capability<authority::Identify>,
+            ) -> Result<authority::Authority, CredentialError> {
                 let did = dialog_varsig::Principal::did(&self.signer);
-                Ok(credential::Identity {
-                    profile: did.clone(),
-                    operator: did.clone(),
-                    account: None,
-                })
+                let subject_did = input.subject().clone();
+                Ok(Subject::from(subject_did)
+                    .attenuate(authority::Profile::local(did.clone()))
+                    .attenuate(authority::Operator::new(did)))
             }
         }
 
         #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
         #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-        impl Provider<credential::Sign> for TestStore {
+        impl Provider<authority::Sign> for TestStore {
             async fn execute(
                 &self,
-                input: Capability<credential::Sign>,
+                input: Capability<authority::Sign>,
             ) -> Result<Vec<u8>, CredentialError> {
                 use dialog_varsig::Signer;
-                let payload = credential::Sign::of(&input).payload.clone();
+                let payload = authority::Sign::of(&input).payload.clone();
                 let sig = self
                     .signer
                     .sign(&payload)
@@ -908,13 +912,14 @@ mod tests {
         let subject_did = signer.did();
 
         let env = test_env(signer);
-        let issuer = Issuer::for_subject(&env, subject_did.clone())
+        let authority = crate::Subject::from(subject_did.clone())
+            .invoke(authority::Identify)
+            .perform(&env)
             .await
             .unwrap();
+        let issuer = Issuer::new(&env, authority);
 
-        let cap = crate::Subject::from(subject_did)
-            .attenuate(credential::Credential)
-            .invoke(credential::Identify);
+        let cap = crate::Subject::from(subject_did).invoke(authority::Identify);
 
         let result = claim(&env, issuer, &cap).await;
         assert!(
@@ -936,13 +941,14 @@ mod tests {
         let env = test_env(operator_signer.clone());
         import_single(&env, &subject_did, delegation).await;
 
-        let issuer = Issuer::for_subject(&env, subject_did.clone())
+        let authority = crate::Subject::from(subject_did.clone())
+            .invoke(authority::Identify)
+            .perform(&env)
             .await
             .unwrap();
+        let issuer = Issuer::new(&env, authority);
 
-        let cap = crate::Subject::from(subject_did)
-            .attenuate(credential::Credential)
-            .invoke(credential::Identify);
+        let cap = crate::Subject::from(subject_did).invoke(authority::Identify);
 
         let result = claim(&env, issuer, &cap).await;
         assert!(
@@ -959,13 +965,14 @@ mod tests {
         let subject_did = subject_signer.did();
 
         let env = test_env(operator_signer.clone());
-        let issuer = Issuer::for_subject(&env, subject_did.clone())
+        let authority = crate::Subject::from(subject_did.clone())
+            .invoke(authority::Identify)
+            .perform(&env)
             .await
             .unwrap();
+        let issuer = Issuer::new(&env, authority);
 
-        let cap = crate::Subject::from(subject_did)
-            .attenuate(credential::Credential)
-            .invoke(credential::Identify);
+        let cap = crate::Subject::from(subject_did).invoke(authority::Identify);
 
         let result = claim(&env, issuer, &cap).await;
         assert!(result.is_err(), "Should be denied without delegation");

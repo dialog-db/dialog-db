@@ -8,14 +8,14 @@
 //! - [`Issuer`] — adapts credential effects to UCAN's Signer interface
 //! - [`authorize`] — builds a UCAN invocation from a capability and delegation chain
 
-mod authorize;
+mod access;
 pub mod claim;
 pub mod delegation;
 mod invocation;
 pub mod issuer;
 mod parameters;
 
-pub use authorize::authorize;
+pub use access::authorize;
 pub use claim::claim;
 pub use delegation::import_delegation_chain;
 pub use invocation::UcanInvocation;
@@ -23,14 +23,14 @@ pub use issuer::Issuer;
 pub use parameters::{Args, Parameters, parameters, parameters_to_args};
 
 use crate::Constraint;
-use crate::credential::AuthorizationFormat;
+use crate::access::Protocol;
 
 /// UCAN authorization format — produces a signed invocation chain.
 ///
-/// Used with [`credential::Authorize<Fx, Ucan>`](crate::credential::Authorize)
+/// Used with [`access::Authorize<Fx, Ucan>`](crate::access::Authorize)
 /// to produce [`UcanInvocation`] as the authorization proof.
 pub struct Ucan;
 
-impl AuthorizationFormat for Ucan {
+impl Protocol for Ucan {
     type Authorization<Fx: Constraint> = UcanInvocation;
 }

@@ -12,6 +12,7 @@
 
 use dialog_capability::Capability;
 use dialog_capability::Provider;
+use dialog_capability::authority;
 use dialog_capability::credential::{self, CredentialError, Import, List, Retrieve, Save};
 use dialog_capability::fork::{Fork, ForkInvocation};
 use dialog_capability::site::Site;
@@ -27,7 +28,7 @@ use serde::de::DeserializeOwned;
 /// - Remote invocations to `Remote`
 #[derive(Provider)]
 pub struct Environment<Credentials, Local, Remote> {
-    #[provide(credential::Identify, credential::Sign)]
+    #[provide(authority::Identify, authority::Sign)]
     /// Provider for credential effects.
     pub credentials: Credentials,
     #[provide(

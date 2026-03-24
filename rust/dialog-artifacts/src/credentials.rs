@@ -5,8 +5,9 @@
 //! the profile and operator signers and implements the credential provider
 //! traits needed by the Environment.
 
-use dialog_capability::credential::{self, CredentialError, Identity};
-use dialog_capability::{Capability, Policy, Provider};
+use dialog_capability::authority::{self, Authority};
+use dialog_capability::credential::CredentialError;
+use dialog_capability::{Capability, Policy, Provider, Subject};
 use dialog_credentials::Ed25519Signer;
 use dialog_varsig::eddsa::Ed25519Signature;
 use dialog_varsig::{Did, Principal};
@@ -82,8 +83,8 @@ impl Default for Profile {
 /// An opened profile with profile and operator signers.
 ///
 /// Created by [`environment::open`](crate::environment::open).
-/// Implements the credential provider traits (`Provider<Identify>`,
-/// `Provider<Sign>`, `Principal`, `Issuer`) needed by the Environment.
+/// Implements the credential provider traits (`Provider<authority::Identify>`,
+/// `Provider<authority::Sign>`, `Principal`, `Issuer`) needed by the Environment.
 #[derive(Debug, Clone)]
 pub struct Credentials {
     name: String,
@@ -138,6 +139,18 @@ impl Credentials {
     pub fn operator_signer(&self) -> &Ed25519Signer {
         &self.operator
     }
+
+    /// Build the authority chain for the given subject DID.
+    fn build_authority(&self, subject: Did) -> Authority {
+        Subject::from(subject)
+            .attenuate(authority::Profile {
+                profile: self.profile_did(),
+                account: self.account.clone(),
+            })
+            .attenuate(authority::Operator {
+                operator: self.operator_did(),
+            })
+    }
 }
 
 impl Principal for Credentials {
@@ -148,27 +161,24 @@ impl Principal for Credentials {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<credential::Identify> for Credentials {
+impl Provider<authority::Identify> for Credentials {
     async fn execute(
         &self,
-        _input: Capability<credential::Identify>,
-    ) -> Result<Identity, CredentialError> {
-        Ok(Identity {
-            profile: self.profile_did(),
-            operator: self.operator_did(),
-            account: self.account.clone(),
-        })
+        input: Capability<authority::Identify>,
+    ) -> Result<Authority, CredentialError> {
+        let subject_did = input.subject().clone();
+        Ok(self.build_authority(subject_did))
     }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<credential::Sign> for Credentials {
+impl Provider<authority::Sign> for Credentials {
     async fn execute(
         &self,
-        input: Capability<credential::Sign>,
+        input: Capability<authority::Sign>,
     ) -> Result<Vec<u8>, CredentialError> {
-        let payload = credential::Sign::of(&input).payload.as_slice();
+        let payload = authority::Sign::of(&input).payload.as_slice();
         let sig: Ed25519Signature = dialog_varsig::Signer::sign(&self.operator, payload)
             .await
             .map_err(|e| CredentialError::SigningFailed(e.to_string()))?;
