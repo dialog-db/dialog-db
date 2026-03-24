@@ -231,7 +231,10 @@ async fn lru_store_caches() -> Result<()> {
     {
         let tracking = tracking.lock().await;
         assert_eq!(tracking.writes(), 0);
-        assert_eq!(tracking.reads(), 4);
+        // With branch factor 254 and 1024 entries, the tree is 2 levels deep
+        // (root + leaves), so a get reads 1 root node + 1 leaf = 2 total
+        // (including the initial root hash read).
+        assert_eq!(tracking.reads(), 2);
     }
 
     let _ = tree.get(&key).await?;
@@ -239,14 +242,14 @@ async fn lru_store_caches() -> Result<()> {
     {
         let tracking = tracking.lock().await;
         assert_eq!(tracking.writes(), 0);
-        assert_eq!(tracking.reads(), 4); // reads cached
+        assert_eq!(tracking.reads(), 2); // reads cached
     }
 
     tree.set(key.to_vec(), vec![1]).await?;
 
     let tracking = tracking.lock().await;
-    assert_eq!(tracking.writes(), 4); // writes on insertion
-    assert_eq!(tracking.reads(), 4); // reads cached
+    assert_eq!(tracking.writes(), 2); // writes on insertion
+    assert_eq!(tracking.reads(), 2); // reads cached
 
     Ok(())
 }
