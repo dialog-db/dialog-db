@@ -36,6 +36,49 @@ impl From<web_sys::CryptoKeyPair> for KeyExport {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+impl From<KeyExport> for wasm_bindgen::JsValue {
+    fn from(export: KeyExport) -> Self {
+        match export {
+            KeyExport::Extractable(bytes) => js_sys::Uint8Array::from(bytes.as_slice()).into(),
+            KeyExport::NonExtractable {
+                private_key,
+                public_key,
+            } => web_sys::CryptoKeyPair::new(&private_key, &public_key).into(),
+        }
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+impl TryFrom<wasm_bindgen::JsValue> for KeyExport {
+    type Error = WebCryptoError;
+
+    fn try_from(value: wasm_bindgen::JsValue) -> Result<Self, Self::Error> {
+        use wasm_bindgen::JsCast;
+
+        // If it's a Uint8Array, treat as extractable bytes
+        if let Some(array) = value.dyn_ref::<js_sys::Uint8Array>() {
+            return Ok(KeyExport::Extractable(array.to_vec()));
+        }
+
+        // Otherwise treat as { privateKey, publicKey } object
+        let private_key: web_sys::CryptoKey = js_sys::Reflect::get(&value, &"privateKey".into())
+            .map_err(|_| WebCryptoError::KeyImport("missing privateKey".into()))?
+            .dyn_into()
+            .map_err(|_| WebCryptoError::KeyImport("invalid privateKey".into()))?;
+
+        let public_key: web_sys::CryptoKey = js_sys::Reflect::get(&value, &"publicKey".into())
+            .map_err(|_| WebCryptoError::KeyImport("missing publicKey".into()))?
+            .dyn_into()
+            .map_err(|_| WebCryptoError::KeyImport("invalid publicKey".into()))?;
+
+        Ok(KeyExport::NonExtractable {
+            private_key,
+            public_key,
+        })
+    }
+}
+
 /// Errors that can occur when using WebCrypto operations.
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 #[derive(Debug, Clone, thiserror::Error)]
@@ -63,6 +106,100 @@ pub enum WebCryptoError {
     /// JavaScript error.
     #[error("JS error: {0}")]
     JsError(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extractable_roundtrip_through_bytes() {
+        let original = KeyExport::Extractable(vec![1, 2, 3, 4, 5]);
+        let bytes = match &original {
+            KeyExport::Extractable(b) => b.clone(),
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+            _ => panic!("expected extractable"),
+        };
+        let restored = KeyExport::Extractable(bytes);
+        match (&original, &restored) {
+            (KeyExport::Extractable(a), KeyExport::Extractable(b)) => assert_eq!(a, b),
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+            _ => panic!("expected extractable"),
+        }
+    }
+}
+
+#[cfg(all(test, target_arch = "wasm32", target_os = "unknown"))]
+mod wasm_tests {
+    use super::*;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::JsValue;
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_service_worker);
+
+    #[dialog_common::test]
+    fn extractable_to_jsvalue_produces_uint8array() {
+        let export = KeyExport::Extractable(vec![10, 20, 30]);
+        let js_val: JsValue = export.into();
+        assert!(js_val.is_instance_of::<js_sys::Uint8Array>());
+
+        let array = js_sys::Uint8Array::from(js_val);
+        assert_eq!(array.to_vec(), vec![10, 20, 30]);
+    }
+
+    #[dialog_common::test]
+    fn extractable_roundtrip_through_jsvalue() {
+        let original = KeyExport::Extractable(vec![42; 32]);
+        let js_val: JsValue = original.into();
+        let restored = KeyExport::try_from(js_val).unwrap();
+
+        match restored {
+            KeyExport::Extractable(bytes) => assert_eq!(bytes, vec![42; 32]),
+            _ => panic!("expected Extractable variant"),
+        }
+    }
+
+    #[dialog_common::test]
+    async fn non_extractable_roundtrip_through_jsvalue() {
+        use crate::Ed25519Signer;
+
+        let signer = Ed25519Signer::generate().await.unwrap();
+        let export = signer.export().await.unwrap();
+
+        // Should be NonExtractable on web
+        assert!(
+            matches!(&export, KeyExport::NonExtractable { .. }),
+            "default generate should produce non-extractable key"
+        );
+
+        let js_val: JsValue = export.into();
+
+        // Should be a JS object with privateKey and publicKey
+        assert!(js_val.is_object());
+        let private = js_sys::Reflect::get(&js_val, &"privateKey".into()).unwrap();
+        let public = js_sys::Reflect::get(&js_val, &"publicKey".into()).unwrap();
+        assert!(private.is_instance_of::<web_sys::CryptoKey>());
+        assert!(public.is_instance_of::<web_sys::CryptoKey>());
+
+        // Roundtrip back to KeyExport
+        let restored = KeyExport::try_from(js_val).unwrap();
+        assert!(matches!(restored, KeyExport::NonExtractable { .. }));
+
+        // Should be importable back into a signer
+        let restored_signer = Ed25519Signer::import(restored).await.unwrap();
+        assert_eq!(
+            dialog_varsig::Principal::did(&signer),
+            dialog_varsig::Principal::did(&restored_signer),
+            "roundtripped signer should have same DID"
+        );
+    }
+
+    #[dialog_common::test]
+    fn try_from_invalid_jsvalue_fails() {
+        let result = KeyExport::try_from(JsValue::from_str("not a key"));
+        assert!(result.is_err());
+    }
 }
 
 /// Trait for creating WebCrypto keys with extractable private key material.
