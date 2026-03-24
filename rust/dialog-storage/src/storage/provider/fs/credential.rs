@@ -126,7 +126,6 @@ mod tests {
     ) -> Capability<credential::Retrieve<C>> {
         subject
             .attenuate(credential::Credential)
-            .attenuate(credential::Profile::default())
             .invoke(credential::Retrieve {
                 address: credential::Address::new(address_id),
             })
@@ -139,7 +138,6 @@ mod tests {
     ) -> Capability<credential::Save<C>> {
         subject
             .attenuate(credential::Credential)
-            .attenuate(credential::Profile::default())
             .invoke(credential::Save {
                 address: credential::Address::new(address_id),
                 credentials,

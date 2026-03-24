@@ -914,7 +914,6 @@ mod tests {
 
         let cap = crate::Subject::from(subject_did)
             .attenuate(credential::Credential)
-            .attenuate(credential::Profile::default())
             .invoke(credential::Identify);
 
         let result = claim(&env, issuer, &cap).await;
@@ -943,7 +942,6 @@ mod tests {
 
         let cap = crate::Subject::from(subject_did)
             .attenuate(credential::Credential)
-            .attenuate(credential::Profile::default())
             .invoke(credential::Identify);
 
         let result = claim(&env, issuer, &cap).await;
@@ -967,7 +965,6 @@ mod tests {
 
         let cap = crate::Subject::from(subject_did)
             .attenuate(credential::Credential)
-            .attenuate(credential::Profile::default())
             .invoke(credential::Identify);
 
         let result = claim(&env, issuer, &cap).await;

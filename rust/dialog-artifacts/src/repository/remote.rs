@@ -24,6 +24,7 @@ pub mod site;
 /// Persisted remote configuration state.
 pub mod state;
 
+pub use address::RemoteAddress;
 pub use branch::RemoteBranch;
 pub use repository::RemoteRepository;
 pub use site::RemoteSite;

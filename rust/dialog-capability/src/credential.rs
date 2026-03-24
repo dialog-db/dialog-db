@@ -1,21 +1,20 @@
 //! Credential capability hierarchy and remote resource authorization.
 //!
 //! Provides identity, signing, and credential store operations scoped to a
-//! repository subject via the [`Profile`] policy.
+//! repository subject via the [`Credential`] attenuation.
 //!
 //! # Capability Hierarchy
 //!
 //! ```text
 //! Subject (operator DID)
 //! └── Credential (ability: /credential)
-//!     └── Profile { profile: String }  (policy, scopes to named profile)
-//!         ├── Identify -> Effect -> Result<Identity, CredentialError>
-//!         ├── Sign { payload } -> Effect -> Result<Vec<u8>, CredentialError>
-//!         ├── Authorize<Fx, S> { capability } -> Effect -> Result<S::Authorization<Fx>, AuthorizeError>
-//!         ├── Retrieve<C> { address } -> Effect -> Result<C, CredentialError>
-//!         ├── Save<C> { address, credentials } -> Effect -> Result<(), CredentialError>
-//!         ├── List<C> { prefix } -> Effect -> Result<Vec<Address<C>>, CredentialError>
-//!         └── Import<M> { material: M } -> Effect -> Result<(), CredentialError>
+//!     ├── Identify -> Effect -> Result<Identity, CredentialError>
+//!     ├── Sign { payload } -> Effect -> Result<Vec<u8>, CredentialError>
+//!     ├── Authorize<Fx, S> { capability } -> Effect -> Result<S::Authorization<Fx>, AuthorizeError>
+//!     ├── Retrieve<C> { address } -> Effect -> Result<C, CredentialError>
+//!     ├── Save<C> { address, credentials } -> Effect -> Result<(), CredentialError>
+//!     ├── List<C> { prefix } -> Effect -> Result<Vec<Address<C>>, CredentialError>
+//!     └── Import<M> { material: M } -> Effect -> Result<(), CredentialError>
 //! ```
 
 pub use crate::{Attenuation, Capability, Did, Effect, Policy, Subject};
@@ -38,35 +37,6 @@ impl Attenuation for Credential {
     type Of = Subject;
 }
 
-/// Profile policy that scopes credential operations to a named profile.
-///
-/// A profile is a named user identity on a specific device (e.g. "default",
-/// "work", "personal"), each with its own ed25519 keypair.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Profile {
-    /// The profile name.
-    pub profile: String,
-}
-
-impl Profile {
-    /// Create a new Profile policy.
-    pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            profile: name.into(),
-        }
-    }
-}
-
-impl Default for Profile {
-    fn default() -> Self {
-        Self::new("default")
-    }
-}
-
-impl Policy for Profile {
-    type Of = Credential;
-}
-
 /// Identity information returned by the Identify effect.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Identity {
@@ -83,7 +53,7 @@ pub struct Identity {
 pub struct Identify;
 
 impl Effect for Identify {
-    type Of = Profile;
+    type Of = Credential;
     type Output = Result<Identity, CredentialError>;
 }
 
@@ -105,7 +75,7 @@ impl Sign {
 }
 
 impl Effect for Sign {
-    type Of = Profile;
+    type Of = Credential;
     type Output = Result<Vec<u8>, CredentialError>;
 }
 
@@ -166,7 +136,7 @@ impl<C> Effect for Retrieve<C>
 where
     C: Serialize + DeserializeOwned + ConditionalSend + 'static,
 {
-    type Of = Profile;
+    type Of = Credential;
     type Output = Result<C, CredentialError>;
 }
 
@@ -184,7 +154,7 @@ impl<C> Effect for Save<C>
 where
     C: Serialize + DeserializeOwned + ConditionalSend + 'static,
 {
-    type Of = Profile;
+    type Of = Credential;
     type Output = Result<(), CredentialError>;
 }
 
@@ -301,7 +271,7 @@ where
     Capability<Fx>: ConditionalSend,
     Self: ConditionalSend + 'static,
 {
-    type Of = Profile;
+    type Of = Credential;
     type Output = Result<Authorization<Fx, F>, AuthorizeError>;
 }
 
@@ -329,7 +299,7 @@ impl<C> Effect for List<C>
 where
     C: Serialize + DeserializeOwned + ConditionalSend + 'static,
 {
-    type Of = Profile;
+    type Of = Credential;
     type Output = Result<Vec<Address<C>>, CredentialError>;
 }
 
@@ -343,7 +313,7 @@ pub struct Import<Material: Serialize> {
 impl<Material: Serialize + DeserializeOwned + ConditionalSend + 'static> Effect
     for Import<Material>
 {
-    type Of = Profile;
+    type Of = Credential;
     type Output = Result<(), CredentialError>;
 }
 
@@ -393,20 +363,9 @@ mod tests {
     }
 
     #[test]
-    fn it_builds_profile_claim_path() {
-        let claim = Subject::from(did!("key:zSpace"))
-            .attenuate(Credential)
-            .attenuate(Profile::new("default"));
-
-        assert_eq!(claim.subject(), &did!("key:zSpace"));
-        assert_eq!(claim.ability(), "/credential");
-    }
-
-    #[test]
     fn it_builds_identify_claim_path() {
         let claim = Subject::from(did!("key:zSpace"))
             .attenuate(Credential)
-            .attenuate(Profile::new("default"))
             .invoke(Identify);
 
         assert_eq!(claim.ability(), "/credential/identify");
@@ -416,7 +375,6 @@ mod tests {
     fn it_builds_sign_claim_path() {
         let claim = Subject::from(did!("key:zSpace"))
             .attenuate(Credential)
-            .attenuate(Profile::new("default"))
             .invoke(Sign::new(b"hello"));
 
         assert_eq!(claim.ability(), "/credential/sign");
@@ -426,7 +384,6 @@ mod tests {
     fn it_extracts_payload_from_sign() {
         let cap = Subject::from(did!("key:zSpace"))
             .attenuate(Credential)
-            .attenuate(Profile::new("default"))
             .invoke(Sign::new(b"payload"));
 
         assert_eq!(cap.payload(), b"payload");
@@ -436,7 +393,6 @@ mod tests {
     fn it_builds_retrieve_claim_path() {
         let claim = Subject::from(did!("key:zSpace"))
             .attenuate(Credential)
-            .attenuate(Profile::new("default"))
             .invoke(Retrieve::<String> {
                 address: Address::new("s3://my-bucket"),
             });
@@ -448,7 +404,6 @@ mod tests {
     fn it_builds_save_claim_path() {
         let claim = Subject::from(did!("key:zSpace"))
             .attenuate(Credential)
-            .attenuate(Profile::new("default"))
             .invoke(Save {
                 address: Address::new("s3://my-bucket"),
                 credentials: "secret-key".to_string(),

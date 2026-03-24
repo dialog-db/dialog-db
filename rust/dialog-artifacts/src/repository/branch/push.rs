@@ -19,17 +19,17 @@ use crate::repository::revision::Revision;
 ///
 /// Borrows `&Branch` (non-consuming). Reads the branch's upstream to
 /// dispatch to local or remote push logic.
-pub struct Push<'a, Store> {
-    branch: &'a Branch<Store>,
+pub struct Push<'a> {
+    branch: &'a Branch,
 }
 
-impl<'a, Store> Push<'a, Store> {
-    pub(super) fn new(branch: &'a Branch<Store>) -> Self {
+impl<'a> Push<'a> {
+    pub(super) fn new(branch: &'a Branch) -> Self {
         Self { branch }
     }
 }
 
-impl<Store: Clone> Push<'_, Store> {
+impl Push<'_> {
     /// Execute the push operation.
     ///
     /// Returns `Some(revision)` on success, `None` if the push could not
@@ -73,8 +73,8 @@ impl<Store: Clone> Push<'_, Store> {
 /// Fast-forward: if the upstream's tree matches our base (it hasn't diverged),
 /// reset upstream to our revision and return success.
 /// Diverged: return `Ok(None)`.
-async fn push_local<Store: Clone, Env>(
-    branch: &Branch<Store>,
+async fn push_local<Env>(
+    branch: &Branch,
     upstream_name: &BranchName,
     env: &Env,
 ) -> Result<Option<Revision>, RepositoryError>
@@ -91,13 +91,21 @@ where
         .perform(env)
         .await?;
 
-    let branch_revision = branch.revision();
+    let branch_revision = match branch.revision() {
+        Some(rev) => rev,
+        None => return Ok(None),
+    };
     let branch_base = branch
         .upstream()
         .map(|u| u.tree().clone())
         .unwrap_or_default();
 
-    if upstream.revision().tree() != &branch_base {
+    let upstream_tree = upstream
+        .revision()
+        .map(|r| r.tree().clone())
+        .unwrap_or_default();
+
+    if upstream_tree != branch_base {
         return Ok(None);
     }
 
@@ -113,8 +121,8 @@ where
 /// 3. Compute novel nodes via `novelty()`
 /// 4. Read each node's raw bytes from local archive, upload to remote
 /// 5. Publish revision to remote
-async fn push_remote<Store, Env>(
-    branch: &Branch<Store>,
+async fn push_remote<Env>(
+    branch: &Branch,
     remote: &SiteName,
     upstream_branch_name: &BranchName,
     upstream_subject: &dialog_capability::Did,
@@ -143,7 +151,10 @@ where
         upstream_branch_name.clone(),
     );
 
-    let branch_revision = branch.revision();
+    let branch_revision = match branch.revision() {
+        Some(rev) => rev,
+        None => return Ok(None),
+    };
     let branch_base = branch
         .upstream()
         .map(|u| u.tree().clone())
@@ -208,19 +219,18 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{test_issuer, test_subject};
+    use super::super::tests::{TestEnv, test_subject};
     use crate::artifacts::{Artifact, Instruction};
     use crate::repository::Repository;
     use crate::repository::branch::state::UpstreamState;
     use crate::repository::node_reference::NodeReference;
-    use dialog_storage::provider::Volatile;
     use futures_util::stream;
 
     #[dialog_common::test]
     async fn it_pushes_to_local_upstream() -> anyhow::Result<()> {
-        let env = Volatile::new();
+        let env = TestEnv::new();
 
-        let repo = Repository::new(test_issuer().await, test_subject());
+        let repo = Repository::new(test_subject());
 
         let _main = repo.open_branch("main").perform(&env).await?;
 
@@ -244,22 +254,25 @@ mod tests {
             .perform(&env)
             .await?;
 
-        let feature_revision = feature.revision();
+        let feature_revision = feature.revision().expect("feature should have a revision");
 
         let result = super::push_local(&feature, &"main".into(), &env).await?;
         assert!(result.is_some());
 
         let main_reloaded = repo.load_branch("main").perform(&env).await?;
-        assert_eq!(main_reloaded.revision().tree(), feature_revision.tree());
+        let main_rev = main_reloaded
+            .revision()
+            .expect("main should have a revision after push");
+        assert_eq!(main_rev.tree(), feature_revision.tree());
 
         Ok(())
     }
 
     #[dialog_common::test]
     async fn it_returns_none_when_local_upstream_diverged() -> anyhow::Result<()> {
-        let env = Volatile::new();
+        let env = TestEnv::new();
 
-        let repo = Repository::new(test_issuer().await, test_subject());
+        let repo = Repository::new(test_subject());
 
         let main = repo.open_branch("main").perform(&env).await?;
         let _hash = main
@@ -299,9 +312,9 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_has_no_upstream_by_default() -> anyhow::Result<()> {
-        let env = Volatile::new();
+        let env = TestEnv::new();
 
-        let repo = Repository::new(test_issuer().await, test_subject());
+        let repo = Repository::new(test_subject());
         let branch = repo.open_branch("feature").perform(&env).await?;
 
         assert!(branch.upstream().is_none());

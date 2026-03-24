@@ -18,17 +18,17 @@ use crate::repository::revision::Revision;
 /// dispatch to local or remote fetch logic.
 ///
 /// Does NOT modify local state — only reads from upstream.
-pub struct Fetch<'a, Store> {
-    branch: &'a Branch<Store>,
+pub struct Fetch<'a> {
+    branch: &'a Branch,
 }
 
-impl<'a, Store> Fetch<'a, Store> {
-    pub(super) fn new(branch: &'a Branch<Store>) -> Self {
+impl<'a> Fetch<'a> {
+    pub(super) fn new(branch: &'a Branch) -> Self {
         Self { branch }
     }
 }
 
-impl<Store: Clone> Fetch<'_, Store> {
+impl Fetch<'_> {
     /// Execute the fetch operation, returning the upstream revision.
     ///
     /// Returns `None` if the upstream has no revision yet.
@@ -61,8 +61,8 @@ impl<Store: Clone> Fetch<'_, Store> {
 /// Fetch the current revision from a local upstream branch.
 ///
 /// Does NOT modify local state.
-async fn fetch_local<Store: Clone, Env>(
-    branch: &Branch<Store>,
+async fn fetch_local<Env>(
+    branch: &Branch,
     upstream_name: &BranchName,
     env: &Env,
 ) -> Result<Option<Revision>, RepositoryError>
@@ -74,15 +74,15 @@ where
         .perform(env)
         .await?;
 
-    Ok(Some(upstream.revision()))
+    Ok(upstream.revision())
 }
 
 /// Fetch the current revision from a remote upstream branch.
 ///
 /// Does NOT modify local state. Looks up credentials from the persisted
 /// `RemoteSite` configuration.
-async fn fetch_remote<Store, Env>(
-    branch: &Branch<Store>,
+async fn fetch_remote<Env>(
+    branch: &Branch,
     remote: &SiteName,
     upstream_branch_name: &BranchName,
     upstream_subject: &dialog_capability::Did,
@@ -108,19 +108,18 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{test_issuer, test_subject};
+    use super::super::tests::{TestEnv, test_subject};
     use crate::artifacts::{Artifact, Instruction};
     use crate::repository::Repository;
     use crate::repository::branch::state::UpstreamState;
     use crate::repository::node_reference::NodeReference;
-    use dialog_storage::provider::Volatile;
     use futures_util::stream;
 
     #[dialog_common::test]
     async fn it_fetches_local_upstream_revision() -> anyhow::Result<()> {
-        let env = Volatile::new();
+        let env = TestEnv::new();
 
-        let repo = Repository::new(test_issuer().await, test_subject());
+        let repo = Repository::new(test_subject());
 
         let main = repo.open_branch("main").perform(&env).await?;
         let _hash = main
@@ -132,7 +131,7 @@ mod tests {
             })]))
             .perform(&env)
             .await?;
-        let main_revision = main.revision();
+        let main_revision = main.revision().expect("main should have a revision");
 
         let feature = repo.open_branch("feature").perform(&env).await?;
         feature
@@ -153,9 +152,9 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_does_not_modify_local_state_on_fetch() -> anyhow::Result<()> {
-        let env = Volatile::new();
+        let env = TestEnv::new();
 
-        let repo = Repository::new(test_issuer().await, test_subject());
+        let repo = Repository::new(test_subject());
 
         let main = repo.open_branch("main").perform(&env).await?;
         let _hash = main
@@ -181,6 +180,7 @@ mod tests {
 
         let _fetched = super::fetch_local(&feature, &"main".into(), &env).await?;
 
+        // Fetch should not modify local state
         assert_eq!(feature.revision(), feature_revision_before);
 
         Ok(())

@@ -59,6 +59,10 @@ url = { workspace = true, features = ["serde"] }
 dialog-storage = { workspace = true, features = ["helpers"] }
 anyhow = { workspace = true }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+dirs = { workspace = true }
+tokio = { workspace = true, features = ["sync", "macros", "io-util", "fs"] }
+
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 # getrandom = { workspace = true, features = ["wasm_js"] }
 getrandom = { workspace = true, features = ["js"] }

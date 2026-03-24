@@ -134,7 +134,6 @@ impl<Fx: Effect> Capability<Fx> {
         let did = self.subject().clone();
         let authorize_cap = Subject::from(did)
             .attenuate(credential::Credential)
-            .attenuate(credential::Profile::default())
             .invoke(credential::Authorize::<Fx, S::Format>::new(self));
         <Env as Provider<credential::Authorize<Fx, S::Format>>>::execute(env, authorize_cap).await
     }

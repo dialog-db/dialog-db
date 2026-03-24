@@ -3,7 +3,6 @@ use dialog_effects::memory as fx;
 
 use super::branch::BranchName;
 use super::cell::Cell;
-use super::credentials::Credentials;
 
 /// Pre-attenuated memory capability (`Subject → Memory`).
 ///
@@ -39,15 +38,6 @@ impl Memory {
             .attenuate(fx::Space::new(format!("trace/{}/local", name)));
         Trace { name, space }
     }
-
-    /// Create a session for the given issuer — `credential/{issuer.did()}/...`
-    pub fn credentials<Store>(&self, issuer: Credentials<Store>) -> Authorization<Store> {
-        let space = self
-            .0
-            .clone()
-            .attenuate(fx::Space::new(format!("credential/{}", issuer.did())));
-        Authorization { issuer, space }
-    }
 }
 
 /// Branch trace — a `Capability<fx::Space>` scoped to a branch's local
@@ -67,48 +57,6 @@ impl Trace {
     }
 
     /// Create a typed cell within this trace space.
-    pub fn cell<T>(&self, cell_name: impl Into<String>) -> Cell<T> {
-        Cell::from_capability(self.cell_capability(cell_name))
-    }
-
-    /// Return the raw cell capability without wrapping in [`Cell<T>`].
-    pub fn cell_capability(&self, cell_name: impl Into<String>) -> Capability<fx::Cell> {
-        self.space.clone().attenuate(fx::Cell::new(cell_name))
-    }
-}
-
-/// Issuer session — `Credentials<Store>` + `Capability<fx::Space>` scoped to
-/// `credential/{issuer.did()}`.
-///
-/// Carries the issuer credentials and provides typed cell accessors
-/// for credential storage.
-#[derive(Debug)]
-pub struct Authorization<Store> {
-    issuer: Credentials<Store>,
-    space: Capability<fx::Space>,
-}
-
-impl<Store: Clone> Clone for Authorization<Store> {
-    fn clone(&self) -> Self {
-        Self {
-            issuer: self.issuer.clone(),
-            space: self.space.clone(),
-        }
-    }
-}
-
-impl<Store> Authorization<Store> {
-    /// The issuer credentials.
-    pub fn issuer(&self) -> &Credentials<Store> {
-        &self.issuer
-    }
-
-    /// The issuer's DID.
-    pub fn did(&self) -> dialog_capability::Did {
-        self.issuer.did()
-    }
-
-    /// Create a typed cell within this session's credential space.
     pub fn cell<T>(&self, cell_name: impl Into<String>) -> Cell<T> {
         Cell::from_capability(self.cell_capability(cell_name))
     }

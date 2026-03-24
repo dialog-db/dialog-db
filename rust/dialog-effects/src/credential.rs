@@ -7,13 +7,12 @@
 //! ```text
 //! Subject
 //!   +-- Credential (ability: /credential)
-//!         +-- Profile { profile: String }  (policy, scopes to named profile)
-//!               +-- Identify -> Effect -> Result<Identity, CredentialError>
-//!               +-- Sign { payload } -> Effect -> Result<Vec<u8>, CredentialError>
+//!         +-- Identify -> Effect -> Result<Identity, CredentialError>
+//!         +-- Sign { payload } -> Effect -> Result<Vec<u8>, CredentialError>
 //! ```
 
 pub use dialog_capability::credential::{
-    Credential, CredentialError, Identify, Identity, Profile, Sign, SignCapability,
+    Credential, CredentialError, Identify, Identity, Sign, SignCapability,
 };
 pub use dialog_capability::{Capability, Did, Subject};
 
@@ -33,7 +32,6 @@ mod tests {
     fn it_builds_identify_claim_path() {
         let claim = Subject::from(did!("key:zSpace"))
             .attenuate(Credential)
-            .attenuate(Profile::default())
             .invoke(Identify);
 
         assert_eq!(claim.ability(), "/credential/identify");
@@ -43,7 +41,6 @@ mod tests {
     fn it_builds_sign_claim_path() {
         let claim = Subject::from(did!("key:zSpace"))
             .attenuate(Credential)
-            .attenuate(Profile::default())
             .invoke(Sign::new(b"hello"));
 
         assert_eq!(claim.ability(), "/credential/sign");

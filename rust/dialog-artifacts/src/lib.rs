@@ -86,8 +86,8 @@ pub use remote::Remote;
 /// Capability-based repository system.
 mod repository;
 pub use repository::{
-    Branch, BranchName, NodeReference, Occurence, RemoteBranch, RemoteRepository, RemoteSite,
-    Repository, Revision,
+    Branch, BranchName, NodeReference, Occurence, RemoteAddress, RemoteBranch, RemoteRepository,
+    RemoteSite, Repository, Revision,
 };
 
 #[cfg(any(test, feature = "helpers"))]

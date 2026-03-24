@@ -900,6 +900,7 @@ dependencies = [
  "dialog-remote-ucan-s3",
  "dialog-storage",
  "dialog-varsig",
+ "dirs",
  "ed25519-dalek",
  "futures-util",
  "getrandom 0.2.16",

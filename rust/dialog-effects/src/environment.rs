@@ -20,7 +20,7 @@ use dialog_capability::{Constraint, Effect};
 /// - Credential effects (including authorization) to `Credentials`
 /// - Remote invocations to `Remote`
 #[derive(Provider)]
-pub struct Environment<Local, Credentials = (), Remote = ()> {
+pub struct Environment<Credentials, Local, Remote> {
     #[provide(crate::credential::Identify, crate::credential::Sign)]
     /// Provider for credential effects.
     pub credentials: Credentials,
@@ -45,7 +45,7 @@ pub struct Environment<Local, Credentials = (), Remote = ()> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<Local, Credentials, Remote, C> Provider<Retrieve<C>>
-    for Environment<Local, Credentials, Remote>
+    for Environment<Credentials, Local, Remote>
 where
     C: serde::Serialize + serde::de::DeserializeOwned + dialog_common::ConditionalSend + 'static,
     Capability<Retrieve<C>>: dialog_common::ConditionalSend,
@@ -61,7 +61,7 @@ where
 // Route Save<C> to self.local for any credential type.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Local, Credentials, Remote, C> Provider<Save<C>> for Environment<Local, Credentials, Remote>
+impl<Local, Credentials, Remote, C> Provider<Save<C>> for Environment<Credentials, Local, Remote>
 where
     C: serde::Serialize + serde::de::DeserializeOwned + dialog_common::ConditionalSend + 'static,
     Capability<Save<C>>: dialog_common::ConditionalSend,
@@ -77,7 +77,7 @@ where
 // Route List<C> to self.local for any credential type.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Local, Credentials, Remote, C> Provider<List<C>> for Environment<Local, Credentials, Remote>
+impl<Local, Credentials, Remote, C> Provider<List<C>> for Environment<Credentials, Local, Remote>
 where
     C: serde::Serialize + serde::de::DeserializeOwned + dialog_common::ConditionalSend + 'static,
     Capability<List<C>>: dialog_common::ConditionalSend,
@@ -97,7 +97,7 @@ where
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<Local, Credentials, Remote, Material> Provider<Import<Material>>
-    for Environment<Local, Credentials, Remote>
+    for Environment<Credentials, Local, Remote>
 where
     Material:
         serde::Serialize + serde::de::DeserializeOwned + dialog_common::ConditionalSend + 'static,
@@ -110,31 +110,9 @@ where
     }
 }
 
-impl<Local> Environment<Local> {
-    /// Create a new environment from a local provider (no credentials).
-    pub fn new(local: Local) -> Self {
-        Self {
-            local,
-            credentials: (),
-            remote: (),
-        }
-    }
-}
-
-impl<Local, Credentials> Environment<Local, Credentials> {
-    /// Create a new environment from local and credential providers.
-    pub fn with_credentials(local: Local, credentials: Credentials) -> Self {
-        Self {
-            local,
-            credentials,
-            remote: (),
-        }
-    }
-}
-
-impl<Local, Credentials, Remote> Environment<Local, Credentials, Remote> {
-    /// Create a new environment from local, credential, and remote providers.
-    pub fn with_remote(local: Local, credentials: Credentials, remote: Remote) -> Self {
+impl<Credentials, Local, Remote> Environment<Credentials, Local, Remote> {
+    /// Create a new environment from credential, local storage, and remote providers.
+    pub fn new(credentials: Credentials, local: Local, remote: Remote) -> Self {
         Self {
             local,
             credentials,
@@ -147,7 +125,7 @@ impl<Local, Credentials, Remote> Environment<Local, Credentials, Remote> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<Local, Credentials, Remote, S, Fx> Provider<dialog_capability::fork::Fork<S, Fx>>
-    for Environment<Local, Credentials, Remote>
+    for Environment<Credentials, Local, Remote>
 where
     S: dialog_capability::site::Site,
     Fx: Effect + 'static,

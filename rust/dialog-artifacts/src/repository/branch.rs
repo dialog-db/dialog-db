@@ -35,9 +35,8 @@ pub use select::Select;
 pub use set_upstream::SetUpstream;
 
 use super::archive::Archive;
-use super::cell::{Cell, CellOr};
-use super::credentials::Credentials;
-use super::memory::{Authorization, Memory, Trace};
+use super::cell::Cell;
+use super::memory::{Memory, Trace};
 pub use super::occurence::Occurence;
 use super::revision::Revision;
 pub use state::{BranchName, UpstreamState};
@@ -49,53 +48,37 @@ pub type Index = Tree<GeometricDistribution, Key, State<Datum>, Blake3Hash>;
 ///
 /// Holds a `Trace` (scoped to `trace/{branch}/local`) plus separate cells
 /// for revision and upstream state.
-pub struct Branch<Store> {
+pub struct Branch {
     subject: Did,
     memory: Memory,
-    session: Authorization<Store>,
     trace: Trace,
-    revision: CellOr<Revision>,
+    revision: Cell<Option<Revision>>,
     upstream: Cell<Option<UpstreamState>>,
 }
 
-impl<Store> Debug for Branch<Store> {
+impl Debug for Branch {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.debug_struct("Branch")
             .field("name", self.trace.name())
-            .field("issuer", &self.session.did())
             .finish_non_exhaustive()
     }
 }
 
-impl<Store> Branch<Store> {
+impl Branch {
     /// Returns the branch name.
     pub fn name(&self) -> &BranchName {
         self.trace.name()
     }
 
-    /// Returns the DID of the authority issuing changes on this branch.
-    pub fn did(&self) -> Did {
-        self.session.did()
-    }
-
-    /// Returns the current revision of this branch.
-    pub fn revision(&self) -> Revision {
-        self.revision.get()
+    /// Returns the current revision of this branch, or `None` if the branch
+    /// has no commits yet (equivalent to an orphan branch in git).
+    pub fn revision(&self) -> Option<Revision> {
+        self.revision.get().flatten()
     }
 
     /// Returns the upstream state.
     pub fn upstream(&self) -> Option<UpstreamState> {
         self.upstream.get().flatten()
-    }
-
-    /// Returns the issuer credentials.
-    pub fn issuer(&self) -> &Credentials<Store> {
-        self.session.issuer()
-    }
-
-    /// Returns the authorization (credentials + scoped credential space).
-    pub fn authorization(&self) -> &Authorization<Store> {
-        &self.session
     }
 
     /// Returns the subject DID.
@@ -108,31 +91,22 @@ impl<Store> Branch<Store> {
         &self.trace
     }
 
-    /// Logical time on this branch
-    pub fn occurence(&self) -> Occurence {
-        self.revision.read_with(|rev| rev.clone().into())
+    /// Logical time on this branch, or `None` if the branch has no commits.
+    pub fn occurence(&self) -> Option<Occurence> {
+        self.revision().map(Into::into)
     }
 
     /// Pre-attenuated archive capability for this branch's subject.
     pub fn archive(&self) -> Archive {
         Archive::new(Subject::from(self.subject.clone()))
     }
-}
 
-impl<Store: Clone> Branch<Store> {
-    /// Load a sibling branch by name (shares this branch's memory and credentials).
-    pub fn load_branch(&self, name: impl Into<BranchName>) -> Load<Store> {
+    /// Load a sibling branch by name (shares this branch's memory).
+    pub fn load_branch(&self, name: impl Into<BranchName>) -> Load {
         let trace = self.memory.trace(name);
-        Load::new(
-            self.session.clone(),
-            self.subject.clone(),
-            self.memory.clone(),
-            trace,
-        )
+        Load::new(self.subject.clone(), self.memory.clone(), trace)
     }
-}
 
-impl<Store> Branch<Store> {
     /// Load a remote site by name (shares this branch's memory).
     pub fn load_remote(
         &self,
@@ -142,7 +116,7 @@ impl<Store> Branch<Store> {
     }
 
     /// Create a command to commit instructions to this branch.
-    pub fn commit<I>(&self, instructions: I) -> Commit<'_, Store, I> {
+    pub fn commit<I>(&self, instructions: I) -> Commit<'_, I> {
         Commit::new(self, instructions)
     }
 
@@ -152,7 +126,7 @@ impl<Store> Branch<Store> {
     }
 
     /// Create a command to reset the branch to a given revision.
-    pub fn reset(&self, revision: Revision) -> Reset<'_, Store> {
+    pub fn reset(&self, revision: Revision) -> Reset<'_> {
         Reset::new(self, revision)
     }
 
@@ -161,7 +135,7 @@ impl<Store> Branch<Store> {
     /// This performs a three-way merge using an explicitly provided
     /// upstream revision. For auto-dispatching based on the branch's
     /// configured upstream, use [`pull_upstream`](Branch::pull_upstream).
-    pub fn pull(&self, upstream_revision: Revision) -> PullLocal<'_, Store> {
+    pub fn pull(&self, upstream_revision: Revision) -> PullLocal<'_> {
         PullLocal::new(self, upstream_revision)
     }
 
@@ -169,14 +143,14 @@ impl<Store> Branch<Store> {
     ///
     /// Reads the branch's upstream and dispatches to local or remote
     /// pull logic automatically.
-    pub fn pull_upstream(&self) -> Pull<'_, Store> {
+    pub fn pull_upstream(&self) -> Pull<'_> {
         Pull::new(self)
     }
 
     /// Create a command to fetch the upstream branch's current revision.
     ///
     /// Does NOT modify local state — only reads from upstream.
-    pub fn fetch(&self) -> Fetch<'_, Store> {
+    pub fn fetch(&self) -> Fetch<'_> {
         Fetch::new(self)
     }
 
@@ -184,7 +158,7 @@ impl<Store> Branch<Store> {
     ///
     /// Reads the upstream configuration from branch state and dispatches
     /// to local or remote push logic.
-    pub fn push(&self) -> Push<'_, Store> {
+    pub fn push(&self) -> Push<'_> {
         Push::new(self)
     }
 
@@ -192,22 +166,94 @@ impl<Store> Branch<Store> {
     ///
     /// Accepts both `UpstreamState` and `RemoteBranch` directly via
     /// `impl Into<UpstreamState>`.
-    pub fn set_upstream(&self, upstream: impl Into<UpstreamState>) -> SetUpstream<'_, Store> {
+    pub fn set_upstream(&self, upstream: impl Into<UpstreamState>) -> SetUpstream<'_> {
         SetUpstream::new(self, upstream.into())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use dialog_capability::Did;
-
-    use super::super::credentials::Credentials;
+    use dialog_capability::{Capability, Did, Provider, credential};
+    use dialog_effects::archive as archive_fx;
+    use dialog_effects::memory as memory_fx;
+    use dialog_storage::provider::Volatile;
 
     pub fn test_subject() -> Did {
         "did:test:branch-cap".parse().unwrap()
     }
 
-    pub async fn test_issuer() -> Credentials<()> {
-        Credentials::from_passphrase("test", ()).await.unwrap()
+    /// Test environment wrapping [`Volatile`] and providing a stub
+    /// `Provider<credential::Identify>` that returns `test_subject()` as
+    /// the operator DID.
+    pub struct TestEnv {
+        pub store: Volatile,
+    }
+
+    impl TestEnv {
+        pub fn new() -> Self {
+            Self {
+                store: Volatile::new(),
+            }
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl Provider<credential::Identify> for TestEnv {
+        async fn execute(
+            &self,
+            _input: Capability<credential::Identify>,
+        ) -> Result<credential::Identity, credential::CredentialError> {
+            let did = test_subject();
+            Ok(credential::Identity {
+                profile: did.clone(),
+                operator: did,
+                account: None,
+            })
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl Provider<archive_fx::Get> for TestEnv {
+        async fn execute(
+            &self,
+            input: Capability<archive_fx::Get>,
+        ) -> Result<Option<Vec<u8>>, archive_fx::ArchiveError> {
+            <Volatile as Provider<archive_fx::Get>>::execute(&self.store, input).await
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl Provider<archive_fx::Put> for TestEnv {
+        async fn execute(
+            &self,
+            input: Capability<archive_fx::Put>,
+        ) -> Result<(), archive_fx::ArchiveError> {
+            <Volatile as Provider<archive_fx::Put>>::execute(&self.store, input).await
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl Provider<memory_fx::Resolve> for TestEnv {
+        async fn execute(
+            &self,
+            input: Capability<memory_fx::Resolve>,
+        ) -> Result<Option<memory_fx::Publication>, memory_fx::MemoryError> {
+            <Volatile as Provider<memory_fx::Resolve>>::execute(&self.store, input).await
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl Provider<memory_fx::Publish> for TestEnv {
+        async fn execute(
+            &self,
+            input: Capability<memory_fx::Publish>,
+        ) -> Result<Vec<u8>, memory_fx::MemoryError> {
+            <Volatile as Provider<memory_fx::Publish>>::execute(&self.store, input).await
+        }
     }
 }

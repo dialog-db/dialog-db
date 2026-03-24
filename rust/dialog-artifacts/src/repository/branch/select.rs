@@ -19,14 +19,14 @@ use crate::{
 /// Command struct for selecting artifacts from a branch.
 pub struct Select {
     subject: Did,
-    revision: Revision,
+    revision: Option<Revision>,
     selector: ArtifactSelector<Constrained>,
 }
 
 impl Select {
     pub(super) fn new(
         subject: Did,
-        revision: Revision,
+        revision: Option<Revision>,
         selector: ArtifactSelector<Constrained>,
     ) -> Self {
         Self {
@@ -51,7 +51,13 @@ impl Select {
             Archive::new(Subject::from(self.subject.clone())).index(),
         );
 
-        let tree: Index = Tree::from_hash(self.revision.tree.hash(), &store)
+        let tree_hash = self
+            .revision
+            .as_ref()
+            .map(|rev| *rev.tree().hash())
+            .unwrap_or(dialog_prolly_tree::EMPT_TREE_HASH);
+
+        let tree: Index = Tree::from_hash(&tree_hash, &store)
             .await
             .map_err(|e| DialogArtifactsError::Storage(format!("Failed to load tree: {:?}", e)))?;
 

@@ -4,7 +4,6 @@ use dialog_remote_s3::Address;
 
 use super::state::SiteName;
 use crate::RemoteAddress;
-use crate::environment::to_s3_address;
 use crate::repository::cell::Cell;
 use crate::repository::error::RepositoryError;
 use crate::repository::memory::Space;
@@ -78,8 +77,10 @@ impl Open {
 
         cell.publish(self.address.clone(), env).await?;
 
-        let s3_address = to_s3_address(&self.address)
-            .map_err(|e| RepositoryError::StorageError(format!("Invalid remote address: {}", e)))?;
+        let s3_address =
+            self.address.as_s3().cloned().map_err(|e| {
+                RepositoryError::StorageError(format!("Invalid remote address: {}", e))
+            })?;
 
         Ok(RemoteSite {
             name: self.name,
@@ -113,7 +114,7 @@ impl Load {
         cell.resolve(env).await?;
         match cell.get() {
             Some(address) => {
-                let s3_address = to_s3_address(&address).map_err(|e| {
+                let s3_address = address.as_s3().cloned().map_err(|e| {
                     RepositoryError::StorageError(format!("Invalid remote address: {}", e))
                 })?;
                 Ok(RemoteSite {
@@ -134,7 +135,6 @@ mod tests {
 
     use crate::RemoteAddress;
     use crate::repository::Repository;
-    use crate::repository::credentials::Credentials;
     use crate::repository::error::RepositoryError;
 
     fn test_address() -> RemoteAddress {
@@ -146,16 +146,15 @@ mod tests {
         RemoteAddress::S3(s3_addr)
     }
 
-    async fn test_repo() -> Repository<()> {
-        let issuer = Credentials::from_passphrase("test", ()).await.unwrap();
+    fn test_repo() -> Repository {
         let subject = "did:test:remote-site".parse().unwrap();
-        Repository::new(issuer, subject)
+        Repository::new(subject)
     }
 
     #[dialog_common::test]
     async fn it_adds_and_loads_remote() -> anyhow::Result<()> {
         let env = Volatile::new();
-        let repo = test_repo().await;
+        let repo = test_repo();
 
         let site = repo
             .add_remote("origin", test_address())
@@ -175,7 +174,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_errors_loading_missing_remote() -> anyhow::Result<()> {
         let env = Volatile::new();
-        let repo = test_repo().await;
+        let repo = test_repo();
 
         let result = repo.load_remote("nonexistent").perform(&env).await;
         assert!(matches!(
@@ -189,7 +188,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_errors_adding_duplicate_remote() -> anyhow::Result<()> {
         let env = Volatile::new();
-        let repo = test_repo().await;
+        let repo = test_repo();
 
         repo.add_remote("origin", test_address())
             .perform(&env)

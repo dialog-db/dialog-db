@@ -144,6 +144,5 @@ where
     let did = capability.subject().clone();
     Subject::from(did)
         .attenuate(credential::Credential)
-        .attenuate(credential::Profile::default())
         .invoke(credential::Authorize::<Fx, F>::new(capability))
 }

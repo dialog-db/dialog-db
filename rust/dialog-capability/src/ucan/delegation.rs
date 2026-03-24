@@ -59,10 +59,8 @@ pub fn parse_key_suffix(key: &str) -> Option<(String, String)> {
 }
 
 /// Build a credential capability for delegation storage.
-pub fn cred_cap(subject: &Did) -> Capability<credential::Profile> {
-    crate::Subject::from(subject.clone())
-        .attenuate(credential::Credential)
-        .attenuate(credential::Profile::default())
+pub fn cred_cap(subject: &Did) -> Capability<credential::Credential> {
+    crate::Subject::from(subject.clone()).attenuate(credential::Credential)
 }
 
 /// Store a delegation chain's individual delegations into the credential store.

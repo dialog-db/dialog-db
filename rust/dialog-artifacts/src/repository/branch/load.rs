@@ -3,46 +3,38 @@ use dialog_effects::memory as memory_fx;
 
 use super::Branch;
 use super::state::UpstreamState;
-use crate::repository::cell::{Cell, CellOr};
+use crate::repository::cell::Cell;
 use crate::repository::error::RepositoryError;
-use crate::repository::memory::{Authorization, Memory, Trace};
+use crate::repository::memory::{Memory, Trace};
 use crate::repository::revision::Revision;
 
 /// Command to load an existing branch, returning an error if not found.
-pub struct Load<Store> {
-    session: Authorization<Store>,
+pub struct Load {
     subject: Did,
     memory: Memory,
     trace: Trace,
 }
 
-impl<Store> Load<Store> {
-    pub(crate) fn new(
-        session: Authorization<Store>,
-        subject: Did,
-        memory: Memory,
-        trace: Trace,
-    ) -> Self {
+impl Load {
+    pub(crate) fn new(subject: Did, memory: Memory, trace: Trace) -> Self {
         Self {
-            session,
             subject,
             memory,
             trace,
         }
     }
-}
 
-impl<Store> Load<Store> {
     /// Execute the load operation.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Branch<Store>, RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<Branch, RepositoryError>
     where
         Env: Provider<memory_fx::Resolve>,
     {
-        let default_revision = Revision::new(self.session.did());
-        let revision: CellOr<Revision> = self.trace.cell("revision").or(default_revision);
+        let revision: Cell<Option<Revision>> = self.trace.cell("revision");
         revision.resolve(env).await?;
 
-        if revision.inner().read_with(|opt| opt.is_none()) {
+        // The outer Option from Cell::get() tells us whether the cell exists
+        // in storage. If it's None, the branch was never opened/created.
+        if revision.get().is_none() {
             return Err(RepositoryError::BranchNotFound {
                 name: self.trace.name().clone(),
             });
@@ -52,7 +44,6 @@ impl<Store> Load<Store> {
         upstream.resolve(env).await?;
 
         Ok(Branch {
-            session: self.session,
             subject: self.subject,
             memory: self.memory,
             trace: self.trace,
@@ -64,7 +55,7 @@ impl<Store> Load<Store> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{test_issuer, test_subject};
+    use super::super::tests::test_subject;
     use crate::repository::Repository;
     use crate::repository::error::RepositoryError;
     use dialog_storage::provider::Volatile;
@@ -72,7 +63,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_loads_existing_branch() -> anyhow::Result<()> {
         let env = Volatile::new();
-        let repo = Repository::new(test_issuer().await, test_subject());
+        let repo = Repository::new(test_subject());
 
         let _ = repo.open_branch("main").perform(&env).await?;
         let branch = repo.load_branch("main").perform(&env).await?;
@@ -84,7 +75,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_fails_loading_missing_branch() -> anyhow::Result<()> {
         let env = Volatile::new();
-        let repo = Repository::new(test_issuer().await, test_subject());
+        let repo = Repository::new(test_subject());
 
         let result = repo.load_branch("nonexistent").perform(&env).await;
 

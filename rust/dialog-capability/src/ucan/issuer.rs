@@ -34,7 +34,6 @@ where
     ) -> Result<Issuer<'a, Env>, AuthorizeError> {
         let identify_cap = Subject::from(subject.clone())
             .attenuate(credential::Credential)
-            .attenuate(credential::Profile::default())
             .invoke(credential::Identify);
 
         let detail = <Env as Provider<credential::Identify>>::execute(env, identify_cap)
@@ -63,7 +62,6 @@ where
     async fn sign(&self, payload: &[u8]) -> Result<Ed25519Signature, signature::Error> {
         let sign_cap = Subject::from(self.subject.clone())
             .attenuate(credential::Credential)
-            .attenuate(credential::Profile::default())
             .invoke(credential::Sign::new(payload));
 
         let bytes = self

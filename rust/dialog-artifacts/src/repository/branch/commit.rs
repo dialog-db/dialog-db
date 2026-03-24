@@ -1,4 +1,4 @@
-use dialog_capability::Provider;
+use dialog_capability::{Provider, Subject, credential};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
@@ -18,13 +18,13 @@ use crate::{
 };
 
 /// Command struct for committing instructions to a branch.
-pub struct Commit<'a, Store, I> {
-    branch: &'a Branch<Store>,
+pub struct Commit<'a, I> {
+    branch: &'a Branch,
     instructions: I,
 }
 
-impl<'a, Store, I> Commit<'a, Store, I> {
-    pub(super) fn new(branch: &'a Branch<Store>, instructions: I) -> Self {
+impl<'a, I> Commit<'a, I> {
+    pub(super) fn new(branch: &'a Branch, instructions: I) -> Self {
         Self {
             branch,
             instructions,
@@ -32,7 +32,7 @@ impl<'a, Store, I> Commit<'a, Store, I> {
     }
 }
 
-impl<Store, I> Commit<'_, Store, I>
+impl<I> Commit<'_, I>
 where
     I: futures_util::Stream<Item = Instruction> + ConditionalSend,
 {
@@ -43,6 +43,7 @@ where
             + Provider<archive_fx::Put>
             + Provider<memory_fx::Resolve>
             + Provider<memory_fx::Publish>
+            + Provider<credential::Identify>
             + ConditionalSync
             + 'static,
     {
@@ -52,8 +53,13 @@ where
 
         let mut store = ContentAddressedStore::new(env, branch.archive().index());
 
-        // Load tree from current revision hash
-        let mut tree: Index = Tree::from_hash(base_revision.tree().hash(), &store)
+        // Load tree from current revision hash (empty tree if no revision yet)
+        let base_tree_hash = base_revision
+            .as_ref()
+            .map(|rev| *rev.tree().hash())
+            .unwrap_or(dialog_prolly_tree::EMPT_TREE_HASH);
+
+        let mut tree: Index = Tree::from_hash(&base_tree_hash, &store)
             .await
             .map_err(|e| DialogArtifactsError::Storage(format!("Failed to load tree: {:?}", e)))?;
 
@@ -150,24 +156,32 @@ where
 
         let tree_reference = NodeReference::from(tree_hash);
 
-        // Calculate new period and moment
-        let issuer_did = branch.issuer().did();
-        let (period, moment) = {
-            let base_period = *base_revision.period();
-            let base_moment = *base_revision.moment();
-            let base_issuer = base_revision.issuer();
+        // Discover operator identity from the environment
+        let identify_cap = Subject::from(branch.subject().clone())
+            .attenuate(credential::Credential)
+            .invoke(credential::Identify);
+        let identity = <Env as Provider<credential::Identify>>::execute(env, identify_cap)
+            .await
+            .map_err(|e| DialogArtifactsError::Storage(format!("Identify failed: {}", e)))?;
+        let issuer_did = identity.operator;
 
-            if base_issuer == &issuer_did {
-                (base_period, base_moment + 1)
-            } else {
-                (base_period + 1, 0)
+        // Calculate new period and moment
+        let (period, moment, cause) = match &base_revision {
+            Some(rev) => {
+                let (p, m) = if rev.issuer() == &issuer_did {
+                    (*rev.period(), *rev.moment() + 1)
+                } else {
+                    (*rev.period() + 1, 0)
+                };
+                (p, m, HashSet::from([rev.tree().clone()]))
             }
+            None => (0, 0, HashSet::new()),
         };
 
         let new_revision = Revision {
             issuer: issuer_did,
             tree: tree_reference,
-            cause: HashSet::from([base_revision.tree().clone()]),
+            cause,
             period,
             moment,
         };
@@ -175,7 +189,7 @@ where
         // Publish updated revision
         branch
             .revision
-            .publish(new_revision, env)
+            .publish(Some(new_revision), env)
             .await
             .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
 
@@ -185,18 +199,17 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{test_issuer, test_subject};
+    use super::super::tests::{TestEnv, test_subject};
     use crate::artifacts::{Artifact, ArtifactSelector, Instruction};
     use crate::repository::Repository;
     use dialog_prolly_tree::EMPT_TREE_HASH;
-    use dialog_storage::provider::Volatile;
     use futures_util::{StreamExt, stream};
 
     #[dialog_common::test]
     async fn it_commits_and_selects() -> anyhow::Result<()> {
-        let env = Volatile::new();
+        let env = TestEnv::new();
 
-        let repo = Repository::new(test_issuer().await, test_subject());
+        let repo = Repository::new(test_subject());
         let branch = repo.open_branch("main").perform(&env).await?;
 
         let artifact = Artifact {

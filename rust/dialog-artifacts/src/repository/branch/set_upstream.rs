@@ -6,18 +6,18 @@ use super::state::UpstreamState;
 use crate::repository::error::RepositoryError;
 
 /// Command struct for setting a branch's upstream.
-pub struct SetUpstream<'a, Store> {
-    branch: &'a Branch<Store>,
+pub struct SetUpstream<'a> {
+    branch: &'a Branch,
     upstream: UpstreamState,
 }
 
-impl<'a, Store> SetUpstream<'a, Store> {
-    pub(super) fn new(branch: &'a Branch<Store>, upstream: UpstreamState) -> Self {
+impl<'a> SetUpstream<'a> {
+    pub(super) fn new(branch: &'a Branch, upstream: UpstreamState) -> Self {
         Self { branch, upstream }
     }
 }
 
-impl<Store> SetUpstream<'_, Store> {
+impl SetUpstream<'_> {
     /// Execute the set_upstream operation.
     pub async fn perform<Env>(self, env: &Env) -> Result<(), RepositoryError>
     where
@@ -51,14 +51,14 @@ mod tests {
     use crate::repository::node_reference::NodeReference;
     use crate::repository::remote::RemoteBranch;
 
-    use super::super::tests::{test_issuer, test_subject};
+    use super::super::tests::test_subject;
     use crate::repository::Repository;
 
     #[dialog_common::test]
     async fn it_sets_local_upstream() -> anyhow::Result<()> {
         let env = Volatile::new();
 
-        let repo = Repository::new(test_issuer().await, test_subject());
+        let repo = Repository::new(test_subject());
 
         let branch = repo.open_branch("feature").perform(&env).await?;
 
@@ -89,7 +89,7 @@ mod tests {
     async fn it_sets_remote_upstream() -> anyhow::Result<()> {
         let env = Volatile::new();
 
-        let repo = Repository::new(test_issuer().await, test_subject());
+        let repo = Repository::new(test_subject());
         let branch = repo.open_branch("main").perform(&env).await?;
 
         let address = Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "bucket");
@@ -124,7 +124,7 @@ mod tests {
     async fn it_errors_setting_upstream_to_self() -> anyhow::Result<()> {
         let env = Volatile::new();
 
-        let repo = Repository::new(test_issuer().await, test_subject());
+        let repo = Repository::new(test_subject());
         let branch = repo.open_branch("main").perform(&env).await?;
 
         let result = branch

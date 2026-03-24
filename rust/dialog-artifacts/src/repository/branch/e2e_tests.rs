@@ -6,7 +6,7 @@ use dialog_remote_s3::Address;
 use dialog_remote_s3::S3;
 use dialog_storage::provider::Volatile;
 
-use crate::environment::RemoteAddress;
+use crate::RemoteAddress;
 use crate::repository::Repository;
 use crate::repository::branch::state::UpstreamState;
 use crate::repository::node_reference::NodeReference;
@@ -14,12 +14,6 @@ use crate::repository::remote::SiteName;
 
 fn test_subject() -> Did {
     "did:test:e2e-subject".parse().unwrap()
-}
-
-async fn test_issuer() -> super::super::credentials::Credentials<()> {
-    super::super::credentials::Credentials::from_passphrase("e2e-test", ())
-        .await
-        .unwrap()
 }
 
 fn test_address() -> Address {
@@ -218,18 +212,13 @@ impl Provider<credential::Sign> for TestEnv {
     }
 }
 
-async fn setup_repo_with_remote(
-    env: &TestEnv,
-) -> anyhow::Result<(Repository<()>, super::Branch<()>)> {
-    let repo = Repository::new(test_issuer().await, test_subject());
+async fn setup_repo_with_remote(env: &TestEnv) -> anyhow::Result<(Repository, super::Branch)> {
+    let repo = Repository::new(test_subject());
 
     let site_address = RemoteAddress::S3(test_address());
-    let _site = repo
-        .add_remote("origin", site_address)
-        .perform(&env.local)
-        .await?;
+    let _site = repo.add_remote("origin", site_address).perform(env).await?;
 
-    let branch = repo.open_branch("main").perform(&env.local).await?;
+    let branch = repo.open_branch("main").perform(env).await?;
 
     branch
         .set_upstream(UpstreamState::Remote {
@@ -238,7 +227,7 @@ async fn setup_repo_with_remote(
             subject: test_subject(),
             tree: NodeReference::default(),
         })
-        .perform(&env.local)
+        .perform(env)
         .await?;
 
     Ok((repo, branch))
@@ -260,7 +249,7 @@ async fn it_pushes_to_remote() -> anyhow::Result<()> {
     };
     branch
         .commit(stream::iter(vec![Instruction::Assert(artifact)]))
-        .perform(&env.local)
+        .perform(&env)
         .await?;
 
     let result = branch.push().perform(&env).await?;
@@ -285,7 +274,7 @@ async fn it_fetches_from_remote() -> anyhow::Result<()> {
     };
     branch
         .commit(stream::iter(vec![Instruction::Assert(artifact)]))
-        .perform(&env.local)
+        .perform(&env)
         .await?;
 
     branch.push().perform(&env).await?;
@@ -312,7 +301,7 @@ async fn it_pushes_and_pulls_roundtrip() -> anyhow::Result<()> {
     };
     branch
         .commit(stream::iter(vec![Instruction::Assert(artifact)]))
-        .perform(&env.local)
+        .perform(&env)
         .await?;
 
     let push_revision = branch.push().perform(&env).await?;
