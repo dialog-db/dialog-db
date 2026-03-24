@@ -712,10 +712,9 @@ mod tests {
             )
         };
 
-        // With branch factor 254, the tree is shallow so we need few reads to
-        // reach any entry. The exact count depends on tree depth, which varies
-        // with the distribution's effective branch factor.
-        assert!(net_reads <= 2, "expected at most 2 reads, got {net_reads}");
+        // With branch factor 254 and 32 entries, the tree fits in a single
+        // level so only 1 read is needed to find any entry.
+        assert_eq!(net_reads, 1);
         assert_eq!(net_writes, 0);
 
         Ok(())
@@ -773,10 +772,9 @@ mod tests {
             )
         };
 
-        // With branch factor 254, the tree is shallow so we need few reads to
-        // reach any entry. The exact count depends on tree depth, which varies
-        // with the distribution's effective branch factor.
-        assert!(net_reads <= 2, "expected at most 2 reads, got {net_reads}");
+        // With branch factor 254 and 32 entries, the tree fits in a single
+        // level so only 1 read is needed to find any entry.
+        assert_eq!(net_reads, 1);
         assert_eq!(net_writes, 0);
 
         Ok(())
@@ -812,9 +810,9 @@ mod tests {
             )
         };
 
-        // The query uses indexes to narrow reads. With a shallower tree
-        // (higher effective branch factor), fewer intermediate nodes are read.
-        assert!(net_reads <= 4, "expected at most 4 reads, got {net_reads}");
+        // With branch factor 254, the index tree is shallow. A single-result
+        // query reads just 1 node.
+        assert_eq!(net_reads, 1);
         assert_eq!(net_writes, 0);
 
         let fact_stream =
@@ -832,9 +830,9 @@ mod tests {
             )
         };
 
-        // Reading all 256 entries requires traversing the full tree. With a
-        // shallower tree (branch factor 254), fewer internal nodes exist.
-        assert!(net_reads <= 11, "expected at most 11 reads, got {net_reads}");
+        // Reading all 256 entries traverses the full tree. With branch factor
+        // 254 the tree is shallow, requiring only 3 reads total.
+        assert_eq!(net_reads, 3);
         assert_eq!(net_writes, 0);
 
         Ok(())

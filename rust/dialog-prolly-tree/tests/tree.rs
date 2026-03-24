@@ -228,14 +228,13 @@ async fn lru_store_caches() -> Result<()> {
     let key = 1023u32.to_be_bytes().to_vec();
     let _ = tree.get(&key).await?;
 
-    let reads_after_get;
     {
         let tracking = tracking.lock().await;
         assert_eq!(tracking.writes(), 0);
-        reads_after_get = tracking.reads();
-        // With branch factor 254 and 1024 entries, the tree is shallow
-        // (root + leaves), so only a few reads are needed to reach any key.
-        assert!(reads_after_get > 1, "should read at least one node beyond root");
+        // With branch factor 254 and 1024 entries, the tree is 2 levels deep
+        // (root + leaves), so a get reads 1 root node + 1 leaf = 2 total
+        // (including the initial root hash read).
+        assert_eq!(tracking.reads(), 2);
     }
 
     let _ = tree.get(&key).await?;
@@ -243,14 +242,14 @@ async fn lru_store_caches() -> Result<()> {
     {
         let tracking = tracking.lock().await;
         assert_eq!(tracking.writes(), 0);
-        assert_eq!(tracking.reads(), reads_after_get); // reads cached
+        assert_eq!(tracking.reads(), 2); // reads cached
     }
 
     tree.set(key.to_vec(), vec![1]).await?;
 
     let tracking = tracking.lock().await;
-    assert!(tracking.writes() > 0, "writes on insertion");
-    assert_eq!(tracking.reads(), reads_after_get); // reads cached
+    assert_eq!(tracking.writes(), 2); // writes on insertion
+    assert_eq!(tracking.reads(), 2); // reads cached
 
     Ok(())
 }
