@@ -4,17 +4,21 @@ use crate::KeyType;
 
 use super::{Distribution, Rank};
 
-/// Maximum rank that can be derived from a u64 hash prefix with branch factor 254.
+/// Compute the maximum rank derivable from a u64 hash prefix for a given
+/// branch factor Q. This is `floor(log_Q(2^64))` — the number of times we
+/// can divide `u64::MAX` by Q before the threshold reaches zero.
 ///
-/// With a 64-bit prefix and branch factor Q, the maximum useful rank is
-/// `floor(log_Q(2^64))`. For Q=254:
-///   - 254^1  ≈ 2.5 × 10^2   (rank 2 threshold)
-///   - 254^2  ≈ 6.5 × 10^4   (rank 3 threshold)
-///   - 254^7  ≈ 7.2 × 10^16  (rank 8 threshold)
-///   - 254^8  ≈ 1.8 × 10^19  > 2^64, so rank 8 is the max
-///
-/// This supports trees with up to ~10^19 entries, far exceeding practical needs.
-const MAX_RANK: Rank = 8;
+/// For Q=254 this gives 8, supporting trees with up to ~10^19 entries.
+const fn max_rank_for(branch_factor: u32) -> Rank {
+    let m = branch_factor as u64;
+    let mut threshold = u64::MAX / m;
+    let mut rank = 1;
+    while threshold / m > 0 {
+        threshold /= m;
+        rank += 1;
+    }
+    rank
+}
 
 /// Implements a geometric distribution for prolly tree chunk boundaries using
 /// a threshold-based approach on the hash prefix.
@@ -98,7 +102,7 @@ where
 ///
 /// 2. Initialize `threshold = u64::MAX / m` and `rank = 1`.
 ///
-/// 3. While `prefix < threshold` and `rank < MAX_RANK`:
+/// 3. While `prefix < threshold` and `rank < max_rank_for(m)`:
 ///    - Increment rank (the prefix fell below this level's threshold).
 ///    - Divide threshold by `m` for the next level.
 ///
@@ -113,7 +117,7 @@ where
 ///
 /// # Returns
 ///
-/// A rank in `[1, MAX_RANK + 1]`. Rank 1 is the most common (probability
+/// A rank in `[1, max_rank_for(m)]`. Rank 1 is the most common (probability
 /// `1 - 1/m`), and each successive rank is `m` times rarer.
 pub(crate) fn compute_geometric_rank(bytes: &[u8], m: u32) -> Rank {
     // Extract the first 8 bytes of the hash as a u64 prefix.
@@ -137,7 +141,9 @@ pub(crate) fn compute_geometric_rank(bytes: &[u8], m: u32) -> Rank {
     // If so, the key is "promoted" to a higher rank, and the threshold is
     // divided by m again for the next level. This creates a geometric
     // distribution: P(rank >= k) ≈ 1/m^(k-1).
-    while prefix < threshold && rank < MAX_RANK {
+    let max_rank = max_rank_for(m);
+
+    while prefix < threshold && rank < max_rank {
         rank += 1;
         threshold /= u64::from(m);
     }
@@ -147,7 +153,7 @@ pub(crate) fn compute_geometric_rank(bytes: &[u8], m: u32) -> Rank {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_RANK, compute_geometric_rank};
+    use super::{compute_geometric_rank, max_rank_for};
     use rand::{Rng, thread_rng as rng};
 
     /// Verify that the distribution matches theoretical expectations.
@@ -193,7 +199,7 @@ mod tests {
         let factor = 254u32;
         let rounds = 1_000_000u32;
 
-        let mut rank_counts = vec![0u32; (MAX_RANK + 2) as usize];
+        let mut rank_counts = vec![0u32; (max_rank_for(factor) + 2) as usize];
         for _ in 0..rounds {
             let mut buffer = [0u8; 32];
             rng().fill(&mut buffer);
@@ -229,13 +235,13 @@ mod tests {
         let factor = 254u32;
 
         // All-zero hash prefix → minimum possible prefix → maximum rank.
-        // The loop exits when rank reaches MAX_RANK, so max possible rank = MAX_RANK.
+        // The loop exits when rank reaches max_rank_for(factor), so max possible rank = max_rank_for(factor).
         let min_prefix = [0u8; 32];
         let rank = compute_geometric_rank(&min_prefix, factor);
         assert_eq!(
-            rank, MAX_RANK,
-            "all-zero prefix should reach MAX_RANK = {}",
-            MAX_RANK
+            rank, max_rank_for(factor),
+            "all-zero prefix should reach max_rank_for(factor) = {}",
+            max_rank_for(factor)
         );
 
         // All-0xFF hash prefix → maximum possible prefix → rank 1

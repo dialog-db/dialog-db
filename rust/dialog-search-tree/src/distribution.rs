@@ -10,13 +10,21 @@ pub mod geometric {
     /// The branch factor of the [`Tree`]s that constitute [`Artifact`] indexes
     pub const BRANCH_FACTOR: u32 = 254;
 
-    /// Maximum rank that can be derived from a u64 hash prefix with branch
-    /// factor 254.
+    /// Compute the maximum rank derivable from a u64 hash prefix for a given
+    /// branch factor Q. This is `floor(log_Q(2^64))` — the number of times we
+    /// can divide `u64::MAX` by Q before the threshold reaches zero.
     ///
-    /// With a 64-bit prefix and branch factor Q, the maximum useful rank is
-    /// `floor(log_Q(2^64))`. For Q=254 this gives 8 levels, supporting
-    /// trees with up to ~10^19 entries.
-    const MAX_RANK: Rank = 8;
+    /// For Q=254 this gives 8, supporting trees with up to ~10^19 entries.
+    const fn max_rank_for(branch_factor: u32) -> Rank {
+        let m = branch_factor as u64;
+        let mut threshold = u64::MAX / m;
+        let mut rank = 1;
+        while threshold / m > 0 {
+            threshold /= m;
+            rank += 1;
+        }
+        rank
+    }
 
     /// Computes the rank of a node from its hash using a geometric distribution.
     pub fn rank(hash: &Blake3Hash) -> Rank {
@@ -44,8 +52,9 @@ pub mod geometric {
 
         let mut rank: Rank = 1;
         let mut threshold = u64::MAX / u64::from(m);
+        let max_rank = max_rank_for(m);
 
-        while prefix < threshold && rank < MAX_RANK {
+        while prefix < threshold && rank < max_rank {
             rank += 1;
             threshold /= u64::from(m);
         }
