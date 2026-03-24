@@ -9,7 +9,7 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["csv"]
+default = ["csv", "s3"]
 debug = []
 helpers = ["dep:anyhow"]
 csv = ["dep:csv-async"]
@@ -17,14 +17,15 @@ csv = ["dep:csv-async"]
 integration-tests = ["dialog-common/integration-tests"]
 # Enable web integration tests
 web-integration-tests = ["dialog-common/web-integration-tests"]
-ucan = ["dep:dialog-remote-ucan-s3"]
+s3 = ["dep:dialog-remote-s3"]
+ucan = ["s3", "dep:dialog-remote-ucan-s3"]
 
 [dependencies]
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
 dialog-credentials = { workspace = true }
 dialog-effects = { workspace = true }
-dialog-remote-s3 = { workspace = true }
+dialog-remote-s3 = { workspace = true, optional = true }
 dialog-remote-ucan-s3 = { workspace = true, optional = true }
 dialog-storage = { workspace = true }
 dialog-prolly-tree = { workspace = true }

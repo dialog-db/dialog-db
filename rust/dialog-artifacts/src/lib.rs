@@ -75,6 +75,14 @@ pub use uri::*;
 pub mod environment;
 pub use environment::*;
 
+/// Profile configuration for opening an environment.
+pub mod profile;
+pub use profile::{Operator, Profile};
+
+/// Remote dispatch for fork invocations.
+pub mod remote;
+pub use remote::Remote;
+
 /// Capability-based repository system.
 mod repository;
 pub use repository::{

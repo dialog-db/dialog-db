@@ -66,7 +66,7 @@ impl UcanAddress {
 /// UCAN site configuration for delegated authorization.
 ///
 /// A marker type -- no fields. Address info lives in `UcanAddress`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct UcanSite;
 
 impl Site for UcanSite {
