@@ -1,6 +1,5 @@
 //! UCAN site configuration -- marker trait + address type.
 
-use dialog_capability::credential::{self, Addressable};
 use dialog_capability::site::Site;
 
 // Re-export UCAN types from dialog-capability for convenience.
@@ -64,12 +63,6 @@ impl UcanAddress {
     }
 }
 
-impl Addressable<()> for UcanAddress {
-    fn credential_address(&self) -> credential::Address<()> {
-        credential::Address::new(&self.endpoint)
-    }
-}
-
 /// UCAN site configuration for delegated authorization.
 ///
 /// A marker type -- no fields. Address info lives in `UcanAddress`.
@@ -77,7 +70,6 @@ impl Addressable<()> for UcanAddress {
 pub struct UcanSite;
 
 impl Site for UcanSite {
-    type Credentials = ();
     type Format = Ucan;
     type Address = UcanAddress;
 }

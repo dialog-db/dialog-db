@@ -17,12 +17,10 @@ on:
       - main
       - patches/*
     paths:
-      - 'rust/dialog-storage/src/storage/backend/s3.rs'
-      - 'rust/dialog-storage/src/storage/backend/s3/**'
+      - 'rust/dialog-remote-s3/src/**'
   pull_request:
     paths:
-      - 'rust/dialog-storage/src/storage/backend/s3.rs'
-      - 'rust/dialog-storage/src/storage/backend/s3/**'
+      - 'rust/dialog-remote-s3/src/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.inputs.provider || 'auto' }}
@@ -101,6 +99,7 @@ jobs:
         shell: bash
         run: |
           nix develop --command cargo test \
-            --test s3_integration_tests \
-            --features s3-integration-tests \
+            -p dialog-remote-s3 \
+            --test integration_tests \
+            --features integration-tests \
             ${{ matrix.target }}

@@ -20,10 +20,7 @@ impl Provider<Fork<S3, Resolve>> for S3 {
     ) -> Result<Option<Publication>, MemoryError> {
         let request = invocation
             .address
-            .authorize(
-                &invocation.authorization.capability,
-                invocation.credentials.as_ref(),
-            )
+            .authorize(&invocation.authorization.capability)
             .await
             .map_err(|e| MemoryError::Storage(e.to_string()))?;
 
@@ -79,10 +76,7 @@ impl Provider<Fork<S3, Publish>> for S3 {
 
         let request = invocation
             .address
-            .authorize(
-                &invocation.authorization.capability,
-                invocation.credentials.as_ref(),
-            )
+            .authorize(&invocation.authorization.capability)
             .await
             .map_err(|e| MemoryError::Storage(e.to_string()))?;
 
@@ -127,10 +121,7 @@ impl Provider<Fork<S3, Retract>> for S3 {
 
         let request = invocation
             .address
-            .authorize(
-                &invocation.authorization.capability,
-                invocation.credentials.as_ref(),
-            )
+            .authorize(&invocation.authorization.capability)
             .await
             .map_err(|e| MemoryError::Storage(e.to_string()))?;
 

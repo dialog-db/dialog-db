@@ -21,10 +21,7 @@ impl Provider<Fork<S3, Get>> for S3 {
     ) -> Result<Option<Vec<u8>>, StorageError> {
         let request = invocation
             .address
-            .authorize(
-                &invocation.authorization.capability,
-                invocation.credentials.as_ref(),
-            )
+            .authorize(&invocation.authorization.capability)
             .await
             .map_err(|e| StorageError::Storage(e.to_string()))?;
 
@@ -60,10 +57,7 @@ impl Provider<Fork<S3, Set>> for S3 {
 
         let request = invocation
             .address
-            .authorize(
-                &invocation.authorization.capability,
-                invocation.credentials.as_ref(),
-            )
+            .authorize(&invocation.authorization.capability)
             .await
             .map_err(|e| StorageError::Storage(e.to_string()))?;
 
@@ -92,10 +86,7 @@ impl Provider<Fork<S3, Delete>> for S3 {
     async fn execute(&self, invocation: ForkInvocation<S3, Delete>) -> Result<(), StorageError> {
         let request = invocation
             .address
-            .authorize(
-                &invocation.authorization.capability,
-                invocation.credentials.as_ref(),
-            )
+            .authorize(&invocation.authorization.capability)
             .await
             .map_err(|e| StorageError::Storage(e.to_string()))?;
 

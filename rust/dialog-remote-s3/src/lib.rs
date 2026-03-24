@@ -27,11 +27,11 @@
 //! // Subject DID identifies whose data we're accessing (used as path prefix)
 //! let subject = did!("key:zSubject");
 //!
-//! // Create credentials for authenticated access
-//! let credentials = S3Credentials::new(
+//! // Attach credentials for authenticated access
+//! let address = address.with_credentials(S3Credentials::new(
 //!     "AKIAIOSFODNN7EXAMPLE",
 //!     "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-//! );
+//! ));
 //!
 //! // Build a capability and authorize it using the address.
 //! let capability = Subject::from(subject)
@@ -39,7 +39,7 @@
 //!     .attenuate(Store::new("index"))
 //!     .invoke(Get::new(b"my-key"));
 //!
-//! let request = address.authorize(&capability, Some(&credentials)).await?;
+//! let request = address.authorize(&capability).await?;
 //! println!("Presigned URL: {}", request.url);
 //! # Ok(())
 //! # }

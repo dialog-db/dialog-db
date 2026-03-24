@@ -1,10 +1,10 @@
 use dialog_capability::credential::{Allow, Authorize};
 use dialog_capability::fork::Fork;
-use dialog_capability::{Did, Provider, credential};
+use dialog_capability::{Did, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
-use dialog_remote_s3::{Address, S3, S3Credentials};
+use dialog_remote_s3::{Address, S3};
 use dialog_storage::{Blake3Hash, CborEncoder, Encoder};
 
 use crate::DialogArtifactsError;
@@ -84,7 +84,6 @@ impl RemoteBranch {
     pub async fn resolve<Env>(&self, env: &Env) -> Result<Option<Revision>, RepositoryError>
     where
         Env: Provider<Authorize<memory_fx::Resolve, Allow>>
-            + Provider<credential::Retrieve<Option<S3Credentials>>>
             + Provider<Fork<S3, memory_fx::Resolve>>
             + ConditionalSync,
     {
@@ -130,7 +129,6 @@ impl RemoteBranch {
     where
         Env: Provider<Authorize<memory_fx::Resolve, Allow>>
             + Provider<Authorize<memory_fx::Publish, Allow>>
-            + Provider<credential::Retrieve<Option<S3Credentials>>>
             + Provider<Fork<S3, memory_fx::Resolve>>
             + Provider<Fork<S3, memory_fx::Publish>>
             + ConditionalSync,
@@ -192,7 +190,6 @@ impl RemoteBranch {
     ) -> Result<(), DialogArtifactsError>
     where
         Env: Provider<Authorize<archive_fx::Put, Allow>>
-            + Provider<credential::Retrieve<Option<S3Credentials>>>
             + Provider<Fork<S3, archive_fx::Put>>
             + ConditionalSync,
     {
@@ -220,7 +217,6 @@ impl RemoteBranch {
     ) -> Result<Option<Vec<u8>>, DialogArtifactsError>
     where
         Env: Provider<Authorize<archive_fx::Get, Allow>>
-            + Provider<credential::Retrieve<Option<S3Credentials>>>
             + Provider<Fork<S3, archive_fx::Get>>
             + ConditionalSync,
     {

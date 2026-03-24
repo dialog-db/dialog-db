@@ -1,11 +1,10 @@
+use dialog_capability::Provider;
 use dialog_capability::credential::{Allow, Authorize};
 use dialog_capability::fork::Fork;
-use dialog_capability::{Provider, credential};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
 use dialog_remote_s3::S3;
-use dialog_remote_s3::S3Credentials;
 use futures_util::{StreamExt, TryStreamExt};
 
 use super::Branch;
@@ -44,7 +43,6 @@ impl<Store: Clone> Push<'_, Store> {
             + Provider<Authorize<archive_fx::Put, Allow>>
             + Provider<Authorize<memory_fx::Resolve, Allow>>
             + Provider<Authorize<memory_fx::Publish, Allow>>
-            + Provider<credential::Retrieve<Option<S3Credentials>>>
             + Provider<Fork<S3, archive_fx::Put>>
             + Provider<Fork<S3, memory_fx::Resolve>>
             + Provider<Fork<S3, memory_fx::Publish>>
@@ -130,7 +128,6 @@ where
         + Provider<Authorize<archive_fx::Put, Allow>>
         + Provider<Authorize<memory_fx::Resolve, Allow>>
         + Provider<Authorize<memory_fx::Publish, Allow>>
-        + Provider<credential::Retrieve<Option<S3Credentials>>>
         + Provider<Fork<S3, archive_fx::Put>>
         + Provider<Fork<S3, memory_fx::Resolve>>
         + Provider<Fork<S3, memory_fx::Publish>>

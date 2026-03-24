@@ -51,6 +51,10 @@ pub struct Address {
     /// Whether to use path-style URLs (auto-detected from endpoint)
     #[serde(default)]
     path_style: bool,
+    /// Optional S3 credentials for authenticated access.
+    /// `None` means public/unsigned access.
+    #[serde(default)]
+    credentials: Option<S3Credentials>,
 }
 
 impl Address {
@@ -97,6 +101,7 @@ impl Address {
             region: region.into(),
             bucket: bucket.into(),
             path_style,
+            credentials: None,
         }
     }
 
@@ -127,6 +132,17 @@ impl Address {
         self.path_style
     }
 
+    /// Attach S3 credentials for authenticated access.
+    pub fn with_credentials(mut self, credentials: S3Credentials) -> Self {
+        self.credentials = Some(credentials);
+        self
+    }
+
+    /// Get the optional credentials.
+    pub fn credentials(&self) -> Option<&S3Credentials> {
+        self.credentials.as_ref()
+    }
+
     /// Build a URL for the given key path.
     pub fn build_url(&self, path: &str) -> Result<Url, AccessError> {
         let endpoint =
@@ -134,16 +150,15 @@ impl Address {
         crate::s3::build_url(&endpoint, &self.bucket, path, self.path_style)
     }
 
-    /// Authorize a request using optional credentials.
+    /// Authorize a request using the address's credentials.
     ///
-    /// - `None` → public/unsigned access (no SigV4 signing)
-    /// - `Some(creds)` → private access with SigV4 signing
+    /// - No credentials → public/unsigned access (no SigV4 signing)
+    /// - With credentials → private access with SigV4 signing
     pub async fn authorize<R: S3Request>(
         &self,
         request: &R,
-        credentials: Option<&S3Credentials>,
     ) -> Result<AuthorizedRequest, AccessError> {
-        match credentials {
+        match &self.credentials {
             None => self.build_unsigned_request(request).await,
             Some(creds) => creds.grant(request, self).await,
         }
@@ -189,13 +204,6 @@ impl Address {
             method: request.method().to_string(),
             headers,
         })
-    }
-}
-
-/// Implement `Addressable` for `Address` to enable credential lookup.
-impl dialog_capability::credential::Addressable<Option<S3Credentials>> for Address {
-    fn credential_address(&self) -> dialog_capability::credential::Address<Option<S3Credentials>> {
-        dialog_capability::credential::Address::new(self.endpoint())
     }
 }
 

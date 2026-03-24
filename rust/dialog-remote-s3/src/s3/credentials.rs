@@ -334,7 +334,7 @@ mod tests {
         let address = test_address();
 
         let get = get_capability("index", b"test-key");
-        let descriptor = address.authorize(&get, None).await.unwrap();
+        let descriptor = address.authorize(&get).await.unwrap();
 
         assert_eq!(descriptor.method, "GET");
         assert!(descriptor.url.as_str().contains("my-bucket"));
@@ -343,11 +343,10 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_signs_with_private_credentials() {
-        let address = test_address();
-        let creds = S3Credentials::new("AKIATEST", "secret123");
+        let address = test_address().with_credentials(S3Credentials::new("AKIATEST", "secret123"));
 
         let get = get_capability("index", b"test-key");
-        let descriptor = address.authorize(&get, Some(&creds)).await.unwrap();
+        let descriptor = address.authorize(&get).await.unwrap();
 
         assert_eq!(descriptor.method, "GET");
         assert!(descriptor.url.as_str().contains("X-Amz-Signature="));
@@ -360,7 +359,7 @@ mod tests {
 
         let checksum = Checksum::Sha256([0u8; 32]);
         let set = set_capability("store", b"key", checksum);
-        let descriptor = address.authorize(&set, None).await.unwrap();
+        let descriptor = address.authorize(&set).await.unwrap();
 
         assert!(
             descriptor
@@ -375,7 +374,7 @@ mod tests {
         let address = localhost_address();
 
         let get = get_capability("test", b"key");
-        let descriptor = address.authorize(&get, None).await.unwrap();
+        let descriptor = address.authorize(&get).await.unwrap();
 
         assert_eq!(descriptor.url.host_str().unwrap(), "localhost");
         assert!(descriptor.url.path().starts_with("/test-bucket/"));

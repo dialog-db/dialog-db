@@ -4,7 +4,6 @@ use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
 use dialog_remote_s3::Address;
 use dialog_remote_s3::S3;
-use dialog_remote_s3::S3Credentials;
 use dialog_storage::provider::Volatile;
 
 use crate::environment::RemoteAddress;
@@ -53,18 +52,6 @@ impl TestEnv {
             local: Volatile::new(),
             remote: InMemoryRemote::new(),
         }
-    }
-}
-
-// Credential lookup — return None (public access).
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<credential::Retrieve<Option<S3Credentials>>> for TestEnv {
-    async fn execute(
-        &self,
-        _input: Capability<credential::Retrieve<Option<S3Credentials>>>,
-    ) -> Result<Option<S3Credentials>, credential::CredentialError> {
-        Ok(None)
     }
 }
 

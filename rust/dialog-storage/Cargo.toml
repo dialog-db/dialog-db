@@ -11,23 +11,7 @@ helpers = [
   "anyhow",
   "rand",
   "dialog-common/helpers",
-  "dep:s3s",
-  "dep:hyper",
-  "dep:hyper-util",
-  "dep:http-body-util",
-  "dep:bytes",
-  "dep:tokio-test",
-  "dep:tower",
-  "dep:tower-http",
 ]
-# Enables the S3/R2-compatible storage backend
-s3 = ["dep:dialog-remote-s3", "dep:reqwest", "dep:url", "dep:chrono"]
-# Enables S3 list operations (ListObjectsV2) with XML parsing
-s3-list = ["s3", "dep:quick-xml"]
-# Enables UCAN-based authorization via external access service
-ucan = ["s3", "dep:dialog-remote-ucan-s3", "dep:dialog-credentials"]
-# Enables real S3/R2 integration tests (requires R2S3_* environment variables)
-s3-integration-tests = ["s3-list", "helpers"]
 # Enable integration tests (tests with service provisioning)
 integration-tests = ["dialog-common/integration-tests"]
 # Enable web integration tests
@@ -51,11 +35,6 @@ futures-util = { workspace = true }
 hyper = { workspace = true, optional = true }
 hyper-util = { workspace = true, features = ["server", "tokio", "service"], optional = true }
 md5 = { workspace = true }
-reqwest = { workspace = true, features = ["json"], optional = true }
-dialog-credentials = { workspace = true, optional = true }
-dialog-remote-ucan-s3 = { workspace = true, optional = true }
-dialog-remote-s3 = { workspace = true, optional = true }
-quick-xml = { workspace = true, features = ["serde", "serialize"], optional = true }
 parking_lot = { workspace = true }
 s3s = { workspace = true, optional = true }
 sieve-cache = { workspace = true }
@@ -65,19 +44,12 @@ serde_json = { workspace = true }
 rand = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
-url = { workspace = true, optional = true }
-chrono = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 url = { workspace = true }
 pidlock = { workspace = true }
 tempfile = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["sync", "fs", "macros", "rt", "net"] }
-http-body-util = { workspace = true, optional = true }
-bytes = { workspace = true, optional = true }
-tokio-test = { workspace = true, optional = true }
-tower = { workspace = true, optional = true }
-tower-http = { workspace = true, features = ["cors"], optional = true }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 js-sys = { workspace = true }
@@ -95,15 +67,6 @@ serde_json = { workspace = true }
 rand = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-bytes = { workspace = true }
-chrono = { workspace = true }
-dialog-remote-s3 = { workspace = true }
-clap = { workspace = true, features = ["derive"] }
-s3s = { workspace = true }
-hyper = { workspace = true }
-hyper-util = { workspace = true, features = ["server", "tokio", "service"] }
-http-body-util = { workspace = true }
-serde_ipld_dagcbor = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = [
   "sync",
@@ -112,18 +75,10 @@ tokio = { workspace = true, features = [
   "fs",
   "rt-multi-thread",
 ] }
-tower = { workspace = true }
-tower-http = { workspace = true, features = ["cors"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
-# getrandom = { workspace = true, features = ["wasm_js"] }
 getrandom = { workspace = true, features = ["js"] }
 wasm-bindgen-test = { workspace = true }
-
-[[test]]
-name = "s3_integration_tests"
-path = "tests/s3_integration_tests/main.rs"
-required-features = ["s3-integration-tests"]
 
 [lints.rust]
 # This cfg is used by the dialog_common::test proc macro for wasm inner tests

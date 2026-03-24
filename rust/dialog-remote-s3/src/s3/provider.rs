@@ -42,17 +42,13 @@ mod tests {
         )
     }
 
-    /// Helper to presign a capability using Address + optional credentials.
-    async fn presign<C>(
-        address: &Address,
-        creds: Option<&S3Credentials>,
-        capability: &Capability<C>,
-    ) -> AuthorizedRequest
+    /// Helper to presign a capability using Address (credentials on address).
+    async fn presign<C>(address: &Address, capability: &Capability<C>) -> AuthorizedRequest
     where
         C: Constraint + 'static,
         Capability<C>: S3Request,
     {
-        address.authorize(capability, creds).await.unwrap()
+        address.authorize(capability).await.unwrap()
     }
 
     #[dialog_common::test]
@@ -65,7 +61,7 @@ mod tests {
             .attenuate(storage::Store::new("index"))
             .invoke(storage::Get::new(key));
 
-        let req = presign(&address, None, &capability).await;
+        let req = presign(&address, &capability).await;
 
         assert_eq!(req.method, "GET");
         assert_eq!(
@@ -89,7 +85,7 @@ mod tests {
             .attenuate(storage::Store::new("blob"))
             .invoke(storage::Get::new(binary_key));
 
-        let req = presign(&address, None, &capability).await;
+        let req = presign(&address, &capability).await;
 
         assert_eq!(req.method, "GET");
         assert!(req.url.path().contains(&binary_key.to_base58()));
@@ -110,7 +106,7 @@ mod tests {
                 checksum,
             });
 
-        let req = presign(&address, None, &capability).await;
+        let req = presign(&address, &capability).await;
 
         assert_eq!(req.method, "PUT");
         assert_eq!(
@@ -138,7 +134,7 @@ mod tests {
             .attenuate(storage::Store::new("index"))
             .invoke(storage::Delete::new(key));
 
-        let req = presign(&address, None, &capability).await;
+        let req = presign(&address, &capability).await;
 
         assert_eq!(req.method, "DELETE");
         assert_eq!(
@@ -156,7 +152,7 @@ mod tests {
             .attenuate(storage::Store::new("index"))
             .invoke(storage::List::new(None));
 
-        let req = presign(&address, None, &capability).await;
+        let req = presign(&address, &capability).await;
 
         assert_eq!(req.method, "GET");
 
@@ -184,7 +180,7 @@ mod tests {
             .attenuate(storage::Store::new("data"))
             .invoke(storage::List::new(Some(token.to_string())));
 
-        let req = presign(&address, None, &capability).await;
+        let req = presign(&address, &capability).await;
 
         let query: Vec<(String, String)> = req
             .url
@@ -206,7 +202,7 @@ mod tests {
             .attenuate(memory::Cell::new("main"))
             .invoke(memory::Resolve);
 
-        let req = presign(&address, None, &capability).await;
+        let req = presign(&address, &capability).await;
 
         assert_eq!(req.method, "GET");
         assert_eq!(
@@ -229,7 +225,7 @@ mod tests {
                 when: None,
             });
 
-        let req = presign(&address, None, &capability).await;
+        let req = presign(&address, &capability).await;
 
         assert_eq!(req.method, "PUT");
         assert_eq!(
@@ -259,7 +255,7 @@ mod tests {
                 when: Some(_prior_etag),
             });
 
-        let req = presign(&address, None, &capability).await;
+        let req = presign(&address, &capability).await;
 
         assert_eq!(req.method, "PUT");
         assert!(
@@ -281,7 +277,7 @@ mod tests {
                 when: "etag-to-match".to_string(),
             });
 
-        let req = presign(&address, None, &capability).await;
+        let req = presign(&address, &capability).await;
 
         assert_eq!(req.method, "DELETE");
         assert_eq!(
@@ -300,7 +296,7 @@ mod tests {
             .attenuate(archive::Catalog::new("blobs"))
             .invoke(archive::Get::new(digest));
 
-        let req = presign(&address, None, &capability).await;
+        let req = presign(&address, &capability).await;
 
         assert_eq!(req.method, "GET");
         assert_eq!(
@@ -323,7 +319,7 @@ mod tests {
                 checksum,
             });
 
-        let req = presign(&address, None, &capability).await;
+        let req = presign(&address, &capability).await;
 
         assert_eq!(req.method, "PUT");
         assert_eq!(
@@ -339,8 +335,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_generates_signed_url_for_get_with_private_creds() {
-        let address = test_address();
-        let creds = private_creds();
+        let address = test_address().with_credentials(private_creds());
         let key = b"signed-key";
 
         let capability = Subject::from(test_subject())
@@ -348,7 +343,7 @@ mod tests {
             .attenuate(storage::Store::new("data"))
             .invoke(storage::Get::new(key));
 
-        let req = presign(&address, Some(&creds), &capability).await;
+        let req = presign(&address, &capability).await;
 
         assert_eq!(req.method, "GET");
 
@@ -367,8 +362,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_generates_signed_url_for_put_with_private_creds() {
-        let address = test_address();
-        let creds = private_creds();
+        let address = test_address().with_credentials(private_creds());
         let key = b"upload-key";
         let checksum = crate::Checksum::Sha256([0xff; 32]);
 
@@ -380,7 +374,7 @@ mod tests {
                 checksum,
             });
 
-        let req = presign(&address, Some(&creds), &capability).await;
+        let req = presign(&address, &capability).await;
 
         assert_eq!(req.method, "PUT");
 
@@ -400,15 +394,14 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_generates_signed_url_for_list_with_private_creds() {
-        let address = test_address();
-        let creds = private_creds();
+        let address = test_address().with_credentials(private_creds());
 
         let capability = Subject::from(test_subject())
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("files"))
             .invoke(storage::List::new(None));
 
-        let req = presign(&address, Some(&creds), &capability).await;
+        let req = presign(&address, &capability).await;
 
         assert_eq!(req.method, "GET");
 
@@ -433,7 +426,7 @@ mod tests {
             .attenuate(storage::Store::new("test"))
             .invoke(storage::Get::new(b"key"));
 
-        let req = presign(&address, None, &capability).await;
+        let req = presign(&address, &capability).await;
 
         assert!(req.url.host_str().unwrap().starts_with("my-bucket."));
     }
@@ -447,7 +440,7 @@ mod tests {
             .attenuate(storage::Store::new("test"))
             .invoke(storage::Get::new(b"key"));
 
-        let req = presign(&address, None, &capability).await;
+        let req = presign(&address, &capability).await;
 
         assert_eq!(req.url.host_str().unwrap(), "localhost");
         assert!(req.url.path().starts_with("/test-bucket/"));
@@ -464,7 +457,7 @@ mod tests {
                 .attenuate(storage::Store::new(store_name))
                 .invoke(storage::Get::new(b"key"));
 
-            let req = presign(&address, None, &capability).await;
+            let req = presign(&address, &capability).await;
 
             if store_name.is_empty() {
                 assert!(req.url.path().contains(&format!("/{}/", TEST_SUBJECT)));
@@ -490,7 +483,7 @@ mod tests {
                 .attenuate(archive::Catalog::new(catalog_name))
                 .invoke(archive::Get::new(digest));
 
-            let req = presign(&address, None, &capability).await;
+            let req = presign(&address, &capability).await;
 
             assert!(
                 req.url

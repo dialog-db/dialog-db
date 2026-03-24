@@ -51,7 +51,7 @@
 //! );
 //!
 //! // Wrap with UCAN authorizer
-//! let authorizer = UcanAuthorizer::new(address, Some(s3_credentials));
+//! let authorizer = UcanAuthorizer::new(address.with_credentials(s3_credentials));
 //!
 //! // Handle incoming UCAN container
 //! let container_bytes: Vec<u8> = vec![]; // UCAN container from request
@@ -67,7 +67,6 @@ use dialog_credentials::Ed25519KeyResolver;
 use dialog_effects::{archive, memory, storage};
 use dialog_remote_s3::Address;
 use dialog_remote_s3::capability::{AccessError, AuthorizedRequest};
-use dialog_remote_s3::s3::S3Credentials;
 use dialog_ucan::InvocationChain;
 use dialog_ucan::promise::Promised;
 use ipld_core::ipld::Ipld;
@@ -256,7 +255,7 @@ macro_rules! dispatch {
             $(
                 [$seg1, $seg2] => {
                     let capability = <$fx as FromUcanArgs>::capability_from_args($subject, $args)?;
-                    $self.address.authorize(&capability, $self.credentials.as_ref()).await
+                    $self.address.authorize(&capability).await
                 }
             )+
             _ => Err(AccessError::Invocation(format!("Unknown command: {:?}", $segments)))
@@ -274,16 +273,14 @@ macro_rules! dispatch {
 #[derive(Debug, Clone)]
 pub struct UcanAuthorizer {
     address: Address,
-    credentials: Option<S3Credentials>,
 }
 
 impl UcanAuthorizer {
-    /// Create a new UCAN authorizer wrapping the given address and credentials.
-    pub fn new(address: Address, credentials: Option<S3Credentials>) -> Self {
-        Self {
-            address,
-            credentials,
-        }
+    /// Create a new UCAN authorizer wrapping the given address.
+    ///
+    /// Credentials (if any) should be set on the address via `Address::with_credentials`.
+    pub fn new(address: Address) -> Self {
+        Self { address }
     }
 
     /// Authorize a UCAN container.
@@ -345,6 +342,7 @@ mod tests {
     use dialog_credentials::Ed25519Signer;
     use dialog_remote_s3::Address;
     use dialog_remote_s3::s3;
+    use dialog_remote_s3::s3::S3Credentials;
     use dialog_ucan::DelegationBuilder;
     use dialog_ucan::InvocationBuilder;
     use dialog_ucan::InvocationChain;
@@ -408,7 +406,7 @@ mod tests {
         );
         let credentials = S3Credentials::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(address, Some(credentials));
+        let authorizer = UcanAuthorizer::new(address.with_credentials(credentials));
 
         let operator_signer = Ed25519Signer::import(&[1u8; 32]).await.unwrap();
 
@@ -442,7 +440,7 @@ mod tests {
         );
         let credentials = S3Credentials::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(address, Some(credentials));
+        let authorizer = UcanAuthorizer::new(address.with_credentials(credentials));
 
         let operator_signer = Ed25519Signer::import(&[1u8; 32]).await.unwrap();
 
@@ -481,7 +479,7 @@ mod tests {
         );
         let credentials = S3Credentials::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(address, Some(credentials));
+        let authorizer = UcanAuthorizer::new(address.with_credentials(credentials));
 
         let operator_signer = Ed25519Signer::import(&[1u8; 32]).await.unwrap();
 
@@ -520,7 +518,7 @@ mod tests {
         );
         let credentials = S3Credentials::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(address, Some(credentials));
+        let authorizer = UcanAuthorizer::new(address.with_credentials(credentials));
 
         let operator_signer = Ed25519Signer::import(&[1u8; 32]).await.unwrap();
 
@@ -553,7 +551,7 @@ mod tests {
         );
         let credentials = S3Credentials::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(address, Some(credentials));
+        let authorizer = UcanAuthorizer::new(address.with_credentials(credentials));
 
         let operator_signer = Ed25519Signer::import(&[1u8; 32]).await.unwrap();
 
@@ -592,7 +590,7 @@ mod tests {
         );
         let credentials = s3::S3Credentials::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(address, Some(credentials));
+        let authorizer = UcanAuthorizer::new(address.with_credentials(credentials));
 
         let digest = Blake3Hash::hash(b"hello");
         let args = BTreeMap::from([
@@ -660,7 +658,7 @@ mod tests {
         );
         let credentials = S3Credentials::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(address, Some(credentials));
+        let authorizer = UcanAuthorizer::new(address.with_credentials(credentials));
 
         let mut args = BTreeMap::new();
         args.insert("store".to_string(), Promised::String("index".to_string()));
@@ -697,7 +695,7 @@ mod tests {
         );
         let credentials = S3Credentials::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(address, Some(credentials));
+        let authorizer = UcanAuthorizer::new(address.with_credentials(credentials));
 
         // Multihash format: [code, length, ...digest]
         // SHA-256 code is 0x12, length is 0x20 (32 bytes)
@@ -739,7 +737,7 @@ mod tests {
         );
         let credentials = S3Credentials::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(address, Some(credentials));
+        let authorizer = UcanAuthorizer::new(address.with_credentials(credentials));
 
         let mut args = BTreeMap::new();
         args.insert("catalog".to_string(), Promised::String("blobs".to_string()));

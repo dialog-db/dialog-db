@@ -1,10 +1,9 @@
+use dialog_capability::Provider;
 use dialog_capability::credential::{Allow, Authorize};
 use dialog_capability::fork::Fork;
-use dialog_capability::{Provider, credential};
 use dialog_common::ConditionalSync;
 use dialog_effects::memory as memory_fx;
 use dialog_remote_s3::S3;
-use dialog_remote_s3::S3Credentials;
 
 use super::Branch;
 use super::state::{BranchName, UpstreamState};
@@ -37,7 +36,6 @@ impl<Store: Clone> Fetch<'_, Store> {
     where
         Env: Provider<memory_fx::Resolve>
             + Provider<Authorize<memory_fx::Resolve, Allow>>
-            + Provider<credential::Retrieve<Option<S3Credentials>>>
             + Provider<Fork<S3, memory_fx::Resolve>>
             + ConditionalSync,
     {
@@ -93,7 +91,6 @@ async fn fetch_remote<Store, Env>(
 where
     Env: Provider<memory_fx::Resolve>
         + Provider<Authorize<memory_fx::Resolve, Allow>>
-        + Provider<credential::Retrieve<Option<S3Credentials>>>
         + Provider<Fork<S3, memory_fx::Resolve>>
         + ConditionalSync,
 {

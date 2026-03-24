@@ -90,19 +90,15 @@ impl From<crate::AccessError> for S3StorageError {
 
 /// S3 HTTP execution layer.
 ///
-/// A stateless executor that presigns and dispatches `ForkInvocation<Fx, S3>` requests
-/// via HTTP. The invocation carries the address, credentials, and capability --
+/// A stateless executor that presigns and dispatches `ForkInvocation<S3, Fx>` requests
+/// via HTTP. The invocation carries the address, credentials, and capability —
 /// `S3` just performs the HTTP round-trip.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct S3;
 
-/// S3 implements `Site` with `Option<S3Credentials>` for credentials.
-///
-/// Uses [`Address`] directly as the address type.
 impl Site for S3 {
-    type Credentials = Option<S3Credentials>;
     type Format = Allow;
-    type Address = Address;
+    type Address = crate::Address;
 }
 
 /// A scoped S3 storage bucket with subject and namespace path.

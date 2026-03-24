@@ -28,21 +28,6 @@ use thiserror::Error;
 
 pub use crate::site::Local;
 
-/// Trait for types that can provide a credential lookup address.
-///
-/// Implemented by site address types to connect addresses to their
-/// corresponding credential type for lookup in the credential store.
-pub trait Addressable<C> {
-    /// Get the credential address for looking up credentials.
-    fn credential_address(&self) -> Address<C>;
-}
-
-impl Addressable<()> for () {
-    fn credential_address(&self) -> Address<()> {
-        Address::new("local")
-    }
-}
-
 /// Root attenuation for credential operations.
 ///
 /// Attaches to Subject and provides the `/credential` ability path segment.
@@ -74,9 +59,7 @@ impl Profile {
 
 impl Default for Profile {
     fn default() -> Self {
-        Self {
-            profile: "default".to_string(),
-        }
+        Self::new("default")
     }
 }
 
@@ -84,19 +67,19 @@ impl Policy for Profile {
     type Of = Credential;
 }
 
-/// The active credential session: profile, operator, and optional account.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Identity information returned by the Identify effect.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Identity {
-    /// The profile's DID (device-local persistent identity).
+    /// The user's profile DID.
     pub profile: Did,
-    /// The operator's DID (ephemeral session key).
+    /// The operator DID (device/agent).
     pub operator: Did,
-    /// The account's DID (optional cross-device recovery identity).
+    /// Optional W3 account DID.
     pub account: Option<Did>,
 }
 
-/// Identify operation — returns the credential detail for the active session.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, crate::Claim)]
+/// Identify operation — returns the operator's identity.
+#[derive(Debug, Clone, Serialize, Deserialize, crate::Claim)]
 pub struct Identify;
 
 impl Effect for Identify {
@@ -193,7 +176,7 @@ where
 pub struct Save<C: Serialize> {
     /// The address to store at.
     pub address: Address<C>,
-    /// The credentials to store.
+    /// The credentials to save.
     pub credentials: C,
 }
 
@@ -205,19 +188,29 @@ where
     type Output = Result<(), CredentialError>;
 }
 
-/// Errors that can occur during credential operations.
+/// Error type for credential operations.
 #[derive(Debug, Error)]
 pub enum CredentialError {
-    /// The signing operation failed.
+    /// The requested credential was not found.
+    #[error("Credential not found: {0}")]
+    NotFound(String),
+
+    /// Signing operation failed.
     #[error("Signing failed: {0}")]
     SigningFailed(String),
 
-    /// No credentials available.
-    #[error("No credentials available: {0}")]
-    NotFound(String),
+    /// Import of credential material failed.
+    #[error("Import failed: {0}")]
+    ImportFailed(String),
 }
 
-/// Trait describing the format of authorization material.
+/// Allow — trivial authorization that requires no proof.
+///
+/// Used by sites like S3 and Local where authorization is implicit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Allow;
+
+/// Trait for authorization proof formats.
 ///
 /// Different authorization schemes produce different proof types:
 /// - [`Allow`]: no extra material (`Authorization<Fx> = ()`)
@@ -227,21 +220,14 @@ pub trait AuthorizationFormat: ConditionalSend + 'static {
     type Authorization<Fx: Constraint>: ConditionalSend;
 }
 
-/// Simple authorization format — permission granted, no extra material.
-///
-/// Used by sites that don't need format-specific authorization (e.g., S3
-/// direct access, local operations).
-pub struct Allow;
-
 impl AuthorizationFormat for Allow {
     type Authorization<Fx: Constraint> = ();
 }
 
-/// An authorized capability paired with format-specific authorization material.
+/// Authorized capability with format-specific proof material.
 ///
-/// Produced by `Provider<Authorize<Fx, F>>`. Carries both the authorized
-/// capability and the format-specific proof.
-pub struct Authorization<Fx: Constraint, F: AuthorizationFormat> {
+/// Created by `Provider<Authorize<Fx, F>>`.
+pub struct Authorization<Fx: Constraint, F: AuthorizationFormat = Allow> {
     /// The authorized capability.
     pub capability: Capability<Fx>,
     /// The format-specific authorization material.
@@ -270,10 +256,9 @@ impl<Fx: Constraint, F: AuthorizationFormat> std::ops::Deref for Authorization<F
     }
 }
 
-/// Request to authorize a capability for a specific authorization format.
+/// Authorize a capability for remote execution.
 ///
-/// The format's `Authorization<Fx>` GAT determines what the authorization
-/// produces — e.g., `()` for `Allow`, or `UcanInvocation` for UCAN.
+/// The `F` type parameter selects the authorization format (Allow, Ucan, etc.).
 #[derive(Serialize, Deserialize)]
 #[serde(bound(deserialize = ""))]
 pub struct Authorize<Fx: Constraint, F: AuthorizationFormat = Allow> {

@@ -1,12 +1,11 @@
+use dialog_capability::Provider;
 use dialog_capability::credential::{Allow, Authorize};
 use dialog_capability::fork::Fork;
-use dialog_capability::{Provider, credential};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
 use dialog_prolly_tree::{EMPT_TREE_HASH, Tree};
 use dialog_remote_s3::S3;
-use dialog_remote_s3::S3Credentials;
 use std::collections::HashSet;
 
 use super::Branch;
@@ -81,7 +80,6 @@ impl<Store: Clone> Pull<'_, Store> {
             + Provider<memory_fx::Publish>
             + Provider<Authorize<archive_fx::Get, Allow>>
             + Provider<Authorize<memory_fx::Resolve, Allow>>
-            + Provider<credential::Retrieve<Option<S3Credentials>>>
             + Provider<Fork<S3, archive_fx::Get>>
             + Provider<Fork<S3, memory_fx::Resolve>>
             + ConditionalSync
@@ -236,7 +234,6 @@ where
         + Provider<memory_fx::Publish>
         + Provider<Authorize<archive_fx::Get, Allow>>
         + Provider<Authorize<memory_fx::Resolve, Allow>>
-        + Provider<credential::Retrieve<Option<S3Credentials>>>
         + Provider<Fork<S3, archive_fx::Get>>
         + Provider<Fork<S3, memory_fx::Resolve>>
         + ConditionalSync

@@ -20,10 +20,7 @@ impl Provider<Fork<S3, Get>> for S3 {
     ) -> Result<Option<Vec<u8>>, ArchiveError> {
         let request = invocation
             .address
-            .authorize(
-                &invocation.authorization.capability,
-                invocation.credentials.as_ref(),
-            )
+            .authorize(&invocation.authorization.capability)
             .await
             .map_err(|e| ArchiveError::Io(e.to_string()))?;
 
@@ -61,10 +58,7 @@ impl Provider<Fork<S3, Put>> for S3 {
 
         let request = invocation
             .address
-            .authorize(
-                &invocation.authorization.capability,
-                invocation.credentials.as_ref(),
-            )
+            .authorize(&invocation.authorization.capability)
             .await
             .map_err(|e| ArchiveError::Io(e.to_string()))?;
 

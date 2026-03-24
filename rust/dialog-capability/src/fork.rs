@@ -1,13 +1,13 @@
 //! Fork — remote execution of capabilities via site-specific providers.
 //!
 //! A [`Fork`] pairs a [`Capability`] with a site address, orchestrating
-//! authorization, credential resolution, and dispatch via the environment.
+//! authorization and dispatch via the environment.
 //!
 //! [`ForkInvocation`] is the input to `Provider<Fork<S, Fx>>` — it carries
-//! the address, credentials, and authorization needed for execution.
+//! the address and authorization needed for execution.
 
 use crate::command::Command;
-use crate::credential::{self, Addressable, Authorization, AuthorizeError, CredentialError};
+use crate::credential::{self, Authorization, AuthorizeError};
 use crate::effect::Effect;
 use crate::site::{Site, SiteAddress};
 use crate::{Ability, Capability, Constraint, Provider};
@@ -16,13 +16,12 @@ use std::marker::PhantomData;
 
 /// The data bundle passed to `Provider<Fork<S, Fx>>`.
 ///
-/// Carries address, credentials, and authorization — everything needed
+/// Carries address and authorization — everything needed
 /// for a site-specific provider to execute the operation.
+/// Credentials (if any) live on the address itself.
 pub struct ForkInvocation<S: Site, Fx: Effect> {
-    /// The site address (endpoint info for building requests).
+    /// The site address (endpoint info + credentials for building requests).
     pub address: S::Address,
-    /// The resolved credentials for this site.
-    pub credentials: S::Credentials,
     /// The authorized capability with format-specific proof.
     pub authorization: Authorization<Fx, S::Format>,
 }
@@ -74,47 +73,33 @@ where
 
     /// Authorize the capability and build a `ForkInvocation`.
     ///
-    /// 1. Authorizes via `Provider<credential::Authorize<Fx, S::Format>>`
-    /// 2. Looks up credentials via `Provider<credential::Retrieve<S::Credentials>>`
-    /// 3. Builds `ForkInvocation { address, credentials, authorization }`
+    /// Authorizes via `Provider<credential::Authorize<Fx, S::Format>>`,
+    /// then builds `ForkInvocation { address, authorization }`.
     pub async fn acquire<Env>(self, env: &Env) -> Result<ForkInvocation<S, Fx>, AuthorizeError>
     where
         Capability<Fx>: Ability + Clone + ConditionalSend,
         credential::Authorize<Fx, S::Format>: ConditionalSend + 'static,
-        credential::Retrieve<S::Credentials>: ConditionalSend + 'static,
-        Env: Provider<credential::Authorize<Fx, S::Format>>
-            + Provider<credential::Retrieve<S::Credentials>>,
+        Env: Provider<credential::Authorize<Fx, S::Format>> + dialog_common::ConditionalSync,
     {
         let authorize_cap = build_authorize_cap::<Fx, S::Format>(self.capability.clone());
         let authorization =
             <Env as Provider<credential::Authorize<Fx, S::Format>>>::execute(env, authorize_cap)
                 .await?;
 
-        let get_cap = build_retrieve_cap::<S::Credentials>(
-            self.capability.subject().clone(),
-            self.address.credential_address(),
-        );
-        let credentials: S::Credentials =
-            <Env as Provider<credential::Retrieve<S::Credentials>>>::execute(env, get_cap)
-                .await
-                .map_err(|e: CredentialError| AuthorizeError::Configuration(e.to_string()))?;
-
         Ok(ForkInvocation {
             address: self.address,
-            credentials,
             authorization,
         })
     }
 
-    /// Authorize, resolve credentials, and execute in one step.
+    /// Authorize and execute in one step.
     pub async fn perform<Env>(self, env: &Env) -> Result<Fx::Output, AuthorizeError>
     where
         Capability<Fx>: Ability + Clone + ConditionalSend,
         credential::Authorize<Fx, S::Format>: ConditionalSend + 'static,
-        credential::Retrieve<S::Credentials>: ConditionalSend + 'static,
         Env: Provider<credential::Authorize<Fx, S::Format>>
-            + Provider<credential::Retrieve<S::Credentials>>
-            + Provider<Fork<S, Fx>>,
+            + Provider<Fork<S, Fx>>
+            + dialog_common::ConditionalSync,
     {
         let invocation = self.acquire(env).await?;
         Ok(invocation.perform(env).await)
@@ -142,10 +127,6 @@ pub enum ForkError {
     /// Authorization was denied.
     #[error(transparent)]
     Authorization(#[from] AuthorizeError),
-
-    /// Credential resolution failed.
-    #[error(transparent)]
-    Credential(#[from] CredentialError),
 }
 
 /// Build a `Capability<credential::Authorize<Fx, F>>` from a `Capability<Fx>`.
@@ -165,19 +146,4 @@ where
         .attenuate(credential::Credential)
         .attenuate(credential::Profile::default())
         .invoke(credential::Authorize::<Fx, F>::new(capability))
-}
-
-/// Build a `Capability<credential::Retrieve<C>>` for retrieving credentials.
-fn build_retrieve_cap<C>(
-    did: crate::Did,
-    address: credential::Address<C>,
-) -> Capability<credential::Retrieve<C>>
-where
-    C: serde::Serialize + serde::de::DeserializeOwned + ConditionalSend + 'static,
-{
-    use crate::Subject;
-    Subject::from(did)
-        .attenuate(credential::Credential)
-        .attenuate(credential::Profile::default())
-        .invoke(credential::Retrieve { address })
 }

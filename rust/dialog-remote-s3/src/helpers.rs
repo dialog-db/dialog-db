@@ -9,8 +9,6 @@
 //! - Test operator types for capability-based testing
 use dialog_capability::{Capability, Did, Principal, Provider, credential};
 
-use crate::s3::S3Credentials;
-
 use serde::{Deserialize, Serialize};
 
 /// S3 test server connection info with credentials, passed to inner tests.
@@ -51,22 +49,12 @@ pub struct PublicS3Address {
 #[derive(Debug, Clone)]
 pub struct Session {
     did: Did,
-    s3_credentials: Option<S3Credentials>,
 }
 
 impl Session {
     /// Create a new test session with the given DID.
     pub fn new(did: impl Into<Did>) -> Self {
-        Self {
-            did: did.into(),
-            s3_credentials: None,
-        }
-    }
-
-    /// Attach S3 credentials to this session for site-based authorization.
-    pub fn with_s3_credentials(mut self, credentials: S3Credentials) -> Self {
-        self.s3_credentials = Some(credentials);
-        self
+        Self { did: did.into() }
     }
 }
 
@@ -101,18 +89,6 @@ impl Provider<credential::Sign> for Session {
         // S3 direct access uses SigV4 signing, not external signatures.
         // The signature is never verified -- S3 uses its own SigV4 auth.
         Ok(vec![0u8; 64])
-    }
-}
-
-/// Session implements Provider<Retrieve<Option<S3Credentials>>> for credential lookup.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<credential::Retrieve<Option<S3Credentials>>> for Session {
-    async fn execute(
-        &self,
-        _input: Capability<credential::Retrieve<Option<S3Credentials>>>,
-    ) -> Result<Option<S3Credentials>, credential::CredentialError> {
-        Ok(self.s3_credentials.clone())
     }
 }
 

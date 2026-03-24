@@ -1,11 +1,10 @@
 use async_trait::async_trait;
 use dialog_capability::credential::{Allow, Authorize};
 use dialog_capability::fork::Fork;
-use dialog_capability::{Capability, Provider, credential};
+use dialog_capability::{Capability, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Catalog, Get, Put};
 use dialog_remote_s3::S3;
-use dialog_remote_s3::S3Credentials;
 use dialog_storage::{
     Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder,
 };
@@ -59,7 +58,6 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Authorize<Get, Allow>>
-        + Provider<credential::Retrieve<Option<S3Credentials>>>
         + Provider<Fork<S3, Get>>
         + ConditionalSync
         + 'static,
