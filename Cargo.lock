@@ -899,6 +899,7 @@ dependencies = [
  "dialog-remote-s3",
  "dialog-remote-ucan-s3",
  "dialog-storage",
+ "dialog-ucan",
  "dialog-varsig",
  "dirs",
  "ed25519-dalek",

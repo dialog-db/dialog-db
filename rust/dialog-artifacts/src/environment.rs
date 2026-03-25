@@ -13,10 +13,13 @@
 
 mod builder;
 mod error;
+pub mod grant;
 mod provider;
 
 pub use builder::Builder;
 pub use error::OpenError;
+#[cfg(feature = "ucan")]
+pub use grant::ucan::Ucan;
 pub use provider::Environment;
 
 #[cfg(not(target_arch = "wasm32"))]

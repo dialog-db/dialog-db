@@ -14,8 +14,8 @@
 //! to find all delegations granted to an operator for a given subject.
 //! Entries where `issuer == subject` are direct grants (no further chain needed).
 
-use crate::credential;
-use crate::{Capability, Did, Provider};
+use crate::credential::{self, CredentialError};
+use crate::{Capability, Did, Policy, Provider};
 use dialog_common::ConditionalSync;
 use dialog_ucan::DelegationChain;
 use dialog_ucan::subject::Subject;
@@ -91,6 +91,23 @@ where
         env.execute(save_cap).await?;
     }
     Ok(())
+}
+
+/// Blanket impl: any type that can save credentials can import delegation chains.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<Env> Provider<credential::Import<DelegationChain>> for Env
+where
+    Env: Provider<credential::Save<Vec<u8>>> + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        input: Capability<credential::Import<DelegationChain>>,
+    ) -> Result<(), CredentialError> {
+        let subject = input.subject().clone();
+        let chain = &credential::Import::<DelegationChain>::of(&input).material;
+        import_delegation_chain(self, &subject, chain).await
+    }
 }
 
 #[cfg(test)]

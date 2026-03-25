@@ -10,19 +10,52 @@ use dialog_credentials::{Ed25519Signer, key::KeyExport};
 /// Domain separation context for deriving operator keys from profile keys.
 const OPERATOR_DERIVATION_CONTEXT: &str = "dialog-db operator derivation";
 
+/// A grant that can be performed against a built environment.
+///
+/// Implement this for protocol-specific delegation commands
+/// like `Ucan::unrestricted()`.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+pub trait Permit<Env> {
+    /// Execute the grant against the environment.
+    async fn perform(self, env: &Env) -> Result<(), OpenError>;
+}
+
+/// No-op permit — used as the default when no grant is specified.
+pub struct NoPermit;
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<Env: dialog_common::ConditionalSync> Permit<Env> for NoPermit {
+    async fn perform(self, _env: &Env) -> Result<(), OpenError> {
+        Ok(())
+    }
+}
+
 /// Builder for constructing an environment.
 ///
 /// Configure profile, operator strategy, storage backend, and remote dispatch,
-/// then call [`build`](Builder::build) or
-/// [`build_with`](Builder::build_with) to open.
-pub struct Builder<Storage> {
+/// then call [`build`](Builder::build) to open.
+pub struct Builder<Storage, Permit = NoPermit> {
     pub(crate) profile: String,
     pub(crate) operator: Operator,
     pub(crate) storage: Storage,
     pub(crate) remote: Remote,
+    pub(crate) permit: Permit,
 }
 
-impl<Storage> Builder<Storage> {
+impl<Storage> Builder<Storage, NoPermit> {
+    /// Create a builder with explicit storage and defaults for everything else.
+    pub(crate) fn new(storage: Storage) -> Self {
+        Self {
+            profile: "default".into(),
+            operator: Operator::Unique,
+            storage,
+            remote: Remote,
+            permit: NoPermit,
+        }
+    }
+
     /// Set the profile name.
     pub fn profile(mut self, name: impl Into<String>) -> Self {
         self.profile = name.into();
@@ -39,12 +72,13 @@ impl<Storage> Builder<Storage> {
     }
 
     /// Set the storage backend.
-    pub fn storage<S>(self, storage: S) -> Builder<S> {
+    pub fn storage<S>(self, storage: S) -> Builder<S, NoPermit> {
         Builder {
             profile: self.profile,
             operator: self.operator,
             storage,
             remote: self.remote,
+            permit: self.permit,
         }
     }
 
@@ -53,25 +87,41 @@ impl<Storage> Builder<Storage> {
         self.remote = remote;
         self
     }
+
+    /// Set a delegation grant to execute after building the environment.
+    pub fn grant<Permit>(self, permit: Permit) -> Builder<Storage, Permit> {
+        Builder {
+            profile: self.profile,
+            operator: self.operator,
+            storage: self.storage,
+            remote: self.remote,
+            permit,
+        }
+    }
 }
 
-impl<Storage: Provider<Open>> Builder<Storage> {
-    /// Build the environment, using the storage backend as the profile provider.
+impl<Storage, NoPermit> Builder<Storage, NoPermit>
+where
+    Storage: Provider<Open>,
+    NoPermit: Permit<Environment<Credentials, Storage, Remote>>,
+{
+    /// Build the environment, executing any configured grants.
     pub async fn build(self) -> Result<Environment<Credentials, Storage, Remote>, OpenError> {
         let credentials = open_profile(&self.storage, &self.profile, &self.operator).await?;
-        Ok(Environment::new(credentials, self.storage, self.remote))
+        let env = Environment::new(credentials, self.storage, self.remote);
+        self.permit.perform(&env).await?;
+        Ok(env)
     }
 
-    /// Build the environment, using a custom provider for opening the profile.
-    ///
-    /// Use this when the profile key source differs from the storage backend,
-    /// for example in tests.
+    /// Build the environment using a custom profile provider.
     pub async fn build_with<P: Provider<Open>>(
         self,
         provider: &P,
     ) -> Result<Environment<Credentials, Storage, Remote>, OpenError> {
         let credentials = open_profile(provider, &self.profile, &self.operator).await?;
-        Ok(Environment::new(credentials, self.storage, self.remote))
+        let env = Environment::new(credentials, self.storage, self.remote);
+        self.permit.perform(&env).await?;
+        Ok(env)
     }
 }
 

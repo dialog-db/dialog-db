@@ -12,12 +12,7 @@ pub type WebEnvironment = Environment<Credentials, IndexedDb, Remote>;
 
 impl Default for Builder<IndexedDb> {
     fn default() -> Self {
-        Builder {
-            profile: "default".into(),
-            operator: crate::Operator::Unique,
-            storage: IndexedDb::new(),
-            remote: Remote,
-        }
+        Builder::new(IndexedDb::new())
     }
 }
 
@@ -86,8 +81,8 @@ mod tests {
         let env = Builder::default().build().await.unwrap();
 
         assert_ne!(
-            env.credentials.profile_did(),
-            env.credentials.operator_did(),
+            env.authority.profile_did(),
+            env.authority.operator_did(),
             "profile and operator should be different keys"
         );
     }

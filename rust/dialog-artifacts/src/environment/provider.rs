@@ -1,11 +1,11 @@
 //! Generic composable environment for executing capability effects.
 //!
 //! [`Environment`] composes three providers:
-//! - `Credentials` — credential effects (identify, sign, authorize)
-//! - `Local` — storage effects (archive, memory)
+//! - `Authority` — identity and signing (identify, sign)
+//! - `Local` — storage effects (archive, memory, credentials)
 //! - `Remote` — remote invocations (S3, UCAN, etc.)
 //!
-//! Local and credential effects are routed via `#[derive(Provider)]`.
+//! Authority and local effects are routed via `#[derive(Provider)]`.
 //! Authorization is handled by blanket impls in `dialog-capability`.
 //! Credential store effects are routed to the local storage provider.
 //! Remote invocations (`Fork<S, Fx>`) are routed to `Remote`.
@@ -13,7 +13,7 @@
 use dialog_capability::Capability;
 use dialog_capability::Provider;
 use dialog_capability::authority;
-use dialog_capability::credential::{self, CredentialError, Import, List, Retrieve, Save};
+use dialog_capability::credential::{self, CredentialError, List, Retrieve, Save};
 use dialog_capability::fork::{Fork, ForkInvocation};
 use dialog_capability::site::Site;
 use dialog_capability::{Constraint, Effect};
@@ -23,14 +23,14 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 /// Generic environment that delegates:
-/// - Credential effects to `Credentials`
+/// - Authority effects (identify, sign) to `Authority`
 /// - Storage effects to `Local`
 /// - Remote invocations to `Remote`
 #[derive(Provider)]
-pub struct Environment<Credentials, Local, Remote> {
+pub struct Environment<Authority, Local, Remote> {
     #[provide(authority::Identify, authority::Sign)]
-    /// Provider for credential effects.
-    pub credentials: Credentials,
+    /// Provider for authority effects (identity + signing).
+    pub authority: Authority,
     #[provide(
         archive::Get,
         archive::Put,
@@ -48,12 +48,12 @@ pub struct Environment<Credentials, Local, Remote> {
     pub remote: Remote,
 }
 
-impl<Credentials, Local, Remote> Environment<Credentials, Local, Remote> {
-    /// Create a new environment from credential, local storage, and remote providers.
-    pub fn new(credentials: Credentials, local: Local, remote: Remote) -> Self {
+impl<Authority, Local, Remote> Environment<Authority, Local, Remote> {
+    /// Create a new environment.
+    pub fn new(authority: Authority, local: Local, remote: Remote) -> Self {
         Self {
             local,
-            credentials,
+            authority,
             remote,
         }
     }
@@ -61,8 +61,7 @@ impl<Credentials, Local, Remote> Environment<Credentials, Local, Remote> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Credentials, Local, Remote, C> Provider<Retrieve<C>>
-    for Environment<Credentials, Local, Remote>
+impl<Authority, Local, Remote, C> Provider<Retrieve<C>> for Environment<Authority, Local, Remote>
 where
     C: Serialize + DeserializeOwned + ConditionalSend + 'static,
     Capability<Retrieve<C>>: ConditionalSend,
@@ -77,7 +76,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Credentials, Local, Remote, C> Provider<Save<C>> for Environment<Credentials, Local, Remote>
+impl<Authority, Local, Remote, C> Provider<Save<C>> for Environment<Authority, Local, Remote>
 where
     C: Serialize + DeserializeOwned + ConditionalSend + 'static,
     Capability<Save<C>>: ConditionalSend,
@@ -92,7 +91,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Credentials, Local, Remote, C> Provider<List<C>> for Environment<Credentials, Local, Remote>
+impl<Authority, Local, Remote, C> Provider<List<C>> for Environment<Authority, Local, Remote>
 where
     C: Serialize + DeserializeOwned + ConditionalSend + 'static,
     Capability<List<C>>: ConditionalSend,
@@ -110,23 +109,8 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Credentials, Local, Remote, Material> Provider<Import<Material>>
-    for Environment<Credentials, Local, Remote>
-where
-    Material: Serialize + DeserializeOwned + ConditionalSend + 'static,
-    Capability<Import<Material>>: ConditionalSend,
-    Credentials: Provider<Import<Material>> + ConditionalSync,
-    Self: ConditionalSend + ConditionalSync,
-{
-    async fn execute(&self, input: Capability<Import<Material>>) -> Result<(), CredentialError> {
-        self.credentials.execute(input).await
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Credentials, Local, Remote, S, Fx> Provider<Fork<S, Fx>>
-    for Environment<Credentials, Local, Remote>
+impl<Authority, Local, Remote, S, Fx> Provider<Fork<S, Fx>>
+    for Environment<Authority, Local, Remote>
 where
     S: Site,
     Fx: Effect + 'static,

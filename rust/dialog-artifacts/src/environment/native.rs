@@ -4,27 +4,23 @@ use dialog_storage::provider::FileSystem;
 
 use super::builder::Builder;
 use super::provider::Environment;
+use crate::Credentials;
 use crate::credentials::open::Open;
 use crate::remote::Remote;
-use crate::{Credentials, Operator};
 
 /// Native environment with opened profile credentials and remote dispatch.
 pub type NativeEnvironment = Environment<Credentials, FileSystem, Remote>;
 
 impl Default for Builder<Option<FileSystem>> {
     fn default() -> Self {
-        Builder {
-            profile: "default".into(),
-            operator: Operator::Unique,
-            storage: None,
-            remote: Remote,
-        }
+        Builder::new(None)
     }
 }
 
 impl Builder<Option<FileSystem>> {
     fn resolve(self) -> Result<Builder<FileSystem>, super::OpenError> {
-        let storage = match self.storage {
+        let storage = self.storage;
+        let resolved = match storage {
             Some(fs) => fs,
             None => FileSystem::profile()
                 .map_err(|e| super::OpenError::Storage(e.to_string()))?
@@ -33,8 +29,9 @@ impl Builder<Option<FileSystem>> {
         Ok(Builder {
             profile: self.profile,
             operator: self.operator,
-            storage,
+            storage: resolved,
             remote: self.remote,
+            permit: self.permit,
         })
     }
 
@@ -110,8 +107,8 @@ mod tests {
         let env = Builder::default().storage(storage).build().await.unwrap();
 
         assert_ne!(
-            env.credentials.profile_did(),
-            env.credentials.operator_did(),
+            env.authority.profile_did(),
+            env.authority.operator_did(),
             "profile and operator should be different keys (Operator::Unique)"
         );
     }
@@ -127,8 +124,8 @@ mod tests {
         let env2 = Builder::default().storage(storage2).build().await.unwrap();
 
         assert_eq!(
-            env1.credentials.profile_did(),
-            env2.credentials.profile_did(),
+            env1.authority.profile_did(),
+            env2.authority.profile_did(),
             "profile DID should persist"
         );
     }
@@ -144,8 +141,8 @@ mod tests {
         let env2 = Builder::default().storage(storage2).build().await.unwrap();
 
         assert_ne!(
-            env1.credentials.operator_did(),
-            env2.credentials.operator_did(),
+            env1.authority.operator_did(),
+            env2.authority.operator_did(),
             "Operator::Unique should differ each time"
         );
     }
@@ -171,8 +168,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            env1.credentials.operator_did(),
-            env2.credentials.operator_did(),
+            env1.authority.operator_did(),
+            env2.authority.operator_did(),
             "same context should produce same operator"
         );
     }
@@ -198,8 +195,8 @@ mod tests {
             .unwrap();
 
         assert_ne!(
-            env1.credentials.operator_did(),
-            env2.credentials.operator_did(),
+            env1.authority.operator_did(),
+            env2.authority.operator_did(),
             "different contexts should produce different operators"
         );
     }
@@ -218,9 +215,6 @@ mod tests {
             .await
             .unwrap();
 
-        assert_ne!(
-            env.credentials.profile_did(),
-            env.credentials.operator_did(),
-        );
+        assert_ne!(env.authority.profile_did(), env.authority.operator_did(),);
     }
 }
