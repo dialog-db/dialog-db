@@ -20,7 +20,7 @@ pub enum Operator {
     /// Generate a random ephemeral keypair each time.
     Unique,
     /// Derive deterministically from the profile key + context.
-    Derived(Vec<u8>),
+    Derive(Vec<u8>),
 }
 
 impl Operator {
@@ -29,9 +29,15 @@ impl Operator {
         Self::Unique
     }
 
-    /// Shorthand for `Operator::Derived(context.into())`.
-    pub fn derived(context: impl Into<Vec<u8>>) -> Self {
-        Self::Derived(context.into())
+    /// Shorthand for `Operator::Derive(context.into())`.
+    pub fn derive(context: impl Into<Vec<u8>>) -> Self {
+        Self::Derive(context.into())
+    }
+}
+
+impl<T: Into<Vec<u8>>> From<T> for Operator {
+    fn from(context: T) -> Self {
+        Self::Derive(context.into())
     }
 }
 
@@ -50,7 +56,7 @@ impl Operator {
 ///
 /// // Named profile with derived operator
 /// let profile = Profile::named("work")
-///     .operated_by(dialog_artifacts::Operator::derived(b"alice"));
+///     .operated_by(dialog_artifacts::Operator::derive(b"alice"));
 /// ```
 pub struct Profile {
     /// The profile name (e.g. "default", "work", "personal").
@@ -71,8 +77,11 @@ impl Profile {
     }
 
     /// Set the operator strategy.
-    pub fn operated_by(mut self, operator: Operator) -> Self {
-        self.operator = operator;
+    ///
+    /// Accepts `Operator` directly, or anything convertible to it
+    /// (e.g. `b"context"` for derived operator).
+    pub fn operated_by(mut self, operator: impl Into<Operator>) -> Self {
+        self.operator = operator.into();
         self
     }
 }

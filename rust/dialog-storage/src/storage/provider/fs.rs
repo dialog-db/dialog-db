@@ -71,6 +71,12 @@ const MEMORY: &str = "memory";
 #[repr(transparent)]
 pub struct FileSystem(Location);
 
+impl From<Location> for FileSystem {
+    fn from(location: Location) -> Self {
+        Self(location)
+    }
+}
+
 impl TryFrom<Url> for FileSystem {
     type Error = FileSystemError;
 
