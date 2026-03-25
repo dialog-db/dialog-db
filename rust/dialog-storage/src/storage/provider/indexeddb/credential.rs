@@ -31,14 +31,14 @@ where
         &self,
         input: Capability<credential::Retrieve<C>>,
     ) -> Result<C, CredentialError> {
-        let subject = input.subject().into();
+        let subject: dialog_capability::Did = input.subject().into();
         let address_id = credential::Retrieve::<C>::of(&input)
             .address
             .id()
             .to_string();
 
-        self.open(&subject).await?;
-        let mut session = self.take_session(&subject)?;
+        self.open(subject.as_ref()).await?;
+        let mut session = self.take_session(subject.as_ref())?;
 
         let result = async {
             let store = session.store(CREDENTIALS_STORE).await?;
@@ -72,7 +72,7 @@ where
         }
         .await;
 
-        self.return_session(subject, session);
+        self.return_session(subject.as_ref(), session);
         result
     }
 }
@@ -83,14 +83,14 @@ where
     C: Serialize + DeserializeOwned + ConditionalSend + 'static,
 {
     async fn execute(&self, input: Capability<credential::Save<C>>) -> Result<(), CredentialError> {
-        let subject = input.subject().into();
+        let subject: dialog_capability::Did = input.subject().into();
         let effect = credential::Save::<C>::of(&input);
         let address_id = effect.address.id().to_string();
         let value = serde_json::to_vec(&effect.credentials)
             .map_err(|e| CredentialError::NotFound(format!("serialization error: {e}")))?;
 
-        self.open(&subject).await?;
-        let mut session = self.take_session(&subject)?;
+        self.open(subject.as_ref()).await?;
+        let mut session = self.take_session(subject.as_ref())?;
 
         let result = async {
             let store = session.store(CREDENTIALS_STORE).await?;
@@ -109,7 +109,7 @@ where
         }
         .await;
 
-        self.return_session(subject, session);
+        self.return_session(subject.as_ref(), session);
         result
     }
 }

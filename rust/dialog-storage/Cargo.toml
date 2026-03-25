@@ -46,6 +46,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+dirs = { workspace = true }
 url = { workspace = true }
 pidlock = { workspace = true }
 tempfile = { workspace = true, optional = true }

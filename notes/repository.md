@@ -50,7 +50,7 @@ The profile is the stable identity on each device. The account, when present, is
 
 ## Opening a Repository
 
-`Credentials` are used to open a repository. The environment is assumed to be bootstrapped with storage capabilities rooted in a `./.dialog/` directory on disk.
+`Credentials` are used to open a repository. The environment is bootstrapped with storage capabilities rooted in the platform data directory (e.g. `~/Library/Application Support/dialog/` on macOS). Profile keys are stored at `profile/{name}/key` within this directory.
 
 The repository identifier is stored in the `meta` store under the key `seed`. To open a repository, the `memory::Get` capability is invoked with the **operator** as subject.
 

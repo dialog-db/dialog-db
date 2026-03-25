@@ -113,6 +113,24 @@ impl FileSystem {
         Ok(Self(root.try_into()?))
     }
 
+    /// Returns the location for profile key storage in the platform data directory.
+    ///
+    /// On macOS: `~/Library/Application Support/dialog/profile`
+    /// On Linux: `~/.local/share/dialog/profile`
+    /// On Windows: `{FOLDERID_RoamingAppData}/dialog/profile`
+    pub fn profile() -> Result<Location, FileSystemError> {
+        let data_dir = dirs::data_dir().ok_or_else(|| {
+            FileSystemError::Io("could not determine platform data directory".into())
+        })?;
+        let root: Location = data_dir.join("dialog").try_into()?;
+        root.resolve("profile")
+    }
+
+    /// Resolves a path segment relative to this filesystem's root.
+    pub fn resolve(&self, segment: &str) -> Result<Location, FileSystemError> {
+        self.0.resolve(segment)
+    }
+
     /// Returns the location for a subject's archive storage.
     fn archive(&self, subject: &Did) -> Result<Location, FileSystemError> {
         self.0.resolve(subject.as_ref())?.resolve(ARCHIVE)
@@ -258,12 +276,119 @@ impl Location {
         Ok(Self(joined))
     }
 
+    /// Ensures the parent directory of this location exists.
+    pub async fn ensure_parent(&self) -> Result<(), FileSystemError> {
+        let path: PathBuf = self.clone().try_into()?;
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| FileSystemError::Io(e.to_string()))?;
+        }
+        Ok(())
+    }
+
     /// Ensures this location exists as a directory.
     pub async fn ensure_dir(&self) -> Result<(), FileSystemError> {
         let path: PathBuf = self.clone().try_into()?;
         tokio::fs::create_dir_all(&path)
             .await
             .map_err(|e| FileSystemError::Io(e.to_string()))
+    }
+
+    /// Read the contents of this location as bytes.
+    pub async fn read(&self) -> Result<Vec<u8>, FileSystemError> {
+        let path: PathBuf = self.clone().try_into()?;
+        tokio::fs::read(&path)
+            .await
+            .map_err(|e| FileSystemError::Io(e.to_string()))
+    }
+
+    /// Write bytes to this location, creating parent directories as needed.
+    pub async fn write(&self, content: &[u8]) -> Result<(), FileSystemError> {
+        let path: PathBuf = self.clone().try_into()?;
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| FileSystemError::Io(e.to_string()))?;
+        }
+        tokio::fs::write(&path, content)
+            .await
+            .map_err(|e| FileSystemError::Io(e.to_string()))
+    }
+
+    /// Check whether this location exists on the filesystem.
+    pub async fn exists(&self) -> bool {
+        let Ok(path) = PathBuf::try_from(self.clone()) else {
+            return false;
+        };
+        tokio::fs::try_exists(&path).await.unwrap_or(false)
+    }
+
+    /// Remove the file at this location.
+    pub async fn remove(&self) -> Result<(), FileSystemError> {
+        let path: PathBuf = self.clone().try_into()?;
+        tokio::fs::remove_file(&path)
+            .await
+            .map_err(|e| FileSystemError::Io(e.to_string()))
+    }
+
+    /// Acquire a PID-based file lock at `{self}.lock`.
+    ///
+    /// Returns an RAII guard that releases the lock when dropped.
+    /// Handles stale lock detection and recovery automatically.
+    /// Fails immediately if the lock is held by an active process.
+    pub fn lock(&self) -> Result<Lock, FileSystemError> {
+        let mut path: PathBuf = self.clone().try_into()?;
+        let mut name = path.file_name().unwrap_or_default().to_os_string();
+        name.push(".lock");
+        path.set_file_name(name);
+        let lock_path = path;
+        let path_str = lock_path
+            .to_str()
+            .ok_or_else(|| FileSystemError::Lock("Lock path is not valid UTF-8".into()))?;
+
+        let mut pidlock = pidlock::Pidlock::new(path_str);
+
+        loop {
+            match pidlock.acquire() {
+                Ok(()) => return Ok(Lock(pidlock)),
+                Err(pidlock::PidlockError::LockExists) => {
+                    match pidlock.get_owner() {
+                        Some(pid) => {
+                            return Err(FileSystemError::Lock(format!(
+                                "Concurrent write in progress (lock held by pid {pid})"
+                            )));
+                        }
+                        None => {
+                            // Stale lock cleared, retry
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Err(FileSystemError::Lock(format!(
+                        "Failed to acquire lock: {e:?}"
+                    )));
+                }
+            }
+        }
+    }
+
+    /// Atomically rename this location to the target location.
+    pub async fn rename(&self, target: &Location) -> Result<(), FileSystemError> {
+        let from: PathBuf = self.clone().try_into()?;
+        let to: PathBuf = target.clone().try_into()?;
+        tokio::fs::rename(&from, &to)
+            .await
+            .map_err(|e| FileSystemError::Io(e.to_string()))
+    }
+}
+
+/// RAII guard that holds a PID lock and releases it when dropped.
+pub struct Lock(pidlock::Pidlock);
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        let _ = self.0.release();
     }
 }
 

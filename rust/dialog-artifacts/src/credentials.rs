@@ -5,6 +5,9 @@
 //! the profile and operator signers and implements the credential provider
 //! traits needed by the Environment.
 
+pub mod open;
+mod provider;
+
 use dialog_capability::authority::{self, Authority};
 use dialog_capability::credential::CredentialError;
 use dialog_capability::{Capability, Policy, Provider, Subject};

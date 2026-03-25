@@ -6,9 +6,6 @@ use base58::ToBase58;
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
 use dialog_effects::archive::{ArchiveError, Get, GetCapability, Put, PutCapability};
-use std::io::ErrorKind;
-use std::path::PathBuf;
-use tokio::fs::{read, rename, write};
 
 impl From<FileSystemError> for ArchiveError {
     fn from(e: FileSystemError) -> Self {
@@ -23,16 +20,14 @@ impl Provider<Get> for FileSystem {
         let catalog = effect.catalog();
         let digest = effect.digest();
 
-        let path: PathBuf = self
+        let location = self
             .archive(&subject)?
             .resolve(catalog)?
-            .resolve(&digest.as_bytes().to_base58())?
-            .try_into()?;
+            .resolve(&digest.as_bytes().to_base58())?;
 
-        match read(&path).await {
+        match location.read().await {
             Ok(bytes) => Ok(Some(bytes)),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(ArchiveError::Storage(e.to_string())),
+            Err(_) => Ok(None),
         }
     }
 }
@@ -60,24 +55,18 @@ impl Provider<Put> for FileSystem {
         destination.ensure_dir().await?;
 
         let key = digest.as_bytes().to_base58();
-        let path: PathBuf = destination.resolve(&key)?.try_into()?;
+        let target = destination.resolve(&key)?;
 
-        // Content-addressed storage is idempotent - if file exists with same
+        // Content-addressed storage is idempotent — if file exists with same
         // content hash, no need to rewrite
-        if path.exists() {
+        if target.read().await.is_ok() {
             return Ok(());
         }
 
         // Write atomically via temp file + rename
-        let temp_path: PathBuf = destination.resolve(&format!("{}.tmp", key))?.try_into()?;
-
-        write(&temp_path, content)
-            .await
-            .map_err(|e| ArchiveError::Storage(e.to_string()))?;
-
-        rename(&temp_path, &path)
-            .await
-            .map_err(|e| ArchiveError::Storage(e.to_string()))?;
+        let temp = destination.resolve(&format!("{key}.tmp"))?;
+        temp.write(content).await?;
+        temp.rename(&target).await?;
 
         Ok(())
     }

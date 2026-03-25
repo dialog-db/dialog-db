@@ -60,7 +60,7 @@ fn to_uint8array(bytes: &[u8]) -> Uint8Array {
 ///
 /// Stores are populated from whatever exists in the database on open,
 /// and new stores are created via upgrade when needed.
-struct Session {
+pub struct Session {
     /// Database name (subject DID).
     name: String,
     /// Current database version.
@@ -129,7 +129,7 @@ impl Session {
     }
 
     /// Gets a store handle, upgrading the database if needed.
-    async fn store(&mut self, store_path: &str) -> Result<Store<'_>, IndexedDbError> {
+    pub async fn store(&mut self, store_path: &str) -> Result<Store<'_>, IndexedDbError> {
         if !self.stores.contains(store_path) {
             let mut stores = self.stores.clone();
             stores.insert(store_path.to_string());
@@ -144,14 +144,14 @@ impl Session {
 }
 
 /// A temporary handle to a specific object store for performing operations.
-struct Store<'a> {
+pub struct Store<'a> {
     db: &'a Rexie,
     name: &'a String,
 }
 
 impl<'a> Store<'a> {
     /// Executes a read-only query on this store.
-    async fn query<F, Fut, Output, E>(&self, select: F) -> Result<Output, E>
+    pub async fn query<F, Fut, Output, E>(&self, select: F) -> Result<Output, E>
     where
         F: FnOnce(rexie::Store) -> Fut,
         Fut: std::future::Future<Output = Result<Output, E>>,
@@ -176,7 +176,7 @@ impl<'a> Store<'a> {
     }
 
     /// Executes a read-write transaction on this store.
-    async fn transact<F, Fut, Output, E>(&self, mutate: F) -> Result<Output, E>
+    pub async fn transact<F, Fut, Output, E>(&self, mutate: F) -> Result<Output, E>
     where
         F: FnOnce(rexie::Store) -> Fut,
         Fut: std::future::Future<Output = Result<Output, E>>,
@@ -213,8 +213,8 @@ impl<'a> Store<'a> {
 /// wasm32 (single-threaded). This avoids the overhead and poisoning concerns
 /// of `RwLock`.
 pub struct IndexedDb {
-    /// Cached database sessions keyed by subject DID.
-    sessions: RefCell<HashMap<Did, Session>>,
+    /// Cached database sessions keyed by name.
+    sessions: RefCell<HashMap<String, Session>>,
 }
 
 impl IndexedDb {
@@ -225,15 +225,16 @@ impl IndexedDb {
         }
     }
 
-    /// Opens or returns an existing session for the given subject.
+    /// Opens or returns an existing session for the given name.
     ///
+    /// Accepts any string-like type (`Did`, `&str`, `String`).
     /// Checks for an existing session via a short borrow, drops it before
     /// any async work, then borrows mutably to insert a new session if needed.
-    async fn open(&self, subject: &Did) -> Result<(), IndexedDbError> {
-        let exists = self.sessions.borrow().contains_key(subject);
+    pub async fn open(&self, name: &str) -> Result<(), IndexedDbError> {
+        let exists = self.sessions.borrow().contains_key(name);
         if !exists {
-            let session = Session::open(subject.as_ref()).await?;
-            self.sessions.borrow_mut().insert(subject.clone(), session);
+            let session = Session::open(name).await?;
+            self.sessions.borrow_mut().insert(name.to_string(), session);
         }
         Ok(())
     }
@@ -244,16 +245,16 @@ impl IndexedDb {
     /// cannot hold a `RefCell` borrow across `.await` points. Instead we
     /// remove the session, perform the work, then re-insert it via
     /// [`IndexedDb::return_session`].
-    fn take_session(&self, subject: &Did) -> Result<Session, IndexedDbError> {
+    pub fn take_session(&self, name: &str) -> Result<Session, IndexedDbError> {
         self.sessions
             .borrow_mut()
-            .remove(subject)
-            .ok_or_else(|| IndexedDbError::Database(format!("No session for {}", subject)))
+            .remove(name)
+            .ok_or_else(|| IndexedDbError::Database(format!("No session for {name}")))
     }
 
     /// Returns a session to the cache after async operations complete.
-    fn return_session(&self, subject: Did, session: Session) {
-        self.sessions.borrow_mut().insert(subject, session);
+    pub fn return_session(&self, name: &str, session: Session) {
+        self.sessions.borrow_mut().insert(name.to_string(), session);
     }
 }
 

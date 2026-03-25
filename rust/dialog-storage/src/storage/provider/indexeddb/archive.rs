@@ -22,15 +22,15 @@ impl From<super::IndexedDbError> for ArchiveError {
 #[async_trait(?Send)]
 impl Provider<Get> for IndexedDb {
     async fn execute(&self, effect: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
-        let subject = effect.subject().into();
+        let subject: dialog_capability::Did = effect.subject().into();
         let catalog = effect.catalog();
         let digest = effect.digest();
 
         let store_path = format!("archive/{}", catalog);
         let key = JsValue::from_str(&digest.as_bytes().to_base58());
 
-        self.open(&subject).await?;
-        let mut session = self.take_session(&subject)?;
+        self.open(subject.as_ref()).await?;
+        let mut session = self.take_session(subject.as_ref())?;
 
         let result = async {
             let store = session.store(&store_path).await?;
@@ -53,7 +53,7 @@ impl Provider<Get> for IndexedDb {
         }
         .await;
 
-        self.return_session(subject, session);
+        self.return_session(subject.as_ref(), session);
         result
     }
 }
@@ -61,7 +61,7 @@ impl Provider<Get> for IndexedDb {
 #[async_trait(?Send)]
 impl Provider<Put> for IndexedDb {
     async fn execute(&self, effect: Capability<Put>) -> Result<(), ArchiveError> {
-        let subject = effect.subject().into();
+        let subject: dialog_capability::Did = effect.subject().into();
         let catalog = effect.catalog();
         let digest = effect.digest();
         let content = effect.content();
@@ -79,8 +79,8 @@ impl Provider<Put> for IndexedDb {
         let key = JsValue::from_str(&digest.as_bytes().to_base58());
         let value: JsValue = to_uint8array(content).into();
 
-        self.open(&subject).await?;
-        let mut session = self.take_session(&subject)?;
+        self.open(subject.as_ref()).await?;
+        let mut session = self.take_session(subject.as_ref())?;
 
         let result = async {
             let store = session.store(&store_path).await?;
@@ -96,7 +96,7 @@ impl Provider<Put> for IndexedDb {
         }
         .await;
 
-        self.return_session(subject, session);
+        self.return_session(subject.as_ref(), session);
         result
     }
 }

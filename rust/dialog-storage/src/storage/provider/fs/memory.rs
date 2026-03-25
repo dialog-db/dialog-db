@@ -13,8 +13,6 @@ use dialog_effects::memory::{
     MemoryError, Publication, Publish, PublishCapability, Resolve, ResolveCapability, Retract,
     RetractCapability,
 };
-use pidlock::Pidlock;
-use std::path::PathBuf;
 
 /// A 32-byte content hash used as the edition for CAS operations.
 type ContentHash = [u8; 32];
@@ -30,65 +28,6 @@ impl From<FileSystemError> for MemoryError {
     }
 }
 
-/// RAII guard that acquires a PID lock and releases it when dropped.
-///
-/// Handles stale lock detection and recovery automatically.
-struct PidlockGuard(Pidlock);
-
-impl PidlockGuard {
-    /// Acquire a PID lock at the given path.
-    ///
-    /// If a stale lock exists (from a dead process), it will be automatically
-    /// cleaned up and the lock acquired.
-    ///
-    /// If the lock is held by an active process, returns an error immediately
-    /// rather than waiting. This is intentional - the STM layer will retry
-    /// the entire transaction, which is the correct behavior since the locked
-    /// value will likely change anyway.
-    fn new(path: PathBuf) -> Result<Self, FileSystemError> {
-        let path_str = path
-            .to_str()
-            .ok_or_else(|| FileSystemError::Lock("Lock path is not valid UTF-8".to_string()))?;
-
-        let mut lock = Pidlock::new(path_str);
-
-        // Acquire lock, handling stale locks
-        loop {
-            match lock.acquire() {
-                Ok(()) => return Ok(Self(lock)),
-                Err(pidlock::PidlockError::LockExists) => {
-                    // get_owner() checks if the PID is valid and clears stale locks
-                    match lock.get_owner() {
-                        Some(pid) => {
-                            // Fail immediately rather than wait - the value is being
-                            // modified so the edition will change anyway. Let STM
-                            // retry the transaction with the new edition.
-                            return Err(FileSystemError::Lock(format!(
-                                "Concurrent write in progress (lock held by pid {})",
-                                pid
-                            )));
-                        }
-                        None => {
-                            // Lock was stale and cleared by get_owner(), retry
-                        }
-                    }
-                }
-                Err(e) => {
-                    return Err(FileSystemError::Lock(format!(
-                        "Failed to acquire lock: {e:?}"
-                    )));
-                }
-            }
-        }
-    }
-}
-
-impl Drop for PidlockGuard {
-    fn drop(&mut self) {
-        let _ = self.0.release();
-    }
-}
-
 /// Format edition bytes for error messages.
 fn format_edition(edition: Option<&[u8]>) -> Option<String> {
     edition.map(base58::ToBase58::to_base58)
@@ -100,12 +39,8 @@ impl Location {
         self.resolve(name)
     }
 
-    fn lock(&self, cell: &str) -> Result<Self, FileSystemError> {
-        self.resolve(&format!("{}.lock", cell))
-    }
-
     fn temp(&self, cell: &str, hash: &[u8; 32]) -> Result<Self, FileSystemError> {
-        self.resolve(&format!("{}.{}.tmp", cell, hash.to_base58()))
+        self.resolve(&format!("{cell}.{}.tmp", hash.to_base58()))
     }
 }
 
@@ -119,13 +54,9 @@ impl Provider<Resolve> for FileSystem {
         let space = effect.space();
         let cell = effect.cell();
 
-        let path: PathBuf = self
-            .memory(&subject)?
-            .resolve(space)?
-            .cell(cell)?
-            .try_into()?;
+        let location = self.memory(&subject)?.resolve(space)?.cell(cell)?;
 
-        match tokio::fs::read(&path).await {
+        match location.read().await {
             Ok(bytes) => {
                 let edition = Blake3Hash::hash(&bytes);
                 Ok(Some(Publication {
@@ -133,8 +64,7 @@ impl Provider<Resolve> for FileSystem {
                     edition: edition.as_bytes().to_vec(),
                 }))
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(MemoryError::Storage(e.to_string())),
+            Err(_) => Ok(None),
         }
     }
 }
@@ -153,26 +83,18 @@ impl Provider<Publish> for FileSystem {
         // Ensure space directory exists
         space_location.ensure_dir().await?;
 
-        let path: PathBuf = space_location.cell(cell)?.try_into()?;
-        let lock_path: PathBuf = space_location.lock(cell)?.try_into()?;
+        let cell_location = space_location.cell(cell)?;
 
         // Ensure parent directory exists for nested cell paths (e.g. "subdir/cell").
-        // space_location.ensure_dir() only creates the space directory, not
-        // subdirectories within it that the cell path may require.
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| MemoryError::Storage(e.to_string()))?;
-        }
+        cell_location.ensure_parent().await?;
 
         // Acquire lock for exclusive access
-        let _guard = PidlockGuard::new(lock_path)?;
+        let _guard = cell_location.lock()?;
 
         // Read current value to check CAS condition
-        let current_edition: Option<[u8; 32]> = match tokio::fs::read(&path).await {
+        let current_edition: Option<[u8; 32]> = match cell_location.read().await {
             Ok(bytes) => Some(content_hash(&bytes)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(MemoryError::Storage(e.to_string())),
+            Err(_) => None,
         };
 
         // Compute new edition
@@ -213,15 +135,11 @@ impl Provider<Publish> for FileSystem {
         }
 
         // Write to temp file (hash in name prevents conflicts if cleanup fails)
-        let tmp_path: PathBuf = space_location.temp(cell, &new_edition)?.try_into()?;
-        tokio::fs::write(&tmp_path, &content)
-            .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+        let temp = space_location.temp(cell, &new_edition)?;
+        temp.write(&content).await?;
 
         // Atomic rename
-        tokio::fs::rename(&tmp_path, &path)
-            .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+        temp.rename(&cell_location).await?;
 
         Ok(new_edition.to_vec())
     }
@@ -236,27 +154,21 @@ impl Provider<Retract> for FileSystem {
         let expected_edition = effect.when().to_vec();
 
         let space_location = self.memory(&subject)?.resolve(space)?;
-        let space_path: PathBuf = space_location.clone().try_into()?;
 
         // If space directory doesn't exist, the cell doesn't exist either
-        if !space_path.exists() {
+        if !space_location.exists().await {
             return Ok(());
         }
 
-        let path: PathBuf = space_location.cell(cell)?.try_into()?;
-        let lock_path: PathBuf = space_location.lock(cell)?.try_into()?;
+        let cell_location = space_location.cell(cell)?;
 
         // Acquire lock for exclusive access
-        let _guard = PidlockGuard::new(lock_path)?;
+        let _guard = cell_location.lock()?;
 
         // Read current value to check CAS condition
-        let current_bytes = match tokio::fs::read(&path).await {
+        let current_bytes = match cell_location.read().await {
             Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // Already deleted, succeed
-                return Ok(());
-            }
-            Err(e) => return Err(MemoryError::Storage(e.to_string())),
+            Err(_) => return Ok(()), // Already deleted, succeed
         };
 
         let current_edition = content_hash(&current_bytes);
@@ -270,10 +182,9 @@ impl Provider<Retract> for FileSystem {
         }
 
         // Delete the file
-        match tokio::fs::remove_file(&path).await {
+        match cell_location.remove().await {
             Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(MemoryError::Storage(e.to_string())),
+            Err(_) => Ok(()), // Already deleted
         }
     }
 }

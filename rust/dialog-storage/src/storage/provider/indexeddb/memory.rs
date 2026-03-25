@@ -43,11 +43,11 @@ impl Provider<Resolve> for IndexedDb {
         &self,
         effect: Capability<Resolve>,
     ) -> Result<Option<Publication>, MemoryError> {
-        let subject = effect.subject().into();
+        let subject: dialog_capability::Did = effect.subject().into();
         let key = make_key(effect.space(), effect.cell());
 
-        self.open(&subject).await?;
-        let mut session = self.take_session(&subject)?;
+        self.open(subject.as_ref()).await?;
+        let mut session = self.take_session(subject.as_ref())?;
 
         let result = async {
             let store = session.store(MEMORY_STORE).await?;
@@ -75,7 +75,7 @@ impl Provider<Resolve> for IndexedDb {
         }
         .await;
 
-        self.return_session(subject, session);
+        self.return_session(subject.as_ref(), session);
         result
     }
 }
@@ -83,13 +83,13 @@ impl Provider<Resolve> for IndexedDb {
 #[async_trait(?Send)]
 impl Provider<Publish> for IndexedDb {
     async fn execute(&self, effect: Capability<Publish>) -> Result<Vec<u8>, MemoryError> {
-        let subject = effect.subject().into();
+        let subject: dialog_capability::Did = effect.subject().into();
         let key = make_key(effect.space(), effect.cell());
         let content = effect.content().to_vec();
         let expected_edition = effect.when().map(|e| e.to_vec());
 
-        self.open(&subject).await?;
-        let mut session = self.take_session(&subject)?;
+        self.open(subject.as_ref()).await?;
+        let mut session = self.take_session(subject.as_ref())?;
 
         let result = async {
             let store = session.store(MEMORY_STORE).await?;
@@ -165,7 +165,7 @@ impl Provider<Publish> for IndexedDb {
         }
         .await;
 
-        self.return_session(subject, session);
+        self.return_session(subject.as_ref(), session);
         result
     }
 }
@@ -173,12 +173,12 @@ impl Provider<Publish> for IndexedDb {
 #[async_trait(?Send)]
 impl Provider<Retract> for IndexedDb {
     async fn execute(&self, effect: Capability<Retract>) -> Result<(), MemoryError> {
-        let subject = effect.subject().into();
+        let subject: dialog_capability::Did = effect.subject().into();
         let key = make_key(effect.space(), effect.cell());
         let expected_edition = effect.when().to_vec();
 
-        self.open(&subject).await?;
-        let mut session = self.take_session(&subject)?;
+        self.open(subject.as_ref()).await?;
+        let mut session = self.take_session(subject.as_ref())?;
 
         let result = async {
             let store = session.store(MEMORY_STORE).await?;
@@ -215,7 +215,7 @@ impl Provider<Retract> for IndexedDb {
         }
         .await;
 
-        self.return_session(subject, session);
+        self.return_session(subject.as_ref(), session);
         result
     }
 }

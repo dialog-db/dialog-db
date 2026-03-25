@@ -1253,6 +1253,7 @@ dependencies = [
  "dialog-common",
  "dialog-effects",
  "dialog-varsig",
+ "dirs",
  "futures-util",
  "getrandom 0.2.16",
  "hyper",
