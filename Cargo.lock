@@ -1255,6 +1255,7 @@ dependencies = [
  "brotli",
  "dialog-capability",
  "dialog-common",
+ "dialog-credentials",
  "dialog-effects",
  "dialog-varsig",
  "dirs",

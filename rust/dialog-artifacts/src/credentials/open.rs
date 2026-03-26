@@ -5,8 +5,8 @@
 //! and persist a new one.
 
 use dialog_capability::command::Command;
-use dialog_capability::credential::CredentialError;
 use dialog_credentials::Ed25519Signer;
+use dialog_effects::credential::CredentialError;
 use dialog_varsig::{Did, Principal};
 
 /// An opened profile keypair.

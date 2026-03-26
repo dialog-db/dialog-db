@@ -1,72 +1,58 @@
 //! Credential capability provider for IndexedDB.
 //!
-//! Stores credentials as JSON bytes in a `credentials` object store,
-//! keyed by credential address ID.
+//! Stores credentials as exported JsValues in a `credentials` object store,
+//! keyed by credential name.
 
-use super::{IndexedDb, IndexedDbError, to_uint8array};
+use super::{IndexedDb, IndexedDbError};
 use async_trait::async_trait;
-use dialog_capability::credential::{self, CredentialError};
-use dialog_capability::{Capability, Policy, Provider};
-use dialog_common::ConditionalSend;
-use js_sys::Uint8Array;
-use serde::Serialize;
-use serde::de::DeserializeOwned;
-use wasm_bindgen::{JsCast, JsValue};
+use dialog_capability::{Capability, Provider};
+use dialog_effects::credential::{
+    self, CredentialError, CredentialExport, Identity, LoadCapability, SaveCapability,
+};
+use wasm_bindgen::JsValue;
 
 /// The single object store used for all credential operations.
 const CREDENTIALS_STORE: &str = "credentials";
 
 impl From<IndexedDbError> for CredentialError {
     fn from(e: IndexedDbError) -> Self {
-        CredentialError::NotFound(e.to_string())
+        CredentialError::Storage(e.to_string())
     }
 }
 
 #[async_trait(?Send)]
-impl<C> Provider<credential::Retrieve<C>> for IndexedDb
-where
-    C: Serialize + DeserializeOwned + ConditionalSend + 'static,
-{
+impl Provider<credential::Load> for IndexedDb {
     async fn execute(
         &self,
-        input: Capability<credential::Retrieve<C>>,
-    ) -> Result<C, CredentialError> {
+        input: Capability<credential::Load>,
+    ) -> Result<Option<Identity>, CredentialError> {
         let subject: dialog_capability::Did = input.subject().into();
-        let address_id = credential::Retrieve::<C>::of(&input)
-            .address
-            .id()
-            .to_string();
+        let name = input.name().to_string();
 
         self.open(subject.as_ref()).await?;
         let mut session = self.take_session(subject.as_ref())?;
 
         let result = async {
             let store = session.store(CREDENTIALS_STORE).await?;
-            let key = JsValue::from_str(&address_id);
+            let key = JsValue::from_str(&name);
 
             store
                 .query(|object_store| async move {
                     let value = object_store
                         .get(key)
                         .await
-                        .map_err(|e| CredentialError::NotFound(e.to_string()))?;
+                        .map_err(|e| CredentialError::Storage(e.to_string()))?;
 
-                    let Some(value) = value else {
-                        return Err(CredentialError::NotFound(format!(
-                            "no credentials at '{address_id}'"
-                        )));
+                    let Some(js_val) = value else {
+                        return Ok(None);
                     };
 
-                    let bytes = value
-                        .dyn_into::<Uint8Array>()
-                        .map_err(|_| {
-                            CredentialError::NotFound("value is not Uint8Array".to_string())
-                        })?
-                        .to_vec();
+                    let export = CredentialExport::from(js_val);
+                    let credential = Identity::import(export)
+                        .await
+                        .map_err(|e| CredentialError::Corrupted(e.to_string()))?;
 
-                    serde_json::from_slice(&bytes).map_err(|e| {
-                        CredentialError::NotFound(format!("deserialization error: {e}"))
-                    })
+                    Ok(Some(credential))
                 })
                 .await
         }
@@ -78,31 +64,31 @@ where
 }
 
 #[async_trait(?Send)]
-impl<C> Provider<credential::Save<C>> for IndexedDb
-where
-    C: Serialize + DeserializeOwned + ConditionalSend + 'static,
-{
-    async fn execute(&self, input: Capability<credential::Save<C>>) -> Result<(), CredentialError> {
+impl Provider<credential::Save> for IndexedDb {
+    async fn execute(&self, input: Capability<credential::Save>) -> Result<(), CredentialError> {
         let subject: dialog_capability::Did = input.subject().into();
-        let effect = credential::Save::<C>::of(&input);
-        let address_id = effect.address.id().to_string();
-        let value = serde_json::to_vec(&effect.credentials)
-            .map_err(|e| CredentialError::NotFound(format!("serialization error: {e}")))?;
+        let name = input.name().to_string();
+        let credential = input.credential();
+
+        let export = credential
+            .export()
+            .await
+            .map_err(|e| CredentialError::Storage(e.to_string()))?;
+        let js_value: JsValue = export.into();
 
         self.open(subject.as_ref()).await?;
         let mut session = self.take_session(subject.as_ref())?;
 
         let result = async {
             let store = session.store(CREDENTIALS_STORE).await?;
-            let key = JsValue::from_str(&address_id);
-            let js_value: JsValue = to_uint8array(&value).into();
+            let key = JsValue::from_str(&name);
 
             store
                 .transact(|object_store| async move {
                     object_store
                         .put(&js_value, Some(&key))
                         .await
-                        .map_err(|e| CredentialError::NotFound(e.to_string()))?;
+                        .map_err(|e| CredentialError::Storage(e.to_string()))?;
                     Ok(())
                 })
                 .await
@@ -117,14 +103,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dialog_capability::{Did, Subject, credential};
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-    struct TestCredentials {
-        access_key: String,
-        secret_key: String,
-    }
+    use dialog_capability::{Did, Subject};
+    use dialog_effects::credential;
 
     fn unique_subject(prefix: &str) -> Subject {
         let did: Did = format!("did:test:{}-{}", prefix, js_sys::Date::now() as u64)
@@ -133,115 +113,36 @@ mod tests {
         Subject::from(did)
     }
 
-    fn build_retrieve_cap<C: Serialize + DeserializeOwned + ConditionalSend + 'static>(
-        subject: Subject,
-        address_id: &str,
-    ) -> Capability<credential::Retrieve<C>> {
+    fn build_load_cap(subject: Subject, name: &str) -> Capability<credential::Load> {
         subject
             .attenuate(credential::Credential)
-            .invoke(credential::Retrieve {
-                address: credential::Address::new(address_id),
-            })
+            .attenuate(credential::Name::new(name))
+            .invoke(credential::Load)
     }
 
-    fn build_save_cap<C: Serialize + DeserializeOwned + ConditionalSend + 'static>(
+    fn _build_save_cap(
         subject: Subject,
-        address_id: &str,
-        credentials: C,
-    ) -> Capability<credential::Save<C>> {
+        name: &str,
+        credential: Identity,
+    ) -> Capability<credential::Save> {
         subject
             .attenuate(credential::Credential)
-            .invoke(credential::Save {
-                address: credential::Address::new(address_id),
-                credentials,
-            })
+            .attenuate(credential::Name::new(name))
+            .invoke(credential::Save::new(credential))
     }
 
     #[dialog_common::test]
-    async fn it_returns_not_found_for_missing_credentials() -> anyhow::Result<()> {
+    async fn it_returns_none_for_missing_credentials() -> anyhow::Result<()> {
         let provider = IndexedDb::new();
         let subject = unique_subject("idb-cred-missing");
 
-        let result: Result<TestCredentials, _> =
-            <IndexedDb as Provider<credential::Retrieve<TestCredentials>>>::execute(
-                &provider,
-                build_retrieve_cap(subject, "s3://my-bucket"),
-            )
-            .await;
-
-        assert!(result.is_err());
-        assert!(matches!(result, Err(CredentialError::NotFound(_))));
-
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    async fn it_stores_and_retrieves_credentials() -> anyhow::Result<()> {
-        let provider = IndexedDb::new();
-        let subject = unique_subject("idb-cred-roundtrip");
-        let creds = TestCredentials {
-            access_key: "AKIA123".to_string(),
-            secret_key: "secret456".to_string(),
-        };
-
-        <IndexedDb as Provider<credential::Save<TestCredentials>>>::execute(
+        let result = <IndexedDb as Provider<credential::Load>>::execute(
             &provider,
-            build_save_cap(subject.clone(), "s3://my-bucket", creds.clone()),
+            build_load_cap(subject, "s3-bucket"),
         )
         .await?;
 
-        let result: TestCredentials = <IndexedDb as Provider<
-            credential::Retrieve<TestCredentials>,
-        >>::execute(
-            &provider, build_retrieve_cap(subject, "s3://my-bucket")
-        )
-        .await?;
-
-        assert_eq!(result, creds);
-
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    async fn it_isolates_credentials_by_address() -> anyhow::Result<()> {
-        let provider = IndexedDb::new();
-        let subject = unique_subject("idb-cred-isolation");
-
-        let creds1 = TestCredentials {
-            access_key: "key1".to_string(),
-            secret_key: "secret1".to_string(),
-        };
-        let creds2 = TestCredentials {
-            access_key: "key2".to_string(),
-            secret_key: "secret2".to_string(),
-        };
-
-        <IndexedDb as Provider<credential::Save<TestCredentials>>>::execute(
-            &provider,
-            build_save_cap(subject.clone(), "bucket-a", creds1.clone()),
-        )
-        .await?;
-        <IndexedDb as Provider<credential::Save<TestCredentials>>>::execute(
-            &provider,
-            build_save_cap(subject.clone(), "bucket-b", creds2.clone()),
-        )
-        .await?;
-
-        let result1: TestCredentials = <IndexedDb as Provider<
-            credential::Retrieve<TestCredentials>,
-        >>::execute(
-            &provider, build_retrieve_cap(subject.clone(), "bucket-a")
-        )
-        .await?;
-        let result2: TestCredentials = <IndexedDb as Provider<
-            credential::Retrieve<TestCredentials>,
-        >>::execute(
-            &provider, build_retrieve_cap(subject, "bucket-b")
-        )
-        .await?;
-
-        assert_eq!(result1, creds1);
-        assert_eq!(result2, creds2);
+        assert!(result.is_none());
 
         Ok(())
     }

@@ -1,109 +1,76 @@
 //! Credential capability provider for volatile storage.
 //!
-//! Implements credential retrieve/save by storing serialized JSON bytes
-//! in the session's credentials HashMap, keyed by address ID.
+//! Implements credential load/save by storing raw exported bytes
+//! in the session's credentials HashMap, keyed by credential name.
 
 use super::Volatile;
 use async_trait::async_trait;
-use dialog_capability::credential::{self, CredentialError};
-use dialog_capability::{Capability, Policy, Provider};
-use dialog_common::ConditionalSend;
-use serde::Serialize;
-use serde::de::DeserializeOwned;
+use dialog_capability::{Capability, Provider};
+use dialog_effects::credential::{
+    self, CredentialError, CredentialExport, Identity, LoadCapability, SaveCapability,
+};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<C> Provider<credential::Retrieve<C>> for Volatile
-where
-    C: Serialize + DeserializeOwned + ConditionalSend + 'static,
-{
+impl Provider<credential::Load> for Volatile {
     async fn execute(
         &self,
-        input: Capability<credential::Retrieve<C>>,
-    ) -> Result<C, CredentialError> {
+        input: Capability<credential::Load>,
+    ) -> Result<Option<Identity>, CredentialError> {
         let subject = input.subject().into();
-        let address_id = credential::Retrieve::<C>::of(&input)
-            .address
-            .id()
-            .to_string();
+        let name = input.name().to_string();
 
-        let sessions = self.sessions.read();
-        let bytes = sessions
-            .get(&subject)
-            .and_then(|session| session.credentials.get(&address_id));
+        let bytes = {
+            let sessions = self.sessions.read();
+            sessions
+                .get(&subject)
+                .and_then(|session| session.credentials.get(&name))
+                .cloned()
+        };
 
-        match bytes {
-            Some(data) => serde_json::from_slice(data)
-                .map_err(|e| CredentialError::NotFound(format!("deserialization error: {e}"))),
-            None => Err(CredentialError::NotFound(format!(
-                "no credentials at '{address_id}'"
-            ))),
-        }
+        let Some(bytes) = bytes else {
+            return Ok(None);
+        };
+
+        let export = CredentialExport::try_from(bytes)
+            .map_err(|e| CredentialError::Corrupted(e.to_string()))?;
+        let credential = Identity::import(export)
+            .await
+            .map_err(|e| CredentialError::Corrupted(e.to_string()))?;
+
+        Ok(Some(credential))
     }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<C> Provider<credential::Save<C>> for Volatile
-where
-    C: Serialize + DeserializeOwned + ConditionalSend + 'static,
-{
-    async fn execute(&self, input: Capability<credential::Save<C>>) -> Result<(), CredentialError> {
+impl Provider<credential::Save> for Volatile {
+    async fn execute(&self, input: Capability<credential::Save>) -> Result<(), CredentialError> {
         let subject = input.subject().into();
-        let effect = credential::Save::<C>::of(&input);
-        let address_id = effect.address.id().to_string();
-        let value = serde_json::to_vec(&effect.credentials)
-            .map_err(|e| CredentialError::NotFound(format!("serialization error: {e}")))?;
+        let name = input.name().to_string();
+        let credential = input.credential();
+
+        let export = credential
+            .export()
+            .await
+            .map_err(|e| CredentialError::Storage(e.to_string()))?;
+
+        let bytes = export.as_bytes().to_vec();
 
         let mut sessions = self.sessions.write();
         let session = sessions.entry(subject).or_default();
-        session.credentials.insert(address_id, value);
+        session.credentials.insert(name, bytes);
 
         Ok(())
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<C> Provider<credential::List<C>> for Volatile
-where
-    C: Serialize + DeserializeOwned + ConditionalSend + 'static,
-{
-    async fn execute(
-        &self,
-        input: Capability<credential::List<C>>,
-    ) -> Result<Vec<credential::Address<C>>, CredentialError> {
-        let subject = input.subject().into();
-        let prefix = credential::List::<C>::of(&input).prefix.id().to_string();
-
-        let sessions = self.sessions.read();
-        let addresses = sessions
-            .get(&subject)
-            .map(|session| {
-                session
-                    .credentials
-                    .keys()
-                    .filter(|key| key.starts_with(&prefix))
-                    .map(|key| credential::Address::new(key.as_str()))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        Ok(addresses)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dialog_capability::{Did, Subject, credential};
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-    struct TestCredentials {
-        access_key: String,
-        secret_key: String,
-    }
+    use dialog_capability::{Did, Subject};
+    use dialog_effects::credential;
+    use dialog_varsig::Principal;
 
     fn unique_subject(prefix: &str) -> Subject {
         let did: Did = format!(
@@ -119,42 +86,41 @@ mod tests {
         Subject::from(did)
     }
 
-    fn build_retrieve_cap<C: Serialize + DeserializeOwned + ConditionalSend + 'static>(
-        subject: Subject,
-        address_id: &str,
-    ) -> Capability<credential::Retrieve<C>> {
+    fn build_load_cap(subject: Subject, name: &str) -> Capability<credential::Load> {
         subject
             .attenuate(credential::Credential)
-            .invoke(credential::Retrieve {
-                address: credential::Address::new(address_id),
-            })
+            .attenuate(credential::Name::new(name))
+            .invoke(credential::Load)
     }
 
-    fn build_save_cap<C: Serialize + DeserializeOwned + ConditionalSend + 'static>(
+    fn build_save_cap(
         subject: Subject,
-        address_id: &str,
-        credentials: C,
-    ) -> Capability<credential::Save<C>> {
+        name: &str,
+        credential: Identity,
+    ) -> Capability<credential::Save> {
         subject
             .attenuate(credential::Credential)
-            .invoke(credential::Save {
-                address: credential::Address::new(address_id),
-                credentials,
-            })
+            .attenuate(credential::Name::new(name))
+            .invoke(credential::Save::new(credential))
+    }
+
+    async fn make_signer_credential() -> Identity {
+        let signer = dialog_credentials::Ed25519Signer::generate().await.unwrap();
+        Identity::from(signer)
     }
 
     #[dialog_common::test]
-    async fn it_returns_not_found_for_missing_credentials() -> anyhow::Result<()> {
+    async fn it_returns_none_for_missing_credentials() -> anyhow::Result<()> {
         let provider = Volatile::new();
         let subject = unique_subject("cred-missing");
 
-        let cap = build_retrieve_cap::<TestCredentials>(subject, "s3://my-bucket");
-        let result: Result<TestCredentials, _> =
-            <Volatile as Provider<credential::Retrieve<TestCredentials>>>::execute(&provider, cap)
-                .await;
+        let result = <Volatile as Provider<credential::Load>>::execute(
+            &provider,
+            build_load_cap(subject, "s3-bucket"),
+        )
+        .await?;
 
-        assert!(result.is_err());
-        assert!(matches!(result, Err(CredentialError::NotFound(_))));
+        assert!(result.is_none());
 
         Ok(())
     }
@@ -163,69 +129,61 @@ mod tests {
     async fn it_stores_and_retrieves_credentials() -> anyhow::Result<()> {
         let provider = Volatile::new();
         let subject = unique_subject("cred-roundtrip");
-        let creds = TestCredentials {
-            access_key: "AKIA123".to_string(),
-            secret_key: "secret456".to_string(),
-        };
+        let cred = make_signer_credential().await;
+        let expected_did = cred.did();
 
-        <Volatile as Provider<credential::Save<TestCredentials>>>::execute(
+        <Volatile as Provider<credential::Save>>::execute(
             &provider,
-            build_save_cap(subject.clone(), "s3://my-bucket", creds.clone()),
+            build_save_cap(subject.clone(), "s3-bucket", cred),
         )
         .await?;
 
-        let result: TestCredentials = <Volatile as Provider<
-            credential::Retrieve<TestCredentials>,
-        >>::execute(
-            &provider, build_retrieve_cap(subject, "s3://my-bucket")
+        let result = <Volatile as Provider<credential::Load>>::execute(
+            &provider,
+            build_load_cap(subject, "s3-bucket"),
         )
         .await?;
 
-        assert_eq!(result, creds);
+        let loaded = result.expect("credential should exist");
+        assert_eq!(loaded.did(), expected_did);
 
         Ok(())
     }
 
     #[dialog_common::test]
-    async fn it_isolates_credentials_by_address() -> anyhow::Result<()> {
+    async fn it_isolates_credentials_by_name() -> anyhow::Result<()> {
         let provider = Volatile::new();
         let subject = unique_subject("cred-isolation");
 
-        let creds1 = TestCredentials {
-            access_key: "key1".to_string(),
-            secret_key: "secret1".to_string(),
-        };
-        let creds2 = TestCredentials {
-            access_key: "key2".to_string(),
-            secret_key: "secret2".to_string(),
-        };
+        let cred_a = make_signer_credential().await;
+        let cred_b = make_signer_credential().await;
+        let did_a = cred_a.did();
+        let did_b = cred_b.did();
 
-        <Volatile as Provider<credential::Save<TestCredentials>>>::execute(
+        <Volatile as Provider<credential::Save>>::execute(
             &provider,
-            build_save_cap(subject.clone(), "s3://bucket-a", creds1.clone()),
+            build_save_cap(subject.clone(), "bucket-a", cred_a),
         )
         .await?;
-        <Volatile as Provider<credential::Save<TestCredentials>>>::execute(
+        <Volatile as Provider<credential::Save>>::execute(
             &provider,
-            build_save_cap(subject.clone(), "s3://bucket-b", creds2.clone()),
+            build_save_cap(subject.clone(), "bucket-b", cred_b),
         )
         .await?;
 
-        let result1: TestCredentials =
-            <Volatile as Provider<credential::Retrieve<TestCredentials>>>::execute(
-                &provider,
-                build_retrieve_cap(subject.clone(), "s3://bucket-a"),
-            )
-            .await?;
-        let result2: TestCredentials = <Volatile as Provider<
-            credential::Retrieve<TestCredentials>,
-        >>::execute(
-            &provider, build_retrieve_cap(subject, "s3://bucket-b")
+        let result1 = <Volatile as Provider<credential::Load>>::execute(
+            &provider,
+            build_load_cap(subject.clone(), "bucket-a"),
+        )
+        .await?;
+        let result2 = <Volatile as Provider<credential::Load>>::execute(
+            &provider,
+            build_load_cap(subject, "bucket-b"),
         )
         .await?;
 
-        assert_eq!(result1, creds1);
-        assert_eq!(result2, creds2);
+        assert_eq!(result1.unwrap().did(), did_a);
+        assert_eq!(result2.unwrap().did(), did_b);
 
         Ok(())
     }
@@ -236,34 +194,30 @@ mod tests {
         let subject1 = unique_subject("cred-subj-1");
         let subject2 = unique_subject("cred-subj-2");
 
-        let creds = TestCredentials {
-            access_key: "key".to_string(),
-            secret_key: "secret".to_string(),
-        };
+        let cred = make_signer_credential().await;
+        let expected_did = cred.did();
 
-        <Volatile as Provider<credential::Save<TestCredentials>>>::execute(
+        <Volatile as Provider<credential::Save>>::execute(
             &provider,
-            build_save_cap(subject1.clone(), "s3://bucket", creds.clone()),
+            build_save_cap(subject1.clone(), "bucket", cred),
         )
         .await?;
 
         // Subject 1 should find it
-        let result: TestCredentials = <Volatile as Provider<
-            credential::Retrieve<TestCredentials>,
-        >>::execute(
-            &provider, build_retrieve_cap(subject1, "s3://bucket")
+        let result = <Volatile as Provider<credential::Load>>::execute(
+            &provider,
+            build_load_cap(subject1, "bucket"),
         )
         .await?;
-        assert_eq!(result, creds);
+        assert_eq!(result.unwrap().did(), expected_did);
 
         // Subject 2 should not
-        let result2: Result<TestCredentials, _> =
-            <Volatile as Provider<credential::Retrieve<TestCredentials>>>::execute(
-                &provider,
-                build_retrieve_cap(subject2, "s3://bucket"),
-            )
-            .await;
-        assert!(result2.is_err());
+        let result2 = <Volatile as Provider<credential::Load>>::execute(
+            &provider,
+            build_load_cap(subject2, "bucket"),
+        )
+        .await?;
+        assert!(result2.is_none());
 
         Ok(())
     }
@@ -273,34 +227,28 @@ mod tests {
         let provider = Volatile::new();
         let subject = unique_subject("cred-overwrite");
 
-        let creds1 = TestCredentials {
-            access_key: "old".to_string(),
-            secret_key: "old-secret".to_string(),
-        };
-        let creds2 = TestCredentials {
-            access_key: "new".to_string(),
-            secret_key: "new-secret".to_string(),
-        };
+        let cred1 = make_signer_credential().await;
+        let cred2 = make_signer_credential().await;
+        let expected_did = cred2.did();
 
-        <Volatile as Provider<credential::Save<TestCredentials>>>::execute(
+        <Volatile as Provider<credential::Save>>::execute(
             &provider,
-            build_save_cap(subject.clone(), "addr", creds1),
+            build_save_cap(subject.clone(), "addr", cred1),
         )
         .await?;
-        <Volatile as Provider<credential::Save<TestCredentials>>>::execute(
+        <Volatile as Provider<credential::Save>>::execute(
             &provider,
-            build_save_cap(subject.clone(), "addr", creds2.clone()),
+            build_save_cap(subject.clone(), "addr", cred2),
         )
         .await?;
 
-        let result: TestCredentials = <Volatile as Provider<
-            credential::Retrieve<TestCredentials>,
-        >>::execute(
-            &provider, build_retrieve_cap(subject, "addr")
+        let result = <Volatile as Provider<credential::Load>>::execute(
+            &provider,
+            build_load_cap(subject, "addr"),
         )
         .await?;
 
-        assert_eq!(result, creds2);
+        assert_eq!(result.unwrap().did(), expected_did);
 
         Ok(())
     }

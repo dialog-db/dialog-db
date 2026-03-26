@@ -1,88 +1,68 @@
 //! Credential capability provider for filesystem.
 //!
-//! Stores credentials as JSON files under `{subject}/credentials/{address_id}`.
+//! Stores credentials as exported bytes under `{subject}/credentials/{name}`.
 
 use super::{FileSystem, FileSystemError};
 use async_trait::async_trait;
-use dialog_capability::credential::{self, CredentialError};
-use dialog_capability::{Capability, Policy, Provider};
-use dialog_common::ConditionalSend;
-use serde::Serialize;
-use serde::de::DeserializeOwned;
-use std::path::PathBuf;
+use dialog_capability::{Capability, Provider};
+use dialog_effects::credential::{
+    self, CredentialError, CredentialExport, Identity, LoadCapability, SaveCapability,
+};
 
 impl From<FileSystemError> for CredentialError {
     fn from(e: FileSystemError) -> Self {
-        CredentialError::NotFound(e.to_string())
+        CredentialError::Storage(e.to_string())
     }
 }
 
-/// Resolve the filesystem path for a credential address.
-fn credential_path(
-    fs: &FileSystem,
-    subject: &dialog_capability::Did,
-    address_id: &str,
-) -> Result<PathBuf, FileSystemError> {
-    let location = fs.credentials(subject)?;
-    let file_location = location.resolve(address_id)?;
-    file_location.try_into()
-}
-
 #[async_trait]
-impl<C> Provider<credential::Retrieve<C>> for FileSystem
-where
-    C: Serialize + DeserializeOwned + ConditionalSend + 'static,
-{
+impl Provider<credential::Load> for FileSystem {
     async fn execute(
         &self,
-        input: Capability<credential::Retrieve<C>>,
-    ) -> Result<C, CredentialError> {
+        input: Capability<credential::Load>,
+    ) -> Result<Option<Identity>, CredentialError> {
         let subject = input.subject().into();
-        let address_id = credential::Retrieve::<C>::of(&input)
-            .address
-            .id()
-            .to_string();
+        let name = input.name();
 
-        let path = credential_path(self, &subject, &address_id)?;
+        let location = self
+            .credentials(&subject)?
+            .resolve(name)
+            .map_err(|e| CredentialError::Storage(e.to_string()))?;
 
-        match tokio::fs::read(&path).await {
-            Ok(data) => serde_json::from_slice(&data)
-                .map_err(|e| CredentialError::NotFound(format!("deserialization error: {e}"))),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(CredentialError::NotFound(
-                format!("no credentials at '{address_id}'"),
-            )),
-            Err(e) => Err(CredentialError::NotFound(e.to_string())),
+        match location.read().await {
+            Ok(data) => {
+                let export = CredentialExport::try_from(data)
+                    .map_err(|e| CredentialError::Corrupted(e.to_string()))?;
+                let credential = Identity::import(export)
+                    .await
+                    .map_err(|e| CredentialError::Corrupted(e.to_string()))?;
+                Ok(Some(credential))
+            }
+            Err(_) => Ok(None),
         }
     }
 }
 
 #[async_trait]
-impl<C> Provider<credential::Save<C>> for FileSystem
-where
-    C: Serialize + DeserializeOwned + ConditionalSend + 'static,
-{
-    async fn execute(&self, input: Capability<credential::Save<C>>) -> Result<(), CredentialError> {
+impl Provider<credential::Save> for FileSystem {
+    async fn execute(&self, input: Capability<credential::Save>) -> Result<(), CredentialError> {
         let subject = input.subject().into();
-        let effect = credential::Save::<C>::of(&input);
-        let address_id = effect.address.id().to_string();
-        let value = serde_json::to_vec(&effect.credentials)
-            .map_err(|e| CredentialError::NotFound(format!("serialization error: {e}")))?;
+        let name = input.name();
+        let credential = input.credential();
 
-        let location = self.credentials(&subject)?;
-        location.ensure_dir().await?;
+        let location = self
+            .credentials(&subject)?
+            .resolve(name)
+            .map_err(|e| CredentialError::Storage(e.to_string()))?;
 
-        let path = credential_path(self, &subject, &address_id)?;
-
-        // Ensure parent directory exists (address_id might contain path separators)
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| FileSystemError::Io(e.to_string()))?;
-        }
-
-        tokio::fs::write(&path, &value)
+        let export = credential
+            .export()
             .await
-            .map_err(|e| FileSystemError::Io(e.to_string()))?;
+            .map_err(|e| CredentialError::Storage(e.to_string()))?;
+        location
+            .write(export.as_bytes())
+            .await
+            .map_err(|e| CredentialError::Storage(e.to_string()))?;
 
         Ok(())
     }
@@ -91,14 +71,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dialog_capability::{Did, Subject, credential};
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-    struct TestCredentials {
-        access_key: String,
-        secret_key: String,
-    }
+    use dialog_capability::{Did, Subject};
+    use dialog_effects::credential;
+    use dialog_varsig::Principal;
 
     fn temp_filesystem() -> (tempfile::TempDir, FileSystem) {
         let dir = tempfile::tempdir().unwrap();
@@ -120,44 +95,41 @@ mod tests {
         Subject::from(did)
     }
 
-    fn build_retrieve_cap<C: Serialize + DeserializeOwned + ConditionalSend + 'static>(
-        subject: Subject,
-        address_id: &str,
-    ) -> Capability<credential::Retrieve<C>> {
+    fn build_load_cap(subject: Subject, name: &str) -> Capability<credential::Load> {
         subject
             .attenuate(credential::Credential)
-            .invoke(credential::Retrieve {
-                address: credential::Address::new(address_id),
-            })
+            .attenuate(credential::Name::new(name))
+            .invoke(credential::Load)
     }
 
-    fn build_save_cap<C: Serialize + DeserializeOwned + ConditionalSend + 'static>(
+    fn build_save_cap(
         subject: Subject,
-        address_id: &str,
-        credentials: C,
-    ) -> Capability<credential::Save<C>> {
+        name: &str,
+        credential: Identity,
+    ) -> Capability<credential::Save> {
         subject
             .attenuate(credential::Credential)
-            .invoke(credential::Save {
-                address: credential::Address::new(address_id),
-                credentials,
-            })
+            .attenuate(credential::Name::new(name))
+            .invoke(credential::Save::new(credential))
+    }
+
+    async fn make_signer_credential() -> Identity {
+        let signer = dialog_credentials::Ed25519Signer::generate().await.unwrap();
+        Identity::from(signer)
     }
 
     #[dialog_common::test]
-    async fn it_returns_not_found_for_missing_credentials() -> anyhow::Result<()> {
+    async fn it_returns_none_for_missing_credentials() -> anyhow::Result<()> {
         let (_dir, provider) = temp_filesystem();
         let subject = unique_subject("fs-cred-missing");
 
-        let result: Result<TestCredentials, _> =
-            <FileSystem as Provider<credential::Retrieve<TestCredentials>>>::execute(
-                &provider,
-                build_retrieve_cap(subject, "s3://my-bucket"),
-            )
-            .await;
+        let result = <FileSystem as Provider<credential::Load>>::execute(
+            &provider,
+            build_load_cap(subject, "s3-bucket"),
+        )
+        .await?;
 
-        assert!(result.is_err());
-        assert!(matches!(result, Err(CredentialError::NotFound(_))));
+        assert!(result.is_none());
 
         Ok(())
     }
@@ -166,69 +138,61 @@ mod tests {
     async fn it_stores_and_retrieves_credentials() -> anyhow::Result<()> {
         let (_dir, provider) = temp_filesystem();
         let subject = unique_subject("fs-cred-roundtrip");
-        let creds = TestCredentials {
-            access_key: "AKIA123".to_string(),
-            secret_key: "secret456".to_string(),
-        };
+        let cred = make_signer_credential().await;
+        let expected_did = cred.did();
 
-        <FileSystem as Provider<credential::Save<TestCredentials>>>::execute(
+        <FileSystem as Provider<credential::Save>>::execute(
             &provider,
-            build_save_cap(subject.clone(), "s3://my-bucket", creds.clone()),
+            build_save_cap(subject.clone(), "s3-bucket", cred),
         )
         .await?;
 
-        let result: TestCredentials = <FileSystem as Provider<
-            credential::Retrieve<TestCredentials>,
-        >>::execute(
-            &provider, build_retrieve_cap(subject, "s3://my-bucket")
+        let result = <FileSystem as Provider<credential::Load>>::execute(
+            &provider,
+            build_load_cap(subject, "s3-bucket"),
         )
         .await?;
 
-        assert_eq!(result, creds);
+        let loaded = result.expect("credential should exist");
+        assert_eq!(loaded.did(), expected_did);
 
         Ok(())
     }
 
     #[dialog_common::test]
-    async fn it_isolates_credentials_by_address() -> anyhow::Result<()> {
+    async fn it_isolates_credentials_by_name() -> anyhow::Result<()> {
         let (_dir, provider) = temp_filesystem();
         let subject = unique_subject("fs-cred-isolation");
 
-        let creds1 = TestCredentials {
-            access_key: "key1".to_string(),
-            secret_key: "secret1".to_string(),
-        };
-        let creds2 = TestCredentials {
-            access_key: "key2".to_string(),
-            secret_key: "secret2".to_string(),
-        };
+        let cred_a = make_signer_credential().await;
+        let cred_b = make_signer_credential().await;
+        let did_a = cred_a.did();
+        let did_b = cred_b.did();
 
-        <FileSystem as Provider<credential::Save<TestCredentials>>>::execute(
+        <FileSystem as Provider<credential::Save>>::execute(
             &provider,
-            build_save_cap(subject.clone(), "bucket-a", creds1.clone()),
+            build_save_cap(subject.clone(), "bucket-a", cred_a),
         )
         .await?;
-        <FileSystem as Provider<credential::Save<TestCredentials>>>::execute(
+        <FileSystem as Provider<credential::Save>>::execute(
             &provider,
-            build_save_cap(subject.clone(), "bucket-b", creds2.clone()),
+            build_save_cap(subject.clone(), "bucket-b", cred_b),
         )
         .await?;
 
-        let result1: TestCredentials = <FileSystem as Provider<
-            credential::Retrieve<TestCredentials>,
-        >>::execute(
-            &provider, build_retrieve_cap(subject.clone(), "bucket-a")
+        let result1 = <FileSystem as Provider<credential::Load>>::execute(
+            &provider,
+            build_load_cap(subject.clone(), "bucket-a"),
         )
         .await?;
-        let result2: TestCredentials = <FileSystem as Provider<
-            credential::Retrieve<TestCredentials>,
-        >>::execute(
-            &provider, build_retrieve_cap(subject, "bucket-b")
+        let result2 = <FileSystem as Provider<credential::Load>>::execute(
+            &provider,
+            build_load_cap(subject, "bucket-b"),
         )
         .await?;
 
-        assert_eq!(result1, creds1);
-        assert_eq!(result2, creds2);
+        assert_eq!(result1.unwrap().did(), did_a);
+        assert_eq!(result2.unwrap().did(), did_b);
 
         Ok(())
     }

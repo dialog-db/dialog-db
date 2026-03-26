@@ -1,5 +1,5 @@
 use dialog_capability::Provider;
-use dialog_capability::credential::{Allow, Authorize};
+use dialog_capability::access::{Allow, Authorize};
 use dialog_capability::fork::Fork;
 use dialog_common::ConditionalSync;
 use dialog_effects::memory as memory_fx;

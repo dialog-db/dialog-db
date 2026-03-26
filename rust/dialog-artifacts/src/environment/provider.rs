@@ -13,14 +13,12 @@
 use dialog_capability::Capability;
 use dialog_capability::Provider;
 use dialog_capability::authority;
-use dialog_capability::credential::{self, CredentialError, List, Retrieve, Save};
 use dialog_capability::fork::{Fork, ForkInvocation};
 use dialog_capability::site::Site;
 use dialog_capability::{Constraint, Effect};
 use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_effects::credential::{self, CredentialError, Identity};
 use dialog_effects::{archive, memory, storage};
-use serde::Serialize;
-use serde::de::DeserializeOwned;
 
 /// Generic environment that delegates:
 /// - Authority effects (identify, sign) to `Authority`
@@ -61,48 +59,27 @@ impl<Authority, Local, Remote> Environment<Authority, Local, Remote> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Authority, Local, Remote, C> Provider<Retrieve<C>> for Environment<Authority, Local, Remote>
+impl<Authority, Local, Remote> Provider<credential::Load> for Environment<Authority, Local, Remote>
 where
-    C: Serialize + DeserializeOwned + ConditionalSend + 'static,
-    Capability<Retrieve<C>>: ConditionalSend,
-    Retrieve<C>: ConditionalSend + 'static,
-    Local: Provider<Retrieve<C>> + ConditionalSync,
-    Self: ConditionalSend + ConditionalSync,
-{
-    async fn execute(&self, input: Capability<Retrieve<C>>) -> Result<C, CredentialError> {
-        self.local.execute(input).await
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Authority, Local, Remote, C> Provider<Save<C>> for Environment<Authority, Local, Remote>
-where
-    C: Serialize + DeserializeOwned + ConditionalSend + 'static,
-    Capability<Save<C>>: ConditionalSend,
-    Save<C>: ConditionalSend + 'static,
-    Local: Provider<Save<C>> + ConditionalSync,
-    Self: ConditionalSend + ConditionalSync,
-{
-    async fn execute(&self, input: Capability<Save<C>>) -> Result<(), CredentialError> {
-        self.local.execute(input).await
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Authority, Local, Remote, C> Provider<List<C>> for Environment<Authority, Local, Remote>
-where
-    C: Serialize + DeserializeOwned + ConditionalSend + 'static,
-    Capability<List<C>>: ConditionalSend,
-    List<C>: ConditionalSend + 'static,
-    Local: Provider<List<C>> + ConditionalSync,
+    Local: Provider<credential::Load> + ConditionalSync,
     Self: ConditionalSend + ConditionalSync,
 {
     async fn execute(
         &self,
-        input: Capability<List<C>>,
-    ) -> Result<Vec<credential::Address<C>>, CredentialError> {
+        input: Capability<credential::Load>,
+    ) -> Result<Option<Identity>, CredentialError> {
+        self.local.execute(input).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<Authority, Local, Remote> Provider<credential::Save> for Environment<Authority, Local, Remote>
+where
+    Local: Provider<credential::Save> + ConditionalSync,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(&self, input: Capability<credential::Save>) -> Result<(), CredentialError> {
         self.local.execute(input).await
     }
 }

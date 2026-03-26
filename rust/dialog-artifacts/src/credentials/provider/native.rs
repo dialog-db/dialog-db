@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use dialog_capability::Provider;
-use dialog_capability::credential::CredentialError;
 use dialog_credentials::Ed25519Signer;
 use dialog_credentials::credential::{SignerCredential, SignerCredentialExport};
+use dialog_effects::credential::CredentialError;
 use dialog_storage::provider::FileSystem;
 
 use crate::credentials::open::{Open, ProfileSigner};

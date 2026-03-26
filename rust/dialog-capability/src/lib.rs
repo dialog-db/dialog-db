@@ -216,8 +216,6 @@ pub mod authority;
 
 pub mod site;
 
-pub mod credential;
-
 pub mod storage;
 
 pub mod command;

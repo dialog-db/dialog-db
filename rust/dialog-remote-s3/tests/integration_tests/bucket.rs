@@ -49,7 +49,7 @@ impl TestBucket {
             .fork(&self.address)
             .acquire(&self.session)
             .await
-            .map_err(|e: dialog_capability::credential::AuthorizeError| {
+            .map_err(|e: dialog_capability::access::AuthorizeError| {
                 S3StorageError::AuthorizationError(e.to_string())
             })?;
 
@@ -65,7 +65,7 @@ impl TestBucket {
             .fork(&self.address)
             .acquire(&self.session)
             .await
-            .map_err(|e: dialog_capability::credential::AuthorizeError| {
+            .map_err(|e: dialog_capability::access::AuthorizeError| {
                 S3StorageError::AuthorizationError(e.to_string())
             })?;
 
@@ -81,7 +81,7 @@ impl TestBucket {
             .fork(&self.address)
             .acquire(&self.session)
             .await
-            .map_err(|e: dialog_capability::credential::AuthorizeError| {
+            .map_err(|e: dialog_capability::access::AuthorizeError| {
                 S3StorageError::AuthorizationError(e.to_string())
             })?;
 
@@ -102,7 +102,7 @@ impl TestBucket {
             .fork(&self.address)
             .acquire(&self.session)
             .await
-            .map_err(|e: dialog_capability::credential::AuthorizeError| {
+            .map_err(|e: dialog_capability::access::AuthorizeError| {
                 S3StorageError::AuthorizationError(e.to_string())
             })?;
 
@@ -125,7 +125,7 @@ impl TestBucket {
             .fork(&self.address)
             .acquire(&self.session)
             .await
-            .map_err(|e: dialog_capability::credential::AuthorizeError| {
+            .map_err(|e: dialog_capability::access::AuthorizeError| {
                 S3StorageError::AuthorizationError(e.to_string())
             })?;
 
@@ -148,7 +148,7 @@ impl TestBucket {
             .fork(&self.address)
             .acquire(&self.session)
             .await
-            .map_err(|e: dialog_capability::credential::AuthorizeError| {
+            .map_err(|e: dialog_capability::access::AuthorizeError| {
                 S3StorageError::AuthorizationError(e.to_string())
             })?;
 

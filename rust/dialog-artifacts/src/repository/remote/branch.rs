@@ -1,4 +1,4 @@
-use dialog_capability::credential::{Allow, Authorize};
+use dialog_capability::access::{Allow, Authorize};
 use dialog_capability::fork::Fork;
 use dialog_capability::{Did, Provider};
 use dialog_common::ConditionalSync;
