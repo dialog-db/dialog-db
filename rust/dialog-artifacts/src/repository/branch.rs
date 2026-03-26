@@ -173,7 +173,7 @@ impl Branch {
 
 #[cfg(test)]
 mod tests {
-    use dialog_capability::{Capability, Did, Provider, Subject, authority, credential};
+    use dialog_capability::{Capability, Did, Provider, Subject, authority};
     use dialog_effects::archive as archive_fx;
     use dialog_effects::memory as memory_fx;
     use dialog_storage::provider::Volatile;
@@ -203,7 +203,7 @@ mod tests {
         async fn execute(
             &self,
             input: Capability<authority::Identify>,
-        ) -> Result<authority::Authority, credential::CredentialError> {
+        ) -> Result<authority::Authority, authority::AuthorityError> {
             let did = test_subject();
             let subject_did = input.subject().clone();
             Ok(Subject::from(subject_did)

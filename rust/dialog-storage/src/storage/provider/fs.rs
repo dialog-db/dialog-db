@@ -46,6 +46,7 @@ mod archive;
 mod credential;
 mod error;
 mod memory;
+mod storage;
 
 pub use error::FileSystemError;
 
@@ -56,6 +57,7 @@ use url::Url;
 const ARCHIVE: &str = "archive";
 const CREDENTIALS: &str = "credentials";
 const MEMORY: &str = "memory";
+const STORAGE: &str = "storage";
 
 /// Filesystem-based storage provider.
 ///
@@ -150,6 +152,14 @@ impl FileSystem {
     /// Returns the location for a subject's credential storage.
     fn credentials(&self, subject: &Did) -> Result<Location, FileSystemError> {
         self.0.resolve(subject.as_ref())?.resolve(CREDENTIALS)
+    }
+
+    /// Returns the location for a subject's key-value storage.
+    fn storage(&self, subject: &Did, store: &str) -> Result<Location, FileSystemError> {
+        self.0
+            .resolve(subject.as_ref())?
+            .resolve(STORAGE)?
+            .resolve(store)
     }
 }
 

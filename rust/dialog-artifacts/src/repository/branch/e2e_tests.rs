@@ -1,5 +1,5 @@
 use dialog_capability::fork::{Fork, ForkInvocation};
-use dialog_capability::{Capability, Did, Provider, Subject, authority, credential};
+use dialog_capability::{Capability, Did, Provider, Subject, authority};
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
 use dialog_remote_s3::Address;
@@ -191,7 +191,7 @@ impl Provider<authority::Identify> for TestEnv {
     async fn execute(
         &self,
         input: Capability<authority::Identify>,
-    ) -> Result<authority::Authority, credential::CredentialError> {
+    ) -> Result<authority::Authority, authority::AuthorityError> {
         let did = test_subject();
         let subject_did = input.subject().clone();
         Ok(Subject::from(subject_did)
@@ -206,7 +206,7 @@ impl Provider<authority::Sign> for TestEnv {
     async fn execute(
         &self,
         _input: Capability<authority::Sign>,
-    ) -> Result<Vec<u8>, credential::CredentialError> {
+    ) -> Result<Vec<u8>, authority::AuthorityError> {
         Ok(vec![0u8; 64])
     }
 }

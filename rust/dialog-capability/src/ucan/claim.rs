@@ -443,7 +443,7 @@ mod tests {
             async fn execute(
                 &self,
                 input: Capability<authority::Identify>,
-            ) -> Result<authority::Authority, CredentialError> {
+            ) -> Result<authority::Authority, authority::AuthorityError> {
                 let did = dialog_varsig::Principal::did(&self.signer);
                 let subject_did = input.subject().clone();
                 Ok(Subject::from(subject_did)
@@ -458,14 +458,14 @@ mod tests {
             async fn execute(
                 &self,
                 input: Capability<authority::Sign>,
-            ) -> Result<Vec<u8>, CredentialError> {
+            ) -> Result<Vec<u8>, authority::AuthorityError> {
                 use dialog_varsig::Signer;
                 let payload = authority::Sign::of(&input).payload.clone();
                 let sig = self
                     .signer
                     .sign(&payload)
                     .await
-                    .map_err(|e| CredentialError::SigningFailed(e.to_string()))?;
+                    .map_err(|e| authority::AuthorityError::SigningFailed(e.to_string()))?;
                 Ok(sig.to_bytes().to_vec())
             }
         }

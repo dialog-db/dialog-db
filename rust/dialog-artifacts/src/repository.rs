@@ -31,7 +31,7 @@ pub mod revision;
 
 use dialog_capability::{Did, Provider, Subject};
 use dialog_credentials::Ed25519Signer;
-use dialog_effects::repository;
+use dialog_effects::repository as repo_fx;
 use dialog_varsig::Principal;
 
 use self::archive::Archive;
@@ -137,10 +137,10 @@ pub struct Open {
 
 impl Open {
     /// Execute the open against an environment that provides
-    /// `repository::Load` and `repository::Save`.
+    /// `repo_fx::Load` and `repo_fx::Save`.
     pub async fn perform<Env>(self, env: &Env) -> Result<Repository, RepositoryError>
     where
-        Env: Provider<repository::Load> + Provider<repository::Save>,
+        Env: Provider<repo_fx::Load> + Provider<repo_fx::Save>,
     {
         let authority = Subject::from(dialog_capability::did!(
             "key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
@@ -148,9 +148,9 @@ impl Open {
 
         let credential = authority
             .clone()
-            .attenuate(repository::Repository)
-            .attenuate(repository::Name::new(&self.name))
-            .invoke(repository::Load)
+            .attenuate(repo_fx::Repository)
+            .attenuate(repo_fx::Name::new(&self.name))
+            .invoke(repo_fx::Load)
             .perform(env)
             .await
             .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
@@ -165,9 +165,9 @@ impl Open {
                 let subject = signer.did();
 
                 authority
-                    .attenuate(repository::Repository)
-                    .attenuate(repository::Name::new(&self.name))
-                    .invoke(repository::Save::new(signer.into()))
+                    .attenuate(repo_fx::Repository)
+                    .attenuate(repo_fx::Name::new(&self.name))
+                    .invoke(repo_fx::Save::new(signer.into()))
                     .perform(env)
                     .await
                     .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
@@ -182,7 +182,8 @@ impl Open {
 mod tests {
     use super::*;
     use crate::artifacts::{Artifact, Instruction};
-    use dialog_capability::{Capability, Provider, Subject, authority, credential};
+    use crate::environment::Builder;
+    use dialog_capability::{Capability, Provider, Subject, authority};
     use dialog_effects::archive as archive_fx;
     use dialog_effects::memory as memory_fx;
     use dialog_remote_s3::Address;
@@ -212,7 +213,7 @@ mod tests {
         async fn execute(
             &self,
             input: Capability<authority::Identify>,
-        ) -> Result<authority::Authority, credential::CredentialError> {
+        ) -> Result<authority::Authority, authority::AuthorityError> {
             let did = test_subject();
             let subject_did = input.subject().clone();
             Ok(Subject::from(subject_did)
@@ -340,7 +341,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_opens_repository_by_name() -> anyhow::Result<()> {
-        let env = crate::environment::Builder::temp()?.build().await?;
+        let env = Builder::temp()?.build().await?;
 
         let repo = Repository::open("home").perform(&env).await?;
         assert!(
@@ -353,7 +354,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_reopens_same_repository() -> anyhow::Result<()> {
-        let env = crate::environment::Builder::temp()?.build().await?;
+        let env = Builder::temp()?.build().await?;
 
         let did1 = Repository::open("home")
             .perform(&env)
@@ -373,7 +374,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_isolates_repositories_by_name() -> anyhow::Result<()> {
-        let env = crate::environment::Builder::temp()?.build().await?;
+        let env = Builder::temp()?.build().await?;
 
         let repo1 = Repository::open("home").perform(&env).await?;
         let repo2 = Repository::open("work").perform(&env).await?;

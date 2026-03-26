@@ -13,9 +13,21 @@
 //! is the identity. [`Identify`] is an effect on `Subject` that returns the
 //! current `Authority`.
 
-use crate::credential::CredentialError;
 use crate::{Attenuation, Capability, Did, Effect, Policy, Subject};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+/// Error type for authority operations (identity and signing).
+#[derive(Debug, Error)]
+pub enum AuthorityError {
+    /// Identity resolution failed.
+    #[error("Identity error: {0}")]
+    Identity(String),
+
+    /// Signing operation failed.
+    #[error("Signing failed: {0}")]
+    SigningFailed(String),
+}
 
 /// Device identity — attenuates from Subject.
 ///
@@ -107,7 +119,7 @@ impl Sign {
 
 impl Effect for Sign {
     type Of = Operator;
-    type Output = Result<Vec<u8>, CredentialError>;
+    type Output = Result<Vec<u8>, AuthorityError>;
 }
 
 /// Extension trait for `Capability<Sign>` to access its fields.
@@ -132,5 +144,5 @@ pub struct Identify;
 
 impl Effect for Identify {
     type Of = Subject;
-    type Output = Result<Authority, CredentialError>;
+    type Output = Result<Authority, AuthorityError>;
 }

@@ -8,8 +8,7 @@
 pub mod open;
 mod provider;
 
-use dialog_capability::authority::{self, Authority};
-use dialog_capability::credential::CredentialError;
+use dialog_capability::authority::{self, Authority, AuthorityError};
 use dialog_capability::{Capability, Policy, Provider, Subject};
 use dialog_credentials::Ed25519Signer;
 use dialog_varsig::eddsa::Ed25519Signature;
@@ -177,7 +176,7 @@ impl Provider<authority::Identify> for Credentials {
     async fn execute(
         &self,
         input: Capability<authority::Identify>,
-    ) -> Result<Authority, CredentialError> {
+    ) -> Result<Authority, AuthorityError> {
         let subject_did = input.subject().clone();
         Ok(self.build_authority(subject_did))
     }
@@ -186,14 +185,11 @@ impl Provider<authority::Identify> for Credentials {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Provider<authority::Sign> for Credentials {
-    async fn execute(
-        &self,
-        input: Capability<authority::Sign>,
-    ) -> Result<Vec<u8>, CredentialError> {
+    async fn execute(&self, input: Capability<authority::Sign>) -> Result<Vec<u8>, AuthorityError> {
         let payload = authority::Sign::of(&input).payload.as_slice();
         let sig: Ed25519Signature = dialog_varsig::Signer::sign(&self.operator, payload)
             .await
-            .map_err(|e| CredentialError::SigningFailed(e.to_string()))?;
+            .map_err(|e| AuthorityError::SigningFailed(e.to_string()))?;
         Ok(sig.to_bytes().to_vec())
     }
 }

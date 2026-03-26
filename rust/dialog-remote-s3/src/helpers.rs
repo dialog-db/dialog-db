@@ -7,7 +7,7 @@
 //! - Address types (available on all platforms for deserialization in WASM tests)
 //! - Server implementation (native-only, in the `server` submodule)
 //! - Test operator types for capability-based testing
-use dialog_capability::{Capability, Did, Principal, Provider, Subject, authority, credential};
+use dialog_capability::{Capability, Did, Principal, Provider, Subject, authority};
 
 use serde::{Deserialize, Serialize};
 
@@ -70,7 +70,7 @@ impl Provider<authority::Identify> for Session {
     async fn execute(
         &self,
         input: Capability<authority::Identify>,
-    ) -> Result<authority::Authority, credential::CredentialError> {
+    ) -> Result<authority::Authority, authority::AuthorityError> {
         let subject_did = input.subject().clone();
         Ok(Subject::from(subject_did)
             .attenuate(authority::Profile::local(self.did.clone()))
@@ -84,7 +84,7 @@ impl Provider<authority::Sign> for Session {
     async fn execute(
         &self,
         _input: Capability<authority::Sign>,
-    ) -> Result<Vec<u8>, credential::CredentialError> {
+    ) -> Result<Vec<u8>, authority::AuthorityError> {
         // S3 direct access uses SigV4 signing, not external signatures.
         // The signature is never verified -- S3 uses its own SigV4 auth.
         Ok(vec![0u8; 64])

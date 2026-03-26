@@ -29,8 +29,8 @@ impl Default for Builder<Option<FileSystem>> {
     }
 }
 
-impl Builder<Option<FileSystem>> {
-    fn resolve(self) -> Result<Builder<FileSystem>, super::OpenError> {
+impl<P> Builder<Option<FileSystem>, P> {
+    fn resolve(self) -> Result<Builder<FileSystem, P>, super::OpenError> {
         let storage = self.storage;
         let resolved = match storage {
             Some(fs) => fs,
@@ -49,15 +49,21 @@ impl Builder<Option<FileSystem>> {
 
     /// Build the environment, resolving default storage from the platform
     /// profile directory if not explicitly set.
-    pub async fn build(self) -> Result<NativeEnvironment, super::OpenError> {
+    pub async fn build(self) -> Result<NativeEnvironment, super::OpenError>
+    where
+        P: super::builder::Permit<NativeEnvironment>,
+    {
         self.resolve()?.build().await
     }
 
     /// Build with a custom profile provider, resolving default storage.
-    pub async fn build_with<P: dialog_capability::Provider<Open>>(
+    pub async fn build_with<Pr: dialog_capability::Provider<Open>>(
         self,
-        provider: &P,
-    ) -> Result<NativeEnvironment, super::OpenError> {
+        provider: &Pr,
+    ) -> Result<NativeEnvironment, super::OpenError>
+    where
+        P: super::builder::Permit<NativeEnvironment>,
+    {
         self.resolve()?.build_with(provider).await
     }
 }
