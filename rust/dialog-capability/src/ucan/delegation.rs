@@ -1,31 +1,33 @@
 //! UCAN delegation storage and authorization extensions.
 //!
-//! Stores individual UCAN delegations in the credential store using credential
+//! Stores individual UCAN delegations in the credential store using storage
 //! effects, and provides blanket extension traits for UCAN authorization.
 //!
 //! # Storage Layout
 //!
-//! Delegations are stored as credentials with addresses:
+//! Delegations are stored in the `"ucan"` store with keys:
 //!
-//! - Subject-specific: `ucan/{audience}/{subject}/{issuer}.{cid}`
-//! - Powerline (`sub: *`): `ucan/{audience}/_/{issuer}.{cid}`
+//! - Subject-specific: `{audience}/{subject}/{issuer}.{cid}`
+//! - Powerline (`sub: *`): `{audience}/_/{issuer}.{cid}`
 //!
-//! This layout enables efficient lookup: list by `ucan/{audience}/{subject}/`
+//! This layout enables efficient lookup: list by `{audience}/{subject}/`
 //! to find all delegations granted to an operator for a given subject.
 //! Entries where `issuer == subject` are direct grants (no further chain needed).
 
-use crate::credential::{self, CredentialError};
-use crate::{Capability, Did, Policy, Provider};
+use crate::storage::{self, Storage, StorageError, Store};
+use crate::{Capability, Did, Provider};
 use dialog_common::ConditionalSync;
 use dialog_ucan::DelegationChain;
 use dialog_ucan::subject::Subject;
 
+const UCAN_STORE: &str = "ucan";
+
 pub fn delegation_prefix(audience: &Did, subject: &Did) -> String {
-    format!("ucan/{}/{}/", audience, subject)
+    format!("{}/{}/", audience, subject)
 }
 
 pub fn powerline_prefix(audience: &Did) -> String {
-    format!("ucan/{}/_/", audience)
+    format!("{}/_/", audience)
 }
 
 fn delegation_key(
@@ -34,16 +36,16 @@ fn delegation_key(
     issuer: &Did,
     cid: &ipld_core::cid::Cid,
 ) -> String {
-    format!("ucan/{}/{}/{}.{}", audience, subject, issuer, cid)
+    format!("{}/{}/{}.{}", audience, subject, issuer, cid)
 }
 
 fn powerline_key(audience: &Did, issuer: &Did, cid: &ipld_core::cid::Cid) -> String {
-    format!("ucan/{}/_/{}.{}", audience, issuer, cid)
+    format!("{}/_/{}.{}", audience, issuer, cid)
 }
 
 /// Parse an issuer DID and CID string from a key's filename portion.
 ///
-/// Given `ucan/{aud}/{sub}/{issuer}.{cid}`, extracts `(issuer, cid)` from the last segment.
+/// Given `{aud}/{sub}/{issuer}.{cid}`, extracts `(issuer, cid)` from the last segment.
 pub fn parse_key_suffix(key: &str) -> Option<(String, String)> {
     let filename = key.rsplit('/').next()?;
     // DIDs contain colons (did:key:z...), so split on the last dot only
@@ -56,12 +58,14 @@ pub fn parse_key_suffix(key: &str) -> Option<(String, String)> {
     Some((issuer.to_string(), cid_str.to_string()))
 }
 
-/// Build a credential capability for delegation storage.
-pub fn cred_cap(subject: &Did) -> Capability<credential::Credential> {
-    crate::Subject::from(subject.clone()).attenuate(credential::Credential)
+/// Build a storage capability scoped to the "ucan" store for the given subject.
+fn ucan_store(subject: &Did) -> Capability<Store> {
+    crate::Subject::from(subject.clone())
+        .attenuate(Storage)
+        .attenuate(Store::new(UCAN_STORE))
 }
 
-/// Store a delegation chain's individual delegations into the credential store.
+/// Store a delegation chain's individual delegations into the storage backend.
 ///
 /// Each delegation is stored separately at its computed key path so that
 /// chain discovery can find them by listing prefixes.
@@ -69,9 +73,9 @@ pub async fn import_delegation_chain<Env>(
     env: &Env,
     subject: &Did,
     chain: &DelegationChain,
-) -> Result<(), credential::CredentialError>
+) -> Result<(), StorageError>
 where
-    Env: Provider<credential::Save<Vec<u8>>> + ConditionalSync,
+    Env: Provider<storage::Set> + ConditionalSync,
 {
     for (cid, delegation) in chain.delegations() {
         let audience = delegation.audience();
@@ -81,33 +85,14 @@ where
         };
 
         let bytes = serde_ipld_dagcbor::to_vec(delegation.as_ref())
-            .map_err(|e| credential::CredentialError::SigningFailed(e.to_string()))?;
+            .map_err(|e| StorageError::Storage(e.to_string()))?;
 
-        let save_cap = cred_cap(subject).invoke(credential::Save {
-            address: credential::Address::new(key),
-            credentials: bytes,
-        });
-
-        env.execute(save_cap).await?;
+        ucan_store(subject)
+            .invoke(storage::Set::new(key.as_bytes(), bytes))
+            .perform(env)
+            .await?;
     }
     Ok(())
-}
-
-/// Blanket impl: any type that can save credentials can import delegation chains.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Env> Provider<credential::Import<DelegationChain>> for Env
-where
-    Env: Provider<credential::Save<Vec<u8>>> + ConditionalSync,
-{
-    async fn execute(
-        &self,
-        input: Capability<credential::Import<DelegationChain>>,
-    ) -> Result<(), CredentialError> {
-        let subject = input.subject().clone();
-        let chain = &credential::Import::<DelegationChain>::of(&input).material;
-        import_delegation_chain(self, &subject, chain).await
-    }
 }
 
 #[cfg(test)]
@@ -120,17 +105,15 @@ mod tests {
     use dialog_varsig::eddsa::Ed25519Signature;
 
     // Minimal test provider that stores credentials in-memory using HashMaps
-    // (no dependency on dialog-storage or Volatile)
     mod test_provider {
         use crate::authority;
-        use crate::credential::{self, CredentialError};
+        use crate::storage::{self, StorageError};
         use crate::{Capability, Policy, Provider, Subject};
         use async_trait::async_trait;
-        use dialog_common::ConditionalSend;
-        use serde::Serialize;
-        use serde::de::DeserializeOwned;
         use std::collections::HashMap;
         use std::sync::RwLock;
+
+        use crate::storage::{GetCapability, ListCapability, SetCapability};
 
         pub struct TestStore {
             data: RwLock<HashMap<String, HashMap<String, Vec<u8>>>>,
@@ -148,85 +131,66 @@ mod tests {
 
         #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
         #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-        impl<C> Provider<credential::Save<C>> for TestStore
-        where
-            C: Serialize + DeserializeOwned + ConditionalSend + 'static,
-        {
-            async fn execute(
-                &self,
-                input: Capability<credential::Save<C>>,
-            ) -> Result<(), CredentialError> {
-                let subject: String = input.subject().to_string();
-                let effect = credential::Save::<C>::of(&input);
-                let address_id = effect.address.id().to_string();
-                let value = serde_json::to_vec(&effect.credentials)
-                    .map_err(|e| CredentialError::NotFound(format!("serialization error: {e}")))?;
+        impl Provider<storage::Set> for TestStore {
+            async fn execute(&self, input: Capability<storage::Set>) -> Result<(), StorageError> {
+                let subject = input.subject().to_string();
+                let key = String::from_utf8_lossy(input.key()).to_string();
+                let value = input.value().to_vec();
 
                 let mut data = self.data.write().unwrap();
                 let entry = data.entry(subject).or_default();
-                entry.insert(address_id, value);
+                entry.insert(key, value);
                 Ok(())
             }
         }
 
         #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
         #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-        impl<C> Provider<credential::Retrieve<C>> for TestStore
-        where
-            C: Serialize + DeserializeOwned + ConditionalSend + 'static,
-        {
+        impl Provider<storage::Get> for TestStore {
             async fn execute(
                 &self,
-                input: Capability<credential::Retrieve<C>>,
-            ) -> Result<C, CredentialError> {
-                let subject: String = input.subject().to_string();
-                let address_id = credential::Retrieve::<C>::of(&input)
-                    .address
-                    .id()
-                    .to_string();
+                input: Capability<storage::Get>,
+            ) -> Result<Option<Vec<u8>>, StorageError> {
+                let subject = input.subject().to_string();
+                let key = String::from_utf8_lossy(input.key()).to_string();
 
                 let data = self.data.read().unwrap();
-                let bytes = data
+                let value = data
                     .get(&subject)
-                    .and_then(|session| session.get(&address_id));
+                    .and_then(|session| session.get(&key))
+                    .cloned();
 
-                match bytes {
-                    Some(data) => serde_json::from_slice(data).map_err(|e| {
-                        CredentialError::NotFound(format!("deserialization error: {e}"))
-                    }),
-                    None => Err(CredentialError::NotFound(format!(
-                        "no credentials at '{address_id}'"
-                    ))),
-                }
+                Ok(value)
             }
         }
 
         #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
         #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-        impl<C> Provider<credential::List<C>> for TestStore
-        where
-            C: Serialize + DeserializeOwned + ConditionalSend + 'static,
-        {
+        impl Provider<storage::List> for TestStore {
             async fn execute(
                 &self,
-                input: Capability<credential::List<C>>,
-            ) -> Result<Vec<credential::Address<C>>, CredentialError> {
-                let subject: String = input.subject().to_string();
-                let prefix = credential::List::<C>::of(&input).prefix.id().to_string();
+                input: Capability<storage::List>,
+            ) -> Result<storage::ListResult, StorageError> {
+                let subject = input.subject().to_string();
+                let store_name = input.store();
+
+                // The continuation_token is used as a prefix filter in tests
+                // We use the store name to scope, but the prefix is passed via
+                // continuation_token in the real API. For tests, we extract the
+                // prefix from the store's keys.
+                let _ = store_name;
 
                 let data = self.data.read().unwrap();
-                let addresses = data
+                let keys = data
                     .get(&subject)
-                    .map(|session| {
-                        session
-                            .keys()
-                            .filter(|key| key.starts_with(&prefix))
-                            .map(|key| credential::Address::new(key.as_str()))
-                            .collect()
-                    })
+                    .map(|session| session.keys().cloned().collect::<Vec<_>>())
                     .unwrap_or_default();
 
-                Ok(addresses)
+                Ok(storage::ListResult {
+                    keys,
+                    is_truncated: false,
+                    next_continuation_token: None,
+                })
             }
         }
 
@@ -316,7 +280,7 @@ mod tests {
 
     #[dialog_common::test]
     fn parse_key_suffix_valid() {
-        let key = "ucan/did:key:zOperator/did:key:zSubject/did:key:zIssuer.bafy123";
+        let key = "did:key:zOperator/did:key:zSubject/did:key:zIssuer.bafy123";
         let (issuer, cid) = parse_key_suffix(key).expect("Should parse valid key");
         assert_eq!(issuer, "did:key:zIssuer");
         assert_eq!(cid, "bafy123");
@@ -324,7 +288,7 @@ mod tests {
 
     #[dialog_common::test]
     fn parse_key_suffix_did_with_colons() {
-        let key = "ucan/did:key:z6MkOperator/did:key:z6MkSubject/did:key:z6MkfFJBxSBFgoAqTQLS7bTfP8MgyDypva5i6CL5PJN8RJZr.bafyreihxyz";
+        let key = "did:key:z6MkOperator/did:key:z6MkSubject/did:key:z6MkfFJBxSBFgoAqTQLS7bTfP8MgyDypva5i6CL5PJN8RJZr.bafyreihxyz";
         let (issuer, cid) = parse_key_suffix(key).expect("Should parse DID with colons");
         assert_eq!(
             issuer,
@@ -335,17 +299,17 @@ mod tests {
 
     #[dialog_common::test]
     fn parse_key_suffix_invalid_no_dot() {
-        assert!(parse_key_suffix("ucan/aud/sub/issuernodot").is_none());
+        assert!(parse_key_suffix("aud/sub/issuernodot").is_none());
     }
 
     #[dialog_common::test]
     fn parse_key_suffix_empty_issuer() {
-        assert!(parse_key_suffix("ucan/aud/sub/.cid").is_none());
+        assert!(parse_key_suffix("aud/sub/.cid").is_none());
     }
 
     #[dialog_common::test]
     fn parse_key_suffix_empty_cid() {
-        assert!(parse_key_suffix("ucan/aud/sub/issuer.").is_none());
+        assert!(parse_key_suffix("aud/sub/issuer.").is_none());
     }
 
     #[dialog_common::test]
@@ -367,21 +331,19 @@ mod tests {
         let env = test_env(operator_signer.clone());
         import_single(&env, &subject_did, delegation).await;
 
-        let expected_key = format!(
-            "ucan/{}/{}/{}.{}",
-            operator_did, subject_did, subject_did, cid
-        );
+        let expected_key = format!("{}/{}/{}.{}", operator_did, subject_did, subject_did, cid);
 
-        // Retrieve via credential effect
-        let retrieve_cap = cred_cap(&subject_did).invoke(credential::Retrieve::<Vec<u8>> {
-            address: credential::Address::new(&expected_key),
-        });
-        let result =
-            <TestStore as Provider<credential::Retrieve<Vec<u8>>>>::execute(&env, retrieve_cap)
-                .await;
+        // Retrieve via storage Get effect
+        let get_cap = ucan_store(&subject_did).invoke(storage::Get::new(expected_key.as_bytes()));
+        let result = <TestStore as Provider<storage::Get>>::execute(&env, get_cap).await;
         assert!(
             result.is_ok(),
             "Expected key '{}' not found in store",
+            expected_key
+        );
+        assert!(
+            result.unwrap().is_some(),
+            "Expected key '{}' to have a value",
             expected_key
         );
     }
@@ -425,21 +387,25 @@ mod tests {
             &d2_cid,
         );
 
-        let r1 = <TestStore as Provider<credential::Retrieve<Vec<u8>>>>::execute(
+        let r1 = <TestStore as Provider<storage::Get>>::execute(
             &env,
-            cred_cap(&subject_did).invoke(credential::Retrieve::<Vec<u8>> {
-                address: credential::Address::new(&key1),
-            }),
+            ucan_store(&subject_did).invoke(storage::Get::new(key1.as_bytes())),
         )
         .await;
-        let r2 = <TestStore as Provider<credential::Retrieve<Vec<u8>>>>::execute(
+        let r2 = <TestStore as Provider<storage::Get>>::execute(
             &env,
-            cred_cap(&subject_did).invoke(credential::Retrieve::<Vec<u8>> {
-                address: credential::Address::new(&key2),
-            }),
+            ucan_store(&subject_did).invoke(storage::Get::new(key2.as_bytes())),
         )
         .await;
-        assert!(r1.is_ok(), "d1 should be stored at {}", key1);
-        assert!(r2.is_ok(), "d2 should be stored at {}", key2);
+        assert!(
+            r1.is_ok() && r1.unwrap().is_some(),
+            "d1 should be stored at {}",
+            key1
+        );
+        assert!(
+            r2.is_ok() && r2.unwrap().is_some(),
+            "d2 should be stored at {}",
+            key2
+        );
     }
 }

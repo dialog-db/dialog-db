@@ -72,6 +72,7 @@ impl Provider<List> for Volatile {
     async fn execute(&self, effect: Capability<List>) -> Result<ListResult, StorageError> {
         let subject = effect.subject().into();
         let store = effect.store().to_string();
+        let prefix = String::from_utf8_lossy(effect.prefix()).into_owned();
 
         let sessions = self.sessions.read();
         let keys: Vec<String> = sessions
@@ -82,6 +83,7 @@ impl Provider<List> for Volatile {
                     .keys()
                     .filter(|(s, _)| s == &store)
                     .filter_map(|(_, k)| String::from_utf8(k.clone()).ok())
+                    .filter(|k| k.starts_with(&prefix))
                     .collect()
             })
             .unwrap_or_default();

@@ -6,7 +6,7 @@
 
 use crate::access::AuthorizeError;
 use crate::authority;
-use crate::credential;
+use crate::storage;
 use crate::{Ability, Capability, Constraint, Did, Policy, Provider};
 use dialog_common::ConditionalSync;
 use dialog_ucan::command::Command;
@@ -16,7 +16,7 @@ use ipld_core::ipld::Ipld;
 use std::collections::BTreeMap;
 
 use super::UcanInvocation;
-use super::delegation::{cred_cap, delegation_prefix, parse_key_suffix, powerline_prefix};
+use super::delegation::{delegation_prefix, parse_key_suffix, powerline_prefix};
 use super::issuer::Issuer;
 use super::parameters::{parameters, parameters_to_args};
 
@@ -25,6 +25,13 @@ const MAX_CHAIN_DEPTH: usize = 10;
 struct Candidate {
     issuer: Did,
     delegation: Delegation<Ed25519Signature>,
+}
+
+/// Build a storage capability scoped to the "ucan" store for the given subject.
+fn ucan_store(subject: &Did) -> Capability<storage::Store> {
+    crate::Subject::from(subject.clone())
+        .attenuate(storage::Storage)
+        .attenuate(storage::Store::new("ucan"))
 }
 
 /// Discover a delegation chain for the given capability and build a signed
@@ -46,8 +53,8 @@ where
     C: Constraint,
     Capability<C>: Ability,
     Env: Provider<authority::Sign>
-        + Provider<credential::List<Vec<u8>>>
-        + Provider<credential::Retrieve<Vec<u8>>>
+        + Provider<storage::List>
+        + Provider<storage::Get>
         + ConditionalSync,
 {
     let subject_did = capability.subject().clone();
@@ -150,9 +157,7 @@ async fn find_chain<Env>(
     now: &dialog_ucan::time::Timestamp,
 ) -> Result<Option<DelegationChain>, AuthorizeError>
 where
-    Env: Provider<credential::List<Vec<u8>>>
-        + Provider<credential::Retrieve<Vec<u8>>>
-        + ConditionalSync,
+    Env: Provider<storage::List> + Provider<storage::Get> + ConditionalSync,
 {
     let mut queue: Vec<(Did, Vec<Delegation<Ed25519Signature>>, usize)> =
         vec![(operator_did.clone(), vec![], 0)];
@@ -224,36 +229,35 @@ async fn fetch_and_validate<Env>(
     now: &dialog_ucan::time::Timestamp,
 ) -> Result<Vec<Candidate>, AuthorizeError>
 where
-    Env: Provider<credential::List<Vec<u8>>>
-        + Provider<credential::Retrieve<Vec<u8>>>
-        + ConditionalSync,
+    Env: Provider<storage::List> + Provider<storage::Get> + ConditionalSync,
 {
-    let list_cap = cred_cap(subject).invoke(credential::List::<Vec<u8>>::new(prefix));
+    // List all keys in the ucan store
+    let list_cap = ucan_store(subject).invoke(storage::List::new(None));
 
-    let addresses: Vec<credential::Address<Vec<u8>>> =
-        <Env as Provider<credential::List<Vec<u8>>>>::execute(env, list_cap)
-            .await
-            .map_err(|e| AuthorizeError::Configuration(format!("List failed: {:?}", e)))?;
+    let list_result: storage::ListResult = <Env as Provider<storage::List>>::execute(env, list_cap)
+        .await
+        .map_err(|e| AuthorizeError::Configuration(format!("List failed: {:?}", e)))?;
+
+    // Filter keys by prefix
+    let matching_keys: Vec<String> = list_result
+        .keys
+        .into_iter()
+        .filter(|key| key.starts_with(prefix))
+        .collect();
 
     let mut candidates = Vec::new();
 
-    for address in addresses {
-        let key = address.id().to_string();
-
+    for key in matching_keys {
         let (issuer_str, _) = match parse_key_suffix(&key) {
             Some(pair) => pair,
             None => continue,
         };
 
-        let retrieve_cap = cred_cap(subject).invoke(credential::Retrieve::<Vec<u8>> { address });
+        let get_cap = ucan_store(subject).invoke(storage::Get::new(key.as_bytes()));
 
-        let bytes: Vec<u8> = match <Env as Provider<credential::Retrieve<Vec<u8>>>>::execute(
-            env,
-            retrieve_cap,
-        )
-        .await
-        {
-            Ok(b) => b,
+        let bytes: Vec<u8> = match <Env as Provider<storage::Get>>::execute(env, get_cap).await {
+            Ok(Some(b)) => b,
+            Ok(None) => continue,
             Err(_) => continue,
         };
 
@@ -325,19 +329,17 @@ mod tests {
     use ipld_core::ipld::Ipld;
     use std::collections::BTreeMap;
 
-    use dialog_common::time::{Duration, SystemTime};
+    use dialog_ucan::time::{Duration, SystemTime};
 
     mod test_provider {
-        use crate::Policy;
         use crate::authority;
-        use crate::credential::{self, CredentialError};
-        use crate::{Capability, Provider, Subject};
+        use crate::storage::{self, StorageError};
+        use crate::{Capability, Policy, Provider, Subject};
         use async_trait::async_trait;
-        use dialog_common::ConditionalSend;
-        use serde::Serialize;
-        use serde::de::DeserializeOwned;
         use std::collections::HashMap;
         use std::sync::RwLock;
+
+        use crate::storage::{GetCapability, ListCapability, SetCapability};
 
         pub struct TestStore {
             data: RwLock<HashMap<String, HashMap<String, Vec<u8>>>>,
@@ -355,85 +357,60 @@ mod tests {
 
         #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
         #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-        impl<C> Provider<credential::Save<C>> for TestStore
-        where
-            C: Serialize + DeserializeOwned + ConditionalSend + 'static,
-        {
-            async fn execute(
-                &self,
-                input: Capability<credential::Save<C>>,
-            ) -> Result<(), CredentialError> {
-                let subject: String = input.subject().to_string();
-                let effect = credential::Save::<C>::of(&input);
-                let address_id = effect.address.id().to_string();
-                let value = serde_json::to_vec(&effect.credentials)
-                    .map_err(|e| CredentialError::NotFound(format!("serialization error: {e}")))?;
+        impl Provider<storage::Set> for TestStore {
+            async fn execute(&self, input: Capability<storage::Set>) -> Result<(), StorageError> {
+                let subject = input.subject().to_string();
+                let key = String::from_utf8_lossy(input.key()).to_string();
+                let value = input.value().to_vec();
 
                 let mut data = self.data.write().unwrap();
                 let entry = data.entry(subject).or_default();
-                entry.insert(address_id, value);
+                entry.insert(key, value);
                 Ok(())
             }
         }
 
         #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
         #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-        impl<C> Provider<credential::Retrieve<C>> for TestStore
-        where
-            C: Serialize + DeserializeOwned + ConditionalSend + 'static,
-        {
+        impl Provider<storage::Get> for TestStore {
             async fn execute(
                 &self,
-                input: Capability<credential::Retrieve<C>>,
-            ) -> Result<C, CredentialError> {
-                let subject: String = input.subject().to_string();
-                let address_id = credential::Retrieve::<C>::of(&input)
-                    .address
-                    .id()
-                    .to_string();
+                input: Capability<storage::Get>,
+            ) -> Result<Option<Vec<u8>>, StorageError> {
+                let subject = input.subject().to_string();
+                let key = String::from_utf8_lossy(input.key()).to_string();
 
                 let data = self.data.read().unwrap();
-                let bytes = data
+                let value = data
                     .get(&subject)
-                    .and_then(|session| session.get(&address_id));
+                    .and_then(|session| session.get(&key))
+                    .cloned();
 
-                match bytes {
-                    Some(data) => serde_json::from_slice(data).map_err(|e| {
-                        CredentialError::NotFound(format!("deserialization error: {e}"))
-                    }),
-                    None => Err(CredentialError::NotFound(format!(
-                        "no credentials at '{address_id}'"
-                    ))),
-                }
+                Ok(value)
             }
         }
 
         #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
         #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-        impl<C> Provider<credential::List<C>> for TestStore
-        where
-            C: Serialize + DeserializeOwned + ConditionalSend + 'static,
-        {
+        impl Provider<storage::List> for TestStore {
             async fn execute(
                 &self,
-                input: Capability<credential::List<C>>,
-            ) -> Result<Vec<credential::Address<C>>, CredentialError> {
-                let subject: String = input.subject().to_string();
-                let prefix = credential::List::<C>::of(&input).prefix.id().to_string();
+                input: Capability<storage::List>,
+            ) -> Result<storage::ListResult, StorageError> {
+                let subject = input.subject().to_string();
+                let _ = input.store();
 
                 let data = self.data.read().unwrap();
-                let addresses = data
+                let keys = data
                     .get(&subject)
-                    .map(|session| {
-                        session
-                            .keys()
-                            .filter(|key| key.starts_with(&prefix))
-                            .map(|key| credential::Address::new(key.as_str()))
-                            .collect()
-                    })
+                    .map(|session| session.keys().cloned().collect::<Vec<_>>())
                     .unwrap_or_default();
 
-                Ok(addresses)
+                Ok(storage::ListResult {
+                    keys,
+                    is_truncated: false,
+                    next_continuation_token: None,
+                })
             }
         }
 

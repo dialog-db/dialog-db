@@ -218,6 +218,8 @@ pub mod site;
 
 pub mod credential;
 
+pub mod storage;
+
 pub mod command;
 pub use command::*;
 

@@ -1,4 +1,4 @@
-//! UCAN access — authorization provider and invocation builder.
+//! UCAN access authorization provider and invocation builder.
 //!
 //! Provides the blanket `Provider<Authorize<Fx, Ucan>>` impl and the
 //! `authorize` function that builds signed UCAN invocations from
@@ -7,7 +7,7 @@
 use super::claim;
 use super::issuer::Issuer;
 use crate::access::{self, Authorization, AuthorizeError};
-use crate::{Ability, Capability, Constraint, Provider, Subject, authority, credential};
+use crate::{Ability, Capability, Constraint, Provider, Subject, authority, storage};
 use dialog_common::{ConditionalSend, ConditionalSync};
 
 use super::Ucan;
@@ -28,8 +28,8 @@ where
     Capability<C>: Ability + ConditionalSync,
     Env: Provider<authority::Identify>
         + Provider<authority::Sign>
-        + Provider<credential::List<Vec<u8>>>
-        + Provider<credential::Retrieve<Vec<u8>>>
+        + Provider<storage::List>
+        + Provider<storage::Get>
         + ConditionalSync,
 {
     let authority = Subject::from(capability.subject().clone())
@@ -43,7 +43,7 @@ where
     Ok(Authorization::new(capability, invocation))
 }
 
-/// Blanket impl: any type providing identity, signing, and credential store
+/// Blanket impl: any type providing identity, signing, and storage
 /// effects can authorize UCAN capabilities.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
@@ -56,8 +56,8 @@ where
     access::Authorize<Fx, Ucan>: ConditionalSend + 'static,
     Env: Provider<authority::Identify>
         + Provider<authority::Sign>
-        + Provider<credential::List<Vec<u8>>>
-        + Provider<credential::Retrieve<Vec<u8>>>
+        + Provider<storage::List>
+        + Provider<storage::Get>
         + ConditionalSync,
 {
     async fn execute(
