@@ -123,3 +123,38 @@ where
         self.remote.execute(input).await
     }
 }
+
+use crate::repository::provider::Storage;
+use dialog_effects::repository;
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<Authority, Local, Remote> Provider<repository::Load> for Environment<Authority, Local, Remote>
+where
+    for<'a> Storage<'a, Local>: Provider<repository::Load>,
+    Local: ConditionalSync,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        input: Capability<repository::Load>,
+    ) -> Result<Option<repository::Credential>, repository::RepositoryError> {
+        input.perform(&Storage(&self.local)).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<Authority, Local, Remote> Provider<repository::Save> for Environment<Authority, Local, Remote>
+where
+    for<'a> Storage<'a, Local>: Provider<repository::Save>,
+    Local: ConditionalSync,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        input: Capability<repository::Save>,
+    ) -> Result<(), repository::RepositoryError> {
+        input.perform(&Storage(&self.local)).await
+    }
+}

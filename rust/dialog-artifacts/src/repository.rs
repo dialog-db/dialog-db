@@ -22,12 +22,17 @@ pub mod memory;
 pub mod node_reference;
 /// Occurence logical timestamp type.
 pub mod occurence;
+/// Provider impls for repository Load/Save capabilities.
+pub mod provider;
 /// Remote site / repository / branch cursor hierarchy.
 pub mod remote;
 /// Revision type and edition tracking.
 pub mod revision;
 
-use dialog_capability::{Did, Subject};
+use dialog_capability::{Did, Provider, Subject};
+use dialog_credentials::Ed25519Signer;
+use dialog_effects::repository;
+use dialog_varsig::Principal;
 
 use self::archive::Archive;
 use self::memory::Memory;
@@ -110,6 +115,66 @@ impl Repository {
     pub fn load_branch(&self, name: impl Into<branch::BranchName>) -> branch::Load {
         let trace = self.memory.trace(name);
         branch::Load::new(self.subject.clone(), self.memory.clone(), trace)
+    }
+
+    /// Open a named repository — loads existing or creates new.
+    ///
+    /// ```text
+    /// let repo = Repository::open("home").perform(&env).await?;
+    /// ```
+    pub fn open(name: impl Into<String>) -> Open {
+        Open { name: name.into() }
+    }
+}
+
+/// Command to open a named repository.
+///
+/// Loads the credential for the given name. If none exists, generates
+/// a new keypair and saves it. Returns a `Repository` with the subject DID.
+pub struct Open {
+    name: String,
+}
+
+impl Open {
+    /// Execute the open against an environment that provides
+    /// `repository::Load` and `repository::Save`.
+    pub async fn perform<Env>(self, env: &Env) -> Result<Repository, RepositoryError>
+    where
+        Env: Provider<repository::Load> + Provider<repository::Save>,
+    {
+        let authority = Subject::from(dialog_capability::did!(
+            "key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+        ));
+
+        let credential = authority
+            .clone()
+            .attenuate(repository::Repository)
+            .attenuate(repository::Name::new(&self.name))
+            .invoke(repository::Load)
+            .perform(env)
+            .await
+            .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
+
+        match credential {
+            Some(credential) => Ok(Repository::new(credential.did())),
+            None => {
+                let signer = Ed25519Signer::generate()
+                    .await
+                    .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
+
+                let subject = signer.did();
+
+                authority
+                    .attenuate(repository::Repository)
+                    .attenuate(repository::Name::new(&self.name))
+                    .invoke(repository::Save::new(signer.into()))
+                    .perform(env)
+                    .await
+                    .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
+
+                Ok(Repository::new(subject))
+            }
+        }
     }
 }
 
@@ -269,6 +334,55 @@ mod tests {
         let loaded = repo.load_remote("origin").perform(&env).await?;
         assert_eq!(loaded.name(), "origin");
         assert_eq!(loaded.address(), &test_address());
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_opens_repository_by_name() -> anyhow::Result<()> {
+        let env = crate::environment::Builder::temp()?.build().await?;
+
+        let repo = Repository::open("home").perform(&env).await?;
+        assert!(
+            !repo.subject().to_string().is_empty(),
+            "should produce a valid subject DID"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_reopens_same_repository() -> anyhow::Result<()> {
+        let env = crate::environment::Builder::temp()?.build().await?;
+
+        let did1 = Repository::open("home")
+            .perform(&env)
+            .await?
+            .subject()
+            .clone();
+        let did2 = Repository::open("home")
+            .perform(&env)
+            .await?
+            .subject()
+            .clone();
+
+        assert_eq!(did1, did2, "reopening should return same subject DID");
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_isolates_repositories_by_name() -> anyhow::Result<()> {
+        let env = crate::environment::Builder::temp()?.build().await?;
+
+        let repo1 = Repository::open("home").perform(&env).await?;
+        let repo2 = Repository::open("work").perform(&env).await?;
+
+        assert_ne!(
+            repo1.subject(),
+            repo2.subject(),
+            "different names should produce different subjects"
+        );
 
         Ok(())
     }

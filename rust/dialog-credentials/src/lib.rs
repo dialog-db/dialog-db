@@ -9,6 +9,7 @@
 //! [`Principal`]: dialog_capability::Principal
 //! [`Issuer`]: dialog_capability::Issuer
 
+pub mod credential;
 pub mod key;
 
 #[cfg(feature = "ed25519")]

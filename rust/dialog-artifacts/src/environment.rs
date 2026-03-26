@@ -3,10 +3,30 @@
 //! Use [`Builder`] to configure and open an environment:
 //!
 //! ```no_run
+//! # #[cfg(not(target_arch = "wasm32"))]
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use dialog_artifacts::environment::Builder;
+//! use dialog_artifacts::Operator;
 //!
+//! // Defaults — system storage, default profile, unique operator
 //! let env = Builder::default().build().await?;
+//!
+//! // With derived operator
+//! let env = Builder::default()
+//!     .operator(b"alice")
+//!     .build()
+//!     .await?;
+//!
+//! // With UCAN delegation grant
+//! # #[cfg(feature = "ucan")]
+//! # {
+//! use dialog_artifacts::environment::Ucan;
+//! let env = Builder::default()
+//!     .operator(b"alice")
+//!     .grant(Ucan::unrestricted())
+//!     .build()
+//!     .await?;
+//! # }
 //! # Ok(())
 //! # }
 //! ```

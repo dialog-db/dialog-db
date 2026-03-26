@@ -17,6 +17,14 @@ impl Default for Builder<IndexedDb> {
 }
 
 #[cfg(test)]
+impl Builder<IndexedDb> {
+    /// Create a builder backed by a fresh IndexedDb instance.
+    pub fn temp() -> Result<Self, super::OpenError> {
+        Ok(Self::default())
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use crate::credentials::open::Open;
     use crate::environment::Builder;
@@ -78,7 +86,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn builder_produces_environment() {
-        let env = Builder::default().build().await.unwrap();
+        let env = Builder::temp().unwrap().build().await.unwrap();
 
         assert_ne!(
             env.authority.profile_did(),

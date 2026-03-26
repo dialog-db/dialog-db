@@ -1,4 +1,4 @@
-//! Algorithm-agnostic key export types.
+//! Algorithm-agnostic key export types and credential storage formats.
 
 /// Key material for import/export.
 ///
@@ -108,6 +108,37 @@ pub enum WebCryptoError {
     JsError(String),
 }
 
+/// Trait for creating WebCrypto keys with extractable private key material.
+///
+/// By default, key generation and import create **non-extractable** keys for
+/// security. Use this trait when you need extractable keys (e.g., for key
+/// backup or export).
+///
+/// # Security Warning
+///
+/// Extractable keys allow the private key material to be exported from
+/// WebCrypto. Only use extractable keys when you have a specific need
+/// for key export functionality.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub trait ExtractableKey: Sized {
+    /// Generate a new keypair with extractable private key.
+    fn generate() -> impl std::future::Future<Output = Result<Self, WebCryptoError>>;
+
+    /// Import a keypair from a [`KeyExport`] with extractable private key.
+    fn import(
+        key: impl Into<KeyExport>,
+    ) -> impl std::future::Future<Output = Result<Self, WebCryptoError>>;
+
+    /// Export the key material.
+    fn export(&self) -> impl std::future::Future<Output = Result<KeyExport, WebCryptoError>>;
+}
+
+// Re-export credential types for backward compatibility.
+pub use crate::credential::{
+    Credential, CredentialExport, CredentialExportError, SignerCredential, SignerCredentialExport,
+    VerifierCredential, VerifierCredentialExport,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,29 +231,4 @@ mod wasm_tests {
         let result = KeyExport::try_from(JsValue::from_str("not a key"));
         assert!(result.is_err());
     }
-}
-
-/// Trait for creating WebCrypto keys with extractable private key material.
-///
-/// By default, key generation and import create **non-extractable** keys for
-/// security. Use this trait when you need extractable keys (e.g., for key
-/// backup or export).
-///
-/// # Security Warning
-///
-/// Extractable keys allow the private key material to be exported from
-/// WebCrypto. Only use extractable keys when you have a specific need
-/// for key export functionality.
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-pub trait ExtractableKey: Sized {
-    /// Generate a new keypair with extractable private key.
-    fn generate() -> impl std::future::Future<Output = Result<Self, WebCryptoError>>;
-
-    /// Import a keypair from a [`KeyExport`] with extractable private key.
-    fn import(
-        key: impl Into<KeyExport>,
-    ) -> impl std::future::Future<Output = Result<Self, WebCryptoError>>;
-
-    /// Export the key material.
-    fn export(&self) -> impl std::future::Future<Output = Result<KeyExport, WebCryptoError>>;
 }

@@ -11,6 +11,18 @@ use crate::remote::Remote;
 /// Native environment with opened profile credentials and remote dispatch.
 pub type NativeEnvironment = Environment<Credentials, FileSystem, Remote>;
 
+#[cfg(test)]
+impl Builder<FileSystem> {
+    /// Create a builder backed by a temporary directory.
+    pub fn temp() -> Result<Self, super::OpenError> {
+        let dir = tempfile::tempdir().map_err(|e| super::OpenError::Storage(e.to_string()))?;
+        let fs = FileSystem::mount(dir.path().to_path_buf())
+            .map_err(|e| super::OpenError::Storage(e.to_string()))?;
+        let _ = dir.keep();
+        Ok(Builder::new(fs))
+    }
+}
+
 impl Default for Builder<Option<FileSystem>> {
     fn default() -> Self {
         Builder::new(None)
@@ -57,11 +69,16 @@ mod tests {
     use crate::credentials::open::Open;
     use crate::environment::Builder;
 
+    fn temp_storage() -> FileSystem {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = FileSystem::mount(dir.path().to_path_buf()).unwrap();
+        let _ = dir.keep();
+        fs
+    }
+
     #[dialog_common::test]
     async fn profile_open_creates_key_on_first_run() {
-        let dir = tempfile::tempdir().unwrap();
-        let storage = FileSystem::mount(dir.path().to_path_buf()).unwrap();
-
+        let storage = temp_storage();
         let profile = Open::new("default").perform(&storage).await.unwrap();
         assert!(
             !profile.did().to_string().is_empty(),
@@ -71,9 +88,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn profile_open_returns_same_key_on_reload() {
-        let dir = tempfile::tempdir().unwrap();
-        let storage = FileSystem::mount(dir.path().to_path_buf()).unwrap();
-
+        let storage = temp_storage();
         let first = Open::new("default").perform(&storage).await.unwrap();
         let second = Open::new("default").perform(&storage).await.unwrap();
 
@@ -86,9 +101,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn profile_open_different_names_produce_different_keys() {
-        let dir = tempfile::tempdir().unwrap();
-        let storage = FileSystem::mount(dir.path().to_path_buf()).unwrap();
-
+        let storage = temp_storage();
         let work = Open::new("work").perform(&storage).await.unwrap();
         let personal = Open::new("personal").perform(&storage).await.unwrap();
 
@@ -101,10 +114,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn builder_produces_different_profile_and_operator() {
-        let dir = tempfile::tempdir().unwrap();
-        let storage = FileSystem::mount(dir.path().to_path_buf()).unwrap();
-
-        let env = Builder::default().storage(storage).build().await.unwrap();
+        let env = Builder::temp().unwrap().build().await.unwrap();
 
         assert_ne!(
             env.authority.profile_did(),
@@ -203,11 +213,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn builder_with_custom_profile_provider() {
-        let profile_dir = tempfile::tempdir().unwrap();
-        let profile_storage = FileSystem::mount(profile_dir.path().to_path_buf()).unwrap();
-
-        let data_dir = tempfile::tempdir().unwrap();
-        let data_storage = FileSystem::mount(data_dir.path().to_path_buf()).unwrap();
+        let profile_storage = temp_storage();
+        let data_storage = temp_storage();
 
         let env = Builder::default()
             .storage(data_storage)
@@ -215,6 +222,6 @@ mod tests {
             .await
             .unwrap();
 
-        assert_ne!(env.authority.profile_did(), env.authority.operator_did(),);
+        assert_ne!(env.authority.profile_did(), env.authority.operator_did());
     }
 }

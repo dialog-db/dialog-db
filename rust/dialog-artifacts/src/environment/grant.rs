@@ -13,7 +13,7 @@ pub mod ucan {
     use dialog_ucan::subject::Subject;
 
     use super::super::OpenError;
-    use super::super::builder::Grant;
+    use super::super::builder::Permit;
     use super::super::provider::Environment;
     use crate::Credentials;
     use crate::remote::Remote;
@@ -25,21 +25,6 @@ pub mod ucan {
         /// Create an unrestricted (powerline) delegation grant.
         ///
         /// Delegates all commands on any subject from the profile to the operator.
-        /// Use with [`Builder::grant`](super::super::Builder::grant):
-        ///
-        /// ```no_run
-        /// # #[cfg(all(not(target_arch = "wasm32"), feature = "ucan"))]
-        /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-        /// use dialog_artifacts::environment::{Builder, grant::ucan::Ucan};
-        ///
-        /// let env = Builder::default()
-        ///     .operator(b"alice")
-        ///     .grant(Ucan::unrestricted())
-        ///     .build()
-        ///     .await?;
-        /// # Ok(())
-        /// # }
-        /// ```
         pub fn unrestricted() -> Unrestricted {
             Unrestricted
         }
@@ -50,7 +35,7 @@ pub mod ucan {
 
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    impl<Storage> Grant<Environment<Credentials, Storage, Remote>> for Unrestricted
+    impl<Storage> Permit<Environment<Credentials, Storage, Remote>> for Unrestricted
     where
         Storage: Provider<credential::Save<Vec<u8>>> + ConditionalSync,
     {
