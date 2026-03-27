@@ -40,6 +40,7 @@ mod memory;
 mod storage;
 
 use dialog_capability::Did;
+use dialog_effects::credential::CredentialExport;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 
@@ -60,7 +61,7 @@ struct Session {
     /// Transactional memory storage keyed by (space, cell).
     memory: HashMap<MemoryKey, Vec<u8>>,
     /// Credential storage keyed by address ID.
-    credentials: HashMap<String, Vec<u8>>,
+    credentials: HashMap<String, CredentialExport>,
     /// Key-value storage keyed by (store, key).
     storage: HashMap<StorageKey, Vec<u8>>,
 }

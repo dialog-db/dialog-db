@@ -6,9 +6,7 @@
 use super::Volatile;
 use async_trait::async_trait;
 use dialog_capability::{Capability, Provider};
-use dialog_effects::credential::{
-    self, CredentialError, CredentialExport, Identity, LoadCapability, SaveCapability,
-};
+use dialog_effects::credential::{self, CredentialError, Identity, LoadCapability, SaveCapability};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -20,7 +18,7 @@ impl Provider<credential::Load> for Volatile {
         let subject = input.subject().into();
         let name = input.name().to_string();
 
-        let bytes = {
+        let export = {
             let sessions = self.sessions.read();
             sessions
                 .get(&subject)
@@ -28,12 +26,10 @@ impl Provider<credential::Load> for Volatile {
                 .cloned()
         };
 
-        let Some(bytes) = bytes else {
+        let Some(export) = export else {
             return Ok(None);
         };
 
-        let export = CredentialExport::try_from(bytes)
-            .map_err(|e| CredentialError::Corrupted(e.to_string()))?;
         let credential = Identity::import(export)
             .await
             .map_err(|e| CredentialError::Corrupted(e.to_string()))?;
@@ -55,11 +51,9 @@ impl Provider<credential::Save> for Volatile {
             .await
             .map_err(|e| CredentialError::Storage(e.to_string()))?;
 
-        let bytes = export.as_bytes().to_vec();
-
         let mut sessions = self.sessions.write();
         let session = sessions.entry(subject).or_default();
-        session.credentials.insert(name, bytes);
+        session.credentials.insert(name, export);
 
         Ok(())
     }
