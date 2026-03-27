@@ -31,6 +31,7 @@ pub mod revision;
 
 use dialog_capability::{Did, Provider, Subject};
 use dialog_credentials::Ed25519Signer;
+use dialog_credentials::credential::{Credential, SignerCredential};
 use dialog_effects::repository as repo_fx;
 use dialog_varsig::Principal;
 
@@ -44,41 +45,21 @@ pub use occurence::*;
 pub use remote::*;
 pub use revision::*;
 
-/// A repository scoped to a specific subject and issuer.
+/// A repository scoped to a specific subject.
 ///
-/// Holds pre-attenuated memory, archive, and session capabilities so that
-/// branches and remotes can further narrow without repeating attenuation.
-///
-/// ```text
-/// let repo = Repository::new(subject);
-/// let branch = repo.open_branch("main").perform(&env).await?;
-/// repo.add_remote("origin", address).perform(&env).await?;
-/// ```
-pub struct Repository {
-    subject: Did,
+/// The credential type parameter determines access level:
+/// - `Repository<SignerCredential>` — owns the keypair, can delegate
+/// - `Repository<Credential>` — either signer or verifier, determined at runtime
+pub struct Repository<C: Principal = Credential> {
+    credential: C,
     memory: Memory,
     archive: Archive,
 }
 
-impl Repository {
-    /// Create a repository for the given subject.
-    ///
-    /// The operator identity comes from the environment at operation time
-    /// via `Provider<Identify>`.
-    pub fn new(subject: Did) -> Self {
-        let cap_subject = Subject::from(subject.clone());
-        let memory = Memory::new(cap_subject.clone());
-        let archive = Archive::new(cap_subject);
-        Self {
-            subject,
-            memory,
-            archive,
-        }
-    }
-
+impl<C: Principal> Repository<C> {
     /// The subject DID.
-    pub fn subject(&self) -> &Did {
-        &self.subject
+    pub fn subject(&self) -> Did {
+        self.credential.did()
     }
 
     /// Pre-attenuated memory capability (`Subject → Memory`).
@@ -108,45 +89,122 @@ impl Repository {
     /// Open (load or create) a branch.
     pub fn open_branch(&self, name: impl Into<branch::BranchName>) -> branch::Open {
         let trace = self.memory.trace(name);
-        branch::Open::new(self.subject.clone(), self.memory.clone(), trace)
+        branch::Open::new(self.subject(), self.memory.clone(), trace)
     }
 
     /// Load an existing branch (error if not found).
     pub fn load_branch(&self, name: impl Into<branch::BranchName>) -> branch::Load {
         let trace = self.memory.trace(name);
-        branch::Load::new(self.subject.clone(), self.memory.clone(), trace)
+        branch::Load::new(self.subject(), self.memory.clone(), trace)
+    }
+}
+
+impl<C: Principal> Repository<C> {
+    fn new(credential: C) -> Self {
+        let cap_subject = Subject::from(credential.did());
+        Self {
+            memory: Memory::new(cap_subject.clone()),
+            archive: Archive::new(cap_subject),
+            credential,
+        }
+    }
+}
+
+impl From<Credential> for Repository {
+    fn from(credential: Credential) -> Self {
+        Self::new(credential)
+    }
+}
+
+impl From<SignerCredential> for Repository<SignerCredential> {
+    fn from(credential: SignerCredential) -> Self {
+        Self::new(credential)
+    }
+}
+
+impl From<Ed25519Signer> for Repository<SignerCredential> {
+    fn from(signer: Ed25519Signer) -> Self {
+        SignerCredential::from(signer).into()
+    }
+}
+
+impl<C: Principal> Repository<C> {
+    /// Get the credential.
+    pub fn credential(&self) -> &C {
+        &self.credential
+    }
+}
+
+impl Repository {
+    /// Load an existing named repository.
+    ///
+    /// Fails if no repository with this name exists.
+    pub fn load(name: impl Into<String>) -> LoadRepository {
+        LoadRepository { name: name.into() }
     }
 
     /// Open a named repository — loads existing or creates new.
-    ///
-    /// ```text
-    /// let repo = Repository::open("home").perform(&env).await?;
-    /// ```
-    pub fn open(name: impl Into<String>) -> Open {
-        Open { name: name.into() }
+    pub fn open(name: impl Into<String>) -> OpenRepository {
+        OpenRepository { name: name.into() }
+    }
+
+    /// Create a named repository — fails if it already exists.
+    pub fn create(name: impl Into<String>) -> CreateRepository {
+        CreateRepository { name: name.into() }
     }
 }
 
-/// Command to open a named repository.
-///
-/// Loads the credential for the given name. If none exists, generates
-/// a new keypair and saves it. Returns a `Repository` with the subject DID.
-pub struct Open {
+/// Command to load an existing named repository.
+pub struct LoadRepository {
     name: String,
 }
 
-impl Open {
-    /// Execute the open against an environment that provides
-    /// `repo_fx::Load` and `repo_fx::Save`.
+impl LoadRepository {
+    /// Load an existing repository by name.
+    ///
+    /// Returns the repository with whatever credential was stored.
+    /// Fails if no repository with this name exists.
+    pub async fn perform<Env>(self, env: &Env) -> Result<Repository, RepositoryError>
+    where
+        Env: Provider<repo_fx::Load>,
+    {
+        let dummy = Subject::from(dialog_capability::did!(
+            "key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+        ));
+
+        let credential = dummy
+            .attenuate(repo_fx::Repository)
+            .attenuate(repo_fx::Name::new(&self.name))
+            .invoke(repo_fx::Load)
+            .perform(env)
+            .await
+            .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
+
+        match credential {
+            Some(credential) => Ok(credential.into()),
+            None => Err(RepositoryError::NotFound(self.name)),
+        }
+    }
+}
+
+/// Command to open a named repository — loads existing or creates new.
+pub struct OpenRepository {
+    name: String,
+}
+
+impl OpenRepository {
+    /// Load existing or create new repository.
+    ///
+    /// Returns `Repository<Credential>` — a signer if created or loaded as owner.
     pub async fn perform<Env>(self, env: &Env) -> Result<Repository, RepositoryError>
     where
         Env: Provider<repo_fx::Load> + Provider<repo_fx::Save>,
     {
-        let authority = Subject::from(dialog_capability::did!(
+        let dummy = Subject::from(dialog_capability::did!(
             "key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
         ));
 
-        let credential = authority
+        let credential = dummy
             .clone()
             .attenuate(repo_fx::Repository)
             .attenuate(repo_fx::Name::new(&self.name))
@@ -156,25 +214,72 @@ impl Open {
             .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
 
         match credential {
-            Some(credential) => Ok(Repository::new(credential.did())),
+            Some(credential) => Ok(credential.into()),
             None => {
                 let signer = Ed25519Signer::generate()
                     .await
                     .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
 
-                let subject = signer.did();
-
-                authority
+                dummy
                     .attenuate(repo_fx::Repository)
                     .attenuate(repo_fx::Name::new(&self.name))
-                    .invoke(repo_fx::Save::new(signer.into()))
+                    .invoke(repo_fx::Save::new(signer.clone().into()))
                     .perform(env)
                     .await
                     .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
 
-                Ok(Repository::new(subject))
+                Ok(Credential::Signer(SignerCredential(signer)).into())
             }
         }
+    }
+}
+
+/// Command to create a new named repository.
+pub struct CreateRepository {
+    name: String,
+}
+
+impl CreateRepository {
+    /// Create a new repository, generating a fresh keypair.
+    ///
+    /// Fails if a repository with this name already exists.
+    pub async fn perform<Env>(
+        self,
+        env: &Env,
+    ) -> Result<Repository<SignerCredential>, RepositoryError>
+    where
+        Env: Provider<repo_fx::Load> + Provider<repo_fx::Save>,
+    {
+        let dummy = Subject::from(dialog_capability::did!(
+            "key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+        ));
+
+        let existing = dummy
+            .clone()
+            .attenuate(repo_fx::Repository)
+            .attenuate(repo_fx::Name::new(&self.name))
+            .invoke(repo_fx::Load)
+            .perform(env)
+            .await
+            .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
+
+        if existing.is_some() {
+            return Err(RepositoryError::AlreadyExists(self.name));
+        }
+
+        let signer = Ed25519Signer::generate()
+            .await
+            .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
+
+        dummy
+            .attenuate(repo_fx::Repository)
+            .attenuate(repo_fx::Name::new(&self.name))
+            .invoke(repo_fx::Save::new(signer.clone().into()))
+            .perform(env)
+            .await
+            .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
+
+        Ok(SignerCredential(signer).into())
     }
 }
 
@@ -182,16 +287,15 @@ impl Open {
 mod tests {
     use super::*;
     use crate::artifacts::{Artifact, Instruction};
-    use crate::environment::Builder;
-    use dialog_capability::{Capability, Provider, Subject, authority};
-    use dialog_effects::archive as archive_fx;
-    use dialog_effects::memory as memory_fx;
+    use crate::environment::{Builder, Ucan};
+    use dialog_capability::Subject;
+    use dialog_capability::ucan::{Issuer, claim};
+    use dialog_effects::storage;
     use dialog_remote_s3::Address;
-    use dialog_storage::provider::Volatile;
     use futures_util::stream;
 
-    fn test_subject() -> Did {
-        "did:test:repository".parse().unwrap()
+    async fn test_signer() -> Ed25519Signer {
+        Ed25519Signer::import(&[42; 32]).await.unwrap()
     }
 
     fn test_address() -> RemoteAddress {
@@ -199,77 +303,10 @@ mod tests {
         RemoteAddress::S3(s3_addr)
     }
 
-    struct TestEnv(Volatile);
-
-    impl TestEnv {
-        fn new() -> Self {
-            Self(Volatile::new())
-        }
-    }
-
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    impl Provider<authority::Identify> for TestEnv {
-        async fn execute(
-            &self,
-            input: Capability<authority::Identify>,
-        ) -> Result<authority::Authority, authority::AuthorityError> {
-            let did = test_subject();
-            let subject_did = input.subject().clone();
-            Ok(Subject::from(subject_did)
-                .attenuate(authority::Profile::local(did.clone()))
-                .attenuate(authority::Operator::new(did)))
-        }
-    }
-
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    impl Provider<archive_fx::Get> for TestEnv {
-        async fn execute(
-            &self,
-            input: Capability<archive_fx::Get>,
-        ) -> Result<Option<Vec<u8>>, archive_fx::ArchiveError> {
-            <Volatile as Provider<archive_fx::Get>>::execute(&self.0, input).await
-        }
-    }
-
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    impl Provider<archive_fx::Put> for TestEnv {
-        async fn execute(
-            &self,
-            input: Capability<archive_fx::Put>,
-        ) -> Result<(), archive_fx::ArchiveError> {
-            <Volatile as Provider<archive_fx::Put>>::execute(&self.0, input).await
-        }
-    }
-
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    impl Provider<memory_fx::Resolve> for TestEnv {
-        async fn execute(
-            &self,
-            input: Capability<memory_fx::Resolve>,
-        ) -> Result<Option<memory_fx::Publication>, memory_fx::MemoryError> {
-            <Volatile as Provider<memory_fx::Resolve>>::execute(&self.0, input).await
-        }
-    }
-
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    impl Provider<memory_fx::Publish> for TestEnv {
-        async fn execute(
-            &self,
-            input: Capability<memory_fx::Publish>,
-        ) -> Result<Vec<u8>, memory_fx::MemoryError> {
-            <Volatile as Provider<memory_fx::Publish>>::execute(&self.0, input).await
-        }
-    }
-
     #[dialog_common::test]
     async fn it_opens_branch_via_repository() -> anyhow::Result<()> {
-        let env = Volatile::new();
-        let repo = Repository::new(test_subject());
+        let env = Builder::volatile().build().await?;
+        let repo = Repository::from(test_signer().await);
 
         let branch = repo.open_branch("main").perform(&env).await?;
 
@@ -284,11 +321,10 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_loads_branch_via_repository() -> anyhow::Result<()> {
-        let env = Volatile::new();
-        let repo = Repository::new(test_subject());
+        let env = Builder::volatile().build().await?;
+        let repo = Repository::from(test_signer().await);
 
         let _branch = repo.open_branch("main").perform(&env).await?;
-
         let branch = repo.load_branch("main").perform(&env).await?;
         assert_eq!(branch.name().as_str(), "main");
 
@@ -297,11 +333,10 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_commits_via_repository() -> anyhow::Result<()> {
-        let env = TestEnv::new();
-        let repo = Repository::new(test_subject());
+        let env = Builder::volatile().build().await?;
+        let repo = Repository::from(test_signer().await);
 
         let branch = repo.open_branch("main").perform(&env).await?;
-
         let artifact = Artifact {
             the: "user/name".parse()?,
             of: "user:123".parse()?,
@@ -323,8 +358,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_adds_and_loads_remote_via_repository() -> anyhow::Result<()> {
-        let env = Volatile::new();
-        let repo = Repository::new(test_subject());
+        let env = Builder::volatile().build().await?;
+        let repo = Repository::from(test_signer().await);
 
         let site = repo
             .add_remote("origin", test_address())
@@ -341,7 +376,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_opens_repository_by_name() -> anyhow::Result<()> {
-        let env = Builder::temp()?.build().await?;
+        let env = Builder::temp().build().await?;
 
         let repo = Repository::open("home").perform(&env).await?;
         assert!(
@@ -354,18 +389,10 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_reopens_same_repository() -> anyhow::Result<()> {
-        let env = Builder::temp()?.build().await?;
+        let env = Builder::temp().build().await?;
 
-        let did1 = Repository::open("home")
-            .perform(&env)
-            .await?
-            .subject()
-            .clone();
-        let did2 = Repository::open("home")
-            .perform(&env)
-            .await?
-            .subject()
-            .clone();
+        let did1 = Repository::open("home").perform(&env).await?.subject();
+        let did2 = Repository::open("home").perform(&env).await?.subject();
 
         assert_eq!(did1, did2, "reopening should return same subject DID");
 
@@ -374,7 +401,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_isolates_repositories_by_name() -> anyhow::Result<()> {
-        let env = Builder::temp()?.build().await?;
+        let env = Builder::temp().build().await?;
 
         let repo1 = Repository::open("home").perform(&env).await?;
         let repo2 = Repository::open("work").perform(&env).await?;
@@ -383,6 +410,116 @@ mod tests {
             repo1.subject(),
             repo2.subject(),
             "different names should produce different subjects"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_delegates_repo_to_profile_and_claims() -> anyhow::Result<()> {
+        let env = Builder::temp().grant(Ucan::unrestricted()).build().await?;
+        let repo = Repository::create("home").perform(&env).await?;
+
+        Ucan::delegate(Subject::from(repo.subject()))
+            .issuer(repo.credential().clone())
+            .audience(env.authority.profile_did())
+            .perform(&env)
+            .await?;
+
+        let capability = Subject::from(repo.subject())
+            .attenuate(storage::Storage)
+            .attenuate(storage::Store::new("data"));
+
+        let authority = env.authority.build_authority(repo.subject());
+        let result = claim(&env, Issuer::new(&env, authority), &capability).await;
+        assert!(
+            result.is_ok(),
+            "should find delegation chain: {:?}",
+            result.err()
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_enforces_scoped_delegation_policy() -> anyhow::Result<()> {
+        let env = Builder::temp().grant(Ucan::unrestricted()).build().await?;
+        let repo = Repository::create("home").perform(&env).await?;
+
+        Ucan::delegate(
+            Subject::from(repo.subject())
+                .attenuate(storage::Storage)
+                .attenuate(storage::Store::new("data")),
+        )
+        .audience(env.authority.profile_did())
+        .issuer(repo.credential().clone())
+        .perform(&env)
+        .await?;
+
+        let data_cap = Subject::from(repo.subject())
+            .attenuate(storage::Storage)
+            .attenuate(storage::Store::new("data"));
+        let authority = env.authority.build_authority(repo.subject());
+        let result = claim(&env, Issuer::new(&env, authority), &data_cap).await;
+        assert!(
+            result.is_ok(),
+            "claim on delegated store 'data' should succeed: {:?}",
+            result.err()
+        );
+
+        let secret_cap = Subject::from(repo.subject())
+            .attenuate(storage::Storage)
+            .attenuate(storage::Store::new("secret"));
+        let authority = env.authority.build_authority(repo.subject());
+        let result = claim(&env, Issuer::new(&env, authority), &secret_cap).await;
+        assert!(
+            result.is_err(),
+            "claim on non-delegated store 'secret' should be denied"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_validates_acquire_against_policy() -> anyhow::Result<()> {
+        let env = Builder::temp().grant(Ucan::unrestricted()).build().await?;
+        let repo = Repository::create("home").perform(&env).await?;
+
+        Ucan::delegate(
+            Subject::from(repo.subject())
+                .attenuate(storage::Storage)
+                .attenuate(storage::Store::new("data")),
+        )
+        .audience(env.authority.profile_did())
+        .issuer(repo.credential().clone())
+        .perform(&env)
+        .await?;
+
+        let result = Ucan::delegate(
+            Subject::from(repo.subject())
+                .attenuate(storage::Storage)
+                .attenuate(storage::Store::new("data")),
+        )
+        .audience(env.authority.operator_did())
+        .acquire(&env)
+        .await;
+        assert!(
+            result.is_ok(),
+            "acquire for delegated store 'data' should succeed: {:?}",
+            result.err()
+        );
+
+        let result = Ucan::delegate(
+            Subject::from(repo.subject())
+                .attenuate(storage::Storage)
+                .attenuate(storage::Store::new("secret")),
+        )
+        .audience(env.authority.operator_did())
+        .acquire(&env)
+        .await;
+        assert!(
+            result.is_err(),
+            "acquire for non-delegated store 'secret' should fail"
         );
 
         Ok(())

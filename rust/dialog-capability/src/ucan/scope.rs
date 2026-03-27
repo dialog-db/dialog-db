@@ -1,0 +1,241 @@
+//! Capability-derived scope for UCAN delegation and invocation.
+
+use crate::{Ability, Subject};
+use dialog_ucan::command::Command;
+use dialog_ucan::delegation::policy::predicate::Predicate;
+use dialog_ucan::delegation::policy::selector::filter::Filter;
+use dialog_ucan::delegation::policy::selector::select::Select;
+use dialog_ucan::promise::Promised;
+use dialog_ucan::subject::Subject as UcanSubject;
+use ipld_core::ipld::Ipld;
+use std::collections::BTreeMap;
+
+use super::parameters::parameters;
+
+/// UCAN invocation arguments.
+pub type Args = BTreeMap<String, Promised>;
+
+/// Parameters extracted from a capability chain.
+#[derive(Debug, Clone, Default)]
+pub struct Parameters(pub BTreeMap<String, Ipld>);
+
+impl Parameters {
+    /// Get the inner map.
+    pub fn as_map(&self) -> &BTreeMap<String, Ipld> {
+        &self.0
+    }
+
+    /// Convert to delegation policy predicates (equality constraints).
+    pub fn policy(&self) -> Vec<Predicate> {
+        self.into()
+    }
+
+    /// Convert to invocation arguments.
+    pub fn args(&self) -> Args {
+        self.into()
+    }
+}
+
+impl From<&Parameters> for Vec<Predicate> {
+    fn from(parameters: &Parameters) -> Self {
+        parameters
+            .0
+            .iter()
+            .map(|(key, value)| {
+                Predicate::Equal(Select::new(vec![Filter::Field(key.clone())]), value.clone())
+            })
+            .collect()
+    }
+}
+
+impl From<&Parameters> for Args {
+    fn from(parameters: &Parameters) -> Self {
+        parameters
+            .0
+            .iter()
+            .map(|(k, v)| (k.clone(), ipld_to_promised(v.clone())))
+            .collect()
+    }
+}
+
+/// Scope extracted from a capability chain for UCAN operations.
+pub struct Scope {
+    /// The subject (specific DID or `Any` for powerline).
+    pub subject: UcanSubject,
+    /// The command.
+    pub command: Command,
+    /// Parameters from the capability's policy chain.
+    pub parameters: Parameters,
+}
+
+impl Scope {
+    /// Convert parameters to delegation policy predicates.
+    pub fn policy(&self) -> Vec<Predicate> {
+        self.parameters.policy()
+    }
+
+    /// Convert parameters to invocation arguments.
+    pub fn args(&self) -> Args {
+        self.parameters.args()
+    }
+}
+
+fn ipld_to_promised(ipld: Ipld) -> Promised {
+    match ipld {
+        Ipld::Null => Promised::Null,
+        Ipld::Bool(b) => Promised::Bool(b),
+        Ipld::Integer(i) => Promised::Integer(i),
+        Ipld::Float(f) => Promised::Float(f),
+        Ipld::String(s) => Promised::String(s),
+        Ipld::Bytes(b) => Promised::Bytes(b),
+        Ipld::Link(c) => Promised::Link(c),
+        Ipld::List(l) => Promised::List(l.into_iter().map(ipld_to_promised).collect()),
+        Ipld::Map(m) => Promised::Map(
+            m.into_iter()
+                .map(|(k, v)| (k, ipld_to_promised(v)))
+                .collect(),
+        ),
+    }
+}
+
+fn ability_to_command(ability: &str) -> Command {
+    if ability == "/" {
+        Command::new(vec![])
+    } else {
+        Command::new(
+            ability
+                .trim_start_matches('/')
+                .split('/')
+                .map(String::from)
+                .collect(),
+        )
+    }
+}
+
+impl<T: Ability> From<&T> for Scope {
+    fn from(capability: &T) -> Self {
+        let ability = capability.ability();
+        let subject_did = capability.subject();
+
+        let subject = if Subject::from(subject_did.clone()).is_any() {
+            UcanSubject::Any
+        } else {
+            UcanSubject::Specific(subject_did.clone())
+        };
+
+        Self {
+            subject,
+            command: ability_to_command(&ability),
+            parameters: Parameters(parameters(capability)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::{Get, Storage, Store};
+    use crate::{Subject, did};
+
+    #[test]
+    fn scope_from_subject() {
+        let cap = Subject::from(did!("key:z6MkTest"));
+        let scope = Scope::from(&cap);
+
+        assert!(matches!(scope.subject, UcanSubject::Specific(_)));
+        assert!(scope.command.segments().is_empty());
+        assert!(scope.parameters.0.is_empty());
+        assert!(scope.policy().is_empty());
+        assert!(scope.args().is_empty());
+    }
+
+    #[test]
+    fn scope_from_any_subject() {
+        let cap = Subject::any();
+        let scope = Scope::from(&cap);
+        assert!(matches!(scope.subject, UcanSubject::Any));
+    }
+
+    #[test]
+    fn scope_from_storage_store() {
+        let cap = Subject::from(did!("key:z6MkTest"))
+            .attenuate(Storage)
+            .attenuate(Store::new("data"));
+        let scope = Scope::from(&cap);
+
+        assert_eq!(scope.command, Command::parse("/storage").unwrap());
+
+        let policy = scope.policy();
+        assert_eq!(policy.len(), 1);
+        assert_eq!(
+            policy[0],
+            Predicate::Equal(
+                Select::new(vec![Filter::Field("store".into())]),
+                Ipld::String("data".into())
+            )
+        );
+
+        let args = scope.args();
+        assert_eq!(args.get("store"), Some(&Promised::String("data".into())));
+    }
+
+    #[test]
+    fn scope_from_storage_get() {
+        let cap = Subject::from(did!("key:z6MkTest"))
+            .attenuate(Storage)
+            .attenuate(Store::new("data"))
+            .invoke(Get::new(b"my-key"));
+        let scope = Scope::from(&cap);
+
+        assert_eq!(scope.command, Command::parse("/storage/get").unwrap());
+
+        let policy = scope.policy();
+        assert!(
+            policy.contains(&Predicate::Equal(
+                Select::new(vec![Filter::Field("store".into())]),
+                Ipld::String("data".into())
+            )),
+            "policy should contain store=data constraint"
+        );
+        assert!(
+            policy.contains(&Predicate::Equal(
+                Select::new(vec![Filter::Field("key".into())]),
+                Ipld::Bytes(b"my-key".to_vec())
+            )),
+            "policy should contain key=my-key constraint"
+        );
+
+        let args = scope.args();
+        assert_eq!(args.get("store"), Some(&Promised::String("data".into())));
+        assert_eq!(args.get("key"), Some(&Promised::Bytes(b"my-key".to_vec())));
+    }
+
+    #[test]
+    fn parameters_to_policy() {
+        let mut map = BTreeMap::new();
+        map.insert("store".into(), Ipld::String("data".into()));
+        let params = Parameters(map);
+        let policy = params.policy();
+
+        assert_eq!(policy.len(), 1);
+        assert_eq!(
+            policy[0],
+            Predicate::Equal(
+                Select::new(vec![Filter::Field("store".into())]),
+                Ipld::String("data".into())
+            )
+        );
+    }
+
+    #[test]
+    fn parameters_to_args() {
+        let mut map = BTreeMap::new();
+        map.insert("name".into(), Ipld::String("test".into()));
+        map.insert("count".into(), Ipld::Integer(42));
+        let params = Parameters(map);
+        let args = params.args();
+
+        assert_eq!(args.get("name"), Some(&Promised::String("test".into())));
+        assert_eq!(args.get("count"), Some(&Promised::Integer(42)));
+    }
+}

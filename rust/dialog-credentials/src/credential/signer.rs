@@ -32,6 +32,25 @@ impl From<SignerCredential> for Did {
     }
 }
 
+impl From<SignerCredential> for Ed25519Signer {
+    fn from(credential: SignerCredential) -> Self {
+        credential.0
+    }
+}
+
+impl dialog_varsig::Signer<dialog_varsig::eddsa::Ed25519Signature> for SignerCredential {
+    async fn sign(
+        &self,
+        msg: &[u8],
+    ) -> Result<dialog_varsig::eddsa::Ed25519Signature, signature::Error> {
+        dialog_varsig::Signer::sign(&self.0, msg).await
+    }
+}
+
+impl dialog_capability::Issuer for SignerCredential {
+    type Signature = dialog_varsig::eddsa::Ed25519Signature;
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 impl SignerCredential {
     /// Export to multicodec-tagged bytes for native storage.

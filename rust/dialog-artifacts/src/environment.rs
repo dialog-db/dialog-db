@@ -54,8 +54,6 @@ pub use web::*;
 
 #[cfg(any(test, feature = "helpers"))]
 mod test;
-#[cfg(any(test, feature = "helpers"))]
-pub use test::*;
 
 /// The platform-specific environment type.
 ///

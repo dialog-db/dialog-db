@@ -9,7 +9,7 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["csv", "s3"]
+default = ["csv", "s3", "ucan"]
 debug = []
 helpers = ["dep:anyhow"]
 csv = ["dep:csv-async"]

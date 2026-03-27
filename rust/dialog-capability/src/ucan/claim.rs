@@ -61,6 +61,7 @@ where
     let ability = capability.ability();
     let params = parameters(capability);
 
+    let profile_did = authority::Profile::of(issuer.capability()).profile.clone();
     let operator_did = authority::Operator::of(issuer.capability())
         .operator
         .clone();
@@ -76,7 +77,7 @@ where
 
         let chain = find_chain(
             env,
-            &subject_did,
+            &profile_did,
             &operator_did,
             &subject_did,
             &command,
@@ -147,7 +148,7 @@ where
 ///
 /// Uses iterative BFS with `MAX_CHAIN_DEPTH` limit. Prioritizes direct grants
 /// (where issuer == subject) before following intermediate delegations.
-async fn find_chain<Env>(
+pub async fn find_chain<Env>(
     env: &Env,
     subject: &Did,
     operator_did: &Did,
@@ -582,12 +583,12 @@ mod tests {
             build_delegation(&subject_signer, &operator_signer, &subject_signer, cmd("/")).await;
 
         let env = test_env(operator_signer.clone());
-        import_single(&env, &subject_did, delegation).await;
+        import_single(&env, &operator_did, delegation).await;
 
         let command = Command::parse("/storage/get").unwrap();
         let chain = find_chain(
             &env,
-            &subject_did,
+            &operator_did,
             &operator_did,
             &subject_did,
             &command,
@@ -615,13 +616,13 @@ mod tests {
             build_delegation(&account_signer, &operator_signer, &subject_signer, cmd("/")).await;
 
         let env = test_env(operator_signer.clone());
-        import_single(&env, &subject_did, d1).await;
-        import_single(&env, &subject_did, d2).await;
+        import_single(&env, &operator_did, d1).await;
+        import_single(&env, &operator_did, d2).await;
 
         let command = Command::parse("/storage/get").unwrap();
         let chain = find_chain(
             &env,
-            &subject_did,
+            &operator_did,
             &operator_did,
             &subject_did,
             &command,
@@ -647,7 +648,7 @@ mod tests {
         let command = Command::parse("/storage/get").unwrap();
         let chain = find_chain(
             &env,
-            &subject_did,
+            &operator_did,
             &operator_did,
             &subject_did,
             &command,
@@ -676,13 +677,13 @@ mod tests {
         .await;
 
         let env = test_env(operator_signer.clone());
-        import_single(&env, &subject_did, delegation).await;
+        import_single(&env, &operator_did, delegation).await;
 
         // Should find for /storage/get
         let command_get = Command::parse("/storage/get").unwrap();
         let chain = find_chain(
             &env,
-            &subject_did,
+            &operator_did,
             &operator_did,
             &subject_did,
             &command_get,
@@ -697,7 +698,7 @@ mod tests {
         let command_set = Command::parse("/storage/set").unwrap();
         let chain = find_chain(
             &env,
-            &subject_did,
+            &operator_did,
             &operator_did,
             &subject_did,
             &command_set,
@@ -727,12 +728,12 @@ mod tests {
         .await;
 
         let env = test_env(operator_signer.clone());
-        import_single(&env, &subject_did, delegation).await;
+        import_single(&env, &operator_did, delegation).await;
 
         let command = Command::parse("/storage/get").unwrap();
         let chain = find_chain(
             &env,
-            &subject_did,
+            &operator_did,
             &operator_did,
             &subject_did,
             &command,
@@ -766,12 +767,12 @@ mod tests {
         .await;
 
         let env = test_env(operator_signer.clone());
-        import_single(&env, &subject_did, delegation).await;
+        import_single(&env, &operator_did, delegation).await;
 
         let command = Command::parse("/storage/get").unwrap();
         let chain = find_chain(
             &env,
-            &subject_did,
+            &operator_did,
             &operator_did,
             &subject_did,
             &command,
@@ -798,12 +799,12 @@ mod tests {
             build_powerline_delegation(&subject_signer, &operator_signer, cmd("/")).await;
 
         let env = test_env(operator_signer.clone());
-        import_single(&env, &subject_did, delegation).await;
+        import_single(&env, &operator_did, delegation).await;
 
         let command = Command::parse("/storage/get").unwrap();
         let chain = find_chain(
             &env,
-            &subject_did,
+            &operator_did,
             &operator_did,
             &subject_did,
             &command,
@@ -841,7 +842,7 @@ mod tests {
         .await;
 
         let env = test_env(operator_signer.clone());
-        import_single(&env, &subject_did, delegation).await;
+        import_single(&env, &operator_did, delegation).await;
 
         // Matching policy
         let command = Command::parse("/storage/get").unwrap();
@@ -849,7 +850,7 @@ mod tests {
         args.insert("bucket".to_string(), Ipld::String("my-bucket".to_string()));
         let chain = find_chain(
             &env,
-            &subject_did,
+            &operator_did,
             &operator_did,
             &subject_did,
             &command,
@@ -868,7 +869,7 @@ mod tests {
         );
         let chain = find_chain(
             &env,
-            &subject_did,
+            &operator_did,
             &operator_did,
             &subject_did,
             &command,
@@ -911,12 +912,13 @@ mod tests {
         let subject_signer = signer_async(1).await;
         let operator_signer = signer_async(2).await;
         let subject_did = subject_signer.did();
+        let operator_did = operator_signer.did();
 
         let delegation =
             build_delegation(&subject_signer, &operator_signer, &subject_signer, cmd("/")).await;
 
         let env = test_env(operator_signer.clone());
-        import_single(&env, &subject_did, delegation).await;
+        import_single(&env, &operator_did, delegation).await;
 
         let authority = crate::Subject::from(subject_did.clone())
             .invoke(authority::Identify)
@@ -956,6 +958,389 @@ mod tests {
         assert!(
             matches!(result, Err(AuthorizeError::Denied(_))),
             "Error should be Denied variant"
+        );
+    }
+
+    #[dialog_common::test]
+    async fn find_chain_with_parameters_to_policy() {
+        use crate::storage::{self, Storage, Store};
+        use crate::ucan::parameters::{parameters, parameters_to_policy};
+
+        let subject_signer = signer_async(1).await;
+        let operator_signer = signer_async(2).await;
+        let subject_did = subject_signer.did();
+        let operator_did = operator_signer.did();
+
+        // Build a capability with policy constraints
+        let cap = crate::Subject::from(subject_did.clone())
+            .attenuate(Storage)
+            .attenuate(Store::new("index"));
+
+        // Convert capability parameters to delegation policy
+        let policy = parameters_to_policy(parameters(&cap));
+        assert!(!policy.is_empty(), "should produce policy from capability");
+
+        // Create delegation with the generated policy
+        let delegation = build_delegation_with_policy(
+            &subject_signer,
+            &operator_signer,
+            &subject_signer,
+            cmd("/storage"),
+            policy,
+        )
+        .await;
+
+        let env = test_env(operator_signer.clone());
+        import_single(&env, &operator_did, delegation).await;
+
+        // Claim with matching store should succeed
+        let matching_cap = crate::Subject::from(subject_did.clone())
+            .attenuate(Storage)
+            .attenuate(Store::new("index"))
+            .invoke(storage::Get::new(b"some-key"));
+
+        let matching_args = crate::ucan::parameters::parameters(&matching_cap);
+        let chain = find_chain(
+            &env,
+            &operator_did,
+            &operator_did,
+            &subject_did,
+            &Command::parse("/storage/get").unwrap(),
+            &matching_args,
+            &now(),
+        )
+        .await
+        .expect("find_chain should not error");
+        assert!(
+            chain.is_some(),
+            "should find chain when store matches delegated policy"
+        );
+
+        // Claim with different store should fail
+        let wrong_cap = crate::Subject::from(subject_did.clone())
+            .attenuate(Storage)
+            .attenuate(Store::new("secret"))
+            .invoke(storage::Get::new(b"some-key"));
+
+        let wrong_args = crate::ucan::parameters::parameters(&wrong_cap);
+        let chain = find_chain(
+            &env,
+            &operator_did,
+            &operator_did,
+            &subject_did,
+            &Command::parse("/storage/get").unwrap(),
+            &wrong_args,
+            &now(),
+        )
+        .await
+        .expect("find_chain should not error");
+        assert!(
+            chain.is_none(),
+            "should not find chain when store differs from delegated policy"
+        );
+    }
+
+    #[dialog_common::test]
+    async fn find_chain_rejects_command_escalation() {
+        let subject_signer = signer_async(1).await;
+        let operator_signer = signer_async(2).await;
+        let subject_did = subject_signer.did();
+        let operator_did = operator_signer.did();
+
+        // Delegate only /storage
+        let delegation = build_delegation(
+            &subject_signer,
+            &operator_signer,
+            &subject_signer,
+            cmd("/storage"),
+        )
+        .await;
+
+        let env = test_env(operator_signer.clone());
+        import_single(&env, &operator_did, delegation).await;
+
+        // Requesting / (root, broader than /storage) should fail
+        let chain = find_chain(
+            &env,
+            &operator_did,
+            &operator_did,
+            &subject_did,
+            &Command::parse("/").unwrap(),
+            &BTreeMap::new(),
+            &now(),
+        )
+        .await
+        .expect("find_chain should not error");
+        assert!(
+            chain.is_none(),
+            "should not allow escalation from /storage to /"
+        );
+    }
+
+    #[dialog_common::test]
+    async fn find_chain_allows_narrower_command_under_delegation() {
+        let subject_signer = signer_async(1).await;
+        let operator_signer = signer_async(2).await;
+        let subject_did = subject_signer.did();
+        let operator_did = operator_signer.did();
+
+        // Delegate /storage (broad)
+        let delegation = build_delegation(
+            &subject_signer,
+            &operator_signer,
+            &subject_signer,
+            cmd("/storage"),
+        )
+        .await;
+
+        let env = test_env(operator_signer.clone());
+        import_single(&env, &operator_did, delegation).await;
+
+        // Requesting /storage/get (narrower) should succeed
+        let chain = find_chain(
+            &env,
+            &operator_did,
+            &operator_did,
+            &subject_did,
+            &Command::parse("/storage/get").unwrap(),
+            &BTreeMap::new(),
+            &now(),
+        )
+        .await
+        .expect("find_chain should not error");
+        assert!(
+            chain.is_some(),
+            "/storage delegation should cover /storage/get"
+        );
+
+        // Requesting /storage/set should also succeed
+        let chain = find_chain(
+            &env,
+            &operator_did,
+            &operator_did,
+            &subject_did,
+            &Command::parse("/storage/set").unwrap(),
+            &BTreeMap::new(),
+            &now(),
+        )
+        .await
+        .expect("find_chain should not error");
+        assert!(
+            chain.is_some(),
+            "/storage delegation should cover /storage/set"
+        );
+
+        // But /memory/resolve should fail (different branch)
+        let chain = find_chain(
+            &env,
+            &operator_did,
+            &operator_did,
+            &subject_did,
+            &Command::parse("/memory/resolve").unwrap(),
+            &BTreeMap::new(),
+            &now(),
+        )
+        .await
+        .expect("find_chain should not error");
+        assert!(
+            chain.is_none(),
+            "/storage delegation should not cover /memory"
+        );
+    }
+
+    #[dialog_common::test]
+    async fn find_chain_policy_multi_field_partial_match_fails() {
+        let subject_signer = signer_async(1).await;
+        let operator_signer = signer_async(2).await;
+        let subject_did = subject_signer.did();
+        let operator_did = operator_signer.did();
+
+        // Delegate with store=data AND key=foo
+        let policy = vec![
+            Predicate::Equal(
+                Select::new(vec![Filter::Field("store".to_string())]),
+                Ipld::String("data".to_string()),
+            ),
+            Predicate::Equal(
+                Select::new(vec![Filter::Field("key".to_string())]),
+                Ipld::Bytes(b"foo".to_vec()),
+            ),
+        ];
+
+        let delegation = build_delegation_with_policy(
+            &subject_signer,
+            &operator_signer,
+            &subject_signer,
+            cmd("/storage"),
+            policy,
+        )
+        .await;
+
+        let env = test_env(operator_signer.clone());
+        import_single(&env, &operator_did, delegation).await;
+
+        // Matching both fields should succeed
+        let mut matching = BTreeMap::new();
+        matching.insert("store".to_string(), Ipld::String("data".to_string()));
+        matching.insert("key".to_string(), Ipld::Bytes(b"foo".to_vec()));
+        let chain = find_chain(
+            &env,
+            &operator_did,
+            &operator_did,
+            &subject_did,
+            &Command::parse("/storage/get").unwrap(),
+            &matching,
+            &now(),
+        )
+        .await
+        .expect("find_chain should not error");
+        assert!(chain.is_some(), "both fields matching should succeed");
+
+        // Matching store but wrong key should fail
+        let mut wrong_key = BTreeMap::new();
+        wrong_key.insert("store".to_string(), Ipld::String("data".to_string()));
+        wrong_key.insert("key".to_string(), Ipld::Bytes(b"bar".to_vec()));
+        let chain = find_chain(
+            &env,
+            &operator_did,
+            &operator_did,
+            &subject_did,
+            &Command::parse("/storage/get").unwrap(),
+            &wrong_key,
+            &now(),
+        )
+        .await
+        .expect("find_chain should not error");
+        assert!(
+            chain.is_none(),
+            "mismatched key should reject even if store matches"
+        );
+
+        // Matching store but missing key should fail (policy requires key)
+        let mut store_only = BTreeMap::new();
+        store_only.insert("store".to_string(), Ipld::String("data".to_string()));
+        let chain = find_chain(
+            &env,
+            &operator_did,
+            &operator_did,
+            &subject_did,
+            &Command::parse("/storage/get").unwrap(),
+            &store_only,
+            &now(),
+        )
+        .await
+        .expect("find_chain should not error");
+        assert!(chain.is_none(), "missing required key field should reject");
+    }
+
+    #[dialog_common::test]
+    async fn find_chain_powerline_covers_any_command() {
+        let subject_signer = signer_async(1).await;
+        let operator_signer = signer_async(2).await;
+        let subject_did = subject_signer.did();
+        let operator_did = operator_signer.did();
+
+        // Powerline delegation (Subject::Any, command /)
+        let delegation = DelegationBuilder::new()
+            .issuer(subject_signer.clone())
+            .audience(&operator_signer)
+            .subject(dialog_ucan::subject::Subject::Any)
+            .command(vec![])
+            .try_build()
+            .await
+            .expect("build powerline");
+
+        let env = test_env(operator_signer.clone());
+        import_single(&env, &operator_did, delegation).await;
+
+        // Should match any command
+        for path in ["/", "/storage", "/storage/get", "/memory/resolve"] {
+            let chain = find_chain(
+                &env,
+                &operator_did,
+                &operator_did,
+                &subject_did,
+                &Command::parse(path).unwrap(),
+                &BTreeMap::new(),
+                &now(),
+            )
+            .await
+            .expect("find_chain should not error");
+            assert!(chain.is_some(), "powerline should cover command '{}'", path);
+        }
+    }
+
+    #[dialog_common::test]
+    async fn find_chain_two_hop_with_policy_narrowing() {
+        let subject_signer = signer_async(1).await;
+        let intermediate_signer = signer_async(2).await;
+        let operator_signer = signer_async(3).await;
+        let subject_did = subject_signer.did();
+        let operator_did = operator_signer.did();
+
+        // subject -> intermediate: grant /storage with store=data
+        let d1 = build_delegation_with_policy(
+            &subject_signer,
+            &intermediate_signer,
+            &subject_signer,
+            cmd("/storage"),
+            vec![Predicate::Equal(
+                Select::new(vec![Filter::Field("store".to_string())]),
+                Ipld::String("data".to_string()),
+            )],
+        )
+        .await;
+
+        // intermediate -> operator: grant /storage/get (narrower command, no extra policy)
+        let d2 = build_delegation(
+            &intermediate_signer,
+            &operator_signer,
+            &subject_signer,
+            cmd("/storage/get"),
+        )
+        .await;
+
+        let env = test_env(operator_signer.clone());
+        import_single(&env, &operator_did, d1).await;
+        import_single(&env, &operator_did, d2).await;
+
+        // Should find chain for /storage/get with store=data
+        let mut args = BTreeMap::new();
+        args.insert("store".to_string(), Ipld::String("data".to_string()));
+        let chain = find_chain(
+            &env,
+            &operator_did,
+            &operator_did,
+            &subject_did,
+            &Command::parse("/storage/get").unwrap(),
+            &args,
+            &now(),
+        )
+        .await
+        .expect("find_chain should not error");
+        assert!(
+            chain.is_some(),
+            "should find two-hop chain matching narrowed command and policy"
+        );
+
+        // Should NOT find chain for /storage/get with store=secret
+        // (first hop's policy requires store=data)
+        let mut wrong_args = BTreeMap::new();
+        wrong_args.insert("store".to_string(), Ipld::String("secret".to_string()));
+        let chain = find_chain(
+            &env,
+            &operator_did,
+            &operator_did,
+            &subject_did,
+            &Command::parse("/storage/get").unwrap(),
+            &wrong_args,
+            &now(),
+        )
+        .await
+        .expect("find_chain should not error");
+        assert!(
+            chain.is_none(),
+            "two-hop chain should reject when first hop's policy doesn't match"
         );
     }
 }

@@ -197,7 +197,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{TestEnv, test_subject};
+    use super::super::tests::{TestEnv, test_signer};
     use crate::artifacts::{Artifact, ArtifactSelector, Instruction};
     use crate::repository::Repository;
     use dialog_prolly_tree::EMPT_TREE_HASH;
@@ -205,9 +205,9 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_commits_and_selects() -> anyhow::Result<()> {
-        let env = TestEnv::new();
+        let env = TestEnv::new().await;
 
-        let repo = Repository::new(test_subject());
+        let repo = Repository::from(test_signer().await);
         let branch = repo.open_branch("main").perform(&env).await?;
 
         let artifact = Artifact {

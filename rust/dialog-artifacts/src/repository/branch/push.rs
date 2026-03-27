@@ -219,7 +219,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{TestEnv, test_subject};
+    use super::super::tests::{TestEnv, test_signer};
     use crate::artifacts::{Artifact, Instruction};
     use crate::repository::Repository;
     use crate::repository::branch::state::UpstreamState;
@@ -228,9 +228,9 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_pushes_to_local_upstream() -> anyhow::Result<()> {
-        let env = TestEnv::new();
+        let env = TestEnv::new().await;
 
-        let repo = Repository::new(test_subject());
+        let repo = Repository::from(test_signer().await);
 
         let _main = repo.open_branch("main").perform(&env).await?;
 
@@ -270,9 +270,9 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_returns_none_when_local_upstream_diverged() -> anyhow::Result<()> {
-        let env = TestEnv::new();
+        let env = TestEnv::new().await;
 
-        let repo = Repository::new(test_subject());
+        let repo = Repository::from(test_signer().await);
 
         let main = repo.open_branch("main").perform(&env).await?;
         let _hash = main
@@ -312,9 +312,9 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_has_no_upstream_by_default() -> anyhow::Result<()> {
-        let env = TestEnv::new();
+        let env = TestEnv::new().await;
 
-        let repo = Repository::new(test_subject());
+        let repo = Repository::from(test_signer().await);
         let branch = repo.open_branch("feature").perform(&env).await?;
 
         assert!(branch.upstream().is_none());

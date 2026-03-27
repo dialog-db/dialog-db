@@ -108,7 +108,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{TestEnv, test_subject};
+    use super::super::tests::{TestEnv, test_signer};
     use crate::artifacts::{Artifact, Instruction};
     use crate::repository::Repository;
     use crate::repository::branch::state::UpstreamState;
@@ -117,9 +117,9 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_fetches_local_upstream_revision() -> anyhow::Result<()> {
-        let env = TestEnv::new();
+        let env = TestEnv::new().await;
 
-        let repo = Repository::new(test_subject());
+        let repo = Repository::from(test_signer().await);
 
         let main = repo.open_branch("main").perform(&env).await?;
         let _hash = main
@@ -152,9 +152,9 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_does_not_modify_local_state_on_fetch() -> anyhow::Result<()> {
-        let env = TestEnv::new();
+        let env = TestEnv::new().await;
 
-        let repo = Repository::new(test_subject());
+        let repo = Repository::from(test_signer().await);
 
         let main = repo.open_branch("main").perform(&env).await?;
         let _hash = main

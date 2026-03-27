@@ -6,14 +6,17 @@ use dialog_remote_s3::Address;
 use dialog_remote_s3::S3;
 use dialog_storage::provider::Volatile;
 
+use dialog_credentials::Ed25519Signer;
+use dialog_credentials::credential::SignerCredential;
+
 use crate::RemoteAddress;
 use crate::repository::Repository;
 use crate::repository::branch::state::UpstreamState;
 use crate::repository::node_reference::NodeReference;
 use crate::repository::remote::SiteName;
 
-fn test_subject() -> Did {
-    "did:test:e2e-subject".parse().unwrap()
+async fn test_signer() -> Ed25519Signer {
+    Ed25519Signer::import(&[43; 32]).await.unwrap()
 }
 
 fn test_address() -> Address {
@@ -38,13 +41,17 @@ impl InMemoryRemote {
 struct TestEnv {
     local: Volatile,
     remote: InMemoryRemote,
+    did: Did,
 }
 
 impl TestEnv {
-    fn new() -> Self {
+    async fn new() -> Self {
+        let signer = test_signer().await;
+        use dialog_varsig::Principal;
         Self {
             local: Volatile::new(),
             remote: InMemoryRemote::new(),
+            did: signer.did(),
         }
     }
 }
@@ -192,7 +199,7 @@ impl Provider<authority::Identify> for TestEnv {
         &self,
         input: Capability<authority::Identify>,
     ) -> Result<authority::Authority, authority::AuthorityError> {
-        let did = test_subject();
+        let did = self.did.clone();
         let subject_did = input.subject().clone();
         Ok(Subject::from(subject_did)
             .attenuate(authority::Profile::local(did.clone()))
@@ -211,8 +218,13 @@ impl Provider<authority::Sign> for TestEnv {
     }
 }
 
-async fn setup_repo_with_remote(env: &TestEnv) -> anyhow::Result<(Repository, super::Branch)> {
-    let repo = Repository::new(test_subject());
+async fn setup_repo_with_remote(
+    env: &TestEnv,
+) -> anyhow::Result<(Repository<SignerCredential>, super::Branch)> {
+    use dialog_varsig::Principal;
+    let signer = test_signer().await;
+    let did = signer.did();
+    let repo = Repository::from(signer);
 
     let site_address = RemoteAddress::S3(test_address());
     let _site = repo.add_remote("origin", site_address).perform(env).await?;
@@ -223,7 +235,7 @@ async fn setup_repo_with_remote(env: &TestEnv) -> anyhow::Result<(Repository, su
         .set_upstream(UpstreamState::Remote {
             name: SiteName::from("origin"),
             branch: "main".into(),
-            subject: test_subject(),
+            subject: did,
             tree: NodeReference::default(),
         })
         .perform(env)
@@ -237,7 +249,7 @@ async fn it_pushes_to_remote() -> anyhow::Result<()> {
     use crate::artifacts::{Artifact, Instruction};
     use futures_util::stream;
 
-    let env = TestEnv::new();
+    let env = TestEnv::new().await;
     let (_repo, branch) = setup_repo_with_remote(&env).await?;
 
     let artifact = Artifact {
@@ -262,7 +274,7 @@ async fn it_fetches_from_remote() -> anyhow::Result<()> {
     use crate::artifacts::{Artifact, Instruction};
     use futures_util::stream;
 
-    let env = TestEnv::new();
+    let env = TestEnv::new().await;
     let (_repo, branch) = setup_repo_with_remote(&env).await?;
 
     let artifact = Artifact {
@@ -289,7 +301,7 @@ async fn it_pushes_and_pulls_roundtrip() -> anyhow::Result<()> {
     use crate::artifacts::{Artifact, Instruction};
     use futures_util::stream;
 
-    let env = TestEnv::new();
+    let env = TestEnv::new().await;
     let (_repo, branch) = setup_repo_with_remote(&env).await?;
 
     let artifact = Artifact {

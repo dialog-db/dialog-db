@@ -55,7 +55,7 @@ impl Load {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::test_subject;
+    use super::super::tests::test_signer;
     use crate::repository::Repository;
     use crate::repository::error::RepositoryError;
     use dialog_storage::provider::Volatile;
@@ -63,7 +63,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_loads_existing_branch() -> anyhow::Result<()> {
         let env = Volatile::new();
-        let repo = Repository::new(test_subject());
+        let repo = Repository::from(test_signer().await);
 
         let _ = repo.open_branch("main").perform(&env).await?;
         let branch = repo.load_branch("main").perform(&env).await?;
@@ -75,7 +75,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_fails_loading_missing_branch() -> anyhow::Result<()> {
         let env = Volatile::new();
-        let repo = Repository::new(test_subject());
+        let repo = Repository::from(test_signer().await);
 
         let result = repo.load_branch("nonexistent").perform(&env).await;
 

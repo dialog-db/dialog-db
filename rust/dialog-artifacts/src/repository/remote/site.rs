@@ -130,10 +130,12 @@ impl Load {
 
 #[cfg(test)]
 mod tests {
+    use dialog_credentials::Ed25519Signer;
     use dialog_remote_s3::Address;
     use dialog_storage::provider::Volatile;
 
     use crate::RemoteAddress;
+
     use crate::repository::Repository;
     use crate::repository::error::RepositoryError;
 
@@ -146,15 +148,14 @@ mod tests {
         RemoteAddress::S3(s3_addr)
     }
 
-    fn test_repo() -> Repository {
-        let subject = "did:test:remote-site".parse().unwrap();
-        Repository::new(subject)
+    async fn test_signer() -> Ed25519Signer {
+        Ed25519Signer::import(&[44; 32]).await.unwrap()
     }
 
     #[dialog_common::test]
     async fn it_adds_and_loads_remote() -> anyhow::Result<()> {
         let env = Volatile::new();
-        let repo = test_repo();
+        let repo = Repository::from(test_signer().await);
 
         let site = repo
             .add_remote("origin", test_address())
@@ -174,7 +175,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_errors_loading_missing_remote() -> anyhow::Result<()> {
         let env = Volatile::new();
-        let repo = test_repo();
+        let repo = Repository::from(test_signer().await);
 
         let result = repo.load_remote("nonexistent").perform(&env).await;
         assert!(matches!(
@@ -188,7 +189,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_errors_adding_duplicate_remote() -> anyhow::Result<()> {
         let env = Volatile::new();
-        let repo = test_repo();
+        let repo = Repository::from(test_signer().await);
 
         repo.add_remote("origin", test_address())
             .perform(&env)

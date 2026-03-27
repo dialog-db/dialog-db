@@ -174,25 +174,30 @@ impl Branch {
 #[cfg(test)]
 mod tests {
     use dialog_capability::{Capability, Did, Provider, Subject, authority};
+    use dialog_credentials::Ed25519Signer;
     use dialog_effects::archive as archive_fx;
     use dialog_effects::memory as memory_fx;
     use dialog_storage::provider::Volatile;
+    use dialog_varsig::Principal;
 
-    pub fn test_subject() -> Did {
-        "did:test:branch-cap".parse().unwrap()
+    pub async fn test_signer() -> Ed25519Signer {
+        Ed25519Signer::import(&[42; 32]).await.unwrap()
     }
 
     /// Test environment wrapping [`Volatile`] and providing a stub
-    /// `Provider<authority::Identify>` that returns `test_subject()` as
+    /// `Provider<authority::Identify>` that returns the test signer's DID as
     /// the operator DID.
     pub struct TestEnv {
         pub store: Volatile,
+        pub did: Did,
     }
 
     impl TestEnv {
-        pub fn new() -> Self {
+        pub async fn new() -> Self {
+            let signer = test_signer().await;
             Self {
                 store: Volatile::new(),
+                did: signer.did(),
             }
         }
     }
@@ -204,7 +209,7 @@ mod tests {
             &self,
             input: Capability<authority::Identify>,
         ) -> Result<authority::Authority, authority::AuthorityError> {
-            let did = test_subject();
+            let did = self.did.clone();
             let subject_did = input.subject().clone();
             Ok(Subject::from(subject_did)
                 .attenuate(authority::Profile::local(did.clone()))

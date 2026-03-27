@@ -14,12 +14,14 @@ pub type NativeEnvironment = Environment<Credentials, FileSystem, Remote>;
 #[cfg(test)]
 impl Builder<FileSystem> {
     /// Create a builder backed by a temporary directory.
-    pub fn temp() -> Result<Self, super::OpenError> {
-        let dir = tempfile::tempdir().map_err(|e| super::OpenError::Storage(e.to_string()))?;
-        let fs = FileSystem::mount(dir.path().to_path_buf())
-            .map_err(|e| super::OpenError::Storage(e.to_string()))?;
+    ///
+    /// Panics if temp directory creation fails (test infrastructure failure).
+    pub fn temp() -> Self {
+        let dir = tempfile::tempdir().expect("failed to create temp directory");
+        let fs =
+            FileSystem::mount(dir.path().to_path_buf()).expect("failed to mount temp directory");
         let _ = dir.keep();
-        Ok(Builder::new(fs))
+        Builder::new(fs)
     }
 }
 
@@ -120,7 +122,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn builder_produces_different_profile_and_operator() {
-        let env = Builder::temp().unwrap().build().await.unwrap();
+        let env = Builder::temp().build().await.unwrap();
 
         assert_ne!(
             env.authority.profile_did(),

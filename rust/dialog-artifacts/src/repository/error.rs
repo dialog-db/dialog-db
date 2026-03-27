@@ -53,6 +53,14 @@ pub enum RepositoryError {
         remote: SiteName,
     },
 
+    /// Repository not found
+    #[error("Repository '{0}' not found")]
+    NotFound(String),
+
+    /// Repository already exists
+    #[error("Repository '{0}' already exists")]
+    AlreadyExists(String),
+
     /// Branch upstream is set to itself
     #[error("Upsteam of local {name} is set to itself")]
     BranchUpstreamIsItself {

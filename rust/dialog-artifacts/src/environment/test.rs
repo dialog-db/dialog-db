@@ -1,8 +1,12 @@
-//! Test environment — in-memory volatile storage, no credentials or remote.
+//! Test utilities — in-memory volatile environment via builder.
 
 use dialog_storage::provider::Volatile;
 
-use super::Environment;
+use super::builder::Builder;
 
-/// Test environment: in-memory local storage, unit credentials and remote.
-pub type TestEnvironment = Environment<(), Volatile, ()>;
+impl Builder<Volatile> {
+    /// Create a builder backed by in-memory volatile storage.
+    pub fn volatile() -> Self {
+        Builder::new(Volatile::new())
+    }
+}

@@ -16,7 +16,22 @@ impl From<Did> for Subject {
     }
 }
 
+/// DID used to represent "any subject" in delegation scope.
+pub const ANY_SUBJECT: &str = "did:_:_";
+
 impl Subject {
+    /// Create a wildcard subject representing "any resource".
+    ///
+    /// Used in delegation to grant unrestricted access across all subjects.
+    pub fn any() -> Self {
+        Self(ANY_SUBJECT.parse().expect("valid wildcard DID"))
+    }
+
+    /// Whether this is the wildcard "any" subject.
+    pub fn is_any(&self) -> bool {
+        self.0.as_ref() == ANY_SUBJECT
+    }
+
     /// Start building a capability chain from this subject.
     pub fn attenuate<T>(self, value: T) -> Capability<T>
     where

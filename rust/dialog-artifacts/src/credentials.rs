@@ -152,7 +152,7 @@ impl Credentials {
     }
 
     /// Build the authority chain for the given subject DID.
-    fn build_authority(&self, subject: Did) -> Authority {
+    pub fn build_authority(&self, subject: Did) -> Authority {
         Subject::from(subject)
             .attenuate(authority::Profile {
                 profile: self.profile_did(),

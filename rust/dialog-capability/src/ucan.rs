@@ -14,13 +14,15 @@ pub mod delegation;
 mod invocation;
 pub mod issuer;
 mod parameters;
+mod scope;
 
 pub use access::authorize;
-pub use claim::claim;
+pub use claim::{claim, find_chain};
 pub use delegation::import_delegation_chain;
 pub use invocation::UcanInvocation;
 pub use issuer::Issuer;
-pub use parameters::{Args, Parameters, parameters, parameters_to_args};
+pub use parameters::{parameters, parameters_to_args, parameters_to_policy};
+pub use scope::{Args, Parameters, Scope};
 
 use crate::Constraint;
 use crate::access::Protocol;

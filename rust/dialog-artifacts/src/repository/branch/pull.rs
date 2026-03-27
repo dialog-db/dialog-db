@@ -382,16 +382,16 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{TestEnv, test_subject};
+    use super::super::tests::{TestEnv, test_signer};
     use crate::artifacts::{Artifact, Instruction};
     use crate::repository::Repository;
     use futures_util::stream;
 
     #[dialog_common::test]
     async fn it_pulls_from_local_upstream_no_changes() -> anyhow::Result<()> {
-        let env = TestEnv::new();
+        let env = TestEnv::new().await;
 
-        let repo = Repository::new(test_subject());
+        let repo = Repository::from(test_signer().await);
 
         let main = repo.open_branch("main").perform(&env).await?;
 
@@ -424,9 +424,9 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_pulls_upstream_changes_without_local_changes() -> anyhow::Result<()> {
-        let env = TestEnv::new();
+        let env = TestEnv::new().await;
 
-        let repo = Repository::new(test_subject());
+        let repo = Repository::from(test_signer().await);
 
         let main = repo.open_branch("main").perform(&env).await?;
 
@@ -458,9 +458,9 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_pulls_and_merges_with_both_sides_changed() -> anyhow::Result<()> {
-        let env = TestEnv::new();
+        let env = TestEnv::new().await;
 
-        let repo = Repository::new(test_subject());
+        let repo = Repository::from(test_signer().await);
 
         let main = repo.open_branch("main").perform(&env).await?;
 
