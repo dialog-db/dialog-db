@@ -42,6 +42,7 @@
 mod archive;
 mod credential;
 mod memory;
+mod mount;
 mod storage;
 
 use dialog_capability::Did;
@@ -214,15 +215,27 @@ impl<'a> Store<'a> {
 /// wasm32 (single-threaded). This avoids the overhead and poisoning concerns
 /// of `RwLock`.
 pub struct IndexedDb {
-    /// Cached database sessions keyed by name.
-    sessions: RefCell<HashMap<String, Session>>,
+    /// Mount prefix prepended to database names.
+    mount: String,
+    /// Cached database sessions keyed by name (shared across mounts).
+    sessions: std::rc::Rc<RefCell<HashMap<String, Session>>>,
 }
 
 impl IndexedDb {
-    /// Creates a new IndexedDB provider.
+    /// Creates a new IndexedDB provider with no prefix.
     pub fn new() -> Self {
         Self {
-            sessions: RefCell::new(HashMap::new()),
+            mount: String::new(),
+            sessions: std::rc::Rc::new(RefCell::new(HashMap::new())),
+        }
+    }
+
+    /// Returns the prefixed database name for a given name.
+    fn prefixed(&self, name: &str) -> String {
+        if self.mount.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}/{}", self.mount, name)
         }
     }
 
@@ -232,10 +245,11 @@ impl IndexedDb {
     /// Checks for an existing session via a short borrow, drops it before
     /// any async work, then borrows mutably to insert a new session if needed.
     pub async fn open(&self, name: &str) -> Result<(), IndexedDbError> {
-        let exists = self.sessions.borrow().contains_key(name);
+        let db_name = self.prefixed(name);
+        let exists = self.sessions.borrow().contains_key(&db_name);
         if !exists {
-            let session = Session::open(name).await?;
-            self.sessions.borrow_mut().insert(name.to_string(), session);
+            let session = Session::open(&db_name).await?;
+            self.sessions.borrow_mut().insert(db_name, session);
         }
         Ok(())
     }
@@ -247,15 +261,17 @@ impl IndexedDb {
     /// remove the session, perform the work, then re-insert it via
     /// [`IndexedDb::return_session`].
     pub fn take_session(&self, name: &str) -> Result<Session, IndexedDbError> {
+        let db_name = self.prefixed(name);
         self.sessions
             .borrow_mut()
-            .remove(name)
-            .ok_or_else(|| IndexedDbError::Database(format!("No session for {name}")))
+            .remove(&db_name)
+            .ok_or_else(|| IndexedDbError::Database(format!("No session for {db_name}")))
     }
 
     /// Returns a session to the cache after async operations complete.
     pub fn return_session(&self, name: &str, session: Session) {
-        self.sessions.borrow_mut().insert(name.to_string(), session);
+        let db_name = self.prefixed(name);
+        self.sessions.borrow_mut().insert(db_name, session);
     }
 }
 

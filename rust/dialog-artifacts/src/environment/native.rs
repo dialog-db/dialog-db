@@ -1,6 +1,6 @@
 //! Native environment type alias and builder default.
 
-use dialog_storage::provider::FileSystem;
+use dialog_storage::provider::FileStore;
 
 use super::builder::Builder;
 use super::provider::Environment;
@@ -9,34 +9,34 @@ use crate::credentials::open::Open;
 use crate::remote::Remote;
 
 /// Native environment with opened profile credentials and remote dispatch.
-pub type NativeEnvironment = Environment<Credentials, FileSystem, Remote>;
+pub type NativeEnvironment = Environment<Credentials, FileStore, Remote>;
 
 #[cfg(test)]
-impl Builder<FileSystem> {
+impl Builder<FileStore> {
     /// Create a builder backed by a temporary directory.
     ///
     /// Panics if temp directory creation fails (test infrastructure failure).
     pub fn temp() -> Self {
         let dir = tempfile::tempdir().expect("failed to create temp directory");
         let fs =
-            FileSystem::mount(dir.path().to_path_buf()).expect("failed to mount temp directory");
+            FileStore::mount(dir.path().to_path_buf()).expect("failed to mount temp directory");
         let _ = dir.keep();
         Builder::new(fs)
     }
 }
 
-impl Default for Builder<Option<FileSystem>> {
+impl Default for Builder<Option<FileStore>> {
     fn default() -> Self {
         Builder::new(None)
     }
 }
 
-impl<P> Builder<Option<FileSystem>, P> {
-    fn resolve(self) -> Result<Builder<FileSystem, P>, super::OpenError> {
+impl<P> Builder<Option<FileStore>, P> {
+    fn resolve(self) -> Result<Builder<FileStore, P>, super::OpenError> {
         let storage = self.storage;
         let resolved = match storage {
             Some(fs) => fs,
-            None => FileSystem::profile()
+            None => FileStore::profile_location()
                 .map_err(|e| super::OpenError::Storage(e.to_string()))?
                 .into(),
         };
@@ -77,9 +77,9 @@ mod tests {
     use crate::credentials::open::Open;
     use crate::environment::Builder;
 
-    fn temp_storage() -> FileSystem {
+    fn temp_storage() -> FileStore {
         let dir = tempfile::tempdir().unwrap();
-        let fs = FileSystem::mount(dir.path().to_path_buf()).unwrap();
+        let fs = FileStore::mount(dir.path().to_path_buf()).unwrap();
         let _ = dir.keep();
         fs
     }
@@ -135,10 +135,10 @@ mod tests {
     async fn builder_preserves_profile_across_restarts() {
         let dir = tempfile::tempdir().unwrap();
 
-        let storage1 = FileSystem::mount(dir.path().to_path_buf()).unwrap();
+        let storage1 = FileStore::mount(dir.path().to_path_buf()).unwrap();
         let env1 = Builder::default().storage(storage1).build().await.unwrap();
 
-        let storage2 = FileSystem::mount(dir.path().to_path_buf()).unwrap();
+        let storage2 = FileStore::mount(dir.path().to_path_buf()).unwrap();
         let env2 = Builder::default().storage(storage2).build().await.unwrap();
 
         assert_eq!(
@@ -152,10 +152,10 @@ mod tests {
     async fn builder_unique_operator_differs_each_time() {
         let dir = tempfile::tempdir().unwrap();
 
-        let storage1 = FileSystem::mount(dir.path().to_path_buf()).unwrap();
+        let storage1 = FileStore::mount(dir.path().to_path_buf()).unwrap();
         let env1 = Builder::default().storage(storage1).build().await.unwrap();
 
-        let storage2 = FileSystem::mount(dir.path().to_path_buf()).unwrap();
+        let storage2 = FileStore::mount(dir.path().to_path_buf()).unwrap();
         let env2 = Builder::default().storage(storage2).build().await.unwrap();
 
         assert_ne!(
@@ -169,7 +169,7 @@ mod tests {
     async fn builder_derived_operator_is_deterministic() {
         let dir = tempfile::tempdir().unwrap();
 
-        let storage1 = FileSystem::mount(dir.path().to_path_buf()).unwrap();
+        let storage1 = FileStore::mount(dir.path().to_path_buf()).unwrap();
         let env1 = Builder::default()
             .operator(Operator::derive(b"alice"))
             .storage(storage1)
@@ -177,7 +177,7 @@ mod tests {
             .await
             .unwrap();
 
-        let storage2 = FileSystem::mount(dir.path().to_path_buf()).unwrap();
+        let storage2 = FileStore::mount(dir.path().to_path_buf()).unwrap();
         let env2 = Builder::default()
             .operator(Operator::derive(b"alice"))
             .storage(storage2)
@@ -196,7 +196,7 @@ mod tests {
     async fn builder_different_contexts_produce_different_operators() {
         let dir = tempfile::tempdir().unwrap();
 
-        let storage1 = FileSystem::mount(dir.path().to_path_buf()).unwrap();
+        let storage1 = FileStore::mount(dir.path().to_path_buf()).unwrap();
         let env1 = Builder::default()
             .operator(Operator::derive(b"alice"))
             .storage(storage1)
@@ -204,7 +204,7 @@ mod tests {
             .await
             .unwrap();
 
-        let storage2 = FileSystem::mount(dir.path().to_path_buf()).unwrap();
+        let storage2 = FileStore::mount(dir.path().to_path_buf()).unwrap();
         let env2 = Builder::default()
             .operator(Operator::derive(b"bob"))
             .storage(storage2)

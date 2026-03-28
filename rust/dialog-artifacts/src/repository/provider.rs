@@ -30,7 +30,7 @@ mod tests {
     use dialog_capability::did;
     use dialog_credentials::Ed25519Signer;
     use dialog_effects::repository::{self, Credential};
-    use dialog_storage::provider::FileSystem;
+    use dialog_storage::provider::FileStore;
     use dialog_varsig::Principal;
 
     fn repo_load(name: &str) -> dialog_capability::Capability<repository::Load> {
@@ -53,7 +53,7 @@ mod tests {
     #[dialog_common::test]
     async fn load_returns_none_for_missing_repo() {
         let dir = tempfile::tempdir().unwrap();
-        let fs = FileSystem::mount(dir.path().to_path_buf()).unwrap();
+        let fs = FileStore::mount(dir.path().to_path_buf()).unwrap();
 
         let result = repo_load("nonexistent")
             .perform(&Storage(&fs))
@@ -65,7 +65,7 @@ mod tests {
     #[dialog_common::test]
     async fn save_and_load_signer_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let fs = FileSystem::mount(dir.path().to_path_buf()).unwrap();
+        let fs = FileStore::mount(dir.path().to_path_buf()).unwrap();
 
         let signer = Ed25519Signer::generate().await.unwrap();
         let did = signer.did();
@@ -88,7 +88,7 @@ mod tests {
     #[dialog_common::test]
     async fn save_and_load_verifier_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let fs = FileSystem::mount(dir.path().to_path_buf()).unwrap();
+        let fs = FileStore::mount(dir.path().to_path_buf()).unwrap();
 
         let signer = Ed25519Signer::generate().await.unwrap();
         let verifier = signer.ed25519_did().clone();
@@ -112,7 +112,7 @@ mod tests {
     #[dialog_common::test]
     async fn different_names_are_isolated() {
         let dir = tempfile::tempdir().unwrap();
-        let fs = FileSystem::mount(dir.path().to_path_buf()).unwrap();
+        let fs = FileStore::mount(dir.path().to_path_buf()).unwrap();
 
         let signer1 = Ed25519Signer::generate().await.unwrap();
         let signer2 = Ed25519Signer::generate().await.unwrap();

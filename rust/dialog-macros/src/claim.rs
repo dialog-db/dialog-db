@@ -106,10 +106,9 @@ fn generate_claim(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
             syn::Fields::Unit => {
                 generate_claim_for_unit(name, &impl_generics, &ty_generics, where_clause)
             }
-            syn::Fields::Unnamed(_) => Err(syn::Error::new_spanned(
-                name,
-                "#[derive(Claim)] does not support tuple structs",
-            )),
+            syn::Fields::Unnamed(_) => {
+                generate_claim_for_unit(name, &impl_generics, &ty_generics, where_clause)
+            }
         },
         _ => Err(syn::Error::new_spanned(
             name,

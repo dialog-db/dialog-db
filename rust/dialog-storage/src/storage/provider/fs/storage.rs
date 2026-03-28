@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use super::FileSystem;
+use super::FileStore;
 use async_trait::async_trait;
 use dialog_capability::{Capability, Provider};
 use dialog_effects::storage::{
@@ -17,7 +17,7 @@ use dialog_effects::storage::{
 };
 
 fn store_dir(
-    fs: &FileSystem,
+    fs: &FileStore,
     subject: &dialog_capability::Did,
     store: &str,
 ) -> Result<PathBuf, StorageError> {
@@ -26,7 +26,7 @@ fn store_dir(
 }
 
 fn key_path(
-    fs: &FileSystem,
+    fs: &FileStore,
     subject: &dialog_capability::Did,
     store: &str,
     key: &[u8],
@@ -62,7 +62,7 @@ async fn list_recursive(
 }
 
 #[async_trait]
-impl Provider<Get> for FileSystem {
+impl Provider<Get> for FileStore {
     async fn execute(&self, effect: Capability<Get>) -> Result<Option<Vec<u8>>, StorageError> {
         let path = key_path(self, effect.subject(), effect.store(), effect.key())?;
         match tokio::fs::read(&path).await {
@@ -74,7 +74,7 @@ impl Provider<Get> for FileSystem {
 }
 
 #[async_trait]
-impl Provider<Set> for FileSystem {
+impl Provider<Set> for FileStore {
     async fn execute(&self, effect: Capability<Set>) -> Result<(), StorageError> {
         let path = key_path(self, effect.subject(), effect.store(), effect.key())?;
         if let Some(parent) = path.parent() {
@@ -89,7 +89,7 @@ impl Provider<Set> for FileSystem {
 }
 
 #[async_trait]
-impl Provider<Delete> for FileSystem {
+impl Provider<Delete> for FileStore {
     async fn execute(&self, effect: Capability<Delete>) -> Result<(), StorageError> {
         let path = key_path(self, effect.subject(), effect.store(), effect.key())?;
         match tokio::fs::remove_file(&path).await {
@@ -101,7 +101,7 @@ impl Provider<Delete> for FileSystem {
 }
 
 #[async_trait]
-impl Provider<List> for FileSystem {
+impl Provider<List> for FileStore {
     async fn execute(&self, effect: Capability<List>) -> Result<ListResult, StorageError> {
         let base = store_dir(self, effect.subject(), effect.store())?;
         let prefix = std::str::from_utf8(effect.prefix())
@@ -133,7 +133,7 @@ impl Provider<List> for FileSystem {
 
 #[cfg(test)]
 mod tests {
-    use super::FileSystem;
+    use super::FileStore;
     use dialog_capability::{Subject, did};
     use dialog_effects::storage::{Get, List, Set, Storage, Store};
 
@@ -144,7 +144,7 @@ mod tests {
     #[dialog_common::test]
     async fn set_and_get_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let fs = FileSystem::mount(dir.path().to_path_buf()).unwrap();
+        let fs = FileStore::mount(dir.path().to_path_buf()).unwrap();
         let subject = Subject::from(did!("key:z6MkTest"));
 
         store_cap(subject.clone(), "data")
@@ -165,7 +165,7 @@ mod tests {
     #[dialog_common::test]
     async fn get_missing_returns_none() {
         let dir = tempfile::tempdir().unwrap();
-        let fs = FileSystem::mount(dir.path().to_path_buf()).unwrap();
+        let fs = FileStore::mount(dir.path().to_path_buf()).unwrap();
         let subject = Subject::from(did!("key:z6MkTest"));
 
         let result = store_cap(subject, "data")
@@ -180,7 +180,7 @@ mod tests {
     #[dialog_common::test]
     async fn keys_with_slashes_create_directories() {
         let dir = tempfile::tempdir().unwrap();
-        let fs = FileSystem::mount(dir.path().to_path_buf()).unwrap();
+        let fs = FileStore::mount(dir.path().to_path_buf()).unwrap();
         let subject = Subject::from(did!("key:z6MkTest"));
 
         let key = b"a/b/c";
@@ -203,7 +203,7 @@ mod tests {
     #[dialog_common::test]
     async fn list_returns_all_keys_recursively() {
         let dir = tempfile::tempdir().unwrap();
-        let fs = FileSystem::mount(dir.path().to_path_buf()).unwrap();
+        let fs = FileStore::mount(dir.path().to_path_buf()).unwrap();
         let subject = Subject::from(did!("key:z6MkTest"));
 
         let key1 = "aud1/sub1/iss1.cid1";
@@ -233,7 +233,7 @@ mod tests {
     #[dialog_common::test]
     async fn list_with_prefix_filters() {
         let dir = tempfile::tempdir().unwrap();
-        let fs = FileSystem::mount(dir.path().to_path_buf()).unwrap();
+        let fs = FileStore::mount(dir.path().to_path_buf()).unwrap();
         let subject = Subject::from(did!("key:z6MkTest"));
 
         let key1 = "aud1/sub1/iss1.cid1";

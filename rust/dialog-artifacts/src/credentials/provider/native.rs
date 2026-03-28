@@ -3,12 +3,12 @@ use dialog_capability::Provider;
 use dialog_credentials::Ed25519Signer;
 use dialog_credentials::credential::{SignerCredential, SignerCredentialExport};
 use dialog_effects::credential::CredentialError;
-use dialog_storage::provider::FileSystem;
+use dialog_storage::provider::FileStore;
 
 use crate::credentials::open::{Open, ProfileSigner};
 
 #[async_trait]
-impl Provider<Open> for FileSystem {
+impl Provider<Open> for FileStore {
     async fn execute(&self, input: Open) -> Result<ProfileSigner, CredentialError> {
         let location = self
             .resolve(&input.name)

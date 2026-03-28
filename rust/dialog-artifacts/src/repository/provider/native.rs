@@ -6,14 +6,14 @@ use dialog_capability::{Capability, Provider};
 use dialog_effects::repository::{
     Credential, CredentialExport, Load, LoadCapability, RepositoryError, Save, SaveCapability,
 };
-use dialog_storage::provider::FileSystem;
+use dialog_storage::provider::FileStore;
 
 fn to_err(e: impl Display) -> RepositoryError {
     RepositoryError::Storage(e.to_string())
 }
 
 #[async_trait]
-impl Provider<Load> for Storage<'_, FileSystem> {
+impl Provider<Load> for Storage<'_, FileStore> {
     async fn execute(
         &self,
         input: Capability<Load>,
@@ -39,7 +39,7 @@ impl Provider<Load> for Storage<'_, FileSystem> {
 }
 
 #[async_trait]
-impl Provider<Save> for Storage<'_, FileSystem> {
+impl Provider<Save> for Storage<'_, FileStore> {
     async fn execute(&self, input: Capability<Save>) -> Result<(), RepositoryError> {
         let name = input.name();
         let credential = input.credential();

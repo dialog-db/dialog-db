@@ -16,3 +16,5 @@ pub mod key;
 pub mod ed25519;
 #[cfg(feature = "ed25519")]
 pub use ed25519::*;
+
+pub use credential::*;

@@ -14,7 +14,7 @@
 //!         └── List { continuation_token } → Effect → Result<ListResult, StorageError>
 //! ```
 
-pub use crate::{Attenuation, Capability, Claim, Effect, Policy, Subject};
+pub use crate::{Attenuation, Capability, Claim, Effect, Policy, Subject, did};
 use dialog_common::Checksum;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -24,6 +24,42 @@ use thiserror::Error;
 /// Attaches to Subject and provides the `/storage` ability path segment.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Storage;
+
+impl Storage {
+    /// Storage location capability for the platform profile directory.
+    pub fn profile() -> Capability<Location> {
+        Subject::from(did!("local:storage"))
+            .attenuate(Storage)
+            .attenuate(Location::profile())
+    }
+
+    /// Storage location capability for a unique temporary directory.
+    ///
+    /// Each call creates a new unique sub-path under `temp://`.
+    pub fn temp() -> Capability<Location> {
+        use dialog_common::time;
+        let id = format!(
+            "dialog-{}",
+            time::now()
+                .duration_since(time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let location = Location::temp()
+            .resolve(&id)
+            .expect("timestamp is a valid path segment");
+        Subject::from(did!("local:storage"))
+            .attenuate(Storage)
+            .attenuate(location)
+    }
+
+    /// Storage location capability for the current/project directory.
+    pub fn storage() -> Capability<Location> {
+        Subject::from(did!("local:storage"))
+            .attenuate(Storage)
+            .attenuate(Location::storage())
+    }
+}
 
 impl Attenuation for Storage {
     type Of = Subject;
@@ -264,6 +300,191 @@ pub enum StorageError {
     Io(#[from] std::io::Error),
 }
 
+/// Location policy — a URI scoping storage operations.
+///
+/// The URI scheme determines the storage root:
+/// - `profile://` — platform profile directory
+/// - `temp://` — temporary directory
+/// - `storage://` — project/working directory
+///
+/// Locations can only be narrowed via `.resolve()`, never broadened.
+/// Obtain one from `Storage::profile()`, `Storage::temp()`, etc.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(transparent)]
+pub struct Location(url::Url);
+
+impl Location {
+    /// Profile storage root.
+    pub fn profile() -> Self {
+        Self(url::Url::parse("profile:///").expect("valid URL"))
+    }
+
+    /// Temporary storage root.
+    pub fn temp() -> Self {
+        Self(url::Url::parse("temp:///").expect("valid URL"))
+    }
+
+    /// Project/working storage root.
+    pub fn storage() -> Self {
+        Self(url::Url::parse("storage:///").expect("valid URL"))
+    }
+
+    /// The URI scheme (e.g. `"profile"`, `"temp"`, `"storage"`).
+    pub fn scheme(&self) -> &str {
+        self.0.scheme()
+    }
+
+    /// The path portion of the URI.
+    pub fn path(&self) -> &str {
+        self.0.path()
+    }
+
+    /// The underlying URL.
+    pub fn url(&self) -> &url::Url {
+        &self.0
+    }
+
+    /// Resolve a sub-path under this location.
+    ///
+    /// Uses URI resolution to ensure the result is always nested
+    /// under this location. Returns an error if the segment would
+    /// escape the base.
+    pub fn resolve(&self, segment: &str) -> Result<Self, StorageError> {
+        let mut base = self.0.clone();
+        if !base.path().ends_with('/') {
+            base.set_path(&format!("{}/", base.path()));
+        }
+
+        let resolved = base
+            .join(&format!("./{segment}"))
+            .map_err(|e| StorageError::Storage(format!("URL join failed: {e}")))?;
+
+        if !resolved.path().starts_with(base.path()) {
+            return Err(StorageError::Storage(format!(
+                "path '{segment}' escapes base '{}'",
+                base.path()
+            )));
+        }
+
+        Ok(Self(resolved))
+    }
+}
+
+impl Policy for Location {
+    type Of = Storage;
+}
+
+impl Capability<Location> {
+    /// Resolve a sub-path under this location, returning a new capability.
+    pub fn resolve(&self, segment: &str) -> Result<Self, StorageError> {
+        let location = Location::of(self);
+        let resolved = location.resolve(segment)?;
+        let subject = self.subject().clone();
+        Ok(Subject::from(subject)
+            .attenuate(Storage)
+            .attenuate(resolved))
+    }
+
+    /// Create a load effect capability for this location.
+    pub fn load<Content: dialog_common::ConditionalSend + 'static>(
+        self,
+    ) -> Capability<Load<Content>> {
+        self.invoke(Load::default())
+    }
+
+    /// Create a save effect capability for this location.
+    pub fn save<Content>(self, content: Content) -> Capability<Save<Content>>
+    where
+        Content: Serialize + serde::de::DeserializeOwned + dialog_common::ConditionalSend + 'static,
+    {
+        self.invoke(Save::new(content))
+    }
+
+    /// Create a mount effect capability for this location.
+    pub fn mount<Resource: dialog_common::ConditionalSend + 'static>(
+        self,
+    ) -> Capability<Mount<Resource>> {
+        self.invoke(Mount::default())
+    }
+}
+
+/// A storage provider that knows what type it mounts.
+///
+/// Implemented by platform storage providers (e.g. `FileSystem` → `FileStore`).
+pub trait Mountable {
+    /// The local store type produced by mounting a location.
+    type Store: dialog_common::ConditionalSend + 'static;
+}
+
+/// Mount effect — opens a storage resource scoped to this location.
+#[derive(Debug, Clone, Serialize, Deserialize, Claim)]
+pub struct Mount<Resource>(std::marker::PhantomData<Resource>);
+
+impl<Resource> Mount<Resource> {
+    /// Create a new Mount effect.
+    pub fn new() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
+impl<Resource> Default for Mount<Resource> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<Resource: dialog_common::ConditionalSend + 'static> Effect for Mount<Resource> {
+    type Of = Location;
+    type Output = Result<Resource, StorageError>;
+}
+
+/// Load effect — reads typed content from this location.
+#[derive(Debug, Clone, Serialize, Deserialize, Claim)]
+pub struct Load<Content>(std::marker::PhantomData<Content>);
+
+impl<Content> Load<Content> {
+    /// Create a new Load effect.
+    pub fn new() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
+impl<Content> Default for Load<Content> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<Content: dialog_common::ConditionalSend + 'static> Effect for Load<Content> {
+    type Of = Location;
+    type Output = Result<Content, StorageError>;
+}
+
+/// Save effect — writes typed content to this location.
+#[derive(Debug, Clone, Serialize, Deserialize, Claim)]
+#[serde(bound(
+    serialize = "Content: Serialize",
+    deserialize = "Content: for<'a> Deserialize<'a>"
+))]
+pub struct Save<Content: Serialize> {
+    /// The content to save.
+    pub content: Content,
+}
+
+impl<Content: Serialize> Save<Content> {
+    /// Create a new Save effect.
+    pub fn new(content: Content) -> Self {
+        Self { content }
+    }
+}
+
+impl<Content: Serialize + serde::de::DeserializeOwned + dialog_common::ConditionalSend + 'static>
+    Effect for Save<Content>
+{
+    type Of = Location;
+    type Output = Result<(), StorageError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,6 +531,55 @@ mod tests {
         // Use policy() method to extract nested constraints
         assert_eq!(claim.policy::<Store, _>().store, "index");
         assert_eq!(&claim.policy::<Set, _>().key[..], &[1, 2, 3]);
+    }
+
+    mod location_tests {
+        use super::*;
+
+        #[test]
+        fn resolve_appends_segment() {
+            let loc = Location::profile();
+            let resolved = loc.resolve("personal").unwrap();
+            assert!(resolved.path().contains("personal"));
+        }
+
+        #[test]
+        fn resolve_chains() {
+            let loc = Location::profile()
+                .resolve("personal")
+                .unwrap()
+                .resolve("credentials")
+                .unwrap()
+                .resolve("self")
+                .unwrap();
+            assert!(loc.path().contains("personal/credentials/self"));
+        }
+
+        #[test]
+        fn resolve_rejects_parent_traversal() {
+            let loc = Location::profile().resolve("personal").unwrap();
+            let result = loc.resolve("../other");
+            assert!(result.is_err(), ".. should be rejected");
+        }
+
+        #[test]
+        fn resolve_rejects_prefix_attack() {
+            let loc = Location::profile().resolve("foo").unwrap();
+            // "fooled/you" resolved from foo/ should be foo/fooled/you, not /fooled/you
+            let resolved = loc.resolve("fooled/you").unwrap();
+            assert!(
+                resolved.path().contains("foo/fooled"),
+                "should be nested under foo: {}",
+                resolved.path()
+            );
+        }
+
+        #[test]
+        fn different_schemes() {
+            assert_eq!(Location::profile().scheme(), "profile");
+            assert_eq!(Location::temp().scheme(), "temp");
+            assert_eq!(Location::storage().scheme(), "storage");
+        }
     }
 
     #[cfg(feature = "ucan")]

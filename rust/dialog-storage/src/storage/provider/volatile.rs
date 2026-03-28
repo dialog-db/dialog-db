@@ -37,6 +37,7 @@
 mod archive;
 mod credential;
 mod memory;
+mod mount;
 mod storage;
 
 use dialog_capability::Did;
@@ -75,9 +76,21 @@ struct Session {
 /// `Provider::execute` can take `&self`. All lock guards are dropped before
 /// any `.await` points. Unlike `std::sync::RwLock`, `parking_lot` locks are
 /// infallible (no poisoning).
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct Volatile {
-    sessions: RwLock<HashMap<Did, Session>>,
+    /// Mount prefix prepended to session keys.
+    mount: String,
+    /// Shared session storage.
+    sessions: std::sync::Arc<RwLock<HashMap<Did, Session>>>,
+}
+
+impl Default for Volatile {
+    fn default() -> Self {
+        Self {
+            mount: String::new(),
+            sessions: std::sync::Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
 }
 
 impl Volatile {

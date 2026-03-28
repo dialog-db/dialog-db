@@ -20,6 +20,7 @@ web-integration-tests = ["dialog-common/web-integration-tests"]
 [dependencies]
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
+dialog-credentials = { workspace = true }
 dialog-effects = { workspace = true }
 dialog-varsig = { workspace = true }
 signature = { workspace = true }

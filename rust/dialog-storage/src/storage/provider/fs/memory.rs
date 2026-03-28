@@ -4,7 +4,7 @@
 //! Uses PID-based file locking for cross-process coordination and BLAKE3
 //! content hashing for edition tracking.
 
-use super::{FileSystem, FileSystemError, Location};
+use super::{FileStore, FileSystemError, Location};
 use async_trait::async_trait;
 use base58::ToBase58;
 use dialog_capability::{Capability, Provider};
@@ -45,7 +45,7 @@ impl Location {
 }
 
 #[async_trait]
-impl Provider<Resolve> for FileSystem {
+impl Provider<Resolve> for FileStore {
     async fn execute(
         &self,
         effect: Capability<Resolve>,
@@ -70,7 +70,7 @@ impl Provider<Resolve> for FileSystem {
 }
 
 #[async_trait]
-impl Provider<Publish> for FileSystem {
+impl Provider<Publish> for FileStore {
     async fn execute(&self, effect: Capability<Publish>) -> Result<Vec<u8>, MemoryError> {
         let subject = effect.subject().into();
         let space = effect.space();
@@ -146,7 +146,7 @@ impl Provider<Publish> for FileSystem {
 }
 
 #[async_trait]
-impl Provider<Retract> for FileSystem {
+impl Provider<Retract> for FileStore {
     async fn execute(&self, effect: Capability<Retract>) -> Result<(), MemoryError> {
         let subject = effect.subject().into();
         let space = effect.space();
@@ -212,7 +212,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_resolves_non_existent_cell() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let provider = FileStore::mount(tempdir.path().to_path_buf())?;
         let subject = unique_subject("memory-resolve-none");
 
         let effect = subject
@@ -230,7 +230,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_publishes_new_content() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let provider = FileStore::mount(tempdir.path().to_path_buf())?;
         let subject = unique_subject("memory-publish-new");
         let content = b"hello world".to_vec();
 
@@ -265,7 +265,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_updates_existing_content() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let provider = FileStore::mount(tempdir.path().to_path_buf())?;
         let subject = unique_subject("memory-publish-update");
 
         // Create initial content
@@ -308,7 +308,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_fails_on_edition_mismatch() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let provider = FileStore::mount(tempdir.path().to_path_buf())?;
         let subject = unique_subject("memory-mismatch");
 
         // Create initial content
@@ -339,7 +339,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_fails_creating_when_exists() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let provider = FileStore::mount(tempdir.path().to_path_buf())?;
         let subject = unique_subject("memory-create-exists");
 
         // Create initial content
@@ -369,7 +369,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_retracts_content() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let provider = FileStore::mount(tempdir.path().to_path_buf())?;
         let subject = unique_subject("memory-retract");
 
         // Create content
@@ -409,7 +409,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_fails_retract_on_edition_mismatch() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let provider = FileStore::mount(tempdir.path().to_path_buf())?;
         let subject = unique_subject("memory-retract-mismatch");
 
         // Create content
@@ -440,7 +440,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_handles_different_spaces() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let provider = FileStore::mount(tempdir.path().to_path_buf())?;
         let subject = unique_subject("memory-spaces");
 
         // Publish to different spaces
@@ -489,7 +489,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_succeeds_with_stale_edition_when_value_matches() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let provider = FileStore::mount(tempdir.path().to_path_buf())?;
         let subject = unique_subject("memory-stale-ok");
         let content = b"desired value".to_vec();
 
@@ -525,7 +525,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_produces_deterministic_content_hash() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let provider = FileStore::mount(tempdir.path().to_path_buf())?;
         let subject = unique_subject("memory-deterministic-hash");
         let content = b"same content".to_vec();
 
@@ -557,7 +557,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_succeeds_retracting_already_retracted() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let provider = FileStore::mount(tempdir.path().to_path_buf())?;
         let subject = unique_subject("memory-retract-already-retracted");
 
         // Try to retract non-existent cell - should succeed
@@ -578,7 +578,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_handles_nested_spaces() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let provider = FileStore::mount(tempdir.path().to_path_buf())?;
         let subject = unique_subject("memory-nested-spaces");
         let content = b"nested content".to_vec();
 
@@ -612,7 +612,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_publishes_to_nested_cell() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let provider = FileStore::mount(tempdir.path().to_path_buf())?;
         let subject = unique_subject("memory-nested-cell");
         let content = b"nested cell content".to_vec();
 
@@ -646,7 +646,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_handles_empty_content() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let provider = FileStore::mount(tempdir.path().to_path_buf())?;
         let subject = unique_subject("memory-empty");
         let content = vec![];
 
@@ -678,7 +678,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_handles_large_content() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let provider = FileStore::mount(tempdir.path().to_path_buf())?;
         let subject = unique_subject("memory-large");
         // 1MB content
         let content: Vec<u8> = (0..1024 * 1024).map(|i| (i % 256) as u8).collect();

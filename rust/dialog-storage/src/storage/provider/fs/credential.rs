@@ -2,7 +2,7 @@
 //!
 //! Stores credentials as exported bytes under `{subject}/credentials/{name}`.
 
-use super::{FileSystem, FileSystemError};
+use super::{FileStore, FileSystemError};
 use async_trait::async_trait;
 use dialog_capability::{Capability, Provider};
 use dialog_effects::credential::{
@@ -16,7 +16,7 @@ impl From<FileSystemError> for CredentialError {
 }
 
 #[async_trait]
-impl Provider<credential::Load> for FileSystem {
+impl Provider<credential::Load> for FileStore {
     async fn execute(
         &self,
         input: Capability<credential::Load>,
@@ -44,7 +44,7 @@ impl Provider<credential::Load> for FileSystem {
 }
 
 #[async_trait]
-impl Provider<credential::Save> for FileSystem {
+impl Provider<credential::Save> for FileStore {
     async fn execute(&self, input: Capability<credential::Save>) -> Result<(), CredentialError> {
         let subject = input.subject().into();
         let name = input.name();
@@ -75,9 +75,9 @@ mod tests {
     use dialog_effects::credential;
     use dialog_varsig::Principal;
 
-    fn temp_filesystem() -> (tempfile::TempDir, FileSystem) {
+    fn temp_filesystem() -> (tempfile::TempDir, FileStore) {
         let dir = tempfile::tempdir().unwrap();
-        let fs = FileSystem::mount(dir.path().to_path_buf()).unwrap();
+        let fs = FileStore::mount(dir.path().to_path_buf()).unwrap();
         (dir, fs)
     }
 
@@ -123,7 +123,7 @@ mod tests {
         let (_dir, provider) = temp_filesystem();
         let subject = unique_subject("fs-cred-missing");
 
-        let result = <FileSystem as Provider<credential::Load>>::execute(
+        let result = <FileStore as Provider<credential::Load>>::execute(
             &provider,
             build_load_cap(subject, "s3-bucket"),
         )
@@ -141,13 +141,13 @@ mod tests {
         let cred = make_signer_credential().await;
         let expected_did = cred.did();
 
-        <FileSystem as Provider<credential::Save>>::execute(
+        <FileStore as Provider<credential::Save>>::execute(
             &provider,
             build_save_cap(subject.clone(), "s3-bucket", cred),
         )
         .await?;
 
-        let result = <FileSystem as Provider<credential::Load>>::execute(
+        let result = <FileStore as Provider<credential::Load>>::execute(
             &provider,
             build_load_cap(subject, "s3-bucket"),
         )
@@ -169,23 +169,23 @@ mod tests {
         let did_a = cred_a.did();
         let did_b = cred_b.did();
 
-        <FileSystem as Provider<credential::Save>>::execute(
+        <FileStore as Provider<credential::Save>>::execute(
             &provider,
             build_save_cap(subject.clone(), "bucket-a", cred_a),
         )
         .await?;
-        <FileSystem as Provider<credential::Save>>::execute(
+        <FileStore as Provider<credential::Save>>::execute(
             &provider,
             build_save_cap(subject.clone(), "bucket-b", cred_b),
         )
         .await?;
 
-        let result1 = <FileSystem as Provider<credential::Load>>::execute(
+        let result1 = <FileStore as Provider<credential::Load>>::execute(
             &provider,
             build_load_cap(subject.clone(), "bucket-a"),
         )
         .await?;
-        let result2 = <FileSystem as Provider<credential::Load>>::execute(
+        let result2 = <FileStore as Provider<credential::Load>>::execute(
             &provider,
             build_load_cap(subject, "bucket-b"),
         )

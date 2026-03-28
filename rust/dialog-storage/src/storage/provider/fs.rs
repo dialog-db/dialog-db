@@ -46,6 +46,7 @@ mod archive;
 mod credential;
 mod error;
 mod memory;
+mod mount;
 mod storage;
 
 pub use error::FileSystemError;
@@ -59,6 +60,51 @@ const CREDENTIALS: &str = "credentials";
 const MEMORY: &str = "memory";
 const STORAGE: &str = "storage";
 
+/// Stateless filesystem provider.
+///
+/// Provides `Mount`, `Load`, and `Save` capabilities by resolving
+/// paths from the capability chain against the native filesystem.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FileSystem;
+
+use dialog_capability::storage as cap_storage;
+
+impl FileSystem {
+    /// Mount a FileStore from a capability Location.
+    pub fn mount(location: &cap_storage::Location) -> Result<FileStore, FileSystemError> {
+        let path = Self::resolve(location)?;
+        FileStore::mount(path)
+    }
+
+    /// Resolve a capability Location to a concrete filesystem path.
+    fn resolve(location: &cap_storage::Location) -> Result<PathBuf, FileSystemError> {
+        let base_path = match location.scheme() {
+            "profile" => {
+                let data_dir = dirs::data_dir().ok_or_else(|| {
+                    FileSystemError::Io("could not determine platform data directory".into())
+                })?;
+                data_dir.join("dialog")
+            }
+            "temp" => std::env::temp_dir(),
+            "storage" => std::env::current_dir().map_err(|e| FileSystemError::Io(e.to_string()))?,
+            scheme => {
+                return Err(FileSystemError::Io(format!(
+                    "unsupported location scheme: {scheme}"
+                )));
+            }
+        };
+
+        let relative = location.path().trim_start_matches('/');
+        if relative.is_empty() {
+            Ok(base_path)
+        } else {
+            Ok(base_path.join(relative))
+        }
+    }
+}
+
+/// Mounted filesystem store at a specific root location.
+///
 /// Filesystem-based storage provider.
 ///
 /// A transparent wrapper over a [`Location`] that manages storage directories
@@ -71,15 +117,15 @@ const STORAGE: &str = "storage";
 /// Directories are created lazily on first access.
 #[derive(Clone, Debug)]
 #[repr(transparent)]
-pub struct FileSystem(Location);
+pub struct FileStore(Location);
 
-impl From<Location> for FileSystem {
+impl From<Location> for FileStore {
     fn from(location: Location) -> Self {
         Self(location)
     }
 }
 
-impl TryFrom<Url> for FileSystem {
+impl TryFrom<Url> for FileStore {
     type Error = FileSystemError;
 
     fn try_from(url: Url) -> Result<Self, Self::Error> {
@@ -87,7 +133,7 @@ impl TryFrom<Url> for FileSystem {
     }
 }
 
-impl TryFrom<String> for FileSystem {
+impl TryFrom<String> for FileStore {
     type Error = FileSystemError;
 
     fn try_from(s: String) -> Result<Self, Self::Error> {
@@ -95,7 +141,7 @@ impl TryFrom<String> for FileSystem {
     }
 }
 
-impl TryFrom<&str> for FileSystem {
+impl TryFrom<&str> for FileStore {
     type Error = FileSystemError;
 
     fn try_from(s: &str) -> Result<Self, Self::Error> {
@@ -103,7 +149,7 @@ impl TryFrom<&str> for FileSystem {
     }
 }
 
-impl TryFrom<PathBuf> for FileSystem {
+impl TryFrom<PathBuf> for FileStore {
     type Error = FileSystemError;
 
     fn try_from(path: PathBuf) -> Result<Self, Self::Error> {
@@ -111,7 +157,7 @@ impl TryFrom<PathBuf> for FileSystem {
     }
 }
 
-impl FileSystem {
+impl FileStore {
     /// Mounts a filesystem provider at the given root.
     ///
     /// Accepts a `PathBuf`, `file:` URL string, or `Url`.
@@ -121,12 +167,8 @@ impl FileSystem {
         Ok(Self(root.try_into()?))
     }
 
-    /// Returns the location for profile key storage in the platform data directory.
-    ///
-    /// On macOS: `~/Library/Application Support/dialog/profile`
-    /// On Linux: `~/.local/share/dialog/profile`
-    /// On Windows: `{FOLDERID_RoamingAppData}/dialog/profile`
-    pub fn profile() -> Result<Location, FileSystemError> {
+    /// Returns the location for profile key storage (old API, kept for compat).
+    pub fn profile_location() -> Result<Location, FileSystemError> {
         let data_dir = dirs::data_dir().ok_or_else(|| {
             FileSystemError::Io("could not determine platform data directory".into())
         })?;
@@ -167,7 +209,8 @@ impl FileSystem {
 ///
 /// Provides methods for resolving child paths with containment validation,
 /// and converting to native filesystem paths.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(transparent)]
 #[repr(transparent)]
 pub struct Location(Url);
 
@@ -415,7 +458,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_generates_correct_paths() {
-        let provider: FileSystem = "file:///root/".try_into().unwrap();
+        let provider: FileStore = "file:///root/".try_into().unwrap();
         let subject = did!("key:z6MkTest");
 
         // Archive path
@@ -437,7 +480,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_allows_nested_paths() {
-        let provider: FileSystem = "file:///root/".try_into().unwrap();
+        let provider: FileStore = "file:///root/".try_into().unwrap();
         let subject = did!("key:z6MkTest");
 
         // Nested space path should work
@@ -456,7 +499,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_prevents_containment_escape_via_dotdot() {
-        let provider: FileSystem = "file:///root/".try_into().unwrap();
+        let provider: FileStore = "file:///root/".try_into().unwrap();
         let subject = did!("key:z6MkTest");
 
         // Attempt to escape via ..
@@ -468,7 +511,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_handles_absolute_looking_path() {
-        let provider: FileSystem = "file:///root/".try_into().unwrap();
+        let provider: FileStore = "file:///root/".try_into().unwrap();
         let subject = did!("key:z6MkTest");
 
         // With "./" prefix, "/etc/passwd" becomes ".//etc/passwd" which URL normalizes
@@ -496,7 +539,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_prevents_escape_via_encoded_dotdot() {
-        let provider: FileSystem = "file:///root/".try_into().unwrap();
+        let provider: FileStore = "file:///root/".try_into().unwrap();
         let subject = did!("key:z6MkTest");
 
         // URL decodes %2e%2e to .. during join, so this should be caught
@@ -507,7 +550,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_prevents_deep_escape() {
-        let provider: FileSystem = "file:///root/".try_into().unwrap();
+        let provider: FileStore = "file:///root/".try_into().unwrap();
         let subject = did!("key:z6MkTest");
 
         // Try to escape multiple levels

@@ -167,4 +167,14 @@ mod tests {
         // hash_len multiplies length by 10
         assert_eq!(claim.checksum, Checksum(30));
     }
+
+    // Generic struct — Claim = Self
+    #[derive(Debug, Clone, Serialize, Deserialize, Claim)]
+    struct GenericEffect<T>(std::marker::PhantomData<T>);
+
+    #[test]
+    fn it_derives_claim_for_generic_struct() {
+        let effect = GenericEffect::<String>(std::marker::PhantomData);
+        let _claim = effect.claim();
+    }
 }

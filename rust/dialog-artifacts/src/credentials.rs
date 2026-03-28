@@ -6,7 +6,7 @@
 //! traits needed by the Environment.
 
 pub mod open;
-mod provider;
+pub mod provider;
 
 use dialog_capability::authority::{self, Authority, AuthorityError};
 use dialog_capability::{Capability, Policy, Provider, Subject};

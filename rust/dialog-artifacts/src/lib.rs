@@ -79,6 +79,12 @@ pub use environment::*;
 pub mod credentials;
 pub use credentials::{Credentials, Operator, Profile};
 
+/// Profile — named identity with signing credential.
+pub mod profile;
+
+/// Operator — operating environment built from a profile.
+pub mod operator;
+
 /// Remote dispatch for fork invocations.
 pub mod remote;
 pub use remote::Remote;
