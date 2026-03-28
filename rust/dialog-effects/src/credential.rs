@@ -130,6 +130,12 @@ pub enum CredentialError {
     Corrupted(String),
 }
 
+impl From<dialog_capability::storage::StorageError> for CredentialError {
+    fn from(e: dialog_capability::storage::StorageError) -> Self {
+        Self::Storage(e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

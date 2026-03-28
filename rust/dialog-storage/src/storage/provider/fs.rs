@@ -22,14 +22,16 @@
 //! # Example
 //!
 //! ```no_run
-//! use dialog_storage::provider::FileSystem;
+//! use dialog_storage::provider::{FileSystem, FileStore};
 //! use dialog_capability::{did, Did, Subject};
+//! use dialog_capability::storage::{Storage, Location};
 //! use dialog_effects::archive::{Archive, Catalog, Get};
 //! use dialog_common::Blake3Hash;
-//! use std::path::PathBuf;
 //!
 //! # async fn example() -> anyhow::Result<()> {
-//! let provider = FileSystem::mount("file:///tmp/storage")?;
+//! # let location = Storage::temp();
+//! # let loc = dialog_capability::Policy::of(&location);
+//! let provider = FileSystem::mount(loc)?;
 //! let digest = Blake3Hash::hash(b"hello");
 //!
 //! let effect = Subject::from(did!("key:z6Mk..."))

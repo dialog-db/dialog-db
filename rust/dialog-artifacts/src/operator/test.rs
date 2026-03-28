@@ -3,7 +3,13 @@ mod tests {
     use crate::profile::Profile;
     use crate::remote::Remote;
     use dialog_capability::storage::Storage;
-    use dialog_storage::provider::FileSystem;
+    use dialog_storage::provider::{FileSystem, Store};
+
+    fn temp_store() -> Store {
+        let location = Storage::temp();
+        let loc = dialog_capability::Policy::of(&location);
+        Store::FileSystem(FileSystem::mount(loc).unwrap())
+    }
 
     #[dialog_common::test]
     async fn it_builds_operator_from_profile() {
@@ -14,17 +20,15 @@ mod tests {
             .unwrap();
 
         let operator = profile
-            .operator(b"alice")
-            .storage(FileSystem)
+            .operator(temp_store(), b"alice")
             .network(Remote)
-            .mount(Storage::temp())
             .build()
             .await
             .unwrap();
 
         assert_ne!(
-            operator.profile_did(),
-            operator.did(),
+            operator.authority.profile_did(),
+            operator.authority.operator_did(),
             "profile and operator DIDs should differ"
         );
     }
@@ -40,26 +44,22 @@ mod tests {
             .unwrap();
 
         let op1 = profile
-            .operator(b"alice")
-            .storage(FileSystem)
+            .operator(temp_store(), b"alice")
             .network(Remote)
-            .mount(Storage::temp())
             .build()
             .await
             .unwrap();
 
         let op2 = profile
-            .operator(b"alice")
-            .storage(FileSystem)
+            .operator(temp_store(), b"alice")
             .network(Remote)
-            .mount(Storage::temp())
             .build()
             .await
             .unwrap();
 
         assert_eq!(
-            op1.did(),
-            op2.did(),
+            op1.authority.operator_did(),
+            op2.authority.operator_did(),
             "same context should produce same operator DID"
         );
     }
@@ -75,26 +75,22 @@ mod tests {
             .unwrap();
 
         let alice = profile
-            .operator(b"alice")
-            .storage(FileSystem)
+            .operator(temp_store(), b"alice")
             .network(Remote)
-            .mount(Storage::temp())
             .build()
             .await
             .unwrap();
 
         let bob = profile
-            .operator(b"bob")
-            .storage(FileSystem)
+            .operator(temp_store(), b"bob")
             .network(Remote)
-            .mount(Storage::temp())
             .build()
             .await
             .unwrap();
 
         assert_ne!(
-            alice.did(),
-            bob.did(),
+            alice.authority.operator_did(),
+            bob.authority.operator_did(),
             "different contexts should produce different operator DIDs"
         );
     }

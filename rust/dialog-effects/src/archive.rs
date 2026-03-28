@@ -187,6 +187,12 @@ pub enum ArchiveError {
     Io(String),
 }
 
+impl From<dialog_capability::storage::StorageError> for ArchiveError {
+    fn from(e: dialog_capability::storage::StorageError) -> Self {
+        Self::Storage(e.to_string())
+    }
+}
+
 impl From<dialog_capability::DialogCapabilityAuthorizationError> for ArchiveError {
     fn from(value: dialog_capability::DialogCapabilityAuthorizationError) -> Self {
         ArchiveError::AuthorizationError(value.to_string())

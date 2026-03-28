@@ -58,8 +58,13 @@ pub struct Repository<C: Principal = Credential> {
 
 impl<C: Principal> Repository<C> {
     /// The subject DID.
-    pub fn subject(&self) -> Did {
+    pub fn did(&self) -> Did {
         self.credential.did()
+    }
+
+    /// The subject as a `Subject`.
+    pub fn subject(&self) -> Subject {
+        Subject::from(self.did())
     }
 
     /// Pre-attenuated memory capability (`Subject → Memory`).
@@ -89,22 +94,22 @@ impl<C: Principal> Repository<C> {
     /// Open (load or create) a branch.
     pub fn open_branch(&self, name: impl Into<branch::BranchName>) -> branch::Open {
         let trace = self.memory.trace(name);
-        branch::Open::new(self.subject(), self.memory.clone(), trace)
+        branch::Open::new(self.credential.did(), self.memory.clone(), trace)
     }
 
     /// Load an existing branch (error if not found).
     pub fn load_branch(&self, name: impl Into<branch::BranchName>) -> branch::Load {
         let trace = self.memory.trace(name);
-        branch::Load::new(self.subject(), self.memory.clone(), trace)
+        branch::Load::new(self.credential.did(), self.memory.clone(), trace)
     }
 }
 
 impl<C: Principal> Repository<C> {
     fn new(credential: C) -> Self {
-        let cap_subject = Subject::from(credential.did());
+        let subject = Subject::from(credential.did());
         Self {
-            memory: Memory::new(cap_subject.clone()),
-            archive: Archive::new(cap_subject),
+            memory: Memory::new(subject.clone()),
+            archive: Archive::new(subject),
             credential,
         }
     }
@@ -288,7 +293,6 @@ mod tests {
     use super::*;
     use crate::artifacts::{Artifact, Instruction};
     use crate::environment::{Builder, Ucan};
-    use dialog_capability::Subject;
     use dialog_capability::ucan::{Issuer, claim};
     use dialog_effects::storage;
     use dialog_remote_s3::Address;
@@ -420,17 +424,18 @@ mod tests {
         let env = Builder::temp().grant(Ucan::unrestricted()).build().await?;
         let repo = Repository::create("home").perform(&env).await?;
 
-        Ucan::delegate(Subject::from(repo.subject()))
+        Ucan::delegate(repo.subject())
             .issuer(repo.credential().clone())
             .audience(env.authority.profile_did())
             .perform(&env)
             .await?;
 
-        let capability = Subject::from(repo.subject())
+        let capability = repo
+            .subject()
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("data"));
 
-        let authority = env.authority.build_authority(repo.subject());
+        let authority = env.authority.build_authority(repo.did());
         let result = claim(&env, Issuer::new(&env, authority), &capability).await;
         assert!(
             result.is_ok(),
@@ -447,7 +452,7 @@ mod tests {
         let repo = Repository::create("home").perform(&env).await?;
 
         Ucan::delegate(
-            Subject::from(repo.subject())
+            repo.subject()
                 .attenuate(storage::Storage)
                 .attenuate(storage::Store::new("data")),
         )
@@ -456,10 +461,11 @@ mod tests {
         .perform(&env)
         .await?;
 
-        let data_cap = Subject::from(repo.subject())
+        let data_cap = repo
+            .subject()
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("data"));
-        let authority = env.authority.build_authority(repo.subject());
+        let authority = env.authority.build_authority(repo.did());
         let result = claim(&env, Issuer::new(&env, authority), &data_cap).await;
         assert!(
             result.is_ok(),
@@ -467,10 +473,11 @@ mod tests {
             result.err()
         );
 
-        let secret_cap = Subject::from(repo.subject())
+        let secret_cap = repo
+            .subject()
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("secret"));
-        let authority = env.authority.build_authority(repo.subject());
+        let authority = env.authority.build_authority(repo.did());
         let result = claim(&env, Issuer::new(&env, authority), &secret_cap).await;
         assert!(
             result.is_err(),
@@ -486,7 +493,7 @@ mod tests {
         let repo = Repository::create("home").perform(&env).await?;
 
         Ucan::delegate(
-            Subject::from(repo.subject())
+            repo.subject()
                 .attenuate(storage::Storage)
                 .attenuate(storage::Store::new("data")),
         )
@@ -496,7 +503,7 @@ mod tests {
         .await?;
 
         let result = Ucan::delegate(
-            Subject::from(repo.subject())
+            repo.subject()
                 .attenuate(storage::Storage)
                 .attenuate(storage::Store::new("data")),
         )
@@ -510,7 +517,7 @@ mod tests {
         );
 
         let result = Ucan::delegate(
-            Subject::from(repo.subject())
+            repo.subject()
                 .attenuate(storage::Storage)
                 .attenuate(storage::Store::new("secret")),
         )

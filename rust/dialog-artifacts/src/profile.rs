@@ -11,6 +11,7 @@ use crate::operator::OperatorBuilder;
 use dialog_capability::storage::{Load, Location, Save};
 use dialog_capability::{Capability, Provider};
 use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
+use dialog_storage::provider::Store;
 use dialog_varsig::{Did, Principal};
 
 /// An opened profile — holds a signing credential and knows where it lives.
@@ -49,9 +50,10 @@ impl Profile {
 
     /// Start building an operator from this profile.
     ///
-    /// The `context` is used to deterministically derive the operator key.
-    pub fn operator(&self, context: impl Into<Vec<u8>>) -> OperatorBuilder {
-        OperatorBuilder::new(self, context.into())
+    /// `store` is the mounted store for the profile's storage location.
+    /// `context` is used to deterministically derive the operator key.
+    pub fn operator(&self, store: Store, context: impl Into<Vec<u8>>) -> OperatorBuilder {
+        OperatorBuilder::new(self, store, context.into())
     }
 }
 

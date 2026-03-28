@@ -73,7 +73,7 @@ mod tests {
     fn it_selects_subject_from_itself() {
         let subject = Subject::from(did!("key:test"));
         let selected: &Subject = subject.select();
-        assert_eq!(selected.0, did!("key:test"));
+        assert_eq!(*selected.did(), did!("key:test"));
     }
 
     #[test]
@@ -91,7 +91,7 @@ mod tests {
 
         // Subject is in the tail, accessed via There<Here>
         let subject: &Subject = cap.policy();
-        assert_eq!(subject.0, did!("key:test"));
+        assert_eq!(*subject.did(), did!("key:test"));
     }
 
     #[test]
@@ -117,6 +117,6 @@ mod tests {
 
         // Select Subject (at the root)
         let subject: &Subject = cap.policy();
-        assert_eq!(subject.0, did!("key:test"));
+        assert_eq!(*subject.did(), did!("key:test"));
     }
 }

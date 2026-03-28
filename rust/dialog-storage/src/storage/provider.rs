@@ -36,3 +36,6 @@ pub use indexeddb::*;
 
 pub mod volatile;
 pub use volatile::*;
+
+pub mod compositor;
+pub use compositor::{Compositor, Store};

@@ -28,7 +28,7 @@ pub trait Ability: Sized + Serialize + DeserializeOwned {
 /// the `/` for ability.
 impl Ability for Subject {
     fn subject(&self) -> &Did {
-        &self.0
+        self.did()
     }
 
     fn ability(&self) -> String {

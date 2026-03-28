@@ -76,7 +76,7 @@ struct Session {
 /// `Provider::execute` can take `&self`. All lock guards are dropped before
 /// any `.await` points. Unlike `std::sync::RwLock`, `parking_lot` locks are
 /// infallible (no poisoning).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Volatile {
     /// Mount prefix prepended to session keys.
     mount: String,

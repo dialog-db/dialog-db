@@ -2,9 +2,13 @@
 
 use super::Volatile;
 use async_trait::async_trait;
-use dialog_capability::storage::{self, StorageError};
+use dialog_capability::storage::{self, Mountable, StorageError};
 use dialog_capability::{Capability, Did, Policy, Provider};
 use dialog_credentials::credential::Credential;
+
+impl Mountable for Volatile {
+    type Store = Volatile;
+}
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]

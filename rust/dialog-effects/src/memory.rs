@@ -268,6 +268,12 @@ pub enum MemoryError {
     Io(#[from] std::io::Error),
 }
 
+impl From<dialog_capability::storage::StorageError> for MemoryError {
+    fn from(e: dialog_capability::storage::StorageError) -> Self {
+        Self::Storage(e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
