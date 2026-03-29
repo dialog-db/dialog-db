@@ -1,30 +1,43 @@
 //! Profile — a named identity backed by a signing credential.
 
 use crate::operator::OperatorBuilder;
-use dialog_capability::storage::{Load, Location, Save};
-use dialog_capability::{Capability, Provider};
-use dialog_common::ConditionalSync;
+use crate::storage::{LocationExt, Storage};
+use dialog_capability::Capability;
+use dialog_capability::storage::Location;
 use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
-use dialog_storage::provider::{Address, Store};
+use dialog_storage::provider::Address;
 use dialog_varsig::{Did, Principal};
 
 /// An opened profile — holds a signing credential and knows where it lives.
 #[derive(Debug, Clone)]
 pub struct Profile {
     credential: SignerCredential,
-    name: String,
     location: Capability<Location<Address>>,
 }
 
 impl Profile {
-    /// Start building a profile open command.
-    pub fn named(name: impl Into<String>) -> ProfileBuilder {
-        ProfileBuilder { name: name.into() }
+    /// Open a profile — loads existing or creates new.
+    pub fn open(location: Capability<Location<Address>>) -> OpenProfile {
+        OpenProfile {
+            location,
+            mode: OpenMode::OpenOrCreate,
+        }
     }
 
-    /// The profile name.
-    pub fn name(&self) -> &str {
-        &self.name
+    /// Load an existing profile — fails if not found.
+    pub fn load(location: Capability<Location<Address>>) -> OpenProfile {
+        OpenProfile {
+            location,
+            mode: OpenMode::Load,
+        }
+    }
+
+    /// Create a new profile — fails if one already exists.
+    pub fn create(location: Capability<Location<Address>>) -> OpenProfile {
+        OpenProfile {
+            location,
+            mode: OpenMode::Create,
+        }
     }
 
     /// The profile's DID.
@@ -43,8 +56,8 @@ impl Profile {
     }
 
     /// Start building an operator from this profile.
-    pub fn operator(&self, store: Store, context: impl Into<Vec<u8>>) -> OperatorBuilder {
-        OperatorBuilder::new(self, store, context.into())
+    pub fn operator(&self, context: impl Into<Vec<u8>>) -> OperatorBuilder {
+        OperatorBuilder::new(self, context.into())
     }
 }
 
@@ -54,56 +67,64 @@ impl Principal for Profile {
     }
 }
 
-/// Builder for opening a profile.
-pub struct ProfileBuilder {
-    name: String,
+enum OpenMode {
+    OpenOrCreate,
+    Load,
+    Create,
 }
 
-impl ProfileBuilder {
-    /// Set the storage location for this profile.
-    pub fn open(self, location: Capability<Location<Address>>) -> OpenProfile {
-        OpenProfile {
-            name: self.name,
-            location,
-        }
-    }
-}
-
-/// Command to open a profile — loads or creates the signing key.
+/// Command to open, load, or create a profile.
 pub struct OpenProfile {
-    name: String,
     location: Capability<Location<Address>>,
+    mode: OpenMode,
 }
 
 impl OpenProfile {
-    /// Execute against a storage provider.
-    pub async fn perform<S>(self, storage: &S) -> Result<Profile, ProfileError>
-    where
-        S: Provider<Load<Credential, Address>>
-            + Provider<Save<Credential, Address>>
-            + ConditionalSync,
-    {
+    /// Execute against storage.
+    ///
+    /// Reads credentials from `{location}/credential/profile`.
+    /// Mounts the profile DID at `{location}` in the storage store table.
+    pub async fn perform(self, storage: &Storage) -> Result<Profile, ProfileError> {
         let location = self.location;
 
-        let load = location.clone().load::<Credential>().perform(storage).await;
+        let cred_location = location
+            .resolve("credential/profile")
+            .map_err(|e| ProfileError::Storage(e.to_string()))?;
 
-        let credential = match load {
-            Ok(credential) => match credential {
-                Credential::Signer(signer) => signer,
-                Credential::Verifier(_) => {
-                    return Err(ProfileError::Key(
-                        "profile credential is verifier-only".into(),
-                    ));
+        let credential = match self.mode {
+            OpenMode::Load => {
+                let cred = cred_location
+                    .load::<Credential>()
+                    .perform(storage)
+                    .await
+                    .map_err(|e| ProfileError::Storage(e.to_string()))?;
+
+                match cred {
+                    Credential::Signer(signer) => signer,
+                    Credential::Verifier(_) => {
+                        return Err(ProfileError::Key(
+                            "profile credential is verifier-only".into(),
+                        ));
+                    }
                 }
-            },
-            Err(_) => {
+            }
+            OpenMode::Create => {
+                let existing = cred_location
+                    .clone()
+                    .load::<Credential>()
+                    .perform(storage)
+                    .await;
+
+                if existing.is_ok() {
+                    return Err(ProfileError::AlreadyExists);
+                }
+
                 let signer = Ed25519Signer::generate()
                     .await
                     .map_err(|e| ProfileError::Key(e.to_string()))?;
                 let credential = SignerCredential::from(signer);
 
-                location
-                    .clone()
+                cred_location
                     .save(Credential::Signer(credential.clone()))
                     .perform(storage)
                     .await
@@ -111,10 +132,45 @@ impl OpenProfile {
 
                 credential
             }
+            OpenMode::OpenOrCreate => {
+                let load = cred_location
+                    .clone()
+                    .load::<Credential>()
+                    .perform(storage)
+                    .await;
+
+                match load {
+                    Ok(cred) => match cred {
+                        Credential::Signer(signer) => signer,
+                        Credential::Verifier(_) => {
+                            return Err(ProfileError::Key(
+                                "profile credential is verifier-only".into(),
+                            ));
+                        }
+                    },
+                    Err(_) => {
+                        let signer = Ed25519Signer::generate()
+                            .await
+                            .map_err(|e| ProfileError::Key(e.to_string()))?;
+                        let credential = SignerCredential::from(signer);
+
+                        cred_location
+                            .save(Credential::Signer(credential.clone()))
+                            .perform(storage)
+                            .await
+                            .map_err(|e| ProfileError::Storage(e.to_string()))?;
+
+                        credential
+                    }
+                }
+            }
         };
 
+        storage
+            .mount_at(credential.did(), &location)
+            .map_err(|e| ProfileError::Storage(e.to_string()))?;
+
         Ok(Profile {
-            name: self.name,
             credential,
             location,
         })
@@ -131,56 +187,91 @@ pub enum ProfileError {
     /// Key generation or import failed.
     #[error("Key error: {0}")]
     Key(String),
+
+    /// Profile already exists (for create).
+    #[error("Profile already exists")]
+    AlreadyExists,
+
+    /// Profile not found (for load).
+    #[error("Profile not found")]
+    NotFound,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dialog_capability::storage::Storage;
-    use dialog_storage::provider::{FileSystem, fs};
+    use crate::storage::Storage;
 
-    fn temp_location() -> Capability<Location<Address>> {
-        use dialog_common::time;
-        let id = format!(
-            "dialog-{}",
-            time::now()
-                .duration_since(time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        );
-        let address = fs::Address::temp().resolve(&id).unwrap();
-        Storage::locate(Address::FileSystem(address))
+    #[dialog_common::test]
+    async fn create_then_load_mounts_did() {
+        let storage = Storage::temp_storage();
+        let location = Storage::temp("create-load");
+
+        let created = Profile::create(location.clone())
+            .perform(&storage)
+            .await
+            .unwrap();
+        assert!(storage.stores().contains(&created.did()));
+
+        let loaded = Profile::load(location).perform(&storage).await.unwrap();
+        assert_eq!(created.did(), loaded.did());
+        assert!(storage.stores().contains(&loaded.did()));
     }
 
     #[dialog_common::test]
-    async fn it_opens_profile() {
-        let location = temp_location();
+    async fn open_creates_when_missing() {
+        let storage = Storage::temp_storage();
 
-        let profile = Profile::named("personal")
-            .open(location)
-            .perform(&FileSystem)
+        let profile = Profile::open(Storage::temp("open-create"))
+            .perform(&storage)
             .await
             .unwrap();
 
         assert!(!profile.did().to_string().is_empty());
-        assert_eq!(profile.name(), "personal");
+        assert!(storage.stores().contains(&profile.did()));
     }
 
     #[dialog_common::test]
-    async fn it_reopens_same_profile() {
-        let location = temp_location();
+    async fn open_loads_when_existing() {
+        let storage = Storage::temp_storage();
+        let location = Storage::temp("open-load");
 
-        let first = Profile::named("work")
-            .open(location.clone())
-            .perform(&FileSystem)
+        let first = Profile::open(location.clone())
+            .perform(&storage)
             .await
             .unwrap();
-        let second = Profile::named("work")
-            .open(location)
-            .perform(&FileSystem)
-            .await
-            .unwrap();
+
+        let second = Profile::open(location).perform(&storage).await.unwrap();
 
         assert_eq!(first.did(), second.did());
+        assert!(storage.stores().contains(&second.did()));
+    }
+
+    #[dialog_common::test]
+    async fn create_fails_when_existing() {
+        let storage = Storage::temp_storage();
+        let location = Storage::temp("create-dup");
+
+        Profile::create(location.clone())
+            .perform(&storage)
+            .await
+            .unwrap();
+
+        let result = Profile::create(location).perform(&storage).await;
+        assert!(
+            matches!(result, Err(ProfileError::AlreadyExists)),
+            "creating an existing profile should fail"
+        );
+    }
+
+    #[dialog_common::test]
+    async fn load_fails_when_missing() {
+        let storage = Storage::temp_storage();
+
+        let result = Profile::load(Storage::temp("load-missing"))
+            .perform(&storage)
+            .await;
+
+        assert!(result.is_err());
     }
 }

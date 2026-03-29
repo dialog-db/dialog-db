@@ -287,6 +287,11 @@ impl<A> Location<A> {
     pub fn address(&self) -> &A {
         &self.0
     }
+
+    /// Transform the address type.
+    pub fn map<B>(self, f: impl FnOnce(A) -> B) -> Location<B> {
+        Location(f(self.0))
+    }
 }
 
 impl<A: Caveat> Policy for Location<A> {

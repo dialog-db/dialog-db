@@ -7,8 +7,6 @@ use crate::remote::Remote;
 use crate::storage::Storage;
 use dialog_credentials::key::KeyExport;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
-use dialog_storage::provider::Store;
-use dialog_varsig::Did;
 
 use super::Operator;
 
@@ -19,54 +17,44 @@ const OPERATOR_DERIVATION_CONTEXT: &str = "dialog-db operator derivation";
 /// Created via `Profile::operator(context)`.
 pub struct OperatorBuilder {
     credential: SignerCredential,
-    storage: Storage,
     context: Vec<u8>,
 }
 
 impl OperatorBuilder {
-    pub(crate) fn new(profile: &Profile, profile_store: Store, context: Vec<u8>) -> Self {
-        let storage = Storage::new();
-        storage.mount(profile.did(), profile_store);
+    pub(crate) fn new(profile: &Profile, context: Vec<u8>) -> Self {
         Self {
             credential: profile.credential().clone(),
-            storage,
             context,
         }
     }
 
-    /// Register a DID → Store mapping for a repository.
-    pub fn mount(self, did: Did, store: Store) -> Self {
-        self.storage.mount(did, store);
-        self
-    }
-
-    /// Set the remote dispatch provider and finalize configuration.
+    /// Set the remote dispatch provider.
     pub fn network(self, remote: Remote) -> NetworkBuilder {
         NetworkBuilder {
             credential: self.credential,
-            storage: self.storage,
             context: self.context,
             remote,
         }
     }
 
-    /// Build with default remote.
-    pub async fn build(self) -> Result<Operator, OperatorError> {
-        self.network(Remote).build().await
+    /// Build with default remote, taking stores from the given storage.
+    pub async fn build(self, storage: Storage) -> Result<Operator, OperatorError> {
+        self.network(Remote).build(storage).await
     }
 }
 
 /// Builder with network configured, ready to build.
 pub struct NetworkBuilder {
     credential: SignerCredential,
-    storage: Storage,
     context: Vec<u8>,
     remote: Remote,
 }
 
 impl NetworkBuilder {
     /// Build the operator, deriving the operator key.
-    pub async fn build(self) -> Result<Operator, OperatorError> {
+    ///
+    /// Takes a [`Storage`] reference to extract the DID-routed store table.
+    pub async fn build(self, storage: Storage) -> Result<Operator, OperatorError> {
         let operator_signer = derive_operator(&self.credential, &self.context).await?;
         let credentials = Credentials::new(
             "operator",
@@ -74,7 +62,11 @@ impl NetworkBuilder {
             operator_signer,
         );
 
-        Ok(Environment::new(credentials, self.storage, self.remote))
+        Ok(Environment::new(
+            credentials,
+            storage.take_stores(),
+            self.remote,
+        ))
     }
 }
 

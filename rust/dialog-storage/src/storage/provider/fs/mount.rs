@@ -101,57 +101,6 @@ fn to_err(e: impl std::fmt::Display) -> StorageError {
     StorageError::Storage(e.to_string())
 }
 
-use crate::provider::Address as EnumAddress;
-
-#[async_trait]
-impl Provider<Load<Credential, EnumAddress>> for FileSystem {
-    async fn execute(
-        &self,
-        input: Capability<Load<Credential, EnumAddress>>,
-    ) -> Result<Credential, StorageError> {
-        let address = match Location::of(&input).address() {
-            EnumAddress::FileSystem(addr) => addr,
-            _ => {
-                return Err(StorageError::Storage(
-                    "FileSystem cannot handle non-filesystem address".into(),
-                ));
-            }
-        };
-        let path = FileSystem::resolve(address).map_err(to_err)?;
-        let data = tokio::fs::read(&path).await.map_err(StorageError::Io)?;
-        let export = CredentialExport::try_from(data).map_err(to_err)?;
-        Credential::import(export).await.map_err(to_err)
-    }
-}
-
-#[async_trait]
-impl Provider<Save<Credential, EnumAddress>> for FileSystem {
-    async fn execute(
-        &self,
-        input: Capability<Save<Credential, EnumAddress>>,
-    ) -> Result<(), StorageError> {
-        let address = match Location::of(&input).address() {
-            EnumAddress::FileSystem(addr) => addr,
-            _ => {
-                return Err(StorageError::Storage(
-                    "FileSystem cannot handle non-filesystem address".into(),
-                ));
-            }
-        };
-        let credential = &Save::<Credential, EnumAddress>::of(&input).content;
-        let export = credential.export().await.map_err(to_err)?;
-        let path = FileSystem::resolve(address).map_err(to_err)?;
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(StorageError::Io)?;
-        }
-        tokio::fs::write(&path, export.as_bytes())
-            .await
-            .map_err(StorageError::Io)
-    }
-}
-
 #[async_trait]
 impl Provider<Load<Credential, Address>> for FileSystem {
     async fn execute(

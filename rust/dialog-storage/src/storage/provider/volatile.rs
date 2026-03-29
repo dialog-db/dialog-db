@@ -87,6 +87,21 @@ impl Address {
         Self(prefix.into())
     }
 
+    /// Profile storage address with the given name.
+    pub fn profile(name: &str) -> Self {
+        Self(format!("profile/{name}"))
+    }
+
+    /// Current/working storage address with the given name.
+    pub fn current(name: &str) -> Self {
+        Self(format!("storage/{name}"))
+    }
+
+    /// Temporary storage address with the given name.
+    pub fn temp(name: &str) -> Self {
+        Self(format!("temp/{name}"))
+    }
+
     /// The prefix string.
     pub fn prefix(&self) -> &str {
         &self.0
@@ -127,6 +142,14 @@ impl Volatile {
     /// Creates a new volatile provider.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a volatile store mounted at the given address.
+    pub fn mount(address: &Address) -> Self {
+        Self {
+            mount: address.prefix().to_string(),
+            sessions: std::sync::Arc::new(RwLock::new(HashMap::new())),
+        }
     }
 }
 

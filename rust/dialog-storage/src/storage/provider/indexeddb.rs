@@ -65,6 +65,29 @@ impl Address {
         Self(prefix.into())
     }
 
+    /// Profile storage address with the given name.
+    pub fn profile(name: &str) -> Self {
+        Self(format!("profile/{name}"))
+    }
+
+    /// Current/working storage address with the given name.
+    pub fn current(name: &str) -> Self {
+        Self(format!("storage/{name}"))
+    }
+
+    /// Unique temporary storage address.
+    pub fn temp() -> Self {
+        use dialog_common::time;
+        let id = format!(
+            "dialog-{}",
+            time::now()
+                .duration_since(time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        Self(format!("temp/{id}"))
+    }
+
     /// The prefix string.
     pub fn prefix(&self) -> &str {
         &self.0
