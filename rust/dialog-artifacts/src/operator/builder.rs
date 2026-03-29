@@ -1,7 +1,6 @@
 //! Builder for constructing an Operator from a Profile.
 
 use crate::Credentials;
-use crate::environment::Environment;
 use crate::profile::Profile;
 use crate::remote::Remote;
 use crate::storage::Storage;
@@ -84,7 +83,11 @@ impl NetworkBuilder {
             operator_signer,
         );
 
-        let operator = Environment::new(credentials.clone(), storage.take_stores(), self.remote);
+        let operator = Operator {
+            authority: credentials.clone(),
+            storage,
+            remote: self.remote,
+        };
 
         // Create delegations for allowed capabilities
         #[cfg(feature = "ucan")]

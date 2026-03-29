@@ -1,6 +1,5 @@
 //! Operator — an operating environment built from a Profile.
 //!
-//! The Operator is a type alias for `Environment<Credentials, Storage, Remote>`.
 //! Build one via `Profile::operator()`.
 
 mod builder;
@@ -10,12 +9,88 @@ mod test;
 pub use builder::{NetworkBuilder, OperatorBuilder, OperatorError};
 
 use crate::Credentials;
-use crate::environment::Environment;
 use crate::remote::Remote;
-use crate::storage::Stores;
+use crate::storage::Storage;
+use dialog_capability::Provider;
+use dialog_capability::authority::{Identify, Sign};
+use dialog_capability::storage::{Load, Mount, Save};
+use dialog_credentials::credential::Credential;
+use dialog_effects::{archive, credential, memory, storage as fx_storage};
+use dialog_storage::provider::Address;
+use dialog_varsig::{Did, Principal};
 
 /// An operating environment built from a [`Profile`](crate::profile::Profile).
 ///
-/// Composes authority credentials, a [`Stores`] for DID-routed effects,
-/// and a remote provider.
-pub type Operator = Environment<Credentials, Stores, Remote>;
+/// Composes:
+/// - Authority credentials (identify, sign)
+/// - [`Storage`] for addressed Load/Save/Mount and DID-routed effects
+/// - Remote for fork invocations
+#[derive(Provider)]
+pub struct Operator {
+    #[provide(Identify, Sign)]
+    /// Provider for authority effects (identity + signing).
+    authority: Credentials,
+
+    #[provide(
+        archive::Get,
+        archive::Put,
+        memory::Resolve,
+        memory::Publish,
+        memory::Retract,
+        fx_storage::Get,
+        fx_storage::Set,
+        fx_storage::Delete,
+        fx_storage::List,
+        credential::Load,
+        credential::Save,
+        Load<Credential, Address>,
+        Save<Credential, Address>,
+        Load<Vec<u8>, Address>,
+        Save<Vec<u8>, Address>,
+        Mount<Address>
+    )]
+    /// Storage — routes DID-based effects and addressed Load/Save/Mount.
+    storage: Storage,
+
+    /// Provider for remote invocations.
+    remote: Remote,
+}
+
+impl Operator {
+    /// The operator's DID (the ephemeral/derived session key).
+    pub fn did(&self) -> Did {
+        self.authority.operator_did()
+    }
+
+    /// The profile's DID (the long-lived identity).
+    pub fn profile_did(&self) -> Did {
+        self.authority.profile_did()
+    }
+}
+
+impl Principal for Operator {
+    fn did(&self) -> Did {
+        self.authority.operator_did()
+    }
+}
+
+use dialog_capability::fork::{Fork, ForkInvocation};
+use dialog_capability::site::Site;
+use dialog_capability::{Constraint, Effect};
+use dialog_common::{ConditionalSend, ConditionalSync};
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S, Fx> Provider<Fork<S, Fx>> for Operator
+where
+    S: Site,
+    Fx: Effect + 'static,
+    Fx::Of: Constraint,
+    ForkInvocation<S, Fx>: ConditionalSend,
+    Remote: Provider<Fork<S, Fx>> + ConditionalSync,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(&self, input: ForkInvocation<S, Fx>) -> Fx::Output {
+        self.remote.execute(input).await
+    }
+}

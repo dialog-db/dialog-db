@@ -164,8 +164,35 @@ fn generate_struct(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream>
         }
     }
 
+    // Collect all command types to generate a dummy reference
+    // that prevents unused_imports warnings for types used only in #[provide]
+    let all_commands: Vec<_> = provide_fields
+        .iter()
+        .flat_map(|pf| pf.commands.iter())
+        .collect();
+
+    let phantom_fields: Vec<_> = all_commands
+        .iter()
+        .enumerate()
+        .map(|(i, cmd)| {
+            let name = syn::Ident::new(&format!("_{i}"), proc_macro2::Span::call_site());
+            quote! { #name: ::core::marker::PhantomData<fn() -> #cmd> }
+        })
+        .collect();
+
+    let dummy_struct_name = syn::Ident::new(
+        &format!("__{}ProviderPhantom", struct_name),
+        proc_macro2::Span::call_site(),
+    );
+
     Ok(quote! {
         #(#provider_impls)*
+
+        #[doc(hidden)]
+        #[allow(non_camel_case_types, dead_code)]
+        struct #dummy_struct_name {
+            #(#phantom_fields),*
+        }
     })
 }
 

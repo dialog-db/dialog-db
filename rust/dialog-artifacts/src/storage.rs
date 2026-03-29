@@ -85,9 +85,24 @@ where
     }
 }
 
+use dialog_effects::{archive, credential, memory, storage as fx_storage};
+
 /// Address-dispatched storage with DID-routed effect table.
-#[derive(Clone)]
+#[derive(Clone, Provider)]
 pub struct Storage {
+    #[provide(
+        archive::Get,
+        archive::Put,
+        memory::Resolve,
+        memory::Publish,
+        memory::Retract,
+        fx_storage::Get,
+        fx_storage::Set,
+        fx_storage::Delete,
+        fx_storage::List,
+        credential::Load,
+        credential::Save
+    )]
     stores: Stores,
 }
 
@@ -163,11 +178,6 @@ impl Storage {
     /// The DID-routed store table for runtime effects.
     pub fn stores(&self) -> &Stores {
         &self.stores
-    }
-
-    /// Clone the store table for use in an Operator.
-    pub fn take_stores(&self) -> Stores {
-        self.stores.clone()
     }
 
     /// Create a Storage backed by a temporary filesystem directory.
