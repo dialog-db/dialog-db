@@ -5,8 +5,11 @@ use crate::environment::Environment;
 use crate::profile::Profile;
 use crate::remote::Remote;
 use crate::storage::Storage;
+use dialog_capability::Ability;
+use dialog_capability::ucan::Scope;
 use dialog_credentials::key::KeyExport;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
+use dialog_varsig::Principal;
 
 use super::Operator;
 
@@ -18,6 +21,7 @@ const OPERATOR_DERIVATION_CONTEXT: &str = "dialog-db operator derivation";
 pub struct OperatorBuilder {
     credential: SignerCredential,
     context: Vec<u8>,
+    allowed: Vec<Scope>,
 }
 
 impl OperatorBuilder {
@@ -25,7 +29,22 @@ impl OperatorBuilder {
         Self {
             credential: profile.credential().clone(),
             context,
+            allowed: Vec::new(),
         }
+    }
+
+    /// Allow a capability — creates a delegation from profile to operator.
+    ///
+    /// The delegation is created during `.build()`.
+    pub fn allow<T: dialog_capability::Constraint>(
+        mut self,
+        capability: dialog_capability::Capability<T>,
+    ) -> Self
+    where
+        dialog_capability::Capability<T>: Ability,
+    {
+        self.allowed.push(Scope::from(&capability));
+        self
     }
 
     /// Set the remote dispatch provider.
@@ -33,6 +52,7 @@ impl OperatorBuilder {
         NetworkBuilder {
             credential: self.credential,
             context: self.context,
+            allowed: self.allowed,
             remote,
         }
     }
@@ -47,26 +67,54 @@ impl OperatorBuilder {
 pub struct NetworkBuilder {
     credential: SignerCredential,
     context: Vec<u8>,
+    allowed: Vec<Scope>,
     remote: Remote,
 }
 
 impl NetworkBuilder {
     /// Build the operator, deriving the operator key.
     ///
-    /// Takes a [`Storage`] reference to extract the DID-routed store table.
+    /// For each `.allow()` scope, creates a UCAN delegation from
+    /// profile → operator and stores it under the profile's DID.
     pub async fn build(self, storage: Storage) -> Result<Operator, OperatorError> {
         let operator_signer = derive_operator(&self.credential, &self.context).await?;
         let credentials = Credentials::new(
             "operator",
-            Ed25519Signer::from(self.credential),
+            Ed25519Signer::from(self.credential.clone()),
             operator_signer,
         );
 
-        Ok(Environment::new(
-            credentials,
-            storage.take_stores(),
-            self.remote,
-        ))
+        let operator = Environment::new(credentials.clone(), storage.take_stores(), self.remote);
+
+        // Create delegations for allowed capabilities
+        #[cfg(feature = "ucan")]
+        if !self.allowed.is_empty() {
+            use crate::environment::grant::ucan::store_delegation_chain;
+            use dialog_ucan::DelegationChain;
+            use dialog_ucan::delegation::builder::DelegationBuilder;
+
+            let profile_did = self.credential.did();
+            let operator_did = credentials.operator_did();
+
+            for scope in &self.allowed {
+                let delegation = DelegationBuilder::new()
+                    .issuer(self.credential.clone())
+                    .audience(&operator_did)
+                    .subject(scope.subject.clone())
+                    .command(scope.command.segments().clone())
+                    .policy(scope.policy())
+                    .try_build()
+                    .await
+                    .map_err(|e| OperatorError::Delegation(format!("{e:?}")))?;
+
+                let chain = DelegationChain::new(delegation);
+                store_delegation_chain(&operator, &profile_did, &chain)
+                    .await
+                    .map_err(|e| OperatorError::Delegation(e.to_string()))?;
+            }
+        }
+
+        Ok(operator)
     }
 }
 
@@ -103,4 +151,8 @@ pub enum OperatorError {
     /// Key derivation or generation failed.
     #[error("Key error: {0}")]
     Key(String),
+
+    /// Delegation creation failed.
+    #[error("Delegation error: {0}")]
+    Delegation(String),
 }
