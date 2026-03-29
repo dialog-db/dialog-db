@@ -2,24 +2,9 @@
 
 use super::{Address, FileStore, FileSystem};
 use async_trait::async_trait;
-use dialog_capability::storage::{Load, Location, Mount, Mountable, Save, StorageError};
+use dialog_capability::storage::{Load, Location, Save, StorageError};
 use dialog_capability::{Capability, Policy, Provider};
 use dialog_credentials::credential::{Credential, CredentialExport};
-
-impl Mountable for FileSystem {
-    type Store = FileStore;
-}
-
-#[async_trait]
-impl Provider<Mount<FileStore, Address>> for FileSystem {
-    async fn execute(
-        &self,
-        input: Capability<Mount<FileStore, Address>>,
-    ) -> Result<FileStore, StorageError> {
-        let address = Location::of(&input).address();
-        FileSystem::mount(address).map_err(to_err)
-    }
-}
 
 #[async_trait]
 impl Provider<Load<Vec<u8>, Address>> for FileStore {

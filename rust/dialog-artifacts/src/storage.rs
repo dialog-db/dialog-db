@@ -205,6 +205,28 @@ impl Default for Storage {
     }
 }
 
+use dialog_capability::storage::Mount;
+
+/// Mount effect — registers a DID → Store mapping in the store table.
+///
+/// The subject DID from the capability chain is mounted at the address
+/// from the Location. Uses `Mount<(), Address>` (unit Resource) to
+/// distinguish from provider-specific mounts that return a Store.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<Mount<Address>> for Storage
+where
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(&self, input: Capability<Mount<Address>>) -> Result<(), StorageError> {
+        let did = input.subject().clone();
+        let address = Location::of(&input).address();
+        let store = Store::mount(address)?;
+        self.stores.mount(did, store);
+        Ok(())
+    }
+}
+
 macro_rules! impl_addressed {
     ($content:ty) => {
         #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -217,31 +239,38 @@ macro_rules! impl_addressed {
                 &self,
                 input: Capability<Load<$content, Address>>,
             ) -> Result<$content, StorageError> {
+                let did = input.subject();
+                let expected = dialog_capability::did!("local:storage");
+                if *did != expected {
+                    return Err(StorageError::Storage(format!(
+                        "addressed Load requires subject did:local:storage, got {did}"
+                    )));
+                }
                 let address = Location::of(&input).address().clone();
-                let did = input.subject().clone();
-                let store = self
-                    .stores
-                    .lookup(&did)
-                    .ok_or_else(|| StorageError::Storage(format!("no mount for {did}")))?;
+                let store = Store::mount(&address)?;
 
                 match (store, address) {
                     #[cfg(not(target_arch = "wasm32"))]
                     (Store::FileSystem(fs), Address::FileSystem(addr)) => {
-                        use dialog_capability::storage::Storage as Cap;
-                        Cap::locate(addr).load::<$content>().perform(&fs).await
+                        CapStorage::locate(addr)
+                            .load::<$content>()
+                            .perform(&fs)
+                            .await
                     }
                     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
                     (Store::IndexedDb(idb), Address::IndexedDb(addr)) => {
-                        use dialog_capability::storage::Storage as Cap;
-                        Cap::locate(addr).load::<$content>().perform(&idb).await
+                        CapStorage::locate(addr)
+                            .load::<$content>()
+                            .perform(&idb)
+                            .await
                     }
                     (Store::Volatile(v), Address::Volatile(addr)) => {
-                        use dialog_capability::storage::Storage as Cap;
-                        Cap::locate(addr).load::<$content>().perform(&v).await
+                        CapStorage::locate(addr)
+                            .load::<$content>()
+                            .perform(&v)
+                            .await
                     }
-                    _ => Err(StorageError::Storage(format!(
-                        "store/address mismatch for {did}"
-                    ))),
+                    _ => Err(StorageError::Storage("store/address mismatch".into())),
                 }
             }
         }
@@ -256,32 +285,30 @@ macro_rules! impl_addressed {
                 &self,
                 input: Capability<Save<$content, Address>>,
             ) -> Result<(), StorageError> {
+                let did = input.subject();
+                let expected = dialog_capability::did!("local:storage");
+                if *did != expected {
+                    return Err(StorageError::Storage(format!(
+                        "addressed Save requires subject did:local:storage, got {did}"
+                    )));
+                }
                 let address = Location::of(&input).address().clone();
                 let content = Save::<$content, Address>::of(&input).content.clone();
-                let did = input.subject().clone();
-                let store = self
-                    .stores
-                    .lookup(&did)
-                    .ok_or_else(|| StorageError::Storage(format!("no mount for {did}")))?;
+                let store = Store::mount(&address)?;
 
                 match (store, address) {
                     #[cfg(not(target_arch = "wasm32"))]
                     (Store::FileSystem(fs), Address::FileSystem(addr)) => {
-                        use dialog_capability::storage::Storage as Cap;
-                        Cap::locate(addr).save(content).perform(&fs).await
+                        CapStorage::locate(addr).save(content).perform(&fs).await
                     }
                     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
                     (Store::IndexedDb(idb), Address::IndexedDb(addr)) => {
-                        use dialog_capability::storage::Storage as Cap;
-                        Cap::locate(addr).save(content).perform(&idb).await
+                        CapStorage::locate(addr).save(content).perform(&idb).await
                     }
                     (Store::Volatile(v), Address::Volatile(addr)) => {
-                        use dialog_capability::storage::Storage as Cap;
-                        Cap::locate(addr).save(content).perform(&v).await
+                        CapStorage::locate(addr).save(content).perform(&v).await
                     }
-                    _ => Err(StorageError::Storage(format!(
-                        "store/address mismatch for {did}"
-                    ))),
+                    _ => Err(StorageError::Storage("store/address mismatch".into())),
                 }
             }
         }

@@ -24,20 +24,6 @@ impl From<StorageError> for Err {
 }
 
 #[async_trait(?Send)]
-impl Provider<storage::Mount<IndexedDb, Address>> for IndexedDb {
-    async fn execute(
-        &self,
-        input: Capability<storage::Mount<IndexedDb, Address>>,
-    ) -> Result<IndexedDb, StorageError> {
-        let prefix = Location::of(&input).address().prefix();
-        Ok(IndexedDb {
-            mount: self.prefixed(prefix),
-            sessions: self.sessions.clone(),
-        })
-    }
-}
-
-#[async_trait(?Send)]
 impl Provider<storage::Load<Credential, Address>> for IndexedDb {
     async fn execute(
         &self,

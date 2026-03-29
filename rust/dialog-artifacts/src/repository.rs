@@ -29,10 +29,13 @@ pub mod remote;
 /// Revision type and edition tracking.
 pub mod revision;
 
-use dialog_capability::{Did, Provider, Subject};
+use crate::storage::LocationExt;
+use dialog_capability::storage::{self as cap_storage, Location};
+use dialog_capability::{Capability, Did, Policy, Provider, Subject};
+use dialog_common::ConditionalSync;
 use dialog_credentials::Ed25519Signer;
 use dialog_credentials::credential::{Credential, SignerCredential};
-use dialog_effects::repository as repo_fx;
+use dialog_storage::provider::Address;
 use dialog_varsig::Principal;
 
 use self::archive::Archive;
@@ -140,151 +143,128 @@ impl<C: Principal> Repository<C> {
     }
 }
 
+enum OpenMode {
+    OpenOrCreate,
+    Load,
+    Create,
+}
+
+/// Command to open, load, or create a repository.
+pub struct OpenRepository {
+    location: Capability<Location<Address>>,
+    mode: OpenMode,
+}
+
 impl Repository {
-    /// Load an existing named repository.
+    /// Open a repository — loads existing or creates new.
     ///
-    /// Fails if no repository with this name exists.
-    pub fn load(name: impl Into<String>) -> LoadRepository {
-        LoadRepository { name: name.into() }
-    }
-
-    /// Open a named repository — loads existing or creates new.
-    pub fn open(name: impl Into<String>) -> OpenRepository {
-        OpenRepository { name: name.into() }
-    }
-
-    /// Create a named repository — fails if it already exists.
-    pub fn create(name: impl Into<String>) -> CreateRepository {
-        CreateRepository { name: name.into() }
-    }
-}
-
-/// Command to load an existing named repository.
-pub struct LoadRepository {
-    name: String,
-}
-
-impl LoadRepository {
-    /// Load an existing repository by name.
-    ///
-    /// Returns the repository with whatever credential was stored.
-    /// Fails if no repository with this name exists.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Repository, RepositoryError>
-    where
-        Env: Provider<repo_fx::Load>,
-    {
-        let dummy = Subject::from(dialog_capability::did!(
-            "key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
-        ));
-
-        let credential = dummy
-            .attenuate(repo_fx::Repository)
-            .attenuate(repo_fx::Name::new(&self.name))
-            .invoke(repo_fx::Load)
-            .perform(env)
-            .await
-            .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
-
-        match credential {
-            Some(credential) => Ok(credential.into()),
-            None => Err(RepositoryError::NotFound(self.name)),
+    /// Use `Storage::current("name")` to get the location.
+    pub fn open(location: Capability<Location<Address>>) -> OpenRepository {
+        OpenRepository {
+            location,
+            mode: OpenMode::OpenOrCreate,
         }
     }
-}
 
-/// Command to open a named repository — loads existing or creates new.
-pub struct OpenRepository {
-    name: String,
+    /// Load an existing repository — fails if not found.
+    pub fn load(location: Capability<Location<Address>>) -> OpenRepository {
+        OpenRepository {
+            location,
+            mode: OpenMode::Load,
+        }
+    }
+
+    /// Create a new repository — fails if one already exists.
+    pub fn create(location: Capability<Location<Address>>) -> OpenRepository {
+        OpenRepository {
+            location,
+            mode: OpenMode::Create,
+        }
+    }
 }
 
 impl OpenRepository {
-    /// Load existing or create new repository.
+    /// Execute against a storage provider.
     ///
-    /// Returns `Repository<Credential>` — a signer if created or loaded as owner.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Repository, RepositoryError>
+    /// Reads credentials from `{location}/credential/space`.
+    /// Mounts the repository DID at `{location}` in the storage store table.
+    pub async fn perform<S>(self, storage: &S) -> Result<Repository, RepositoryError>
     where
-        Env: Provider<repo_fx::Load> + Provider<repo_fx::Save>,
+        S: Provider<cap_storage::Load<Credential, Address>>
+            + Provider<cap_storage::Save<Credential, Address>>
+            + Provider<cap_storage::Mount<Address>>
+            + ConditionalSync,
     {
-        let dummy = Subject::from(dialog_capability::did!(
-            "key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
-        ));
-
-        let credential = dummy
-            .clone()
-            .attenuate(repo_fx::Repository)
-            .attenuate(repo_fx::Name::new(&self.name))
-            .invoke(repo_fx::Load)
-            .perform(env)
-            .await
+        let location = self.location;
+        let cred_location = location
+            .resolve("credential/space")
             .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
 
-        match credential {
-            Some(credential) => Ok(credential.into()),
-            None => {
+        let credential = match self.mode {
+            OpenMode::Load => cred_location
+                .load::<Credential>()
+                .perform(storage)
+                .await
+                .map_err(|e| RepositoryError::StorageError(e.to_string()))?,
+            OpenMode::Create => {
+                let existing = cred_location
+                    .clone()
+                    .load::<Credential>()
+                    .perform(storage)
+                    .await;
+
+                if existing.is_ok() {
+                    return Err(RepositoryError::AlreadyExists(String::new()));
+                }
+
                 let signer = Ed25519Signer::generate()
                     .await
                     .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
+                let credential = Credential::Signer(SignerCredential::from(signer));
 
-                dummy
-                    .attenuate(repo_fx::Repository)
-                    .attenuate(repo_fx::Name::new(&self.name))
-                    .invoke(repo_fx::Save::new(signer.clone().into()))
-                    .perform(env)
+                cred_location
+                    .save(credential.clone())
+                    .perform(storage)
                     .await
                     .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
 
-                Ok(Credential::Signer(SignerCredential(signer)).into())
+                credential
             }
-        }
-    }
-}
+            OpenMode::OpenOrCreate => {
+                let load = cred_location
+                    .clone()
+                    .load::<Credential>()
+                    .perform(storage)
+                    .await;
 
-/// Command to create a new named repository.
-pub struct CreateRepository {
-    name: String,
-}
+                match load {
+                    Ok(cred) => cred,
+                    Err(_) => {
+                        let signer = Ed25519Signer::generate()
+                            .await
+                            .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
+                        let credential = Credential::Signer(SignerCredential::from(signer));
 
-impl CreateRepository {
-    /// Create a new repository, generating a fresh keypair.
-    ///
-    /// Fails if a repository with this name already exists.
-    pub async fn perform<Env>(
-        self,
-        env: &Env,
-    ) -> Result<Repository<SignerCredential>, RepositoryError>
-    where
-        Env: Provider<repo_fx::Load> + Provider<repo_fx::Save>,
-    {
-        let dummy = Subject::from(dialog_capability::did!(
-            "key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
-        ));
+                        cred_location
+                            .save(credential.clone())
+                            .perform(storage)
+                            .await
+                            .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
 
-        let existing = dummy
-            .clone()
-            .attenuate(repo_fx::Repository)
-            .attenuate(repo_fx::Name::new(&self.name))
-            .invoke(repo_fx::Load)
-            .perform(env)
+                        credential
+                    }
+                }
+            }
+        };
+
+        // Mount the repository DID at the root location
+        let address = Location::of(&location).address().clone();
+        cap_storage::Storage::mount(credential.did(), address)
+            .perform(storage)
             .await
             .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
 
-        if existing.is_some() {
-            return Err(RepositoryError::AlreadyExists(self.name));
-        }
-
-        let signer = Ed25519Signer::generate()
-            .await
-            .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
-
-        dummy
-            .attenuate(repo_fx::Repository)
-            .attenuate(repo_fx::Name::new(&self.name))
-            .invoke(repo_fx::Save::new(signer.clone().into()))
-            .perform(env)
-            .await
-            .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
-
-        Ok(SignerCredential(signer).into())
+        Ok(credential.into())
     }
 }
 
@@ -293,9 +273,10 @@ mod tests {
     use super::*;
     use crate::artifacts::{Artifact, Instruction};
     use crate::environment::{Builder, Ucan};
+    use crate::storage::Storage;
     use dialog_capability::ucan::{Issuer, claim};
-    use dialog_effects::storage;
-    use dialog_remote_s3::Address;
+    use dialog_effects::storage as fx_storage;
+    use dialog_remote_s3::Address as S3Address;
     use futures_util::stream;
 
     async fn test_signer() -> Ed25519Signer {
@@ -303,8 +284,56 @@ mod tests {
     }
 
     fn test_address() -> RemoteAddress {
-        let s3_addr = Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "bucket");
+        let s3_addr = S3Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "bucket");
         RemoteAddress::S3(s3_addr)
+    }
+
+    /// Extract the Ed25519Signer from a Credential that is known to be a Signer variant.
+    fn extract_signer(credential: &Credential) -> Ed25519Signer {
+        match credential {
+            Credential::Signer(s) => s.clone().into(),
+            Credential::Verifier(_) => panic!("expected Signer credential"),
+        }
+    }
+
+    /// Generate a unique location for test isolation.
+    fn unique_location(prefix: &str) -> Capability<Location<Address>> {
+        use dialog_common::time;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = time::now()
+            .duration_since(time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        Storage::temp(&format!("{prefix}-{id}-{seq}"))
+    }
+
+    #[dialog_common::test]
+    async fn open_creates_and_mounts() {
+        let storage = Storage::temp_storage();
+        let repo = Repository::open(unique_location("open-mount"))
+            .perform(&storage)
+            .await
+            .unwrap();
+
+        assert!(storage.stores().contains(&repo.did()));
+    }
+
+    #[dialog_common::test]
+    async fn create_then_load_mounts() {
+        let storage = Storage::temp_storage();
+        let location = unique_location("create-load-mount");
+
+        let created = Repository::create(location.clone())
+            .perform(&storage)
+            .await
+            .unwrap();
+        assert!(storage.stores().contains(&created.did()));
+
+        let loaded = Repository::load(location).perform(&storage).await.unwrap();
+        assert_eq!(created.did(), loaded.did());
+        assert!(storage.stores().contains(&loaded.did()));
     }
 
     #[dialog_common::test]
@@ -380,9 +409,11 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_opens_repository_by_name() -> anyhow::Result<()> {
-        let env = Builder::temp().build().await?;
+        let storage = Storage::temp_storage();
 
-        let repo = Repository::open("home").perform(&env).await?;
+        let repo = Repository::open(unique_location("home"))
+            .perform(&storage)
+            .await?;
         assert!(
             !repo.subject().to_string().is_empty(),
             "should produce a valid subject DID"
@@ -393,10 +424,17 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_reopens_same_repository() -> anyhow::Result<()> {
-        let env = Builder::temp().build().await?;
+        let storage = Storage::temp_storage();
+        let location = unique_location("home");
 
-        let did1 = Repository::open("home").perform(&env).await?.subject();
-        let did2 = Repository::open("home").perform(&env).await?.subject();
+        let did1 = Repository::open(location.clone())
+            .perform(&storage)
+            .await?
+            .subject();
+        let did2 = Repository::open(location)
+            .perform(&storage)
+            .await?
+            .subject();
 
         assert_eq!(did1, did2, "reopening should return same subject DID");
 
@@ -405,10 +443,14 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_isolates_repositories_by_name() -> anyhow::Result<()> {
-        let env = Builder::temp().build().await?;
+        let storage = Storage::temp_storage();
 
-        let repo1 = Repository::open("home").perform(&env).await?;
-        let repo2 = Repository::open("work").perform(&env).await?;
+        let repo1 = Repository::open(unique_location("home"))
+            .perform(&storage)
+            .await?;
+        let repo2 = Repository::open(unique_location("work"))
+            .perform(&storage)
+            .await?;
 
         assert_ne!(
             repo1.subject(),
@@ -421,19 +463,23 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_delegates_repo_to_profile_and_claims() -> anyhow::Result<()> {
+        let storage = Storage::temp_storage();
         let env = Builder::temp().grant(Ucan::unrestricted()).build().await?;
-        let repo = Repository::create("home").perform(&env).await?;
+        let repo = Repository::create(unique_location("home"))
+            .perform(&storage)
+            .await?;
 
+        let signer = extract_signer(repo.credential());
         Ucan::delegate(repo.subject())
-            .issuer(repo.credential().clone())
+            .issuer(signer)
             .audience(env.authority.profile_did())
             .perform(&env)
             .await?;
 
         let capability = repo
             .subject()
-            .attenuate(storage::Storage)
-            .attenuate(storage::Store::new("data"));
+            .attenuate(fx_storage::Storage)
+            .attenuate(fx_storage::Store::new("data"));
 
         let authority = env.authority.build_authority(repo.did());
         let result = claim(&env, Issuer::new(&env, authority), &capability).await;
@@ -448,23 +494,27 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_enforces_scoped_delegation_policy() -> anyhow::Result<()> {
+        let storage = Storage::temp_storage();
         let env = Builder::temp().grant(Ucan::unrestricted()).build().await?;
-        let repo = Repository::create("home").perform(&env).await?;
+        let repo = Repository::create(unique_location("home"))
+            .perform(&storage)
+            .await?;
 
+        let signer = extract_signer(repo.credential());
         Ucan::delegate(
             repo.subject()
-                .attenuate(storage::Storage)
-                .attenuate(storage::Store::new("data")),
+                .attenuate(fx_storage::Storage)
+                .attenuate(fx_storage::Store::new("data")),
         )
         .audience(env.authority.profile_did())
-        .issuer(repo.credential().clone())
+        .issuer(signer)
         .perform(&env)
         .await?;
 
         let data_cap = repo
             .subject()
-            .attenuate(storage::Storage)
-            .attenuate(storage::Store::new("data"));
+            .attenuate(fx_storage::Storage)
+            .attenuate(fx_storage::Store::new("data"));
         let authority = env.authority.build_authority(repo.did());
         let result = claim(&env, Issuer::new(&env, authority), &data_cap).await;
         assert!(
@@ -475,8 +525,8 @@ mod tests {
 
         let secret_cap = repo
             .subject()
-            .attenuate(storage::Storage)
-            .attenuate(storage::Store::new("secret"));
+            .attenuate(fx_storage::Storage)
+            .attenuate(fx_storage::Store::new("secret"));
         let authority = env.authority.build_authority(repo.did());
         let result = claim(&env, Issuer::new(&env, authority), &secret_cap).await;
         assert!(
@@ -489,23 +539,27 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_validates_acquire_against_policy() -> anyhow::Result<()> {
+        let storage = Storage::temp_storage();
         let env = Builder::temp().grant(Ucan::unrestricted()).build().await?;
-        let repo = Repository::create("home").perform(&env).await?;
+        let repo = Repository::create(unique_location("home"))
+            .perform(&storage)
+            .await?;
 
+        let signer = extract_signer(repo.credential());
         Ucan::delegate(
             repo.subject()
-                .attenuate(storage::Storage)
-                .attenuate(storage::Store::new("data")),
+                .attenuate(fx_storage::Storage)
+                .attenuate(fx_storage::Store::new("data")),
         )
         .audience(env.authority.profile_did())
-        .issuer(repo.credential().clone())
+        .issuer(signer)
         .perform(&env)
         .await?;
 
         let result = Ucan::delegate(
             repo.subject()
-                .attenuate(storage::Storage)
-                .attenuate(storage::Store::new("data")),
+                .attenuate(fx_storage::Storage)
+                .attenuate(fx_storage::Store::new("data")),
         )
         .audience(env.authority.operator_did())
         .acquire(&env)
@@ -518,8 +572,8 @@ mod tests {
 
         let result = Ucan::delegate(
             repo.subject()
-                .attenuate(storage::Storage)
-                .attenuate(storage::Store::new("secret")),
+                .attenuate(fx_storage::Storage)
+                .attenuate(fx_storage::Store::new("secret")),
         )
         .audience(env.authority.operator_did())
         .acquire(&env)

@@ -1,9 +1,10 @@
 //! Profile — a named identity backed by a signing credential.
 
 use crate::operator::OperatorBuilder;
-use crate::storage::{LocationExt, Storage};
-use dialog_capability::Capability;
-use dialog_capability::storage::Location;
+use crate::storage::LocationExt;
+use dialog_capability::storage::{Load, Location, Mount, Save, Storage as StorageCap};
+use dialog_capability::{Capability, Policy, Provider};
+use dialog_common::ConditionalSync;
 use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
 use dialog_storage::provider::Address;
 use dialog_varsig::{Did, Principal};
@@ -84,7 +85,13 @@ impl OpenProfile {
     ///
     /// Reads credentials from `{location}/credential/profile`.
     /// Mounts the profile DID at `{location}` in the storage store table.
-    pub async fn perform(self, storage: &Storage) -> Result<Profile, ProfileError> {
+    pub async fn perform<S>(self, storage: &S) -> Result<Profile, ProfileError>
+    where
+        S: Provider<Load<Credential, Address>>
+            + Provider<Save<Credential, Address>>
+            + Provider<Mount<Address>>
+            + ConditionalSync,
+    {
         let location = self.location;
 
         let cred_location = location
@@ -166,8 +173,11 @@ impl OpenProfile {
             }
         };
 
-        storage
-            .mount_at(credential.did(), &location)
+        // Mount the profile DID at the root location
+        let address = Location::of(&location).address().clone();
+        StorageCap::mount(credential.did(), address)
+            .perform(storage)
+            .await
             .map_err(|e| ProfileError::Storage(e.to_string()))?;
 
         Ok(Profile {
@@ -202,10 +212,22 @@ mod tests {
     use super::*;
     use crate::storage::Storage;
 
+    fn unique_location(prefix: &str) -> Capability<Location<Address>> {
+        use dialog_common::time;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = time::now()
+            .duration_since(time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        Storage::temp(&format!("{prefix}-{id}-{seq}"))
+    }
+
     #[dialog_common::test]
     async fn create_then_load_mounts_did() {
         let storage = Storage::temp_storage();
-        let location = Storage::temp("create-load");
+        let location = unique_location("create-load");
 
         let created = Profile::create(location.clone())
             .perform(&storage)
@@ -222,7 +244,7 @@ mod tests {
     async fn open_creates_when_missing() {
         let storage = Storage::temp_storage();
 
-        let profile = Profile::open(Storage::temp("open-create"))
+        let profile = Profile::open(unique_location("open-create"))
             .perform(&storage)
             .await
             .unwrap();
@@ -234,7 +256,7 @@ mod tests {
     #[dialog_common::test]
     async fn open_loads_when_existing() {
         let storage = Storage::temp_storage();
-        let location = Storage::temp("open-load");
+        let location = unique_location("open-load");
 
         let first = Profile::open(location.clone())
             .perform(&storage)
@@ -250,7 +272,7 @@ mod tests {
     #[dialog_common::test]
     async fn create_fails_when_existing() {
         let storage = Storage::temp_storage();
-        let location = Storage::temp("create-dup");
+        let location = unique_location("create-dup");
 
         Profile::create(location.clone())
             .perform(&storage)
@@ -268,7 +290,7 @@ mod tests {
     async fn load_fails_when_missing() {
         let storage = Storage::temp_storage();
 
-        let result = Profile::load(Storage::temp("load-missing"))
+        let result = Profile::load(unique_location("load-missing"))
             .perform(&storage)
             .await;
 

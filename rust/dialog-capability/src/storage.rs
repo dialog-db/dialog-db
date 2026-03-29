@@ -14,7 +14,7 @@
 //!         └── List { continuation_token } → Effect → Result<ListResult, StorageError>
 //! ```
 
-pub use crate::{Attenuation, Capability, Caveat, Claim, Effect, Policy, Subject, did};
+pub use crate::{Attenuation, Capability, Caveat, Claim, Did, Effect, Policy, Subject, did};
 use dialog_common::Checksum;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -31,6 +31,35 @@ impl Storage {
         Subject::from(did!("local:storage"))
             .attenuate(Storage)
             .attenuate(Location(address))
+    }
+
+    /// Build a mount capability for the given DID at the given address.
+    pub fn mount<A>(did: Did, address: A) -> Capability<Mount<A>>
+    where
+        A: Caveat + dialog_common::ConditionalSend + 'static,
+    {
+        Subject::from(did)
+            .attenuate(Storage)
+            .attenuate(Location(address))
+            .mount()
+    }
+
+    /// Build a load capability for the given address.
+    pub fn load<Content, A>(address: A) -> Capability<Load<Content, A>>
+    where
+        Content: dialog_common::ConditionalSend + 'static,
+        A: Caveat + dialog_common::ConditionalSend + 'static,
+    {
+        Self::locate(address).load()
+    }
+
+    /// Build a save capability for the given address and content.
+    pub fn save<Content, A>(address: A, content: Content) -> Capability<Save<Content, A>>
+    where
+        Content: Serialize + serde::de::DeserializeOwned + dialog_common::ConditionalSend + 'static,
+        A: Caveat + dialog_common::ConditionalSend + 'static,
+    {
+        Self::locate(address).save(content)
     }
 }
 
@@ -318,47 +347,43 @@ impl<A: Caveat> Capability<Location<A>> {
     }
 
     /// Create a mount effect capability for this location.
-    pub fn mount<Resource>(self) -> Capability<Mount<Resource, A>>
+    ///
+    /// The subject DID from the capability chain will be registered
+    /// to route to this location's address.
+    pub fn mount(self) -> Capability<Mount<A>>
     where
-        Resource: dialog_common::ConditionalSend + 'static,
         A: dialog_common::ConditionalSend + 'static,
     {
         self.invoke(Mount::default())
     }
 }
 
-/// A storage provider that knows what type it mounts.
+/// Mount effect — registers a subject DID to be routed to this location.
 ///
-/// Implemented by platform storage providers (e.g. `FileSystem` → `FileStore`).
-pub trait Mountable {
-    /// The local store type produced by mounting a location.
-    type Store: dialog_common::ConditionalSend + 'static;
-}
-
-/// Mount effect — opens a storage resource scoped to this location.
+/// The subject DID in the capability chain is the identity to mount.
+/// The `Location<A>` carries the address where its data lives.
 #[derive(Debug, Clone, Serialize, Deserialize, Claim)]
-pub struct Mount<Resource, A>(std::marker::PhantomData<(Resource, A)>);
+pub struct Mount<A>(std::marker::PhantomData<A>);
 
-impl<Resource, A> Mount<Resource, A> {
+impl<A> Mount<A> {
     /// Create a new Mount effect.
     pub fn new() -> Self {
         Self(std::marker::PhantomData)
     }
 }
 
-impl<Resource, A> Default for Mount<Resource, A> {
+impl<A> Default for Mount<A> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<Resource, A> Effect for Mount<Resource, A>
+impl<A> Effect for Mount<A>
 where
-    Resource: dialog_common::ConditionalSend + 'static,
     A: Caveat + dialog_common::ConditionalSend + 'static,
 {
     type Of = Location<A>;
-    type Output = Result<Resource, StorageError>;
+    type Output = Result<(), StorageError>;
 }
 
 /// Load effect — reads typed content from a location.
