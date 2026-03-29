@@ -209,6 +209,9 @@ where
             let mut new_chain = chain_so_far.clone();
             new_chain.push(candidate.delegation);
 
+            // A powerline delegation from issuer→audience means
+            // "audience can do anything issuer can do." The chain
+            // terminates when issuer IS the subject being claimed.
             if &candidate.issuer == subject_did {
                 return build_chain(new_chain).map(Some);
             }

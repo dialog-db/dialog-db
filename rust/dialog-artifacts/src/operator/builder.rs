@@ -96,7 +96,7 @@ impl NetworkBuilder {
         // Create delegations for allowed capabilities
         #[cfg(feature = "ucan")]
         if !self.allowed.is_empty() {
-            use crate::environment::grant::ucan::store_delegation_chain;
+            use dialog_capability::ucan::import_delegation_chain;
             use dialog_ucan::DelegationChain;
             use dialog_ucan::delegation::builder::DelegationBuilder;
 
@@ -115,7 +115,7 @@ impl NetworkBuilder {
                     .map_err(|e| OperatorError::Delegation(format!("{e:?}")))?;
 
                 let chain = DelegationChain::new(delegation);
-                store_delegation_chain(&operator, &profile_did, &chain)
+                import_delegation_chain(&operator, &profile_did, &chain)
                     .await
                     .map_err(|e| OperatorError::Delegation(e.to_string()))?;
             }

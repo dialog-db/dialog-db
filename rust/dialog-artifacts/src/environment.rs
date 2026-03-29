@@ -23,7 +23,7 @@
 //! use dialog_artifacts::environment::Ucan;
 //! let env = Builder::default()
 //!     .operator(b"alice")
-//!     .grant(Ucan::unrestricted())
+//!     .grant(Ucan::delegate(&dialog_capability::Subject::any()))
 //!     .build()
 //!     .await?;
 //! # }
@@ -37,9 +37,9 @@ pub mod grant;
 mod provider;
 
 pub use builder::Builder;
-pub use error::OpenError;
 #[cfg(feature = "ucan")]
-pub use grant::ucan::Ucan;
+pub use dialog_capability::ucan::Ucan;
+pub use error::OpenError;
 pub use provider::Environment;
 
 #[cfg(not(target_arch = "wasm32"))]

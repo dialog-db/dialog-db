@@ -120,25 +120,230 @@ mod tests {
         assert!(operator.storage().stores().contains(&home.did()));
     }
 
-    #[dialog_common::test]
-    async fn powerline_delegation() {
+    #[cfg(feature = "ucan")]
+    mod delegation_tests {
+        use super::*;
         use dialog_capability::Subject;
+        use dialog_capability::ucan::Ucan;
+        use dialog_credentials::Ed25519Signer;
+        use dialog_effects::archive::prelude::{ArchiveExt, SubjectExt as ArchiveSubjectExt};
+        use dialog_effects::storage as fx_storage;
+        use dialog_varsig::Principal;
 
-        let storage = Storage::temp_storage();
+        /// 1. Self-grant: issuer == subject, delegation succeeds (no proof chain needed)
+        #[dialog_common::test]
+        async fn self_grant_produces_delegation() {
+            let storage = Storage::temp_storage();
 
-        let profile = Profile::open(Storage::temp(&unique_name("power")))
-            .perform(&storage)
-            .await
-            .unwrap();
+            let profile = Profile::open(Storage::temp(&unique_name("self")))
+                .perform(&storage)
+                .await
+                .unwrap();
 
-        let operator = profile
-            .operator(b"admin")
-            .allow(Subject::any())
-            .network(Remote)
-            .build(storage)
-            .await
-            .unwrap();
+            let operator = profile
+                .operator(b"alice")
+                .network(Remote)
+                .build(storage)
+                .await
+                .unwrap();
 
-        assert_ne!(profile.did(), operator.did());
+            let signer = Ed25519Signer::generate().await.unwrap();
+            let did = signer.did();
+
+            let result = Ucan::delegate(&Subject::from(did).archive().catalog("index"))
+                .issuer(signer)
+                .audience(operator.did())
+                .perform(&operator)
+                .await;
+
+            assert!(
+                result.is_ok(),
+                "self-grant should succeed: {:?}",
+                result.err()
+            );
+        }
+
+        /// 2. Powerline self-grant: subject = Any, issuer set → delegation succeeds
+        #[dialog_common::test]
+        async fn powerline_self_grant_produces_delegation() {
+            let storage = Storage::temp_storage();
+
+            let profile = Profile::open(Storage::temp(&unique_name("psg")))
+                .perform(&storage)
+                .await
+                .unwrap();
+
+            let operator = profile
+                .operator(b"alice")
+                .network(Remote)
+                .build(storage)
+                .await
+                .unwrap();
+
+            let result = Ucan::delegate(&Subject::any())
+                .issuer(Ed25519Signer::generate().await.unwrap())
+                .audience(operator.did())
+                .perform(&operator)
+                .await;
+
+            assert!(
+                result.is_ok(),
+                "powerline self-grant should succeed: {:?}",
+                result.err()
+            );
+        }
+
+        /// 3. Scoped delegation found: .allow(archive/index) → delegate for archive/index succeeds
+        #[dialog_common::test]
+        async fn scoped_delegation_found() {
+            use dialog_effects::archive::prelude::{ArchiveExt, SubjectExt as ArchiveSubjectExt};
+
+            let storage = Storage::temp_storage();
+
+            let profile = Profile::open(Storage::temp(&unique_name("found")))
+                .perform(&storage)
+                .await
+                .unwrap();
+
+            let operator = profile
+                .operator(b"alice")
+                .allow(Subject::any().archive().catalog("index"))
+                .network(Remote)
+                .build(storage)
+                .await
+                .unwrap();
+
+            let result = Ucan::delegate(&Subject::from(profile.did()).archive().catalog("index"))
+                .audience(operator.did())
+                .perform(&operator)
+                .await;
+
+            assert!(
+                result.is_ok(),
+                "should find delegation for archive/index: {:?}",
+                result.err()
+            );
+        }
+
+        /// 4. Scoped delegation denied: .allow(archive/index) → delegate for archive/secret fails
+        #[dialog_common::test]
+        async fn scoped_delegation_denied() {
+            use dialog_effects::archive::prelude::{ArchiveExt, SubjectExt as ArchiveSubjectExt};
+
+            let storage = Storage::temp_storage();
+
+            let profile = Profile::open(Storage::temp(&unique_name("deny")))
+                .perform(&storage)
+                .await
+                .unwrap();
+
+            let operator = profile
+                .operator(b"alice")
+                .allow(Subject::any().archive().catalog("index"))
+                .network(Remote)
+                .build(storage)
+                .await
+                .unwrap();
+
+            let result = Ucan::delegate(&Subject::from(profile.did()).archive().catalog("secret"))
+                .audience(operator.did())
+                .perform(&operator)
+                .await;
+
+            assert!(result.is_err(), "should deny non-delegated archive/secret");
+        }
+
+        /// 5. Powerline delegation: .allow(Subject::any()) → delegate for anything succeeds
+        #[dialog_common::test]
+        async fn powerline_delegation_allows_anything() {
+            let storage = Storage::temp_storage();
+
+            let profile = Profile::open(Storage::temp(&unique_name("power")))
+                .perform(&storage)
+                .await
+                .unwrap();
+
+            let operator = profile
+                .operator(b"admin")
+                .allow(Subject::any())
+                .network(Remote)
+                .build(storage)
+                .await
+                .unwrap();
+
+            let result = Ucan::delegate(
+                &Subject::from(profile.did())
+                    .attenuate(fx_storage::Storage)
+                    .attenuate(fx_storage::Store::new("anything")),
+            )
+            .audience(operator.did())
+            .perform(&operator)
+            .await;
+
+            assert!(
+                result.is_ok(),
+                "powerline should allow any capability: {:?}",
+                result.err()
+            );
+        }
+
+        /// 6. No delegation: nothing allowed → delegate fails
+        #[dialog_common::test]
+        async fn no_delegation_fails() {
+            use dialog_effects::archive::prelude::{ArchiveExt, SubjectExt as ArchiveSubjectExt};
+
+            let storage = Storage::temp_storage();
+
+            let profile = Profile::open(Storage::temp(&unique_name("none")))
+                .perform(&storage)
+                .await
+                .unwrap();
+
+            let operator = profile
+                .operator(b"alice")
+                .network(Remote)
+                .build(storage)
+                .await
+                .unwrap();
+
+            let result = Ucan::delegate(&Subject::from(profile.did()).archive().catalog("index"))
+                .audience(operator.did())
+                .perform(&operator)
+                .await;
+
+            assert!(result.is_err(), "should fail with no delegations");
+        }
+
+        /// 7. No issuer set: resolves via Identify/Sign, finds chain via profile DID
+        #[dialog_common::test]
+        async fn no_issuer_uses_profile_did() {
+            use dialog_effects::archive::prelude::{ArchiveExt, SubjectExt as ArchiveSubjectExt};
+
+            let storage = Storage::temp_storage();
+
+            let profile = Profile::open(Storage::temp(&unique_name("noiss")))
+                .perform(&storage)
+                .await
+                .unwrap();
+
+            let operator = profile
+                .operator(b"alice")
+                .allow(Subject::any().archive().catalog("data"))
+                .network(Remote)
+                .build(storage)
+                .await
+                .unwrap();
+
+            let result = Ucan::delegate(&Subject::from(profile.did()).archive().catalog("data"))
+                .audience(operator.did())
+                .perform(&operator)
+                .await;
+
+            assert!(
+                result.is_ok(),
+                "should find chain without explicit issuer: {:?}",
+                result.err()
+            );
+        }
     }
 }

@@ -1,12 +1,10 @@
 //! UCAN access authorization — Protocol implementation for Ucan.
 //!
-//! Implements [`Protocol`](access::Protocol) for [`Ucan`], using delegation
-//! chain discovery to produce signed UCAN invocations.
+//! Implements [`Protocol`](access::Protocol) for [`Ucan`], using the
+//! invoke builder to produce signed UCAN invocations.
 
-use super::claim;
-use super::issuer::Issuer;
 use crate::access::{Authorization, AuthorizeError, Protocol};
-use crate::{Ability, Capability, Constraint, Provider, Subject, authority, storage};
+use crate::{Ability, Capability, Constraint, Provider, authority, storage};
 use dialog_common::{ConditionalSend, ConditionalSync};
 
 use super::Ucan;
@@ -29,14 +27,7 @@ impl Protocol for Ucan {
             + Provider<storage::Get>
             + ConditionalSync,
     {
-        let authority = Subject::from(capability.subject().clone())
-            .invoke(authority::Identify)
-            .perform(env)
-            .await
-            .map_err(|e| AuthorizeError::Configuration(e.to_string()))?;
-
-        let issuer = Issuer::new(env, authority);
-        let invocation = claim(env, issuer, &capability).await?;
+        let invocation = Ucan::invoke(&capability).perform(env).await?;
         Ok(Authorization::new(capability, invocation))
     }
 }

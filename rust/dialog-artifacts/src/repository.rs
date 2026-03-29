@@ -464,13 +464,16 @@ mod tests {
     #[dialog_common::test]
     async fn it_delegates_repo_to_profile_and_claims() -> anyhow::Result<()> {
         let storage = Storage::temp_storage();
-        let env = Builder::temp().grant(Ucan::unrestricted()).build().await?;
+        let env = Builder::temp()
+            .grant(Ucan::delegate(&Subject::any()))
+            .build()
+            .await?;
         let repo = Repository::create(unique_location("home"))
             .perform(&storage)
             .await?;
 
         let signer = extract_signer(repo.credential());
-        Ucan::delegate(repo.subject())
+        Ucan::delegate(&repo.subject())
             .issuer(signer)
             .audience(env.authority.profile_did())
             .perform(&env)
@@ -495,21 +498,24 @@ mod tests {
     #[dialog_common::test]
     async fn it_enforces_scoped_delegation_policy() -> anyhow::Result<()> {
         let storage = Storage::temp_storage();
-        let env = Builder::temp().grant(Ucan::unrestricted()).build().await?;
+        let env = Builder::temp()
+            .grant(Ucan::delegate(&Subject::any()))
+            .build()
+            .await?;
         let repo = Repository::create(unique_location("home"))
             .perform(&storage)
             .await?;
 
         let signer = extract_signer(repo.credential());
-        Ucan::delegate(
-            repo.subject()
-                .attenuate(fx_storage::Storage)
-                .attenuate(fx_storage::Store::new("data")),
-        )
-        .audience(env.authority.profile_did())
-        .issuer(signer)
-        .perform(&env)
-        .await?;
+        let scoped_cap = repo
+            .subject()
+            .attenuate(fx_storage::Storage)
+            .attenuate(fx_storage::Store::new("data"));
+        Ucan::delegate(&scoped_cap)
+            .audience(env.authority.profile_did())
+            .issuer(signer)
+            .perform(&env)
+            .await?;
 
         let data_cap = repo
             .subject()
@@ -538,49 +544,54 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_validates_acquire_against_policy() -> anyhow::Result<()> {
+    async fn it_validates_delegation_against_policy() -> anyhow::Result<()> {
         let storage = Storage::temp_storage();
-        let env = Builder::temp().grant(Ucan::unrestricted()).build().await?;
+        let env = Builder::temp()
+            .grant(Ucan::delegate(&Subject::any()))
+            .build()
+            .await?;
         let repo = Repository::create(unique_location("home"))
             .perform(&storage)
             .await?;
 
         let signer = extract_signer(repo.credential());
-        Ucan::delegate(
-            repo.subject()
-                .attenuate(fx_storage::Storage)
-                .attenuate(fx_storage::Store::new("data")),
-        )
-        .audience(env.authority.profile_did())
-        .issuer(signer)
-        .perform(&env)
-        .await?;
+        let scoped_cap = repo
+            .subject()
+            .attenuate(fx_storage::Storage)
+            .attenuate(fx_storage::Store::new("data"));
+        Ucan::delegate(&scoped_cap)
+            .audience(env.authority.profile_did())
+            .issuer(signer)
+            .perform(&env)
+            .await?;
 
-        let result = Ucan::delegate(
-            repo.subject()
-                .attenuate(fx_storage::Storage)
-                .attenuate(fx_storage::Store::new("data")),
-        )
-        .audience(env.authority.operator_did())
-        .acquire(&env)
-        .await;
+        // Delegating for 'data' store should succeed (chain exists)
+        let data_cap = repo
+            .subject()
+            .attenuate(fx_storage::Storage)
+            .attenuate(fx_storage::Store::new("data"));
+        let result = Ucan::delegate(&data_cap)
+            .audience(env.authority.operator_did())
+            .perform(&env)
+            .await;
         assert!(
             result.is_ok(),
-            "acquire for delegated store 'data' should succeed: {:?}",
+            "delegation for store 'data' should succeed: {:?}",
             result.err()
         );
 
-        let result = Ucan::delegate(
-            repo.subject()
-                .attenuate(fx_storage::Storage)
-                .attenuate(fx_storage::Store::new("secret")),
-        )
-        .audience(env.authority.operator_did())
-        .acquire(&env)
-        .await;
+        // Delegating for 'secret' store should fail (no chain)
+        let secret_cap = repo
+            .subject()
+            .attenuate(fx_storage::Storage)
+            .attenuate(fx_storage::Store::new("secret"));
+        let result = Ucan::delegate(&secret_cap)
+            .audience(env.authority.operator_did())
+            .perform(&env)
+            .await;
         assert!(
             result.is_err(),
-            "acquire for non-delegated store 'secret' should fail"
+            "delegation for non-delegated store 'secret' should fail"
         );
 
         Ok(())
