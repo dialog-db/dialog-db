@@ -2,19 +2,35 @@
 mod tests {
     use crate::profile::Profile;
     use crate::remote::Remote;
-    use dialog_capability::storage::Storage;
-    use dialog_storage::provider::{FileSystem, Store};
+    use dialog_capability::Capability;
+    use dialog_capability::storage::{Location, Storage};
+    use dialog_storage::provider::{Address, FileSystem, Store, fs};
+
+    fn temp_location() -> Capability<Location<Address>> {
+        let address = fs::Address::temp().resolve(&unique_id()).unwrap();
+        Storage::locate(Address::FileSystem(address))
+    }
 
     fn temp_store() -> Store {
-        let location = Storage::temp();
-        let loc = dialog_capability::Policy::of(&location);
-        Store::FileSystem(FileSystem::mount(loc).unwrap())
+        let address = fs::Address::temp().resolve(&unique_id()).unwrap();
+        Store::FileSystem(FileSystem::mount(&address).unwrap())
+    }
+
+    fn unique_id() -> String {
+        use dialog_common::time;
+        format!(
+            "dialog-{}",
+            time::now()
+                .duration_since(time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        )
     }
 
     #[dialog_common::test]
     async fn it_builds_operator_from_profile() {
         let profile = Profile::named("personal")
-            .open(Storage::temp())
+            .open(temp_location())
             .perform(&FileSystem)
             .await
             .unwrap();
@@ -35,10 +51,10 @@ mod tests {
 
     #[dialog_common::test]
     async fn operator_key_is_deterministic() {
-        let location = Storage::temp();
+        let location = temp_location();
 
         let profile = Profile::named("work")
-            .open(location.clone())
+            .open(location)
             .perform(&FileSystem)
             .await
             .unwrap();
@@ -66,10 +82,10 @@ mod tests {
 
     #[dialog_common::test]
     async fn different_contexts_produce_different_operators() {
-        let location = Storage::temp();
+        let location = temp_location();
 
         let profile = Profile::named("work")
-            .open(location.clone())
+            .open(location)
             .perform(&FileSystem)
             .await
             .unwrap();

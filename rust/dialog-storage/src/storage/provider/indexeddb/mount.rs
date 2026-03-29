@@ -1,8 +1,8 @@
 //! Mount and Location providers for IndexedDb.
 
-use super::{IndexedDb, IndexedDbError};
+use super::{Address, IndexedDb, IndexedDbError};
 use async_trait::async_trait;
-use dialog_capability::storage::{self, StorageError};
+use dialog_capability::storage::{self, Location, StorageError};
 use dialog_capability::{Capability, Policy, Provider};
 use dialog_credentials::credential::{Credential, CredentialExport};
 use wasm_bindgen::JsValue;
@@ -24,28 +24,27 @@ impl From<StorageError> for Err {
 }
 
 #[async_trait(?Send)]
-impl Provider<storage::Mount<IndexedDb>> for IndexedDb {
+impl Provider<storage::Mount<IndexedDb, Address>> for IndexedDb {
     async fn execute(
         &self,
-        input: Capability<storage::Mount<IndexedDb>>,
+        input: Capability<storage::Mount<IndexedDb, Address>>,
     ) -> Result<IndexedDb, StorageError> {
-        let path = &storage::Location::of(&input).path();
+        let prefix = Location::of(&input).address().prefix();
         Ok(IndexedDb {
-            mount: self.prefixed(path),
+            mount: self.prefixed(prefix),
             sessions: self.sessions.clone(),
         })
     }
 }
 
 #[async_trait(?Send)]
-impl Provider<storage::Load<Credential>> for IndexedDb {
+impl Provider<storage::Load<Credential, Address>> for IndexedDb {
     async fn execute(
         &self,
-        input: Capability<storage::Load<Credential>>,
+        input: Capability<storage::Load<Credential, Address>>,
     ) -> Result<Credential, StorageError> {
-        let path = storage::Location::of(&input).path().to_owned();
+        let prefix = Location::of(&input).address().prefix().to_owned();
         let subject = input.subject().to_string();
-        let db_name = self.prefixed(&subject);
 
         self.open(&subject)
             .await
@@ -56,7 +55,7 @@ impl Provider<storage::Load<Credential>> for IndexedDb {
 
         let result: Result<_, Err> = async {
             let store = session.store(DATA_STORE).await?;
-            let js_key = JsValue::from_str(&path);
+            let js_key = JsValue::from_str(&prefix);
 
             let value = store
                 .query(|object_store| async move {
@@ -75,7 +74,7 @@ impl Provider<storage::Load<Credential>> for IndexedDb {
                         .map_err(|e| StorageError::Storage(e.to_string()))?;
                     Ok(credential)
                 }
-                None => Err(StorageError::Storage(format!("not found: {}", path)).into()),
+                None => Err(StorageError::Storage(format!("not found: {}", prefix)).into()),
             }
         }
         .await;
@@ -86,13 +85,13 @@ impl Provider<storage::Load<Credential>> for IndexedDb {
 }
 
 #[async_trait(?Send)]
-impl Provider<storage::Save<Credential>> for IndexedDb {
+impl Provider<storage::Save<Credential, Address>> for IndexedDb {
     async fn execute(
         &self,
-        input: Capability<storage::Save<Credential>>,
+        input: Capability<storage::Save<Credential, Address>>,
     ) -> Result<(), StorageError> {
-        let path = storage::Location::of(&input).path().to_owned();
-        let credential = &storage::Save::<Credential>::of(&input).content;
+        let prefix = Location::of(&input).address().prefix().to_owned();
+        let credential = &storage::Save::<Credential, Address>::of(&input).content;
         let subject = input.subject().to_string();
 
         let export = credential
@@ -110,7 +109,7 @@ impl Provider<storage::Save<Credential>> for IndexedDb {
 
         let result: Result<_, Err> = async {
             let store = session.store(DATA_STORE).await?;
-            let js_key = JsValue::from_str(&path);
+            let js_key = JsValue::from_str(&prefix);
 
             store
                 .transact(|object_store| async move {

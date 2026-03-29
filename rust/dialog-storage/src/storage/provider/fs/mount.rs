@@ -1,6 +1,6 @@
 //! Mount, Load, and Save providers for FileStore and FileSystem.
 
-use super::{FileStore, FileSystem};
+use super::{Address, FileStore, FileSystem};
 use async_trait::async_trait;
 use dialog_capability::storage::{Load, Location, Mount, Mountable, Save, StorageError};
 use dialog_capability::{Capability, Policy, Provider};
@@ -11,21 +11,25 @@ impl Mountable for FileSystem {
 }
 
 #[async_trait]
-impl Provider<Mount<FileStore>> for FileSystem {
+impl Provider<Mount<FileStore, Address>> for FileSystem {
     async fn execute(
         &self,
-        input: Capability<Mount<FileStore>>,
+        input: Capability<Mount<FileStore, Address>>,
     ) -> Result<FileStore, StorageError> {
-        FileSystem::mount(Location::of(&input)).map_err(to_err)
+        let address = Location::of(&input).address();
+        FileSystem::mount(address).map_err(to_err)
     }
 }
 
 #[async_trait]
-impl Provider<Load<Vec<u8>>> for FileStore {
-    async fn execute(&self, input: Capability<Load<Vec<u8>>>) -> Result<Vec<u8>, StorageError> {
-        let path = &Location::of(&input).path();
+impl Provider<Load<Vec<u8>, Address>> for FileStore {
+    async fn execute(
+        &self,
+        input: Capability<Load<Vec<u8>, Address>>,
+    ) -> Result<Vec<u8>, StorageError> {
+        let address = Location::of(&input).address();
         let location = self
-            .resolve(path)
+            .resolve(address.path())
             .map_err(|e| StorageError::Storage(e.to_string()))?;
         location
             .read()
@@ -35,12 +39,12 @@ impl Provider<Load<Vec<u8>>> for FileStore {
 }
 
 #[async_trait]
-impl Provider<Save<Vec<u8>>> for FileStore {
-    async fn execute(&self, input: Capability<Save<Vec<u8>>>) -> Result<(), StorageError> {
-        let path = &Location::of(&input).path();
-        let bytes = &Save::<Vec<u8>>::of(&input).content;
+impl Provider<Save<Vec<u8>, Address>> for FileStore {
+    async fn execute(&self, input: Capability<Save<Vec<u8>, Address>>) -> Result<(), StorageError> {
+        let address = Location::of(&input).address();
+        let bytes = &Save::<Vec<u8>, Address>::of(&input).content;
         let location = self
-            .resolve(path)
+            .resolve(address.path())
             .map_err(|e| StorageError::Storage(e.to_string()))?;
         location
             .write(bytes)
@@ -50,14 +54,14 @@ impl Provider<Save<Vec<u8>>> for FileStore {
 }
 
 #[async_trait]
-impl Provider<Load<Credential>> for FileStore {
+impl Provider<Load<Credential, Address>> for FileStore {
     async fn execute(
         &self,
-        input: Capability<Load<Credential>>,
+        input: Capability<Load<Credential, Address>>,
     ) -> Result<Credential, StorageError> {
-        let path = &Location::of(&input).path();
+        let address = Location::of(&input).address();
         let location = self
-            .resolve(path)
+            .resolve(address.path())
             .map_err(|e| StorageError::Storage(e.to_string()))?;
         let data = location
             .read()
@@ -72,12 +76,15 @@ impl Provider<Load<Credential>> for FileStore {
 }
 
 #[async_trait]
-impl Provider<Save<Credential>> for FileStore {
-    async fn execute(&self, input: Capability<Save<Credential>>) -> Result<(), StorageError> {
-        let path = &Location::of(&input).path();
-        let credential = &Save::<Credential>::of(&input).content;
+impl Provider<Save<Credential, Address>> for FileStore {
+    async fn execute(
+        &self,
+        input: Capability<Save<Credential, Address>>,
+    ) -> Result<(), StorageError> {
+        let address = Location::of(&input).address();
+        let credential = &Save::<Credential, Address>::of(&input).content;
         let location = self
-            .resolve(path)
+            .resolve(address.path())
             .map_err(|e| StorageError::Storage(e.to_string()))?;
         let export = credential
             .export()
@@ -94,13 +101,23 @@ fn to_err(e: impl std::fmt::Display) -> StorageError {
     StorageError::Storage(e.to_string())
 }
 
+use crate::provider::Address as EnumAddress;
+
 #[async_trait]
-impl Provider<Load<Credential>> for FileSystem {
+impl Provider<Load<Credential, EnumAddress>> for FileSystem {
     async fn execute(
         &self,
-        input: Capability<Load<Credential>>,
+        input: Capability<Load<Credential, EnumAddress>>,
     ) -> Result<Credential, StorageError> {
-        let path = FileSystem::resolve(Location::of(&input)).map_err(to_err)?;
+        let address = match Location::of(&input).address() {
+            EnumAddress::FileSystem(addr) => addr,
+            _ => {
+                return Err(StorageError::Storage(
+                    "FileSystem cannot handle non-filesystem address".into(),
+                ));
+            }
+        };
+        let path = FileSystem::resolve(address).map_err(to_err)?;
         let data = tokio::fs::read(&path).await.map_err(StorageError::Io)?;
         let export = CredentialExport::try_from(data).map_err(to_err)?;
         Credential::import(export).await.map_err(to_err)
@@ -108,11 +125,57 @@ impl Provider<Load<Credential>> for FileSystem {
 }
 
 #[async_trait]
-impl Provider<Save<Credential>> for FileSystem {
-    async fn execute(&self, input: Capability<Save<Credential>>) -> Result<(), StorageError> {
-        let path = FileSystem::resolve(Location::of(&input)).map_err(to_err)?;
-        let credential = &Save::<Credential>::of(&input).content;
+impl Provider<Save<Credential, EnumAddress>> for FileSystem {
+    async fn execute(
+        &self,
+        input: Capability<Save<Credential, EnumAddress>>,
+    ) -> Result<(), StorageError> {
+        let address = match Location::of(&input).address() {
+            EnumAddress::FileSystem(addr) => addr,
+            _ => {
+                return Err(StorageError::Storage(
+                    "FileSystem cannot handle non-filesystem address".into(),
+                ));
+            }
+        };
+        let credential = &Save::<Credential, EnumAddress>::of(&input).content;
         let export = credential.export().await.map_err(to_err)?;
+        let path = FileSystem::resolve(address).map_err(to_err)?;
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(StorageError::Io)?;
+        }
+        tokio::fs::write(&path, export.as_bytes())
+            .await
+            .map_err(StorageError::Io)
+    }
+}
+
+#[async_trait]
+impl Provider<Load<Credential, Address>> for FileSystem {
+    async fn execute(
+        &self,
+        input: Capability<Load<Credential, Address>>,
+    ) -> Result<Credential, StorageError> {
+        let address = Location::of(&input).address();
+        let path = FileSystem::resolve(address).map_err(to_err)?;
+        let data = tokio::fs::read(&path).await.map_err(StorageError::Io)?;
+        let export = CredentialExport::try_from(data).map_err(to_err)?;
+        Credential::import(export).await.map_err(to_err)
+    }
+}
+
+#[async_trait]
+impl Provider<Save<Credential, Address>> for FileSystem {
+    async fn execute(
+        &self,
+        input: Capability<Save<Credential, Address>>,
+    ) -> Result<(), StorageError> {
+        let address = Location::of(&input).address();
+        let credential = &Save::<Credential, Address>::of(&input).content;
+        let export = credential.export().await.map_err(to_err)?;
+        let path = FileSystem::resolve(address).map_err(to_err)?;
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await

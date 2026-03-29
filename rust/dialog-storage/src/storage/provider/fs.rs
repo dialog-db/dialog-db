@@ -22,16 +22,13 @@
 //! # Example
 //!
 //! ```no_run
-//! use dialog_storage::provider::{FileSystem, FileStore};
+//! use dialog_storage::provider::{FileSystem, FileStore, fs};
 //! use dialog_capability::{did, Did, Subject};
-//! use dialog_capability::storage::{Storage, Location};
 //! use dialog_effects::archive::{Archive, Catalog, Get};
 //! use dialog_common::Blake3Hash;
 //!
 //! # async fn example() -> anyhow::Result<()> {
-//! # let location = Storage::temp();
-//! # let loc = dialog_capability::Policy::of(&location);
-//! let provider = FileSystem::mount(loc)?;
+//! let provider = FileSystem::mount(&fs::Address::temp())?;
 //! let digest = Blake3Hash::hash(b"hello");
 //!
 //! let effect = Subject::from(did!("key:z6Mk..."))
@@ -133,18 +130,16 @@ impl Address {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FileSystem;
 
-use dialog_capability::storage as cap_storage;
-
 impl FileSystem {
-    /// Mount a FileStore from a capability Location.
-    pub fn mount(location: &cap_storage::Location) -> Result<FileStore, FileSystemError> {
-        let path = Self::resolve(location)?;
+    /// Mount a FileStore from an address.
+    pub fn mount(address: &Address) -> Result<FileStore, FileSystemError> {
+        let path = Self::resolve(address)?;
         FileStore::mount(path)
     }
 
-    /// Resolve a capability Location to a concrete filesystem path.
-    fn resolve(location: &cap_storage::Location) -> Result<PathBuf, FileSystemError> {
-        let base_path = match location.scheme() {
+    /// Resolve an address to a concrete filesystem path.
+    fn resolve(address: &Address) -> Result<PathBuf, FileSystemError> {
+        let base_path = match address.scheme() {
             "profile" => {
                 let data_dir = dirs::data_dir().ok_or_else(|| {
                     FileSystemError::Io("could not determine platform data directory".into())
@@ -160,7 +155,7 @@ impl FileSystem {
             }
         };
 
-        let relative = location.path().trim_start_matches('/');
+        let relative = address.path().trim_start_matches('/');
         if relative.is_empty() {
             Ok(base_path)
         } else {

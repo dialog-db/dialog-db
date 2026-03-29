@@ -1,8 +1,8 @@
 //! Mount and Location providers for Volatile.
 
-use super::Volatile;
+use super::{Address, Volatile};
 use async_trait::async_trait;
-use dialog_capability::storage::{self, Mountable, StorageError};
+use dialog_capability::storage::{self, Location, Mountable, StorageError};
 use dialog_capability::{Capability, Did, Policy, Provider};
 use dialog_credentials::credential::Credential;
 
@@ -12,16 +12,16 @@ impl Mountable for Volatile {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<storage::Mount<Volatile>> for Volatile {
+impl Provider<storage::Mount<Volatile, Address>> for Volatile {
     async fn execute(
         &self,
-        input: Capability<storage::Mount<Volatile>>,
+        input: Capability<storage::Mount<Volatile, Address>>,
     ) -> Result<Volatile, StorageError> {
-        let path = &storage::Location::of(&input).path();
+        let prefix = Location::of(&input).address().prefix();
         let mount = if self.mount.is_empty() {
-            path.to_string()
+            prefix.to_string()
         } else {
-            format!("{}/{}", self.mount, path)
+            format!("{}/{}", self.mount, prefix)
         };
         Ok(Volatile {
             mount,
@@ -32,17 +32,17 @@ impl Provider<storage::Mount<Volatile>> for Volatile {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<storage::Load<Credential>> for Volatile {
+impl Provider<storage::Load<Credential, Address>> for Volatile {
     async fn execute(
         &self,
-        input: Capability<storage::Load<Credential>>,
+        input: Capability<storage::Load<Credential, Address>>,
     ) -> Result<Credential, StorageError> {
         let subject: Did = input.subject().into();
-        let path = storage::Location::of(&input).path().to_owned();
+        let prefix = Location::of(&input).address().prefix().to_owned();
         let key = if self.mount.is_empty() {
-            path
+            prefix
         } else {
-            format!("{}/{}", self.mount, path)
+            format!("{}/{}", self.mount, prefix)
         };
 
         let export = {
@@ -65,18 +65,18 @@ impl Provider<storage::Load<Credential>> for Volatile {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<storage::Save<Credential>> for Volatile {
+impl Provider<storage::Save<Credential, Address>> for Volatile {
     async fn execute(
         &self,
-        input: Capability<storage::Save<Credential>>,
+        input: Capability<storage::Save<Credential, Address>>,
     ) -> Result<(), StorageError> {
         let subject: Did = input.subject().into();
-        let path = storage::Location::of(&input).path().to_owned();
-        let credential = &storage::Save::<Credential>::of(&input).content;
+        let prefix = Location::of(&input).address().prefix().to_owned();
+        let credential = &storage::Save::<Credential, Address>::of(&input).content;
         let key = if self.mount.is_empty() {
-            path
+            prefix
         } else {
-            format!("{}/{}", self.mount, path)
+            format!("{}/{}", self.mount, prefix)
         };
 
         let export = credential

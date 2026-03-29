@@ -1,17 +1,11 @@
 //! Profile — a named identity backed by a signing credential.
-//!
-//! ```text
-//! let profile = Profile::named("personal")
-//!     .at(Storage::profile())
-//!     .perform(&fs)
-//!     .await?;
-//! ```
 
 use crate::operator::OperatorBuilder;
 use dialog_capability::storage::{Load, Location, Save};
 use dialog_capability::{Capability, Provider};
+use dialog_common::ConditionalSync;
 use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
-use dialog_storage::provider::Store;
+use dialog_storage::provider::{Address, Store};
 use dialog_varsig::{Did, Principal};
 
 /// An opened profile — holds a signing credential and knows where it lives.
@@ -19,7 +13,7 @@ use dialog_varsig::{Did, Principal};
 pub struct Profile {
     credential: SignerCredential,
     name: String,
-    location: Capability<Location>,
+    location: Capability<Location<Address>>,
 }
 
 impl Profile {
@@ -44,14 +38,11 @@ impl Profile {
     }
 
     /// The storage location capability for this profile.
-    pub fn location(&self) -> &Capability<Location> {
+    pub fn location(&self) -> &Capability<Location<Address>> {
         &self.location
     }
 
     /// Start building an operator from this profile.
-    ///
-    /// `store` is the mounted store for the profile's storage location.
-    /// `context` is used to deterministically derive the operator key.
     pub fn operator(&self, store: Store, context: impl Into<Vec<u8>>) -> OperatorBuilder {
         OperatorBuilder::new(self, store, context.into())
     }
@@ -70,7 +61,7 @@ pub struct ProfileBuilder {
 
 impl ProfileBuilder {
     /// Set the storage location for this profile.
-    pub fn open(self, location: Capability<Location>) -> OpenProfile {
+    pub fn open(self, location: Capability<Location<Address>>) -> OpenProfile {
         OpenProfile {
             name: self.name,
             location,
@@ -81,33 +72,20 @@ impl ProfileBuilder {
 /// Command to open a profile — loads or creates the signing key.
 pub struct OpenProfile {
     name: String,
-    location: Capability<Location>,
+    location: Capability<Location<Address>>,
 }
 
 impl OpenProfile {
     /// Execute against a storage provider.
-    ///
-    /// Loads the credential from `{location}/{name}/credentials/self`,
-    /// or generates a new keypair and saves it.
     pub async fn perform<S>(self, storage: &S) -> Result<Profile, ProfileError>
     where
-        S: Provider<Load<Credential>> + Provider<Save<Credential>> + dialog_common::ConditionalSync,
+        S: Provider<Load<Credential, Address>>
+            + Provider<Save<Credential, Address>>
+            + ConditionalSync,
     {
-        let location = self
-            .location
-            .resolve(&self.name)
-            .map_err(|e| ProfileError::Storage(e.to_string()))?;
+        let location = self.location;
 
-        let credentials = location
-            .resolve("credentials/self")
-            .map_err(|e| ProfileError::Storage(e.to_string()))?;
-
-        // Try to load existing
-        let load = credentials
-            .clone()
-            .load::<Credential>()
-            .perform(storage)
-            .await;
+        let load = location.clone().load::<Credential>().perform(storage).await;
 
         let credential = match load {
             Ok(credential) => match credential {
@@ -124,7 +102,8 @@ impl OpenProfile {
                     .map_err(|e| ProfileError::Key(e.to_string()))?;
                 let credential = SignerCredential::from(signer);
 
-                credentials
+                location
+                    .clone()
                     .save(Credential::Signer(credential.clone()))
                     .perform(storage)
                     .await
@@ -158,11 +137,24 @@ pub enum ProfileError {
 mod tests {
     use super::*;
     use dialog_capability::storage::Storage;
-    use dialog_storage::provider::FileSystem;
+    use dialog_storage::provider::{FileSystem, fs};
+
+    fn temp_location() -> Capability<Location<Address>> {
+        use dialog_common::time;
+        let id = format!(
+            "dialog-{}",
+            time::now()
+                .duration_since(time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let address = fs::Address::temp().resolve(&id).unwrap();
+        Storage::locate(Address::FileSystem(address))
+    }
 
     #[dialog_common::test]
     async fn it_opens_profile() {
-        let location = Storage::temp();
+        let location = temp_location();
 
         let profile = Profile::named("personal")
             .open(location)
@@ -176,7 +168,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_reopens_same_profile() {
-        let location = Storage::temp();
+        let location = temp_location();
 
         let first = Profile::named("work")
             .open(location.clone())
