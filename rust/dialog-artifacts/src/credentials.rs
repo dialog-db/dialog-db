@@ -1,9 +1,7 @@
-//! Profile configuration and credentials for opening an environment.
+//! Credentials — opened profile with signers and authority chain.
 //!
-//! [`Profile`] describes which identity to open — profile name and operator
-//! strategy. [`Credentials`] is the result of opening a profile — it holds
-//! the profile and operator signers and implements the credential provider
-//! traits needed by the Environment.
+//! [`Credentials`] holds the profile and operator signers and implements
+//! the provider traits needed by `Operator` for identity and signing effects.
 
 pub mod open;
 pub mod provider;
@@ -13,83 +11,6 @@ use dialog_capability::{Capability, Policy, Provider, Subject};
 use dialog_credentials::Ed25519Signer;
 use dialog_varsig::eddsa::Ed25519Signature;
 use dialog_varsig::{Did, Principal};
-
-/// How to create the operator key for a session.
-pub enum Operator {
-    /// Generate a random ephemeral keypair each time.
-    Unique,
-    /// Derive deterministically from the profile key + context.
-    Derive(Vec<u8>),
-}
-
-impl Operator {
-    /// Shorthand for `Operator::Unique`.
-    pub fn unique() -> Self {
-        Self::Unique
-    }
-
-    /// Shorthand for `Operator::Derive(context.into())`.
-    pub fn derive(context: impl Into<Vec<u8>>) -> Self {
-        Self::Derive(context.into())
-    }
-}
-
-impl<T: Into<Vec<u8>>> From<T> for Operator {
-    fn from(context: T) -> Self {
-        Self::Derive(context.into())
-    }
-}
-
-/// Describes which profile to open and how to create the operator.
-///
-/// This is a configuration type — pass it to [`environment::open`](crate::environment::open)
-/// to materialize the actual credentials.
-///
-/// # Examples
-///
-/// ```no_run
-/// use dialog_artifacts::Profile;
-///
-/// // Default profile with unique operator
-/// let profile = Profile::default();
-///
-/// // Named profile with derived operator
-/// let profile = Profile::named("work")
-///     .operated_by(dialog_artifacts::Operator::derive(b"alice"));
-/// ```
-pub struct Profile {
-    /// The profile name (e.g. "default", "work", "personal").
-    pub name: String,
-    /// How to create the operator key.
-    pub operator: Operator,
-}
-
-impl Profile {
-    /// Create a profile descriptor with the given name.
-    ///
-    /// Defaults to `Operator::Unique`. Use `.operated_by()` to change.
-    pub fn named(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            operator: Operator::Unique,
-        }
-    }
-
-    /// Set the operator strategy.
-    ///
-    /// Accepts `Operator` directly, or anything convertible to it
-    /// (e.g. `b"context"` for derived operator).
-    pub fn operated_by(mut self, operator: impl Into<Operator>) -> Self {
-        self.operator = operator.into();
-        self
-    }
-}
-
-impl Default for Profile {
-    fn default() -> Self {
-        Self::named("default")
-    }
-}
 
 /// An opened profile with profile and operator signers.
 ///

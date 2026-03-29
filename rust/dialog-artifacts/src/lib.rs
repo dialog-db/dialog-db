@@ -71,13 +71,9 @@ pub use key::*;
 mod uri;
 pub use uri::*;
 
-/// Concrete environment composition for the repository layer.
-pub mod environment;
-pub use environment::*;
-
-/// Credentials, profile configuration, and operator strategy.
+/// Credentials — opened profile with signers and authority chain.
 pub mod credentials;
-pub use credentials::{Credentials, Operator, Profile};
+pub use credentials::Credentials;
 
 /// Profile — named identity with signing credential.
 pub mod profile;
@@ -87,6 +83,7 @@ pub mod storage;
 
 /// Operator — operating environment built from a profile.
 pub mod operator;
+pub use operator::Operator;
 
 /// Remote dispatch for fork invocations.
 pub mod remote;

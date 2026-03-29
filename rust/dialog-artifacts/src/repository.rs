@@ -22,8 +22,6 @@ pub mod memory;
 pub mod node_reference;
 /// Occurence logical timestamp type.
 pub mod occurence;
-/// Provider impls for repository Load/Save capabilities.
-pub mod provider;
 /// Remote site / repository / branch cursor hierarchy.
 pub mod remote;
 /// Revision type and edition tracking.
@@ -271,17 +269,15 @@ impl OpenRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Operator;
     use crate::artifacts::{Artifact, Instruction};
-    use crate::environment::{Builder, Ucan};
+    use crate::profile::Profile;
+    use crate::remote::Remote;
     use crate::storage::Storage;
-    use dialog_capability::ucan::{Issuer, claim};
+    use dialog_capability::ucan::{Issuer, Ucan, claim};
     use dialog_effects::storage as fx_storage;
     use dialog_remote_s3::Address as S3Address;
     use futures_util::stream;
-
-    async fn test_signer() -> Ed25519Signer {
-        Ed25519Signer::import(&[42; 32]).await.unwrap()
-    }
 
     fn test_address() -> RemoteAddress {
         let s3_addr = S3Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "bucket");
@@ -307,6 +303,33 @@ mod tests {
             .as_nanos();
         let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
         Storage::temp(&format!("{prefix}-{id}-{seq}"))
+    }
+
+    fn unique_name(prefix: &str) -> String {
+        use dialog_common::time;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let ts = time::now()
+            .duration_since(time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("{prefix}-{ts}-{seq}")
+    }
+
+    /// Build a test operator with the new Profile/Operator flow.
+    async fn test_operator() -> Operator {
+        let storage = Storage::temp_storage();
+        let profile = Profile::open(Storage::temp(&unique_name("repo-test")))
+            .perform(&storage)
+            .await
+            .unwrap();
+        profile
+            .operator(b"test")
+            .network(Remote)
+            .build(storage)
+            .await
+            .unwrap()
     }
 
     #[dialog_common::test]
@@ -338,10 +361,12 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_opens_branch_via_repository() -> anyhow::Result<()> {
-        let env = Builder::volatile().build().await?;
-        let repo = Repository::from(test_signer().await);
+        let operator = test_operator().await;
+        let repo = Repository::open(unique_location("branch"))
+            .perform(&operator)
+            .await?;
 
-        let branch = repo.open_branch("main").perform(&env).await?;
+        let branch = repo.open_branch("main").perform(&operator).await?;
 
         assert_eq!(branch.name().as_str(), "main");
         assert!(
@@ -354,11 +379,13 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_loads_branch_via_repository() -> anyhow::Result<()> {
-        let env = Builder::volatile().build().await?;
-        let repo = Repository::from(test_signer().await);
+        let operator = test_operator().await;
+        let repo = Repository::open(unique_location("load-branch"))
+            .perform(&operator)
+            .await?;
 
-        let _branch = repo.open_branch("main").perform(&env).await?;
-        let branch = repo.load_branch("main").perform(&env).await?;
+        let _branch = repo.open_branch("main").perform(&operator).await?;
+        let branch = repo.load_branch("main").perform(&operator).await?;
         assert_eq!(branch.name().as_str(), "main");
 
         Ok(())
@@ -366,10 +393,12 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_commits_via_repository() -> anyhow::Result<()> {
-        let env = Builder::volatile().build().await?;
-        let repo = Repository::from(test_signer().await);
+        let operator = test_operator().await;
+        let repo = Repository::open(unique_location("commit"))
+            .perform(&operator)
+            .await?;
 
-        let branch = repo.open_branch("main").perform(&env).await?;
+        let branch = repo.open_branch("main").perform(&operator).await?;
         let artifact = Artifact {
             the: "user/name".parse()?,
             of: "user:123".parse()?,
@@ -378,7 +407,7 @@ mod tests {
         };
         let _hash = branch
             .commit(stream::iter(vec![Instruction::Assert(artifact)]))
-            .perform(&env)
+            .perform(&operator)
             .await?;
 
         assert!(
@@ -391,16 +420,18 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_adds_and_loads_remote_via_repository() -> anyhow::Result<()> {
-        let env = Builder::volatile().build().await?;
-        let repo = Repository::from(test_signer().await);
+        let operator = test_operator().await;
+        let repo = Repository::open(unique_location("remote"))
+            .perform(&operator)
+            .await?;
 
         let site = repo
             .add_remote("origin", test_address())
-            .perform(&env)
+            .perform(&operator)
             .await?;
         assert_eq!(site.name(), "origin");
 
-        let loaded = repo.load_remote("origin").perform(&env).await?;
+        let loaded = repo.load_remote("origin").perform(&operator).await?;
         assert_eq!(loaded.name(), "origin");
         assert_eq!(loaded.address(), &test_address());
 
@@ -461,139 +492,147 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_common::test]
-    async fn it_delegates_repo_to_profile_and_claims() -> anyhow::Result<()> {
-        let storage = Storage::temp_storage();
-        let env = Builder::temp()
-            .grant(Ucan::delegate(&Subject::any()))
-            .build()
-            .await?;
-        let repo = Repository::create(unique_location("home"))
-            .perform(&storage)
-            .await?;
+    #[cfg(feature = "ucan")]
+    mod delegation_tests {
+        use super::*;
 
-        let signer = extract_signer(repo.credential());
-        Ucan::delegate(&repo.subject())
-            .issuer(signer)
-            .audience(env.authority.profile_did())
-            .perform(&env)
-            .await?;
+        async fn test_operator_with_delegation() -> Operator {
+            let storage = Storage::temp_storage();
+            let profile = Profile::open(Storage::temp(&unique_name("deleg")))
+                .perform(&storage)
+                .await
+                .unwrap();
+            profile
+                .operator(b"test")
+                .allow(Subject::any())
+                .network(Remote)
+                .build(storage)
+                .await
+                .unwrap()
+        }
 
-        let capability = repo
-            .subject()
-            .attenuate(fx_storage::Storage)
-            .attenuate(fx_storage::Store::new("data"));
+        #[dialog_common::test]
+        async fn it_delegates_repo_to_profile_and_claims() -> anyhow::Result<()> {
+            let operator = test_operator_with_delegation().await;
+            let repo = Repository::create(unique_location("home"))
+                .perform(&operator)
+                .await?;
 
-        let authority = env.authority.build_authority(repo.did());
-        let result = claim(&env, Issuer::new(&env, authority), &capability).await;
-        assert!(
-            result.is_ok(),
-            "should find delegation chain: {:?}",
-            result.err()
-        );
+            let signer = extract_signer(repo.credential());
+            Ucan::delegate(&repo.subject())
+                .issuer(signer)
+                .audience(operator.profile_did())
+                .perform(&operator)
+                .await?;
 
-        Ok(())
-    }
+            let capability = repo
+                .subject()
+                .attenuate(fx_storage::Storage)
+                .attenuate(fx_storage::Store::new("data"));
 
-    #[dialog_common::test]
-    async fn it_enforces_scoped_delegation_policy() -> anyhow::Result<()> {
-        let storage = Storage::temp_storage();
-        let env = Builder::temp()
-            .grant(Ucan::delegate(&Subject::any()))
-            .build()
-            .await?;
-        let repo = Repository::create(unique_location("home"))
-            .perform(&storage)
-            .await?;
+            let authority = operator.build_authority(repo.did());
+            let result = claim(&operator, Issuer::new(&operator, authority), &capability).await;
+            assert!(
+                result.is_ok(),
+                "should find delegation chain: {:?}",
+                result.err()
+            );
 
-        let signer = extract_signer(repo.credential());
-        let scoped_cap = repo
-            .subject()
-            .attenuate(fx_storage::Storage)
-            .attenuate(fx_storage::Store::new("data"));
-        Ucan::delegate(&scoped_cap)
-            .audience(env.authority.profile_did())
-            .issuer(signer)
-            .perform(&env)
-            .await?;
+            Ok(())
+        }
 
-        let data_cap = repo
-            .subject()
-            .attenuate(fx_storage::Storage)
-            .attenuate(fx_storage::Store::new("data"));
-        let authority = env.authority.build_authority(repo.did());
-        let result = claim(&env, Issuer::new(&env, authority), &data_cap).await;
-        assert!(
-            result.is_ok(),
-            "claim on delegated store 'data' should succeed: {:?}",
-            result.err()
-        );
+        #[dialog_common::test]
+        async fn it_enforces_scoped_delegation_policy() -> anyhow::Result<()> {
+            let operator = test_operator_with_delegation().await;
+            let repo = Repository::create(unique_location("home"))
+                .perform(&operator)
+                .await?;
 
-        let secret_cap = repo
-            .subject()
-            .attenuate(fx_storage::Storage)
-            .attenuate(fx_storage::Store::new("secret"));
-        let authority = env.authority.build_authority(repo.did());
-        let result = claim(&env, Issuer::new(&env, authority), &secret_cap).await;
-        assert!(
-            result.is_err(),
-            "claim on non-delegated store 'secret' should be denied"
-        );
+            let signer = extract_signer(repo.credential());
+            let scoped_cap = repo
+                .subject()
+                .attenuate(fx_storage::Storage)
+                .attenuate(fx_storage::Store::new("data"));
+            Ucan::delegate(&scoped_cap)
+                .audience(operator.profile_did())
+                .issuer(signer)
+                .perform(&operator)
+                .await?;
 
-        Ok(())
-    }
+            let data_cap = repo
+                .subject()
+                .attenuate(fx_storage::Storage)
+                .attenuate(fx_storage::Store::new("data"));
+            let authority = operator.build_authority(repo.did());
+            let result = claim(&operator, Issuer::new(&operator, authority), &data_cap).await;
+            assert!(
+                result.is_ok(),
+                "claim on delegated store 'data' should succeed: {:?}",
+                result.err()
+            );
 
-    #[dialog_common::test]
-    async fn it_validates_delegation_against_policy() -> anyhow::Result<()> {
-        let storage = Storage::temp_storage();
-        let env = Builder::temp()
-            .grant(Ucan::delegate(&Subject::any()))
-            .build()
-            .await?;
-        let repo = Repository::create(unique_location("home"))
-            .perform(&storage)
-            .await?;
+            let secret_cap = repo
+                .subject()
+                .attenuate(fx_storage::Storage)
+                .attenuate(fx_storage::Store::new("secret"));
+            let authority = operator.build_authority(repo.did());
+            let result = claim(&operator, Issuer::new(&operator, authority), &secret_cap).await;
+            assert!(
+                result.is_err(),
+                "claim on non-delegated store 'secret' should be denied"
+            );
 
-        let signer = extract_signer(repo.credential());
-        let scoped_cap = repo
-            .subject()
-            .attenuate(fx_storage::Storage)
-            .attenuate(fx_storage::Store::new("data"));
-        Ucan::delegate(&scoped_cap)
-            .audience(env.authority.profile_did())
-            .issuer(signer)
-            .perform(&env)
-            .await?;
+            Ok(())
+        }
 
-        // Delegating for 'data' store should succeed (chain exists)
-        let data_cap = repo
-            .subject()
-            .attenuate(fx_storage::Storage)
-            .attenuate(fx_storage::Store::new("data"));
-        let result = Ucan::delegate(&data_cap)
-            .audience(env.authority.operator_did())
-            .perform(&env)
-            .await;
-        assert!(
-            result.is_ok(),
-            "delegation for store 'data' should succeed: {:?}",
-            result.err()
-        );
+        #[dialog_common::test]
+        async fn it_validates_delegation_against_policy() -> anyhow::Result<()> {
+            let operator = test_operator_with_delegation().await;
+            let repo = Repository::create(unique_location("home"))
+                .perform(&operator)
+                .await?;
 
-        // Delegating for 'secret' store should fail (no chain)
-        let secret_cap = repo
-            .subject()
-            .attenuate(fx_storage::Storage)
-            .attenuate(fx_storage::Store::new("secret"));
-        let result = Ucan::delegate(&secret_cap)
-            .audience(env.authority.operator_did())
-            .perform(&env)
-            .await;
-        assert!(
-            result.is_err(),
-            "delegation for non-delegated store 'secret' should fail"
-        );
+            let signer = extract_signer(repo.credential());
+            let scoped_cap = repo
+                .subject()
+                .attenuate(fx_storage::Storage)
+                .attenuate(fx_storage::Store::new("data"));
+            Ucan::delegate(&scoped_cap)
+                .audience(operator.profile_did())
+                .issuer(signer)
+                .perform(&operator)
+                .await?;
 
-        Ok(())
+            // Delegating for 'data' store should succeed (chain exists)
+            let data_cap = repo
+                .subject()
+                .attenuate(fx_storage::Storage)
+                .attenuate(fx_storage::Store::new("data"));
+            let result = Ucan::delegate(&data_cap)
+                .audience(operator.did())
+                .perform(&operator)
+                .await;
+            assert!(
+                result.is_ok(),
+                "delegation for store 'data' should succeed: {:?}",
+                result.err()
+            );
+
+            // Delegating for 'secret' store should fail (no chain)
+            let secret_cap = repo
+                .subject()
+                .attenuate(fx_storage::Storage)
+                .attenuate(fx_storage::Store::new("secret"));
+            let result = Ucan::delegate(&secret_cap)
+                .audience(operator.did())
+                .perform(&operator)
+                .await;
+            assert!(
+                result.is_err(),
+                "delegation for non-delegated store 'secret' should fail"
+            );
+
+            Ok(())
+        }
     }
 }
