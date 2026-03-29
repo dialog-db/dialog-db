@@ -54,6 +54,7 @@ mod storage;
 pub use error::FileSystemError;
 
 use dialog_capability::Did;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use url::Url;
 
@@ -61,6 +62,69 @@ const ARCHIVE: &str = "archive";
 const CREDENTIALS: &str = "credentials";
 const MEMORY: &str = "memory";
 const STORAGE: &str = "storage";
+
+/// Address for filesystem-based storage.
+///
+/// Wraps a URL with scheme-based resolution:
+/// - `profile://` → platform data directory
+/// - `temp://` → system temp directory
+/// - `storage://` → current working directory
+///
+/// Use `resolve()` to narrow the address to a sub-path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(transparent)]
+pub struct Address(url::Url);
+
+impl Address {
+    /// Profile storage root.
+    pub fn profile() -> Self {
+        Self(url::Url::parse("profile:///").expect("valid URL"))
+    }
+
+    /// Temporary storage root.
+    pub fn temp() -> Self {
+        Self(url::Url::parse("temp:///").expect("valid URL"))
+    }
+
+    /// Current/working directory storage root.
+    pub fn current() -> Self {
+        Self(url::Url::parse("storage:///").expect("valid URL"))
+    }
+
+    /// The URL scheme (e.g. `"profile"`, `"temp"`, `"storage"`).
+    pub fn scheme(&self) -> &str {
+        self.0.scheme()
+    }
+
+    /// The path portion of the URL.
+    pub fn path(&self) -> &str {
+        self.0.path()
+    }
+
+    /// Resolve a sub-path under this address.
+    ///
+    /// Uses URL resolution to ensure the result is always nested
+    /// under this address.
+    pub fn resolve(&self, segment: &str) -> Result<Self, FileSystemError> {
+        let mut base = self.0.clone();
+        if !base.path().ends_with('/') {
+            base.set_path(&format!("{}/", base.path()));
+        }
+
+        let resolved = base
+            .join(&format!("./{segment}"))
+            .map_err(|e| FileSystemError::Io(format!("URL join failed: {e}")))?;
+
+        if !resolved.path().starts_with(base.path()) {
+            return Err(FileSystemError::Io(format!(
+                "path '{segment}' escapes base '{}'",
+                base.path()
+            )));
+        }
+
+        Ok(Self(resolved))
+    }
+}
 
 /// Stateless filesystem provider.
 ///

@@ -72,6 +72,36 @@ struct Session {
 /// A simple provider that stores all data in memory. Each subject DID gets its
 /// own session with separate archive and memory storage. Data is not persisted.
 ///
+use serde::{Deserialize, Serialize};
+
+/// Address for volatile (in-memory) storage.
+///
+/// A string prefix that scopes storage operations.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(transparent)]
+pub struct Address(String);
+
+impl Address {
+    /// Create an address with the given prefix.
+    pub fn new(prefix: impl Into<String>) -> Self {
+        Self(prefix.into())
+    }
+
+    /// The prefix string.
+    pub fn prefix(&self) -> &str {
+        &self.0
+    }
+
+    /// Resolve a sub-path under this address.
+    pub fn resolve(&self, segment: &str) -> Self {
+        if self.0.is_empty() {
+            Self(segment.to_string())
+        } else {
+            Self(format!("{}/{}", self.0, segment))
+        }
+    }
+}
+
 /// Uses `parking_lot::RwLock` for interior mutability so that
 /// `Provider::execute` can take `&self`. All lock guards are dropped before
 /// any `.await` points. Unlike `std::sync::RwLock`, `parking_lot` locks are

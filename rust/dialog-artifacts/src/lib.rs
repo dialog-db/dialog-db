@@ -82,6 +82,9 @@ pub use credentials::{Credentials, Operator, Profile};
 /// Profile — named identity with signing credential.
 pub mod profile;
 
+/// DID-routed storage dispatcher.
+pub mod storage;
+
 /// Operator — operating environment built from a profile.
 pub mod operator;
 

@@ -48,8 +48,37 @@ mod storage;
 use dialog_capability::Did;
 use js_sys::Uint8Array;
 use rexie::{ObjectStore, Rexie, RexieBuilder, TransactionMode};
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+
+/// Address for IndexedDB-based storage.
+///
+/// A string prefix that scopes database names.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(transparent)]
+pub struct Address(String);
+
+impl Address {
+    /// Create an address with the given prefix.
+    pub fn new(prefix: impl Into<String>) -> Self {
+        Self(prefix.into())
+    }
+
+    /// The prefix string.
+    pub fn prefix(&self) -> &str {
+        &self.0
+    }
+
+    /// Resolve a sub-path under this address.
+    pub fn resolve(&self, segment: &str) -> Self {
+        if self.0.is_empty() {
+            Self(segment.to_string())
+        } else {
+            Self(format!("{}/{}", self.0, segment))
+        }
+    }
+}
 
 /// Convert bytes to a JS Uint8Array.
 fn to_uint8array(bytes: &[u8]) -> Uint8Array {

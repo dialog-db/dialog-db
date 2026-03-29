@@ -1,4 +1,5 @@
 use dialog_capability::fork::{Fork, ForkInvocation};
+use dialog_capability::storage as cap_storage;
 use dialog_capability::{Capability, Did, Provider, Subject, authority};
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
@@ -215,6 +216,28 @@ impl Provider<authority::Sign> for TestEnv {
         _input: Capability<authority::Sign>,
     ) -> Result<Vec<u8>, authority::AuthorityError> {
         Ok(vec![0u8; 64])
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<cap_storage::Get> for TestEnv {
+    async fn execute(
+        &self,
+        input: Capability<cap_storage::Get>,
+    ) -> Result<Option<Vec<u8>>, cap_storage::StorageError> {
+        Provider::<cap_storage::Get>::execute(&self.local, input).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<cap_storage::List> for TestEnv {
+    async fn execute(
+        &self,
+        input: Capability<cap_storage::List>,
+    ) -> Result<cap_storage::ListResult, cap_storage::StorageError> {
+        Provider::<cap_storage::List>::execute(&self.local, input).await
     }
 }
 

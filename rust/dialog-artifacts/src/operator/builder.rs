@@ -4,9 +4,10 @@ use crate::Credentials;
 use crate::environment::Environment;
 use crate::profile::Profile;
 use crate::remote::Remote;
+use crate::storage::Storage;
 use dialog_credentials::key::KeyExport;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
-use dialog_storage::provider::{Compositor, Store};
+use dialog_storage::provider::Store;
 use dialog_varsig::Did;
 
 use super::Operator;
@@ -18,24 +19,24 @@ const OPERATOR_DERIVATION_CONTEXT: &str = "dialog-db operator derivation";
 /// Created via `Profile::operator(context)`.
 pub struct OperatorBuilder {
     credential: SignerCredential,
-    compositor: Compositor,
+    storage: Storage,
     context: Vec<u8>,
 }
 
 impl OperatorBuilder {
     pub(crate) fn new(profile: &Profile, profile_store: Store, context: Vec<u8>) -> Self {
-        let compositor = Compositor::new();
-        compositor.mount(profile.did(), profile_store);
+        let storage = Storage::new();
+        storage.mount(profile.did(), profile_store);
         Self {
             credential: profile.credential().clone(),
-            compositor,
+            storage,
             context,
         }
     }
 
     /// Register a DID → Store mapping for a repository.
     pub fn mount(self, did: Did, store: Store) -> Self {
-        self.compositor.mount(did, store);
+        self.storage.mount(did, store);
         self
     }
 
@@ -43,7 +44,7 @@ impl OperatorBuilder {
     pub fn network(self, remote: Remote) -> NetworkBuilder {
         NetworkBuilder {
             credential: self.credential,
-            compositor: self.compositor,
+            storage: self.storage,
             context: self.context,
             remote,
         }
@@ -58,7 +59,7 @@ impl OperatorBuilder {
 /// Builder with network configured, ready to build.
 pub struct NetworkBuilder {
     credential: SignerCredential,
-    compositor: Compositor,
+    storage: Storage,
     context: Vec<u8>,
     remote: Remote,
 }
@@ -73,7 +74,7 @@ impl NetworkBuilder {
             operator_signer,
         );
 
-        Ok(Environment::new(credentials, self.compositor, self.remote))
+        Ok(Environment::new(credentials, self.storage, self.remote))
     }
 }
 
