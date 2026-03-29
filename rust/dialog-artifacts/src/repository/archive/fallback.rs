@@ -1,7 +1,6 @@
 use async_trait::async_trait;
-use dialog_capability::access::{Allow, Authorize};
 use dialog_capability::fork::Fork;
-use dialog_capability::{Capability, Provider};
+use dialog_capability::{Capability, Provider, authority, storage};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Catalog, Get, Put};
 use dialog_remote_s3::S3;
@@ -57,8 +56,11 @@ impl<Env> ContentAddressedStorage for FallbackStore<'_, Env>
 where
     Env: Provider<Get>
         + Provider<Put>
-        + Provider<Authorize<Get, Allow>>
         + Provider<Fork<S3, Get>>
+        + Provider<authority::Identify>
+        + Provider<authority::Sign>
+        + Provider<storage::List>
+        + Provider<storage::Get>
         + ConditionalSync
         + 'static,
 {

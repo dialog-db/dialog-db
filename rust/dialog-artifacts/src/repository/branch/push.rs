@@ -1,6 +1,5 @@
-use dialog_capability::Provider;
-use dialog_capability::access::{Allow, Authorize};
 use dialog_capability::fork::Fork;
+use dialog_capability::{Provider, authority, storage};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
@@ -40,12 +39,13 @@ impl Push<'_> {
             + Provider<archive_fx::Put>
             + Provider<memory_fx::Resolve>
             + Provider<memory_fx::Publish>
-            + Provider<Authorize<archive_fx::Put, Allow>>
-            + Provider<Authorize<memory_fx::Resolve, Allow>>
-            + Provider<Authorize<memory_fx::Publish, Allow>>
             + Provider<Fork<S3, archive_fx::Put>>
             + Provider<Fork<S3, memory_fx::Resolve>>
             + Provider<Fork<S3, memory_fx::Publish>>
+            + Provider<authority::Identify>
+            + Provider<authority::Sign>
+            + Provider<storage::List>
+            + Provider<storage::Get>
             + ConditionalSync
             + 'static,
     {
@@ -133,12 +133,13 @@ where
         + Provider<archive_fx::Put>
         + Provider<memory_fx::Resolve>
         + Provider<memory_fx::Publish>
-        + Provider<Authorize<archive_fx::Put, Allow>>
-        + Provider<Authorize<memory_fx::Resolve, Allow>>
-        + Provider<Authorize<memory_fx::Publish, Allow>>
         + Provider<Fork<S3, archive_fx::Put>>
         + Provider<Fork<S3, memory_fx::Resolve>>
         + Provider<Fork<S3, memory_fx::Publish>>
+        + Provider<authority::Identify>
+        + Provider<authority::Sign>
+        + Provider<storage::List>
+        + Provider<storage::Get>
         + ConditionalSync
         + 'static,
 {

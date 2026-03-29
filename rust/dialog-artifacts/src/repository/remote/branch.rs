@@ -1,6 +1,5 @@
-use dialog_capability::access::{Allow, Authorize};
 use dialog_capability::fork::Fork;
-use dialog_capability::{Did, Provider};
+use dialog_capability::{Did, Provider, authority, storage};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
@@ -83,8 +82,11 @@ impl RemoteBranch {
     /// Returns `None` if the remote branch has no state (not yet created).
     pub async fn resolve<Env>(&self, env: &Env) -> Result<Option<Revision>, RepositoryError>
     where
-        Env: Provider<Authorize<memory_fx::Resolve, Allow>>
-            + Provider<Fork<S3, memory_fx::Resolve>>
+        Env: Provider<Fork<S3, memory_fx::Resolve>>
+            + Provider<authority::Identify>
+            + Provider<authority::Sign>
+            + Provider<storage::List>
+            + Provider<storage::Get>
             + ConditionalSync,
     {
         let capability = self
@@ -127,10 +129,12 @@ impl RemoteBranch {
     /// then publishes the updated state with the new revision.
     pub async fn publish<Env>(&self, revision: Revision, env: &Env) -> Result<(), RepositoryError>
     where
-        Env: Provider<Authorize<memory_fx::Resolve, Allow>>
-            + Provider<Authorize<memory_fx::Publish, Allow>>
-            + Provider<Fork<S3, memory_fx::Resolve>>
+        Env: Provider<Fork<S3, memory_fx::Resolve>>
             + Provider<Fork<S3, memory_fx::Publish>>
+            + Provider<authority::Identify>
+            + Provider<authority::Sign>
+            + Provider<storage::List>
+            + Provider<storage::Get>
             + ConditionalSync,
     {
         let cell_cap = self.cell_capability();
@@ -189,8 +193,11 @@ impl RemoteBranch {
         env: &Env,
     ) -> Result<(), DialogArtifactsError>
     where
-        Env: Provider<Authorize<archive_fx::Put, Allow>>
-            + Provider<Fork<S3, archive_fx::Put>>
+        Env: Provider<Fork<S3, archive_fx::Put>>
+            + Provider<authority::Identify>
+            + Provider<authority::Sign>
+            + Provider<storage::List>
+            + Provider<storage::Get>
             + ConditionalSync,
     {
         let catalog = self.archive().index();
@@ -216,8 +223,11 @@ impl RemoteBranch {
         env: &Env,
     ) -> Result<Option<Vec<u8>>, DialogArtifactsError>
     where
-        Env: Provider<Authorize<archive_fx::Get, Allow>>
-            + Provider<Fork<S3, archive_fx::Get>>
+        Env: Provider<Fork<S3, archive_fx::Get>>
+            + Provider<authority::Identify>
+            + Provider<authority::Sign>
+            + Provider<storage::List>
+            + Provider<storage::Get>
             + ConditionalSync,
     {
         let catalog = self.archive().index();

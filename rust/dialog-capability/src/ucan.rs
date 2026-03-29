@@ -16,7 +16,6 @@ pub mod issuer;
 mod parameters;
 mod scope;
 
-pub use access::authorize;
 pub use claim::{claim, find_chain};
 pub use delegation::import_delegation_chain;
 pub use invocation::UcanInvocation;
@@ -24,15 +23,9 @@ pub use issuer::Issuer;
 pub use parameters::{parameters, parameters_to_args, parameters_to_policy};
 pub use scope::{Args, Parameters, Scope};
 
-use crate::Constraint;
-use crate::access::Protocol;
-
 /// UCAN authorization format — produces a signed invocation chain.
 ///
-/// Used with [`access::Authorize<Fx, Ucan>`](crate::access::Authorize)
-/// to produce [`UcanInvocation`] as the authorization proof.
+/// Implements [`Protocol`](crate::access::Protocol) for environments
+/// that provide identity, signing, and storage effects. Produces
+/// [`UcanInvocation`] as the authorization proof.
 pub struct Ucan;
-
-impl Protocol for Ucan {
-    type Authorization<Fx: Constraint> = UcanInvocation;
-}

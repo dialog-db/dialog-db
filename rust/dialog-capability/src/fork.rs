@@ -6,11 +6,11 @@
 //! [`ForkInvocation`] is the input to `Provider<Fork<S, Fx>>` — it carries
 //! the address and authorization needed for execution.
 
-use crate::access::{self, Authorization, AuthorizeError};
+use crate::access::{Authorization, AuthorizeError, Protocol};
 use crate::command::Command;
 use crate::effect::Effect;
 use crate::site::{Site, SiteAddress};
-use crate::{Ability, Capability, Constraint, Provider, Subject};
+use crate::{Ability, Capability, Constraint, Provider};
 use dialog_common::ConditionalSend;
 use std::marker::PhantomData;
 
@@ -73,18 +73,19 @@ where
 
     /// Authorize the capability and build a `ForkInvocation`.
     ///
-    /// Authorizes via `Provider<access::Authorize<Fx, S::Format>>`,
-    /// then builds `ForkInvocation { address, authorization }`.
+    /// Delegates to the site's [`Protocol::authorize`](access::Protocol::authorize).
     pub async fn acquire<Env>(self, env: &Env) -> Result<ForkInvocation<S, Fx>, AuthorizeError>
     where
-        Capability<Fx>: Ability + Clone + ConditionalSend,
-        access::Authorize<Fx, S::Protocol>: ConditionalSend + 'static,
-        Env: Provider<access::Authorize<Fx, S::Protocol>> + dialog_common::ConditionalSync,
+        Fx: ConditionalSend + 'static,
+        Capability<Fx>: Ability + Clone + ConditionalSend + dialog_common::ConditionalSync,
+        S::Protocol: Protocol,
+        Env: Provider<crate::authority::Identify>
+            + Provider<crate::authority::Sign>
+            + Provider<crate::storage::List>
+            + Provider<crate::storage::Get>
+            + dialog_common::ConditionalSync,
     {
-        let authorize_cap = build_authorize_cap::<Fx, S::Protocol>(self.capability.clone());
-        let authorization =
-            <Env as Provider<access::Authorize<Fx, S::Protocol>>>::execute(env, authorize_cap)
-                .await?;
+        let authorization = S::Protocol::authorize(env, self.capability).await?;
 
         Ok(ForkInvocation {
             address: self.address,
@@ -95,9 +96,13 @@ where
     /// Authorize and execute in one step.
     pub async fn perform<Env>(self, env: &Env) -> Result<Fx::Output, AuthorizeError>
     where
-        Capability<Fx>: Ability + Clone + ConditionalSend,
-        access::Authorize<Fx, S::Protocol>: ConditionalSend + 'static,
-        Env: Provider<access::Authorize<Fx, S::Protocol>>
+        Fx: ConditionalSend + 'static,
+        Capability<Fx>: Ability + Clone + ConditionalSend + dialog_common::ConditionalSync,
+        S::Protocol: Protocol,
+        Env: Provider<crate::authority::Identify>
+            + Provider<crate::authority::Sign>
+            + Provider<crate::storage::List>
+            + Provider<crate::storage::Get>
             + Provider<Fork<S, Fx>>
             + dialog_common::ConditionalSync,
     {
@@ -127,19 +132,4 @@ pub enum ForkError {
     /// Authorization was denied.
     #[error(transparent)]
     Authorization(#[from] AuthorizeError),
-}
-
-/// Build a `Capability<access::Authorize<Fx, F>>` from a `Capability<Fx>`.
-fn build_authorize_cap<Fx, F>(capability: Capability<Fx>) -> Capability<access::Authorize<Fx, F>>
-where
-    Fx: Effect,
-    Fx::Of: Constraint,
-    F: access::Protocol,
-    Capability<Fx>: Ability + ConditionalSend,
-    access::Authorize<Fx, F>: ConditionalSend + 'static,
-{
-    let did = capability.subject().clone();
-    Subject::from(did)
-        .attenuate(access::Access)
-        .invoke(access::Authorize::<Fx, F>::new(capability))
 }

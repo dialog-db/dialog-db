@@ -1,6 +1,5 @@
-use dialog_capability::access::{Allow, Authorize};
 use dialog_capability::fork::Fork;
-use dialog_capability::{Policy, Provider, Subject, authority};
+use dialog_capability::{Policy, Provider, Subject, authority, storage};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
@@ -80,8 +79,9 @@ impl Pull<'_> {
             + Provider<memory_fx::Resolve>
             + Provider<memory_fx::Publish>
             + Provider<authority::Identify>
-            + Provider<Authorize<archive_fx::Get, Allow>>
-            + Provider<Authorize<memory_fx::Resolve, Allow>>
+            + Provider<authority::Sign>
+            + Provider<storage::List>
+            + Provider<storage::Get>
             + Provider<Fork<S3, archive_fx::Get>>
             + Provider<Fork<S3, memory_fx::Resolve>>
             + ConditionalSync
@@ -250,8 +250,9 @@ where
         + Provider<memory_fx::Resolve>
         + Provider<memory_fx::Publish>
         + Provider<authority::Identify>
-        + Provider<Authorize<archive_fx::Get, Allow>>
-        + Provider<Authorize<memory_fx::Resolve, Allow>>
+        + Provider<authority::Sign>
+        + Provider<storage::List>
+        + Provider<storage::Get>
         + Provider<Fork<S3, archive_fx::Get>>
         + Provider<Fork<S3, memory_fx::Resolve>>
         + ConditionalSync

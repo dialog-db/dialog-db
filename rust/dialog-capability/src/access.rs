@@ -1,20 +1,15 @@
 //! Access capability hierarchy — authorization for remote execution.
 //!
-//! Provides the [`Access`] attenuation and [`Authorize`] effect for
+//! Provides the [`Access`] attenuation and [`Authorizer`] trait for
 //! authorizing capabilities before sending them to remote sites.
 //!
-//! # Capability Hierarchy
-//!
-//! ```text
-//! Subject (operator DID)
-//! └── Access (ability: /access)
-//!     └── Authorize<Fx, F> { capability } -> Effect -> Result<Authorization<Fx, F>, AuthorizeError>
-//! ```
+//! Authorization is dispatched through [`Protocol`] types (e.g. [`Allow`],
+//! `Ucan`) via the [`Authorizer`] trait, rather than through the
+//! `Provider` effect system.
 
-use crate::{Attenuation, Capability, Claim, Constraint, Effect};
-use dialog_common::ConditionalSend;
+use crate::{Attenuation, Capability, Constraint};
+use dialog_common::{ConditionalSend, ConditionalSync};
 use serde::{Deserialize, Serialize};
-use std::marker::PhantomData;
 use thiserror::Error;
 
 pub use crate::Subject;
@@ -35,23 +30,59 @@ impl Attenuation for Access {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Allow;
 
-/// Trait for describing access protocol in terms of authorization formats.
+use crate::{Provider, authority, storage};
+
+/// Access protocol — defines how authorization is produced.
 ///
-/// Different authorization schemes produce different proof types:
+/// Different protocols produce different proof types:
 /// - [`Allow`]: no extra material (`Authorization<Fx> = ()`)
-/// - UCAN format: a signed invocation chain
-pub trait Protocol: ConditionalSend + 'static {
+/// - UCAN: a signed delegation chain
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+pub trait Protocol: Sized + ConditionalSend + 'static {
     /// The authorization material produced for a given capability.
     type Authorization<Fx: Constraint>: ConditionalSend;
+
+    /// Authorize a capability, producing format-specific proof material.
+    async fn authorize<Fx, Env>(
+        env: &Env,
+        capability: Capability<Fx>,
+    ) -> Result<Authorization<Fx, Self>, AuthorizeError>
+    where
+        Fx: Constraint + ConditionalSend + 'static,
+        Capability<Fx>: crate::Ability + ConditionalSend + ConditionalSync,
+        Env: Provider<authority::Identify>
+            + Provider<authority::Sign>
+            + Provider<storage::List>
+            + Provider<storage::Get>
+            + ConditionalSync;
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Protocol for Allow {
     type Authorization<Fx: Constraint> = ();
+
+    async fn authorize<Fx, Env>(
+        _env: &Env,
+        capability: Capability<Fx>,
+    ) -> Result<Authorization<Fx, Self>, AuthorizeError>
+    where
+        Fx: Constraint + ConditionalSend + 'static,
+        Capability<Fx>: crate::Ability + ConditionalSend + ConditionalSync,
+        Env: Provider<authority::Identify>
+            + Provider<authority::Sign>
+            + Provider<storage::List>
+            + Provider<storage::Get>
+            + ConditionalSync,
+    {
+        Ok(Authorization::new(capability, ()))
+    }
 }
 
 /// Authorized capability with format-specific proof material.
 ///
-/// Created by `Provider<Authorize<Fx, F>>`.
+/// Created by [`Authorizer::authorize`].
 pub struct Authorization<Fx: Constraint, F: Protocol = Allow> {
     /// The authorized capability.
     pub capability: Capability<Fx>,
@@ -81,55 +112,6 @@ impl<Fx: Constraint, F: Protocol> std::ops::Deref for Authorization<Fx, F> {
     }
 }
 
-/// Authorize a capability for remote execution.
-///
-/// The `F` type parameter selects the authorization format (Allow, Ucan, etc.).
-#[derive(Serialize, Deserialize)]
-#[serde(bound(deserialize = ""))]
-pub struct Authorize<Fx: Constraint, F: Protocol = Allow> {
-    /// The capability to authorize.
-    pub capability: Capability<Fx>,
-    /// The target format (used for routing to the correct provider).
-    #[serde(skip)]
-    _format: PhantomData<F>,
-}
-
-impl<Fx: Constraint, F: Protocol> Authorize<Fx, F> {
-    /// Create a new authorization request for the given capability and format.
-    pub fn new(capability: Capability<Fx>) -> Self {
-        Self {
-            capability,
-            _format: PhantomData,
-        }
-    }
-}
-
-impl<Fx, F> Claim for Authorize<Fx, F>
-where
-    Fx: Effect,
-    Fx::Of: Constraint,
-    F: Protocol,
-    Capability<Fx>: ConditionalSend,
-    Self: ConditionalSend + 'static,
-{
-    type Claim = Self;
-    fn claim(self) -> Self {
-        self
-    }
-}
-
-impl<Fx, F> Effect for Authorize<Fx, F>
-where
-    Fx: Effect,
-    Fx::Of: Constraint,
-    F: Protocol,
-    Capability<Fx>: ConditionalSend,
-    Self: ConditionalSend + 'static,
-{
-    type Of = Access;
-    type Output = Result<Authorization<Fx, F>, AuthorizeError>;
-}
-
 /// Error during the authorize step.
 #[derive(Debug, Error)]
 pub enum AuthorizeError {
@@ -140,26 +122,6 @@ pub enum AuthorizeError {
     /// Configuration error (e.g., missing delegation chain).
     #[error("Authorization configuration error: {0}")]
     Configuration(String),
-}
-
-/// Blanket impl: any type can authorize with `Allow` format (no proof needed).
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Env, Fx> crate::Provider<Authorize<Fx, Allow>> for Env
-where
-    Fx: crate::Effect + 'static,
-    Fx::Of: Constraint,
-    Capability<Fx>: ConditionalSend,
-    Authorize<Fx, Allow>: ConditionalSend + 'static,
-    Env: ConditionalSend + dialog_common::ConditionalSync,
-{
-    async fn execute(
-        &self,
-        input: Capability<Authorize<Fx, Allow>>,
-    ) -> Result<Authorization<Fx, Allow>, AuthorizeError> {
-        let auth_request = input.into_inner().constraint;
-        Ok(Authorization::new(auth_request.capability, ()))
-    }
 }
 
 #[cfg(test)]

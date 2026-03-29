@@ -1,6 +1,5 @@
-use dialog_capability::Provider;
-use dialog_capability::access::{Allow, Authorize};
 use dialog_capability::fork::Fork;
+use dialog_capability::{Provider, authority, storage};
 use dialog_common::ConditionalSync;
 use dialog_effects::memory as memory_fx;
 use dialog_remote_s3::S3;
@@ -35,8 +34,11 @@ impl Fetch<'_> {
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, RepositoryError>
     where
         Env: Provider<memory_fx::Resolve>
-            + Provider<Authorize<memory_fx::Resolve, Allow>>
             + Provider<Fork<S3, memory_fx::Resolve>>
+            + Provider<authority::Identify>
+            + Provider<authority::Sign>
+            + Provider<storage::List>
+            + Provider<storage::Get>
             + ConditionalSync,
     {
         let upstream =
@@ -90,8 +92,11 @@ async fn fetch_remote<Env>(
 ) -> Result<Option<Revision>, RepositoryError>
 where
     Env: Provider<memory_fx::Resolve>
-        + Provider<Authorize<memory_fx::Resolve, Allow>>
         + Provider<Fork<S3, memory_fx::Resolve>>
+        + Provider<authority::Identify>
+        + Provider<authority::Sign>
+        + Provider<storage::List>
+        + Provider<storage::Get>
         + ConditionalSync,
 {
     let remote_site = branch.load_remote(remote.clone()).perform(env).await?;

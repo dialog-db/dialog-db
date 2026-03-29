@@ -19,7 +19,20 @@ use super::FileStore;
 ///
 /// Platform-gated: native gets `FileSystem` + `Volatile`,
 /// web gets `IndexedDb` + `Volatile`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, dialog_capability::Provider)]
+#[provide(
+    archive::Get,
+    archive::Put,
+    memory::Resolve,
+    memory::Publish,
+    memory::Retract,
+    storage::Get,
+    storage::Set,
+    storage::Delete,
+    storage::List,
+    credential::Load,
+    credential::Save
+)]
 pub enum Store {
     /// Filesystem-backed store (native only).
     #[cfg(not(target_arch = "wasm32"))]
@@ -53,15 +66,6 @@ impl Compositor {
     pub fn mount(&self, did: Did, store: Store) {
         self.mounts.write().insert(did, store);
     }
-
-    /// Look up the store for a DID, cloning it out of the lock.
-    fn lookup(&self, did: &Did) -> Result<Store, StorageError> {
-        let mounts = self.mounts.read();
-        mounts
-            .get(did)
-            .cloned()
-            .ok_or_else(|| StorageError::Storage(format!("no mount for {did}")))
-    }
 }
 
 impl Default for Compositor {
@@ -72,82 +76,38 @@ impl Default for Compositor {
 
 use dialog_effects::{archive, credential, memory, storage};
 
-/// Generate `Provider<Fx>` for `Store` by dispatching to the inner variant.
-macro_rules! dispatch {
-    ($($effect:ty),+ $(,)?) => {
-        $(
-            #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-            #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-            impl Provider<$effect> for Store
-            where
-                Self: ConditionalSend + ConditionalSync,
-            {
-                async fn execute(
-                    &self,
-                    input: Capability<$effect>,
-                ) -> <$effect as dialog_capability::Effect>::Output {
-                    match self {
-                        #[cfg(not(target_arch = "wasm32"))]
-                        Self::FileSystem(s) => Provider::<$effect>::execute(s, input).await,
-                        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-                        Self::IndexedDb(s) => Provider::<$effect>::execute(s, input).await,
-                        Self::Volatile(s) => Provider::<$effect>::execute(s, input).await,
-                    }
-                }
-            }
-        )+
-    };
+/// Produce an error when no mount is registered for a DID.
+trait FromUnmounted {
+    fn unmounted(did: &Did) -> Self;
 }
 
-dispatch!(
-    archive::Get,
-    archive::Put,
-    memory::Resolve,
-    memory::Publish,
-    memory::Retract,
-    storage::Get,
-    storage::Set,
-    storage::Delete,
-    storage::List,
-    credential::Load,
-    credential::Save,
-);
-
-/// Route Compositor effects by looking up the subject DID and delegating to Store.
-macro_rules! route {
-    ($($effect:ty),+ $(,)?) => {
-        $(
-            #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-            #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-            impl Provider<$effect> for Compositor
-            where
-                Self: ConditionalSend + ConditionalSync,
-            {
-                async fn execute(
-                    &self,
-                    input: Capability<$effect>,
-                ) -> <$effect as dialog_capability::Effect>::Output {
-                    let did = input.subject().clone();
-                    match self.lookup(&did) {
-                        Ok(store) => Provider::<$effect>::execute(&store, input).await,
-                        Err(e) => Err(e.into()),
-                    }
-                }
-            }
-        )+
-    };
+impl<T, E: From<StorageError>> FromUnmounted for Result<T, E> {
+    fn unmounted(did: &Did) -> Self {
+        Err(StorageError::Storage(format!("no mount for {did}")).into())
+    }
 }
 
-route!(
-    archive::Get,
-    archive::Put,
-    memory::Resolve,
-    memory::Publish,
-    memory::Retract,
-    storage::Get,
-    storage::Set,
-    storage::Delete,
-    storage::List,
-    credential::Load,
-    credential::Save,
-);
+/// Blanket Provider impl for Compositor — routes by subject DID to the mounted Store.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<Fx> Provider<Fx> for Compositor
+where
+    Fx: dialog_capability::Effect + ConditionalSend + 'static,
+    Fx::Output: FromUnmounted,
+    Capability<Fx>: ConditionalSend,
+    Store: Provider<Fx> + ConditionalSync,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(&self, input: Capability<Fx>) -> Fx::Output {
+        let did = input.subject().clone();
+        let mounted = {
+            let mounts = self.mounts.read();
+            mounts.get(&did).cloned()
+        };
+
+        match mounted {
+            Some(store) => store.execute(input).await,
+            None => Fx::Output::unmounted(&did),
+        }
+    }
+}

@@ -7,7 +7,7 @@
 //! - Address types (available on all platforms for deserialization in WASM tests)
 //! - Server implementation (native-only, in the `server` submodule)
 //! - Test operator types for capability-based testing
-use dialog_capability::{Capability, Did, Principal, Provider, Subject, authority};
+use dialog_capability::{Capability, Did, Principal, Provider, authority};
 
 use serde::{Deserialize, Serialize};
 
@@ -69,12 +69,11 @@ impl Principal for Session {
 impl Provider<authority::Identify> for Session {
     async fn execute(
         &self,
-        input: Capability<authority::Identify>,
+        _input: Capability<authority::Identify>,
     ) -> Result<authority::Authority, authority::AuthorityError> {
-        let subject_did = input.subject().clone();
-        Ok(Subject::from(subject_did)
-            .attenuate(authority::Profile::local(self.did.clone()))
-            .attenuate(authority::Operator::new(self.did.clone())))
+        Err(authority::AuthorityError::Identity(
+            "Session does not provide identity".into(),
+        ))
     }
 }
 
@@ -85,9 +84,37 @@ impl Provider<authority::Sign> for Session {
         &self,
         _input: Capability<authority::Sign>,
     ) -> Result<Vec<u8>, authority::AuthorityError> {
-        // S3 direct access uses SigV4 signing, not external signatures.
-        // The signature is never verified -- S3 uses its own SigV4 auth.
-        Ok(vec![0u8; 64])
+        Err(authority::AuthorityError::SigningFailed(
+            "Session does not provide signing".into(),
+        ))
+    }
+}
+
+use dialog_capability::storage;
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<storage::Get> for Session {
+    async fn execute(
+        &self,
+        _input: Capability<storage::Get>,
+    ) -> Result<Option<Vec<u8>>, storage::StorageError> {
+        Err(storage::StorageError::Storage(
+            "Session does not provide storage".into(),
+        ))
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<storage::List> for Session {
+    async fn execute(
+        &self,
+        _input: Capability<storage::List>,
+    ) -> Result<storage::ListResult, storage::StorageError> {
+        Err(storage::StorageError::Storage(
+            "Session does not provide storage".into(),
+        ))
     }
 }
 
