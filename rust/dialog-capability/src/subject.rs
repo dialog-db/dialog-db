@@ -30,6 +30,12 @@ impl From<Did> for Subject {
     }
 }
 
+impl From<Subject> for Capability<Subject> {
+    fn from(subject: Subject) -> Self {
+        Self::new(subject)
+    }
+}
+
 /// DID used to represent "any subject" in delegation scope.
 pub const ANY_SUBJECT: &str = "did:_:_";
 

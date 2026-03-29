@@ -12,7 +12,7 @@ use crate::Credentials;
 use crate::remote::Remote;
 use crate::storage::Storage;
 use dialog_capability::Provider;
-use dialog_capability::authority::{Identify, Sign};
+use dialog_capability::authority::{Authority, Identify, Sign};
 use dialog_capability::storage::{Load, Mount, Save};
 use dialog_credentials::credential::Credential;
 use dialog_effects::{archive, credential, memory, storage as fx_storage};
@@ -65,6 +65,16 @@ impl Operator {
     /// The profile's DID (the long-lived identity).
     pub fn profile_did(&self) -> Did {
         self.authority.profile_did()
+    }
+
+    /// Build the authority chain for a given subject DID.
+    pub fn build_authority(&self, subject: Did) -> Authority {
+        self.authority.build_authority(subject)
+    }
+
+    /// The storage for this operator.
+    pub fn storage(&self) -> &Storage {
+        &self.storage
     }
 }
 

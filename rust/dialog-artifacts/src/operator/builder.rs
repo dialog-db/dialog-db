@@ -35,14 +35,18 @@ impl OperatorBuilder {
     /// Allow a capability — creates a delegation from profile to operator.
     ///
     /// The delegation is created during `.build()`.
-    pub fn allow<T: dialog_capability::Constraint>(
-        mut self,
-        capability: dialog_capability::Capability<T>,
-    ) -> Self
+    /// Allow a capability — creates a delegation from profile to operator.
+    ///
+    /// Accepts a `Capability<T>` or anything convertible to one
+    /// (e.g. `Subject::any()` for powerline delegation).
+    pub fn allow<T, C>(mut self, capability: C) -> Self
     where
+        T: dialog_capability::Constraint,
+        C: Into<dialog_capability::Capability<T>>,
         dialog_capability::Capability<T>: Ability,
     {
-        self.allowed.push(Scope::from(&capability));
+        let cap = capability.into();
+        self.allowed.push(Scope::from(&cap));
         self
     }
 
