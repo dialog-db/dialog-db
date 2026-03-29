@@ -16,7 +16,7 @@ const OPERATOR_DERIVATION_CONTEXT: &str = "dialog-db operator derivation";
 
 /// Builder for constructing an Operator from a Profile.
 ///
-/// Created via `Profile::operator(context)`.
+/// Created via `Profile::derive(context)`.
 pub struct OperatorBuilder {
     credential: SignerCredential,
     context: Vec<u8>,

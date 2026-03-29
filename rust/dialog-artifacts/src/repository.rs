@@ -325,7 +325,7 @@ mod tests {
             .await
             .unwrap();
         profile
-            .operator(b"test")
+            .derive(b"test")
             .network(Remote)
             .build(storage)
             .await
@@ -503,7 +503,7 @@ mod tests {
                 .await
                 .unwrap();
             profile
-                .operator(b"test")
+                .derive(b"test")
                 .allow(Subject::any())
                 .network(Remote)
                 .build(storage)

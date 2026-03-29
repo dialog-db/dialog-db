@@ -26,7 +26,7 @@ mod tests {
             .unwrap();
 
         let operator = profile
-            .operator(b"alice")
+            .derive(b"alice")
             .network(Remote)
             .build(storage)
             .await
@@ -45,14 +45,14 @@ mod tests {
             .unwrap();
 
         let op1 = profile
-            .operator(b"alice")
+            .derive(b"alice")
             .network(Remote)
             .build(storage.clone())
             .await
             .unwrap();
 
         let op2 = profile
-            .operator(b"alice")
+            .derive(b"alice")
             .network(Remote)
             .build(storage)
             .await
@@ -71,14 +71,14 @@ mod tests {
             .unwrap();
 
         let alice = profile
-            .operator(b"alice")
+            .derive(b"alice")
             .network(Remote)
             .build(storage.clone())
             .await
             .unwrap();
 
         let bob = profile
-            .operator(b"bob")
+            .derive(b"bob")
             .network(Remote)
             .build(storage)
             .await
@@ -101,7 +101,7 @@ mod tests {
             .unwrap();
 
         let operator = profile
-            .operator(b"alice")
+            .derive(b"alice")
             .allow(Subject::any().archive().catalog("index"))
             .allow(Subject::any().archive().catalog("content"))
             .allow(Subject::any().memory().space("local"))
@@ -141,7 +141,7 @@ mod tests {
                 .unwrap();
 
             let operator = profile
-                .operator(b"alice")
+                .derive(b"alice")
                 .network(Remote)
                 .build(storage)
                 .await
@@ -174,7 +174,7 @@ mod tests {
                 .unwrap();
 
             let operator = profile
-                .operator(b"alice")
+                .derive(b"alice")
                 .network(Remote)
                 .build(storage)
                 .await
@@ -206,7 +206,7 @@ mod tests {
                 .unwrap();
 
             let operator = profile
-                .operator(b"alice")
+                .derive(b"alice")
                 .allow(Subject::any().archive().catalog("index"))
                 .network(Remote)
                 .build(storage)
@@ -238,7 +238,7 @@ mod tests {
                 .unwrap();
 
             let operator = profile
-                .operator(b"alice")
+                .derive(b"alice")
                 .allow(Subject::any().archive().catalog("index"))
                 .network(Remote)
                 .build(storage)
@@ -264,7 +264,7 @@ mod tests {
                 .unwrap();
 
             let operator = profile
-                .operator(b"admin")
+                .derive(b"admin")
                 .allow(Subject::any())
                 .network(Remote)
                 .build(storage)
@@ -300,7 +300,7 @@ mod tests {
                 .unwrap();
 
             let operator = profile
-                .operator(b"alice")
+                .derive(b"alice")
                 .network(Remote)
                 .build(storage)
                 .await
@@ -327,7 +327,7 @@ mod tests {
                 .unwrap();
 
             let operator = profile
-                .operator(b"alice")
+                .derive(b"alice")
                 .allow(Subject::any().archive().catalog("data"))
                 .network(Remote)
                 .build(storage)

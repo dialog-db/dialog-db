@@ -56,8 +56,11 @@ impl Profile {
         &self.location
     }
 
-    /// Start building an operator from this profile.
-    pub fn operator(&self, context: impl Into<Vec<u8>>) -> OperatorBuilder {
+    /// Derive an operator from this profile with the given context seed.
+    ///
+    /// The context determines the derived keypair — same profile + same
+    /// context always produces the same operator key.
+    pub fn derive(&self, context: impl Into<Vec<u8>>) -> OperatorBuilder {
         OperatorBuilder::new(self, context.into())
     }
 }
