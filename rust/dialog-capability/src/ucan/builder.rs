@@ -15,7 +15,6 @@ use dialog_varsig::eddsa::Ed25519Signature;
 
 use super::UcanInvocation;
 use super::claim::find_chain;
-use super::delegation::import_delegation_chain;
 use super::issuer::Issuer;
 use super::scope::Scope;
 
@@ -86,14 +85,13 @@ impl<S> DelegateRequest<S>
 where
     S: dialog_varsig::Signer<Ed25519Signature> + Principal,
 {
-    /// Sign and store the delegation.
+    /// Sign the delegation and return the chain.
     ///
     /// When issuer is set explicitly, only `Identify` (for profile discovery)
-    /// and storage bounds are needed — no `Sign` required.
+    /// and storage read bounds are needed — no `Sign` required.
     pub async fn perform<Env>(self, env: &Env) -> Result<DelegationChain, AuthorizeError>
     where
         Env: Provider<authority::Identify>
-            + Provider<storage::Set>
             + Provider<storage::List>
             + Provider<storage::Get>
             + ConditionalSync,
@@ -134,27 +132,18 @@ where
         )
         .await?;
 
-        // Extend proof chain with outermost delegation
-        let chain = extend_chain(proof, delegation)?;
-
-        // Store delegation chain
-        import_delegation_chain(env, &profile_did, &chain)
-            .await
-            .map_err(|e| AuthorizeError::Configuration(e.to_string()))?;
-
-        Ok(chain)
+        extend_chain(proof, delegation)
     }
 }
 
 impl DelegateRequest<IssuerUnset> {
-    /// Sign and store the delegation, resolving issuer via environment.
+    /// Sign the delegation, resolving issuer via environment.
     ///
     /// Requires `Identify` and `Sign` to discover and use the profile signer.
     pub async fn perform<Env>(self, env: &Env) -> Result<DelegationChain, AuthorizeError>
     where
         Env: Provider<authority::Identify>
             + Provider<authority::Sign>
-            + Provider<storage::Set>
             + Provider<storage::List>
             + Provider<storage::Get>
             + ConditionalSync,
@@ -197,13 +186,7 @@ impl DelegateRequest<IssuerUnset> {
         )
         .await?;
 
-        let chain = extend_chain(proof, delegation)?;
-
-        import_delegation_chain(env, &profile_did, &chain)
-            .await
-            .map_err(|e| AuthorizeError::Configuration(e.to_string()))?;
-
-        Ok(chain)
+        extend_chain(proof, delegation)
     }
 }
 

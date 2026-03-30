@@ -13,6 +13,7 @@ pub use export::{
 pub use signer::SignerCredential;
 pub use verifier::VerifierCredential;
 
+use crate::Ed25519Signer;
 use dialog_varsig::{Did, Principal};
 
 /// Either a signer or verifier credential.
@@ -58,6 +59,14 @@ impl From<Credential> for Did {
 }
 
 impl Credential {
+    /// Get a reference to the signer, if this credential holds one.
+    pub fn signer(&self) -> Option<&Ed25519Signer> {
+        match self {
+            Self::Signer(s) => Some(&s.0),
+            Self::Verifier(_) => None,
+        }
+    }
+
     /// Export to a platform-specific storage form.
     pub async fn export(&self) -> Result<CredentialExport, CredentialExportError> {
         match self {

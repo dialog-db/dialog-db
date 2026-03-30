@@ -32,6 +32,18 @@ impl From<SignerCredential> for Did {
     }
 }
 
+impl SignerCredential {
+    /// Get a reference to the underlying signer.
+    pub fn signer(&self) -> &Ed25519Signer {
+        &self.0
+    }
+
+    /// Consume and return the underlying signer.
+    pub fn into_signer(self) -> Ed25519Signer {
+        self.0
+    }
+}
+
 impl From<SignerCredential> for Ed25519Signer {
     fn from(credential: SignerCredential) -> Self {
         credential.0

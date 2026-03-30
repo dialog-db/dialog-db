@@ -8,6 +8,8 @@
 //! - [`cell`] — Transactional memory cells with edition tracking
 //! - [`revision`] — Revision tracking and logical timestamps
 
+/// Capability access and delegation for repositories.
+pub mod access;
 /// Archive capabilities and CAS adapters.
 pub mod archive;
 /// Capability-based branch operations (command pattern).
@@ -76,6 +78,14 @@ impl<C: Principal> Repository<C> {
     /// Pre-attenuated archive capability (`Subject → Archive`).
     pub fn archive(&self) -> &Archive {
         &self.archive
+    }
+
+    /// Delegation scope for this repository's capabilities.
+    ///
+    /// From here you can delegate full ownership or narrow to specific
+    /// domains (archive, memory) before delegating.
+    pub fn ownership(&self) -> access::Access<'_, C, Subject> {
+        access::Access::new(self.subject().into(), &self.credential)
     }
 
     /// Add a new remote site to this repository.
@@ -495,6 +505,7 @@ mod tests {
     #[cfg(feature = "ucan")]
     mod delegation_tests {
         use super::*;
+        use dialog_capability::ucan::import_delegation_chain;
 
         async fn test_operator_with_delegation() -> Operator {
             let storage = Storage::temp_storage();
@@ -519,11 +530,12 @@ mod tests {
                 .await?;
 
             let signer = extract_signer(repo.credential());
-            Ucan::delegate(&repo.subject())
+            let chain = Ucan::delegate(&repo.subject())
                 .issuer(signer)
                 .audience(operator.profile_did())
                 .perform(&operator)
                 .await?;
+            import_delegation_chain(&operator, &operator.profile_did(), &chain).await?;
 
             let capability = repo
                 .subject()
@@ -553,11 +565,12 @@ mod tests {
                 .subject()
                 .attenuate(fx_storage::Storage)
                 .attenuate(fx_storage::Store::new("data"));
-            Ucan::delegate(&scoped_cap)
+            let chain = Ucan::delegate(&scoped_cap)
                 .audience(operator.profile_did())
                 .issuer(signer)
                 .perform(&operator)
                 .await?;
+            import_delegation_chain(&operator, &operator.profile_did(), &chain).await?;
 
             let data_cap = repo
                 .subject()
@@ -597,11 +610,12 @@ mod tests {
                 .subject()
                 .attenuate(fx_storage::Storage)
                 .attenuate(fx_storage::Store::new("data"));
-            Ucan::delegate(&scoped_cap)
+            let chain = Ucan::delegate(&scoped_cap)
                 .audience(operator.profile_did())
                 .issuer(signer)
                 .perform(&operator)
                 .await?;
+            import_delegation_chain(&operator, &operator.profile_did(), &chain).await?;
 
             // Delegating for 'data' store should succeed (chain exists)
             let data_cap = repo

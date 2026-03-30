@@ -2,11 +2,15 @@
 
 use crate::operator::OperatorBuilder;
 use crate::storage::LocationExt;
-use dialog_capability::storage::{Load, Location, Mount, Save, Storage as StorageCap};
+use dialog_capability::storage::{
+    self as cap_storage, Load, Location, Mount, Save, Storage as StorageCap,
+};
+use dialog_capability::ucan::import_delegation_chain;
 use dialog_capability::{Capability, Policy, Provider};
 use dialog_common::ConditionalSync;
 use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
 use dialog_storage::provider::Address;
+use dialog_ucan::DelegationChain;
 use dialog_varsig::{Did, Principal};
 
 /// An opened profile — holds a signing credential and knows where it lives.
@@ -56,6 +60,17 @@ impl Profile {
         &self.location
     }
 
+    /// Store a delegation chain under this profile's DID.
+    ///
+    /// Use this to save delegations received from other parties
+    /// (e.g. repository ownership delegated to this profile).
+    pub fn save(&self, chain: dialog_ucan::DelegationChain) -> SaveDelegation {
+        SaveDelegation {
+            did: self.did(),
+            chain,
+        }
+    }
+
     /// Derive an operator from this profile with the given context seed.
     ///
     /// The context determines the derived keypair — same profile + same
@@ -68,6 +83,24 @@ impl Profile {
 impl Principal for Profile {
     fn did(&self) -> Did {
         self.credential.did()
+    }
+}
+
+/// Command to store a delegation chain under a profile's DID.
+pub struct SaveDelegation {
+    did: Did,
+    chain: DelegationChain,
+}
+
+impl SaveDelegation {
+    /// Execute against the environment.
+    pub async fn perform<Env>(self, env: &Env) -> Result<(), ProfileError>
+    where
+        Env: Provider<cap_storage::Set> + ConditionalSync,
+    {
+        import_delegation_chain(env, &self.did, &self.chain)
+            .await
+            .map_err(|e| ProfileError::Storage(e.to_string()))
     }
 }
 
