@@ -1,4 +1,5 @@
 use dialog_capability::fork::Fork;
+use dialog_capability::site::{Site, SiteAddress};
 use dialog_capability::{Policy, Provider, Subject, authority, storage};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
@@ -84,6 +85,8 @@ impl Pull<'_> {
             + Provider<storage::Get>
             + Provider<Fork<S3, archive_fx::Get>>
             + Provider<Fork<S3, memory_fx::Resolve>>
+            + Provider<Fork<dialog_remote_ucan_s3::UcanSite, archive_fx::Get>>
+            + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Resolve>>
             + ConditionalSync
             + 'static,
     {
@@ -232,11 +235,7 @@ where
     }
 }
 
-/// Perform a three-way merge pulling from a remote upstream.
-///
-/// Uses `FallbackStore` so that reads can fall through to the remote
-/// when the local archive doesn't have the blocks. Looks up credentials
-/// from the persisted `RemoteSite` configuration.
+/// Load the remote site and dispatch to the right pull implementation.
 async fn pull_remote<Env>(
     branch: &Branch,
     remote: &SiteName,
@@ -255,6 +254,8 @@ where
         + Provider<storage::Get>
         + Provider<Fork<S3, archive_fx::Get>>
         + Provider<Fork<S3, memory_fx::Resolve>>
+        + Provider<Fork<dialog_remote_ucan_s3::UcanSite, archive_fx::Get>>
+        + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Resolve>>
         + ConditionalSync
         + 'static,
 {
@@ -264,13 +265,51 @@ where
         .await
         .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
 
-    let remote_branch = RemoteBranch::new(
-        remote_site.name().clone(),
-        remote_site.s3_address().clone(),
-        upstream_subject.clone(),
-        upstream_branch_name.clone(),
-    );
+    match remote_site.address() {
+        crate::RemoteAddress::S3(addr) => {
+            let remote_branch = RemoteBranch::new(
+                remote_site.name().clone(),
+                addr.clone(),
+                upstream_subject.clone(),
+                upstream_branch_name.clone(),
+            );
+            pull_with_branch(branch, &remote_branch, env).await
+        }
+        #[cfg(feature = "ucan")]
+        crate::RemoteAddress::Ucan(addr) => {
+            let remote_branch = RemoteBranch::new(
+                remote_site.name().clone(),
+                addr.clone(),
+                upstream_subject.clone(),
+                upstream_branch_name.clone(),
+            );
+            pull_with_branch(branch, &remote_branch, env).await
+        }
+    }
+}
 
+/// Generic pull implementation over any site address type.
+async fn pull_with_branch<A, Env>(
+    branch: &Branch,
+    remote_branch: &RemoteBranch<A>,
+    env: &Env,
+) -> Result<Option<Revision>, DialogArtifactsError>
+where
+    A: SiteAddress + ConditionalSync,
+    A::Site: Site,
+    Env: Provider<archive_fx::Get>
+        + Provider<archive_fx::Put>
+        + Provider<memory_fx::Resolve>
+        + Provider<memory_fx::Publish>
+        + Provider<authority::Identify>
+        + Provider<authority::Sign>
+        + Provider<storage::List>
+        + Provider<storage::Get>
+        + Provider<Fork<A::Site, archive_fx::Get>>
+        + Provider<Fork<A::Site, memory_fx::Resolve>>
+        + ConditionalSync
+        + 'static,
+{
     let upstream_revision = remote_branch
         .resolve(env)
         .await
@@ -291,7 +330,7 @@ where
         return Ok(None);
     }
 
-    let mut store = FallbackStore::new(env, branch.archive().index(), &remote_branch);
+    let mut store = FallbackStore::new(env, branch.archive().index(), remote_branch);
 
     let mut target: Index = Tree::from_hash(upstream_revision.tree.hash(), &store)
         .await
@@ -322,6 +361,21 @@ where
         .map_err(|e| {
             DialogArtifactsError::Storage(format!("Failed to integrate changes: {:?}", e))
         })?;
+
+    // Replicate all tree blocks to local storage by streaming through
+    // the FallbackStore. This ensures subsequent local reads (e.g. select)
+    // can find the blocks without needing the remote.
+    {
+        use futures_util::StreamExt;
+        let replicate_store = store.clone();
+        let stream = target.stream(&replicate_store);
+        tokio::pin!(stream);
+        while let Some(result) = stream.next().await {
+            result.map_err(|e| {
+                DialogArtifactsError::Storage(format!("Failed to replicate tree block: {:?}", e))
+            })?;
+        }
+    }
 
     let hash = target.hash().cloned().unwrap_or(EMPT_TREE_HASH);
 
@@ -383,18 +437,16 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{TestEnv, test_signer};
+    use super::super::tests::{test_operator, test_repo};
     use crate::artifacts::{Artifact, Instruction};
-    use crate::repository::Repository;
     use futures_util::stream;
 
     #[dialog_common::test]
     async fn it_pulls_from_local_upstream_no_changes() -> anyhow::Result<()> {
-        let env = TestEnv::new().await;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
 
-        let repo = Repository::from(test_signer().await);
-
-        let main = repo.open_branch("main").perform(&env).await?;
+        let main = repo.open_branch("main").perform(&operator).await?;
 
         // Commit something to main so we have a real upstream revision
         let artifact = Artifact {
@@ -405,16 +457,16 @@ mod tests {
         };
         let _hash = main
             .commit(stream::iter(vec![Instruction::Assert(artifact)]))
-            .perform(&env)
+            .perform(&operator)
             .await?;
 
         let upstream_revision = main.revision().expect("main should have a revision");
 
-        let feature = repo.open_branch("feature").perform(&env).await?;
+        let feature = repo.open_branch("feature").perform(&operator).await?;
 
         // Pull with same revision as upstream_revision — no changes since
         // feature's base is the default empty tree.
-        let pulled = feature.pull(upstream_revision).perform(&env).await?;
+        let pulled = feature.pull(upstream_revision).perform(&operator).await?;
 
         // The pull should produce a result since the feature branch is empty
         // and the upstream has data.
@@ -425,11 +477,10 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_pulls_upstream_changes_without_local_changes() -> anyhow::Result<()> {
-        let env = TestEnv::new().await;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
 
-        let repo = Repository::from(test_signer().await);
-
-        let main = repo.open_branch("main").perform(&env).await?;
+        let main = repo.open_branch("main").perform(&operator).await?;
 
         let artifact = Artifact {
             the: "user/name".parse()?,
@@ -439,14 +490,17 @@ mod tests {
         };
         let _hash = main
             .commit(stream::iter(vec![Instruction::Assert(artifact)]))
-            .perform(&env)
+            .perform(&operator)
             .await?;
 
         let main_revision = main.revision().expect("main should have a revision");
 
-        let feature = repo.open_branch("feature").perform(&env).await?;
+        let feature = repo.open_branch("feature").perform(&operator).await?;
 
-        let pulled = feature.pull(main_revision.clone()).perform(&env).await?;
+        let pulled = feature
+            .pull(main_revision.clone())
+            .perform(&operator)
+            .await?;
 
         assert!(pulled.is_some());
         let feature_rev = feature
@@ -459,11 +513,10 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_pulls_and_merges_with_both_sides_changed() -> anyhow::Result<()> {
-        let env = TestEnv::new().await;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
 
-        let repo = Repository::from(test_signer().await);
-
-        let main = repo.open_branch("main").perform(&env).await?;
+        let main = repo.open_branch("main").perform(&operator).await?;
 
         let _hash = main
             .commit(stream::iter(vec![Instruction::Assert(Artifact {
@@ -472,12 +525,12 @@ mod tests {
                 is: crate::Value::String("Main data".to_string()),
                 cause: None,
             })]))
-            .perform(&env)
+            .perform(&operator)
             .await?;
 
         let main_revision = main.revision().expect("main should have a revision");
 
-        let feature = repo.open_branch("feature").perform(&env).await?;
+        let feature = repo.open_branch("feature").perform(&operator).await?;
 
         let _hash = feature
             .commit(stream::iter(vec![Instruction::Assert(Artifact {
@@ -486,10 +539,13 @@ mod tests {
                 is: crate::Value::String("feature@test.com".to_string()),
                 cause: None,
             })]))
-            .perform(&env)
+            .perform(&operator)
             .await?;
 
-        let pulled = feature.pull(main_revision.clone()).perform(&env).await?;
+        let pulled = feature
+            .pull(main_revision.clone())
+            .perform(&operator)
+            .await?;
 
         assert!(pulled.is_some());
         let feature_rev = feature

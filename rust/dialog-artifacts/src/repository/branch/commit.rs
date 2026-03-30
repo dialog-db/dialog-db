@@ -197,18 +197,16 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{TestEnv, test_signer};
+    use super::super::tests::{test_operator, test_repo};
     use crate::artifacts::{Artifact, ArtifactSelector, Instruction};
-    use crate::repository::Repository;
     use dialog_prolly_tree::EMPT_TREE_HASH;
     use futures_util::{StreamExt, stream};
 
     #[dialog_common::test]
     async fn it_commits_and_selects() -> anyhow::Result<()> {
-        let env = TestEnv::new().await;
-
-        let repo = Repository::from(test_signer().await);
-        let branch = repo.open_branch("main").perform(&env).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.open_branch("main").perform(&operator).await?;
 
         let artifact = Artifact {
             the: "user/name".parse()?,
@@ -219,12 +217,12 @@ mod tests {
 
         let instructions = stream::iter(vec![Instruction::Assert(artifact.clone())]);
 
-        let hash = branch.commit(instructions).perform(&env).await?;
+        let hash = branch.commit(instructions).perform(&operator).await?;
         assert_ne!(hash, EMPT_TREE_HASH);
 
         // Select should find the artifact
         let selector = ArtifactSelector::new().the("user/name".parse()?);
-        let stream = branch.select(selector).perform(&env).await?;
+        let stream = branch.select(selector).perform(&operator).await?;
         tokio::pin!(stream);
 
         let results: Vec<_> = stream.filter_map(|r| async { r.ok() }).collect().await;

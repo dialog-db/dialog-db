@@ -12,9 +12,9 @@ use crate::{Key, State};
 pub mod state;
 
 mod commit;
-#[cfg(test)]
-mod e2e_tests;
 mod fetch;
+#[cfg(all(test, feature = "integration-tests"))]
+mod integration_tests;
 mod load;
 mod novelty;
 mod open;
@@ -172,92 +172,45 @@ impl Branch {
 }
 
 #[cfg(test)]
-mod tests {
-    use dialog_capability::{Capability, Did, Provider, Subject, authority};
-    use dialog_credentials::Ed25519Signer;
-    use dialog_effects::archive as archive_fx;
-    use dialog_effects::memory as memory_fx;
-    use dialog_storage::provider::Volatile;
-    use dialog_varsig::Principal;
+pub(crate) mod tests {
+    use crate::Operator;
+    use crate::profile::Profile;
+    use crate::remote::Remote;
+    use crate::repository::Repository;
+    use crate::storage::Storage;
+    use dialog_capability::Subject;
 
-    pub async fn test_signer() -> Ed25519Signer {
-        Ed25519Signer::import(&[42; 32]).await.unwrap()
+    fn unique_name(prefix: &str) -> String {
+        use dialog_common::time;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let ts = time::now()
+            .duration_since(time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("{prefix}-{ts}-{seq}")
     }
 
-    /// Test environment wrapping [`Volatile`] and providing a stub
-    /// `Provider<authority::Identify>` that returns the test signer's DID as
-    /// the operator DID.
-    pub struct TestEnv {
-        pub store: Volatile,
-        pub did: Did,
+    pub async fn test_operator() -> Operator {
+        let storage = Storage::temp_storage();
+        let profile = Profile::open(Storage::temp(&unique_name("branch-test")))
+            .perform(&storage)
+            .await
+            .unwrap();
+        profile
+            .derive(b"test")
+            .allow(Subject::any())
+            .network(Remote)
+            .build(storage)
+            .await
+            .unwrap()
     }
 
-    impl TestEnv {
-        pub async fn new() -> Self {
-            let signer = test_signer().await;
-            Self {
-                store: Volatile::new(),
-                did: signer.did(),
-            }
-        }
-    }
-
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    impl Provider<authority::Identify> for TestEnv {
-        async fn execute(
-            &self,
-            input: Capability<authority::Identify>,
-        ) -> Result<authority::Authority, authority::AuthorityError> {
-            let did = self.did.clone();
-            let subject_did = input.subject().clone();
-            Ok(Subject::from(subject_did)
-                .attenuate(authority::Profile::local(did.clone()))
-                .attenuate(authority::Operator::new(did)))
-        }
-    }
-
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    impl Provider<archive_fx::Get> for TestEnv {
-        async fn execute(
-            &self,
-            input: Capability<archive_fx::Get>,
-        ) -> Result<Option<Vec<u8>>, archive_fx::ArchiveError> {
-            <Volatile as Provider<archive_fx::Get>>::execute(&self.store, input).await
-        }
-    }
-
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    impl Provider<archive_fx::Put> for TestEnv {
-        async fn execute(
-            &self,
-            input: Capability<archive_fx::Put>,
-        ) -> Result<(), archive_fx::ArchiveError> {
-            <Volatile as Provider<archive_fx::Put>>::execute(&self.store, input).await
-        }
-    }
-
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    impl Provider<memory_fx::Resolve> for TestEnv {
-        async fn execute(
-            &self,
-            input: Capability<memory_fx::Resolve>,
-        ) -> Result<Option<memory_fx::Publication>, memory_fx::MemoryError> {
-            <Volatile as Provider<memory_fx::Resolve>>::execute(&self.store, input).await
-        }
-    }
-
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    impl Provider<memory_fx::Publish> for TestEnv {
-        async fn execute(
-            &self,
-            input: Capability<memory_fx::Publish>,
-        ) -> Result<Vec<u8>, memory_fx::MemoryError> {
-            <Volatile as Provider<memory_fx::Publish>>::execute(&self.store, input).await
-        }
+    pub async fn test_repo(operator: &Operator) -> Repository {
+        Repository::open(Storage::temp(&unique_name("repo")))
+            .perform(operator)
+            .await
+            .unwrap()
     }
 }

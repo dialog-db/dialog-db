@@ -1190,6 +1190,7 @@ dependencies = [
  "async-signature",
  "async-trait",
  "base58",
+ "bytes",
  "dialog-capability",
  "dialog-common",
  "dialog-credentials",
@@ -1199,6 +1200,9 @@ dependencies = [
  "dialog-ucan",
  "dialog-varsig",
  "getrandom 0.2.16",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "ipld-core",
  "reqwest",
  "serde",
@@ -1208,6 +1212,8 @@ dependencies = [
  "signature",
  "thiserror 2.0.18",
  "tokio",
+ "tower",
+ "tower-http",
  "wasm-bindgen-test",
 ]
 

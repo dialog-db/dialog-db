@@ -20,7 +20,8 @@ pub struct RemoteRepository {
 }
 
 impl RemoteRepository {
-    pub(super) fn new(remote: SiteName, address: Address, subject: Did) -> Self {
+    /// Create a new remote repository cursor.
+    pub fn new(remote: SiteName, address: Address, subject: Did) -> Self {
         Self {
             remote,
             address,
@@ -44,7 +45,7 @@ impl RemoteRepository {
     }
 
     /// Get a cursor into a specific branch at this remote repository.
-    pub fn branch(&self, name: impl Into<BranchName>) -> RemoteBranch {
+    pub fn branch(&self, name: impl Into<BranchName>) -> RemoteBranch<Address> {
         RemoteBranch::new(
             self.remote.clone(),
             self.address.clone(),

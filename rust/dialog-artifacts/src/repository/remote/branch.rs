@@ -1,9 +1,9 @@
 use dialog_capability::fork::Fork;
+use dialog_capability::site::{Site, SiteAddress};
 use dialog_capability::{Did, Provider, authority, storage};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
-use dialog_remote_s3::{Address, S3};
 use dialog_storage::{Blake3Hash, CborEncoder, Encoder};
 
 use crate::DialogArtifactsError;
@@ -19,27 +19,22 @@ use super::UpstreamState;
 
 /// A cursor pointing to a specific branch at a remote repository.
 ///
-/// Created by [`RemoteRepository::branch`](super::repository::RemoteRepository::branch).
-/// Provides remote operations: resolve, publish, and upload.
+/// Generic over the address type `A`, which determines the site type
+/// used for remote operations (S3 or UcanSite).
 #[derive(Debug, Clone)]
-pub struct RemoteBranch {
+pub struct RemoteBranch<A: SiteAddress> {
     remote: SiteName,
-    address: Address,
+    address: A,
     subject: Did,
     branch: BranchName,
 }
 
-impl RemoteBranch {
+impl<A: SiteAddress> RemoteBranch<A> {
     /// Create a new remote branch cursor.
-    pub fn new(
-        remote: SiteName,
-        address: impl Into<Address>,
-        subject: Did,
-        branch: BranchName,
-    ) -> Self {
+    pub fn new(remote: SiteName, address: A, subject: Did, branch: BranchName) -> Self {
         Self {
             remote,
-            address: address.into(),
+            address,
             subject,
             branch,
         }
@@ -50,8 +45,8 @@ impl RemoteBranch {
         &self.remote
     }
 
-    /// The S3 address for this remote.
-    pub fn address(&self) -> &Address {
+    /// The address for this remote.
+    pub fn address(&self) -> &A {
         &self.address
     }
 
@@ -76,34 +71,31 @@ impl RemoteBranch {
     fn archive(&self) -> Archive {
         Archive::new(dialog_capability::Subject::from(self.subject.clone()))
     }
+}
 
+impl<A> RemoteBranch<A>
+where
+    A: SiteAddress,
+    A::Site: Site,
+{
     /// Fetch the current revision from the remote branch.
-    ///
-    /// Returns `None` if the remote branch has no state (not yet created).
     pub async fn resolve<Env>(&self, env: &Env) -> Result<Option<Revision>, RepositoryError>
     where
-        Env: Provider<Fork<S3, memory_fx::Resolve>>
+        Env: Provider<Fork<A::Site, memory_fx::Resolve>>
             + Provider<authority::Identify>
             + Provider<authority::Sign>
             + Provider<storage::List>
             + Provider<storage::Get>
             + ConditionalSync,
     {
-        let capability = self
+        let result: Option<memory_fx::Publication> = self
             .cell_capability()
             .invoke(memory_fx::Resolve)
-            .fork(&self.address);
-
-        let invocation = capability.acquire(env).await.map_err(|e| {
-            RepositoryError::StorageError(format!("Remote authorize failed: {}", e))
-        })?;
-
-        let result: Option<_> =
-            <Env as Provider<Fork<S3, memory_fx::Resolve>>>::execute(env, invocation)
-                .await
-                .map_err(|e| {
-                    RepositoryError::StorageError(format!("Remote resolve failed: {}", e))
-                })?;
+            .fork(&self.address)
+            .perform(env)
+            .await
+            .map_err(|e| RepositoryError::StorageError(format!("Remote resolve failed: {}", e)))?
+            .map_err(|e| RepositoryError::StorageError(format!("Remote resolve failed: {}", e)))?;
 
         match result {
             None => Ok(None),
@@ -124,13 +116,10 @@ impl RemoteBranch {
     }
 
     /// Publish a revision to the remote branch.
-    ///
-    /// This resolves the remote branch state first to get the current edition,
-    /// then publishes the updated state with the new revision.
     pub async fn publish<Env>(&self, revision: Revision, env: &Env) -> Result<(), RepositoryError>
     where
-        Env: Provider<Fork<S3, memory_fx::Resolve>>
-            + Provider<Fork<S3, memory_fx::Publish>>
+        Env: Provider<Fork<A::Site, memory_fx::Resolve>>
+            + Provider<Fork<A::Site, memory_fx::Publish>>
             + Provider<authority::Identify>
             + Provider<authority::Sign>
             + Provider<storage::List>
@@ -140,52 +129,33 @@ impl RemoteBranch {
         let cell_cap = self.cell_capability();
 
         // Resolve to get current edition
-        let resolve_invocation = cell_cap
+        let resolve_result: Option<memory_fx::Publication> = cell_cap
             .clone()
             .invoke(memory_fx::Resolve)
             .fork(&self.address)
-            .acquire(env)
+            .perform(env)
             .await
-            .map_err(|e| {
-                RepositoryError::StorageError(format!("Remote authorize failed: {}", e))
-            })?;
+            .map_err(|e| RepositoryError::StorageError(format!("Remote resolve failed: {}", e)))?
+            .map_err(|e| RepositoryError::StorageError(format!("Remote resolve failed: {}", e)))?;
 
-        let resolve_result =
-            <Env as Provider<Fork<S3, memory_fx::Resolve>>>::execute(env, resolve_invocation)
-                .await
-                .map_err(|e| {
-                    RepositoryError::StorageError(format!("Remote resolve failed: {}", e))
-                })?;
-
-        let edition = match resolve_result {
-            None => None,
-            Some(pub_data) => Some(pub_data.edition),
-        };
+        let edition = resolve_result.map(|pub_data| pub_data.edition);
 
         let content = serde_ipld_dagcbor::to_vec(&revision).map_err(|e| {
             RepositoryError::StorageError(format!("Failed to encode revision: {}", e))
         })?;
 
-        let publish_invocation = cell_cap
+        cell_cap
             .invoke(memory_fx::Publish::new(content, edition))
             .fork(&self.address)
-            .acquire(env)
+            .perform(env)
             .await
-            .map_err(|e| {
-                RepositoryError::StorageError(format!("Remote authorize failed: {}", e))
-            })?;
-
-        <Env as Provider<Fork<S3, memory_fx::Publish>>>::execute(env, publish_invocation)
-            .await
+            .map_err(|e| RepositoryError::StorageError(format!("Remote publish failed: {}", e)))?
             .map_err(|e| RepositoryError::StorageError(format!("Remote publish failed: {}", e)))?;
 
         Ok(())
     }
 
     /// Upload a content-addressed block to the remote archive.
-    ///
-    /// Transfers a single block (identified by its blake3 hash and raw bytes)
-    /// to the remote site's archive.
     pub async fn upload_block<Env>(
         &self,
         hash: Blake3Hash,
@@ -193,25 +163,20 @@ impl RemoteBranch {
         env: &Env,
     ) -> Result<(), DialogArtifactsError>
     where
-        Env: Provider<Fork<S3, archive_fx::Put>>
+        Env: Provider<Fork<A::Site, archive_fx::Put>>
             + Provider<authority::Identify>
             + Provider<authority::Sign>
             + Provider<storage::List>
             + Provider<storage::Get>
             + ConditionalSync,
     {
-        let catalog = self.archive().index();
-        let invocation = catalog
+        self.archive()
+            .index()
             .invoke(archive_fx::Put::new(hash, bytes))
             .fork(&self.address)
-            .acquire(env)
+            .perform(env)
             .await
-            .map_err(|e| {
-                DialogArtifactsError::Storage(format!("Remote authorize failed: {}", e))
-            })?;
-
-        <Env as Provider<Fork<S3, archive_fx::Put>>>::execute(env, invocation)
-            .await
+            .map_err(|e| DialogArtifactsError::Storage(format!("Remote upload failed: {}", e)))?
             .map_err(|e| DialogArtifactsError::Storage(format!("Remote upload failed: {}", e)))?;
         Ok(())
     }
@@ -223,88 +188,31 @@ impl RemoteBranch {
         env: &Env,
     ) -> Result<Option<Vec<u8>>, DialogArtifactsError>
     where
-        Env: Provider<Fork<S3, archive_fx::Get>>
+        Env: Provider<Fork<A::Site, archive_fx::Get>>
             + Provider<authority::Identify>
             + Provider<authority::Sign>
             + Provider<storage::List>
             + Provider<storage::Get>
             + ConditionalSync,
     {
-        let catalog = self.archive().index();
-        let invocation = catalog
+        self.archive()
+            .index()
             .invoke(archive_fx::Get::new(hash))
             .fork(&self.address)
-            .acquire(env)
+            .perform(env)
             .await
-            .map_err(|e| {
-                DialogArtifactsError::Storage(format!("Remote authorize failed: {}", e))
-            })?;
-
-        let result = <Env as Provider<Fork<S3, archive_fx::Get>>>::execute(env, invocation)
-            .await
-            .map_err(|e| DialogArtifactsError::Storage(format!("Remote download failed: {}", e)))?;
-        Ok(result)
+            .map_err(|e| DialogArtifactsError::Storage(format!("Remote download failed: {}", e)))?
+            .map_err(|e| DialogArtifactsError::Storage(format!("Remote download failed: {}", e)))
     }
 }
 
-impl From<RemoteBranch> for UpstreamState {
-    fn from(remote: RemoteBranch) -> Self {
+impl<A: SiteAddress> From<RemoteBranch<A>> for UpstreamState {
+    fn from(remote: RemoteBranch<A>) -> Self {
         UpstreamState::Remote {
             name: remote.remote,
             branch: remote.branch,
             subject: remote.subject,
             tree: NodeReference::default(),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn test_subject() -> Did {
-        "did:test:remote-branch".parse().unwrap()
-    }
-
-    fn test_address() -> Address {
-        Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "bucket")
-    }
-
-    #[test]
-    fn it_creates_remote_branch_cursor() {
-        let remote = RemoteBranch::new(
-            "origin".into(),
-            test_address(),
-            test_subject(),
-            "main".into(),
-        );
-
-        assert_eq!(remote.subject(), &test_subject());
-        assert_eq!(remote.branch(), &BranchName::from("main"));
-    }
-
-    #[test]
-    fn it_converts_remote_branch_to_upstream_state() {
-        let remote = RemoteBranch::new(
-            "origin".into(),
-            test_address(),
-            test_subject(),
-            "main".into(),
-        );
-
-        let upstream: UpstreamState = remote.into();
-        match upstream {
-            UpstreamState::Remote {
-                name,
-                branch,
-                subject,
-                ..
-            } => {
-                assert_eq!(name, "origin");
-                assert_eq!(branch, BranchName::from("main"));
-                assert_eq!(subject, test_subject());
-            }
-            _ => panic!("Expected Remote upstream"),
         }
     }
 }

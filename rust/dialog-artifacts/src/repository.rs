@@ -502,6 +502,199 @@ mod tests {
         Ok(())
     }
 
+    #[dialog_common::test]
+    async fn it_commits_and_selects_by_attribute() -> anyhow::Result<()> {
+        use crate::artifacts::ArtifactSelector;
+        use futures_util::StreamExt;
+
+        let operator = test_operator().await;
+        let repo = Repository::open(unique_location("select-attr"))
+            .perform(&operator)
+            .await?;
+
+        let branch = repo.open_branch("main").perform(&operator).await?;
+
+        let artifacts = vec![
+            Instruction::Assert(Artifact {
+                the: "user/name".parse()?,
+                of: "user:1".parse()?,
+                is: crate::Value::String("Alice".into()),
+                cause: None,
+            }),
+            Instruction::Assert(Artifact {
+                the: "user/email".parse()?,
+                of: "user:1".parse()?,
+                is: crate::Value::String("alice@example.com".into()),
+                cause: None,
+            }),
+            Instruction::Assert(Artifact {
+                the: "user/name".parse()?,
+                of: "user:2".parse()?,
+                is: crate::Value::String("Bob".into()),
+                cause: None,
+            }),
+        ];
+
+        branch
+            .commit(stream::iter(artifacts))
+            .perform(&operator)
+            .await?;
+
+        let results: Vec<_> = branch
+            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .perform(&operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+
+        assert_eq!(results.len(), 2, "should find 2 user/name artifacts");
+        let names: Vec<_> = results.iter().map(|a| &a.is).collect();
+        assert!(
+            names.contains(&&crate::Value::String("Alice".into())),
+            "should contain Alice"
+        );
+        assert!(
+            names.contains(&&crate::Value::String("Bob".into())),
+            "should contain Bob"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_commits_and_selects_by_entity() -> anyhow::Result<()> {
+        use crate::artifacts::ArtifactSelector;
+        use futures_util::StreamExt;
+
+        let operator = test_operator().await;
+        let repo = Repository::open(unique_location("select-entity"))
+            .perform(&operator)
+            .await?;
+
+        let branch = repo.open_branch("main").perform(&operator).await?;
+
+        let artifacts = vec![
+            Instruction::Assert(Artifact {
+                the: "user/name".parse()?,
+                of: "user:alice".parse()?,
+                is: crate::Value::String("Alice".into()),
+                cause: None,
+            }),
+            Instruction::Assert(Artifact {
+                the: "user/name".parse()?,
+                of: "user:bob".parse()?,
+                is: crate::Value::String("Bob".into()),
+                cause: None,
+            }),
+            Instruction::Assert(Artifact {
+                the: "user/email".parse()?,
+                of: "user:alice".parse()?,
+                is: crate::Value::String("alice@example.com".into()),
+                cause: None,
+            }),
+        ];
+
+        branch
+            .commit(stream::iter(artifacts))
+            .perform(&operator)
+            .await?;
+
+        let results: Vec<_> = branch
+            .select(ArtifactSelector::new().of("user:alice".parse()?))
+            .perform(&operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+
+        assert_eq!(results.len(), 2, "should find 2 artifacts for user:alice");
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_selects_empty_branch() -> anyhow::Result<()> {
+        use crate::artifacts::ArtifactSelector;
+        use futures_util::StreamExt;
+
+        let operator = test_operator().await;
+        let repo = Repository::open(unique_location("select-empty"))
+            .perform(&operator)
+            .await?;
+
+        let branch = repo.open_branch("main").perform(&operator).await?;
+
+        let results: Vec<_> = branch
+            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .perform(&operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+
+        assert_eq!(results.len(), 0, "empty branch should have no artifacts");
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_retracts_artifact() -> anyhow::Result<()> {
+        use crate::artifacts::ArtifactSelector;
+        use futures_util::StreamExt;
+
+        let operator = test_operator().await;
+        let repo = Repository::open(unique_location("retract"))
+            .perform(&operator)
+            .await?;
+
+        let branch = repo.open_branch("main").perform(&operator).await?;
+
+        let artifact = Artifact {
+            the: "user/name".parse()?,
+            of: "user:1".parse()?,
+            is: crate::Value::String("Alice".into()),
+            cause: None,
+        };
+
+        branch
+            .commit(stream::iter(vec![Instruction::Assert(artifact.clone())]))
+            .perform(&operator)
+            .await?;
+
+        // Verify it's there
+        let before: Vec<_> = branch
+            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .perform(&operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(before.len(), 1, "should have 1 artifact before retract");
+
+        // Retract it
+        branch
+            .commit(stream::iter(vec![Instruction::Retract(artifact)]))
+            .perform(&operator)
+            .await?;
+
+        let after: Vec<_> = branch
+            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .perform(&operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(after.len(), 0, "should have 0 artifacts after retract");
+
+        Ok(())
+    }
+
     #[cfg(feature = "ucan")]
     mod delegation_tests {
         use super::*;

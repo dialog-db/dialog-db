@@ -23,6 +23,9 @@ pub use site::{Ucan, UcanAddress, UcanInvocation, UcanSite};
 // Re-export container types from dialog-ucan
 pub use dialog_ucan::{Container, ContainerError, DelegationChain, InvocationChain};
 
+#[cfg(feature = "helpers")]
+pub mod helpers;
+
 /// Test helpers for creating UCAN delegations.
 /// Only available with the `helpers` feature.
 #[cfg(any(test, feature = "helpers"))]

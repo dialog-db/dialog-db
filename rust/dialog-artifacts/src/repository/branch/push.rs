@@ -1,4 +1,5 @@
 use dialog_capability::fork::Fork;
+use dialog_capability::site::{Site, SiteAddress};
 use dialog_capability::{Provider, authority, storage};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
@@ -41,7 +42,12 @@ impl Push<'_> {
             + Provider<memory_fx::Publish>
             + Provider<Fork<S3, archive_fx::Put>>
             + Provider<Fork<S3, memory_fx::Resolve>>
+            + Provider<Fork<dialog_remote_ucan_s3::UcanSite, archive_fx::Get>>
+            + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Resolve>>
             + Provider<Fork<S3, memory_fx::Publish>>
+            + Provider<Fork<dialog_remote_ucan_s3::UcanSite, archive_fx::Put>>
+            + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Resolve>>
+            + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Publish>>
             + Provider<authority::Identify>
             + Provider<authority::Sign>
             + Provider<storage::List>
@@ -135,7 +141,12 @@ where
         + Provider<memory_fx::Publish>
         + Provider<Fork<S3, archive_fx::Put>>
         + Provider<Fork<S3, memory_fx::Resolve>>
+        + Provider<Fork<dialog_remote_ucan_s3::UcanSite, archive_fx::Get>>
+        + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Resolve>>
         + Provider<Fork<S3, memory_fx::Publish>>
+        + Provider<Fork<dialog_remote_ucan_s3::UcanSite, archive_fx::Put>>
+        + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Resolve>>
+        + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Publish>>
         + Provider<authority::Identify>
         + Provider<authority::Sign>
         + Provider<storage::List>
@@ -145,13 +156,51 @@ where
 {
     let remote_site = branch.load_remote(remote.clone()).perform(env).await?;
 
-    let remote_branch = RemoteBranch::new(
-        remote_site.name().clone(),
-        remote_site.s3_address().clone(),
-        upstream_subject.clone(),
-        upstream_branch_name.clone(),
-    );
+    match remote_site.address() {
+        crate::RemoteAddress::S3(addr) => {
+            let rb = RemoteBranch::new(
+                remote_site.name().clone(),
+                addr.clone(),
+                upstream_subject.clone(),
+                upstream_branch_name.clone(),
+            );
+            push_with_branch(branch, &rb, env).await
+        }
+        #[cfg(feature = "ucan")]
+        crate::RemoteAddress::Ucan(addr) => {
+            let rb = RemoteBranch::new(
+                remote_site.name().clone(),
+                addr.clone(),
+                upstream_subject.clone(),
+                upstream_branch_name.clone(),
+            );
+            push_with_branch(branch, &rb, env).await
+        }
+    }
+}
 
+async fn push_with_branch<A, Env>(
+    branch: &Branch,
+    remote_branch: &RemoteBranch<A>,
+    env: &Env,
+) -> Result<Option<Revision>, RepositoryError>
+where
+    A: SiteAddress + ConditionalSync,
+    A::Site: Site,
+    Env: Provider<archive_fx::Get>
+        + Provider<archive_fx::Put>
+        + Provider<memory_fx::Resolve>
+        + Provider<memory_fx::Publish>
+        + Provider<Fork<A::Site, archive_fx::Put>>
+        + Provider<Fork<A::Site, memory_fx::Resolve>>
+        + Provider<Fork<A::Site, memory_fx::Publish>>
+        + Provider<authority::Identify>
+        + Provider<authority::Sign>
+        + Provider<storage::List>
+        + Provider<storage::Get>
+        + ConditionalSync
+        + 'static,
+{
     let branch_revision = match branch.revision() {
         Some(rev) => rev,
         None => return Ok(None),
@@ -215,33 +264,45 @@ where
             cause: format!("Failed to publish revision: {}", e),
         })?;
 
+    // Update the upstream state's tree to match the pushed revision
+    if let Some(upstream) = branch.upstream() {
+        branch
+            .upstream
+            .publish(
+                Some(upstream.with_tree(branch_revision.tree().clone())),
+                env,
+            )
+            .await
+            .map_err(|e| RepositoryError::PushFailed {
+                cause: format!("Failed to update upstream state: {:?}", e),
+            })?;
+    }
+
     Ok(Some(branch_revision))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{TestEnv, test_signer};
+    use super::super::tests::{test_operator, test_repo};
     use crate::artifacts::{Artifact, Instruction};
-    use crate::repository::Repository;
     use crate::repository::branch::state::UpstreamState;
     use crate::repository::node_reference::NodeReference;
     use futures_util::stream;
 
     #[dialog_common::test]
     async fn it_pushes_to_local_upstream() -> anyhow::Result<()> {
-        let env = TestEnv::new().await;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
 
-        let repo = Repository::from(test_signer().await);
+        let _main = repo.open_branch("main").perform(&operator).await?;
 
-        let _main = repo.open_branch("main").perform(&env).await?;
-
-        let feature = repo.open_branch("feature").perform(&env).await?;
+        let feature = repo.open_branch("feature").perform(&operator).await?;
         feature
             .set_upstream(UpstreamState::Local {
                 branch: "main".into(),
                 tree: NodeReference::default(),
             })
-            .perform(&env)
+            .perform(&operator)
             .await?;
 
         let artifact = Artifact {
@@ -252,15 +313,15 @@ mod tests {
         };
         let _hash = feature
             .commit(stream::iter(vec![Instruction::Assert(artifact)]))
-            .perform(&env)
+            .perform(&operator)
             .await?;
 
         let feature_revision = feature.revision().expect("feature should have a revision");
 
-        let result = super::push_local(&feature, &"main".into(), &env).await?;
+        let result = super::push_local(&feature, &"main".into(), &operator).await?;
         assert!(result.is_some());
 
-        let main_reloaded = repo.load_branch("main").perform(&env).await?;
+        let main_reloaded = repo.load_branch("main").perform(&operator).await?;
         let main_rev = main_reloaded
             .revision()
             .expect("main should have a revision after push");
@@ -271,11 +332,10 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_returns_none_when_local_upstream_diverged() -> anyhow::Result<()> {
-        let env = TestEnv::new().await;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
 
-        let repo = Repository::from(test_signer().await);
-
-        let main = repo.open_branch("main").perform(&env).await?;
+        let main = repo.open_branch("main").perform(&operator).await?;
         let _hash = main
             .commit(stream::iter(vec![Instruction::Assert(Artifact {
                 the: "user/name".parse()?,
@@ -283,16 +343,16 @@ mod tests {
                 is: crate::Value::String("Main data".to_string()),
                 cause: None,
             })]))
-            .perform(&env)
+            .perform(&operator)
             .await?;
 
-        let feature = repo.open_branch("feature").perform(&env).await?;
+        let feature = repo.open_branch("feature").perform(&operator).await?;
         feature
             .set_upstream(UpstreamState::Local {
                 branch: "main".into(),
                 tree: NodeReference::default(),
             })
-            .perform(&env)
+            .perform(&operator)
             .await?;
 
         let _hash = feature
@@ -302,10 +362,10 @@ mod tests {
                 is: crate::Value::String("feature@test.com".to_string()),
                 cause: None,
             })]))
-            .perform(&env)
+            .perform(&operator)
             .await?;
 
-        let result = super::push_local(&feature, &"main".into(), &env).await?;
+        let result = super::push_local(&feature, &"main".into(), &operator).await?;
         assert!(result.is_none(), "Push should return None when diverged");
 
         Ok(())
@@ -313,10 +373,9 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_has_no_upstream_by_default() -> anyhow::Result<()> {
-        let env = TestEnv::new().await;
-
-        let repo = Repository::from(test_signer().await);
-        let branch = repo.open_branch("feature").perform(&env).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.open_branch("feature").perform(&operator).await?;
 
         assert!(branch.upstream().is_none());
 

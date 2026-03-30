@@ -1,6 +1,6 @@
 //! UCAN site configuration -- marker trait + address type.
 
-use dialog_capability::site::Site;
+use dialog_capability::site::{Site, SiteAddress};
 
 // Re-export UCAN types from dialog-capability for convenience.
 pub use dialog_capability::ucan::{Ucan, UcanInvocation};
@@ -61,6 +61,10 @@ impl UcanAddress {
             dialog_remote_s3::AccessError::Service(format!("Failed to decode response: {}", e))
         })
     }
+}
+
+impl SiteAddress for UcanAddress {
+    type Site = UcanSite;
 }
 
 /// UCAN site configuration for delegated authorization.

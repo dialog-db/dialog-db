@@ -8,7 +8,18 @@ license.workspace = true
 
 [features]
 default = []
-helpers = ["dep:anyhow", "dialog-common/helpers"]
+helpers = [
+    "dep:anyhow",
+    "dep:bytes",
+    "dep:http-body-util",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:tokio",
+    "dep:tower",
+    "dep:tower-http",
+    "dialog-common/helpers",
+    "dialog-remote-s3/helpers",
+]
 integration-tests = ["dialog-common/integration-tests"]
 web-integration-tests = ["dialog-common/web-integration-tests"]
 
@@ -31,8 +42,15 @@ serde_json = { workspace = true }
 signature = { workspace = true }
 thiserror = { workspace = true }
 
-# Optional dependencies
+# Optional dependencies (helpers feature)
 anyhow = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
+hyper = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["net", "rt"], optional = true }
+tower = { workspace = true, optional = true }
+tower-http = { workspace = true, features = ["cors"], optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { workspace = true, features = ["js"] }

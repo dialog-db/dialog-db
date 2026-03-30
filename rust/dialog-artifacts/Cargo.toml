@@ -58,6 +58,9 @@ url = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 dialog-storage = { workspace = true, features = ["helpers"] }
+dialog-remote-s3 = { workspace = true, features = ["helpers"] }
+dialog-remote-ucan-s3 = { workspace = true, features = ["helpers"] }
+dialog-common = { workspace = true, features = ["helpers"] }
 anyhow = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

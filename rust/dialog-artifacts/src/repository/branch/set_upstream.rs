@@ -44,33 +44,30 @@ impl SetUpstream<'_> {
 #[cfg(test)]
 mod tests {
     use dialog_remote_s3::Address;
-    use dialog_storage::provider::Volatile;
 
     use crate::repository::branch::state::UpstreamState;
     use crate::repository::error::RepositoryError;
     use crate::repository::node_reference::NodeReference;
     use crate::repository::remote::RemoteBranch;
 
-    use super::super::tests::test_signer;
-    use crate::repository::Repository;
+    use super::super::tests::{test_operator, test_repo};
 
     #[dialog_common::test]
     async fn it_sets_local_upstream() -> anyhow::Result<()> {
-        let env = Volatile::new();
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
 
-        let repo = Repository::from(test_signer().await);
-
-        let branch = repo.open_branch("feature").perform(&env).await?;
+        let branch = repo.open_branch("feature").perform(&operator).await?;
 
         // Create upstream branch
-        let _main = repo.open_branch("main").perform(&env).await?;
+        let _main = repo.open_branch("main").perform(&operator).await?;
 
         branch
             .set_upstream(UpstreamState::Local {
                 branch: "main".into(),
                 tree: NodeReference::default(),
             })
-            .perform(&env)
+            .perform(&operator)
             .await?;
 
         let upstream = branch.upstream();
@@ -87,10 +84,9 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_sets_remote_upstream() -> anyhow::Result<()> {
-        let env = Volatile::new();
-
-        let repo = Repository::from(test_signer().await);
-        let branch = repo.open_branch("main").perform(&env).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.open_branch("main").perform(&operator).await?;
 
         let address = Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "bucket");
         let remote_branch = RemoteBranch::new(
@@ -100,7 +96,10 @@ mod tests {
             "main".into(),
         );
 
-        branch.set_upstream(remote_branch).perform(&env).await?;
+        branch
+            .set_upstream(remote_branch)
+            .perform(&operator)
+            .await?;
 
         let upstream = branch.upstream();
         match upstream {
@@ -122,17 +121,16 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_errors_setting_upstream_to_self() -> anyhow::Result<()> {
-        let env = Volatile::new();
-
-        let repo = Repository::from(test_signer().await);
-        let branch = repo.open_branch("main").perform(&env).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.open_branch("main").perform(&operator).await?;
 
         let result = branch
             .set_upstream(UpstreamState::Local {
                 branch: "main".into(),
                 tree: NodeReference::default(),
             })
-            .perform(&env)
+            .perform(&operator)
             .await;
 
         assert!(matches!(

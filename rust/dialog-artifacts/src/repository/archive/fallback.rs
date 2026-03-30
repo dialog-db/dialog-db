@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use dialog_capability::fork::Fork;
+use dialog_capability::site::{Site, SiteAddress};
 use dialog_capability::{Capability, Provider, authority, storage};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Catalog, Get, Put};
-use dialog_remote_s3::S3;
 use dialog_storage::{
     Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder,
 };
@@ -16,14 +16,14 @@ use crate::repository::remote::RemoteBranch;
 ///
 /// On a remote cache miss that hits remotely, the fetched bytes are written
 /// to the local store (cache-through). Writes go to local only.
-pub struct FallbackStore<'a, Env> {
+pub struct FallbackStore<'a, Env, A: SiteAddress> {
     env: &'a Env,
     encoder: CborEncoder,
     local_catalog: Capability<Catalog>,
-    remote_branch: &'a RemoteBranch,
+    remote_branch: &'a RemoteBranch<A>,
 }
 
-impl<Env> Clone for FallbackStore<'_, Env> {
+impl<Env, A: SiteAddress> Clone for FallbackStore<'_, Env, A> {
     fn clone(&self) -> Self {
         Self {
             env: self.env,
@@ -34,12 +34,12 @@ impl<Env> Clone for FallbackStore<'_, Env> {
     }
 }
 
-impl<'a, Env> FallbackStore<'a, Env> {
+impl<'a, Env, A: SiteAddress> FallbackStore<'a, Env, A> {
     /// Create a new FallbackStore.
     pub fn new(
         env: &'a Env,
         local_catalog: Capability<Catalog>,
-        remote_branch: &'a RemoteBranch,
+        remote_branch: &'a RemoteBranch<A>,
     ) -> Self {
         Self {
             env,
@@ -52,11 +52,13 @@ impl<'a, Env> FallbackStore<'a, Env> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> ContentAddressedStorage for FallbackStore<'_, Env>
+impl<Env, A> ContentAddressedStorage for FallbackStore<'_, Env, A>
 where
+    A: SiteAddress + ConditionalSync,
+    A::Site: Site,
     Env: Provider<Get>
         + Provider<Put>
-        + Provider<Fork<S3, Get>>
+        + Provider<Fork<A::Site, Get>>
         + Provider<authority::Identify>
         + Provider<authority::Sign>
         + Provider<storage::List>
@@ -130,8 +132,9 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> Encoder for FallbackStore<'_, Env>
+impl<Env, A> Encoder for FallbackStore<'_, Env, A>
 where
+    A: SiteAddress + ConditionalSync,
     Env: ConditionalSync + 'static,
 {
     type Bytes = Vec<u8>;

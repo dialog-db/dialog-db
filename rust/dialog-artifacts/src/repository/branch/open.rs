@@ -51,16 +51,14 @@ impl Open {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::test_signer;
-    use crate::repository::Repository;
-    use dialog_storage::provider::Volatile;
+    use super::super::tests::{test_operator, test_repo};
 
     #[dialog_common::test]
     async fn it_opens_new_branch() -> anyhow::Result<()> {
-        let env = Volatile::new();
-        let repo = Repository::from(test_signer().await);
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
 
-        let branch = repo.open_branch("main").perform(&env).await?;
+        let branch = repo.open_branch("main").perform(&operator).await?;
 
         assert_eq!(branch.name().as_str(), "main");
         assert!(

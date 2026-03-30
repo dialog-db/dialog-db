@@ -35,6 +35,7 @@ impl Fetch<'_> {
     where
         Env: Provider<memory_fx::Resolve>
             + Provider<Fork<S3, memory_fx::Resolve>>
+            + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Resolve>>
             + Provider<authority::Identify>
             + Provider<authority::Sign>
             + Provider<storage::List>
@@ -93,6 +94,7 @@ async fn fetch_remote<Env>(
 where
     Env: Provider<memory_fx::Resolve>
         + Provider<Fork<S3, memory_fx::Resolve>>
+        + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Resolve>>
         + Provider<authority::Identify>
         + Provider<authority::Sign>
         + Provider<storage::List>
@@ -101,32 +103,43 @@ where
 {
     let remote_site = branch.load_remote(remote.clone()).perform(env).await?;
 
-    let remote_branch = RemoteBranch::new(
-        remote_site.name().clone(),
-        remote_site.s3_address().clone(),
-        upstream_subject.clone(),
-        upstream_branch_name.clone(),
-    );
-
-    remote_branch.resolve(env).await
+    match remote_site.address() {
+        crate::RemoteAddress::S3(addr) => {
+            let remote_branch = RemoteBranch::new(
+                remote_site.name().clone(),
+                addr.clone(),
+                upstream_subject.clone(),
+                upstream_branch_name.clone(),
+            );
+            remote_branch.resolve(env).await
+        }
+        #[cfg(feature = "ucan")]
+        crate::RemoteAddress::Ucan(addr) => {
+            let remote_branch = RemoteBranch::new(
+                remote_site.name().clone(),
+                addr.clone(),
+                upstream_subject.clone(),
+                upstream_branch_name.clone(),
+            );
+            remote_branch.resolve(env).await
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{TestEnv, test_signer};
+    use super::super::tests::{test_operator, test_repo};
     use crate::artifacts::{Artifact, Instruction};
-    use crate::repository::Repository;
     use crate::repository::branch::state::UpstreamState;
     use crate::repository::node_reference::NodeReference;
     use futures_util::stream;
 
     #[dialog_common::test]
     async fn it_fetches_local_upstream_revision() -> anyhow::Result<()> {
-        let env = TestEnv::new().await;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
 
-        let repo = Repository::from(test_signer().await);
-
-        let main = repo.open_branch("main").perform(&env).await?;
+        let main = repo.open_branch("main").perform(&operator).await?;
         let _hash = main
             .commit(stream::iter(vec![Instruction::Assert(Artifact {
                 the: "user/name".parse()?,
@@ -134,20 +147,20 @@ mod tests {
                 is: crate::Value::String("Main data".to_string()),
                 cause: None,
             })]))
-            .perform(&env)
+            .perform(&operator)
             .await?;
         let main_revision = main.revision().expect("main should have a revision");
 
-        let feature = repo.open_branch("feature").perform(&env).await?;
+        let feature = repo.open_branch("feature").perform(&operator).await?;
         feature
             .set_upstream(UpstreamState::Local {
                 branch: "main".into(),
                 tree: NodeReference::default(),
             })
-            .perform(&env)
+            .perform(&operator)
             .await?;
 
-        let fetched = super::fetch_local(&feature, &"main".into(), &env).await?;
+        let fetched = super::fetch_local(&feature, &"main".into(), &operator).await?;
 
         assert!(fetched.is_some());
         assert_eq!(fetched.unwrap().tree(), main_revision.tree());
@@ -157,11 +170,10 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_does_not_modify_local_state_on_fetch() -> anyhow::Result<()> {
-        let env = TestEnv::new().await;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
 
-        let repo = Repository::from(test_signer().await);
-
-        let main = repo.open_branch("main").perform(&env).await?;
+        let main = repo.open_branch("main").perform(&operator).await?;
         let _hash = main
             .commit(stream::iter(vec![Instruction::Assert(Artifact {
                 the: "user/name".parse()?,
@@ -169,21 +181,21 @@ mod tests {
                 is: crate::Value::String("Main data".to_string()),
                 cause: None,
             })]))
-            .perform(&env)
+            .perform(&operator)
             .await?;
 
-        let feature = repo.open_branch("feature").perform(&env).await?;
+        let feature = repo.open_branch("feature").perform(&operator).await?;
         feature
             .set_upstream(UpstreamState::Local {
                 branch: "main".into(),
                 tree: NodeReference::default(),
             })
-            .perform(&env)
+            .perform(&operator)
             .await?;
 
         let feature_revision_before = feature.revision();
 
-        let _fetched = super::fetch_local(&feature, &"main".into(), &env).await?;
+        let _fetched = super::fetch_local(&feature, &"main".into(), &operator).await?;
 
         // Fetch should not modify local state
         assert_eq!(feature.revision(), feature_revision_before);
