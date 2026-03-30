@@ -55,7 +55,7 @@ impl LoadBranch {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{test_operator, test_repo};
+    use crate::helpers::{test_operator, test_repo};
     use crate::repository::error::RepositoryError;
 
     #[dialog_common::test]

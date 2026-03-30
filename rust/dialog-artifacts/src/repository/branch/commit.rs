@@ -197,8 +197,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{test_operator, test_repo};
     use crate::artifacts::{Artifact, ArtifactSelector, Instruction};
+    use crate::helpers::{test_operator, test_repo};
     use dialog_prolly_tree::EMPT_TREE_HASH;
     use futures_util::{StreamExt, stream};
 

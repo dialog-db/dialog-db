@@ -284,8 +284,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{test_operator, test_repo};
     use crate::artifacts::{Artifact, Instruction};
+    use crate::helpers::{test_operator, test_repo};
     use crate::repository::branch::state::UpstreamState;
     use crate::repository::node_reference::NodeReference;
     use futures_util::stream;

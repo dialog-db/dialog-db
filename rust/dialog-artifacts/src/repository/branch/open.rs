@@ -51,7 +51,7 @@ impl OpenBranch {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{test_operator, test_repo};
+    use crate::helpers::{test_operator, test_repo};
 
     #[dialog_common::test]
     async fn it_opens_new_branch() -> anyhow::Result<()> {

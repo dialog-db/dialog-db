@@ -36,7 +36,7 @@ async fn setup_repo_with_s3_remote(
     let site_address = s3_remote_address(s3);
     let _site = repo
         .site("origin")
-        .add(site_address)
+        .create(site_address)
         .perform(operator)
         .await?;
 
@@ -183,7 +183,7 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> anyhow::Result
     let site_address = s3_remote_address(&s3);
     bob_repo
         .site("origin")
-        .add(site_address)
+        .create(site_address)
         .perform(&operator)
         .await?;
 
@@ -248,7 +248,7 @@ async fn it_two_party_convergence(s3: S3Address) -> anyhow::Result<()> {
 
     bob_repo
         .site("origin")
-        .add(s3_remote_address(&s3))
+        .create(s3_remote_address(&s3))
         .perform(&operator)
         .await?;
 
@@ -344,7 +344,7 @@ async fn it_pushes_and_pulls_via_ucan(ucan: UcanS3Address) -> anyhow::Result<()>
     // Set up UCAN remote
     let ucan_address = RemoteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
     repo.site("origin")
-        .add(ucan_address)
+        .create(ucan_address)
         .perform(&operator)
         .await?;
 

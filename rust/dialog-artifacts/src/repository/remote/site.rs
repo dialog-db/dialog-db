@@ -1,6 +1,7 @@
-use dialog_capability::Provider;
+use dialog_capability::{Did, Provider};
 use dialog_effects::memory as memory_fx;
 
+use super::repository::RemoteRepository;
 use super::state::SiteName;
 use crate::RemoteAddress;
 use crate::repository::cell::Cell;
@@ -25,6 +26,11 @@ impl RemoteSite {
     /// The serializable address configuration for this remote.
     pub fn address(&self) -> &RemoteAddress {
         &self.address
+    }
+
+    /// Get a cursor into a specific repository at this remote site.
+    pub fn repository(&self, subject: Did) -> RemoteRepository {
+        RemoteRepository::new(self.name.clone(), self.address.clone(), subject)
     }
 }
 
@@ -61,9 +67,7 @@ impl CreateSite {
 }
 
 /// Command to load an existing remote site configuration.
-pub struct LoadSite {
-    cell: Cell<RemoteAddress>,
-}
+pub struct LoadSite(Cell<RemoteAddress>);
 
 impl LoadSite {
     /// Execute the load operation.
@@ -71,14 +75,14 @@ impl LoadSite {
     where
         Env: Provider<memory_fx::Resolve>,
     {
-        self.cell.resolve(env).await?;
-        match self.cell.get() {
+        self.0.resolve(env).await?;
+        match self.0.get() {
             Some(address) => Ok(RemoteSite {
-                name: self.cell.name().into(),
+                name: self.0.name().into(),
                 address,
             }),
             None => Err(RepositoryError::RemoteNotFound {
-                remote: self.cell.name().into(),
+                remote: self.0.name().into(),
             }),
         }
     }
@@ -86,7 +90,7 @@ impl LoadSite {
 
 impl From<Cell<RemoteAddress>> for LoadSite {
     fn from(cell: Cell<RemoteAddress>) -> Self {
-        Self { cell }
+        Self(cell)
     }
 }
 

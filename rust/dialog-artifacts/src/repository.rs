@@ -43,10 +43,7 @@ use self::memory::Memory;
 
 pub use branch::*;
 pub use error::*;
-pub use node_reference::*;
-pub use occurence::*;
 pub use remote::*;
-pub use revision::*;
 
 /// A repository scoped to a specific subject.
 ///

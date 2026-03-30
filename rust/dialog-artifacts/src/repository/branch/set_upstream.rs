@@ -50,7 +50,7 @@ mod tests {
     use crate::repository::node_reference::NodeReference;
     use crate::repository::remote::RemoteBranch;
 
-    use super::super::tests::{test_operator, test_repo};
+    use crate::helpers::{test_operator, test_repo};
 
     #[dialog_common::test]
     async fn it_sets_local_upstream() -> anyhow::Result<()> {

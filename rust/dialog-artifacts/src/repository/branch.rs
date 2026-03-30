@@ -7,7 +7,7 @@ use std::fmt::{Debug, Formatter, Result as FmtResult};
 use crate::artifacts::selector::Constrained;
 use crate::artifacts::{ArtifactSelector, Datum};
 use crate::repository::SiteSelector;
-use crate::{Key, RemoteAddress, State};
+use crate::{Key, State};
 
 /// Branch state, identifiers, and upstream descriptors.
 pub mod state;
