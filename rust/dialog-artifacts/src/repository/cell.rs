@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use dialog_capability::{Capability, Provider};
+use dialog_capability::{Capability, Policy, Provider};
 use dialog_effects::memory;
 use dialog_storage::{CborEncoder, DialogStorageError, Encoder};
 use serde::{Serialize, de::DeserializeOwned};
@@ -44,6 +44,10 @@ impl<T, Codec: Clone> Clone for Cell<T, Codec> {
 }
 
 impl<T> Cell<T> {
+    /// Returns the name of this cell.
+    pub fn name(&self) -> &str {
+        &memory::Cell::of(&self.capability).cell
+    }
     /// Create a Cell from a pre-built cell capability.
     pub fn from_capability(capability: Capability<memory::Cell>) -> Self {
         Self {

@@ -60,6 +60,20 @@ pub struct Repository<C: Principal = Credential> {
 }
 
 impl<C: Principal> Repository<C> {
+    fn new(credential: C) -> Self {
+        let subject = Subject::from(credential.did());
+        Self {
+            memory: Memory::new(subject.clone()),
+            archive: Archive::new(subject),
+            credential,
+        }
+    }
+
+    /// Get the credential.
+    pub fn credential(&self) -> &C {
+        &self.credential
+    }
+
     /// The subject DID.
     pub fn did(&self) -> Did {
         self.credential.did()
@@ -67,7 +81,7 @@ impl<C: Principal> Repository<C> {
 
     /// The subject as a `Subject`.
     pub fn subject(&self) -> Subject {
-        Subject::from(self.did())
+        self.did().into()
     }
 
     /// Pre-attenuated memory capability (`Subject → Memory`).
@@ -87,79 +101,6 @@ impl<C: Principal> Repository<C> {
     pub fn ownership(&self) -> access::Access<'_, C, Subject> {
         access::Access::new(self.subject().into(), &self.credential)
     }
-
-    /// Get a branch reference for the given name.
-    ///
-    /// Call `.open()` or `.load()` on the returned reference.
-    pub fn branch(&self, name: impl Into<branch::BranchName>) -> BranchRef<'_, C> {
-        BranchRef {
-            repo: self,
-            name: name.into(),
-        }
-    }
-
-    /// Get a site reference for the given remote name.
-    ///
-    /// Call `.add(address)` or `.load()` on the returned reference.
-    pub fn site(&self, name: impl Into<remote::SiteName>) -> SiteRef<'_, C> {
-        SiteRef {
-            repo: self,
-            name: name.into(),
-        }
-    }
-}
-
-/// A reference to a named branch within a repository.
-///
-/// Call `.open()` to open (create if missing) or `.load()` to load (fail if missing).
-pub struct BranchRef<'a, C: Principal> {
-    repo: &'a Repository<C>,
-    name: branch::BranchName,
-}
-
-impl<C: Principal> BranchRef<'_, C> {
-    /// Open the branch, creating it if it doesn't exist.
-    pub fn open(self) -> branch::Open {
-        let trace = self.repo.memory.trace(self.name);
-        branch::Open::new(self.repo.credential.did(), self.repo.memory.clone(), trace)
-    }
-
-    /// Load the branch, returning an error if it doesn't exist.
-    pub fn load(self) -> branch::Load {
-        let trace = self.repo.memory.trace(self.name);
-        branch::Load::new(self.repo.credential.did(), self.repo.memory.clone(), trace)
-    }
-}
-
-/// A reference to a named remote site within a repository.
-///
-/// Call `.add(address)` to create or `.load()` to load an existing remote.
-pub struct SiteRef<'a, C: Principal> {
-    repo: &'a Repository<C>,
-    name: remote::SiteName,
-}
-
-impl<C: Principal> SiteRef<'_, C> {
-    /// Add a new remote with the given address.
-    pub fn add(self, address: RemoteAddress) -> remote::site::Open {
-        remote::site::Open::new(self.name, address, self.repo.memory.space("site"))
-    }
-
-    /// Load an existing remote.
-    pub fn load(self) -> remote::site::Load {
-        remote::site::Load::new(self.name, self.repo.memory.space("site"))
-    }
-}
-
-impl<C: Principal> Repository<C> {
-    fn new(credential: C) -> Self {
-        let subject = Subject::from(credential.did());
-        Self {
-            memory: Memory::new(subject.clone()),
-            archive: Archive::new(subject),
-            credential,
-        }
-    }
 }
 
 impl From<Credential> for Repository {
@@ -177,13 +118,6 @@ impl From<SignerCredential> for Repository<SignerCredential> {
 impl From<Ed25519Signer> for Repository<SignerCredential> {
     fn from(signer: Ed25519Signer) -> Self {
         SignerCredential::from(signer).into()
-    }
-}
-
-impl<C: Principal> Repository<C> {
-    /// Get the credential.
-    pub fn credential(&self) -> &C {
-        &self.credential
     }
 }
 
@@ -423,18 +357,18 @@ mod tests {
     #[dialog_common::test]
     async fn it_adds_and_loads_remote_via_repository() -> anyhow::Result<()> {
         let operator = test_operator().await;
-        let repo = Repository::open(unique_location("remote"))
+        let space = Repository::open(unique_location("remote"))
             .perform(&operator)
             .await?;
 
-        let site = repo
+        let site = space
             .site("origin")
-            .add(test_address())
+            .create(test_address())
             .perform(&operator)
             .await?;
         assert_eq!(site.name(), "origin");
 
-        let loaded = repo.site("origin").load().perform(&operator).await?;
+        let loaded = space.site("origin").load().perform(&operator).await?;
         assert_eq!(loaded.name(), "origin");
         assert_eq!(loaded.address(), &test_address());
 

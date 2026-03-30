@@ -24,10 +24,10 @@ pub mod site;
 /// Persisted remote configuration state.
 pub mod state;
 
-pub use address::RemoteAddress;
-pub use branch::RemoteBranch;
-pub use repository::RemoteRepository;
-pub use site::RemoteSite;
-pub use state::SiteName;
+mod selector;
 
-use super::branch::UpstreamState;
+pub use address::*;
+pub use branch::*;
+pub use selector::*;
+pub use site::*;
+pub use state::*;

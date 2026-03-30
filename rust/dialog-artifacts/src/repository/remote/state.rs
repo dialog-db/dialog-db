@@ -48,3 +48,9 @@ impl From<String> for SiteName {
         SiteName(value)
     }
 }
+
+impl From<&SiteName> for String {
+    fn from(value: &SiteName) -> Self {
+        value.0.clone()
+    }
+}

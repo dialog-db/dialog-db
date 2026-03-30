@@ -6,7 +6,8 @@ use std::fmt::{Debug, Formatter, Result as FmtResult};
 
 use crate::artifacts::selector::Constrained;
 use crate::artifacts::{ArtifactSelector, Datum};
-use crate::{Key, State};
+use crate::repository::SiteSelector;
+use crate::{Key, RemoteAddress, State};
 
 /// Branch state, identifiers, and upstream descriptors.
 pub mod state;
@@ -22,21 +23,24 @@ mod pull;
 mod push;
 mod reset;
 mod select;
+mod selector;
 mod set_upstream;
 
 pub use commit::Commit;
 pub use fetch::Fetch;
-pub use load::Load;
-pub use open::Open;
+pub use load::LoadBranch;
+pub use open::OpenBranch;
 pub use pull::{Pull, PullLocal};
 pub use push::Push;
 pub use reset::Reset;
 pub use select::Select;
+pub use selector::*;
 pub use set_upstream::SetUpstream;
 
 use super::archive::Archive;
 use super::cell::Cell;
 use super::memory::{Memory, Trace};
+
 pub use super::occurence::Occurence;
 use super::revision::Revision;
 pub use state::{BranchName, UpstreamState};
@@ -111,11 +115,9 @@ impl Branch {
     }
 
     /// Get a remote site reference by name.
-    pub fn site(&self, name: impl Into<super::remote::SiteName>) -> SiteRef<'_> {
-        SiteRef {
-            memory: &self.memory,
-            name: name.into(),
-        }
+    pub fn site(&self, name: impl Into<super::remote::SiteName>) -> SiteSelector {
+        let cell = self.memory.space("site").cell(name.into().as_str());
+        SiteSelector::from(cell)
     }
 
     /// Create a command to commit instructions to this branch.
@@ -183,32 +185,14 @@ pub struct BranchRef<'a> {
 
 impl BranchRef<'_> {
     /// Open the branch (create if missing).
-    pub fn open(self) -> Open {
+    pub fn open(self) -> OpenBranch {
         let trace = self.memory.trace(self.name);
-        Open::new(self.subject, self.memory.clone(), trace)
+        OpenBranch::new(self.subject, self.memory.clone(), trace)
     }
 
     /// Load the branch (error if missing).
-    pub fn load(self) -> Load {
+    pub fn load(self) -> LoadBranch {
         let trace = self.memory.trace(self.name);
-        Load::new(self.subject, self.memory.clone(), trace)
+        LoadBranch::new(self.subject, self.memory.clone(), trace)
     }
-}
-
-/// A reference to a named remote site, obtained from a branch.
-pub struct SiteRef<'a> {
-    memory: &'a super::memory::Memory,
-    name: super::remote::SiteName,
-}
-
-impl SiteRef<'_> {
-    /// Load an existing remote site.
-    pub fn load(self) -> super::remote::site::Load {
-        super::remote::site::Load::new(self.name, self.memory.space("site"))
-    }
-}
-
-#[cfg(test)]
-pub(crate) mod tests {
-    pub use crate::helpers::{test_operator, test_repo};
 }

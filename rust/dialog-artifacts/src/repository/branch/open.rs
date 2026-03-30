@@ -9,13 +9,13 @@ use crate::repository::memory::{Memory, Trace};
 use crate::repository::revision::Revision;
 
 /// Command to open a branch, creating it with defaults if it doesn't exist.
-pub struct Open {
+pub struct OpenBranch {
     subject: Did,
     memory: Memory,
     trace: Trace,
 }
 
-impl Open {
+impl OpenBranch {
     pub(crate) fn new(subject: Did, memory: Memory, trace: Trace) -> Self {
         Self {
             subject,

@@ -5,7 +5,6 @@ use super::state::SiteName;
 use crate::RemoteAddress;
 use crate::repository::cell::Cell;
 use crate::repository::error::RepositoryError;
-use crate::repository::memory::Space;
 
 /// A loaded remote site configuration.
 ///
@@ -30,19 +29,14 @@ impl RemoteSite {
 }
 
 /// Command to add a new remote site, persisting its configuration.
-pub struct Open {
-    name: SiteName,
+pub struct CreateSite {
     address: RemoteAddress,
-    sites: Space,
+    cell: Cell<RemoteAddress>,
 }
 
-impl Open {
-    pub(crate) fn new(name: impl Into<SiteName>, address: RemoteAddress, sites: Space) -> Self {
-        Self {
-            name: name.into(),
-            address,
-            sites,
-        }
+impl CreateSite {
+    pub(crate) fn new(cell: Cell<RemoteAddress>, address: RemoteAddress) -> Self {
+        Self { cell, address }
     }
 
     /// Execute the open operation.
@@ -50,51 +44,49 @@ impl Open {
     where
         Env: Provider<memory_fx::Resolve> + Provider<memory_fx::Publish>,
     {
-        let cell: Cell<RemoteAddress> = self.sites.cell(self.name.as_str().to_string());
-
-        cell.resolve(env).await?;
-        if cell.get().is_some() {
-            return Err(RepositoryError::RemoteAlreadyExists { remote: self.name });
+        self.cell.resolve(env).await?;
+        if self.cell.get().is_some() {
+            return Err(RepositoryError::RemoteAlreadyExists {
+                remote: self.cell.name().into(),
+            });
         }
 
-        cell.publish(self.address.clone(), env).await?;
+        self.cell.publish(self.address.clone(), env).await?;
 
         Ok(RemoteSite {
-            name: self.name,
+            name: self.cell.name().into(),
             address: self.address,
         })
     }
 }
 
 /// Command to load an existing remote site configuration.
-pub struct Load {
-    name: SiteName,
-    sites: Space,
+pub struct LoadSite {
+    cell: Cell<RemoteAddress>,
 }
 
-impl Load {
-    pub(crate) fn new(name: impl Into<SiteName>, sites: Space) -> Self {
-        Self {
-            name: name.into(),
-            sites,
-        }
-    }
-
+impl LoadSite {
     /// Execute the load operation.
     pub async fn perform<Env>(self, env: &Env) -> Result<RemoteSite, RepositoryError>
     where
         Env: Provider<memory_fx::Resolve>,
     {
-        let cell: Cell<RemoteAddress> = self.sites.cell(self.name.as_str().to_string());
-
-        cell.resolve(env).await?;
-        match cell.get() {
+        self.cell.resolve(env).await?;
+        match self.cell.get() {
             Some(address) => Ok(RemoteSite {
-                name: self.name,
+                name: self.cell.name().into(),
                 address,
             }),
-            None => Err(RepositoryError::RemoteNotFound { remote: self.name }),
+            None => Err(RepositoryError::RemoteNotFound {
+                remote: self.cell.name().into(),
+            }),
         }
+    }
+}
+
+impl From<Cell<RemoteAddress>> for LoadSite {
+    fn from(cell: Cell<RemoteAddress>) -> Self {
+        Self { cell }
     }
 }
 
@@ -129,7 +121,7 @@ mod tests {
 
         let site = repo
             .site("origin")
-            .add(test_address())
+            .create(test_address())
             .perform(&env)
             .await?;
 
@@ -163,11 +155,15 @@ mod tests {
         let repo = Repository::from(test_signer().await);
 
         repo.site("origin")
-            .add(test_address())
+            .create(test_address())
             .perform(&env)
             .await?;
 
-        let result = repo.site("origin").add(test_address()).perform(&env).await;
+        let result = repo
+            .site("origin")
+            .create(test_address())
+            .perform(&env)
+            .await;
 
         assert!(matches!(
             result,

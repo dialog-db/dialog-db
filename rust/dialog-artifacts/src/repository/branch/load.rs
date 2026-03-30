@@ -9,13 +9,13 @@ use crate::repository::memory::{Memory, Trace};
 use crate::repository::revision::Revision;
 
 /// Command to load an existing branch, returning an error if not found.
-pub struct Load {
+pub struct LoadBranch {
     subject: Did,
     memory: Memory,
     trace: Trace,
 }
 
-impl Load {
+impl LoadBranch {
     pub(crate) fn new(subject: Did, memory: Memory, trace: Trace) -> Self {
         Self {
             subject,

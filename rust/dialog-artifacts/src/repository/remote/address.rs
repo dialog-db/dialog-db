@@ -22,21 +22,6 @@ pub enum RemoteAddress {
     Ucan(dialog_remote_ucan_s3::UcanAddress),
 }
 
-impl RemoteAddress {
-    /// Extract the S3 [`Address`] from this remote address.
-    ///
-    /// Returns an error for non-S3 address variants.
-    pub fn as_s3(&self) -> Result<&Address, dialog_remote_s3::AccessError> {
-        match self {
-            Self::S3(addr) => Ok(addr),
-            #[cfg(feature = "ucan")]
-            Self::Ucan(_) => Err(dialog_remote_s3::AccessError::Configuration(
-                "UCAN credentials cannot be converted to an S3 address directly".to_string(),
-            )),
-        }
-    }
-}
-
 impl Hash for RemoteAddress {
     fn hash<H: Hasher>(&self, state: &mut H) {
         mem::discriminant(self).hash(state);

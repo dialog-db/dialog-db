@@ -14,8 +14,7 @@ use crate::repository::memory::Memory;
 use crate::repository::node_reference::NodeReference;
 use crate::repository::revision::Revision;
 
-use super::SiteName;
-use super::UpstreamState;
+use crate::{SiteName, UpstreamState};
 
 /// A cursor pointing to a specific branch at a remote repository.
 ///

@@ -92,8 +92,8 @@ pub use remote::Remote;
 /// Capability-based repository system.
 mod repository;
 pub use repository::{
-    Branch, BranchName, NodeReference, Occurence, RemoteAddress, RemoteBranch, RemoteRepository,
-    RemoteSite, Repository, Revision,
+    Branch, BranchName, BranchSelector, CreateSite, LoadBranch, LoadSite, OpenBranch,
+    RemoteAddress, RemoteSite, Repository, SiteName, UpstreamState,
 };
 
 /// Test helpers for setting up profiles, operators, repositories, and test data.
