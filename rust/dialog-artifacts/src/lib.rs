@@ -96,7 +96,6 @@ pub use repository::{
     RemoteSite, Repository, Revision,
 };
 
+/// Test helpers for setting up profiles, operators, repositories, and test data.
 #[cfg(any(test, feature = "helpers"))]
-mod helpers;
-#[cfg(any(test, feature = "helpers"))]
-pub use helpers::*;
+pub mod helpers;

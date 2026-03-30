@@ -279,13 +279,9 @@ impl OpenRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Operator;
     use crate::artifacts::{Artifact, Instruction};
-    use crate::profile::Profile;
-    use crate::remote::Remote;
+    use crate::helpers::{test_operator, unique_location};
     use crate::storage::Storage;
-    use dialog_capability::ucan::{Issuer, Ucan, claim};
-    use dialog_effects::storage as fx_storage;
     use dialog_remote_s3::Address as S3Address;
     use futures_util::stream;
 
@@ -300,46 +296,6 @@ mod tests {
             Credential::Signer(s) => s.clone().into(),
             Credential::Verifier(_) => panic!("expected Signer credential"),
         }
-    }
-
-    /// Generate a unique location for test isolation.
-    fn unique_location(prefix: &str) -> Capability<Location<Address>> {
-        use dialog_common::time;
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let id = time::now()
-            .duration_since(time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        Storage::temp(&format!("{prefix}-{id}-{seq}"))
-    }
-
-    fn unique_name(prefix: &str) -> String {
-        use dialog_common::time;
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let ts = time::now()
-            .duration_since(time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        format!("{prefix}-{ts}-{seq}")
-    }
-
-    /// Build a test operator with the new Profile/Operator flow.
-    async fn test_operator() -> Operator {
-        let storage = Storage::temp_storage();
-        let profile = Profile::open(Storage::temp(&unique_name("repo-test")))
-            .perform(&storage)
-            .await
-            .unwrap();
-        profile
-            .derive(b"test")
-            .network(Remote)
-            .build(storage)
-            .await
-            .unwrap()
     }
 
     #[dialog_common::test]
@@ -698,26 +654,13 @@ mod tests {
     #[cfg(feature = "ucan")]
     mod delegation_tests {
         use super::*;
-        use dialog_capability::ucan::import_delegation_chain;
-
-        async fn test_operator_with_delegation() -> Operator {
-            let storage = Storage::temp_storage();
-            let profile = Profile::open(Storage::temp(&unique_name("deleg")))
-                .perform(&storage)
-                .await
-                .unwrap();
-            profile
-                .derive(b"test")
-                .allow(Subject::any())
-                .network(Remote)
-                .build(storage)
-                .await
-                .unwrap()
-        }
+        use crate::helpers::test_operator;
+        use dialog_capability::ucan::{Issuer, Ucan, claim, import_delegation_chain};
+        use dialog_effects::storage as fx_storage;
 
         #[dialog_common::test]
         async fn it_delegates_repo_to_profile_and_claims() -> anyhow::Result<()> {
-            let operator = test_operator_with_delegation().await;
+            let operator = test_operator().await;
             let repo = Repository::create(unique_location("home"))
                 .perform(&operator)
                 .await?;
@@ -748,7 +691,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn it_enforces_scoped_delegation_policy() -> anyhow::Result<()> {
-            let operator = test_operator_with_delegation().await;
+            let operator = test_operator().await;
             let repo = Repository::create(unique_location("home"))
                 .perform(&operator)
                 .await?;
@@ -793,7 +736,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn it_validates_delegation_against_policy() -> anyhow::Result<()> {
-            let operator = test_operator_with_delegation().await;
+            let operator = test_operator().await;
             let repo = Repository::create(unique_location("home"))
                 .perform(&operator)
                 .await?;

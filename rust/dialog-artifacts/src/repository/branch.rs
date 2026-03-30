@@ -173,44 +173,5 @@ impl Branch {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use crate::Operator;
-    use crate::profile::Profile;
-    use crate::remote::Remote;
-    use crate::repository::Repository;
-    use crate::storage::Storage;
-    use dialog_capability::Subject;
-
-    fn unique_name(prefix: &str) -> String {
-        use dialog_common::time;
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let ts = time::now()
-            .duration_since(time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        format!("{prefix}-{ts}-{seq}")
-    }
-
-    pub async fn test_operator() -> Operator {
-        let storage = Storage::temp_storage();
-        let profile = Profile::open(Storage::temp(&unique_name("branch-test")))
-            .perform(&storage)
-            .await
-            .unwrap();
-        profile
-            .derive(b"test")
-            .allow(Subject::any())
-            .network(Remote)
-            .build(storage)
-            .await
-            .unwrap()
-    }
-
-    pub async fn test_repo(operator: &Operator) -> Repository {
-        Repository::open(Storage::temp(&unique_name("repo")))
-            .perform(operator)
-            .await
-            .unwrap()
-    }
+    pub use crate::helpers::{test_operator, test_repo};
 }

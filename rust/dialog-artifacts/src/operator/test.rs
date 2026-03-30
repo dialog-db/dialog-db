@@ -1,20 +1,9 @@
 #[cfg(test)]
 mod tests {
+    use crate::helpers::unique_name;
     use crate::profile::Profile;
     use crate::remote::Remote;
     use crate::storage::Storage;
-
-    fn unique_name(prefix: &str) -> String {
-        use dialog_common::time;
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let ts = time::now()
-            .duration_since(time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        format!("{prefix}-{ts}-{seq}")
-    }
 
     #[dialog_common::test]
     async fn it_builds_operator_from_profile() {

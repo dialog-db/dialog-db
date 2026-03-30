@@ -569,10 +569,10 @@ mod tests {
     use futures_util::{StreamExt, TryStreamExt};
     use tokio::sync::Mutex;
 
+    use crate::helpers::generate_data;
     use crate::{
         Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMutExt, Artifacts, Attribute,
-        DialogArtifactsError, Entity, Instruction, NULL_REVISION_HASH, Value, generate_data,
-        make_reference,
+        DialogArtifactsError, Entity, Instruction, NULL_REVISION_HASH, Value, make_reference,
     };
 
     #[cfg(target_arch = "wasm32")]
