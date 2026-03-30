@@ -63,8 +63,8 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
 
-        let _ = repo.open_branch("main").perform(&operator).await?;
-        let branch = repo.load_branch("main").perform(&operator).await?;
+        let _ = repo.branch("main").open().perform(&operator).await?;
+        let branch = repo.branch("main").load().perform(&operator).await?;
 
         assert_eq!(branch.name().as_str(), "main");
         Ok(())
@@ -75,7 +75,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
 
-        let result = repo.load_branch("nonexistent").perform(&operator).await;
+        let result = repo.branch("nonexistent").load().perform(&operator).await;
 
         assert!(matches!(
             result,

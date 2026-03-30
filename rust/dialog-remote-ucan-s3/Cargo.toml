@@ -42,8 +42,11 @@ serde_json = { workspace = true }
 signature = { workspace = true }
 thiserror = { workspace = true }
 
-# Optional dependencies (helpers feature)
+# Optional dependencies (helpers feature, cross-platform)
 anyhow = { workspace = true, optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Optional dependencies (helpers feature, native-only server infrastructure)
 bytes = { workspace = true, optional = true }
 http-body-util = { workspace = true, optional = true }
 hyper = { workspace = true, optional = true }

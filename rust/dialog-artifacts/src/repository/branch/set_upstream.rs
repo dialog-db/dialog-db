@@ -57,10 +57,10 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
 
-        let branch = repo.open_branch("feature").perform(&operator).await?;
+        let branch = repo.branch("feature").open().perform(&operator).await?;
 
         // Create upstream branch
-        let _main = repo.open_branch("main").perform(&operator).await?;
+        let _main = repo.branch("main").open().perform(&operator).await?;
 
         branch
             .set_upstream(UpstreamState::Local {
@@ -86,7 +86,7 @@ mod tests {
     async fn it_sets_remote_upstream() -> anyhow::Result<()> {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
-        let branch = repo.open_branch("main").perform(&operator).await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let address = Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "bucket");
         let remote_branch = RemoteBranch::new(
@@ -123,7 +123,7 @@ mod tests {
     async fn it_errors_setting_upstream_to_self() -> anyhow::Result<()> {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
-        let branch = repo.open_branch("main").perform(&operator).await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let result = branch
             .set_upstream(UpstreamState::Local {

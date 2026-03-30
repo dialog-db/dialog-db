@@ -98,7 +98,8 @@ impl Pull<'_> {
             UpstreamState::Local { branch: id, .. } => {
                 let upstream_branch = self
                     .branch
-                    .load_branch(id)
+                    .branch(id)
+                    .load()
                     .perform(env)
                     .await
                     .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
@@ -260,7 +261,8 @@ where
         + 'static,
 {
     let remote_site = branch
-        .load_remote(remote.clone())
+        .site(remote.clone())
+        .load()
         .perform(env)
         .await
         .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
@@ -446,7 +448,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
 
-        let main = repo.open_branch("main").perform(&operator).await?;
+        let main = repo.branch("main").open().perform(&operator).await?;
 
         // Commit something to main so we have a real upstream revision
         let artifact = Artifact {
@@ -462,7 +464,7 @@ mod tests {
 
         let upstream_revision = main.revision().expect("main should have a revision");
 
-        let feature = repo.open_branch("feature").perform(&operator).await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
 
         // Pull with same revision as upstream_revision — no changes since
         // feature's base is the default empty tree.
@@ -480,7 +482,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
 
-        let main = repo.open_branch("main").perform(&operator).await?;
+        let main = repo.branch("main").open().perform(&operator).await?;
 
         let artifact = Artifact {
             the: "user/name".parse()?,
@@ -495,7 +497,7 @@ mod tests {
 
         let main_revision = main.revision().expect("main should have a revision");
 
-        let feature = repo.open_branch("feature").perform(&operator).await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
 
         let pulled = feature
             .pull(main_revision.clone())
@@ -516,7 +518,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
 
-        let main = repo.open_branch("main").perform(&operator).await?;
+        let main = repo.branch("main").open().perform(&operator).await?;
 
         let _hash = main
             .commit(stream::iter(vec![Instruction::Assert(Artifact {
@@ -530,7 +532,7 @@ mod tests {
 
         let main_revision = main.revision().expect("main should have a revision");
 
-        let feature = repo.open_branch("feature").perform(&operator).await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
 
         let _hash = feature
             .commit(stream::iter(vec![Instruction::Assert(Artifact {

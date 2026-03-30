@@ -128,14 +128,15 @@ mod tests {
         let repo = Repository::from(test_signer().await);
 
         let site = repo
-            .add_remote("origin", test_address())
+            .site("origin")
+            .add(test_address())
             .perform(&env)
             .await?;
 
         assert_eq!(site.name(), "origin");
         assert_eq!(site.address(), &test_address());
 
-        let loaded = repo.load_remote("origin").perform(&env).await?;
+        let loaded = repo.site("origin").load().perform(&env).await?;
         assert_eq!(loaded.name(), "origin");
         assert_eq!(loaded.address(), &test_address());
 
@@ -147,7 +148,7 @@ mod tests {
         let env = Volatile::new();
         let repo = Repository::from(test_signer().await);
 
-        let result = repo.load_remote("nonexistent").perform(&env).await;
+        let result = repo.site("nonexistent").load().perform(&env).await;
         assert!(matches!(
             result,
             Err(RepositoryError::RemoteNotFound { .. })
@@ -161,14 +162,12 @@ mod tests {
         let env = Volatile::new();
         let repo = Repository::from(test_signer().await);
 
-        repo.add_remote("origin", test_address())
+        repo.site("origin")
+            .add(test_address())
             .perform(&env)
             .await?;
 
-        let result = repo
-            .add_remote("origin", test_address())
-            .perform(&env)
-            .await;
+        let result = repo.site("origin").add(test_address()).perform(&env).await;
 
         assert!(matches!(
             result,

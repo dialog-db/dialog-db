@@ -67,8 +67,8 @@ impl Provider<storage::Save<Credential, Address>> for Volatile {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait]
 impl Provider<storage::Load<Vec<u8>, Address>> for Volatile {
     async fn execute(
         &self,
@@ -95,8 +95,8 @@ impl Provider<storage::Load<Vec<u8>, Address>> for Volatile {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait]
 impl Provider<storage::Save<Vec<u8>, Address>> for Volatile {
     async fn execute(
         &self,

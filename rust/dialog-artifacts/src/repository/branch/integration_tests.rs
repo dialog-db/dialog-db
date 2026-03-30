@@ -35,11 +35,12 @@ async fn setup_repo_with_s3_remote(
 
     let site_address = s3_remote_address(s3);
     let _site = repo
-        .add_remote("origin", site_address)
+        .site("origin")
+        .add(site_address)
         .perform(operator)
         .await?;
 
-    let branch = repo.open_branch("main").perform(operator).await?;
+    let branch = repo.branch("main").open().perform(operator).await?;
 
     branch
         .set_upstream(UpstreamState::Remote {
@@ -181,11 +182,12 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> anyhow::Result
 
     let site_address = s3_remote_address(&s3);
     bob_repo
-        .add_remote("origin", site_address)
+        .site("origin")
+        .add(site_address)
         .perform(&operator)
         .await?;
 
-    let bob_branch = bob_repo.open_branch("main").perform(&operator).await?;
+    let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
     bob_branch
         .set_upstream(UpstreamState::Remote {
             name: SiteName::from("origin"),
@@ -245,11 +247,12 @@ async fn it_two_party_convergence(s3: S3Address) -> anyhow::Result<()> {
         .await?;
 
     bob_repo
-        .add_remote("origin", s3_remote_address(&s3))
+        .site("origin")
+        .add(s3_remote_address(&s3))
         .perform(&operator)
         .await?;
 
-    let bob_branch = bob_repo.open_branch("main").perform(&operator).await?;
+    let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
     bob_branch
         .set_upstream(UpstreamState::Remote {
             name: SiteName::from("origin"),
@@ -340,11 +343,12 @@ async fn it_pushes_and_pulls_via_ucan(ucan: UcanS3Address) -> anyhow::Result<()>
 
     // Set up UCAN remote
     let ucan_address = RemoteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
-    repo.add_remote("origin", ucan_address)
+    repo.site("origin")
+        .add(ucan_address)
         .perform(&operator)
         .await?;
 
-    let branch = repo.open_branch("main").perform(&operator).await?;
+    let branch = repo.branch("main").open().perform(&operator).await?;
     branch
         .set_upstream(UpstreamState::Remote {
             name: SiteName::from("origin"),

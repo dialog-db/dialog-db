@@ -88,30 +88,66 @@ impl<C: Principal> Repository<C> {
         access::Access::new(self.subject().into(), &self.credential)
     }
 
-    /// Add a new remote site to this repository.
-    pub fn add_remote(
-        &self,
-        name: impl Into<remote::SiteName>,
-        address: RemoteAddress,
-    ) -> remote::site::Open {
-        remote::site::Open::new(name, address, self.memory.space("site"))
+    /// Get a branch reference for the given name.
+    ///
+    /// Call `.open()` or `.load()` on the returned reference.
+    pub fn branch(&self, name: impl Into<branch::BranchName>) -> BranchRef<'_, C> {
+        BranchRef {
+            repo: self,
+            name: name.into(),
+        }
     }
 
-    /// Load an existing remote site from this repository.
-    pub fn load_remote(&self, name: impl Into<SiteName>) -> remote::site::Load {
-        remote::site::Load::new(name, self.memory.space("site"))
+    /// Get a site reference for the given remote name.
+    ///
+    /// Call `.add(address)` or `.load()` on the returned reference.
+    pub fn site(&self, name: impl Into<remote::SiteName>) -> SiteRef<'_, C> {
+        SiteRef {
+            repo: self,
+            name: name.into(),
+        }
+    }
+}
+
+/// A reference to a named branch within a repository.
+///
+/// Call `.open()` to open (create if missing) or `.load()` to load (fail if missing).
+pub struct BranchRef<'a, C: Principal> {
+    repo: &'a Repository<C>,
+    name: branch::BranchName,
+}
+
+impl<C: Principal> BranchRef<'_, C> {
+    /// Open the branch, creating it if it doesn't exist.
+    pub fn open(self) -> branch::Open {
+        let trace = self.repo.memory.trace(self.name);
+        branch::Open::new(self.repo.credential.did(), self.repo.memory.clone(), trace)
     }
 
-    /// Open (load or create) a branch.
-    pub fn open_branch(&self, name: impl Into<branch::BranchName>) -> branch::Open {
-        let trace = self.memory.trace(name);
-        branch::Open::new(self.credential.did(), self.memory.clone(), trace)
+    /// Load the branch, returning an error if it doesn't exist.
+    pub fn load(self) -> branch::Load {
+        let trace = self.repo.memory.trace(self.name);
+        branch::Load::new(self.repo.credential.did(), self.repo.memory.clone(), trace)
+    }
+}
+
+/// A reference to a named remote site within a repository.
+///
+/// Call `.add(address)` to create or `.load()` to load an existing remote.
+pub struct SiteRef<'a, C: Principal> {
+    repo: &'a Repository<C>,
+    name: remote::SiteName,
+}
+
+impl<C: Principal> SiteRef<'_, C> {
+    /// Add a new remote with the given address.
+    pub fn add(self, address: RemoteAddress) -> remote::site::Open {
+        remote::site::Open::new(self.name, address, self.repo.memory.space("site"))
     }
 
-    /// Load an existing branch (error if not found).
-    pub fn load_branch(&self, name: impl Into<branch::BranchName>) -> branch::Load {
-        let trace = self.memory.trace(name);
-        branch::Load::new(self.credential.did(), self.memory.clone(), trace)
+    /// Load an existing remote.
+    pub fn load(self) -> remote::site::Load {
+        remote::site::Load::new(self.name, self.repo.memory.space("site"))
     }
 }
 
@@ -332,7 +368,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let branch = repo.open_branch("main").perform(&operator).await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         assert_eq!(branch.name().as_str(), "main");
         assert!(
@@ -350,8 +386,8 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let _branch = repo.open_branch("main").perform(&operator).await?;
-        let branch = repo.load_branch("main").perform(&operator).await?;
+        let _branch = repo.branch("main").open().perform(&operator).await?;
+        let branch = repo.branch("main").load().perform(&operator).await?;
         assert_eq!(branch.name().as_str(), "main");
 
         Ok(())
@@ -364,7 +400,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let branch = repo.open_branch("main").perform(&operator).await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
         let artifact = Artifact {
             the: "user/name".parse()?,
             of: "user:123".parse()?,
@@ -392,12 +428,13 @@ mod tests {
             .await?;
 
         let site = repo
-            .add_remote("origin", test_address())
+            .site("origin")
+            .add(test_address())
             .perform(&operator)
             .await?;
         assert_eq!(site.name(), "origin");
 
-        let loaded = repo.load_remote("origin").perform(&operator).await?;
+        let loaded = repo.site("origin").load().perform(&operator).await?;
         assert_eq!(loaded.name(), "origin");
         assert_eq!(loaded.address(), &test_address());
 
@@ -468,7 +505,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let branch = repo.open_branch("main").perform(&operator).await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let artifacts = vec![
             Instruction::Assert(Artifact {
@@ -529,7 +566,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let branch = repo.open_branch("main").perform(&operator).await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let artifacts = vec![
             Instruction::Assert(Artifact {
@@ -581,7 +618,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let branch = repo.open_branch("main").perform(&operator).await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let results: Vec<_> = branch
             .select(ArtifactSelector::new().the("user/name".parse()?))
@@ -607,7 +644,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let branch = repo.open_branch("main").perform(&operator).await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let artifact = Artifact {
             the: "user/name".parse()?,

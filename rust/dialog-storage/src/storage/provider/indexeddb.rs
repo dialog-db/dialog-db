@@ -273,11 +273,36 @@ pub struct IndexedDb {
     sessions: std::rc::Rc<RefCell<HashMap<String, Session>>>,
 }
 
+impl Clone for IndexedDb {
+    fn clone(&self) -> Self {
+        Self {
+            mount: self.mount.clone(),
+            sessions: self.sessions.clone(),
+        }
+    }
+}
+
+impl std::fmt::Debug for IndexedDb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IndexedDb")
+            .field("mount", &self.mount)
+            .finish_non_exhaustive()
+    }
+}
+
 impl IndexedDb {
     /// Creates a new IndexedDB provider with no prefix.
     pub fn new() -> Self {
         Self {
             mount: String::new(),
+            sessions: std::rc::Rc::new(RefCell::new(HashMap::new())),
+        }
+    }
+
+    /// Create an IndexedDB provider mounted at the given address.
+    pub fn mount(address: &Address) -> Self {
+        Self {
+            mount: address.prefix().to_string(),
             sessions: std::rc::Rc::new(RefCell::new(HashMap::new())),
         }
     }

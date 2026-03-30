@@ -58,7 +58,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
 
-        let branch = repo.open_branch("main").perform(&operator).await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         assert_eq!(branch.name().as_str(), "main");
         assert!(

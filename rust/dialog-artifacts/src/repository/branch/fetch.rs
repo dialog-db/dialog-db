@@ -73,7 +73,8 @@ where
     Env: Provider<memory_fx::Resolve>,
 {
     let upstream = branch
-        .load_branch(upstream_name.clone())
+        .branch(upstream_name.clone())
+        .load()
         .perform(env)
         .await?;
 
@@ -101,7 +102,7 @@ where
         + Provider<storage::Get>
         + ConditionalSync,
 {
-    let remote_site = branch.load_remote(remote.clone()).perform(env).await?;
+    let remote_site = branch.site(remote.clone()).load().perform(env).await?;
 
     match remote_site.address() {
         crate::RemoteAddress::S3(addr) => {
@@ -139,7 +140,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
 
-        let main = repo.open_branch("main").perform(&operator).await?;
+        let main = repo.branch("main").open().perform(&operator).await?;
         let _hash = main
             .commit(stream::iter(vec![Instruction::Assert(Artifact {
                 the: "user/name".parse()?,
@@ -151,7 +152,7 @@ mod tests {
             .await?;
         let main_revision = main.revision().expect("main should have a revision");
 
-        let feature = repo.open_branch("feature").perform(&operator).await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
         feature
             .set_upstream(UpstreamState::Local {
                 branch: "main".into(),
@@ -173,7 +174,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
 
-        let main = repo.open_branch("main").perform(&operator).await?;
+        let main = repo.branch("main").open().perform(&operator).await?;
         let _hash = main
             .commit(stream::iter(vec![Instruction::Assert(Artifact {
                 the: "user/name".parse()?,
@@ -184,7 +185,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let feature = repo.open_branch("feature").perform(&operator).await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
         feature
             .set_upstream(UpstreamState::Local {
                 branch: "main".into(),

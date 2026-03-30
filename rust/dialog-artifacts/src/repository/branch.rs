@@ -101,18 +101,21 @@ impl Branch {
         Archive::new(Subject::from(self.subject.clone()))
     }
 
-    /// Load a sibling branch by name (shares this branch's memory).
-    pub fn load_branch(&self, name: impl Into<BranchName>) -> Load {
-        let trace = self.memory.trace(name);
-        Load::new(self.subject.clone(), self.memory.clone(), trace)
+    /// Get a sibling branch reference by name.
+    pub fn branch(&self, name: impl Into<BranchName>) -> BranchRef<'_> {
+        BranchRef {
+            subject: self.subject.clone(),
+            memory: &self.memory,
+            name: name.into(),
+        }
     }
 
-    /// Load a remote site by name (shares this branch's memory).
-    pub fn load_remote(
-        &self,
-        name: impl Into<super::remote::SiteName>,
-    ) -> super::remote::site::Load {
-        super::remote::site::Load::new(name, self.memory.space("site"))
+    /// Get a remote site reference by name.
+    pub fn site(&self, name: impl Into<super::remote::SiteName>) -> SiteRef<'_> {
+        SiteRef {
+            memory: &self.memory,
+            name: name.into(),
+        }
     }
 
     /// Create a command to commit instructions to this branch.
@@ -168,6 +171,40 @@ impl Branch {
     /// `impl Into<UpstreamState>`.
     pub fn set_upstream(&self, upstream: impl Into<UpstreamState>) -> SetUpstream<'_> {
         SetUpstream::new(self, upstream.into())
+    }
+}
+
+/// A reference to a named branch, obtained from another branch.
+pub struct BranchRef<'a> {
+    subject: Did,
+    memory: &'a super::memory::Memory,
+    name: state::BranchName,
+}
+
+impl BranchRef<'_> {
+    /// Open the branch (create if missing).
+    pub fn open(self) -> Open {
+        let trace = self.memory.trace(self.name);
+        Open::new(self.subject, self.memory.clone(), trace)
+    }
+
+    /// Load the branch (error if missing).
+    pub fn load(self) -> Load {
+        let trace = self.memory.trace(self.name);
+        Load::new(self.subject, self.memory.clone(), trace)
+    }
+}
+
+/// A reference to a named remote site, obtained from a branch.
+pub struct SiteRef<'a> {
+    memory: &'a super::memory::Memory,
+    name: super::remote::SiteName,
+}
+
+impl SiteRef<'_> {
+    /// Load an existing remote site.
+    pub fn load(self) -> super::remote::site::Load {
+        super::remote::site::Load::new(self.name, self.memory.space("site"))
     }
 }
 

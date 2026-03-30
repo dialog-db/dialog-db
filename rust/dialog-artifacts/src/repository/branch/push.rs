@@ -93,7 +93,8 @@ where
         + 'static,
 {
     let upstream = branch
-        .load_branch(upstream_name.clone())
+        .branch(upstream_name.clone())
+        .load()
         .perform(env)
         .await?;
 
@@ -154,7 +155,7 @@ where
         + ConditionalSync
         + 'static,
 {
-    let remote_site = branch.load_remote(remote.clone()).perform(env).await?;
+    let remote_site = branch.site(remote.clone()).load().perform(env).await?;
 
     match remote_site.address() {
         crate::RemoteAddress::S3(addr) => {
@@ -294,9 +295,9 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
 
-        let _main = repo.open_branch("main").perform(&operator).await?;
+        let _main = repo.branch("main").open().perform(&operator).await?;
 
-        let feature = repo.open_branch("feature").perform(&operator).await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
         feature
             .set_upstream(UpstreamState::Local {
                 branch: "main".into(),
@@ -321,7 +322,7 @@ mod tests {
         let result = super::push_local(&feature, &"main".into(), &operator).await?;
         assert!(result.is_some());
 
-        let main_reloaded = repo.load_branch("main").perform(&operator).await?;
+        let main_reloaded = repo.branch("main").load().perform(&operator).await?;
         let main_rev = main_reloaded
             .revision()
             .expect("main should have a revision after push");
@@ -335,7 +336,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
 
-        let main = repo.open_branch("main").perform(&operator).await?;
+        let main = repo.branch("main").open().perform(&operator).await?;
         let _hash = main
             .commit(stream::iter(vec![Instruction::Assert(Artifact {
                 the: "user/name".parse()?,
@@ -346,7 +347,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let feature = repo.open_branch("feature").perform(&operator).await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
         feature
             .set_upstream(UpstreamState::Local {
                 branch: "main".into(),
@@ -375,7 +376,7 @@ mod tests {
     async fn it_has_no_upstream_by_default() -> anyhow::Result<()> {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
-        let branch = repo.open_branch("feature").perform(&operator).await?;
+        let branch = repo.branch("feature").open().perform(&operator).await?;
 
         assert!(branch.upstream().is_none());
 

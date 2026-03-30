@@ -206,7 +206,7 @@ mod tests {
     async fn it_commits_and_selects() -> anyhow::Result<()> {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
-        let branch = repo.open_branch("main").perform(&operator).await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let artifact = Artifact {
             the: "user/name".parse()?,

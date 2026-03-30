@@ -60,7 +60,7 @@ impl Provider<storage::Load<Credential, Address>> for IndexedDb {
                         .map_err(|e| StorageError::Storage(e.to_string()))?;
                     Ok(credential)
                 }
-                None => Err(StorageError::Storage(format!("not found: {}", prefix)).into()),
+                None => Result::Err(StorageError::Storage(format!("not found: {}", prefix)).into()),
             }
         }
         .await;
