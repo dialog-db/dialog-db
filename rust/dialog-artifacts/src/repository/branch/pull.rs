@@ -1,5 +1,4 @@
 use dialog_capability::fork::Fork;
-use dialog_capability::site::{Site, SiteAddress};
 use dialog_capability::{Policy, Provider, Subject, authority, storage};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
@@ -16,7 +15,6 @@ use crate::repository::archive::ContentAddressedStore;
 use crate::repository::archive::fallback::FallbackStore;
 use crate::repository::node_reference::NodeReference;
 use crate::repository::remote::RemoteName;
-use crate::repository::remote::branch::RemoteBranchCursor;
 use crate::repository::revision::Revision;
 
 /// Command struct for pulling from a local upstream revision (legacy API).
@@ -236,7 +234,7 @@ where
     }
 }
 
-/// Load the remote site and dispatch to the right pull implementation.
+/// Pull from a remote upstream: fetch, merge, update local state.
 async fn pull_remote<Env>(
     branch: &Branch,
     remote: &RemoteName,
@@ -259,6 +257,7 @@ where
         + ConditionalSync
         + 'static,
 {
+    // Load remote repository and fetch latest revision
     let remote_repo = branch
         .remote(remote.clone())
         .load()
@@ -266,55 +265,17 @@ where
         .await
         .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
 
-    match remote_repo.address().address {
-        crate::SiteAddress::S3(addr) => {
-            let remote_branch = RemoteBranchCursor::new(
-                remote_repo.name().clone(),
-                addr.clone(),
-                remote_repo.did(),
-                upstream_branch_name.clone(),
-            );
-            pull_with_branch(branch, &remote_branch, env).await
-        }
-        #[cfg(feature = "ucan")]
-        crate::SiteAddress::Ucan(addr) => {
-            let remote_branch = RemoteBranchCursor::new(
-                remote_repo.name().clone(),
-                addr.clone(),
-                remote_repo.did(),
-                upstream_branch_name.clone(),
-            );
-            pull_with_branch(branch, &remote_branch, env).await
-        }
-    }
-}
-
-/// Generic pull implementation over any site address type.
-async fn pull_with_branch<A, Env>(
-    branch: &Branch,
-    remote_branch: &RemoteBranchCursor<A>,
-    env: &Env,
-) -> Result<Option<Revision>, DialogArtifactsError>
-where
-    A: SiteAddress + ConditionalSync,
-    A::Site: Site,
-    Env: Provider<archive_fx::Get>
-        + Provider<archive_fx::Put>
-        + Provider<memory_fx::Resolve>
-        + Provider<memory_fx::Publish>
-        + Provider<authority::Identify>
-        + Provider<authority::Sign>
-        + Provider<storage::List>
-        + Provider<storage::Get>
-        + Provider<Fork<A::Site, archive_fx::Get>>
-        + Provider<Fork<A::Site, memory_fx::Resolve>>
-        + ConditionalSync
-        + 'static,
-{
-    let upstream_revision = remote_branch
-        .resolve(env)
+    let remote_branch = remote_repo
+        .branch(upstream_branch_name.clone())
+        .open()
+        .perform(env)
         .await
-        .map_err(|e| DialogArtifactsError::Storage(format!("Failed to resolve remote: {:?}", e)))?;
+        .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
+
+    let upstream_revision =
+        remote_branch.fetch().perform(env).await.map_err(|e| {
+            DialogArtifactsError::Storage(format!("Failed to fetch remote: {:?}", e))
+        })?;
 
     let upstream_revision = match upstream_revision {
         Some(rev) => rev,
@@ -331,7 +292,8 @@ where
         return Ok(None);
     }
 
-    let mut store = FallbackStore::new(env, branch.archive().index(), remote_branch);
+    // Use FallbackStore for three-way merge (reads fall through to remote)
+    let mut store = FallbackStore::new(env, branch.archive().index(), &remote_repo);
 
     let mut target: Index = Tree::from_hash(upstream_revision.tree.hash(), &store)
         .await
@@ -363,9 +325,7 @@ where
             DialogArtifactsError::Storage(format!("Failed to integrate changes: {:?}", e))
         })?;
 
-    // Replicate all tree blocks to local storage by streaming through
-    // the FallbackStore. This ensures subsequent local reads (e.g. select)
-    // can find the blocks without needing the remote.
+    // Replicate all tree blocks to local storage
     {
         use futures_util::StreamExt;
         let replicate_store = store.clone();

@@ -8,7 +8,6 @@ use super::Branch;
 use super::state::{BranchName, UpstreamState};
 use crate::repository::error::RepositoryError;
 use crate::repository::remote::RemoteName;
-use crate::repository::remote::branch::RemoteBranchCursor;
 use crate::repository::revision::Revision;
 
 /// Command struct for fetching the upstream branch's current revision.
@@ -34,6 +33,7 @@ impl Fetch<'_> {
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, RepositoryError>
     where
         Env: Provider<memory_fx::Resolve>
+            + Provider<memory_fx::Publish>
             + Provider<Fork<S3, memory_fx::Resolve>>
             + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Resolve>>
             + Provider<authority::Identify>
@@ -82,8 +82,7 @@ where
 
 /// Fetch the current revision from a remote upstream branch.
 ///
-/// Does NOT modify local state. Looks up credentials from the persisted
-/// `RemoteSite` configuration.
+/// Resolves the remote revision and updates the local cache.
 async fn fetch_remote<Env>(
     branch: &Branch,
     remote: &RemoteName,
@@ -92,6 +91,7 @@ async fn fetch_remote<Env>(
 ) -> Result<Option<Revision>, RepositoryError>
 where
     Env: Provider<memory_fx::Resolve>
+        + Provider<memory_fx::Publish>
         + Provider<Fork<S3, memory_fx::Resolve>>
         + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Resolve>>
         + Provider<authority::Identify>
@@ -101,28 +101,17 @@ where
         + ConditionalSync,
 {
     let remote_repo = branch.remote(remote.clone()).load().perform(env).await?;
+    let remote_branch = remote_repo
+        .branch(upstream_branch_name.clone())
+        .open()
+        .perform(env)
+        .await?;
 
-    match remote_repo.address().address {
-        crate::SiteAddress::S3(addr) => {
-            let remote_branch = RemoteBranchCursor::new(
-                remote_repo.name().clone(),
-                addr.clone(),
-                remote_repo.did(),
-                upstream_branch_name.clone(),
-            );
-            remote_branch.resolve(env).await
-        }
-        #[cfg(feature = "ucan")]
-        crate::SiteAddress::Ucan(addr) => {
-            let remote_branch = RemoteBranchCursor::new(
-                remote_repo.name().clone(),
-                addr.clone(),
-                remote_repo.did(),
-                upstream_branch_name.clone(),
-            );
-            remote_branch.resolve(env).await
-        }
-    }
+    remote_branch
+        .fetch()
+        .perform(env)
+        .await
+        .map_err(|e| RepositoryError::StorageError(format!("Remote fetch failed: {:?}", e)))
 }
 
 #[cfg(test)]

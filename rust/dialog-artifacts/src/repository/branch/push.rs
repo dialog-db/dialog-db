@@ -1,18 +1,15 @@
 use dialog_capability::fork::Fork;
-use dialog_capability::site::{Site, SiteAddress};
 use dialog_capability::{Provider, authority, storage};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
 use dialog_remote_s3::S3;
-use futures_util::{StreamExt, TryStreamExt};
 
 use super::Branch;
 use super::novelty::novelty;
 use super::state::{BranchName, UpstreamState};
 use crate::repository::error::RepositoryError;
 use crate::repository::remote::RemoteName;
-use crate::repository::remote::branch::RemoteBranchCursor;
 use crate::repository::revision::Revision;
 
 /// Command struct for pushing local changes to an upstream branch.
@@ -68,7 +65,7 @@ impl Push<'_> {
                 name,
                 branch: branch_name,
                 ..
-            } => push_remote(self.branch, name, branch_name, env).await,
+            } => Box::pin(push_remote(self.branch, name, branch_name, env)).await,
         }
     }
 }
@@ -122,11 +119,13 @@ where
 
 /// Push local changes to a remote upstream branch.
 ///
-/// 1. Look up credentials from `RemoteSite`
-/// 2. Build `RemoteBranch` from upstream state
-/// 3. Compute novel nodes via `novelty()`
-/// 4. Read each node's raw bytes from local archive, upload to remote
-/// 5. Publish revision to remote
+/// Push local changes to a remote upstream branch.
+///
+/// 1. Load remote repository
+/// 2. Compute novel nodes
+/// 3. Upload blocks via remote archive
+/// 4. Publish revision via remote branch
+/// 5. Update local upstream state
 async fn push_remote<Env>(
     branch: &Branch,
     remote: &RemoteName,
@@ -140,59 +139,10 @@ where
         + Provider<memory_fx::Publish>
         + Provider<Fork<S3, archive_fx::Put>>
         + Provider<Fork<S3, memory_fx::Resolve>>
-        + Provider<Fork<dialog_remote_ucan_s3::UcanSite, archive_fx::Get>>
-        + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Resolve>>
         + Provider<Fork<S3, memory_fx::Publish>>
         + Provider<Fork<dialog_remote_ucan_s3::UcanSite, archive_fx::Put>>
         + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Resolve>>
         + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Publish>>
-        + Provider<authority::Identify>
-        + Provider<authority::Sign>
-        + Provider<storage::List>
-        + Provider<storage::Get>
-        + ConditionalSync
-        + 'static,
-{
-    let remote_repo = branch.remote(remote.clone()).load().perform(env).await?;
-
-    match remote_repo.address().address {
-        crate::SiteAddress::S3(addr) => {
-            let rb = RemoteBranchCursor::new(
-                remote_repo.name().clone(),
-                addr.clone(),
-                remote_repo.did(),
-                upstream_branch_name.clone(),
-            );
-            push_with_branch(branch, &rb, env).await
-        }
-        #[cfg(feature = "ucan")]
-        crate::SiteAddress::Ucan(addr) => {
-            let rb = RemoteBranchCursor::new(
-                remote_repo.name().clone(),
-                addr.clone(),
-                remote_repo.did(),
-                upstream_branch_name.clone(),
-            );
-            push_with_branch(branch, &rb, env).await
-        }
-    }
-}
-
-async fn push_with_branch<A, Env>(
-    branch: &Branch,
-    remote_branch: &RemoteBranchCursor<A>,
-    env: &Env,
-) -> Result<Option<Revision>, RepositoryError>
-where
-    A: SiteAddress + ConditionalSync,
-    A::Site: Site,
-    Env: Provider<archive_fx::Get>
-        + Provider<archive_fx::Put>
-        + Provider<memory_fx::Resolve>
-        + Provider<memory_fx::Publish>
-        + Provider<Fork<A::Site, archive_fx::Put>>
-        + Provider<Fork<A::Site, memory_fx::Resolve>>
-        + Provider<Fork<A::Site, memory_fx::Publish>>
         + Provider<authority::Identify>
         + Provider<authority::Sign>
         + Provider<storage::List>
@@ -208,62 +158,40 @@ where
         .upstream()
         .map(|u| u.tree().clone())
         .unwrap_or_default();
-    let catalog = branch.archive().index();
 
-    // Maximum number of concurrent block uploads.
-    const UPLOAD_CONCURRENCY: usize = 16;
+    // Load remote repository and open remote branch
+    let remote_repo = branch.remote(remote.clone()).load().perform(env).await?;
+    let remote_branch = remote_repo
+        .branch(upstream_branch_name.clone())
+        .open()
+        .perform(env)
+        .await?;
 
+    // Compute and upload novel blocks
     let nodes = novelty(
         *branch_base.hash(),
         *branch_revision.tree().hash(),
         env,
-        catalog.clone(),
+        branch.archive().index(),
     );
 
-    nodes
-        .map(|node_result| {
-            let catalog = &catalog;
-            let remote_branch = &remote_branch;
-            async move {
-                let node = node_result.map_err(|e| RepositoryError::PushFailed {
-                    cause: format!("Failed to compute novelty: {}", e),
-                })?;
+    let local_catalog = branch.archive().index();
+    Box::pin(
+        remote_repo
+            .archive()
+            .index()
+            .upload(nodes, local_catalog)
+            .perform(env),
+    )
+    .await?;
 
-                let hash = *node.hash();
-
-                let get_cap = catalog.clone().invoke(archive_fx::Get::new(hash));
-                let bytes =
-                    get_cap
-                        .perform(env)
-                        .await
-                        .map_err(|e| RepositoryError::PushFailed {
-                            cause: format!("Failed to read local block: {}", e),
-                        })?;
-
-                if let Some(bytes) = bytes {
-                    remote_branch
-                        .upload_block(hash, bytes, env)
-                        .await
-                        .map_err(|e| RepositoryError::PushFailed {
-                            cause: format!("Failed to upload block: {}", e),
-                        })?;
-                }
-
-                Ok(())
-            }
-        })
-        .buffer_unordered(UPLOAD_CONCURRENCY)
-        .try_collect::<()>()
+    // Publish revision to remote
+    remote_branch
+        .publish(branch_revision.clone())
+        .perform(env)
         .await?;
 
-    remote_branch
-        .publish(branch_revision.clone(), env)
-        .await
-        .map_err(|e| RepositoryError::PushFailed {
-            cause: format!("Failed to publish revision: {}", e),
-        })?;
-
-    // Update the upstream state's tree to match the pushed revision
+    // Update local upstream state
     if let Some(upstream) = branch.upstream() {
         branch
             .upstream

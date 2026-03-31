@@ -46,13 +46,21 @@ pub struct RemoteArchiveIndex<'a> {
 impl RemoteArchiveIndex<'_> {
     /// Upload a stream of novel nodes to the remote.
     ///
-    /// For each node, reads its raw bytes from local archive and uploads
-    /// to the remote via Fork.
-    pub fn upload<'a, S>(&'a self, nodes: S) -> Upload<'a, S>
+    /// `local_catalog` is used to read raw bytes from local storage.
+    /// The remote catalog (from this index) is used for the fork upload.
+    pub fn upload<'a, S>(
+        &'a self,
+        nodes: S,
+        local_catalog: Capability<archive_fx::Catalog>,
+    ) -> Upload<'a, S>
     where
         S: Stream<Item = Result<Node<Key, State<Datum>, Blake3Hash>, DialogArtifactsError>>,
     {
-        Upload { index: self, nodes }
+        Upload {
+            index: self,
+            nodes,
+            local_catalog,
+        }
     }
 }
 
@@ -60,6 +68,7 @@ impl RemoteArchiveIndex<'_> {
 pub struct Upload<'a, S> {
     index: &'a RemoteArchiveIndex<'a>,
     nodes: S,
+    local_catalog: Capability<archive_fx::Catalog>,
 }
 
 const UPLOAD_CONCURRENCY: usize = 16;
@@ -81,19 +90,25 @@ where
             + ConditionalSync,
     {
         let address = self.index.repository.address();
-        let catalog = &self.index.catalog;
+        let remote_catalog = &self.index.catalog;
+        let local_catalog = &self.local_catalog;
 
         match address.address {
-            SiteAddressEnum::S3(ref addr) => upload_nodes(self.nodes, catalog, addr, env).await,
+            SiteAddressEnum::S3(ref addr) => {
+                upload_nodes(self.nodes, local_catalog, remote_catalog, addr, env).await
+            }
             #[cfg(feature = "ucan")]
-            SiteAddressEnum::Ucan(ref addr) => upload_nodes(self.nodes, catalog, addr, env).await,
+            SiteAddressEnum::Ucan(ref addr) => {
+                upload_nodes(self.nodes, local_catalog, remote_catalog, addr, env).await
+            }
         }
     }
 }
 
 async fn upload_nodes<S, A, Env>(
     nodes: S,
-    catalog: &Capability<archive_fx::Catalog>,
+    local_catalog: &Capability<archive_fx::Catalog>,
+    remote_catalog: &Capability<archive_fx::Catalog>,
     address: &A,
     env: &Env,
 ) -> Result<(), RepositoryError>
@@ -117,7 +132,8 @@ where
 
             let hash = *node.hash();
 
-            let get_cap = catalog.clone().invoke(archive_fx::Get::new(hash));
+            // Read from local archive
+            let get_cap = local_catalog.clone().invoke(archive_fx::Get::new(hash));
             let bytes: Option<Vec<u8>> =
                 get_cap
                     .perform(env)
@@ -127,7 +143,8 @@ where
                     })?;
 
             if let Some(bytes) = bytes {
-                upload_block(catalog, address, hash, bytes, env).await?;
+                // Upload to remote archive
+                upload_block(remote_catalog, address, hash, bytes, env).await?;
             }
 
             Ok(())

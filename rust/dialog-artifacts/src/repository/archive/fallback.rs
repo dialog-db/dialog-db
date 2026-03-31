@@ -3,62 +3,58 @@ use dialog_capability::fork::Fork;
 use dialog_capability::site::{Site, SiteAddress};
 use dialog_capability::{Capability, Provider, authority, storage};
 use dialog_common::ConditionalSync;
-use dialog_effects::archive::{Catalog, Get, Put};
+use dialog_effects::archive::{self as archive_fx, Catalog, Get, Put};
+use dialog_remote_s3::S3;
 use dialog_storage::{
     Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::fmt::Debug;
 
-use crate::repository::remote::branch::RemoteBranchCursor;
+use crate::SiteAddress as SiteAddressEnum;
+use crate::repository::remote::RemoteRepository;
 
-/// A content-addressed store that reads from local first, falls back to remote.
-///
-/// On a remote cache miss that hits remotely, the fetched bytes are written
-/// to the local store (cache-through). Writes go to local only.
-pub struct FallbackStore<'a, Env, A: SiteAddress> {
+pub struct FallbackStore<'a, Env> {
     env: &'a Env,
     encoder: CborEncoder,
     local_catalog: Capability<Catalog>,
-    remote_branch: &'a RemoteBranchCursor<A>,
+    remote: &'a RemoteRepository,
 }
 
-impl<Env, A: SiteAddress> Clone for FallbackStore<'_, Env, A> {
+impl<Env> Clone for FallbackStore<'_, Env> {
     fn clone(&self) -> Self {
         Self {
             env: self.env,
             encoder: self.encoder.clone(),
             local_catalog: self.local_catalog.clone(),
-            remote_branch: self.remote_branch,
+            remote: self.remote,
         }
     }
 }
 
-impl<'a, Env, A: SiteAddress> FallbackStore<'a, Env, A> {
-    /// Create a new FallbackStore.
+impl<'a, Env> FallbackStore<'a, Env> {
     pub fn new(
         env: &'a Env,
         local_catalog: Capability<Catalog>,
-        remote_branch: &'a RemoteBranchCursor<A>,
+        remote: &'a RemoteRepository,
     ) -> Self {
         Self {
             env,
             encoder: CborEncoder,
             local_catalog,
-            remote_branch,
+            remote,
         }
     }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env, A> ContentAddressedStorage for FallbackStore<'_, Env, A>
+impl<Env> ContentAddressedStorage for FallbackStore<'_, Env>
 where
-    A: SiteAddress + ConditionalSync,
-    A::Site: Site,
     Env: Provider<Get>
         + Provider<Put>
-        + Provider<Fork<A::Site, Get>>
+        + Provider<Fork<S3, Get>>
+        + Provider<Fork<dialog_remote_ucan_s3::UcanSite, Get>>
         + Provider<authority::Identify>
         + Provider<authority::Sign>
         + Provider<storage::List>
@@ -73,7 +69,6 @@ where
     where
         T: DeserializeOwned + ConditionalSync,
     {
-        // Try local first
         let local_get = self.local_catalog.clone().invoke(Get::new(*hash));
         let local_result: Result<Option<Vec<u8>>, _> = local_get.perform(self.env).await;
         let local_result =
@@ -88,22 +83,29 @@ where
             return Ok(Some(value));
         }
 
-        // Fall back to remote
-        let remote_result = self
-            .remote_branch
-            .download_block(*hash, self.env)
-            .await
-            .map_err(|e| DialogStorageError::StorageBackend(e.to_string()))?;
+        let address = self.remote.address();
+        let remote_catalog = dialog_capability::Subject::from(address.subject.clone())
+            .attenuate(archive_fx::Archive)
+            .attenuate(Catalog::new("index"));
+
+        let remote_result = match address.address {
+            SiteAddressEnum::S3(ref addr) => {
+                download_block(&remote_catalog, addr, *hash, self.env).await
+            }
+            #[cfg(feature = "ucan")]
+            SiteAddressEnum::Ucan(ref addr) => {
+                download_block(&remote_catalog, addr, *hash, self.env).await
+            }
+        }
+        .map_err(|e| DialogStorageError::StorageBackend(e.to_string()))?;
 
         match remote_result {
             Some(bytes) => {
-                // Cache locally
                 let local_put = self
                     .local_catalog
                     .clone()
                     .invoke(Put::new(*hash, bytes.clone()));
                 let _: Result<(), _> = local_put.perform(self.env).await;
-
                 let value: T = self
                     .encoder
                     .decode(&bytes)
@@ -119,22 +121,46 @@ where
     where
         T: Serialize + ConditionalSync + Debug,
     {
-        // Write to local only
         let (hash, bytes) = self.encoder.encode(block).await?;
-
         let effect = self.local_catalog.clone().invoke(Put::new(hash, bytes));
         let result: Result<(), _> = effect.perform(self.env).await;
         result.map_err(|e| DialogStorageError::StorageBackend(e.to_string()))?;
-
         Ok(hash)
     }
 }
 
+async fn download_block<A, Env>(
+    catalog: &Capability<Catalog>,
+    address: &A,
+    hash: Blake3Hash,
+    env: &Env,
+) -> Result<Option<Vec<u8>>, crate::DialogArtifactsError>
+where
+    A: SiteAddress,
+    A::Site: Site,
+    Env: Provider<Fork<A::Site, Get>>
+        + Provider<authority::Identify>
+        + Provider<authority::Sign>
+        + Provider<storage::List>
+        + Provider<storage::Get>
+        + ConditionalSync,
+{
+    catalog
+        .clone()
+        .invoke(Get::new(hash))
+        .fork(address)
+        .perform(env)
+        .await
+        .map_err(|e| {
+            crate::DialogArtifactsError::Storage(format!("Remote download failed: {}", e))
+        })?
+        .map_err(|e| crate::DialogArtifactsError::Storage(format!("Remote download failed: {}", e)))
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env, A> Encoder for FallbackStore<'_, Env, A>
+impl<Env> Encoder for FallbackStore<'_, Env>
 where
-    A: SiteAddress + ConditionalSync,
     Env: ConditionalSync + 'static,
 {
     type Bytes = Vec<u8>;
