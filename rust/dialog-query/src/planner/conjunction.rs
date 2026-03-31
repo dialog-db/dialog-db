@@ -47,13 +47,13 @@ impl Conjunction {
     /// Returns `Pin<Box<...>>` because each step's output type depends on the
     /// previous step. Boxing erases the nesting from the type and keeps each
     /// step at pointer size on the stack.
-    pub fn evaluate<S: Source, M: Selection>(
+    pub fn evaluate<'a, S: Source, M: Selection + 'a>(
         self,
         selection: M,
-        source: &S,
-    ) -> Pin<Box<dyn Selection>> {
+        source: &'a S,
+    ) -> Pin<Box<dyn Selection + 'a>> {
         self.steps.into_iter().fold(
-            Box::pin(selection) as Pin<Box<dyn Selection>>,
+            Box::pin(selection) as Pin<Box<dyn Selection + 'a>>,
             |selection, plan| Box::pin(plan.evaluate(selection, source)),
         )
     }

@@ -34,7 +34,7 @@ pub trait Application: Clone + ConditionalSend + 'static {
     fn realize(&self, input: selection::Match) -> Result<Self::Conclusion, EvaluationError>;
 
     /// Execute this query against a source, returning a stream of typed results.
-    fn perform<S: Source>(self, source: &S) -> impl Output<Self::Conclusion>
+    fn perform<S: Source>(self, source: &S) -> impl Output<Self::Conclusion> + '_
     where
         Self: Sized,
     {

@@ -46,11 +46,11 @@ impl Disjunction {
     /// Returns `Pin<Box<...>>` because Disjunction is recursive — Or holds a
     /// `Box<Disjunction>` whose evaluate calls back into this method. Boxing
     /// keeps each alternative at pointer size on the stack.
-    pub fn evaluate<S: Source, M: Selection>(
+    pub fn evaluate<'a, S: Source, M: Selection + 'static>(
         self,
         selection: M,
-        source: &S,
-    ) -> Pin<Box<dyn Selection>> {
+        source: &'a S,
+    ) -> Pin<Box<dyn Selection + 'a>> {
         match self {
             Self::Empty => Box::pin(empty()),
             Self::Solo(join) => Box::pin(join.evaluate(selection, source)),
@@ -69,12 +69,12 @@ impl FromIterator<Conjunction> for Disjunction {
 
 impl Disjunction {
     /// Disjunction the input stream and merge two alternative evaluations.
-    fn merge<S: Source, M: Selection>(
+    fn merge<'a, S: Source, M: Selection + 'static>(
         left: Disjunction,
         right: Conjunction,
         selection: M,
-        source: &S,
-    ) -> Pin<Box<dyn Selection>> {
+        source: &'a S,
+    ) -> Pin<Box<dyn Selection + 'a>> {
         let source = source.clone();
         Box::pin(try_stream! {
             let (left_input, right_input) = fork_stream(selection);
