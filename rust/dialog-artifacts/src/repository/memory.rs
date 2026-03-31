@@ -1,5 +1,9 @@
-use dialog_capability::{Capability, Subject};
+use dialog_capability::{Capability, Policy, Subject};
 use dialog_effects::memory as fx;
+#[allow(unused_imports)]
+use dialog_effects::memory::prelude::SpaceExt;
+
+use crate::RemoteAddress;
 
 use super::branch::BranchName;
 use super::cell::Cell;
@@ -10,10 +14,10 @@ use super::cell::Cell;
 /// structured helpers:
 ///
 /// ```text
-/// trace/{branch}/local/revision        Cell<Revision>
-/// trace/{branch}/local/upstream        Cell<Option<UpstreamState>>
-/// trace/{branch}/remote/{site}/revision Cell<Revision>
-/// credential/{audience}/{site}          Cell<RemoteAddress>
+/// branch/{name}/revision                  Cell<Revision>
+/// branch/{name}/upstream                  Cell<Option<UpstreamState>>
+/// remote/{name}/address                   Cell<RemoteAddress>
+/// remote/{name}/branch/{branch}/revision  Cell<Revision>
 /// ```
 #[derive(Debug, Clone)]
 pub struct Memory(Capability<fx::Memory>);
@@ -73,6 +77,46 @@ pub struct Space(Capability<fx::Space>);
 
 impl Space {
     /// Create a [`Cell`] within this space.
+    pub fn cell<T>(&self, name: impl Into<String>) -> Cell<T> {
+        Cell::from_capability(self.cell_capability(name))
+    }
+
+    /// Return the raw cell capability without wrapping in [`Cell<T>`].
+    pub fn cell_capability(&self, name: impl Into<String>) -> Capability<fx::Cell> {
+        self.0.clone().attenuate(fx::Cell::new(name))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Site(Capability<fx::Space>);
+
+impl From<Space> for Site {
+    fn from(space: Space) -> Self {
+        Self(space.0)
+    }
+}
+
+impl Site {
+    /// Return name for this site, strips out remote/ prefix.
+    pub fn name(&self) -> &str {
+        fx::Space::of(&self.0)
+            .space
+            .strip_prefix("remote/")
+            .unwrap_or("")
+    }
+
+    /// The underlying space capability.
+    pub fn capability(&self) -> Capability<fx::Space> {
+        self.0.clone()
+    }
+
+    /// Cell for the site address.
+    pub fn address(&self) -> Cell<RemoteAddress> {
+        Cell::from_capability(self.cell_capability("address"))
+    }
+
+    /// Create a [`Cell`] within this site space.
+    #[allow(dead_code)]
     pub fn cell<T>(&self, name: impl Into<String>) -> Cell<T> {
         Cell::from_capability(self.cell_capability(name))
     }

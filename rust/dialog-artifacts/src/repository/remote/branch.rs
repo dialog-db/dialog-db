@@ -14,7 +14,11 @@ use crate::repository::memory::Memory;
 use crate::repository::node_reference::NodeReference;
 use crate::repository::revision::Revision;
 
-use crate::{SiteName, UpstreamState};
+use crate::{RemoteName, UpstreamState};
+
+mod selector;
+#[allow(unused_imports)]
+pub use selector::RemoteBranchSelector;
 
 /// A cursor pointing to a specific branch at a remote repository.
 ///
@@ -22,7 +26,7 @@ use crate::{SiteName, UpstreamState};
 /// used for remote operations (S3 or UcanSite).
 #[derive(Debug, Clone)]
 pub struct RemoteBranch<A: SiteAddress> {
-    remote: SiteName,
+    remote: RemoteName,
     address: A,
     subject: Did,
     branch: BranchName,
@@ -30,7 +34,7 @@ pub struct RemoteBranch<A: SiteAddress> {
 
 impl<A: SiteAddress> RemoteBranch<A> {
     /// Create a new remote branch cursor.
-    pub fn new(remote: SiteName, address: A, subject: Did, branch: BranchName) -> Self {
+    pub fn new(remote: RemoteName, address: A, subject: Did, branch: BranchName) -> Self {
         Self {
             remote,
             address,
@@ -40,7 +44,7 @@ impl<A: SiteAddress> RemoteBranch<A> {
     }
 
     /// The remote name (e.g., "origin").
-    pub fn remote(&self) -> &SiteName {
+    pub fn remote(&self) -> &RemoteName {
         &self.remote
     }
 
@@ -210,7 +214,6 @@ impl<A: SiteAddress> From<RemoteBranch<A>> for UpstreamState {
         UpstreamState::Remote {
             name: remote.remote,
             branch: remote.branch,
-            subject: remote.subject,
             tree: NodeReference::default(),
         }
     }

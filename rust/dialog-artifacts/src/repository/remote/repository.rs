@@ -1,44 +1,59 @@
-use dialog_capability::Did;
+//! Remote repository — a loaded remote with address and branch navigation.
 
-use super::SiteName;
+use dialog_capability::{Capability, Did, Policy};
+use dialog_effects::memory as fx;
+
+use super::state::RemoteName;
 use crate::RemoteAddress;
+use crate::repository::cell::{Cell, Retain};
+use crate::repository::revision::Revision;
 
-/// A cursor pointing to a specific repository at a remote site.
+/// A loaded remote repository.
 ///
-/// Created by [`RemoteSite::repository`](super::site::RemoteSite::repository).
-/// Holds the remote name, address, and subject DID identifying the repository.
-///
-/// Call [`.branch(name)`](RemoteRepository::branch) to get a cursor into a
-/// specific branch within this repository.
+/// Holds the retained address and a memory space capability scoped to
+/// `remote/{name}`, used for branch revision cells.
 #[derive(Debug, Clone)]
 pub struct RemoteRepository {
-    remote: SiteName,
-    address: RemoteAddress,
-    subject: Did,
+    address: Retain<RemoteAddress>,
+    capability: Capability<fx::Space>,
 }
 
 impl RemoteRepository {
-    /// Create a new remote repository cursor.
-    pub fn new(remote: SiteName, address: RemoteAddress, subject: Did) -> Self {
+    /// Construct from a retained address cell and its site space capability.
+    pub(crate) fn new(address: Retain<RemoteAddress>, capability: Capability<fx::Space>) -> Self {
         Self {
-            remote,
             address,
-            subject,
+            capability,
         }
     }
 
-    /// The address for remote operations.
-    pub fn address(&self) -> &RemoteAddress {
-        &self.address
+    /// Local name for this remote.
+    pub fn name(&self) -> RemoteName {
+        fx::Space::of(&self.capability)
+            .space
+            .strip_prefix("remote/")
+            .unwrap_or("")
+            .into()
     }
 
-    /// The subject DID of the repository.
-    pub fn subject(&self) -> &Did {
-        &self.subject
+    /// The subject DID of the remote repository.
+    pub fn did(&self) -> Did {
+        self.address.get().subject.clone()
     }
 
-    /// The remote name.
-    pub fn remote(&self) -> &SiteName {
-        &self.remote
+    /// The full remote address (site + subject).
+    pub fn address(&self) -> RemoteAddress {
+        self.address.get().clone()
+    }
+
+    /// A cell for a branch revision at this remote.
+    ///
+    /// Path: `remote/{name}/branch/{branch}/revision`
+    pub fn branch_revision(&self, branch: &str) -> Cell<Revision> {
+        let cap = self
+            .capability
+            .clone()
+            .attenuate(fx::Cell::new(format!("branch/{branch}/revision")));
+        Cell::from_capability(cap)
     }
 }

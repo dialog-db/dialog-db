@@ -4,7 +4,7 @@ use std::fmt::{Display, Formatter, Result as FmtResult};
 use thiserror::Error;
 
 use super::branch::BranchName;
-use super::remote::SiteName;
+use super::remote::RemoteName;
 
 /// The common error type used by repository operations.
 #[derive(Error, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,19 +38,19 @@ pub enum RepositoryError {
     #[error("Remote {remote} not found")]
     RemoteNotFound {
         /// Remote site name
-        remote: SiteName,
+        remote: RemoteName,
     },
     /// Remote repository already exists
     #[error("Remote {remote} already exist")]
     RemoteAlreadyExists {
         /// Remote site name
-        remote: SiteName,
+        remote: RemoteName,
     },
     /// Connection to remote repository failed
     #[error("Connection to remote {remote} failed")]
     RemoteConnectionError {
         /// Remote site name
-        remote: SiteName,
+        remote: RemoteName,
     },
 
     /// Repository not found

@@ -12,7 +12,7 @@ use super::novelty::novelty;
 use super::state::{BranchName, UpstreamState};
 use crate::repository::error::RepositoryError;
 use crate::repository::remote::RemoteBranch;
-use crate::repository::remote::SiteName;
+use crate::repository::remote::RemoteName;
 use crate::repository::revision::Revision;
 
 /// Command struct for pushing local changes to an upstream branch.
@@ -67,9 +67,8 @@ impl Push<'_> {
             UpstreamState::Remote {
                 name,
                 branch: branch_name,
-                subject,
                 ..
-            } => push_remote(self.branch, name, branch_name, subject, env).await,
+            } => push_remote(self.branch, name, branch_name, env).await,
         }
     }
 }
@@ -130,9 +129,8 @@ where
 /// 5. Publish revision to remote
 async fn push_remote<Env>(
     branch: &Branch,
-    remote: &SiteName,
+    remote: &RemoteName,
     upstream_branch_name: &BranchName,
-    upstream_subject: &dialog_capability::Did,
     env: &Env,
 ) -> Result<Option<Revision>, RepositoryError>
 where
@@ -155,24 +153,24 @@ where
         + ConditionalSync
         + 'static,
 {
-    let remote_site = branch.site(remote.clone()).load().perform(env).await?;
+    let remote_repo = branch.remote(remote.clone()).load().perform(env).await?;
 
-    match remote_site.address() {
-        crate::RemoteAddress::S3(addr) => {
+    match remote_repo.address().address {
+        crate::SiteAddress::S3(addr) => {
             let rb = RemoteBranch::new(
-                remote_site.name().clone(),
+                remote_repo.name().clone(),
                 addr.clone(),
-                upstream_subject.clone(),
+                remote_repo.did(),
                 upstream_branch_name.clone(),
             );
             push_with_branch(branch, &rb, env).await
         }
         #[cfg(feature = "ucan")]
-        crate::RemoteAddress::Ucan(addr) => {
+        crate::SiteAddress::Ucan(addr) => {
             let rb = RemoteBranch::new(
-                remote_site.name().clone(),
+                remote_repo.name().clone(),
                 addr.clone(),
-                upstream_subject.clone(),
+                remote_repo.did(),
                 upstream_branch_name.clone(),
             );
             push_with_branch(branch, &rb, env).await

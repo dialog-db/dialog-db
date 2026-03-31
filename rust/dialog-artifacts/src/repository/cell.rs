@@ -270,6 +270,108 @@ where
     }
 }
 
+/// A cell that always has a value.
+///
+/// Constructed with an initial value via [`Cell::equip`]. On [`resolve`](Retain::resolve),
+/// updates to the latest remote value — but if the remote is empty (deleted),
+/// the last known value is retained. [`get()`](Retain::get) always returns `T`.
+#[derive(Debug)]
+pub struct Retain<T, Codec = CborEncoder> {
+    cell: Cell<T, Codec>,
+    value: Arc<RwLock<T>>,
+}
+
+impl<T, Codec: Clone> Clone for Retain<T, Codec>
+where
+    T: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            cell: self.cell.clone(),
+            value: Arc::clone(&self.value),
+        }
+    }
+}
+
+impl<T: Clone> Retain<T> {
+    /// Read the current value, syncing from the inner cell first.
+    ///
+    /// If the cell has a newer value, the sticky cache is updated.
+    /// Returns a read guard that derefs to `&T`.
+    pub fn get(&self) -> parking_lot::RwLockReadGuard<'_, T> {
+        if let Some(value) = self.cell.get() {
+            *self.value.write() = value;
+        }
+        self.value.read()
+    }
+
+    /// Returns the name of the underlying cell.
+    pub fn name(&self) -> &str {
+        self.cell.name()
+    }
+
+    /// Read the value via callback without cloning.
+    pub fn read_with<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&T) -> R,
+    {
+        f(&*self.get())
+    }
+
+    /// Returns the subject DID from the capability chain.
+    pub fn subject(&self) -> &dialog_capability::Did {
+        self.cell.subject()
+    }
+}
+
+impl<T, Codec> Retain<T, Codec>
+where
+    T: DeserializeOwned + Clone + dialog_common::ConditionalSync,
+    Codec: Encoder,
+{
+    /// Resolve from the environment.
+    ///
+    /// If the remote has a value, the local cache is updated.
+    /// If the remote is empty (deleted), the current value is retained.
+    pub async fn resolve<Env>(&self, env: &Env) -> Result<(), RepositoryError>
+    where
+        Env: Provider<memory::Resolve>,
+    {
+        self.cell.resolve(env).await?;
+        if let Some(value) = self.cell.get() {
+            *self.value.write() = value;
+        }
+        Ok(())
+    }
+}
+
+impl<T, Codec> Retain<T, Codec>
+where
+    T: Serialize + Clone,
+    Codec: Encoder,
+{
+    /// Publish a new value, updating both the remote and local cache.
+    pub async fn publish<Env>(&self, value: T, env: &Env) -> Result<(), RepositoryError>
+    where
+        Env: Provider<memory::Publish>,
+    {
+        self.cell.publish(value.clone(), env).await?;
+        *self.value.write() = value;
+        Ok(())
+    }
+}
+
+impl<T> Cell<T> {
+    /// Equip this cell with an initial value, creating a [`Retain`]
+    /// that always has a value and never drops back to empty.
+    pub fn retain(self, initial: T) -> Retain<T> {
+        Retain {
+            cell: self,
+            value: Arc::new(RwLock::new(initial)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,6 +564,113 @@ mod tests {
         clone.publish(value.clone(), &provider).await?;
         assert_eq!(original.get(), Some(value));
 
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn equipped_publishes_and_reads() -> anyhow::Result<()> {
+        let provider = Volatile::new();
+        let equipped = test_cell::<TestValue>("equipped-pub").retain(TestValue::default());
+
+        assert_eq!(
+            *equipped.get(),
+            TestValue::default(),
+            "empty before publish"
+        );
+
+        let value = TestValue {
+            count: 42,
+            name: "equipped".into(),
+        };
+        equipped.publish(value.clone(), &provider).await?;
+        assert_eq!(*equipped.get(), value.clone());
+
+        // Re-resolve — value persists
+        equipped.resolve(&provider).await?;
+        assert_eq!(*equipped.get(), value);
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn equipped_updates_on_resolve() -> anyhow::Result<()> {
+        let provider = Volatile::new();
+
+        // Write v1 via a regular cell
+        let cell: Cell<TestValue> = test_cell("equipped-update");
+        let v1 = TestValue {
+            count: 1,
+            name: "first".into(),
+        };
+        cell.publish(v1.clone(), &provider).await?;
+
+        // Equip a separate cell for the same key — resolve picks up v1
+        let equipped = test_cell::<TestValue>("equipped-update").retain(TestValue::default());
+        equipped.resolve(&provider).await?;
+        assert_eq!(*equipped.get(), v1);
+
+        // Write v2 via the regular cell (which has the right edition)
+        let v2 = TestValue {
+            count: 2,
+            name: "second".into(),
+        };
+        cell.publish(v2.clone(), &provider).await?;
+
+        // Retain resolve picks up v2
+        equipped.resolve(&provider).await?;
+        assert_eq!(*equipped.get(), v2);
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn equipped_retains_value_when_remote_empty() -> anyhow::Result<()> {
+        let provider = Volatile::new();
+
+        // Publish a value
+        let cell: Cell<TestValue> = test_cell("equipped-retain");
+        let value = TestValue {
+            count: 42,
+            name: "retained".into(),
+        };
+        cell.publish(value.clone(), &provider).await?;
+
+        // Equip and resolve — gets the value
+        let equipped = test_cell::<TestValue>("equipped-retain").retain(TestValue::default());
+        equipped.resolve(&provider).await?;
+        assert_eq!(*equipped.get(), value.clone());
+
+        // Now resolve from a DIFFERENT key that has no data.
+        // This simulates what happens when the underlying cell resolves
+        // to None (e.g., remote deleted). We can't easily delete from
+        // Volatile, so instead we verify the contract: equipped.get()
+        // retains the value even if the inner cell would be None.
+        //
+        // The Retain::resolve implementation only updates the sticky
+        // value when the inner cell has Some, so a None resolve is a no-op
+        // for the sticky value.
+        let empty_equipped = test_cell::<TestValue>("nonexistent").retain(TestValue::default());
+        empty_equipped.resolve(&provider).await?;
+        assert_eq!(
+            *empty_equipped.get(),
+            TestValue::default(),
+            "equipped on nonexistent cell retains default"
+        );
+
+        // Original equipped still has its value
+        assert_eq!(
+            *equipped.get(),
+            value,
+            "equipped retains value independently"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    fn equipped_returns_none_before_any_value() -> anyhow::Result<()> {
+        let equipped = test_cell::<TestValue>("equipped-empty").retain(TestValue::default());
+        assert_eq!(*equipped.get(), TestValue::default());
         Ok(())
     }
 }

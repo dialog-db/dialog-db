@@ -8,7 +8,7 @@ use super::Branch;
 use super::state::{BranchName, UpstreamState};
 use crate::repository::error::RepositoryError;
 use crate::repository::remote::RemoteBranch;
-use crate::repository::remote::SiteName;
+use crate::repository::remote::RemoteName;
 use crate::repository::revision::Revision;
 
 /// Command struct for fetching the upstream branch's current revision.
@@ -54,9 +54,8 @@ impl Fetch<'_> {
             UpstreamState::Remote {
                 name,
                 branch: branch_name,
-                subject,
                 ..
-            } => fetch_remote(self.branch, name, branch_name, subject, env).await,
+            } => fetch_remote(self.branch, name, branch_name, env).await,
         }
     }
 }
@@ -87,9 +86,8 @@ where
 /// `RemoteSite` configuration.
 async fn fetch_remote<Env>(
     branch: &Branch,
-    remote: &SiteName,
+    remote: &RemoteName,
     upstream_branch_name: &BranchName,
-    upstream_subject: &dialog_capability::Did,
     env: &Env,
 ) -> Result<Option<Revision>, RepositoryError>
 where
@@ -102,24 +100,24 @@ where
         + Provider<storage::Get>
         + ConditionalSync,
 {
-    let remote_site = branch.site(remote.clone()).load().perform(env).await?;
+    let remote_repo = branch.remote(remote.clone()).load().perform(env).await?;
 
-    match remote_site.address() {
-        crate::RemoteAddress::S3(addr) => {
+    match remote_repo.address().address {
+        crate::SiteAddress::S3(addr) => {
             let remote_branch = RemoteBranch::new(
-                remote_site.name().clone(),
+                remote_repo.name().clone(),
                 addr.clone(),
-                upstream_subject.clone(),
+                remote_repo.did(),
                 upstream_branch_name.clone(),
             );
             remote_branch.resolve(env).await
         }
         #[cfg(feature = "ucan")]
-        crate::RemoteAddress::Ucan(addr) => {
+        crate::SiteAddress::Ucan(addr) => {
             let remote_branch = RemoteBranch::new(
-                remote_site.name().clone(),
+                remote_repo.name().clone(),
                 addr.clone(),
-                upstream_subject.clone(),
+                remote_repo.did(),
                 upstream_branch_name.clone(),
             );
             remote_branch.resolve(env).await

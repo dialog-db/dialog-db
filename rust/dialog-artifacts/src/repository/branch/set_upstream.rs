@@ -103,15 +103,9 @@ mod tests {
 
         let upstream = branch.upstream();
         match upstream {
-            Some(UpstreamState::Remote {
-                name,
-                branch,
-                subject,
-                ..
-            }) => {
+            Some(UpstreamState::Remote { name, branch, .. }) => {
                 assert_eq!(name, "origin");
                 assert_eq!(branch.as_str(), "main");
-                assert_eq!(subject, "did:test:remote-repo".parse()?);
             }
             _ => panic!("Expected Remote upstream"),
         }

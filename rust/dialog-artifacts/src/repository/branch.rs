@@ -6,7 +6,7 @@ use std::fmt::{Debug, Formatter, Result as FmtResult};
 
 use crate::artifacts::selector::Constrained;
 use crate::artifacts::{ArtifactSelector, Datum};
-use crate::repository::SiteSelector;
+use crate::repository::RemoteSelector;
 use crate::{Key, State};
 
 /// Branch state, identifiers, and upstream descriptors.
@@ -114,10 +114,12 @@ impl Branch {
         }
     }
 
-    /// Get a remote site reference by name.
-    pub fn site(&self, name: impl Into<super::remote::SiteName>) -> SiteSelector {
-        let cell = self.memory.space("site").cell(name.into().as_str());
-        SiteSelector::from(cell)
+    /// Get a remote reference by name.
+    pub fn remote(&self, name: impl Into<super::remote::RemoteName>) -> RemoteSelector {
+        let name = name.into();
+        let space = self.memory.space(&format!("remote/{}", name.as_str()));
+        use super::memory::Site;
+        RemoteSelector(Site::from(space))
     }
 
     /// Create a command to commit instructions to this branch.

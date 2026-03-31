@@ -1,4 +1,3 @@
-use dialog_capability::Did;
 use dialog_prolly_tree::KeyType;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -7,7 +6,7 @@ use std::{
 };
 
 use crate::repository::node_reference::NodeReference;
-use crate::repository::remote::SiteName;
+use crate::repository::remote::RemoteName;
 
 /// Unique name for the branch
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -79,11 +78,9 @@ pub enum UpstreamState {
     /// A remote branch upstream
     Remote {
         /// Remote name (e.g., "origin")
-        name: SiteName,
+        name: RemoteName,
         /// Branch name
         branch: BranchName,
-        /// Subject DID of the repository being tracked
-        subject: Did,
         /// Tree root at last sync point
         tree: NodeReference,
     },
@@ -95,14 +92,6 @@ impl UpstreamState {
         match self {
             Self::Local { branch, .. } => branch,
             Self::Remote { branch, .. } => branch,
-        }
-    }
-
-    /// Returns the subject DID for remote upstreams, None for local.
-    pub fn subject(&self) -> Option<&Did> {
-        match self {
-            Self::Local { .. } => None,
-            Self::Remote { subject, .. } => Some(subject),
         }
     }
 
@@ -118,17 +107,7 @@ impl UpstreamState {
     pub fn with_tree(self, tree: NodeReference) -> Self {
         match self {
             Self::Local { branch, .. } => Self::Local { branch, tree },
-            Self::Remote {
-                name,
-                branch,
-                subject,
-                ..
-            } => Self::Remote {
-                name,
-                branch,
-                subject,
-                tree,
-            },
+            Self::Remote { name, branch, .. } => Self::Remote { name, branch, tree },
         }
     }
 }

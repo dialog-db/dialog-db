@@ -1,36 +1,62 @@
-//! Serializable remote address configuration.
+//! Remote address types.
 //!
-//! [`RemoteAddress`] carries the address (endpoint/bucket/region) for the
-//! remote backend. Credentials are stored separately in the credential store.
+//! [`SiteAddress`] is the connection info (endpoint/credentials).
+//! [`RemoteAddress`] pairs it with a subject DID to identify a specific
+//! remote repository.
 
 use std::hash::{Hash, Hasher};
 use std::mem;
 
+use dialog_capability::Did;
 use dialog_remote_s3::Address;
 
-/// Serializable remote address configuration.
+/// Connection info for a remote site.
 ///
 /// Carries the address (endpoint/bucket/region) for the remote backend.
-/// Credentials are stored separately in the credential store and resolved
-/// via `Provider<credential::Retrieve<...>>` during remote operations.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub enum RemoteAddress {
-    /// Direct S3 access: address (endpoint/region/bucket).
+pub enum SiteAddress {
+    /// Direct S3 access.
     S3(Address),
     /// UCAN-based authorization via external access service.
     #[cfg(feature = "ucan")]
     Ucan(dialog_remote_ucan_s3::UcanAddress),
 }
 
-impl Hash for RemoteAddress {
+impl Hash for SiteAddress {
     fn hash<H: Hasher>(&self, state: &mut H) {
         mem::discriminant(self).hash(state);
         match self {
-            Self::S3(addr) => {
-                addr.hash(state);
-            }
+            Self::S3(addr) => addr.hash(state),
             #[cfg(feature = "ucan")]
             Self::Ucan(c) => c.hash(state),
         }
+    }
+}
+
+/// A remote repository address — connection info plus subject DID.
+///
+/// This is what gets stored in the `remote/{name}/address` cell.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
+pub struct RemoteAddress {
+    /// How to connect to the remote.
+    pub address: SiteAddress,
+    /// Which repository (subject DID) at that site.
+    pub subject: Did,
+}
+
+impl RemoteAddress {
+    /// Create a new remote address.
+    pub fn new(address: SiteAddress, subject: Did) -> Self {
+        Self { address, subject }
+    }
+
+    /// The site connection info.
+    pub fn site(&self) -> &SiteAddress {
+        &self.address
+    }
+
+    /// The subject DID of the remote repository.
+    pub fn subject(&self) -> &Did {
+        &self.subject
     }
 }

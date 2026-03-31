@@ -252,9 +252,12 @@ mod tests {
     use dialog_remote_s3::Address as S3Address;
     use futures_util::stream;
 
-    fn test_address() -> RemoteAddress {
+    fn test_remote_address() -> RemoteAddress {
         let s3_addr = S3Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "bucket");
-        RemoteAddress::S3(s3_addr)
+        RemoteAddress::new(
+            SiteAddress::S3(s3_addr),
+            "did:key:z6MkTest".parse().unwrap(),
+        )
     }
 
     /// Extract the Ed25519Signer from a Credential that is known to be a Signer variant.
@@ -359,15 +362,15 @@ mod tests {
             .await?;
 
         let site = space
-            .site("origin")
-            .create(test_address())
+            .remote("origin")
+            .create(test_remote_address())
             .perform(&operator)
             .await?;
         assert_eq!(site.name(), "origin");
 
-        let loaded = space.site("origin").load().perform(&operator).await?;
+        let loaded = space.remote("origin").load().perform(&operator).await?;
         assert_eq!(loaded.name(), "origin");
-        assert_eq!(loaded.address(), &test_address());
+        assert_eq!(loaded.address(), test_remote_address());
 
         Ok(())
     }

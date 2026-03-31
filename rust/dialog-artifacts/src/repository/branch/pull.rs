@@ -15,7 +15,7 @@ use crate::DialogArtifactsError;
 use crate::repository::archive::ContentAddressedStore;
 use crate::repository::archive::fallback::FallbackStore;
 use crate::repository::node_reference::NodeReference;
-use crate::repository::remote::{RemoteBranch, SiteName};
+use crate::repository::remote::{RemoteBranch, RemoteName};
 use crate::repository::revision::Revision;
 
 /// Command struct for pulling from a local upstream revision (legacy API).
@@ -112,9 +112,8 @@ impl Pull<'_> {
             UpstreamState::Remote {
                 name,
                 branch: branch_name,
-                subject,
                 ..
-            } => pull_remote(self.branch, &name, &branch_name, &subject, env).await,
+            } => pull_remote(self.branch, &name, &branch_name, env).await,
         }
     }
 }
@@ -239,9 +238,8 @@ where
 /// Load the remote site and dispatch to the right pull implementation.
 async fn pull_remote<Env>(
     branch: &Branch,
-    remote: &SiteName,
+    remote: &RemoteName,
     upstream_branch_name: &super::state::BranchName,
-    upstream_subject: &dialog_capability::Did,
     env: &Env,
 ) -> Result<Option<Revision>, DialogArtifactsError>
 where
@@ -260,29 +258,29 @@ where
         + ConditionalSync
         + 'static,
 {
-    let remote_site = branch
-        .site(remote.clone())
+    let remote_repo = branch
+        .remote(remote.clone())
         .load()
         .perform(env)
         .await
         .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
 
-    match remote_site.address() {
-        crate::RemoteAddress::S3(addr) => {
+    match remote_repo.address().address {
+        crate::SiteAddress::S3(addr) => {
             let remote_branch = RemoteBranch::new(
-                remote_site.name().clone(),
+                remote_repo.name().clone(),
                 addr.clone(),
-                upstream_subject.clone(),
+                remote_repo.did(),
                 upstream_branch_name.clone(),
             );
             pull_with_branch(branch, &remote_branch, env).await
         }
         #[cfg(feature = "ucan")]
-        crate::RemoteAddress::Ucan(addr) => {
+        crate::SiteAddress::Ucan(addr) => {
             let remote_branch = RemoteBranch::new(
-                remote_site.name().clone(),
+                remote_repo.name().clone(),
                 addr.clone(),
-                upstream_subject.clone(),
+                remote_repo.did(),
                 upstream_branch_name.clone(),
             );
             pull_with_branch(branch, &remote_branch, env).await

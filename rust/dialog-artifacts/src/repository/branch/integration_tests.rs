@@ -4,23 +4,27 @@
 //! local S3 (and UCAN access) servers via `#[dialog_common::test]`.
 
 use crate::Operator;
-use crate::RemoteAddress;
 use crate::artifacts::{Artifact, ArtifactSelector, Instruction};
 use crate::helpers::{test_operator, test_operator_with_profile, unique_location};
 use crate::repository::Repository;
 use crate::repository::branch::state::UpstreamState;
 use crate::repository::node_reference::NodeReference;
-use crate::repository::remote::SiteName;
-use dialog_remote_s3::Address as S3RemoteAddress;
+use crate::repository::remote::RemoteName;
+use crate::{RemoteAddress, SiteAddress};
+use dialog_capability::Did;
+use dialog_remote_s3::Address as S3SiteAddress;
 use dialog_remote_s3::helpers::S3Address;
 use futures_util::StreamExt;
 use futures_util::stream;
 
-fn s3_remote_address(s3: &S3Address) -> RemoteAddress {
-    RemoteAddress::S3(
-        S3RemoteAddress::new(&s3.endpoint, "us-east-1", &s3.bucket).with_credentials(
-            dialog_remote_s3::S3Credentials::new(&s3.access_key_id, &s3.secret_access_key),
+fn s3_remote_address(s3: &S3Address, subject: Did) -> RemoteAddress {
+    RemoteAddress::new(
+        SiteAddress::S3(
+            S3SiteAddress::new(&s3.endpoint, "us-east-1", &s3.bucket).with_credentials(
+                dialog_remote_s3::S3Credentials::new(&s3.access_key_id, &s3.secret_access_key),
+            ),
         ),
+        subject,
     )
 }
 
@@ -33,9 +37,9 @@ async fn setup_repo_with_s3_remote(
         .perform(operator)
         .await?;
 
-    let site_address = s3_remote_address(s3);
+    let site_address = s3_remote_address(s3, repo.did());
     let _site = repo
-        .site("origin")
+        .remote("origin")
         .create(site_address)
         .perform(operator)
         .await?;
@@ -44,9 +48,8 @@ async fn setup_repo_with_s3_remote(
 
     branch
         .set_upstream(UpstreamState::Remote {
-            name: SiteName::from("origin"),
+            name: RemoteName::from("origin"),
             branch: "main".into(),
-            subject: repo.did(),
             tree: NodeReference::default(),
         })
         .perform(operator)
@@ -180,9 +183,9 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> anyhow::Result
         .perform(&operator)
         .await?;
 
-    let site_address = s3_remote_address(&s3);
+    let site_address = s3_remote_address(&s3, alice_repo.did());
     bob_repo
-        .site("origin")
+        .remote("origin")
         .create(site_address)
         .perform(&operator)
         .await?;
@@ -190,9 +193,8 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> anyhow::Result
     let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
     bob_branch
         .set_upstream(UpstreamState::Remote {
-            name: SiteName::from("origin"),
+            name: RemoteName::from("origin"),
             branch: "main".into(),
-            subject: alice_repo.did(),
             tree: NodeReference::default(),
         })
         .perform(&operator)
@@ -247,17 +249,16 @@ async fn it_two_party_convergence(s3: S3Address) -> anyhow::Result<()> {
         .await?;
 
     bob_repo
-        .site("origin")
-        .create(s3_remote_address(&s3))
+        .remote("origin")
+        .create(s3_remote_address(&s3, alice_repo.did()))
         .perform(&operator)
         .await?;
 
     let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
     bob_branch
         .set_upstream(UpstreamState::Remote {
-            name: SiteName::from("origin"),
+            name: RemoteName::from("origin"),
             branch: "main".into(),
-            subject: alice_repo.did(),
             tree: NodeReference::default(),
         })
         .perform(&operator)
@@ -342,8 +343,11 @@ async fn it_pushes_and_pulls_via_ucan(ucan: UcanS3Address) -> anyhow::Result<()>
     profile.save(chain).perform(&operator).await?;
 
     // Set up UCAN remote
-    let ucan_address = RemoteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
-    repo.site("origin")
+    let ucan_address = RemoteAddress::new(
+        SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url)),
+        repo.did(),
+    );
+    repo.remote("origin")
         .create(ucan_address)
         .perform(&operator)
         .await?;
@@ -351,9 +355,8 @@ async fn it_pushes_and_pulls_via_ucan(ucan: UcanS3Address) -> anyhow::Result<()>
     let branch = repo.branch("main").open().perform(&operator).await?;
     branch
         .set_upstream(UpstreamState::Remote {
-            name: SiteName::from("origin"),
+            name: RemoteName::from("origin"),
             branch: "main".into(),
-            subject: repo.did(),
             tree: NodeReference::default(),
         })
         .perform(&operator)
