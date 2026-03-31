@@ -1,11 +1,14 @@
 use async_stream::try_stream;
-use dialog_common::ConditionalSend;
+use dialog_capability::Provider;
+use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_effects::archive;
 
 use crate::error::EvaluationError;
 use crate::selection;
 use crate::selection::Match;
+use crate::source::Source;
 
-use super::{Output, Source};
+use super::Output;
 
 /// A query pattern that can be evaluated against a [`Source`] to produce
 /// typed results.
@@ -24,18 +27,21 @@ pub trait Application: Clone + ConditionalSend + 'static {
     type Conclusion: ConditionalSend + 'static;
 
     /// Evaluate this query, producing a selection stream.
-    fn evaluate<S: Source, M: selection::Selection>(
+    fn evaluate<'a, Env, M: selection::Selection + 'a>(
         self,
         selection: M,
-        source: &S,
-    ) -> impl selection::Selection;
+        source: &'a Source<'a, Env>,
+    ) -> impl selection::Selection + 'a
+    where
+        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static;
 
     /// Convert a match into a concrete result value.
     fn realize(&self, input: selection::Match) -> Result<Self::Conclusion, EvaluationError>;
 
     /// Execute this query against a source, returning a stream of typed results.
-    fn perform<S: Source>(self, source: &S) -> impl Output<Self::Conclusion> + '_
+    fn perform<'a, Env>(self, source: &'a Source<'a, Env>) -> impl Output<Self::Conclusion> + 'a
     where
+        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
         Self: Sized,
     {
         let query = self.clone();

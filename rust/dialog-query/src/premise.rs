@@ -6,14 +6,17 @@
 //! Note: Premises are only used in rule conditions (the "when" part), not in conclusions.
 
 pub use super::negation::Negation;
-use crate::Source;
 use crate::constraint::Constraint;
 use crate::environment::Environment;
 pub use crate::error::{AnalyzerError, QueryResult};
 use crate::formula::query::FormulaQuery;
 use crate::proposition::Proposition;
 use crate::selection::{Match, Selection};
+use crate::source::Source;
 use crate::{Parameters, Schema};
+use dialog_capability::Provider;
+use dialog_common::ConditionalSync;
+use dialog_effects::archive;
 use futures_util::future::Either;
 use std::fmt::{self, Display};
 use std::ops;
@@ -66,7 +69,14 @@ impl Premise {
     }
 
     /// Evaluate this premise with the given selection and source
-    pub fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
+    pub fn evaluate<'a, Env, M: Selection + 'a>(
+        self,
+        selection: M,
+        source: &'a Source<'a, Env>,
+    ) -> impl Selection + 'a
+    where
+        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+    {
         match self {
             Premise::Assert(application) => Either::Left(application.evaluate(selection, source)),
             Premise::Unless(negation) => Either::Right(negation.evaluate(selection, source)),
@@ -74,8 +84,11 @@ impl Premise {
     }
 
     /// Execute this premise against the given store
-    pub fn perform<S: Source>(self, store: &S) -> impl Selection {
-        self.evaluate(Match::new().seed(), store)
+    pub fn perform<'a, Env>(self, source: &'a Source<'a, Env>) -> impl Selection + 'a
+    where
+        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+    {
+        self.evaluate(Match::new().seed(), source)
     }
 }
 

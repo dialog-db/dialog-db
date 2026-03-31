@@ -276,11 +276,17 @@ pub fn derive(input: TokenStream) -> TokenStream {
     {
                 type Conclusion = #struct_name;
 
-                fn evaluate<S: dialog_query::Source, M: dialog_query::Selection>(
+                fn evaluate<'__a, __Env, __M: dialog_query::Selection + '__a>(
                     self,
-                    selection: M,
-                    _source: &S,
-                ) -> impl dialog_query::Selection {
+                    selection: __M,
+                    _source: &'__a dialog_query::source::Source<'__a, __Env>,
+                ) -> impl dialog_query::Selection + '__a
+                where
+                    __Env: dialog_query::Provider<dialog_query::archive::Get>
+                        + dialog_query::Provider<dialog_query::archive::Put>
+                        + dialog_query::ConditionalSync
+                        + 'static,
+                {
                     let formula: dialog_query::FormulaQuery = self.into();
                     formula.evaluate(selection)
                 }

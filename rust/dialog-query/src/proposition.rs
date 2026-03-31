@@ -10,7 +10,11 @@ pub use crate::formula::query::FormulaQuery;
 pub use crate::premise::{Negation, Premise};
 use crate::query::Application;
 use crate::selection::Selection;
-pub use crate::{Environment, Parameters, Schema, Source};
+use crate::source::Source;
+pub use crate::{Environment, Parameters, Schema};
+use dialog_capability::Provider;
+use dialog_common::ConditionalSync;
+use dialog_effects::archive;
 use futures_util::future::Either;
 use serde::de;
 use serde::ser;
@@ -56,7 +60,14 @@ impl Proposition {
     }
 
     /// Evaluate this application against the given context, producing a selection stream
-    pub fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
+    pub fn evaluate<'a, Env, M: Selection + 'a>(
+        self,
+        selection: M,
+        source: &'a Source<'a, Env>,
+    ) -> impl Selection + 'a
+    where
+        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+    {
         match self {
             Proposition::Attribute(query) => Either::Left(Either::Left(Either::Left(
                 Application::evaluate(*query, selection, source),

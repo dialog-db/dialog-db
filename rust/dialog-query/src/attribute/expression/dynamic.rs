@@ -5,10 +5,14 @@ use crate::attribute::statement::AttributeStatement;
 use crate::negation::Negation;
 use crate::query::Output;
 use crate::schema::Cardinality;
+use crate::source::Source;
 use crate::statement::Statement;
 use crate::term::Term;
 use crate::types::{Scalar, Typed};
-use crate::{Claim, Premise, Proposition, Source, Transaction};
+use crate::{Claim, Premise, Proposition, Transaction};
+use dialog_capability::Provider;
+use dialog_common::ConditionalSync;
+use dialog_effects::archive;
 use std::ops::Not;
 
 /// Converts a value into a [`Term`], resolving the type unambiguously
@@ -136,7 +140,10 @@ where
     Is::Type: Scalar,
 {
     /// Execute this expression as a query, returning a stream of claims.
-    pub fn perform<S: Source>(self, source: &S) -> impl Output<Claim> {
+    pub fn perform<'a, Env>(self, source: &'a Source<'a, Env>) -> impl Output<Claim> + 'a
+    where
+        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+    {
         let query: AttributeQuery = self.into();
         query.perform(source)
     }
@@ -409,26 +416,24 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_roundtrips_assert_and_query() -> anyhow::Result<()> {
-        use crate::Session;
-        use crate::artifact::Artifacts;
-        use dialog_storage::MemoryStorageBackend;
+        use crate::session::RuleRegistry;
+        use crate::source::Source;
+        use dialog_artifacts::helpers::{test_operator, test_repo};
         use futures_util::TryStreamExt;
 
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
 
-        let mut session = Session::open(store.clone());
-        {
-            let mut tx = session.edit();
-            tx.assert(
-                the!("person/name")
-                    .of(alice.clone())
-                    .is("Alice".to_string()),
-            );
-            session.commit(tx).await?;
-        }
+        let mut tx = Transaction::new();
+        tx.assert(
+            the!("person/name")
+                .of(alice.clone())
+                .is("Alice".to_string()),
+        );
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
         let premise: Premise = the!("person/name")
             .of(alice.clone())
@@ -440,8 +445,9 @@ mod tests {
             _ => panic!("Expected Assert"),
         };
 
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
         let results = prop
-            .evaluate(Match::new().seed(), &Session::open(store.clone()))
+            .evaluate(Match::new().seed(), &source)
             .try_collect::<Vec<_>>()
             .await?;
 
@@ -452,26 +458,24 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_finds_all_relations_between_entities() -> anyhow::Result<()> {
-        use crate::Session;
-        use crate::artifact::Artifacts;
-        use dialog_storage::MemoryStorageBackend;
+        use crate::session::RuleRegistry;
+        use crate::source::Source;
+        use dialog_artifacts::helpers::{test_operator, test_repo};
         use futures_util::TryStreamExt;
 
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
         // Assert multiple relations between alice and bob
-        let mut session = Session::open(store.clone());
-        {
-            let mut tx = session.edit();
-            tx.assert(the!("team/colleague").of(alice.clone()).is(bob.clone()))
-                .assert(the!("team/manager").of(alice.clone()).is(bob.clone()))
-                .assert(the!("team/mentor").of(alice.clone()).is(bob.clone()));
-            session.commit(tx).await?;
-        }
+        let mut tx = Transaction::new();
+        tx.assert(the!("team/colleague").of(alice.clone()).is(bob.clone()))
+            .assert(the!("team/manager").of(alice.clone()).is(bob.clone()))
+            .assert(the!("team/mentor").of(alice.clone()).is(bob.clone()));
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
         // Use Term::<The>::var to find all relations between alice and bob
         let premise: Premise = Term::<The>::var("relation")
@@ -484,8 +488,9 @@ mod tests {
             _ => panic!("Expected Assert"),
         };
 
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
         let results = prop
-            .evaluate(Match::new().seed(), &Session::open(store.clone()))
+            .evaluate(Match::new().seed(), &source)
             .try_collect::<Vec<_>>()
             .await?;
 

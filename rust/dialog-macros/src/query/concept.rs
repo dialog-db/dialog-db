@@ -250,11 +250,17 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl dialog_query::Application for #query_name {
             type Conclusion = #struct_name;
 
-            fn evaluate<S: dialog_query::Source, M: dialog_query::Selection>(
+            fn evaluate<'__a, __Env, __M: dialog_query::Selection + '__a>(
                 self,
-                selection: M,
-                source: &S,
-            ) -> impl dialog_query::Selection {
+                selection: __M,
+                source: &'__a dialog_query::source::Source<'__a, __Env>,
+            ) -> impl dialog_query::Selection + '__a
+            where
+                __Env: dialog_query::Provider<dialog_query::archive::Get>
+                    + dialog_query::Provider<dialog_query::archive::Put>
+                    + dialog_query::ConditionalSync
+                    + 'static,
+            {
                 let application: dialog_query::ConceptQuery = self.into();
                 application.evaluate(selection, source)
             }
@@ -270,10 +276,16 @@ pub fn derive(input: TokenStream) -> TokenStream {
         // Add inherent perform method so users don't need to import Application trait
         impl #query_name {
             /// Execute this query against the given source
-            pub fn perform<S: dialog_query::Source>(
+            pub fn perform<'__a, __Env>(
                 self,
-                source: &S,
-            ) -> impl dialog_query::Output<#struct_name> {
+                source: &'__a dialog_query::source::Source<'__a, __Env>,
+            ) -> impl dialog_query::Output<#struct_name> + '__a
+            where
+                __Env: dialog_query::Provider<dialog_query::archive::Get>
+                    + dialog_query::Provider<dialog_query::archive::Put>
+                    + dialog_query::ConditionalSync
+                    + 'static,
+            {
                 dialog_query::Application::perform(self, source)
             }
         }

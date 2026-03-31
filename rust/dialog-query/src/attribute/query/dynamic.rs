@@ -8,9 +8,13 @@ use crate::proposition::Proposition;
 use crate::query::Application;
 use crate::query::Output;
 use crate::selection::{Match, Selection};
+use crate::source::Source;
 use crate::types::{Any, Record};
-use crate::{Entity, EvaluationError, Parameters, Premise, Schema, Source, Term};
+use crate::{Entity, EvaluationError, Parameters, Premise, Schema, Term};
 use dialog_artifacts::Cause;
+use dialog_capability::Provider;
+use dialog_common::ConditionalSync;
+use dialog_effects::archive;
 use futures_util::future::Either;
 use serde::Serialize;
 use std::fmt::Display;
@@ -136,7 +140,14 @@ impl DynamicAttributeQuery {
     }
 
     /// Evaluate, dispatching to the appropriate cardinality variant.
-    pub fn evaluate<S: Source, M: Selection>(self, source: S, selection: M) -> impl Selection {
+    pub fn evaluate<'a, Env, M: Selection + 'a>(
+        self,
+        source: &'a Source<'a, Env>,
+        selection: M,
+    ) -> impl Selection + 'a
+    where
+        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+    {
         match self {
             DynamicAttributeQuery::All(query) => Either::Left(query.evaluate(source, selection)),
             DynamicAttributeQuery::Only(query) => Either::Right(query.evaluate(source, selection)),
@@ -144,8 +155,9 @@ impl DynamicAttributeQuery {
     }
 
     /// Execute this query, returning a stream of claims.
-    pub fn perform<S: Source>(self, source: &S) -> impl Output<Claim>
+    pub fn perform<'a, Env>(self, source: &'a Source<'a, Env>) -> impl Output<Claim> + 'a
     where
+        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
         Self: Sized,
     {
         Application::perform(self, source)
@@ -155,8 +167,15 @@ impl DynamicAttributeQuery {
 impl Application for DynamicAttributeQuery {
     type Conclusion = Claim;
 
-    fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
-        self.evaluate(source.clone(), selection)
+    fn evaluate<'a, Env, M: Selection + 'a>(
+        self,
+        selection: M,
+        source: &'a Source<'a, Env>,
+    ) -> impl Selection + 'a
+    where
+        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+    {
+        self.evaluate(source, selection)
     }
 
     fn realize(&self, input: Match) -> Result<Claim, EvaluationError> {
@@ -216,26 +235,38 @@ impl From<&DynamicAttributeQuery> for Premise {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Transaction;
     use crate::query::Output;
     use crate::selection::{Match, Selection};
-    use crate::{Session, the};
-    use dialog_storage::MemoryStorageBackend;
+    use crate::session::RuleRegistry;
+    use crate::source::Source;
+    use crate::the;
+    use dialog_artifacts::helpers::{test_operator, test_repo};
+
+    macro_rules! assert_relation {
+        ($branch:expr, $operator:expr, $the:expr, $of:expr, $is:expr) => {{
+            let mut tx = Transaction::new();
+            tx.assert($the.clone().of($of.clone()).is($is));
+            $branch
+                .commit(tx.into_stream())
+                .perform($operator)
+                .await
+                .unwrap();
+        }};
+    }
 
     #[dialog_common::test]
     async fn it_evaluates() -> anyhow::Result<()> {
-        use crate::artifact::Artifacts;
-        use crate::the;
-
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let name_attr = the!("person/name");
 
-        let claims = vec![name_attr.clone().of(alice.clone()).is("Alice".to_string())];
-
-        let mut session = Session::open(artifacts.clone());
-        session.transact(claims).await?;
+        let mut tx = Transaction::new();
+        tx.assert(name_attr.clone().of(alice.clone()).is("Alice".to_string()));
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
         let query = DynamicAttributeQuery::new(
             Term::from(the!("person/name")),
@@ -245,8 +276,8 @@ mod tests {
             Some(Cardinality::Many),
         );
 
-        let session = Session::open(artifacts);
-        let selection = Application::evaluate(query, Match::new().seed(), &session);
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let selection = Application::evaluate(query, Match::new().seed(), &source);
 
         let results = Selection::try_vec(selection).await?;
 
@@ -268,28 +299,20 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_returns_single_value_for_cardinality_one() -> anyhow::Result<()> {
-        use crate::artifact::Artifacts;
-        use crate::the;
-
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let name_attr = the!("person/name");
 
-        let mut session = Session::open(artifacts.clone());
-        session
-            .transact(vec![
-                name_attr.clone().of(alice.clone()).is("Alice".to_string()),
-            ])
-            .await?;
+        let mut tx = Transaction::new();
+        tx.assert(name_attr.clone().of(alice.clone()).is("Alice".to_string()));
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
-        let mut session = Session::open(artifacts.clone());
-        session
-            .transact(vec![
-                name_attr.clone().of(alice.clone()).is("Alicia".to_string()),
-            ])
-            .await?;
+        let mut tx = Transaction::new();
+        tx.assert(name_attr.clone().of(alice.clone()).is("Alicia".to_string()));
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
         let query = DynamicAttributeQuery::new(
             Term::from(the!("person/name")),
@@ -299,8 +322,8 @@ mod tests {
             Some(Cardinality::One),
         );
 
-        let session = Session::open(artifacts.clone());
-        let results = query.perform(&session).try_vec().await?;
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(
             results.len(),
@@ -317,8 +340,7 @@ mod tests {
             Some(Cardinality::Many),
         );
 
-        let session = Session::open(artifacts);
-        let results_many = query_many.perform(&session).try_vec().await?;
+        let results_many = query_many.perform(&source).try_vec().await?;
 
         assert_eq!(
             results_many.len(),
@@ -330,29 +352,19 @@ mod tests {
         Ok(())
     }
 
-    macro_rules! assert_relation {
-        ($artifacts:expr, $the:expr, $of:expr, $is:expr) => {{
-            let mut session = Session::open($artifacts.clone());
-            let mut tx = session.edit();
-            tx.assert($the.clone().of($of.clone()).is($is));
-            session.commit(tx).await.unwrap();
-        }};
-    }
-
     #[dialog_common::test]
     async fn it_selects_winner_via_eav_scan() -> anyhow::Result<()> {
-        use crate::artifact::Artifacts;
-
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let name_attr = the!("person/name");
         let age_attr = the!("person/age");
 
-        assert_relation!(artifacts, name_attr, alice, "Alice".to_string());
-        assert_relation!(artifacts, name_attr, alice, "Alicia".to_string());
-        assert_relation!(artifacts, age_attr, alice, 30i64);
+        assert_relation!(branch, &operator, name_attr, alice, "Alice".to_string());
+        assert_relation!(branch, &operator, name_attr, alice, "Alicia".to_string());
+        assert_relation!(branch, &operator, age_attr, alice, 30i64);
 
         let query = DynamicAttributeQuery::new(
             Term::var("the"),
@@ -362,8 +374,8 @@ mod tests {
             Some(Cardinality::One),
         );
 
-        let session = Session::open(artifacts);
-        let results = query.perform(&session).try_vec().await?;
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(
             results.len(),
@@ -384,19 +396,18 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_selects_winner_via_aev_scan() -> anyhow::Result<()> {
-        use crate::artifact::Artifacts;
-
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
         let name_attr = the!("person/name");
 
-        assert_relation!(artifacts, name_attr, alice, "Alice".to_string());
-        assert_relation!(artifacts, name_attr, alice, "Alicia".to_string());
-        assert_relation!(artifacts, name_attr, bob, "Bob".to_string());
-        assert_relation!(artifacts, name_attr, bob, "Robert".to_string());
+        assert_relation!(branch, &operator, name_attr, alice, "Alice".to_string());
+        assert_relation!(branch, &operator, name_attr, alice, "Alicia".to_string());
+        assert_relation!(branch, &operator, name_attr, bob, "Bob".to_string());
+        assert_relation!(branch, &operator, name_attr, bob, "Robert".to_string());
 
         let query = DynamicAttributeQuery::new(
             Term::from(the!("person/name")),
@@ -406,8 +417,8 @@ mod tests {
             Some(Cardinality::One),
         );
 
-        let session = Session::open(artifacts);
-        let results = query.perform(&session).try_vec().await?;
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(
             results.len(),
@@ -431,16 +442,15 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_selects_winner_via_vae_scan() -> anyhow::Result<()> {
-        use crate::artifact::Artifacts;
-
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let name_attr = the!("person/name");
 
-        assert_relation!(artifacts, name_attr, alice, "Alice".to_string());
-        assert_relation!(artifacts, name_attr, alice, "Alicia".to_string());
+        assert_relation!(branch, &operator, name_attr, alice, "Alice".to_string());
+        assert_relation!(branch, &operator, name_attr, alice, "Alicia".to_string());
 
         let aev_query = DynamicAttributeQuery::new(
             Term::from(the!("person/name")),
@@ -450,8 +460,8 @@ mod tests {
             Some(Cardinality::One),
         );
 
-        let session = Session::open(artifacts.clone());
-        let aev_results = aev_query.perform(&session).try_vec().await?;
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let aev_results = aev_query.perform(&source).try_vec().await?;
         assert_eq!(aev_results.len(), 1);
         let expected_winner_value = aev_results[0].is().clone();
 
@@ -463,8 +473,7 @@ mod tests {
             Some(Cardinality::One),
         );
 
-        let session = Session::open(artifacts.clone());
-        let vae_results = vae_query.perform(&session).try_vec().await?;
+        let vae_results = vae_query.perform(&source).try_vec().await?;
 
         assert_eq!(
             vae_results.len(),
@@ -488,8 +497,7 @@ mod tests {
             Some(Cardinality::One),
         );
 
-        let session = Session::open(artifacts);
-        let vae_loser_results = vae_loser_query.perform(&session).try_vec().await?;
+        let vae_loser_results = vae_loser_query.perform(&source).try_vec().await?;
 
         assert_eq!(
             vae_loser_results.len(),
@@ -503,16 +511,15 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_picks_deterministic_winner() -> anyhow::Result<()> {
-        use crate::artifact::Artifacts;
-
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let name_attr = the!("person/name");
 
-        assert_relation!(artifacts, name_attr, alice, "Alice".to_string());
-        assert_relation!(artifacts, name_attr, alice, "Alicia".to_string());
+        assert_relation!(branch, &operator, name_attr, alice, "Alice".to_string());
+        assert_relation!(branch, &operator, name_attr, alice, "Alicia".to_string());
 
         let eav_query = DynamicAttributeQuery::new(
             Term::var("the"),
@@ -522,8 +529,8 @@ mod tests {
             Some(Cardinality::One),
         );
 
-        let session = Session::open(artifacts.clone());
-        let eav_results = eav_query.perform(&session).try_vec().await?;
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let eav_results = eav_query.perform(&source).try_vec().await?;
         let eav_name_results: Vec<_> = eav_results
             .iter()
             .filter(|f| *f.the() == name_attr)
@@ -539,8 +546,7 @@ mod tests {
             Some(Cardinality::One),
         );
 
-        let session = Session::open(artifacts.clone());
-        let aev_results = aev_query.perform(&session).try_vec().await?;
+        let aev_results = aev_query.perform(&source).try_vec().await?;
         let aev_alice: Vec<_> = aev_results.iter().filter(|f| f.of() == &alice).collect();
         assert_eq!(aev_alice.len(), 1);
         let aev_winner = aev_alice[0].is().clone();
@@ -555,18 +561,16 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_queries_from_the() -> anyhow::Result<()> {
-        use crate::artifact::Artifacts;
-
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let name_attr = the!("person/name");
 
-        let claims = vec![name_attr.of(alice.clone()).is("Alice".to_string())];
-
-        let mut session = Session::open(artifacts.clone());
-        session.transact(claims).await?;
+        let mut tx = Transaction::new();
+        tx.assert(name_attr.of(alice.clone()).is("Alice".to_string()));
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
         let query = DynamicAttributeQuery::new(
             Term::from(the!("person/name")),
@@ -578,8 +582,8 @@ mod tests {
 
         assert_eq!(query.the(), &Term::from(the!("person/name")));
 
-        let session = Session::open(artifacts);
-        let results = query.perform(&session).try_vec().await?;
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].of(), &alice);
@@ -590,19 +594,16 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_executes_query() -> anyhow::Result<()> {
-        use crate::artifact::Artifacts;
-        use crate::the;
-
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let name_attr = the!("person/name");
 
-        let claims = vec![name_attr.clone().of(alice.clone()).is("Alice".to_string())];
-
-        let mut session = Session::open(artifacts.clone());
-        session.transact(claims).await?;
+        let mut tx = Transaction::new();
+        tx.assert(name_attr.clone().of(alice.clone()).is("Alice".to_string()));
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
         let query = DynamicAttributeQuery::new(
             Term::from(the!("person/name")),
@@ -612,8 +613,8 @@ mod tests {
             Some(Cardinality::Many),
         );
 
-        let session = Session::open(artifacts);
-        let results = query.perform(&session).try_vec().await?;
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1);
         let fact = &results[0];
@@ -626,12 +627,11 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_retracts_facts() -> anyhow::Result<()> {
-        use crate::Statement;
-        use crate::artifact::Artifacts;
         use crate::attribute::AttributeStatement;
 
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
 
@@ -640,8 +640,9 @@ mod tests {
             .is("Alice".to_string())
             .into();
 
-        let mut session = Session::open(artifacts.clone());
-        session.transact(vec![alice_name.clone()]).await?;
+        let mut tx = Transaction::new();
+        tx.assert(alice_name.clone());
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
         let query = DynamicAttributeQuery::new(
             Term::from(the!("user/name")),
@@ -651,17 +652,16 @@ mod tests {
             None,
         );
 
-        let results = query
-            .perform(&Session::open(artifacts.clone()))
-            .try_vec()
-            .await?;
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].of(), &alice);
         assert_eq!(results[0].is(), &crate::Value::String("Alice".to_string()));
 
-        let mut session = Session::open(artifacts.clone());
-        session.transact([alice_name.revert()]).await?;
+        let mut tx = Transaction::new();
+        tx.retract(alice_name);
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
         let query2 = DynamicAttributeQuery::new(
             Term::from(the!("user/name")),
@@ -671,10 +671,8 @@ mod tests {
             None,
         );
 
-        let results2 = query2
-            .perform(&Session::open(artifacts.clone()))
-            .try_vec()
-            .await?;
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let results2 = query2.perform(&source).try_vec().await?;
 
         assert_eq!(results2.len(), 0, "Fact should be retracted");
 
@@ -683,17 +681,15 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_mixes_constants_and_variables() -> anyhow::Result<()> {
-        use crate::artifact::Artifacts;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
 
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
-
-        let claims = vec![the!("user/name").of(alice.clone()).is("Alice".to_string())];
-
-        let mut session = Session::open(artifacts.clone());
-        session.transact(claims).await?;
+        let mut tx = Transaction::new();
+        tx.assert(the!("user/name").of(alice.clone()).is("Alice".to_string()));
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
         let query = DynamicAttributeQuery::new(
             Term::from(the!("user/name")),
@@ -703,10 +699,8 @@ mod tests {
             None,
         );
 
-        let results = query
-            .perform(&Session::open(artifacts.clone()))
-            .try_vec()
-            .await?;
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1, "Should find Alice's name fact");
         assert_eq!(results[0].domain(), "user");
@@ -719,21 +713,17 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_queries_without_descriptor() -> anyhow::Result<()> {
-        use crate::artifact::Artifacts;
-
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        let claims = vec![
-            the!("user/name").of(alice.clone()).is("Alice".to_string()),
-            the!("user/name").of(bob.clone()).is("Bob".to_string()),
-        ];
-
-        let mut session = Session::open(artifacts.clone());
-        session.transact(claims).await?;
+        let mut tx = Transaction::new();
+        tx.assert(the!("user/name").of(alice.clone()).is("Alice".to_string()));
+        tx.assert(the!("user/name").of(bob.clone()).is("Bob".to_string()));
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
         let query = DynamicAttributeQuery::new(
             Term::from(the!("user/name")),
@@ -743,10 +733,8 @@ mod tests {
             None,
         );
 
-        let results = query
-            .perform(&Session::open(artifacts.clone()))
-            .try_vec()
-            .await?;
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 2, "Should find both Alice and Bob");
 
@@ -763,17 +751,15 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_accepts_string_literal_as_value_term() -> anyhow::Result<()> {
-        use crate::artifact::Artifacts;
-
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
 
-        let claims = vec![the!("user/name").of(alice.clone()).is("Alice".to_string())];
-
-        let mut session = Session::open(artifacts.clone());
-        session.transact(claims).await?;
+        let mut tx = Transaction::new();
+        tx.assert(the!("user/name").of(alice.clone()).is("Alice".to_string()));
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
         let query = DynamicAttributeQuery::new(
             Term::from(the!("user/name")),
@@ -783,10 +769,8 @@ mod tests {
             None,
         );
 
-        let results = query
-            .perform(&Session::open(artifacts.clone()))
-            .try_vec()
-            .await?;
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let results = query.perform(&source).try_vec().await?;
         assert_eq!(results.len(), 1);
 
         Ok(())
@@ -794,21 +778,19 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_queries_via_dynamic_expression() -> anyhow::Result<()> {
-        use crate::artifact::Artifacts;
-
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
 
-        let mut session = Session::open(artifacts.clone());
-        session
-            .transact(vec![
-                the!("person/name")
-                    .of(alice.clone())
-                    .is("Alice".to_string()),
-            ])
-            .await?;
+        let mut tx = Transaction::new();
+        tx.assert(
+            the!("person/name")
+                .of(alice.clone())
+                .is("Alice".to_string()),
+        );
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
         let premise: Premise = the!("person/name")
             .of(alice.clone())
@@ -820,8 +802,8 @@ mod tests {
             _ => panic!("Expected Attribute query"),
         };
 
-        let session = Session::open(artifacts);
-        let results = query.perform(&session).try_vec().await?;
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].of(), &alice);
@@ -839,17 +821,15 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_queries_via_typed_expression() -> anyhow::Result<()> {
-        use crate::artifact::Artifacts;
-
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
 
-        let mut session = Session::open(artifacts.clone());
-        session
-            .transact(person::Name::of(alice.clone()).is("Alice"))
-            .await?;
+        let mut tx = Transaction::new();
+        tx.assert(person::Name::of(alice.clone()).is("Alice"));
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
         let premise: Premise = person::Name::of(alice.clone())
             .is(Term::<String>::var("name"))
@@ -860,8 +840,8 @@ mod tests {
             _ => panic!("Expected Attribute query"),
         };
 
-        let session = Session::open(artifacts);
-        let results = query.perform(&session).try_vec().await?;
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].of(), &alice);

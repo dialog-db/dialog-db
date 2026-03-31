@@ -24,30 +24,32 @@ impl<T> Store for T where T: ArtifactStoreMut + Clone + ConditionalSend {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::artifact::{Artifacts, Entity};
+    use crate::artifact::Entity;
     use crate::attribute::query::AttributeQuery;
-    use crate::{Session, Term, the};
+    use crate::session::RuleRegistry;
+    use crate::source::Source;
+    use crate::{Term, Transaction, the};
     use anyhow::Result;
-    use dialog_storage::MemoryStorageBackend;
+    use dialog_artifacts::helpers::{test_operator, test_repo};
 
     #[dialog_common::test]
     async fn it_queries_via_fact_selector() -> Result<()> {
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        let claims = vec![
-            the!("user/name").of(alice.clone()).is("Alice".to_string()),
+        let mut tx = Transaction::new();
+        tx.assert(the!("user/name").of(alice.clone()).is("Alice".to_string()));
+        tx.assert(
             the!("user/email")
                 .of(alice.clone())
                 .is("alice@example.com".to_string()),
-            the!("user/name").of(bob.clone()).is("Bob".to_string()),
-        ];
-
-        let mut session = Session::open(artifacts.clone());
-        session.transact(claims).await?;
+        );
+        tx.assert(the!("user/name").of(bob.clone()).is("Bob".to_string()));
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
         let alice_query = AttributeQuery::new(
             Term::from(the!("user/name")),
@@ -57,8 +59,8 @@ mod tests {
             None,
         );
 
-        let session = Session::open(artifacts.clone());
-        let result = alice_query.perform(&session).try_vec().await;
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let result = alice_query.perform(&source).try_vec().await;
         assert!(result.is_ok());
 
         let all_names_query = AttributeQuery::new(
@@ -69,8 +71,7 @@ mod tests {
             None,
         );
 
-        let session = Session::open(artifacts.clone());
-        let result = all_names_query.perform(&session).try_vec().await;
+        let result = all_names_query.perform(&source).try_vec().await;
         assert!(result.is_ok());
 
         let email_query = AttributeQuery::new(
@@ -81,8 +82,7 @@ mod tests {
             None,
         );
 
-        let session = Session::open(artifacts);
-        let result = email_query.perform(&session).try_vec().await;
+        let result = email_query.perform(&source).try_vec().await;
         assert!(result.is_ok());
 
         Ok(())
@@ -90,8 +90,9 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_succeeds_with_variables_and_constants() -> Result<()> {
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let variable_query = AttributeQuery::new(
             Term::from(the!("user/name")),
@@ -101,8 +102,8 @@ mod tests {
             None,
         );
 
-        let session = Session::open(artifacts);
-        let result = variable_query.perform(&session).try_vec().await;
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let result = variable_query.perform(&source).try_vec().await;
         assert!(result.is_ok());
 
         Ok(())
@@ -110,14 +111,14 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_queries_polymorphically() -> Result<()> {
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
-        let claims = vec![the!("user/name").of(alice.clone()).is("Alice".to_string())];
-
-        let mut session = Session::open(artifacts.clone());
-        session.transact(claims).await?;
+        let mut tx = Transaction::new();
+        tx.assert(the!("user/name").of(alice.clone()).is("Alice".to_string()));
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
         let fact_selector = AttributeQuery::new(
             Term::from(the!("user/name")),
@@ -127,8 +128,8 @@ mod tests {
             None,
         );
 
-        let session = Session::open(artifacts);
-        let results = fact_selector.perform(&session).try_vec().await?;
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let results = fact_selector.perform(&source).try_vec().await?;
         assert_eq!(results.len(), 1);
 
         Ok(())
@@ -136,23 +137,21 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_chains_query_operations() -> Result<()> {
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        let claims = vec![
-            the!("user/name").of(alice.clone()).is("Alice".to_string()),
-            the!("user/role").of(alice.clone()).is("admin".to_string()),
-            the!("user/name").of(bob.clone()).is("Bob".to_string()),
-            the!("user/role").of(bob.clone()).is("user".to_string()),
-        ];
+        let mut tx = Transaction::new();
+        tx.assert(the!("user/name").of(alice.clone()).is("Alice".to_string()));
+        tx.assert(the!("user/role").of(alice.clone()).is("admin".to_string()));
+        tx.assert(the!("user/name").of(bob.clone()).is("Bob".to_string()));
+        tx.assert(the!("user/role").of(bob.clone()).is("user".to_string()));
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
-        let mut session = Session::open(artifacts.clone());
-        session.transact(claims).await?;
-
-        let session = Session::open(artifacts.clone());
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
         let admin_result = AttributeQuery::new(
             Term::from(the!("user/role")),
             Term::blank(),
@@ -160,12 +159,11 @@ mod tests {
             Term::blank(),
             None,
         )
-        .perform(&session)
+        .perform(&source)
         .try_vec()
         .await;
         assert!(admin_result.is_ok());
 
-        let session = Session::open(artifacts);
         let names_result = AttributeQuery::new(
             Term::from(the!("user/name")),
             Term::blank(),
@@ -173,7 +171,7 @@ mod tests {
             Term::blank(),
             None,
         )
-        .perform(&session)
+        .perform(&source)
         .try_vec()
         .await;
         assert!(names_result.is_ok());

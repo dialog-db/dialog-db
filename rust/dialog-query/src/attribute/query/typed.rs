@@ -6,11 +6,15 @@ use crate::attribute::expression::ExpressionCause;
 use crate::attribute::expression::typed::{StaticAttributeExpression, StaticAttributeStatement};
 use crate::attribute::query::dynamic::DynamicAttributeQuery;
 use crate::descriptor::Descriptor;
-use crate::query::{Application, Source};
+use crate::query::Application;
 use crate::selection::{Match, Selection};
+use crate::source::Source;
 use crate::types::Any;
 use crate::types::Scalar;
 use crate::{Entity, EvaluationError, Premise, Proposition, Term, Value};
+use dialog_capability::Provider;
+use dialog_common::ConditionalSync;
+use dialog_effects::archive;
 
 /// A typed attribute query with named fields for entity and value.
 ///
@@ -79,7 +83,14 @@ where
 {
     type Conclusion = StaticAttributeStatement<A>;
 
-    fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
+    fn evaluate<'a, Env, M: Selection + 'a>(
+        self,
+        selection: M,
+        source: &'a Source<'a, Env>,
+    ) -> impl Selection + 'a
+    where
+        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+    {
         let query = DynamicAttributeQuery::from(self);
         Application::evaluate(query, selection, source)
     }
@@ -161,9 +172,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Session;
     use crate::query::Output;
-    use dialog_storage::MemoryStorageBackend;
 
     mod person {
         use crate::Attribute;
@@ -200,25 +209,28 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_performs_typed_query() -> anyhow::Result<()> {
-        use crate::artifact::Artifacts;
+        use crate::Transaction;
+        use crate::session::RuleRegistry;
+        use crate::source::Source;
+        use dialog_artifacts::helpers::{test_operator, test_repo};
 
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
 
-        let mut session = Session::open(artifacts.clone());
-        session
-            .transact(person::Name::of(alice.clone()).is("Alice"))
-            .await?;
+        let mut tx = Transaction::new();
+        tx.assert(person::Name::of(alice.clone()).is("Alice"));
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
         let query = StaticAttributeQuery::<person::Name> {
             of: Term::from(alice.clone()),
             is: Term::var("name"),
         };
 
-        let session = Session::open(artifacts);
-        let results = Application::perform(query, &session).try_vec().await?;
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let results = Application::perform(query, &source).try_vec().await?;
 
         assert_eq!(results.len(), 1);
 
@@ -231,29 +243,31 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_roundtrips_assert_and_typed_query() -> anyhow::Result<()> {
-        use crate::artifact::Artifacts;
+        use crate::Transaction;
+        use crate::session::RuleRegistry;
+        use crate::source::Source;
+        use dialog_artifacts::helpers::{test_operator, test_repo};
 
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        let mut session = Session::open(artifacts.clone());
-        session
-            .transact(person::Name::of(alice.clone()).is("Alice"))
-            .await?;
+        let mut tx = Transaction::new();
+        tx.assert(person::Name::of(alice.clone()).is("Alice"));
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
-        let mut session = Session::open(artifacts.clone());
-        session
-            .transact(person::Name::of(bob.clone()).is("Bob"))
-            .await?;
+        let mut tx = Transaction::new();
+        tx.assert(person::Name::of(bob.clone()).is("Bob"));
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
         // Query all entities with default (all-variable) query.
         let query = StaticAttributeQuery::<person::Name>::default();
 
-        let session = Session::open(artifacts);
-        let results = Application::perform(query, &session).try_vec().await?;
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let results = Application::perform(query, &source).try_vec().await?;
 
         // Cardinality::One means one value per entity, so we should get two results.
         assert_eq!(results.len(), 2);

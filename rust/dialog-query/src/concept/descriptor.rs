@@ -9,8 +9,9 @@ use crate::attribute::{AttributeDescriptor, Attribution};
 use crate::concept::query::ConceptQuery;
 use crate::concept::{Concept, Conclusion};
 use crate::error::TypeError;
-use crate::query::{Application, Source};
+use crate::query::Application;
 use crate::selection::{Match, Selection};
+use crate::source::Source;
 use crate::statement::Retraction;
 use crate::term::Term;
 use crate::types::Scalar;
@@ -18,6 +19,9 @@ use crate::{
     Cardinality, Entity, EvaluationError, Field, Parameters, Proposition, Requirement, Schema,
     Statement, Transaction, Type, Value,
 };
+use dialog_capability::Provider;
+use dialog_common::ConditionalSync;
+use dialog_effects::archive;
 
 use base58::ToBase58;
 use serde::{Deserialize, Serialize};
@@ -432,7 +436,14 @@ impl From<ConceptQuery> for ConceptDescriptor {
 impl Application for ConceptQuery {
     type Conclusion = ConceptConclusion;
 
-    fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
+    fn evaluate<'a, Env, M: Selection + 'a>(
+        self,
+        selection: M,
+        source: &'a Source<'a, Env>,
+    ) -> impl Selection + 'a
+    where
+        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+    {
         ConceptQuery::evaluate(self, selection, source)
     }
 

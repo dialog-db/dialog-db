@@ -2,7 +2,11 @@ use std::fmt::{self, Display};
 
 use super::proposition::Proposition;
 use crate::selection::Selection;
-use crate::{Environment, Parameters, Requirement, Schema, Source, try_stream};
+use crate::source::Source;
+use crate::{Environment, Parameters, Requirement, Schema, try_stream};
+use dialog_capability::Provider;
+use dialog_common::ConditionalSync;
+use dialog_effects::archive;
 pub use futures_util::{TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
 
@@ -70,13 +74,19 @@ impl Negation {
     }
 
     /// Evaluate this negation, yielding matches that do NOT match the inner application
-    pub fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
+    pub fn evaluate<'a, Env, M: Selection + 'a>(
+        self,
+        selection: M,
+        source: &'a Source<'a, Env>,
+    ) -> impl Selection + 'a
+    where
+        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+    {
         let application = self.0;
-        let source = source.clone();
         try_stream! {
             for await candidate in selection {
                 let base = candidate?;
-                let output = application.clone().evaluate(base.clone().seed(), &source);
+                let output = application.clone().evaluate(base.clone().seed(), source);
 
                 tokio::pin!(output);
 
@@ -99,20 +109,21 @@ impl Display for Negation {
 
 #[cfg(test)]
 mod tests {
-    use crate::Session;
-    use crate::artifact::Artifacts;
     use crate::error::EvaluationError;
     use crate::selection::Match;
+    use crate::session::RuleRegistry;
+    use crate::source::Source;
     use crate::types::Any;
     use crate::{Term, Value};
-    use dialog_storage::MemoryStorageBackend;
+    use dialog_artifacts::helpers::{test_operator, test_repo};
     use futures_util::TryStreamExt;
 
     #[dialog_common::test]
     async fn it_passes_match_when_negated_equality_not_satisfied() -> Result<(), EvaluationError> {
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await.unwrap();
-        let session = Session::open(store);
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await.unwrap();
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
 
         // a=1, b=2 → equality finds no match → negation keeps the match
         let a = Term::<String>::var("a");
@@ -124,7 +135,7 @@ mod tests {
         input.bind(&Term::<Any>::from(&b), Value::from(2))?;
 
         let results: Vec<Match> = premise
-            .evaluate(input.seed(), &session)
+            .evaluate(input.seed(), &source)
             .try_collect()
             .await?;
 
@@ -139,9 +150,10 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_filters_match_when_negated_equality_satisfied() -> Result<(), EvaluationError> {
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await.unwrap();
-        let session = Session::open(store);
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await.unwrap();
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
 
         let a = Term::<String>::var("a");
         let b = Term::<String>::var("b");
@@ -152,7 +164,7 @@ mod tests {
         input.bind(&Term::<Any>::from(&b), Value::from(1))?;
 
         let results: Vec<Match> = premise
-            .evaluate(input.seed(), &session)
+            .evaluate(input.seed(), &source)
             .try_collect()
             .await?;
 

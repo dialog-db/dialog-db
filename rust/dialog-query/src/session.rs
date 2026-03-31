@@ -352,31 +352,32 @@ mod tests {
     use std::sync::Arc;
 
     use crate::Match;
-    use crate::artifact::{Artifacts, Entity, Value};
+    use crate::artifact::{Entity, Value};
     use crate::attribute::query::AttributeQuery;
-    use crate::query::{Output, Source};
+    use crate::query::Output;
+    use crate::session::RuleRegistry;
+    use crate::source::Source;
     use crate::the;
 
     use crate::{
         AttributeDescriptor, Cardinality, Concept, Parameters, Query, Term, Type,
         concept::descriptor::ConceptDescriptor,
     };
+    use dialog_artifacts::helpers::{test_operator, test_repo};
 
     use super::*;
 
     #[dialog_common::test]
     async fn it_queries_asserted_facts() -> anyhow::Result<()> {
-        use dialog_storage::MemoryStorageBackend;
-
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
-        let mut session = Session::open(store);
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
         let bob = Entity::new()?;
         let mallory = Entity::new()?;
 
         {
-            let mut tx = session.edit();
+            let mut tx = Transaction::new();
             tx.assert(
                 the!("person/name")
                     .of(alice.clone())
@@ -390,8 +391,9 @@ mod tests {
                     .of(mallory.clone())
                     .is("Mallory".to_string()),
             );
-            session.commit(tx).await?;
+            branch.commit(tx.into_stream()).perform(&operator).await?;
         }
+        let session = Source::new(&branch, &operator, RuleRegistry::new());
 
         let person = ConceptDescriptor::from([
             (
@@ -493,11 +495,9 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_asserts_and_queries_concept() -> anyhow::Result<()> {
-        use dialog_storage::MemoryStorageBackend;
-
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
-        let mut session = Session::open(store);
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let person = ConceptDescriptor::from([
             (
@@ -532,7 +532,11 @@ mod tests {
             .with("age", 30usize)
             .build()?;
 
-        session.transact(vec![alice, bob]).await?;
+        let mut tx = Transaction::new();
+        tx.assert(alice);
+        tx.assert(bob);
+        branch.commit(tx.into_stream()).perform(&operator).await?;
+        let session = Source::new(&branch, &operator, RuleRegistry::new());
 
         let name_param = Term::var("name");
         let age_param = Term::var("age");
@@ -578,8 +582,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_evaluates_derived_rules() -> anyhow::Result<()> {
-        use dialog_storage::MemoryStorageBackend;
-
         mod employee {
             use crate::Attribute;
 
@@ -643,9 +645,11 @@ mod tests {
             ],
         )?;
 
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
-        let mut session = Session::open(store).register(employee_from_stuff)?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let mut rules = RuleRegistry::new();
+        rules.register(employee_from_stuff)?;
 
         let stuff_predicate: ConceptDescriptor = Query::<Stuff>::default().into();
         let alice = stuff_predicate
@@ -666,8 +670,12 @@ mod tests {
             role: stuff::Role("developer".into()),
         };
 
-        session.transact(vec![alice, bob]).await?;
+        let mut tx = Transaction::new();
+        tx.assert(alice);
+        tx.assert(bob);
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
+        let session = Source::new(&branch, &operator, rules);
         let query_stuff = Query::<Stuff> {
             this: Term::var("stuff"),
             name: Term::var("name"),
@@ -697,7 +705,6 @@ mod tests {
     #[dialog_common::test]
     async fn it_installs_rule_via_api() -> anyhow::Result<()> {
         use crate::rule::When;
-        use dialog_storage::MemoryStorageBackend;
 
         mod employee {
             use crate::Attribute;
@@ -758,12 +765,21 @@ mod tests {
             )
         }
 
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
-        // Install the rule using the clean API - no turbofish needed!
-        // The type inference works: Employee is inferred from the function parameter
-        let mut session = Session::open(store).install(employee_from_stuff)?;
+        // Replicate Session::install logic for RuleRegistry
+        let query = Query::<Employee>::default();
+        let concept: ConceptDescriptor = query.clone().into();
+        let when = employee_from_stuff(query).into_premises();
+        let premises = when.into_vec();
+        let install_rule =
+            DeductiveRule::new(concept, premises).map_err(|e| EvaluationError::Planning {
+                message: e.to_string(),
+            })?;
+        let mut rules = RuleRegistry::new();
+        rules.register(install_rule)?;
 
         // Create test data as Stuff
         let stuff_predicate: ConceptDescriptor = Query::<Stuff>::default().into();
@@ -779,8 +795,12 @@ mod tests {
             .with("role", "developer".to_string())
             .build()?;
 
-        session.transact(vec![alice, bob]).await?;
+        let mut tx = Transaction::new();
+        tx.assert(alice);
+        tx.assert(bob);
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
+        let session = Source::new(&branch, &operator, rules);
         // Verify Stuff records exist
         let query_stuff = Query::<Stuff> {
             this: Term::var("stuff"),
@@ -834,10 +854,9 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_resolves_rules_via_source_trait() -> anyhow::Result<()> {
-        use dialog_storage::MemoryStorageBackend;
-
-        let backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let _branch = repo.branch("main").open().perform(&operator).await?;
 
         let adult_conclusion = ConceptDescriptor::from(vec![
             (
@@ -862,10 +881,11 @@ mod tests {
 
         let rule = DeductiveRule::from(&adult_conclusion);
 
-        let session_with_rule = Session::open(artifacts).register(rule.clone())?;
+        let mut registry = RuleRegistry::new();
+        registry.register(rule.clone())?;
 
         // Verify resolve returns ConceptRules that can plan
-        let rules = session_with_rule.acquire(&adult_conclusion)?;
+        let rules = registry.acquire(&adult_conclusion)?;
         let candidate = Match::new();
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("e"));
@@ -878,18 +898,9 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_accepts_source_trait_implementations() -> anyhow::Result<()> {
-        use dialog_storage::MemoryStorageBackend;
-
-        // Test that both QuerySession and Session can be used polymorphically as a Source
-        fn resolve_with_source<S: Source>(
-            source: &S,
-            predicate: &ConceptDescriptor,
-        ) -> ConceptRules {
-            source.acquire(predicate).unwrap()
-        }
-
-        let backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let concept = ConceptDescriptor::from([(
             "name",
@@ -902,24 +913,20 @@ mod tests {
         )]);
         let rule = DeductiveRule::from(&concept);
 
-        // Test with QuerySession
-        let query_session: QuerySession<_> = artifacts.clone().into();
-        let query_session = query_session.install(rule.clone())?;
-        let _rules = resolve_with_source(&query_session, &concept);
-
-        // Test with Session
-        let session = Session::open(artifacts).register(rule.clone())?;
-        let _rules = resolve_with_source(&session, &concept);
+        // Test with RuleRegistry + Source
+        let mut registry = RuleRegistry::new();
+        registry.register(rule.clone())?;
+        let source = Source::new(&branch, &operator, registry);
+        let _rules = source.acquire(&concept)?;
 
         Ok(())
     }
 
     #[dialog_common::test]
     async fn it_converts_source_explicitly() -> anyhow::Result<()> {
-        use dialog_storage::MemoryStorageBackend;
-
-        let backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let _branch = repo.branch("main").open().perform(&operator).await?;
 
         let adult_concept = ConceptDescriptor::from([(
             "name".to_string(),
@@ -933,12 +940,11 @@ mod tests {
 
         let adult_rule = DeductiveRule::from(&adult_concept);
 
-        let query_session: QuerySession<_> = artifacts.into();
-        let query_session = query_session.install(adult_rule.clone())?;
+        let mut registry = RuleRegistry::new();
+        registry.register(adult_rule.clone())?;
 
-        // Verify resolve works and store is still accessible
-        let _rules = query_session.acquire(&adult_concept)?;
-        assert!(!std::ptr::addr_of!(*query_session.store()).is_null());
+        // Verify resolve works
+        let _rules = registry.acquire(&adult_concept)?;
 
         Ok(())
     }
@@ -958,7 +964,6 @@ mod tests {
         use crate::Attribute;
         use crate::formula::Like;
         use crate::rule::When;
-        use dialog_storage::MemoryStorageBackend;
 
         mod note_like_test {
             use crate::Attribute;
@@ -998,11 +1003,21 @@ mod tests {
             )
         }
 
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
-        let mut session = Session::open(store).install(matching_notes)?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let query_m = Query::<MatchingNote>::default();
+        let concept_m: ConceptDescriptor = query_m.clone().into();
+        let when_m = matching_notes(query_m).into_premises();
+        let rule_m = DeductiveRule::new(concept_m, when_m.into_vec()).map_err(|e| {
+            EvaluationError::Planning {
+                message: e.to_string(),
+            }
+        })?;
+        let mut rules = RuleRegistry::new();
+        rules.register(rule_m)?;
 
-        let mut transaction = session.edit();
+        let mut transaction = Transaction::new();
         transaction.assert(Note {
             this: Entity::new()?,
             title: note_like_test::Title("Hello World".into()),
@@ -1015,8 +1030,12 @@ mod tests {
             this: Entity::new()?,
             title: note_like_test::Title("Goodbye World".into()),
         });
-        session.commit(transaction).await?;
+        branch
+            .commit(transaction.into_stream())
+            .perform(&operator)
+            .await?;
 
+        let session = Source::new(&branch, &operator, rules);
         let results = Query::<MatchingNote> {
             this: Term::var("note"),
             title: Term::var("title"),
@@ -1039,7 +1058,6 @@ mod tests {
         use crate::Attribute;
         use crate::formula::Like;
         use crate::rule::When;
-        use dialog_storage::MemoryStorageBackend;
 
         mod note_not_like_test {
             use crate::Attribute;
@@ -1084,11 +1102,21 @@ mod tests {
             )
         }
 
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
-        let mut session = Session::open(store).install(non_draft_notes)?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let query_n = Query::<NonDraftNote>::default();
+        let concept_n: ConceptDescriptor = query_n.clone().into();
+        let when_n = non_draft_notes(query_n).into_premises();
+        let rule_n = DeductiveRule::new(concept_n, when_n.into_vec()).map_err(|e| {
+            EvaluationError::Planning {
+                message: e.to_string(),
+            }
+        })?;
+        let mut rules = RuleRegistry::new();
+        rules.register(rule_n)?;
 
-        let mut transaction = session.edit();
+        let mut transaction = Transaction::new();
         transaction.assert(Note {
             this: Entity::new()?,
             title: note_not_like_test::Title("Draft: My Ideas".into()),
@@ -1105,8 +1133,12 @@ mod tests {
             this: Entity::new()?,
             title: note_not_like_test::Title("Final Report".into()),
         });
-        session.commit(transaction).await?;
+        branch
+            .commit(transaction.into_stream())
+            .perform(&operator)
+            .await?;
 
+        let session = Source::new(&branch, &operator, rules);
         let results = Query::<NonDraftNote> {
             this: Term::var("note"),
             title: Term::var("title"),
@@ -1128,7 +1160,6 @@ mod tests {
     async fn it_infers_implicit_attributes() -> anyhow::Result<()> {
         use crate::Attribute as _;
         use crate::rule::When;
-        use dialog_storage::MemoryStorageBackend;
         use implicit_attr_test::{Name, Role};
 
         #[derive(Clone, Debug, PartialEq, Concept)]
@@ -1174,14 +1205,24 @@ mod tests {
             )
         }
 
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         // Install the rule using the clean API - no turbofish needed!
         // The type inference works: Employee is inferred from the function parameter
-        let mut session = Session::open(store).install(employee_with_implicit_title)?;
+        let query_e = Query::<Employee>::default();
+        let concept_e: ConceptDescriptor = query_e.clone().into();
+        let when_e = employee_with_implicit_title(query_e).into_premises();
+        let rule_e = DeductiveRule::new(concept_e, when_e.into_vec()).map_err(|e| {
+            EvaluationError::Planning {
+                message: e.to_string(),
+            }
+        })?;
+        let mut rules = RuleRegistry::new();
+        rules.register(rule_e)?;
 
-        let mut transaction = session.edit();
+        let mut transaction = Transaction::new();
         transaction.assert(Employee {
             this: Entity::new()?,
             name: Name("Alice".into()),
@@ -1193,8 +1234,12 @@ mod tests {
         });
 
         // Create test data as Stuff
-        session.commit(transaction).await?;
+        branch
+            .commit(transaction.into_stream())
+            .perform(&operator)
+            .await?;
 
+        let session = Source::new(&branch, &operator, rules);
         // Verify Stuff records exist
         let employees = Query::<Employee> {
             this: Term::var("employee"),
@@ -1458,19 +1503,16 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_produces_correct_results_from_cached_plan() -> anyhow::Result<()> {
-        use dialog_storage::MemoryStorageBackend;
-
         // End-to-end test: verify that evaluating a concept with the plan cache
         // produces the same correct results as the pre-cache implementation.
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
-        let mut session = Session::open(store);
-
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
         {
-            let mut tx = session.edit();
+            let mut tx = Transaction::new();
             tx.assert(
                 the!("person/name")
                     .of(alice.clone())
@@ -1479,9 +1521,10 @@ mod tests {
             .assert(the!("person/age").of(alice.clone()).is(30u32))
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
             .assert(the!("person/age").of(bob.clone()).is(25u32));
-            session.commit(tx).await?;
+            branch.commit(tx.into_stream()).perform(&operator).await?;
         }
 
+        let session = Source::new(&branch, &operator, RuleRegistry::new());
         let person = person_concept();
         let name_param = Term::var("name");
         let mut params = Parameters::new();
@@ -1490,13 +1533,13 @@ mod tests {
 
         let application = person.apply(params)?;
 
-        // First query — plan is computed and cached
+        // First query -- plan is computed and cached
         let results1: Vec<_> = futures_util::TryStreamExt::try_collect(
             application.clone().evaluate(Match::new().seed(), &session),
         )
         .await?;
 
-        // Second query — plan is reused from cache
+        // Second query -- plan is reused from cache
         let results2: Vec<_> = futures_util::TryStreamExt::try_collect(
             application.evaluate(Match::new().seed(), &session),
         )
@@ -1526,17 +1569,15 @@ mod tests {
     #[dialog_common::test]
     async fn it_produces_correct_results_from_cached_plan_with_bound_entity() -> anyhow::Result<()>
     {
-        use dialog_storage::MemoryStorageBackend;
-
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
-        let mut session = Session::open(store);
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
         {
-            let mut tx = session.edit();
+            let mut tx = Transaction::new();
             tx.assert(
                 the!("person/name")
                     .of(alice.clone())
@@ -1545,9 +1586,10 @@ mod tests {
             .assert(the!("person/age").of(alice.clone()).is(30u32))
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
             .assert(the!("person/age").of(bob.clone()).is(25u32));
-            session.commit(tx).await?;
+            branch.commit(tx.into_stream()).perform(&operator).await?;
         }
 
+        let session = Source::new(&branch, &operator, RuleRegistry::new());
         let person = person_concept();
 
         let name_param = Term::var("name");

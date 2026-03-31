@@ -1,5 +1,9 @@
 use crate::selection::Selection;
-use crate::{Environment, Premise, Source};
+use crate::source::Source;
+use crate::{Environment, Premise};
+use dialog_capability::Provider;
+use dialog_common::ConditionalSync;
+use dialog_effects::archive;
 
 /// A finalized, ready-to-execute premise produced by the query planner.
 ///
@@ -40,7 +44,14 @@ impl Plan {
     }
 
     /// Evaluate this plan with the given selection and source
-    pub fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
+    pub fn evaluate<'a, Env, M: Selection + 'a>(
+        self,
+        selection: M,
+        source: &'a Source<'a, Env>,
+    ) -> impl Selection + 'a
+    where
+        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+    {
         self.premise.evaluate(selection, source)
     }
 }

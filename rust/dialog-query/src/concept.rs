@@ -110,22 +110,25 @@ mod tests {
     use super::*;
     use crate::AttributeStatement;
     use crate::Query;
-    use crate::artifact::{
-        ArtifactSelector, ArtifactStore, Artifacts, ArtifactsAttribute, Type, Value,
-    };
+    use crate::artifact::{ArtifactSelector, ArtifactsAttribute, Type, Value};
     use crate::attribute::{Attribute as _, AttributeDescriptor};
     use crate::error::EvaluationError;
+    use crate::query::Application;
     use crate::query::Output;
-    use crate::query::{Application, Source};
     use crate::selection::Selection;
 
     use crate::attribute::query::AttributeQuery;
+    use crate::session::RuleRegistry;
+    use crate::source::Source;
     use crate::term::Term;
     use crate::the;
     use crate::types::Any;
-    use crate::{Cardinality, Concept, Match, Session, Statement, Transaction};
+    use crate::{Cardinality, Concept, Match, Statement, Transaction};
     use anyhow::Result;
-    use dialog_storage::MemoryStorageBackend;
+    use dialog_artifacts::helpers::{test_operator, test_repo};
+    use dialog_capability::Provider;
+    use dialog_common::ConditionalSync;
+    use dialog_effects::archive;
 
     // Define a Person concept for testing using raw concept API
     // This mirrors what the #[derive(Concept)] macro generates
@@ -305,7 +308,14 @@ mod tests {
     impl Application for PersonQuery {
         type Conclusion = Person;
 
-        fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
+        fn evaluate<'a, Env, M: Selection + 'a>(
+            self,
+            selection: M,
+            source: &'a Source<'a, Env>,
+        ) -> impl Selection + 'a
+        where
+            Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+        {
             let application: ConceptQuery = self.into();
             application.evaluate(selection, source)
         }
@@ -534,24 +544,20 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_returns_empty_for_no_matches() -> Result<()> {
-        // Test that individual fact selectors work for non-matching queries
-
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
 
-        // Create minimal test data
-        let claims = vec![
+        let mut tx = Transaction::new();
+        tx.assert(
             the!("person/name")
                 .of(alice.clone())
                 .is("Alice".to_string()),
-        ];
+        );
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
-        let mut session = Session::open(artifacts.clone());
-        session.transact(claims).await?;
-
-        // Test: Search for non-existent person using individual fact selector
         let missing_query = AttributeQuery::new(
             Term::from(the!("person/name")),
             Term::var("person"),
@@ -560,8 +566,8 @@ mod tests {
             None,
         );
 
-        let session = Session::open(artifacts);
-        let no_results = missing_query.perform(&session).try_vec().await?;
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let no_results = missing_query.perform(&source).try_vec().await?;
         assert_eq!(no_results.len(), 0, "Should find no non-existent people");
 
         Ok(())
@@ -571,8 +577,9 @@ mod tests {
     async fn it_queries_with_concept_dsl() -> Result<()> {
         use crate::Query;
 
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         mod employee {
             use crate::Attribute;
@@ -595,10 +602,7 @@ mod tests {
         let bob = Entity::new()?;
         let mallory = Entity::new()?;
 
-        // Create test data
-
-        let mut session = Session::open(artifacts.clone());
-        let mut transaction = session.edit();
+        let mut transaction = Transaction::new();
 
         transaction
             .assert(Employee {
@@ -622,15 +626,19 @@ mod tests {
                     .is("Hacker".to_string()),
             );
 
-        session.commit(transaction).await?;
+        branch
+            .commit(transaction.into_stream())
+            .perform(&operator)
+            .await?;
 
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
         let employee = Query::<Employee> {
             this: Term::var("this"),
             name: Term::var("name"),
             role: Term::var("role"),
         };
 
-        let mut employees = employee.perform(&session).try_vec().await?;
+        let mut employees = employee.perform(&source).try_vec().await?;
         employees.sort();
         let mut expected = vec![
             Employee {
@@ -657,8 +665,9 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_negates_concept_with_not_operator() -> Result<()> {
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         mod person {
             use crate::Attribute;
@@ -679,29 +688,30 @@ mod tests {
 
         let alice = Entity::new()?;
 
-        // Create test data - assert Alice
-        let mut session = Session::open(artifacts.clone());
         let alice_person = Person {
             this: alice.clone(),
             name: person::Name("Alice".to_string()),
             age: person::Age(25),
         };
 
-        session.transact(vec![alice_person.clone()]).await?;
+        let mut tx = Transaction::new();
+        tx.assert(alice_person.clone());
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
         // Verify Alice exists
         use futures_util::TryStreamExt;
 
-        let session = Session::open(artifacts.clone());
         let name_attr: ArtifactsAttribute = "person/name".parse()?;
         let age_attr: ArtifactsAttribute = "person/age".parse()?;
 
-        let name_facts: Vec<_> = session
+        let name_facts: Vec<_> = branch
             .select(
                 ArtifactSelector::new()
                     .the(name_attr.clone())
                     .of(alice.clone()),
             )
+            .perform(&operator)
+            .await?
             .try_collect()
             .await?;
         assert_eq!(name_facts.len(), 1, "Should have Alice's name");
@@ -711,29 +721,33 @@ mod tests {
             "Name should be Alice"
         );
 
-        let age_facts: Vec<_> = session
+        let age_facts: Vec<_> = branch
             .select(
                 ArtifactSelector::new()
                     .the(age_attr.clone())
                     .of(alice.clone()),
             )
+            .perform(&operator)
+            .await?
             .try_collect()
             .await?;
         assert_eq!(age_facts.len(), 1, "Should have Alice's age");
         assert_eq!(age_facts[0].is, Value::UnsignedInt(25), "Age should be 25");
 
         // Now retract using !operator
-        let mut session = Session::open(artifacts.clone());
-        session.transact(vec![!alice_person]).await?;
+        let mut tx = Transaction::new();
+        tx.retract(alice_person);
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
         // Verify Alice has been retracted
-        let session = Session::open(artifacts.clone());
-        let name_facts_after: Vec<_> = session
+        let name_facts_after: Vec<_> = branch
             .select(
                 ArtifactSelector::new()
                     .the(name_attr.clone())
                     .of(alice.clone()),
             )
+            .perform(&operator)
+            .await?
             .try_collect()
             .await?;
         assert_eq!(
@@ -742,12 +756,14 @@ mod tests {
             "Should not have Alice's name after retraction"
         );
 
-        let age_facts_after: Vec<_> = session
+        let age_facts_after: Vec<_> = branch
             .select(
                 ArtifactSelector::new()
                     .the(age_attr.clone())
                     .of(alice.clone()),
             )
+            .perform(&operator)
+            .await?
             .try_collect()
             .await?;
         assert_eq!(
@@ -761,49 +777,52 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_negates_relation_with_not_operator() -> Result<()> {
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let name_attr = the!("user/name");
 
-        // Assert a relation
-        let mut session = Session::open(artifacts.clone());
         let name_relation: AttributeStatement = name_attr
             .clone()
             .of(alice.clone())
             .is("Alice".to_string())
             .into();
 
-        session.transact(vec![name_relation.clone()]).await?;
+        let mut tx = Transaction::new();
+        tx.assert(name_relation.clone());
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
         // Verify relation exists
         use futures_util::TryStreamExt;
 
-        let session = Session::open(artifacts.clone());
-        let facts: Vec<_> = session
+        let facts: Vec<_> = branch
             .select(
                 ArtifactSelector::new()
                     .the(name_attr.clone().into())
                     .of(alice.clone()),
             )
+            .perform(&operator)
+            .await?
             .try_collect()
             .await?;
         assert_eq!(facts.len(), 1, "Should have name relation");
 
-        // Retract using .revert() — produces a Retraction<AttributeStatement>
-        // which calls retract() when merged into the transaction.
-        let mut session = Session::open(artifacts.clone());
-        session.transact(vec![name_relation.revert()]).await?;
+        // Retract using .revert()
+        let mut tx = Transaction::new();
+        tx.retract(name_relation);
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
         // Verify relation has been retracted
-        let session = Session::open(artifacts.clone());
-        let facts_after: Vec<_> = session
+        let facts_after: Vec<_> = branch
             .select(
                 ArtifactSelector::new()
                     .the(name_attr.clone().into())
                     .of(alice.clone()),
             )
+            .perform(&operator)
+            .await?
             .try_collect()
             .await?;
         assert_eq!(
@@ -847,8 +866,9 @@ mod tests {
     async fn it_asserts_concept_with_attribute_fields() -> Result<()> {
         use futures_util::TryStreamExt;
 
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice_id = Entity::new()?;
 
@@ -858,8 +878,9 @@ mod tests {
             birthday: person_attr_concept::Birthday(19830703),
         };
 
-        let mut session = Session::open(store.clone());
-        session.transact(vec![alice.clone()]).await?;
+        let mut tx = Transaction::new();
+        tx.assert(alice.clone());
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
         let name_query = AttributeQuery::new(
             Term::from(the!("person-attr-concept/name")),
@@ -878,12 +899,12 @@ mod tests {
         );
 
         let name_facts: Vec<_> = name_query
-            .perform(&Session::open(store.clone()))
+            .perform(&Source::new(&branch, &operator, RuleRegistry::new()))
             .try_collect()
             .await?;
 
         let birthday_facts: Vec<_> = birthday_query
-            .perform(&Session::open(store))
+            .perform(&Source::new(&branch, &operator, RuleRegistry::new()))
             .try_collect()
             .await?;
 
@@ -900,8 +921,9 @@ mod tests {
     async fn it_queries_concept_with_attribute_fields() -> Result<()> {
         use futures_util::TryStreamExt;
 
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice_id = Entity::new()?;
         let bob_id = Entity::new()?;
@@ -918,8 +940,10 @@ mod tests {
             birthday: person_attr_concept::Birthday(19900515),
         };
 
-        let mut session = Session::open(store.clone());
-        session.transact(vec![alice, bob]).await?;
+        let mut tx = Transaction::new();
+        tx.assert(alice);
+        tx.assert(bob);
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
         let query = Query::<DerivedPerson> {
             this: Term::var("person"),
@@ -927,8 +951,8 @@ mod tests {
             birthday: Term::var("birthday"),
         };
 
-        let session = Session::open(store);
-        let results: Vec<DerivedPerson> = query.perform(&session).try_collect().await?;
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let results: Vec<DerivedPerson> = query.perform(&source).try_collect().await?;
 
         assert_eq!(results.len(), 2);
 
@@ -948,8 +972,9 @@ mod tests {
     async fn it_queries_concept_with_constant_term() -> Result<()> {
         use futures_util::TryStreamExt;
 
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice_id = Entity::new()?;
         let bob_id = Entity::new()?;
@@ -966,8 +991,10 @@ mod tests {
             birthday: person_attr_concept::Birthday(19900515),
         };
 
-        let mut session = Session::open(store.clone());
-        session.transact(vec![alice, bob]).await?;
+        let mut tx = Transaction::new();
+        tx.assert(alice);
+        tx.assert(bob);
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
         let query = Query::<DerivedPerson> {
             this: Term::var("person"),
@@ -975,8 +1002,8 @@ mod tests {
             birthday: Term::var("birthday"),
         };
 
-        let session = Session::open(store);
-        let results: Vec<DerivedPerson> = query.perform(&session).try_collect().await?;
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let results: Vec<DerivedPerson> = query.perform(&source).try_collect().await?;
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name.value(), "Alice");
@@ -989,8 +1016,9 @@ mod tests {
     async fn it_reuses_attributes_across_concepts() -> Result<()> {
         use futures_util::TryStreamExt;
 
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice_id = Entity::new()?;
 
@@ -1000,8 +1028,9 @@ mod tests {
             email: person_attr_concept::Email("alice@example.com".to_string()),
         };
 
-        let mut session = Session::open(store.clone());
-        session.transact(vec![alice_with_email]).await?;
+        let mut tx = Transaction::new();
+        tx.assert(alice_with_email);
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
         let alice_with_birthday = DerivedPerson {
             this: alice_id.clone(),
@@ -1009,8 +1038,9 @@ mod tests {
             birthday: person_attr_concept::Birthday(19830703),
         };
 
-        let mut session = Session::open(store.clone());
-        session.transact(vec![alice_with_birthday]).await?;
+        let mut tx = Transaction::new();
+        tx.assert(alice_with_birthday);
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
         let name_query = AttributeQuery::new(
             Term::from(the!("person-attr-concept/name")),
@@ -1037,17 +1067,17 @@ mod tests {
         );
 
         let name_facts: Vec<_> = name_query
-            .perform(&Session::open(store.clone()))
+            .perform(&Source::new(&branch, &operator, RuleRegistry::new()))
             .try_collect()
             .await?;
 
         let email_facts: Vec<_> = email_query
-            .perform(&Session::open(store.clone()))
+            .perform(&Source::new(&branch, &operator, RuleRegistry::new()))
             .try_collect()
             .await?;
 
         let birthday_facts: Vec<_> = birthday_query
-            .perform(&Session::open(store))
+            .perform(&Source::new(&branch, &operator, RuleRegistry::new()))
             .try_collect()
             .await?;
 
@@ -1062,8 +1092,9 @@ mod tests {
     async fn it_retracts_concept_with_attributes() -> Result<()> {
         use futures_util::TryStreamExt;
 
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice_id = Entity::new()?;
 
@@ -1073,11 +1104,13 @@ mod tests {
             birthday: person_attr_concept::Birthday(19830703),
         };
 
-        let mut session = Session::open(store.clone());
-        session.transact(vec![alice.clone()]).await?;
+        let mut tx = Transaction::new();
+        tx.assert(alice.clone());
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
-        let mut session = Session::open(store.clone());
-        session.transact(vec![!alice]).await?;
+        let mut tx = Transaction::new();
+        tx.retract(alice);
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
         let name_query = AttributeQuery::new(
             Term::from(the!("person-attr-concept/name")),
@@ -1096,12 +1129,12 @@ mod tests {
         );
 
         let name_facts: Vec<_> = name_query
-            .perform(&Session::open(store.clone()))
+            .perform(&Source::new(&branch, &operator, RuleRegistry::new()))
             .try_collect()
             .await?;
 
         let birthday_facts: Vec<_> = birthday_query
-            .perform(&Session::open(store))
+            .perform(&Source::new(&branch, &operator, RuleRegistry::new()))
             .try_collect()
             .await?;
 
@@ -1133,14 +1166,13 @@ mod tests {
     async fn it_queries_concept_via_shortcut() -> Result<()> {
         use futures_util::TryStreamExt;
 
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
-        let mut session = Session::open(store);
-
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        let mut edit = session.edit();
+        let mut edit = Transaction::new();
         edit.assert(ShortcutEmployee {
             this: alice.clone(),
             name: shortcut_employee::Name("Alice".into()),
@@ -1151,15 +1183,16 @@ mod tests {
             name: shortcut_employee::Name("Bob".into()),
             job: shortcut_employee::Job("Designer".into()),
         });
-        session.commit(edit).await?;
+        branch.commit(edit.into_stream()).perform(&operator).await?;
 
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
         let employees_shortcut: Vec<ShortcutEmployee> = Query::<ShortcutEmployee>::default()
-            .perform(&session)
+            .perform(&source)
             .try_collect()
             .await?;
 
         let employees_explicit: Vec<ShortcutEmployee> = Query::<ShortcutEmployee>::default()
-            .perform(&session)
+            .perform(&source)
             .try_collect()
             .await?;
 
@@ -1189,22 +1222,22 @@ mod tests {
     async fn it_filters_concept_query_via_shortcut() -> Result<()> {
         use futures_util::TryStreamExt;
 
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
-        let mut session = Session::open(store);
-
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
 
-        let mut edit = session.edit();
+        let mut edit = Transaction::new();
         edit.assert(ShortcutEmployee {
             this: alice.clone(),
             name: shortcut_employee::Name("Alice".into()),
             job: shortcut_employee::Job("Engineer".into()),
         });
-        session.commit(edit).await?;
+        branch.commit(edit.into_stream()).perform(&operator).await?;
 
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
         let result1: Vec<ShortcutEmployee> = Query::<ShortcutEmployee>::default()
-            .perform(&session)
+            .perform(&source)
             .try_collect()
             .await?;
 
@@ -1213,12 +1246,12 @@ mod tests {
             name: Term::var("name"),
             job: Term::var("job"),
         }
-        .perform(&session)
+        .perform(&source)
         .try_collect()
         .await?;
 
         let result3: Vec<ShortcutEmployee> = Query::<ShortcutEmployee>::default()
-            .perform(&session)
+            .perform(&source)
             .try_collect()
             .await?;
 
@@ -1265,25 +1298,28 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_queries_single_attribute() -> Result<()> {
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        let mut session = Session::open(artifacts.clone());
-        let mut transaction = session.edit();
+        let mut transaction = Transaction::new();
         transaction.assert(helper_person::Name::of(alice).is("Alice"));
         transaction.assert(helper_person::Name::of(bob).is("Bob"));
-        session.commit(transaction).await?;
+        branch
+            .commit(transaction.into_stream())
+            .perform(&operator)
+            .await?;
 
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
         let alice_query = Query::<HelperPerson> {
             this: Term::var("person"),
             name: Term::from("Alice".to_string()),
         };
 
-        let session = Session::open(artifacts.clone());
-        let results = alice_query.perform(&session).try_vec().await?;
+        let results = alice_query.perform(&source).try_vec().await?;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name.value(), "Alice");
 
@@ -1292,8 +1328,7 @@ mod tests {
             name: Term::var("name"),
         };
 
-        let session = Session::open(artifacts);
-        let all_results = all_people_query.perform(&session).try_vec().await?;
+        let all_results = all_people_query.perform(&source).try_vec().await?;
         assert_eq!(all_results.len(), 2);
 
         Ok(())
@@ -1301,29 +1336,31 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_queries_multi_attribute_with_constants() -> Result<()> {
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        let mut session = Session::open(artifacts.clone());
-        let mut transaction = session.edit();
+        let mut transaction = Transaction::new();
         transaction.assert(helper_employee::Name::of(alice.clone()).is("Alice"));
         transaction.assert(helper_employee::Department::of(alice.clone()).is("Engineering"));
         transaction.assert(helper_employee::Name::of(bob.clone()).is("Bob"));
         transaction.assert(helper_employee::Department::of(bob).is("Sales"));
-        session.commit(transaction).await?;
+        branch
+            .commit(transaction.into_stream())
+            .perform(&operator)
+            .await?;
 
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
         let alice_engineering_query = Query::<HelperEmployee> {
             this: Term::var("employee"),
             name: Term::from("Alice".to_string()),
             department: Term::from("Engineering".to_string()),
         };
 
-        let session = Session::open(artifacts);
-
-        let results = alice_engineering_query.perform(&session).try_vec().await?;
+        let results = alice_engineering_query.perform(&source).try_vec().await?;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name.value(), "Alice");
         assert_eq!(results[0].department.value(), "Engineering");
@@ -1334,28 +1371,31 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_handles_multi_attribute_variable_limitation() -> Result<()> {
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        let mut session = Session::open(artifacts.clone());
-        let mut transaction = session.edit();
+        let mut transaction = Transaction::new();
         transaction.assert(helper_employee::Name::of(alice.clone()).is("Alice"));
         transaction.assert(helper_employee::Department::of(alice.clone()).is("Engineering"));
         transaction.assert(helper_employee::Name::of(bob.clone()).is("Bob"));
         transaction.assert(helper_employee::Department::of(bob.clone()).is("Sales"));
-        session.commit(transaction).await?;
+        branch
+            .commit(transaction.into_stream())
+            .perform(&operator)
+            .await?;
 
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
         let engineering_query = Query::<HelperEmployee> {
             this: Term::var("employee"),
             name: Term::var("name"),
             department: Term::from("Engineering".to_string()),
         };
 
-        let session = Session::open(artifacts);
-        let results = engineering_query.perform(&session).try_vec().await?;
+        let results = engineering_query.perform(&source).try_vec().await?;
         assert_eq!(
             results,
             vec![HelperEmployee {

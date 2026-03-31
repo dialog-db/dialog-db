@@ -7,9 +7,13 @@ use crate::query::Application;
 use crate::query::Output;
 use crate::schema::Cardinality;
 use crate::selection::{Match, Selection};
+use crate::source::Source;
 use crate::types::{Any, Record};
-use crate::{Entity, EvaluationError, Parameters, Schema, Source, Term, try_stream};
+use crate::{Entity, EvaluationError, Parameters, Schema, Term, try_stream};
 use dialog_artifacts::{Artifact, Cause};
+use dialog_capability::Provider;
+use dialog_common::ConditionalSync;
+use dialog_effects::archive;
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
 
@@ -40,11 +44,14 @@ fn choose(current: Artifact, challenger: Artifact) -> Artifact {
 /// `(attribute, entity)` pair. Each candidate is verified by a secondary
 /// `(attribute, entity)` lookup to find the true winner. Yields the match
 /// only if the candidate matches the winner.
-fn challenge<S: Source>(
-    source: S,
+fn challenge<'a, Env>(
+    source: &'a Source<'a, Env>,
     selector: AttributeQueryAll,
     candidate: Match,
-) -> impl Selection {
+) -> impl Selection + 'a
+where
+    Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+{
     try_stream! {
         let relation = selector.attribute();
         let attribute = ArtifactsAttribute::try_from(candidate.lookup(&Term::from(&relation))?)?;
@@ -59,7 +66,7 @@ fn challenge<S: Source>(
 
         let challengers = source.select(ArtifactSelector::new()
             .the(attribute)
-            .of(entity));
+            .of(entity)).await?;
 
         let mut winner: Option<Artifact> = None;
         for await each in challengers {
@@ -165,7 +172,14 @@ impl AttributeQueryOnly {
     ///   without entity). Each candidate is verified by a secondary
     ///   `(attribute, entity)` lookup because the scan is not grouped by
     ///   entity or because blanking the value would widen the scan.
-    pub fn evaluate<S: Source, M: Selection>(self, source: S, selection: M) -> impl Selection {
+    pub fn evaluate<'a, Env, M: Selection + 'a>(
+        self,
+        source: &'a Source<'a, Env>,
+        selection: M,
+    ) -> impl Selection + 'a
+    where
+        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+    {
         let selector = self.query;
         try_stream! {
             for await each in selection {
@@ -181,28 +195,6 @@ impl AttributeQueryOnly {
 
                 if entity_known || (attribute_known && !value_known) {
                     // Sliding window path.
-                    //
-                    // When entity is known we use the EAV index; when only the
-                    // attribute is known (without value) we use the AEV index.
-                    // Both return artifacts ordered by (attribute, entity), so
-                    // consecutive artifacts with the same key belong to the
-                    // same group and we can pick the winner in a single pass.
-                    //
-                    // When attribute AND value are both known ({the, is}) we
-                    // do NOT take this path. The sliding window blanks out the
-                    // value to see all competitors, which would turn a narrow
-                    // {the, is} VAE lookup into a full attribute scan. The
-                    // challenge path is more efficient in that case: it uses
-                    // the {the, is} index directly and verifies each candidate
-                    // with a secondary lookup.
-
-                    // Save the value constraint (if any) for post-filtering.
-                    // We blank out the value in the scan query so that the
-                    // index returns ALL values for each (attribute, entity)
-                    // pair — otherwise competing values would be filtered out
-                    // and we couldn't determine the true winner. After the
-                    // sliding window picks the winner, we check it against
-                    // this saved constraint before yielding.
                     let value_constraint = resolved.is().as_constant().cloned();
 
                     let scan = AttributeQueryAll::new(
@@ -212,22 +204,16 @@ impl AttributeQueryOnly {
                         resolved.cause().clone(),
                     );
 
-                    // Buffer one artifact at a time. While consecutive
-                    // artifacts share the same (attribute, entity), `choose`
-                    // keeps the winner. When the group key changes we yield
-                    // the winner and start a new group.
                     let mut candidate: Option<Artifact> = None;
 
-                    for await artifact in source.select((&scan).try_into()?) {
+                    let stream = source.select((&scan).try_into()?).await?;
+                    for await artifact in stream {
                         let artifact = artifact?;
 
                         candidate = Some(match candidate.take() {
-                            // Same group — keep the winner.
                             Some(current) if current.the == artifact.the && current.of == artifact.of => {
                                 choose(current, artifact)
                             }
-                            // New group — yield previous winner if it satisfies
-                            // the value constraint, then start fresh.
                             Some(winner) => {
                                 if value_constraint.is_none() || value_constraint.as_ref() == Some(&winner.is) {
                                     let mut extension = base.clone();
@@ -236,7 +222,6 @@ impl AttributeQueryOnly {
                                 }
                                 artifact
                             }
-                            // First artifact in the scan.
                             None => artifact,
                         });
                     }
@@ -251,20 +236,10 @@ impl AttributeQueryOnly {
                     }
                 } else {
                     // Secondary lookup path.
-                    //
-                    // Entity is unknown and either only the value is known
-                    // ({is}) or both attribute and value are known ({the, is}).
-                    // In either case, the sliding window is not suitable:
-                    // for {is} the VAE scan is not grouped by entity, and for
-                    // {the, is} blanking the value would widen a narrow lookup
-                    // into a full attribute scan. Instead, we run the base
-                    // scan and verify each candidate with a secondary
-                    // (attribute, entity) lookup to confirm it is the actual
-                    // winner.
-                    let candidates = resolved.evaluate(source.clone(), base.clone().seed());
+                    let candidates = resolved.evaluate(source, base.clone().seed());
                     for await candidate in candidates {
                         let candidate = candidate?;
-                        for await verified in challenge(source.clone(), selector.clone(), candidate) {
+                        for await verified in challenge(source, selector.clone(), candidate) {
                             yield verified?;
                         }
                     }
@@ -274,8 +249,9 @@ impl AttributeQueryOnly {
     }
 
     /// Execute this query, returning a stream of claims.
-    pub fn perform<S: Source>(self, source: &S) -> impl Output<Claim>
+    pub fn perform<'a, Env>(self, source: &'a Source<'a, Env>) -> impl Output<Claim> + 'a
     where
+        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
         Self: Sized,
     {
         Application::perform(self, source)
@@ -285,8 +261,15 @@ impl AttributeQueryOnly {
 impl Application for AttributeQueryOnly {
     type Conclusion = Claim;
 
-    fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
-        self.evaluate(source.clone(), selection)
+    fn evaluate<'a, Env, M: Selection + 'a>(
+        self,
+        selection: M,
+        source: &'a Source<'a, Env>,
+    ) -> impl Selection + 'a
+    where
+        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+    {
+        self.evaluate(source, selection)
     }
 
     fn realize(&self, input: Match) -> Result<Claim, EvaluationError> {
@@ -311,32 +294,37 @@ impl Display for AttributeQueryOnly {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::artifact::Artifacts;
     use crate::query::Output;
-    use crate::{Session, Value, the};
+    use crate::session::RuleRegistry;
+    use crate::source::Source;
+    use crate::{Transaction, Value, the};
+    use dialog_artifacts::helpers::{test_operator, test_repo};
     use dialog_artifacts::{Artifact, Cause};
-    use dialog_storage::MemoryStorageBackend;
     use std::str::FromStr;
 
     macro_rules! assert_relation {
-        ($artifacts:expr, $the:expr, $of:expr, $is:expr) => {{
-            let mut session = Session::open($artifacts.clone());
-            let mut tx = session.edit();
+        ($branch:expr, $operator:expr, $the:expr, $of:expr, $is:expr) => {{
+            let mut tx = Transaction::new();
             tx.assert($the.clone().of($of.clone()).is($is));
-            session.commit(tx).await.unwrap();
+            $branch
+                .commit(tx.into_stream())
+                .perform($operator)
+                .await
+                .unwrap();
         }};
     }
 
     #[dialog_common::test]
     async fn it_selects_winner_with_constant_entity() -> anyhow::Result<()> {
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let name_attr = the!("person/name");
 
-        assert_relation!(artifacts, name_attr, alice, "Alice".to_string());
-        assert_relation!(artifacts, name_attr, alice, "Alicia".to_string());
+        assert_relation!(branch, &operator, name_attr, alice, "Alice".to_string());
+        assert_relation!(branch, &operator, name_attr, alice, "Alicia".to_string());
 
         let query = AttributeQueryOnly::new(
             Term::var("the"),
@@ -345,8 +333,8 @@ mod tests {
             Term::var("cause"),
         );
 
-        let session = Session::open(artifacts);
-        let results = query.perform(&session).try_vec().await?;
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(
             results.len(),
@@ -360,17 +348,18 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_selects_winner_with_constant_attribute() -> anyhow::Result<()> {
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
         let name_attr = the!("person/name");
 
-        assert_relation!(artifacts, name_attr, alice, "Alice".to_string());
-        assert_relation!(artifacts, name_attr, alice, "Alicia".to_string());
-        assert_relation!(artifacts, name_attr, bob, "Bob".to_string());
-        assert_relation!(artifacts, name_attr, bob, "Robert".to_string());
+        assert_relation!(branch, &operator, name_attr, alice, "Alice".to_string());
+        assert_relation!(branch, &operator, name_attr, alice, "Alicia".to_string());
+        assert_relation!(branch, &operator, name_attr, bob, "Bob".to_string());
+        assert_relation!(branch, &operator, name_attr, bob, "Robert".to_string());
 
         let query = AttributeQueryOnly::new(
             Term::from(the!("person/name")),
@@ -379,8 +368,8 @@ mod tests {
             Term::var("cause"),
         );
 
-        let session = Session::open(artifacts);
-        let results = query.perform(&session).try_vec().await?;
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(
             results.len(),
@@ -399,14 +388,15 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_selects_winner_via_vae_path() -> anyhow::Result<()> {
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let name_attr = the!("person/name");
 
-        assert_relation!(artifacts, name_attr, alice, "Alice".to_string());
-        assert_relation!(artifacts, name_attr, alice, "Alicia".to_string());
+        assert_relation!(branch, &operator, name_attr, alice, "Alice".to_string());
+        assert_relation!(branch, &operator, name_attr, alice, "Alicia".to_string());
 
         // First find the winner via AEV to know which value wins.
         let aev_query = AttributeQueryOnly::new(
@@ -416,8 +406,8 @@ mod tests {
             Term::var("cause"),
         );
 
-        let session = Session::open(artifacts.clone());
-        let aev_results = aev_query.perform(&session).try_vec().await?;
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let aev_results = aev_query.perform(&source).try_vec().await?;
         assert_eq!(aev_results.len(), 1);
         let winner_value = aev_results[0].is().clone();
 
@@ -429,8 +419,7 @@ mod tests {
             Term::var("cause"),
         );
 
-        let session = Session::open(artifacts.clone());
-        let vae_results = vae_query.perform(&session).try_vec().await?;
+        let vae_results = vae_query.perform(&source).try_vec().await?;
 
         assert_eq!(
             vae_results.len(),
@@ -449,41 +438,48 @@ mod tests {
     /// out non-winners.
     #[dialog_common::test]
     async fn it_verifies_winner_for_attribute_and_value_known() -> anyhow::Result<()> {
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let entity = Entity::new()?;
 
         // Assert two competing values for the same (attribute, entity) pair.
         {
-            let mut session = Session::open(artifacts.clone());
-            let mut tx = session.edit();
+            let mut tx = Transaction::new();
             tx.assert(
                 the!("person/name")
                     .of(entity.clone())
                     .is("Alice".to_string()),
             );
-            session.commit(tx).await.unwrap();
+            branch
+                .commit(tx.into_stream())
+                .perform(&operator)
+                .await
+                .unwrap();
         }
         {
-            let mut session = Session::open(artifacts.clone());
-            let mut tx = session.edit();
+            let mut tx = Transaction::new();
             tx.assert(
                 the!("person/name")
                     .of(entity.clone())
                     .is("Alicia".to_string()),
             );
-            session.commit(tx).await.unwrap();
+            branch
+                .commit(tx.into_stream())
+                .perform(&operator)
+                .await
+                .unwrap();
         }
 
-        let session = Session::open(artifacts.clone());
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
         // First, determine which value is the actual winner via an
-        // unconstrained Cardinality::One query (entity known → EAV path).
+        // unconstrained Cardinality::One query (entity known -> EAV path).
         let race = the!("person/name")
             .of(Term::from(entity.clone()))
             .is(Term::<String>::var("name"))
             .cardinality(Cardinality::One)
-            .perform(&session)
+            .perform(&source)
             .try_vec()
             .await?;
         assert_eq!(race.len(), 1);
@@ -496,12 +492,11 @@ mod tests {
 
         // Query with {the, is} for the LOSER value.
         // The VAE scan finds it, but verification must reject it.
-        let session = Session::open(artifacts.clone());
         let results = the!("person/name")
             .of(Term::var("person"))
             .is(looser.clone())
             .cardinality(Cardinality::One)
-            .perform(&session)
+            .perform(&source)
             .try_vec()
             .await?;
 
@@ -514,12 +509,11 @@ mod tests {
 
         // Query with {the, is} for the WINNER value.
         // Verification confirms it is the winner.
-        let session = Session::open(artifacts.clone());
         let results = the!("person/name")
             .of(Term::var("person"))
             .is(winner.clone())
             .cardinality(Cardinality::One)
-            .perform(&session)
+            .perform(&source)
             .try_vec()
             .await?;
 
@@ -533,39 +527,46 @@ mod tests {
     /// The challenge path must reject the loser and accept the winner.
     #[dialog_common::test]
     async fn it_verifies_winner_for_entity_and_value_known() -> anyhow::Result<()> {
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let entity = Entity::new()?;
 
         {
-            let mut session = Session::open(artifacts.clone());
-            let mut tx = session.edit();
+            let mut tx = Transaction::new();
             tx.assert(
                 the!("person/name")
                     .of(entity.clone())
                     .is("Alice".to_string()),
             );
-            session.commit(tx).await.unwrap();
+            branch
+                .commit(tx.into_stream())
+                .perform(&operator)
+                .await
+                .unwrap();
         }
         {
-            let mut session = Session::open(artifacts.clone());
-            let mut tx = session.edit();
+            let mut tx = Transaction::new();
             tx.assert(
                 the!("person/name")
                     .of(entity.clone())
                     .is("Alicia".to_string()),
             );
-            session.commit(tx).await.unwrap();
+            branch
+                .commit(tx.into_stream())
+                .perform(&operator)
+                .await
+                .unwrap();
         }
 
         // Determine the winner via EAV (entity known, value unknown).
-        let session = Session::open(artifacts.clone());
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
         let race = the!("person/name")
             .of(Term::from(entity.clone()))
             .is(Term::<String>::var("name"))
             .cardinality(Cardinality::One)
-            .perform(&session)
+            .perform(&source)
             .try_vec()
             .await?;
         assert_eq!(race.len(), 1);
@@ -576,13 +577,12 @@ mod tests {
             ("Alicia".to_string(), "Alice".to_string())
         };
 
-        // {of, is} with the LOSER value — should return nothing.
-        let session = Session::open(artifacts.clone());
+        // {of, is} with the LOSER value -- should return nothing.
         let results = Term::<The>::var("relation")
             .of(entity.clone())
             .is(looser.clone())
             .cardinality(Cardinality::One)
-            .perform(&session)
+            .perform(&source)
             .try_vec()
             .await?;
 
@@ -593,13 +593,12 @@ mod tests {
             looser,
         );
 
-        // {of, is} with the WINNER value — should return the winner.
-        let session = Session::open(artifacts.clone());
+        // {of, is} with the WINNER value -- should return the winner.
         let results = Term::<The>::var("relation")
             .of(entity.clone())
             .is(winner.clone())
             .cardinality(Cardinality::One)
-            .perform(&session)
+            .perform(&source)
             .try_vec()
             .await?;
 
@@ -618,39 +617,46 @@ mod tests {
     /// The challenge path must reject the loser and accept the winner.
     #[dialog_common::test]
     async fn it_verifies_winner_for_value_only_known() -> anyhow::Result<()> {
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let entity = Entity::new()?;
 
         {
-            let mut session = Session::open(artifacts.clone());
-            let mut tx = session.edit();
+            let mut tx = Transaction::new();
             tx.assert(
                 the!("person/name")
                     .of(entity.clone())
                     .is("Alice".to_string()),
             );
-            session.commit(tx).await.unwrap();
+            branch
+                .commit(tx.into_stream())
+                .perform(&operator)
+                .await
+                .unwrap();
         }
         {
-            let mut session = Session::open(artifacts.clone());
-            let mut tx = session.edit();
+            let mut tx = Transaction::new();
             tx.assert(
                 the!("person/name")
                     .of(entity.clone())
                     .is("Alicia".to_string()),
             );
-            session.commit(tx).await.unwrap();
+            branch
+                .commit(tx.into_stream())
+                .perform(&operator)
+                .await
+                .unwrap();
         }
 
         // Determine the winner via EAV.
-        let session = Session::open(artifacts.clone());
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
         let race = the!("person/name")
             .of(Term::from(entity.clone()))
             .is(Term::<String>::var("name"))
             .cardinality(Cardinality::One)
-            .perform(&session)
+            .perform(&source)
             .try_vec()
             .await?;
         assert_eq!(race.len(), 1);
@@ -661,13 +667,12 @@ mod tests {
             ("Alicia".to_string(), "Alice".to_string())
         };
 
-        // {is} with the LOSER value — should return nothing.
-        let session = Session::open(artifacts.clone());
+        // {is} with the LOSER value -- should return nothing.
         let results = Term::<The>::var("relation")
             .of(Term::var("person"))
             .is(looser.clone())
             .cardinality(Cardinality::One)
-            .perform(&session)
+            .perform(&source)
             .try_vec()
             .await?;
 
@@ -678,13 +683,12 @@ mod tests {
             looser,
         );
 
-        // {is} with the WINNER value — should return the winner.
-        let session = Session::open(artifacts.clone());
+        // {is} with the WINNER value -- should return the winner.
         let results = Term::<The>::var("relation")
             .of(Term::var("person"))
             .is(winner.clone())
             .cardinality(Cardinality::One)
-            .perform(&session)
+            .perform(&source)
             .try_vec()
             .await?;
 
@@ -761,17 +765,17 @@ mod tests {
     /// sliding window path rather than the challenge path.
     #[dialog_common::test]
     async fn it_uses_sliding_window_when_entity_bound_at_eval_time() -> anyhow::Result<()> {
-        use crate::artifact::Artifacts;
         use crate::selection::Match;
 
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let name_attr = the!("person/name");
 
-        assert_relation!(artifacts, name_attr, alice, "Alice".to_string());
-        assert_relation!(artifacts, name_attr, alice, "Alicia".to_string());
+        assert_relation!(branch, &operator, name_attr, alice, "Alice".to_string());
+        assert_relation!(branch, &operator, name_attr, alice, "Alicia".to_string());
 
         // Query with entity as a variable.
         let query = AttributeQueryOnly::new(
@@ -790,8 +794,8 @@ mod tests {
         )
         .unwrap();
 
-        let session = Session::open(artifacts);
-        let results = Application::evaluate(query, seed.seed(), &session);
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let results = Application::evaluate(query, seed.seed(), &source);
         let results = Selection::try_vec(results).await?;
 
         assert_eq!(

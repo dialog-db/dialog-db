@@ -64,15 +64,19 @@ mod tests {
     use crate::concept::{Concept, Conclusion};
     use crate::predicate::Predicate;
     use crate::premise::Premise;
-    use crate::query::{Application, Source};
+    use crate::query::Application;
     use crate::selection::Match;
     use crate::selection::Selection;
+    use crate::source::Source;
     use crate::statement::Statement;
     use crate::term::Term;
     use crate::the;
     use crate::{
         AttributeStatement, EvaluationError, Parameters, Proposition, Query, Session, Transaction,
     };
+    use dialog_capability::Provider;
+    use dialog_common::ConditionalSync;
+    use dialog_effects::archive;
 
     // Manual implementation of Person struct with Concept and Rule traits
     // This serves as a template for what the derive macro should generate
@@ -238,7 +242,14 @@ mod tests {
     impl Application for PersonQuery {
         type Conclusion = Person;
 
-        fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
+        fn evaluate<'a, Env, M: Selection + 'a>(
+            self,
+            selection: M,
+            source: &'a Source<'a, Env>,
+        ) -> impl Selection + 'a
+        where
+            Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+        {
             let application: ConceptQuery = self.into();
             application.evaluate(selection, source)
         }

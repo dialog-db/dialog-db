@@ -467,20 +467,21 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_roundtrips_assert_and_query() -> anyhow::Result<()> {
-        use crate::artifact::Artifacts;
-        use crate::{Session, Term};
-        use dialog_storage::MemoryStorageBackend;
+        use crate::Term;
+        use crate::session::RuleRegistry;
+        use crate::source::Source;
+        use dialog_artifacts::helpers::{test_operator, test_repo};
         use futures_util::TryStreamExt;
 
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
 
-        let mut session = Session::open(store.clone());
-        session
-            .transact(person::Name::of(alice.clone()).is("Alice"))
-            .await?;
+        let mut tx = Transaction::new();
+        tx.assert(person::Name::of(alice.clone()).is("Alice"));
+        branch.commit(tx.into_stream()).perform(&operator).await?;
 
         let premise: Premise = person::Name::of(alice.clone())
             .is(Term::<String>::var("name"))
@@ -491,17 +492,13 @@ mod tests {
             _ => panic!("Expected Assert"),
         };
 
+        let source = Source::new(&branch, &operator, RuleRegistry::new());
         let results = prop
-            .evaluate(Match::new().seed(), &Session::open(store.clone()))
+            .evaluate(Match::new().seed(), &source)
             .try_collect::<Vec<_>>()
             .await?;
 
         assert_eq!(results.len(), 1);
-
-        let mut session = Session::open(store.clone());
-        session
-            .transact(person::Name::of(alice.clone()).is("Alice"))
-            .await?;
 
         Ok(())
     }
