@@ -7,6 +7,8 @@
 
 /// Serializable remote address configuration.
 pub mod address;
+/// Remote archive operations (upload blocks).
+pub mod archive;
 /// Remote branch cursor with resolve/publish/upload operations.
 pub mod branch;
 /// Command to create a new remote.
