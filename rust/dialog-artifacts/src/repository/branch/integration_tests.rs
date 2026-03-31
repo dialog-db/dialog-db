@@ -324,6 +324,165 @@ use dialog_remote_ucan_s3::UcanAddress;
 #[cfg(feature = "ucan")]
 use dialog_remote_ucan_s3::helpers::UcanS3Address;
 
+/// Alice creates a repo, delegates to Bob, Bob pulls, commits, pushes,
+/// then Alice pulls Bob's changes.
+#[cfg(feature = "ucan")]
+#[dialog_common::test]
+async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> anyhow::Result<()> {
+    use dialog_capability::Subject;
+    use dialog_capability::ucan::Ucan;
+
+    // Alice: create profile, operator, repo
+    let (alice_operator, alice_profile) = test_operator_with_profile().await;
+    let alice_repo = Repository::open(unique_location("collab-alice"))
+        .perform(&alice_operator)
+        .await?;
+
+    // Delegate repo ownership to Alice's profile
+    let ownership_chain = alice_repo
+        .ownership()
+        .delegate(&alice_profile)
+        .perform(&alice_operator)
+        .await?;
+    alice_profile
+        .save(ownership_chain)
+        .perform(&alice_operator)
+        .await?;
+
+    // Set up UCAN remote on Alice's repo
+    let ucan_address = RemoteAddress::new(
+        SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url)),
+        alice_repo.did(),
+    );
+    alice_repo
+        .remote("origin")
+        .create(ucan_address.clone())
+        .perform(&alice_operator)
+        .await?;
+
+    let alice_branch = alice_repo
+        .branch("main")
+        .open()
+        .perform(&alice_operator)
+        .await?;
+    alice_branch
+        .set_upstream(UpstreamState::Remote {
+            name: RemoteName::from("origin"),
+            branch: "main".into(),
+            tree: NodeReference::default(),
+        })
+        .perform(&alice_operator)
+        .await?;
+
+    // Alice commits and pushes initial data
+    alice_branch
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:alice".parse()?,
+            is: crate::Value::String("Alice".into()),
+            cause: None,
+        })]))
+        .perform(&alice_operator)
+        .await?;
+
+    alice_branch.push().perform(&alice_operator).await?;
+
+    // Bob: create profile, operator
+    let (bob_operator, bob_profile) = test_operator_with_profile().await;
+
+    // Alice delegates repo access to Bob's profile
+    let delegation_to_bob = Ucan::delegate(&Subject::from(alice_repo.did()))
+        .audience(bob_profile.did())
+        .issuer(alice_profile.credential().signer().clone())
+        .perform(&alice_operator)
+        .await?;
+
+    // Bob saves the delegation chain under his profile
+    bob_profile
+        .save(delegation_to_bob)
+        .perform(&bob_operator)
+        .await?;
+
+    // Bob creates his own repo (different DID) and adds Alice's remote
+    let bob_repo = Repository::open(unique_location("collab-bob"))
+        .perform(&bob_operator)
+        .await?;
+
+    bob_repo
+        .remote("origin")
+        .create(ucan_address)
+        .perform(&bob_operator)
+        .await?;
+
+    let bob_branch = bob_repo
+        .branch("main")
+        .open()
+        .perform(&bob_operator)
+        .await?;
+    bob_branch
+        .set_upstream(UpstreamState::Remote {
+            name: RemoteName::from("origin"),
+            branch: "main".into(),
+            tree: NodeReference::default(),
+        })
+        .perform(&bob_operator)
+        .await?;
+
+    // Bob pulls Alice's data
+    let pull_result = bob_branch.pull_upstream().perform(&bob_operator).await?;
+    assert!(pull_result.is_some(), "Bob should pull Alice's data");
+
+    // Verify Bob has Alice's artifact
+    let bob_results: Vec<_> = bob_branch
+        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .perform(&bob_operator)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(bob_results.len(), 1, "Bob should have Alice's artifact");
+
+    // Bob commits his own change
+    bob_branch
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:bob".parse()?,
+            is: crate::Value::String("Bob".into()),
+            cause: None,
+        })]))
+        .perform(&bob_operator)
+        .await?;
+
+    // Bob pushes
+    let push_result = bob_branch.push().perform(&bob_operator).await?;
+    assert!(push_result.is_some(), "Bob should push successfully");
+
+    // Alice pulls Bob's changes
+    let alice_pull = alice_branch
+        .pull_upstream()
+        .perform(&alice_operator)
+        .await?;
+    assert!(alice_pull.is_some(), "Alice should pull Bob's changes");
+
+    // Alice should have both artifacts
+    let alice_results: Vec<_> = alice_branch
+        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .perform(&alice_operator)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        alice_results.len(),
+        2,
+        "Alice should have both artifacts after pulling Bob's changes"
+    );
+
+    Ok(())
+}
+
 /// Push and pull via UCAN access service.
 #[cfg(feature = "ucan")]
 #[dialog_common::test]

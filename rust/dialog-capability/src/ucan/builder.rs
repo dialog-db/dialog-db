@@ -108,15 +108,15 @@ where
             .map_err(|e| AuthorizeError::Configuration(e.to_string()))?;
 
         let profile_did = authority::Profile::of(&auth).profile.clone();
-        let operator_did = authority::Operator::of(&auth).operator.clone();
 
-        // Find proof chain if needed (explicit issuer → self-grant shortcuts apply)
+        // Find proof chain from subject to the issuer (not operator),
+        // since the issuer is the one signing the new delegation.
         let issuer_did = self.issuer.did();
         let proof = find_proof(
             env,
             &self.scope,
             &profile_did,
-            &operator_did,
+            &issuer_did,
             &issuer_did,
             true,
         )
