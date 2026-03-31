@@ -146,9 +146,25 @@ async fn derive_operator(
                 .map_err(|e| OperatorError::Key(e.to_string()))
         }
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-        KeyExport::NonExtractable { .. } => Err(OperatorError::Key(
-            "derived operators require extractable profile key".into(),
-        )),
+        KeyExport::NonExtractable { .. } => {
+            // Use sign-to-derive: Ed25519 signing is deterministic, so
+            // signing the context produces reproducible bytes we can use
+            // as key material for the derived operator.
+            let mut derivation_input = OPERATOR_DERIVATION_CONTEXT.as_bytes().to_vec();
+            derivation_input.extend_from_slice(context);
+
+            use dialog_varsig::Signer;
+            let signature = signer
+                .sign(&derivation_input)
+                .await
+                .map_err(|e| OperatorError::Key(e.to_string()))?;
+
+            let sig_bytes: [u8; 64] = signature.into();
+            let derived = blake3::derive_key(OPERATOR_DERIVATION_CONTEXT, &sig_bytes);
+            Ed25519Signer::import(&derived)
+                .await
+                .map_err(|e| OperatorError::Key(e.to_string()))
+        }
     }
 }
 
