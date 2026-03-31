@@ -125,7 +125,7 @@ impl<Fx: Effect> Capability<Fx> {
         env: &Env,
     ) -> Result<access::Authorization<Fx, S::Protocol>, access::AuthorizeError>
     where
-        Fx: ConditionalSend + 'static,
+        Fx: Clone + ConditionalSend + 'static,
         S: Site,
         S::Protocol: Protocol,
         Self: Ability + ConditionalSend + dialog_common::ConditionalSync,
@@ -334,6 +334,23 @@ mod tests {
         assert_eq!(archive, &Archive);
     }
 
+    /// An effect with claim projection (content → checksum).
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, crate::Claim)]
+    struct Upload {
+        digest: Vec<u8>,
+        #[claim(into = u64, with = byte_len, rename = size)]
+        content: Vec<u8>,
+    }
+
+    fn byte_len(v: Vec<u8>) -> u64 {
+        v.len() as u64
+    }
+
+    impl Effect for Upload {
+        type Of = Catalog;
+        type Output = Result<(), String>;
+    }
+
     #[cfg(feature = "ucan")]
     mod parameters_tests {
         use super::*;
@@ -385,6 +402,33 @@ mod tests {
             let hello_bytes: Vec<Ipld> =
                 b"hello".iter().map(|&b| Ipld::Integer(b as i128)).collect();
             assert_eq!(params.get("key"), Some(&Ipld::List(hello_bytes)));
+        }
+
+        #[test]
+        fn it_uses_claim_projection_for_invocation_parameters() {
+            let cap: Capability<Upload> = Subject::from(did!("key:zSpace"))
+                .attenuate(Archive)
+                .attenuate(Catalog {
+                    name: "blobs".into(),
+                })
+                .invoke(Upload {
+                    digest: vec![1, 2, 3],
+                    content: b"hello world".to_vec(),
+                });
+
+            let invoke = crate::ucan::Ucan::invoke(&cap);
+            let params = invoke.scope.parameters.as_map();
+
+            // Should have "size" (from claim projection), NOT "content"
+            assert!(
+                !params.contains_key("content"),
+                "parameters should not contain raw 'content' field"
+            );
+            assert_eq!(
+                params.get("size"),
+                Some(&Ipld::Integer(11)),
+                "parameters should contain claim-projected 'size' field"
+            );
         }
     }
 }

@@ -25,7 +25,7 @@ pub use issuer::Issuer;
 pub use parameters::{parameters, parameters_to_args, parameters_to_policy};
 pub use scope::{Args, Parameters, Scope};
 
-use crate::Ability;
+use crate::{Ability, Capability, Effect};
 
 /// UCAN authorization format — produces a signed invocation chain.
 ///
@@ -46,8 +46,15 @@ impl Ucan {
         DelegateRequest::new(capability)
     }
 
-    /// Start building a signed invocation for the given capability.
-    pub fn invoke(capability: &impl Ability) -> InvokeRequest<IssuerUnset> {
+    /// Start building a signed invocation for an effect capability.
+    ///
+    /// Projects the effect through [`Claim`](crate::Claim) so that
+    /// payload fields are replaced with checksums in the invocation arguments.
+    pub fn invoke<Fx>(capability: &Capability<Fx>) -> InvokeRequest<IssuerUnset>
+    where
+        Fx: Effect + Clone,
+        Capability<Fx>: Ability,
+    {
         InvokeRequest::new(capability)
     }
 }

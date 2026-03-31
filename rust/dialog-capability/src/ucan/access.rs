@@ -4,7 +4,7 @@
 //! invoke builder to produce signed UCAN invocations.
 
 use crate::access::{Authorization, AuthorizeError, Protocol};
-use crate::{Ability, Capability, Constraint, Provider, authority, storage};
+use crate::{Ability, Capability, Constraint, Effect, Provider, authority, storage};
 use dialog_common::{ConditionalSend, ConditionalSync};
 
 use super::Ucan;
@@ -19,7 +19,7 @@ impl Protocol for Ucan {
         capability: Capability<Fx>,
     ) -> Result<Authorization<Fx, Self>, AuthorizeError>
     where
-        Fx: Constraint + ConditionalSend + 'static,
+        Fx: Effect + Clone + ConditionalSend + 'static,
         Capability<Fx>: Ability + ConditionalSend + ConditionalSync,
         Env: Provider<authority::Identify>
             + Provider<authority::Sign>

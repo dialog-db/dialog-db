@@ -1,6 +1,6 @@
 //! Capability-derived scope for UCAN delegation and invocation.
 
-use crate::{Ability, Subject};
+use crate::{Ability, Capability, Constraint, Effect, Policy, Subject};
 use dialog_ucan::command::Command;
 use dialog_ucan::delegation::policy::predicate::Predicate;
 use dialog_ucan::delegation::policy::selector::filter::Filter;
@@ -127,6 +127,40 @@ impl<T: Ability> From<&T> for Scope {
             subject,
             command: ability_to_command(&ability),
             parameters: Parameters(parameters(capability)),
+        }
+    }
+}
+
+impl Scope {
+    /// Build a scope from an effect capability, projecting through Claim.
+    pub(crate) fn invoke<Fx>(capability: &Capability<Fx>) -> Self
+    where
+        Fx: Effect + Clone,
+        Capability<Fx>: Ability,
+    {
+        let ability = capability.ability();
+        let subject_did = capability.subject();
+
+        let subject = if Subject::from(subject_did.clone()).is_any() {
+            UcanSubject::Any
+        } else {
+            UcanSubject::Specific(subject_did.clone())
+        };
+
+        // Collect parameters from the parent chain (excluding the leaf effect)
+        let chain: &<Fx as Constraint>::Capability = capability.as_ref();
+        let mut params = parameters(&chain.capability);
+
+        // Add claim-projected parameters for the effect
+        let claim = Policy::of(capability).clone().claim();
+        if let Ok(Ipld::Map(map)) = ipld_core::serde::to_ipld(&claim) {
+            params.extend(map);
+        }
+
+        Self {
+            subject,
+            command: ability_to_command(&ability),
+            parameters: Parameters(params),
         }
     }
 }

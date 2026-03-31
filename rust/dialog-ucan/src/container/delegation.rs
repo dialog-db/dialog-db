@@ -3,16 +3,11 @@
 //! This module provides [`DelegationChain`], which represents a chain of UCAN delegations
 //! proving authority from a subject to an operator.
 //!
-//! # Container Format
+//! Delegations are stored in subject-first (root-to-leaf) order:
+//! - Index 0 is the root delegation (closest to subject, its `iss` is the subject)
+//! - Last index is closest to the invoker (its `aud` is the operator)
 //!
-//! `DelegationChain` can serialize to/from the [UCAN Container spec](https://github.com/ucan-wg/container):
-//!
-//! ```text
-//! { "ctn-v1": [delegation_0_bytes, delegation_1_bytes, ...] }
-//! ```
-//!
-//! Where tokens are DAG-CBOR serialized delegations, ordered from closest to invoker
-//! (index 0) to closest to subject (last index).
+//! This matches the proof order expected by UCAN invocation verification.
 
 use super::{Container, ContainerError};
 use crate::Delegation;
@@ -37,7 +32,7 @@ use std::sync::Arc;
 pub struct DelegationChain {
     /// The delegation proofs keyed by CID.
     delegations: HashMap<Cid, Arc<Delegation<Ed25519Signature>>>,
-    /// The CIDs of the delegation proofs (for reference in invocations).
+    /// The CIDs of the delegation proofs in subject-first (root-to-leaf) order.
     /// This is guaranteed to be non-empty.
     proof_cids: Vec<Cid>,
 }
@@ -97,7 +92,7 @@ impl DelegationChain {
     /// Serialize to DAG-CBOR bytes in the UCAN container format.
     ///
     /// The container format is: `{ "ctn-v1": [delegation_0_bytes, ...] }`
-    /// where delegations are ordered from closest to invoker to closest to subject.
+    /// where delegations are in subject-first (root-to-leaf) order.
     pub fn to_bytes(&self) -> Result<Vec<u8>, ContainerError> {
         Container::from(self).to_bytes()
     }
@@ -112,26 +107,22 @@ impl DelegationChain {
         &self.delegations
     }
 
-    /// Get the audience of the first delegation in the chain.
+    /// Get the audience of the last delegation in the chain (closest to invoker).
     ///
-    /// Per UCAN spec, the first delegation's `aud` should match the invoker (operator).
+    /// This is the operator/invoker DID.
     /// Since the chain is guaranteed non-empty, this always returns a value.
     pub fn audience(&self) -> &Did {
-        // Safe because chain is guaranteed non-empty
-        let cid = &self.proof_cids[0];
+        let cid = &self.proof_cids[self.proof_cids.len() - 1];
         self.delegations.get(cid).unwrap().audience()
     }
 
     /// Get the subject of the delegation chain.
     ///
-    /// Per UCAN spec, the last delegation's `iss` (issuer) should match the `sub` (subject).
-    /// This returns the subject from the last delegation in the chain, which represents
-    /// the root authority being delegated from.
+    /// The root delegation's (index 0) subject should match the claimed subject.
     ///
     /// Returns `None` if the delegation has no specific subject (i.e., `Subject::Any`).
     pub fn subject(&self) -> Option<&Did> {
-        // Safe because chain is guaranteed non-empty
-        let cid = &self.proof_cids[self.proof_cids.len() - 1];
+        let cid = &self.proof_cids[0];
         let delegation = self.delegations.get(cid).unwrap();
         match delegation.subject() {
             Subject::Specific(did) => Some(did),
@@ -139,27 +130,24 @@ impl DelegationChain {
         }
     }
 
-    /// Get the issuer of the root delegation (closest to subject).
+    /// Get the issuer of the root delegation (index 0, closest to subject).
     ///
     /// The root delegation's issuer is the original authority that started the
     /// delegation chain. For powerline delegations (`Subject::Any`), this issuer
     /// is typically used as the effective subject.
     pub fn issuer(&self) -> &Did {
-        // Safe because chain is guaranteed non-empty
-        let cid = &self.proof_cids[self.proof_cids.len() - 1];
+        let cid = &self.proof_cids[0];
         self.delegations.get(cid).unwrap().issuer()
     }
 
-    /// Get the ability path of the first delegation.
+    /// Get the ability path of the last delegation (closest to invoker).
     ///
     /// Returns the ability as a string path (e.g., "/storage/get").
-    /// The first delegation (closest to invoker) defines the most attenuated capability.
+    /// The leaf delegation defines the most attenuated capability.
     pub fn ability(&self) -> String {
-        // Safe because chain is guaranteed non-empty
-        let cid = &self.proof_cids[0];
+        let cid = &self.proof_cids[self.proof_cids.len() - 1];
         let delegation = self.delegations.get(cid).unwrap();
         let cmd = delegation.command();
-        // Command is a newtype around Vec<String>, access inner via .0
         if cmd.0.is_empty() {
             "/".to_string()
         } else {
@@ -167,27 +155,10 @@ impl DelegationChain {
         }
     }
 
-    /// Create a new chain by extending this one with an additional delegation.
+    /// Push a delegation onto the chain (closer to invoker).
     ///
-    /// The new delegation is added to the front of the proof chain (closest to invoker).
-    ///
-    /// # Principal Alignment
-    ///
-    /// This method verifies that the new delegation's issuer matches the current
-    /// chain's audience (the first delegation's `aud`). This ensures proper chain
-    /// alignment per the UCAN spec:
-    ///
-    /// ```text
-    /// Subject -> ... -> CurrentAudience -> NewAudience
-    ///                 (new delegation's iss must match current audience)
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the new delegation's issuer doesn't match the current
-    /// chain's audience.
-    pub fn extend(&self, delegation: Delegation<Ed25519Signature>) -> Result<Self, ContainerError> {
-        // Verify principal alignment: new delegation's issuer must match current audience
+    /// Its issuer must match the current chain's audience.
+    pub fn push(&self, delegation: Delegation<Ed25519Signature>) -> Result<Self, ContainerError> {
         let current_audience = self.audience();
         let new_issuer = delegation.issuer();
         if new_issuer != current_audience {
@@ -202,9 +173,8 @@ impl DelegationChain {
         let mut delegations = self.delegations.clone();
         delegations.insert(cid, Arc::new(delegation));
 
-        // New delegation goes at the front (closest to invoker)
-        let mut proof_cids = vec![cid];
-        proof_cids.extend(self.proof_cids.iter().cloned());
+        let mut proof_cids = self.proof_cids.clone();
+        proof_cids.push(cid);
 
         Ok(Self {
             delegations,
@@ -218,14 +188,14 @@ impl TryFrom<Vec<Delegation<Ed25519Signature>>> for DelegationChain {
 
     /// Create a delegation chain from a vector of delegations.
     ///
-    /// The delegations must be ordered from invoker to subject:
-    /// - delegations[0] is closest to invoker (its `aud` is the operator)
-    /// - delegations[n-1] is closest to subject (its `iss` is the subject)
+    /// The delegations must be in subject-first (root-to-leaf) order:
+    /// - delegations[0] is closest to subject (its `iss` is the subject)
+    /// - delegations[n-1] is closest to invoker (its `aud` is the operator)
     ///
     /// # Principal Alignment
     ///
-    /// For each consecutive pair (i, i+1), the issuer of delegation[i] must match
-    /// the audience of delegation[i+1]. This ensures a proper chain of authority.
+    /// For each consecutive pair (i, i+1), the audience of delegation[i] must match
+    /// the issuer of delegation[i+1]. This ensures a proper chain of authority.
     ///
     /// # Errors
     ///
@@ -238,18 +208,17 @@ impl TryFrom<Vec<Delegation<Ed25519Signature>>> for DelegationChain {
         }
 
         // Verify principal alignment between consecutive delegations
+        // In subject-first order: delegation[i].aud must == delegation[i+1].iss
         for i in 0..delegations_vec.len().saturating_sub(1) {
             let current = &delegations_vec[i];
             let next = &delegations_vec[i + 1];
 
-            // The issuer of current delegation must be the audience of the next delegation
-            // (moving from invoker toward subject)
-            if current.issuer() != next.audience() {
+            if current.audience() != next.issuer() {
                 return Err(ContainerError::Invocation(format!(
-                    "Principal alignment error at position {}: delegation issuer '{}' does not match next delegation audience '{}'",
+                    "Principal alignment error at position {}: delegation audience '{}' does not match next delegation issuer '{}'",
                     i,
-                    current.issuer(),
-                    next.audience()
+                    current.audience(),
+                    next.issuer()
                 )));
             }
         }
@@ -456,8 +425,8 @@ mod tests {
             .await
             .unwrap();
 
-        // Note: order matters - first in vec is first in proof chain (closest to invoker)
-        let chain = DelegationChain::try_from(vec![delegation2, delegation1]).unwrap();
+        // Subject-first order: root delegation first, leaf delegation last
+        let chain = DelegationChain::try_from(vec![delegation1, delegation2]).unwrap();
         assert_eq!(chain.proof_cids().len(), 2);
         assert_eq!(chain.delegations().len(), 2);
     }
@@ -493,7 +462,7 @@ mod tests {
             .await
             .unwrap();
 
-        let extended_chain = chain.extend(second_delegation).unwrap();
+        let extended_chain = chain.push(second_delegation).unwrap();
 
         // Extended chain should have 2 delegations
         assert_eq!(extended_chain.proof_cids().len(), 2);
@@ -534,7 +503,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = chain.extend(bad_delegation);
+        let result = chain.push(bad_delegation);
         assert!(result.is_err());
         assert!(
             result
@@ -553,8 +522,18 @@ mod tests {
         let operator2_signer = generate_signer().await;
         let operator3_signer = generate_signer().await;
 
-        // First delegation: operator2 -> operator3 (closest to invoker)
+        // Root delegation: space -> operator1 (closest to subject)
         let delegation1 = DelegationBuilder::new()
+            .issuer(space_signer.clone())
+            .audience(&operator1_signer) // Wrong! Should be operator2 for alignment
+            .subject(Subject::Specific(space_did.clone()))
+            .command(vec!["storage".to_string()])
+            .try_build()
+            .await
+            .unwrap();
+
+        // Leaf delegation: operator2 -> operator3 (closest to invoker)
+        let delegation2 = DelegationBuilder::new()
             .issuer(operator2_signer.clone())
             .audience(&operator3_signer)
             .subject(Subject::Specific(space_did.clone()))
@@ -563,19 +542,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Second delegation: space -> operator1 (closest to subject)
-        // This should fail because operator2 != operator1
-        let delegation2 = DelegationBuilder::new()
-            .issuer(space_signer.clone())
-            .audience(&operator1_signer) // Wrong! Should be operator2
-            .subject(Subject::Specific(space_did.clone()))
-            .command(vec!["storage".to_string()])
-            .try_build()
-            .await
-            .unwrap();
-
-        // Order: [delegation1, delegation2] means delegation1.issuer should == delegation2.audience
-        // But operator2 != operator1, so this should fail
+        // Subject-first order: delegation1.aud (operator1) != delegation2.iss (operator2)
         let result = DelegationChain::try_from(vec![delegation1, delegation2]);
         assert!(result.is_err());
         assert!(

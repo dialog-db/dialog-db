@@ -6,7 +6,7 @@
 //! `Provider<Identify>` and `Provider<Sign>`.
 
 use crate::access::AuthorizeError;
-use crate::{Ability, Did, Policy, Provider, Subject, authority, storage};
+use crate::{Ability, Capability, Did, Effect, Policy, Provider, Subject, authority, storage};
 use dialog_common::ConditionalSync;
 use dialog_ucan::time::Timestamp;
 use dialog_ucan::{DelegationChain, InvocationChain};
@@ -195,14 +195,18 @@ impl DelegateRequest<IssuerUnset> {
 /// Created via [`Ucan::invoke()`](super::Ucan::invoke). Use `.issuer()` to
 /// provide an explicit signer, or leave it unset to resolve via `Identify`/`Sign`.
 pub struct InvokeRequest<I = IssuerUnset> {
-    scope: Scope,
+    pub(crate) scope: Scope,
     issuer: I,
 }
 
 impl InvokeRequest<IssuerUnset> {
-    pub(crate) fn new(capability: &impl Ability) -> Self {
+    pub(crate) fn new<Fx>(capability: &Capability<Fx>) -> Self
+    where
+        Fx: Effect + Clone,
+        Capability<Fx>: Ability,
+    {
         Self {
-            scope: Scope::from(capability),
+            scope: Scope::invoke(capability),
             issuer: IssuerUnset,
         }
     }
@@ -366,14 +370,14 @@ where
         .map_err(|e| AuthorizeError::Configuration(format!("failed to build delegation: {e:?}")))
 }
 
-/// Extend proof chain with outermost delegation.
+/// Append a delegation to the proof chain (closer to invoker).
 fn extend_chain(
     proof: Option<DelegationChain>,
     delegation: dialog_ucan::Delegation<Ed25519Signature>,
 ) -> Result<DelegationChain, AuthorizeError> {
     match proof {
         Some(proof_chain) => proof_chain
-            .extend(delegation)
+            .push(delegation)
             .map_err(|e| AuthorizeError::Configuration(format!("chain extension failed: {e}"))),
         None => Ok(DelegationChain::new(delegation)),
     }

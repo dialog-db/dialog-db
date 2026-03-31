@@ -7,7 +7,7 @@
 //! `Ucan`) via the [`Authorizer`] trait, rather than through the
 //! `Provider` effect system.
 
-use crate::{Attenuation, Capability, Constraint};
+use crate::{Attenuation, Capability, Constraint, Effect};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -49,7 +49,7 @@ pub trait Protocol: Sized + ConditionalSend + 'static {
         capability: Capability<Fx>,
     ) -> Result<Authorization<Fx, Self>, AuthorizeError>
     where
-        Fx: Constraint + ConditionalSend + 'static,
+        Fx: Effect + Clone + ConditionalSend + 'static,
         Capability<Fx>: crate::Ability + ConditionalSend + ConditionalSync,
         Env: Provider<authority::Identify>
             + Provider<authority::Sign>
@@ -68,7 +68,7 @@ impl Protocol for Allow {
         capability: Capability<Fx>,
     ) -> Result<Authorization<Fx, Self>, AuthorizeError>
     where
-        Fx: Constraint + ConditionalSend + 'static,
+        Fx: Effect + Clone + ConditionalSend + 'static,
         Capability<Fx>: crate::Ability + ConditionalSend + ConditionalSync,
         Env: Provider<authority::Identify>
             + Provider<authority::Sign>

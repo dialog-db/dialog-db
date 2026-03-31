@@ -76,7 +76,7 @@ where
     /// Delegates to the site's [`Protocol::authorize`](access::Protocol::authorize).
     pub async fn acquire<Env>(self, env: &Env) -> Result<ForkInvocation<S, Fx>, AuthorizeError>
     where
-        Fx: ConditionalSend + 'static,
+        Fx: Clone + ConditionalSend + 'static,
         Capability<Fx>: Ability + Clone + ConditionalSend + dialog_common::ConditionalSync,
         S::Protocol: Protocol,
         Env: Provider<crate::authority::Identify>
@@ -96,7 +96,7 @@ where
     /// Authorize and execute in one step.
     pub async fn perform<Env>(self, env: &Env) -> Result<Fx::Output, AuthorizeError>
     where
-        Fx: ConditionalSend + 'static,
+        Fx: Clone + ConditionalSend + 'static,
         Capability<Fx>: Ability + Clone + ConditionalSend + dialog_common::ConditionalSync,
         S::Protocol: Protocol,
         Env: Provider<crate::authority::Identify>

@@ -365,8 +365,8 @@ mod tests {
             build_delegation(&account_signer, &operator_signer, &subject_signer, cmd("/")).await;
         let d2_cid = d2.to_cid();
 
-        // Build chain: [d2, d1] (closest to invoker first)
-        let chain = DelegationChain::try_from(vec![d2.clone(), d1.clone()]).expect("valid chain");
+        // Build chain: [d1, d2] (subject-first, root-to-leaf)
+        let chain = DelegationChain::try_from(vec![d1.clone(), d2.clone()]).expect("valid chain");
 
         let env = test_env(operator_signer.clone());
         import_delegation_chain(&env, &subject_did, &chain)
