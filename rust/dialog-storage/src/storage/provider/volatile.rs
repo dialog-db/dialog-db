@@ -63,6 +63,8 @@ struct Session {
     memory: HashMap<MemoryKey, Vec<u8>>,
     /// Credential storage keyed by address ID.
     credentials: HashMap<String, CredentialExport>,
+    /// Mounted byte storage keyed by address prefix.
+    mounted: HashMap<String, Vec<u8>>,
     /// Key-value storage keyed by (store, key).
     storage: HashMap<StorageKey, Vec<u8>>,
 }

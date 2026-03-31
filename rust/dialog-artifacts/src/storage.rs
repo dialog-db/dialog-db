@@ -196,6 +196,15 @@ impl Storage {
         storage.mount(dialog_capability::did!("local:storage"), store);
         storage
     }
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    pub fn temp_storage() -> Self {
+        let address = Address::temp(&unique_id());
+        let store = Store::mount(&address).expect("mount temp");
+        let storage = Self::new();
+        storage.mount(dialog_capability::did!("local:storage"), store);
+        storage
+    }
 }
 
 fn unique_id() -> String {
