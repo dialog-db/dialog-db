@@ -304,7 +304,7 @@ mod tests {
     use crate::session::RuleRegistry;
     use crate::source::Source;
     use crate::the;
-    use dialog_artifacts::helpers::{test_operator, test_repo};
+    use dialog_repository::helpers::{test_operator, test_repo};
 
     #[dialog_common::test]
     async fn it_scans_with_all_variables() -> anyhow::Result<()> {

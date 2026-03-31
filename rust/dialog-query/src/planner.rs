@@ -268,7 +268,7 @@ mod tests {
 
         use crate::{Cardinality, Proposition, Term, Value, the};
         use dialog_artifacts::Entity;
-        use dialog_artifacts::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator, test_repo};
 
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;

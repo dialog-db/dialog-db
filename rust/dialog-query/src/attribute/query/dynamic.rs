@@ -241,7 +241,7 @@ mod tests {
     use crate::session::RuleRegistry;
     use crate::source::Source;
     use crate::the;
-    use dialog_artifacts::helpers::{test_operator, test_repo};
+    use dialog_repository::helpers::{test_operator, test_repo};
 
     macro_rules! assert_relation {
         ($branch:expr, $operator:expr, $the:expr, $of:expr, $is:expr) => {{

@@ -125,10 +125,10 @@ mod tests {
     use crate::types::Any;
     use crate::{Cardinality, Concept, Match, Statement, Transaction};
     use anyhow::Result;
-    use dialog_artifacts::helpers::{test_operator, test_repo};
     use dialog_capability::Provider;
     use dialog_common::ConditionalSync;
     use dialog_effects::archive;
+    use dialog_repository::helpers::{test_operator, test_repo};
 
     // Define a Person concept for testing using raw concept API
     // This mirrors what the #[derive(Concept)] macro generates

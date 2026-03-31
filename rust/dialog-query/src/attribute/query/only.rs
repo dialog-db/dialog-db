@@ -235,12 +235,13 @@ impl AttributeQueryOnly {
                         yield extension;
                     }
                 } else {
-                    // Secondary lookup path.
-                    let candidates = resolved.evaluate(source, base.clone().seed());
+                    // Secondary lookup path (Box::pin to avoid stack overflow).
+                    let candidates = Box::pin(resolved.evaluate(source, base.clone().seed()));
                     for await candidate in candidates {
                         let candidate = candidate?;
-                        for await verified in challenge(source, selector.clone(), candidate) {
-                            yield verified?;
+                        let verified = Box::pin(challenge(source, selector.clone(), candidate));
+                        for await v in verified {
+                            yield v?;
                         }
                     }
                 }
@@ -298,8 +299,8 @@ mod tests {
     use crate::session::RuleRegistry;
     use crate::source::Source;
     use crate::{Transaction, Value, the};
-    use dialog_artifacts::helpers::{test_operator, test_repo};
     use dialog_artifacts::{Artifact, Cause};
+    use dialog_repository::helpers::{test_operator, test_repo};
     use std::str::FromStr;
 
     macro_rules! assert_relation {

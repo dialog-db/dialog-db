@@ -1,5 +1,5 @@
 [package]
-name = "dialog-artifacts"
+name = "dialog-repository"
 edition = "2024"
 version.workspace = true
 authors.workspace = true
@@ -9,48 +9,56 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["csv"]
-debug = []
+default = ["s3", "ucan"]
 helpers = ["dep:anyhow"]
-csv = ["dep:csv-async"]
 # Enable integration tests (tests with service provisioning)
 integration-tests = ["dialog-common/integration-tests"]
 # Enable web integration tests
 web-integration-tests = ["dialog-common/web-integration-tests"]
+s3 = ["dep:dialog-remote-s3"]
+ucan = ["s3", "dep:dialog-remote-ucan-s3", "dep:dialog-ucan", "dialog-capability/ucan"]
 
 [dependencies]
+dialog-artifacts = { workspace = true }
+dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
+dialog-credentials = { workspace = true }
+dialog-effects = { workspace = true }
+dialog-ucan = { workspace = true, optional = true }
+dialog-remote-s3 = { workspace = true, optional = true }
+dialog-remote-ucan-s3 = { workspace = true, optional = true }
 dialog-storage = { workspace = true }
 dialog-prolly-tree = { workspace = true }
+dialog-varsig = { workspace = true }
+parking_lot = { workspace = true }
 
 anyhow = { workspace = true, optional = true }
-arrayref = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 base58 = { workspace = true }
 blake3 = { workspace = true }
-csv-async = { workspace = true, optional = true, features = ["tokio"] }
 ed25519-dalek = { workspace = true }
 futures-util = { workspace = true }
-leb128 = { workspace = true }
 rand = { workspace = true }
 rand_core = { workspace = true }
 rand_chacha = { workspace = true }
 serde = { workspace = true }
-serde-big-array = { workspace = true }
+signature = { workspace = true }
 serde_ipld_dagcbor = { workspace = true }
-serde_json = { workspace = true }
-static_assertions = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "io-util"] }
 url = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 dialog-storage = { workspace = true, features = ["helpers"] }
+dialog-remote-s3 = { workspace = true, features = ["helpers"] }
+dialog-remote-ucan-s3 = { workspace = true, features = ["helpers"] }
 dialog-common = { workspace = true, features = ["helpers"] }
 anyhow = { workspace = true }
+serde_json = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+dirs = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "io-util", "fs"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]

@@ -6,9 +6,9 @@ use dialog_storage::Blake3Hash;
 use futures_util::Stream;
 
 use super::Index;
-use crate::artifacts::Datum;
 use crate::repository::archive::ContentAddressedStore;
 use crate::{DialogArtifactsError, Key, State};
+use dialog_artifacts::Datum;
 
 /// Create a stream of novel nodes representing local changes since the last sync.
 ///

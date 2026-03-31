@@ -6,8 +6,6 @@ use futures_util::Stream;
 use std::ops::Range;
 
 use super::Index;
-use crate::artifacts::selector::Constrained;
-use crate::artifacts::{Artifact, ArtifactSelector, Datum, MatchCandidate};
 use crate::repository::archive::Archive;
 use crate::repository::archive::ContentAddressedStore;
 use crate::repository::revision::Revision;
@@ -15,6 +13,8 @@ use crate::{
     AttributeKey, DialogArtifactsError, EntityKey, Key, KeyViewConstruct, KeyViewMut, State,
     ValueKey,
 };
+use dialog_artifacts::selector::Constrained;
+use dialog_artifacts::{Artifact, ArtifactSelector, Datum, MatchCandidate};
 
 /// Command struct for selecting artifacts from a branch.
 pub struct Select {

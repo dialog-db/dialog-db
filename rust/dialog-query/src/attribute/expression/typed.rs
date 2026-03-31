@@ -470,7 +470,7 @@ mod tests {
         use crate::Term;
         use crate::session::RuleRegistry;
         use crate::source::Source;
-        use dialog_artifacts::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator, test_repo};
         use futures_util::TryStreamExt;
 
         let operator = test_operator().await;

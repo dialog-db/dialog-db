@@ -212,7 +212,7 @@ mod tests {
         use crate::Transaction;
         use crate::session::RuleRegistry;
         use crate::source::Source;
-        use dialog_artifacts::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator, test_repo};
 
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
@@ -246,7 +246,7 @@ mod tests {
         use crate::Transaction;
         use crate::session::RuleRegistry;
         use crate::source::Source;
-        use dialog_artifacts::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator, test_repo};
 
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;

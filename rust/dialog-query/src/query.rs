@@ -30,7 +30,7 @@ mod tests {
     use crate::source::Source;
     use crate::{Term, Transaction, the};
     use anyhow::Result;
-    use dialog_artifacts::helpers::{test_operator, test_repo};
+    use dialog_repository::helpers::{test_operator, test_repo};
 
     #[dialog_common::test]
     async fn it_queries_via_fact_selector() -> Result<()> {

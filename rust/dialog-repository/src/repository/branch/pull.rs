@@ -398,8 +398,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::artifacts::{Artifact, Instruction};
     use crate::helpers::{test_operator, test_repo};
+    use crate::{Artifact, Instruction};
     use futures_util::stream;
 
     #[dialog_common::test]

@@ -115,7 +115,7 @@ mod tests {
     use crate::source::Source;
     use crate::types::Any;
     use crate::{Term, Value};
-    use dialog_artifacts::helpers::{test_operator, test_repo};
+    use dialog_repository::helpers::{test_operator, test_repo};
     use futures_util::TryStreamExt;
 
     #[dialog_common::test]

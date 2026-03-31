@@ -4,8 +4,9 @@ use dialog_storage::Blake3Hash;
 
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 
-use crate::artifacts::selector::Constrained;
-use crate::artifacts::{ArtifactSelector, Datum};
+use dialog_artifacts::selector::Constrained;
+use dialog_artifacts::{ArtifactSelector, Datum};
+
 use crate::repository::RemoteSelector;
 use crate::{Key, State};
 

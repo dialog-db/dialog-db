@@ -521,7 +521,7 @@ mod tests {
         use crate::query::Application;
         use crate::session::RuleRegistry;
         use crate::source::Source;
-        use dialog_artifacts::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator, test_repo};
 
         // Create a SumQuery with all variables
         let query = Query::<Sum> {
@@ -564,7 +564,7 @@ mod tests {
         use crate::query::Application;
         use crate::session::RuleRegistry;
         use crate::source::Source;
-        use dialog_artifacts::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator, test_repo};
 
         // Input fields are constants, output field is a variable
         let query = Query::<Sum> {
@@ -598,7 +598,7 @@ mod tests {
         use crate::query::Application;
         use crate::session::RuleRegistry;
         use crate::source::Source;
-        use dialog_artifacts::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator, test_repo};
 
         // Output field is a constant matching the expected result
         let query = Query::<Sum> {
@@ -634,7 +634,7 @@ mod tests {
         use crate::query::Application;
         use crate::session::RuleRegistry;
         use crate::source::Source;
-        use dialog_artifacts::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator, test_repo};
 
         // Output field is a constant that does NOT match (5 + 3 ≠ 99)
         let query = Query::<Sum> {
@@ -670,7 +670,7 @@ mod tests {
         use crate::query::Application;
         use crate::session::RuleRegistry;
         use crate::source::Source;
-        use dialog_artifacts::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator, test_repo};
 
         // Mix: one input is constant, one is variable, output is variable
         let query = Query::<Sum> {
@@ -704,7 +704,7 @@ mod tests {
         use crate::query::Application;
         use crate::session::RuleRegistry;
         use crate::source::Source;
-        use dialog_artifacts::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator, test_repo};
 
         // Both inputs use the same variable (x + x)
         let query = Query::<Sum> {

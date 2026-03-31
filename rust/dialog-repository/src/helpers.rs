@@ -1,12 +1,77 @@
-//! Test helpers for generating deterministic test data.
-
 use std::str::FromStr;
 
+use crate::operator::Operator;
+use crate::profile::Profile;
+use crate::remote::Remote;
+use crate::repository::Repository;
+use crate::storage::Storage;
 use crate::{Artifact, Attribute, Entity, Value};
 use anyhow::Result;
 use base58::ToBase58;
+use dialog_capability::storage::Location;
+use dialog_capability::{Capability, Subject};
+use dialog_storage::provider::Address;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
+
+/// Generate a unique name with a prefix for test isolation.
+pub fn unique_name(prefix: &str) -> String {
+    use dialog_common::time;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let ts = time::now()
+        .duration_since(time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}-{ts}-{seq}")
+}
+
+/// Generate a unique storage location for test isolation.
+pub fn unique_location(prefix: &str) -> Capability<Location<Address>> {
+    Storage::temp(&unique_name(prefix))
+}
+
+/// Build a test operator with a fresh profile and powerline delegation.
+pub async fn test_operator() -> Operator {
+    let storage = Storage::temp_storage();
+    let profile = Profile::open(Storage::temp(&unique_name("test")))
+        .perform(&storage)
+        .await
+        .unwrap();
+    profile
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Remote)
+        .build(storage)
+        .await
+        .unwrap()
+}
+
+/// Build a test operator and return both the operator and the profile.
+pub async fn test_operator_with_profile() -> (Operator, Profile) {
+    let storage = Storage::temp_storage();
+    let profile = Profile::open(Storage::temp(&unique_name("test")))
+        .perform(&storage)
+        .await
+        .unwrap();
+    let operator = profile
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Remote)
+        .build(storage)
+        .await
+        .unwrap();
+    (operator, profile)
+}
+
+/// Open a test repository against the given operator.
+pub async fn test_repo(operator: &Operator) -> Repository {
+    Repository::open(unique_location("repo"))
+        .perform(operator)
+        .await
+        .unwrap()
+}
 
 /// Generate deterministic test data consisting of facts that reference a
 /// specified number of [`Entity`]s.

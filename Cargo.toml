@@ -17,6 +17,7 @@ strip = "debuginfo"
 [workspace]
 members = [
     "rust/dialog-artifacts",
+    "rust/dialog-repository",
     "rust/dialog-capability",
     "rust/dialog-credentials",
     "rust/dialog-common",
@@ -193,6 +194,9 @@ path = "./rust/dialog-remote-s3"
 [workspace.dependencies.dialog-remote-ucan-s3]
 path = "./rust/dialog-remote-ucan-s3"
 
+
+[workspace.dependencies.dialog-repository]
+path = "./rust/dialog-repository"
 
 [workspace.dependencies.dialog-blobs]
 path = "./rust/dialog-blobs"

@@ -8,7 +8,6 @@ use futures_util::{StreamExt, TryStreamExt};
 use std::collections::HashSet;
 
 use super::{Branch, Index};
-use crate::artifacts::{Artifact, Cause, Datum, Instruction};
 use crate::repository::archive::ContentAddressedStore;
 use crate::repository::node_reference::NodeReference;
 use crate::repository::revision::Revision;
@@ -16,6 +15,7 @@ use crate::{
     AttributeKey, DialogArtifactsError, EntityKey, FromKey, Key, KeyView, KeyViewConstruct,
     KeyViewMut, State, ValueKey,
 };
+use dialog_artifacts::{Artifact, Cause, Datum, Instruction};
 
 /// Command struct for committing instructions to a branch.
 pub struct Commit<'a, I> {
@@ -197,8 +197,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::artifacts::{Artifact, ArtifactSelector, Instruction};
     use crate::helpers::{test_operator, test_repo};
+    use crate::{Artifact, ArtifactSelector, Instruction};
     use dialog_prolly_tree::EMPT_TREE_HASH;
     use futures_util::{StreamExt, stream};
 

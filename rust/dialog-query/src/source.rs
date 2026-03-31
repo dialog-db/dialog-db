@@ -1,8 +1,9 @@
 use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{Artifact, ArtifactSelector, Branch, DialogArtifactsError};
+use dialog_artifacts::{Artifact, ArtifactSelector, DialogArtifactsError};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use dialog_effects::archive;
+use dialog_repository::Branch;
 use futures_util::Stream;
 
 use crate::concept::descriptor::ConceptDescriptor;

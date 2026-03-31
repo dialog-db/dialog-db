@@ -45,7 +45,7 @@ pub trait Application: Clone + ConditionalSend + 'static {
         Self: Sized,
     {
         let query = self.clone();
-        let results = self.evaluate(Match::new().seed(), source);
+        let results = Box::pin(self.evaluate(Match::new().seed(), source));
         try_stream! {
             for await each in results {
                 yield query.realize(each?)?;

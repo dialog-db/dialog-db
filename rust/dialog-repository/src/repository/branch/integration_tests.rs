@@ -4,12 +4,12 @@
 //! local S3 (and UCAN access) servers via `#[dialog_common::test]`.
 
 use crate::Operator;
-use crate::artifacts::{Artifact, ArtifactSelector, Instruction};
 use crate::helpers::{test_operator, test_operator_with_profile, unique_location};
 use crate::repository::Repository;
 use crate::repository::branch::state::UpstreamState;
 use crate::repository::node_reference::NodeReference;
 use crate::repository::remote::RemoteName;
+use crate::{Artifact, ArtifactSelector, Instruction};
 use crate::{RemoteAddress, SiteAddress};
 use dialog_capability::Did;
 use dialog_remote_s3::Address as S3SiteAddress;

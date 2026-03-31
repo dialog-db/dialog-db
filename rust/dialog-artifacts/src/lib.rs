@@ -71,31 +71,6 @@ pub use key::*;
 mod uri;
 pub use uri::*;
 
-/// Credentials — opened profile with signers and authority chain.
-pub mod credentials;
-pub use credentials::Credentials;
-
-/// Profile — named identity with signing credential.
-pub mod profile;
-
-/// DID-routed storage dispatcher.
-pub mod storage;
-
-/// Operator — operating environment built from a profile.
-pub mod operator;
-pub use operator::Operator;
-
-/// Remote dispatch for fork invocations.
-pub mod remote;
-pub use remote::Remote;
-
-/// Capability-based repository system.
-mod repository;
-pub use repository::{
-    Branch, BranchName, BranchSelector, CreateRemote, LoadBranch, LoadRemote, OpenBranch,
-    RemoteAddress, RemoteName, RemoteRepository, Repository, SiteAddress, UpstreamState,
-};
-
-/// Test helpers for setting up profiles, operators, repositories, and test data.
+/// Test helpers for generating deterministic test data.
 #[cfg(any(test, feature = "helpers"))]
 pub mod helpers;

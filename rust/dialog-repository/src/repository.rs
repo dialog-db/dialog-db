@@ -246,9 +246,9 @@ impl OpenRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::artifacts::{Artifact, Instruction};
     use crate::helpers::{test_operator, unique_location};
     use crate::storage::Storage;
+    use crate::{Artifact, Instruction};
     use dialog_remote_s3::Address as S3Address;
     use futures_util::stream;
 
@@ -431,7 +431,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_commits_and_selects_by_attribute() -> anyhow::Result<()> {
-        use crate::artifacts::ArtifactSelector;
+        use crate::ArtifactSelector;
         use futures_util::StreamExt;
 
         let operator = test_operator().await;
@@ -492,7 +492,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_commits_and_selects_by_entity() -> anyhow::Result<()> {
-        use crate::artifacts::ArtifactSelector;
+        use crate::ArtifactSelector;
         use futures_util::StreamExt;
 
         let operator = test_operator().await;
@@ -544,7 +544,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_selects_empty_branch() -> anyhow::Result<()> {
-        use crate::artifacts::ArtifactSelector;
+        use crate::ArtifactSelector;
         use futures_util::StreamExt;
 
         let operator = test_operator().await;
@@ -570,7 +570,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_retracts_artifact() -> anyhow::Result<()> {
-        use crate::artifacts::ArtifactSelector;
+        use crate::ArtifactSelector;
         use futures_util::StreamExt;
 
         let operator = test_operator().await;

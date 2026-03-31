@@ -301,7 +301,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_executes_concept_query() -> anyhow::Result<()> {
         use dialog_artifacts::Entity;
-        use dialog_artifacts::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator, test_repo};
 
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
@@ -397,7 +397,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_executes_query_with_bound_entity() -> anyhow::Result<()> {
         use dialog_artifacts::Entity;
-        use dialog_artifacts::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator, test_repo};
 
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
@@ -709,7 +709,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_respects_constant_entity_parameter() -> anyhow::Result<()> {
         use dialog_artifacts::Entity;
-        use dialog_artifacts::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator, test_repo};
 
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
@@ -771,7 +771,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_respects_constant_attribute_parameter() -> anyhow::Result<()> {
         use dialog_artifacts::Entity;
-        use dialog_artifacts::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator, test_repo};
 
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
@@ -846,7 +846,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_respects_multiple_constant_parameters() -> anyhow::Result<()> {
         use dialog_artifacts::Entity;
-        use dialog_artifacts::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator, test_repo};
 
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;

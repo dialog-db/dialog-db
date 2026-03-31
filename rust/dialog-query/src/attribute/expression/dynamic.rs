@@ -418,7 +418,7 @@ mod tests {
     async fn it_roundtrips_assert_and_query() -> anyhow::Result<()> {
         use crate::session::RuleRegistry;
         use crate::source::Source;
-        use dialog_artifacts::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator, test_repo};
         use futures_util::TryStreamExt;
 
         let operator = test_operator().await;
@@ -460,7 +460,7 @@ mod tests {
     async fn it_finds_all_relations_between_entities() -> anyhow::Result<()> {
         use crate::session::RuleRegistry;
         use crate::source::Source;
-        use dialog_artifacts::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator, test_repo};
         use futures_util::TryStreamExt;
 
         let operator = test_operator().await;

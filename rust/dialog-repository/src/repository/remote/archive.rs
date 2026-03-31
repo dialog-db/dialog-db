@@ -11,10 +11,10 @@ use dialog_storage::Blake3Hash;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 
 use super::repository::RemoteRepository;
-use crate::artifacts::Datum;
 use crate::repository::error::RepositoryError;
 use crate::{DialogArtifactsError, SiteAddress as SiteAddressEnum};
 use crate::{Key, State};
+use dialog_artifacts::Datum;
 
 /// Remote archive scoped to a remote repository.
 pub struct RemoteArchive<'a> {

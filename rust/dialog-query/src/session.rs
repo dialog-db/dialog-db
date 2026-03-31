@@ -363,7 +363,7 @@ mod tests {
         AttributeDescriptor, Cardinality, Concept, Parameters, Query, Term, Type,
         concept::descriptor::ConceptDescriptor,
     };
-    use dialog_artifacts::helpers::{test_operator, test_repo};
+    use dialog_repository::helpers::{test_operator, test_repo};
 
     use super::*;
 
