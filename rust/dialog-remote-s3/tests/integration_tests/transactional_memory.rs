@@ -3,7 +3,7 @@
 //! These tests verify that memory resolve/publish/retract work correctly with the S3 backend,
 //! including CAS semantics and conflict detection.
 
-#![cfg(feature = "integration-tests")]
+#![cfg(feature = "s3-integration-tests")]
 
 use super::bucket;
 use serde::{Deserialize, Serialize};

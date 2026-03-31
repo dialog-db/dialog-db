@@ -11,7 +11,7 @@
 //!
 //! Run with:
 //! ```bash
-//! cargo test -p dialog-remote-s3 --features integration-tests --test integration_tests
+//! cargo test -p dialog-remote-s3 --features s3-integration-tests --test integration_tests
 //! ```
 
 mod bucket;

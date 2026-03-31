@@ -25,6 +25,7 @@ helpers = [
   "dep:tokio",
 ]
 list = ["dep:quick-xml"]
+s3-integration-tests = ["list", "helpers"]
 integration-tests = ["list", "helpers", "dialog-common/integration-tests"]
 web-integration-tests = ["dialog-common/web-integration-tests"]
 
@@ -77,10 +78,10 @@ wasm-bindgen-test = { workspace = true }
 [[test]]
 name = "integration_tests"
 path = "tests/integration_tests/main.rs"
-required-features = ["integration-tests"]
+required-features = ["s3-integration-tests"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
-  "cfg(feature, values(\"web-integration-tests\", \"helpers\"))",
+  "cfg(feature, values(\"s3-integration-tests\", \"web-integration-tests\", \"helpers\"))",
   "cfg(dialog_test_wasm_integration)",
 ] }

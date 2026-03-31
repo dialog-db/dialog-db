@@ -1,6 +1,6 @@
 //! Test helpers for S3 integration tests.
 
-#![cfg(feature = "integration-tests")]
+#![cfg(feature = "s3-integration-tests")]
 
 use dialog_capability::Did;
 use dialog_capability::Subject;

@@ -1,6 +1,6 @@
 //! Integration tests that run against a real S3/R2/MinIO endpoint.
 
-#![cfg(feature = "integration-tests")]
+#![cfg(feature = "s3-integration-tests")]
 
 use super::bucket;
 use anyhow::Result;

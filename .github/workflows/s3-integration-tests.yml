@@ -101,5 +101,5 @@ jobs:
           nix develop --command cargo test \
             -p dialog-remote-s3 \
             --test integration_tests \
-            --features integration-tests \
+            --features s3-integration-tests \
             ${{ matrix.target }}
