@@ -16,6 +16,8 @@ use crate::repository::revision::Revision;
 
 use crate::{RemoteName, UpstreamState};
 
+mod fetch;
+mod publish;
 mod selector;
 mod session;
 

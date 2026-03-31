@@ -28,4 +28,14 @@ impl RemoteBranch {
     pub fn address(&self) -> RemoteAddress {
         self.address.get().clone()
     }
+
+    /// Fetch the latest revision from the remote.
+    pub fn fetch(&self) -> super::fetch::Fetch<'_> {
+        super::fetch::Fetch::new(self)
+    }
+
+    /// Publish a revision to the remote.
+    pub fn publish(&self, revision: Revision) -> super::publish::Publish<'_> {
+        super::publish::Publish::new(self, revision)
+    }
 }
