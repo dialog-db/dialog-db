@@ -137,21 +137,17 @@ impl Branch {
         Reset::new(self, revision)
     }
 
-    /// Create a command to pull changes from a local upstream revision.
-    ///
-    /// This performs a three-way merge using an explicitly provided
-    /// upstream revision. For auto-dispatching based on the branch's
-    /// configured upstream, use [`pull_upstream`](Branch::pull_upstream).
-    pub fn pull(&self, upstream_revision: Revision) -> PullLocal<'_> {
-        PullLocal::new(self, upstream_revision)
-    }
-
-    /// Create a command to pull from the configured upstream.
+    /// Pull from the configured upstream.
     ///
     /// Reads the branch's upstream and dispatches to local or remote
     /// pull logic automatically.
-    pub fn pull_upstream(&self) -> Pull<'_> {
+    pub fn pull(&self) -> Pull<'_> {
         Pull::new(self)
+    }
+
+    /// Merge an explicit upstream revision into this branch.
+    pub fn merge(&self, upstream_revision: Revision) -> PullLocal<'_> {
+        PullLocal::new(self, upstream_revision)
     }
 
     /// Create a command to fetch the upstream branch's current revision.

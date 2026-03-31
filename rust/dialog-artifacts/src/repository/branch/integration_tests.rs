@@ -149,7 +149,7 @@ async fn it_pull_returns_none_when_no_changes(s3: S3Address) -> anyhow::Result<(
     branch.push().perform(&operator).await?;
 
     // Pull immediately after push — no new changes
-    let pull_result = branch.pull_upstream().perform(&operator).await?;
+    let pull_result = branch.pull().perform(&operator).await?;
     assert!(
         pull_result.is_none(),
         "pull with no changes should return None"
@@ -200,7 +200,7 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> anyhow::Result
         .perform(&operator)
         .await?;
 
-    let pull_result = bob_branch.pull_upstream().perform(&operator).await?;
+    let pull_result = bob_branch.pull().perform(&operator).await?;
     assert!(pull_result.is_some(), "Bob's pull should find Alice's data");
 
     // Verify Bob can query Alice's artifact
@@ -265,7 +265,7 @@ async fn it_two_party_convergence(s3: S3Address) -> anyhow::Result<()> {
         .await?;
 
     // Bob pulls Alice's changes
-    bob_branch.pull_upstream().perform(&operator).await?;
+    bob_branch.pull().perform(&operator).await?;
 
     // Bob commits his own artifact
     bob_branch
@@ -282,7 +282,7 @@ async fn it_two_party_convergence(s3: S3Address) -> anyhow::Result<()> {
     bob_branch.push().perform(&operator).await?;
 
     // Alice pulls Bob's changes
-    alice_branch.pull_upstream().perform(&operator).await?;
+    alice_branch.pull().perform(&operator).await?;
 
     // Both should have both artifacts
     let alice_results: Vec<_> = alice_branch
@@ -429,7 +429,7 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> anyhow::Res
         .await?;
 
     // Bob pulls Alice's data
-    let pull_result = bob_branch.pull_upstream().perform(&bob_operator).await?;
+    let pull_result = bob_branch.pull().perform(&bob_operator).await?;
     assert!(pull_result.is_some(), "Bob should pull Alice's data");
 
     // Verify Bob has Alice's artifact
@@ -459,10 +459,7 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> anyhow::Res
     assert!(push_result.is_some(), "Bob should push successfully");
 
     // Alice pulls Bob's changes
-    let alice_pull = alice_branch
-        .pull_upstream()
-        .perform(&alice_operator)
-        .await?;
+    let alice_pull = alice_branch.pull().perform(&alice_operator).await?;
     assert!(alice_pull.is_some(), "Alice should pull Bob's changes");
 
     // Alice should have both artifacts
@@ -536,7 +533,7 @@ async fn it_pushes_and_pulls_via_ucan(ucan: UcanS3Address) -> anyhow::Result<()>
     assert!(push_result.is_some(), "UCAN push should succeed");
 
     // Pull should find no changes (just pushed)
-    let pull_result = branch.pull_upstream().perform(&operator).await?;
+    let pull_result = branch.pull().perform(&operator).await?;
     assert!(pull_result.is_none(), "pull after push should return None");
 
     // Verify data survives select

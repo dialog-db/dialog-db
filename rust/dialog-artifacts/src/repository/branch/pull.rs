@@ -427,7 +427,7 @@ mod tests {
 
         // Pull with same revision as upstream_revision — no changes since
         // feature's base is the default empty tree.
-        let pulled = feature.pull(upstream_revision).perform(&operator).await?;
+        let pulled = feature.merge(upstream_revision).perform(&operator).await?;
 
         // The pull should produce a result since the feature branch is empty
         // and the upstream has data.
@@ -459,7 +459,7 @@ mod tests {
         let feature = repo.branch("feature").open().perform(&operator).await?;
 
         let pulled = feature
-            .pull(main_revision.clone())
+            .merge(main_revision.clone())
             .perform(&operator)
             .await?;
 
@@ -504,7 +504,7 @@ mod tests {
             .await?;
 
         let pulled = feature
-            .pull(main_revision.clone())
+            .merge(main_revision.clone())
             .perform(&operator)
             .await?;
 
