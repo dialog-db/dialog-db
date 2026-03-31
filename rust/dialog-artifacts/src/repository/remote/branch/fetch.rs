@@ -9,7 +9,7 @@ use dialog_effects::memory as memory_fx;
 use dialog_remote_s3::S3;
 use dialog_storage::{CborEncoder, Encoder};
 
-use super::session::RemoteBranch;
+use super::RemoteBranch;
 use crate::SiteAddress as SiteAddressEnum;
 use crate::repository::error::RepositoryError;
 use crate::repository::memory::Memory;

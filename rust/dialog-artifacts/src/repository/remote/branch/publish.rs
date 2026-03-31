@@ -8,7 +8,7 @@ use dialog_common::ConditionalSync;
 use dialog_effects::memory as memory_fx;
 use dialog_remote_s3::S3;
 
-use super::session::RemoteBranch;
+use super::RemoteBranch;
 use crate::SiteAddress as SiteAddressEnum;
 use crate::repository::error::RepositoryError;
 use crate::repository::memory::Memory;

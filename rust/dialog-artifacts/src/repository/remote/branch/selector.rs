@@ -3,7 +3,7 @@
 use dialog_capability::Provider;
 use dialog_effects::memory as memory_fx;
 
-use super::session::RemoteBranch;
+use super::RemoteBranch;
 use crate::RemoteAddress;
 use crate::repository::branch::BranchName;
 use crate::repository::cell::{Cell, Retain};
