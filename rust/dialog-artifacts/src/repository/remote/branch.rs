@@ -17,22 +17,26 @@ use crate::repository::revision::Revision;
 use crate::{RemoteName, UpstreamState};
 
 mod selector;
+mod session;
+
 #[allow(unused_imports)]
 pub use selector::RemoteBranchSelector;
+#[allow(unused_imports)]
+pub use session::RemoteBranch;
 
 /// A cursor pointing to a specific branch at a remote repository.
 ///
 /// Generic over the address type `A`, which determines the site type
 /// used for remote operations (S3 or UcanSite).
 #[derive(Debug, Clone)]
-pub struct RemoteBranch<A: SiteAddress> {
+pub struct RemoteBranchCursor<A: SiteAddress> {
     remote: RemoteName,
     address: A,
     subject: Did,
     branch: BranchName,
 }
 
-impl<A: SiteAddress> RemoteBranch<A> {
+impl<A: SiteAddress> RemoteBranchCursor<A> {
     /// Create a new remote branch cursor.
     pub fn new(remote: RemoteName, address: A, subject: Did, branch: BranchName) -> Self {
         Self {
@@ -76,7 +80,7 @@ impl<A: SiteAddress> RemoteBranch<A> {
     }
 }
 
-impl<A> RemoteBranch<A>
+impl<A> RemoteBranchCursor<A>
 where
     A: SiteAddress,
     A::Site: Site,
@@ -209,8 +213,8 @@ where
     }
 }
 
-impl<A: SiteAddress> From<RemoteBranch<A>> for UpstreamState {
-    fn from(remote: RemoteBranch<A>) -> Self {
+impl<A: SiteAddress> From<RemoteBranchCursor<A>> for UpstreamState {
+    fn from(remote: RemoteBranchCursor<A>) -> Self {
         UpstreamState::Remote {
             name: remote.remote,
             branch: remote.branch,

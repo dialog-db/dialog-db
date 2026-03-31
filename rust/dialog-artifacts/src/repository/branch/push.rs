@@ -11,8 +11,8 @@ use super::Branch;
 use super::novelty::novelty;
 use super::state::{BranchName, UpstreamState};
 use crate::repository::error::RepositoryError;
-use crate::repository::remote::RemoteBranch;
 use crate::repository::remote::RemoteName;
+use crate::repository::remote::branch::RemoteBranchCursor;
 use crate::repository::revision::Revision;
 
 /// Command struct for pushing local changes to an upstream branch.
@@ -157,7 +157,7 @@ where
 
     match remote_repo.address().address {
         crate::SiteAddress::S3(addr) => {
-            let rb = RemoteBranch::new(
+            let rb = RemoteBranchCursor::new(
                 remote_repo.name().clone(),
                 addr.clone(),
                 remote_repo.did(),
@@ -167,7 +167,7 @@ where
         }
         #[cfg(feature = "ucan")]
         crate::SiteAddress::Ucan(addr) => {
-            let rb = RemoteBranch::new(
+            let rb = RemoteBranchCursor::new(
                 remote_repo.name().clone(),
                 addr.clone(),
                 remote_repo.did(),
@@ -180,7 +180,7 @@ where
 
 async fn push_with_branch<A, Env>(
     branch: &Branch,
-    remote_branch: &RemoteBranch<A>,
+    remote_branch: &RemoteBranchCursor<A>,
     env: &Env,
 ) -> Result<Option<Revision>, RepositoryError>
 where

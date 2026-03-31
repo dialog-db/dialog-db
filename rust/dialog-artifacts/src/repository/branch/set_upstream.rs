@@ -48,7 +48,7 @@ mod tests {
     use crate::repository::branch::state::UpstreamState;
     use crate::repository::error::RepositoryError;
     use crate::repository::node_reference::NodeReference;
-    use crate::repository::remote::RemoteBranch;
+    use crate::repository::remote::branch::RemoteBranchCursor;
 
     use crate::helpers::{test_operator, test_repo};
 
@@ -89,7 +89,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let address = Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "bucket");
-        let remote_branch = RemoteBranch::new(
+        let remote_branch = RemoteBranchCursor::new(
             "origin".into(),
             address,
             "did:test:remote-repo".parse()?,

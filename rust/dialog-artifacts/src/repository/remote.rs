@@ -21,7 +21,8 @@ mod selector;
 pub mod state;
 
 pub use address::*;
-pub use branch::*;
+#[allow(unused_imports)]
+pub use branch::{RemoteBranch, RemoteBranchSelector};
 pub use create::*;
 pub use load::*;
 pub use repository::RemoteRepository;

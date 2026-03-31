@@ -5,8 +5,7 @@ use dialog_effects::memory as fx;
 
 use super::state::RemoteName;
 use crate::RemoteAddress;
-use crate::repository::cell::{Cell, Retain};
-use crate::repository::revision::Revision;
+use crate::repository::cell::Retain;
 
 /// A loaded remote repository.
 ///
@@ -46,14 +45,13 @@ impl RemoteRepository {
         self.address.get().clone()
     }
 
-    /// A cell for a branch revision at this remote.
-    ///
-    /// Path: `remote/{name}/branch/{branch}/revision`
-    pub fn branch_revision(&self, branch: &str) -> Cell<Revision> {
-        let cap = self
-            .capability
-            .clone()
-            .attenuate(fx::Cell::new(format!("branch/{branch}/revision")));
-        Cell::from_capability(cap)
+    /// The space capability scoped to `remote/{name}/`.
+    pub(crate) fn capability(&self) -> Capability<fx::Space> {
+        self.capability.clone()
+    }
+
+    /// Clone the retained address for sharing.
+    pub(crate) fn retain_address(&self) -> Retain<RemoteAddress> {
+        self.address.clone()
     }
 }

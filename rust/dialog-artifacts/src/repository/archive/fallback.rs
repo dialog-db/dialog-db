@@ -10,7 +10,7 @@ use dialog_storage::{
 use serde::{Serialize, de::DeserializeOwned};
 use std::fmt::Debug;
 
-use crate::repository::remote::RemoteBranch;
+use crate::repository::remote::branch::RemoteBranchCursor;
 
 /// A content-addressed store that reads from local first, falls back to remote.
 ///
@@ -20,7 +20,7 @@ pub struct FallbackStore<'a, Env, A: SiteAddress> {
     env: &'a Env,
     encoder: CborEncoder,
     local_catalog: Capability<Catalog>,
-    remote_branch: &'a RemoteBranch<A>,
+    remote_branch: &'a RemoteBranchCursor<A>,
 }
 
 impl<Env, A: SiteAddress> Clone for FallbackStore<'_, Env, A> {
@@ -39,7 +39,7 @@ impl<'a, Env, A: SiteAddress> FallbackStore<'a, Env, A> {
     pub fn new(
         env: &'a Env,
         local_catalog: Capability<Catalog>,
-        remote_branch: &'a RemoteBranch<A>,
+        remote_branch: &'a RemoteBranchCursor<A>,
     ) -> Self {
         Self {
             env,

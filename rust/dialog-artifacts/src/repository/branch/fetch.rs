@@ -7,8 +7,8 @@ use dialog_remote_s3::S3;
 use super::Branch;
 use super::state::{BranchName, UpstreamState};
 use crate::repository::error::RepositoryError;
-use crate::repository::remote::RemoteBranch;
 use crate::repository::remote::RemoteName;
+use crate::repository::remote::branch::RemoteBranchCursor;
 use crate::repository::revision::Revision;
 
 /// Command struct for fetching the upstream branch's current revision.
@@ -104,7 +104,7 @@ where
 
     match remote_repo.address().address {
         crate::SiteAddress::S3(addr) => {
-            let remote_branch = RemoteBranch::new(
+            let remote_branch = RemoteBranchCursor::new(
                 remote_repo.name().clone(),
                 addr.clone(),
                 remote_repo.did(),
@@ -114,7 +114,7 @@ where
         }
         #[cfg(feature = "ucan")]
         crate::SiteAddress::Ucan(addr) => {
-            let remote_branch = RemoteBranch::new(
+            let remote_branch = RemoteBranchCursor::new(
                 remote_repo.name().clone(),
                 addr.clone(),
                 remote_repo.did(),

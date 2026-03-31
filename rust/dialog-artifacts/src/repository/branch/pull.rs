@@ -15,7 +15,8 @@ use crate::DialogArtifactsError;
 use crate::repository::archive::ContentAddressedStore;
 use crate::repository::archive::fallback::FallbackStore;
 use crate::repository::node_reference::NodeReference;
-use crate::repository::remote::{RemoteBranch, RemoteName};
+use crate::repository::remote::RemoteName;
+use crate::repository::remote::branch::RemoteBranchCursor;
 use crate::repository::revision::Revision;
 
 /// Command struct for pulling from a local upstream revision (legacy API).
@@ -267,7 +268,7 @@ where
 
     match remote_repo.address().address {
         crate::SiteAddress::S3(addr) => {
-            let remote_branch = RemoteBranch::new(
+            let remote_branch = RemoteBranchCursor::new(
                 remote_repo.name().clone(),
                 addr.clone(),
                 remote_repo.did(),
@@ -277,7 +278,7 @@ where
         }
         #[cfg(feature = "ucan")]
         crate::SiteAddress::Ucan(addr) => {
-            let remote_branch = RemoteBranch::new(
+            let remote_branch = RemoteBranchCursor::new(
                 remote_repo.name().clone(),
                 addr.clone(),
                 remote_repo.did(),
@@ -291,7 +292,7 @@ where
 /// Generic pull implementation over any site address type.
 async fn pull_with_branch<A, Env>(
     branch: &Branch,
-    remote_branch: &RemoteBranch<A>,
+    remote_branch: &RemoteBranchCursor<A>,
     env: &Env,
 ) -> Result<Option<Revision>, DialogArtifactsError>
 where
