@@ -356,7 +356,7 @@ mod tests {
     use crate::attribute::query::AttributeQuery;
     use crate::query::Output;
     use crate::session::RuleRegistry;
-    use crate::source::Source;
+    use crate::source::test::TestEnv;
     use crate::the;
 
     use crate::{
@@ -393,7 +393,7 @@ mod tests {
             );
             branch.commit(tx.into_stream()).perform(&operator).await?;
         }
-        let session = Source::new(&branch, &operator, RuleRegistry::new());
+        let session = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let person = ConceptDescriptor::from([
             (
@@ -536,7 +536,7 @@ mod tests {
         tx.assert(alice);
         tx.assert(bob);
         branch.commit(tx.into_stream()).perform(&operator).await?;
-        let session = Source::new(&branch, &operator, RuleRegistry::new());
+        let session = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let name_param = Term::var("name");
         let age_param = Term::var("age");
@@ -675,7 +675,7 @@ mod tests {
         tx.assert(bob);
         branch.commit(tx.into_stream()).perform(&operator).await?;
 
-        let session = Source::new(&branch, &operator, rules);
+        let session = TestEnv::new(&branch, &operator, rules);
         let query_stuff = Query::<Stuff> {
             this: Term::var("stuff"),
             name: Term::var("name"),
@@ -800,7 +800,7 @@ mod tests {
         tx.assert(bob);
         branch.commit(tx.into_stream()).perform(&operator).await?;
 
-        let session = Source::new(&branch, &operator, rules);
+        let session = TestEnv::new(&branch, &operator, rules);
         // Verify Stuff records exist
         let query_stuff = Query::<Stuff> {
             this: Term::var("stuff"),
@@ -913,11 +913,13 @@ mod tests {
         )]);
         let rule = DeductiveRule::from(&concept);
 
-        // Test with RuleRegistry + Source
+        // Test with RuleRegistry + TestEnv
         let mut registry = RuleRegistry::new();
         registry.register(rule.clone())?;
-        let source = Source::new(&branch, &operator, registry);
-        let _rules = source.acquire(&concept)?;
+        let env = TestEnv::new(&branch, &operator, registry);
+        use crate::source::SelectRules;
+        use dialog_capability::Provider;
+        let _rules = Provider::<SelectRules>::execute(&env, concept.clone()).await?;
 
         Ok(())
     }
@@ -1035,7 +1037,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let session = Source::new(&branch, &operator, rules);
+        let session = TestEnv::new(&branch, &operator, rules);
         let results = Query::<MatchingNote> {
             this: Term::var("note"),
             title: Term::var("title"),
@@ -1138,7 +1140,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let session = Source::new(&branch, &operator, rules);
+        let session = TestEnv::new(&branch, &operator, rules);
         let results = Query::<NonDraftNote> {
             this: Term::var("note"),
             title: Term::var("title"),
@@ -1239,7 +1241,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let session = Source::new(&branch, &operator, rules);
+        let session = TestEnv::new(&branch, &operator, rules);
         // Verify Stuff records exist
         let employees = Query::<Employee> {
             this: Term::var("employee"),
@@ -1524,7 +1526,7 @@ mod tests {
             branch.commit(tx.into_stream()).perform(&operator).await?;
         }
 
-        let session = Source::new(&branch, &operator, RuleRegistry::new());
+        let session = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let person = person_concept();
         let name_param = Term::var("name");
         let mut params = Parameters::new();
@@ -1589,7 +1591,7 @@ mod tests {
             branch.commit(tx.into_stream()).perform(&operator).await?;
         }
 
-        let session = Source::new(&branch, &operator, RuleRegistry::new());
+        let session = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let person = person_concept();
 
         let name_param = Term::var("name");

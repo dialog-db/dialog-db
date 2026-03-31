@@ -7,13 +7,12 @@ use crate::query::Application;
 use crate::query::Output;
 use crate::schema::Cardinality;
 use crate::selection::{Match, Selection};
-use crate::source::Source;
+use crate::source::SelectRules;
 use crate::types::{Any, Record};
 use crate::{Entity, EvaluationError, Parameters, Schema, Term, try_stream};
-use dialog_artifacts::{Artifact, Cause};
+use dialog_artifacts::{Artifact, Cause, Select};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
-use dialog_effects::archive;
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
 
@@ -45,12 +44,12 @@ fn choose(current: Artifact, challenger: Artifact) -> Artifact {
 /// `(attribute, entity)` lookup to find the true winner. Yields the match
 /// only if the candidate matches the winner.
 fn challenge<'a, Env>(
-    source: &'a Source<'a, Env>,
+    env: &'a Env,
     selector: AttributeQueryAll,
     candidate: Match,
 ) -> impl Selection + 'a
 where
-    Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+    Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
 {
     try_stream! {
         let relation = selector.attribute();
@@ -64,7 +63,7 @@ where
             Some(Cause::try_from(candidate.lookup(&Term::from(cause_term))?)?)
         };
 
-        let challengers = source.select(ArtifactSelector::new()
+        let challengers = Provider::<Select<'_>>::execute(env, ArtifactSelector::new()
             .the(attribute)
             .of(entity)).await?;
 
@@ -174,11 +173,11 @@ impl AttributeQueryOnly {
     ///   entity or because blanking the value would widen the scan.
     pub fn evaluate<'a, Env, M: Selection + 'a>(
         self,
-        source: &'a Source<'a, Env>,
+        env: &'a Env,
         selection: M,
     ) -> impl Selection + 'a
     where
-        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
     {
         let selector = self.query;
         try_stream! {
@@ -206,7 +205,7 @@ impl AttributeQueryOnly {
 
                     let mut candidate: Option<Artifact> = None;
 
-                    let stream = source.select((&scan).try_into()?).await?;
+                    let stream = Provider::<Select<'_>>::execute(env, (&scan).try_into()?).await?;
                     for await artifact in stream {
                         let artifact = artifact?;
 
@@ -236,10 +235,10 @@ impl AttributeQueryOnly {
                     }
                 } else {
                     // Secondary lookup path (Box::pin to avoid stack overflow).
-                    let candidates = Box::pin(resolved.evaluate(source, base.clone().seed()));
+                    let candidates = Box::pin(resolved.evaluate(env, base.clone().seed()));
                     for await candidate in candidates {
                         let candidate = candidate?;
-                        let verified = Box::pin(challenge(source, selector.clone(), candidate));
+                        let verified = Box::pin(challenge(env, selector.clone(), candidate));
                         for await v in verified {
                             yield v?;
                         }
@@ -250,27 +249,23 @@ impl AttributeQueryOnly {
     }
 
     /// Execute this query, returning a stream of claims.
-    pub fn perform<'a, Env>(self, source: &'a Source<'a, Env>) -> impl Output<Claim> + 'a
+    pub fn perform<'a, Env>(self, env: &'a Env) -> impl Output<Claim> + 'a
     where
-        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
         Self: Sized,
     {
-        Application::perform(self, source)
+        Application::perform(self, env)
     }
 }
 
 impl Application for AttributeQueryOnly {
     type Conclusion = Claim;
 
-    fn evaluate<'a, Env, M: Selection + 'a>(
-        self,
-        selection: M,
-        source: &'a Source<'a, Env>,
-    ) -> impl Selection + 'a
+    fn evaluate<'a, Env, M: Selection + 'a>(self, selection: M, env: &'a Env) -> impl Selection + 'a
     where
-        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
     {
-        self.evaluate(source, selection)
+        self.evaluate(env, selection)
     }
 
     fn realize(&self, input: Match) -> Result<Claim, EvaluationError> {
@@ -297,7 +292,7 @@ mod tests {
     use super::*;
     use crate::query::Output;
     use crate::session::RuleRegistry;
-    use crate::source::Source;
+    use crate::source::test::TestEnv;
     use crate::{Transaction, Value, the};
     use dialog_artifacts::{Artifact, Cause};
     use dialog_repository::helpers::{test_operator, test_repo};
@@ -334,7 +329,7 @@ mod tests {
             Term::var("cause"),
         );
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(
@@ -369,7 +364,7 @@ mod tests {
             Term::var("cause"),
         );
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(
@@ -407,7 +402,7 @@ mod tests {
             Term::var("cause"),
         );
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let aev_results = aev_query.perform(&source).try_vec().await?;
         assert_eq!(aev_results.len(), 1);
         let winner_value = aev_results[0].is().clone();
@@ -473,7 +468,7 @@ mod tests {
                 .unwrap();
         }
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         // First, determine which value is the actual winner via an
         // unconstrained Cardinality::One query (entity known -> EAV path).
         let race = the!("person/name")
@@ -562,7 +557,7 @@ mod tests {
         }
 
         // Determine the winner via EAV (entity known, value unknown).
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let race = the!("person/name")
             .of(Term::from(entity.clone()))
             .is(Term::<String>::var("name"))
@@ -652,7 +647,7 @@ mod tests {
         }
 
         // Determine the winner via EAV.
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let race = the!("person/name")
             .of(Term::from(entity.clone()))
             .is(Term::<String>::var("name"))
@@ -795,7 +790,7 @@ mod tests {
         )
         .unwrap();
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = Application::evaluate(query, seed.seed(), &source);
         let results = Selection::try_vec(results).await?;
 

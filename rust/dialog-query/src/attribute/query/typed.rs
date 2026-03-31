@@ -8,13 +8,13 @@ use crate::attribute::query::dynamic::DynamicAttributeQuery;
 use crate::descriptor::Descriptor;
 use crate::query::Application;
 use crate::selection::{Match, Selection};
-use crate::source::Source;
+use crate::source::SelectRules;
 use crate::types::Any;
 use crate::types::Scalar;
 use crate::{Entity, EvaluationError, Premise, Proposition, Term, Value};
+use dialog_artifacts::Select;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
-use dialog_effects::archive;
 
 /// A typed attribute query with named fields for entity and value.
 ///
@@ -83,16 +83,12 @@ where
 {
     type Conclusion = StaticAttributeStatement<A>;
 
-    fn evaluate<'a, Env, M: Selection + 'a>(
-        self,
-        selection: M,
-        source: &'a Source<'a, Env>,
-    ) -> impl Selection + 'a
+    fn evaluate<'a, Env, M: Selection + 'a>(self, selection: M, env: &'a Env) -> impl Selection + 'a
     where
-        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
     {
         let query = DynamicAttributeQuery::from(self);
-        Application::evaluate(query, selection, source)
+        Application::evaluate(query, selection, env)
     }
 
     fn realize(&self, input: Match) -> Result<Self::Conclusion, EvaluationError> {
@@ -211,7 +207,7 @@ mod tests {
     async fn it_performs_typed_query() -> anyhow::Result<()> {
         use crate::Transaction;
         use crate::session::RuleRegistry;
-        use crate::source::Source;
+        use crate::source::test::TestEnv;
         use dialog_repository::helpers::{test_operator, test_repo};
 
         let operator = test_operator().await;
@@ -229,7 +225,7 @@ mod tests {
             is: Term::var("name"),
         };
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = Application::perform(query, &source).try_vec().await?;
 
         assert_eq!(results.len(), 1);
@@ -245,7 +241,7 @@ mod tests {
     async fn it_roundtrips_assert_and_typed_query() -> anyhow::Result<()> {
         use crate::Transaction;
         use crate::session::RuleRegistry;
-        use crate::source::Source;
+        use crate::source::test::TestEnv;
         use dialog_repository::helpers::{test_operator, test_repo};
 
         let operator = test_operator().await;
@@ -266,7 +262,7 @@ mod tests {
         // Query all entities with default (all-variable) query.
         let query = StaticAttributeQuery::<person::Name>::default();
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = Application::perform(query, &source).try_vec().await?;
 
         // Cardinality::One means one value per entity, so we should get two results.

@@ -891,6 +891,7 @@ dependencies = [
  "base58",
  "blake3",
  "csv-async",
+ "dialog-capability",
  "dialog-common",
  "dialog-prolly-tree",
  "dialog-storage",
@@ -1114,6 +1115,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-stream",
+ "async-trait",
  "base58",
  "blake3",
  "dialog-artifacts",

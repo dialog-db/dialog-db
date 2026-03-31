@@ -53,6 +53,7 @@ anyhow = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "rt"] }
 futures-util = { workspace = true }
 wasm-bindgen-test = { workspace = true }
+async-trait = { workspace = true }
 
 [features]
 default = []

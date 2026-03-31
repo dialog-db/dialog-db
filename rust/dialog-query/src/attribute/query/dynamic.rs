@@ -8,13 +8,12 @@ use crate::proposition::Proposition;
 use crate::query::Application;
 use crate::query::Output;
 use crate::selection::{Match, Selection};
-use crate::source::Source;
+use crate::source::SelectRules;
 use crate::types::{Any, Record};
 use crate::{Entity, EvaluationError, Parameters, Premise, Schema, Term};
-use dialog_artifacts::Cause;
+use dialog_artifacts::{Cause, Select};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
-use dialog_effects::archive;
 use futures_util::future::Either;
 use serde::Serialize;
 use std::fmt::Display;
@@ -142,40 +141,36 @@ impl DynamicAttributeQuery {
     /// Evaluate, dispatching to the appropriate cardinality variant.
     pub fn evaluate<'a, Env, M: Selection + 'a>(
         self,
-        source: &'a Source<'a, Env>,
+        env: &'a Env,
         selection: M,
     ) -> impl Selection + 'a
     where
-        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
     {
         match self {
-            DynamicAttributeQuery::All(query) => Either::Left(query.evaluate(source, selection)),
-            DynamicAttributeQuery::Only(query) => Either::Right(query.evaluate(source, selection)),
+            DynamicAttributeQuery::All(query) => Either::Left(query.evaluate(env, selection)),
+            DynamicAttributeQuery::Only(query) => Either::Right(query.evaluate(env, selection)),
         }
     }
 
     /// Execute this query, returning a stream of claims.
-    pub fn perform<'a, Env>(self, source: &'a Source<'a, Env>) -> impl Output<Claim> + 'a
+    pub fn perform<'a, Env>(self, env: &'a Env) -> impl Output<Claim> + 'a
     where
-        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
         Self: Sized,
     {
-        Application::perform(self, source)
+        Application::perform(self, env)
     }
 }
 
 impl Application for DynamicAttributeQuery {
     type Conclusion = Claim;
 
-    fn evaluate<'a, Env, M: Selection + 'a>(
-        self,
-        selection: M,
-        source: &'a Source<'a, Env>,
-    ) -> impl Selection + 'a
+    fn evaluate<'a, Env, M: Selection + 'a>(self, selection: M, env: &'a Env) -> impl Selection + 'a
     where
-        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
     {
-        self.evaluate(source, selection)
+        self.evaluate(env, selection)
     }
 
     fn realize(&self, input: Match) -> Result<Claim, EvaluationError> {
@@ -239,7 +234,7 @@ mod tests {
     use crate::query::Output;
     use crate::selection::{Match, Selection};
     use crate::session::RuleRegistry;
-    use crate::source::Source;
+    use crate::source::test::TestEnv;
     use crate::the;
     use dialog_repository::helpers::{test_operator, test_repo};
 
@@ -276,7 +271,7 @@ mod tests {
             Some(Cardinality::Many),
         );
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let selection = Application::evaluate(query, Match::new().seed(), &source);
 
         let results = Selection::try_vec(selection).await?;
@@ -322,7 +317,7 @@ mod tests {
             Some(Cardinality::One),
         );
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(
@@ -374,7 +369,7 @@ mod tests {
             Some(Cardinality::One),
         );
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(
@@ -417,7 +412,7 @@ mod tests {
             Some(Cardinality::One),
         );
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(
@@ -460,7 +455,7 @@ mod tests {
             Some(Cardinality::One),
         );
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let aev_results = aev_query.perform(&source).try_vec().await?;
         assert_eq!(aev_results.len(), 1);
         let expected_winner_value = aev_results[0].is().clone();
@@ -529,7 +524,7 @@ mod tests {
             Some(Cardinality::One),
         );
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let eav_results = eav_query.perform(&source).try_vec().await?;
         let eav_name_results: Vec<_> = eav_results
             .iter()
@@ -582,7 +577,7 @@ mod tests {
 
         assert_eq!(query.the(), &Term::from(the!("person/name")));
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1);
@@ -613,7 +608,7 @@ mod tests {
             Some(Cardinality::Many),
         );
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1);
@@ -652,7 +647,7 @@ mod tests {
             None,
         );
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1);
@@ -671,7 +666,7 @@ mod tests {
             None,
         );
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results2 = query2.perform(&source).try_vec().await?;
 
         assert_eq!(results2.len(), 0, "Fact should be retracted");
@@ -699,7 +694,7 @@ mod tests {
             None,
         );
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1, "Should find Alice's name fact");
@@ -733,7 +728,7 @@ mod tests {
             None,
         );
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 2, "Should find both Alice and Bob");
@@ -769,7 +764,7 @@ mod tests {
             None,
         );
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = query.perform(&source).try_vec().await?;
         assert_eq!(results.len(), 1);
 
@@ -802,7 +797,7 @@ mod tests {
             _ => panic!("Expected Attribute query"),
         };
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1);
@@ -840,7 +835,7 @@ mod tests {
             _ => panic!("Expected Attribute query"),
         };
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1);

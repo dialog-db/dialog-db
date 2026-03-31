@@ -520,7 +520,7 @@ mod tests {
     async fn it_performs_formula_with_all_variables() -> anyhow::Result<()> {
         use crate::query::Application;
         use crate::session::RuleRegistry;
-        use crate::source::Source;
+        use crate::source::test::TestEnv;
         use dialog_repository::helpers::{test_operator, test_repo};
 
         // Create a SumQuery with all variables
@@ -534,7 +534,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         // perform = evaluate(new_context) -> realize for each match
         // But first we need to seed the context with input values.
@@ -563,7 +563,7 @@ mod tests {
     async fn it_performs_formula_with_constant_inputs() -> anyhow::Result<()> {
         use crate::query::Application;
         use crate::session::RuleRegistry;
-        use crate::source::Source;
+        use crate::source::test::TestEnv;
         use dialog_repository::helpers::{test_operator, test_repo};
 
         // Input fields are constants, output field is a variable
@@ -576,7 +576,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         // Constants are already bound — empty starting Match should work
         let input = Match::new();
@@ -597,7 +597,7 @@ mod tests {
     async fn it_performs_formula_with_constant_output() -> anyhow::Result<()> {
         use crate::query::Application;
         use crate::session::RuleRegistry;
-        use crate::source::Source;
+        use crate::source::test::TestEnv;
         use dialog_repository::helpers::{test_operator, test_repo};
 
         // Output field is a constant matching the expected result
@@ -610,7 +610,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let mut input = Match::new();
         input.bind(&Term::var("x"), 5u32.into())?;
@@ -633,7 +633,7 @@ mod tests {
     async fn it_rejects_inconsistent_constant_in_formula() -> anyhow::Result<()> {
         use crate::query::Application;
         use crate::session::RuleRegistry;
-        use crate::source::Source;
+        use crate::source::test::TestEnv;
         use dialog_repository::helpers::{test_operator, test_repo};
 
         // Output field is a constant that does NOT match (5 + 3 ≠ 99)
@@ -646,7 +646,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let mut input = Match::new();
         input.bind(&Term::var("x"), 5u32.into())?;
@@ -669,7 +669,7 @@ mod tests {
     async fn it_performs_formula_with_mixed_terms() -> anyhow::Result<()> {
         use crate::query::Application;
         use crate::session::RuleRegistry;
-        use crate::source::Source;
+        use crate::source::test::TestEnv;
         use dialog_repository::helpers::{test_operator, test_repo};
 
         // Mix: one input is constant, one is variable, output is variable
@@ -682,7 +682,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let mut input = Match::new();
         input.bind(&Term::var("y"), 7u32.into())?;
@@ -703,7 +703,7 @@ mod tests {
     async fn it_performs_formula_with_shared_variable() -> anyhow::Result<()> {
         use crate::query::Application;
         use crate::session::RuleRegistry;
-        use crate::source::Source;
+        use crate::source::test::TestEnv;
         use dialog_repository::helpers::{test_operator, test_repo};
 
         // Both inputs use the same variable (x + x)
@@ -716,7 +716,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let mut input = Match::new();
         input.bind(&Term::var("x"), 4u32.into())?;

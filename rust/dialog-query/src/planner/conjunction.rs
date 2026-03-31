@@ -2,11 +2,11 @@ use super::{Plan, Planner};
 use crate::Environment;
 use crate::error::TypeError;
 use crate::selection::Selection;
-use crate::source::Source;
+use crate::source::SelectRules;
 use core::pin::Pin;
+use dialog_artifacts::Select;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
-use dialog_effects::archive;
 
 /// An ordered sequence of [`Plan`] steps produced by the query planner.
 ///
@@ -54,14 +54,14 @@ impl Conjunction {
     pub fn evaluate<'a, Env, M: Selection + 'a>(
         self,
         selection: M,
-        source: &'a Source<'a, Env>,
+        env: &'a Env,
     ) -> Pin<Box<dyn Selection + 'a>>
     where
-        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
     {
         self.steps.into_iter().fold(
             Box::pin(selection) as Pin<Box<dyn Selection + 'a>>,
-            |selection, plan| Box::pin(plan.evaluate(selection, source)),
+            |selection, plan| Box::pin(plan.evaluate(selection, env)),
         )
     }
 }

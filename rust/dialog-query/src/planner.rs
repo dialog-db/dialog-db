@@ -264,7 +264,7 @@ mod tests {
         use crate::Transaction;
         use crate::attribute::query::AttributeQuery;
         use crate::session::RuleRegistry;
-        use crate::source::Source;
+        use crate::source::test::TestEnv;
 
         use crate::{Cardinality, Proposition, Term, Value, the};
         use dialog_artifacts::Entity;
@@ -312,7 +312,7 @@ mod tests {
         ];
         let plan = Planner::from(premises).plan(&Environment::new())?;
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
             plan.evaluate(Match::new().seed(), &source),
         )

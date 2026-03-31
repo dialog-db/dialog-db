@@ -279,13 +279,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 fn evaluate<'__a, __Env, __M: dialog_query::Selection + '__a>(
                     self,
                     selection: __M,
-                    _source: &'__a dialog_query::source::Source<'__a, __Env>,
+                    _env: &'__a __Env,
                 ) -> impl dialog_query::Selection + '__a
                 where
-                    __Env: dialog_query::Provider<dialog_query::archive::Get>
-                        + dialog_query::Provider<dialog_query::archive::Put>
-                        + dialog_query::ConditionalSync
-                        + 'static,
+                    __Env: dialog_query::Provider<dialog_query::Select<'__a>>
+                        + dialog_query::Provider<dialog_query::source::SelectRules>
+                        + dialog_query::ConditionalSync,
                 {
                     let formula: dialog_query::FormulaQuery = self.into();
                     formula.evaluate(selection)

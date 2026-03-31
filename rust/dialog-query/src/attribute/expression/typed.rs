@@ -469,7 +469,7 @@ mod tests {
     async fn it_roundtrips_assert_and_query() -> anyhow::Result<()> {
         use crate::Term;
         use crate::session::RuleRegistry;
-        use crate::source::Source;
+        use crate::source::test::TestEnv;
         use dialog_repository::helpers::{test_operator, test_repo};
         use futures_util::TryStreamExt;
 
@@ -492,7 +492,7 @@ mod tests {
             _ => panic!("Expected Assert"),
         };
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = prop
             .evaluate(Match::new().seed(), &source)
             .try_collect::<Vec<_>>()

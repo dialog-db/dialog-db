@@ -112,7 +112,7 @@ mod tests {
     use crate::query::{Application, Output};
     use crate::selection::Match;
     use crate::session::RuleRegistry;
-    use crate::source::Source;
+    use crate::source::test::TestEnv;
     use crate::{Entity, Query, Term};
     use dialog_repository::helpers::{test_operator, test_repo};
     use futures_util::TryStreamExt;
@@ -122,7 +122,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let query = Query::<ToString> {
             value: Term::from(42u32).into(),
@@ -140,7 +140,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let query = Query::<ToString> {
             value: Term::from(true).into(),
@@ -158,7 +158,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let query = Query::<ToString> {
             value: Term::from("hello".to_string()).into(),
@@ -176,7 +176,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let entity = Entity::new()?;
         let query = Query::<ToString> {
@@ -195,7 +195,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let query = Query::<ToString> {
             value: Term::from(3.15f64).into(),
@@ -213,7 +213,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let query = Query::<ToString> {
             value: Term::var("input"),
@@ -238,7 +238,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let query = Query::<ParseUnsignedInteger> {
             text: Term::from("123".to_string()),
@@ -256,7 +256,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let query = Query::<ParseUnsignedInteger> {
             text: Term::from("  456  ".to_string()),
@@ -274,7 +274,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let query = Query::<ParseUnsignedInteger> {
             text: Term::from("-123".to_string()),
@@ -291,7 +291,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let query = Query::<ParseSignedInteger> {
             text: Term::from("-123".to_string()),
@@ -309,7 +309,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let query = Query::<ParseSignedInteger> {
             text: Term::from("42".to_string()),
@@ -327,7 +327,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let query = Query::<ParseFloat> {
             text: Term::from("3.15".to_string()),
@@ -345,7 +345,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let query = Query::<ParseFloat> {
             text: Term::from("-2.5".to_string()),
@@ -363,7 +363,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let query = Query::<ParseFloat> {
             text: Term::from("42".to_string()),
@@ -381,7 +381,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         for text in ["not a number", ""] {
             let query = Query::<ParseUnsignedInteger> {

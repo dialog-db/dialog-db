@@ -27,7 +27,7 @@ mod tests {
     use crate::artifact::Entity;
     use crate::attribute::query::AttributeQuery;
     use crate::session::RuleRegistry;
-    use crate::source::Source;
+    use crate::source::test::TestEnv;
     use crate::{Term, Transaction, the};
     use anyhow::Result;
     use dialog_repository::helpers::{test_operator, test_repo};
@@ -59,7 +59,7 @@ mod tests {
             None,
         );
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let result = alice_query.perform(&source).try_vec().await;
         assert!(result.is_ok());
 
@@ -102,7 +102,7 @@ mod tests {
             None,
         );
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let result = variable_query.perform(&source).try_vec().await;
         assert!(result.is_ok());
 
@@ -128,7 +128,7 @@ mod tests {
             None,
         );
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = fact_selector.perform(&source).try_vec().await?;
         assert_eq!(results.len(), 1);
 
@@ -151,7 +151,7 @@ mod tests {
         tx.assert(the!("user/role").of(bob.clone()).is("user".to_string()));
         branch.commit(tx.into_stream()).perform(&operator).await?;
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let admin_result = AttributeQuery::new(
             Term::from(the!("user/role")),
             Term::blank(),

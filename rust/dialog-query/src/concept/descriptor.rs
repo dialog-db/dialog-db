@@ -11,7 +11,7 @@ use crate::concept::{Concept, Conclusion};
 use crate::error::TypeError;
 use crate::query::Application;
 use crate::selection::{Match, Selection};
-use crate::source::Source;
+use crate::source::SelectRules;
 use crate::statement::Retraction;
 use crate::term::Term;
 use crate::types::Scalar;
@@ -19,9 +19,9 @@ use crate::{
     Cardinality, Entity, EvaluationError, Field, Parameters, Proposition, Requirement, Schema,
     Statement, Transaction, Type, Value,
 };
+use dialog_artifacts::Select;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
-use dialog_effects::archive;
 
 use base58::ToBase58;
 use serde::{Deserialize, Serialize};
@@ -436,15 +436,11 @@ impl From<ConceptQuery> for ConceptDescriptor {
 impl Application for ConceptQuery {
     type Conclusion = ConceptConclusion;
 
-    fn evaluate<'a, Env, M: Selection + 'a>(
-        self,
-        selection: M,
-        source: &'a Source<'a, Env>,
-    ) -> impl Selection + 'a
+    fn evaluate<'a, Env, M: Selection + 'a>(self, selection: M, env: &'a Env) -> impl Selection + 'a
     where
-        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
     {
-        ConceptQuery::evaluate(self, selection, source)
+        ConceptQuery::evaluate(self, selection, env)
     }
 
     fn realize(&self, source: Match) -> Result<Self::Conclusion, EvaluationError> {

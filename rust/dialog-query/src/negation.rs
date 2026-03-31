@@ -2,11 +2,11 @@ use std::fmt::{self, Display};
 
 use super::proposition::Proposition;
 use crate::selection::Selection;
-use crate::source::Source;
+use crate::source::SelectRules;
 use crate::{Environment, Parameters, Requirement, Schema, try_stream};
+use dialog_artifacts::Select;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
-use dialog_effects::archive;
 pub use futures_util::{TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
 
@@ -77,16 +77,16 @@ impl Negation {
     pub fn evaluate<'a, Env, M: Selection + 'a>(
         self,
         selection: M,
-        source: &'a Source<'a, Env>,
+        env: &'a Env,
     ) -> impl Selection + 'a
     where
-        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
     {
         let application = self.0;
         try_stream! {
             for await candidate in selection {
                 let base = candidate?;
-                let output = application.clone().evaluate(base.clone().seed(), source);
+                let output = application.clone().evaluate(base.clone().seed(), env);
 
                 tokio::pin!(output);
 
@@ -112,7 +112,7 @@ mod tests {
     use crate::error::EvaluationError;
     use crate::selection::Match;
     use crate::session::RuleRegistry;
-    use crate::source::Source;
+    use crate::source::test::TestEnv;
     use crate::types::Any;
     use crate::{Term, Value};
     use dialog_repository::helpers::{test_operator, test_repo};
@@ -123,7 +123,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
         let branch = repo.branch("main").open().perform(&operator).await.unwrap();
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         // a=1, b=2 → equality finds no match → negation keeps the match
         let a = Term::<String>::var("a");
@@ -153,7 +153,7 @@ mod tests {
         let operator = test_operator().await;
         let repo = test_repo(&operator).await;
         let branch = repo.branch("main").open().perform(&operator).await.unwrap();
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let a = Term::<String>::var("a");
         let b = Term::<String>::var("b");

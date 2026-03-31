@@ -12,13 +12,13 @@ use crate::concept::descriptor::ConceptDescriptor;
 use crate::planner::Disjunction;
 use crate::schema::CONCEPT_OVERHEAD;
 use crate::selection::Selection;
-use crate::source::Source;
+use crate::source::SelectRules;
 use crate::{
     Cardinality, Environment, EvaluationError, Match, Parameters, Schema, Term, try_stream,
 };
+use dialog_artifacts::Select;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
-use dialog_effects::archive;
 use std::fmt::Display;
 
 /// Extract a Match with parameter names from a Match with user variable names
@@ -228,10 +228,10 @@ impl ConceptQuery {
     pub fn evaluate<'a, Env, M: Selection + 'a>(
         self,
         selection: M,
-        source: &'a Source<'a, Env>,
+        env: &'a Env,
     ) -> impl Selection + 'a
     where
-        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
     {
         let app = self;
 
@@ -245,7 +245,7 @@ impl ConceptQuery {
                 // plan. All matches in the selection share the same binding pattern
                 // (same variables bound), only the values differ.
                 if plan.is_none() {
-                    let rules = source.acquire(&app.predicate)?;
+                    let rules = Provider::<SelectRules>::execute(env, app.predicate.clone()).await?;
                     plan = Some(rules.plan(&app.terms, &input));
                 }
                 let plan = plan.as_ref().unwrap();
@@ -258,7 +258,7 @@ impl ConceptQuery {
 
                 // Merge results back, mapping parameter names → user variable names
                 // All factors are copied with their original provenance
-                for await result in Disjunction::clone(plan).evaluate(seed, source) {
+                for await result in Disjunction::clone(plan).evaluate(seed, env) {
                     let result_match = result?;
                     let merged = merge_parameters(&input, &result_match, &app.terms)
                         .map_err(|e| EvaluationError::Store(e.to_string()))?;
@@ -288,7 +288,7 @@ mod tests {
     use crate::the;
 
     use crate::session::RuleRegistry;
-    use crate::source::Source;
+    use crate::source::test::TestEnv;
     use crate::{
         AttributeDescriptor, Cardinality, DeductiveRule, Negation, Parameters, Premise,
         Proposition, Term, Transaction, Type, Value,
@@ -322,7 +322,7 @@ mod tests {
             .assert(the!("person/age").of(bob.clone()).is(30u32));
             branch.commit(tx.into_stream()).perform(&operator).await?;
         }
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         // Create a person concept
         let concept = ConceptDescriptor::from(vec![
@@ -415,7 +415,7 @@ mod tests {
             .assert(the!("person/age").of(alice.clone()).is(25u32));
             branch.commit(tx.into_stream()).perform(&operator).await?;
         }
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         // Create a person concept
         let concept = ConceptDescriptor::from(vec![
@@ -745,7 +745,7 @@ mod tests {
         );
         terms.insert("name".to_string(), Term::var("name"));
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let app = ConceptQuery {
             terms,
             predicate: concept,
@@ -820,7 +820,7 @@ mod tests {
         terms.insert("name".to_string(), Term::constant("Bob".to_string()));
         terms.insert("age".to_string(), Term::var("age"));
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let app = ConceptQuery {
             terms,
             predicate: concept,
@@ -895,7 +895,7 @@ mod tests {
         terms.insert("name".to_string(), Term::constant("Alice".to_string()));
         terms.insert("age".to_string(), Term::constant(25u32));
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let app = ConceptQuery {
             terms,
             predicate: concept,

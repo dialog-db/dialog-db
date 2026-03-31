@@ -13,6 +13,9 @@ pub use instruction::*;
 pub mod selector;
 pub use selector::ArtifactSelector;
 
+mod query;
+pub use query::{ArtifactStream, Select};
+
 mod store;
 pub use store::*;
 

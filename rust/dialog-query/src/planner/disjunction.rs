@@ -1,12 +1,12 @@
 use core::pin::Pin;
 
 use crate::selection::Selection;
-use crate::source::Source;
+use crate::source::SelectRules;
 use crate::stream::{fork_stream, stream_select};
 use crate::try_stream;
+use dialog_artifacts::Select;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
-use dialog_effects::archive;
 use futures_util::stream::empty;
 
 use super::Conjunction;
@@ -53,16 +53,16 @@ impl Disjunction {
     pub fn evaluate<'a, Env, M: Selection + 'static>(
         self,
         selection: M,
-        source: &'a Source<'a, Env>,
+        env: &'a Env,
     ) -> Pin<Box<dyn Selection + 'a>>
     where
-        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
     {
         match self {
             Self::Empty => Box::pin(empty()),
-            Self::Solo(join) => Box::pin(join.evaluate(selection, source)),
-            Self::Duet(left, right) => Self::merge(Self::Solo(left), right, selection, source),
-            Self::Or(left, right) => Self::merge(*left, right, selection, source),
+            Self::Solo(join) => Box::pin(join.evaluate(selection, env)),
+            Self::Duet(left, right) => Self::merge(Self::Solo(left), right, selection, env),
+            Self::Or(left, right) => Self::merge(*left, right, selection, env),
         }
     }
 }
@@ -80,16 +80,16 @@ impl Disjunction {
         left: Disjunction,
         right: Conjunction,
         selection: M,
-        source: &'a Source<'a, Env>,
+        env: &'a Env,
     ) -> Pin<Box<dyn Selection + 'a>>
     where
-        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
     {
         Box::pin(try_stream! {
             let (left_input, right_input) = fork_stream(selection);
 
-            let left_output = left.evaluate(left_input, source);
-            let right_output = right.evaluate(right_input, source);
+            let left_output = left.evaluate(left_input, env);
+            let right_output = right.evaluate(right_input, env);
 
             tokio::pin!(left_output);
             tokio::pin!(right_output);

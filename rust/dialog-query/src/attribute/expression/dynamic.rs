@@ -5,14 +5,14 @@ use crate::attribute::statement::AttributeStatement;
 use crate::negation::Negation;
 use crate::query::Output;
 use crate::schema::Cardinality;
-use crate::source::Source;
+use crate::source::SelectRules;
 use crate::statement::Statement;
 use crate::term::Term;
 use crate::types::{Scalar, Typed};
 use crate::{Claim, Premise, Proposition, Transaction};
+use dialog_artifacts::Select;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
-use dialog_effects::archive;
 use std::ops::Not;
 
 /// Converts a value into a [`Term`], resolving the type unambiguously
@@ -140,12 +140,12 @@ where
     Is::Type: Scalar,
 {
     /// Execute this expression as a query, returning a stream of claims.
-    pub fn perform<'a, Env>(self, source: &'a Source<'a, Env>) -> impl Output<Claim> + 'a
+    pub fn perform<'a, Env>(self, env: &'a Env) -> impl Output<Claim> + 'a
     where
-        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
     {
         let query: AttributeQuery = self.into();
-        query.perform(source)
+        query.perform(env)
     }
 }
 
@@ -417,7 +417,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_roundtrips_assert_and_query() -> anyhow::Result<()> {
         use crate::session::RuleRegistry;
-        use crate::source::Source;
+        use crate::source::test::TestEnv;
         use dialog_repository::helpers::{test_operator, test_repo};
         use futures_util::TryStreamExt;
 
@@ -445,7 +445,7 @@ mod tests {
             _ => panic!("Expected Assert"),
         };
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = prop
             .evaluate(Match::new().seed(), &source)
             .try_collect::<Vec<_>>()
@@ -459,7 +459,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_finds_all_relations_between_entities() -> anyhow::Result<()> {
         use crate::session::RuleRegistry;
-        use crate::source::Source;
+        use crate::source::test::TestEnv;
         use dialog_repository::helpers::{test_operator, test_repo};
         use futures_util::TryStreamExt;
 
@@ -488,7 +488,7 @@ mod tests {
             _ => panic!("Expected Assert"),
         };
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = prop
             .evaluate(Match::new().seed(), &source)
             .try_collect::<Vec<_>>()

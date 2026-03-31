@@ -6,15 +6,14 @@ use crate::environment::Environment;
 use crate::query::Application;
 use crate::query::Output;
 use crate::selection::{Match, Selection};
-use crate::source::Source;
+use crate::source::SelectRules;
 use crate::types::{Any, Record};
 use crate::{
     Entity, EvaluationError, Field, Parameters, Requirement, Schema, Term, Type, Value, try_stream,
 };
-use dialog_artifacts::{Artifact, Cause};
+use dialog_artifacts::{Artifact, Cause, Select};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
-use dialog_effects::archive;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
@@ -188,11 +187,11 @@ impl AttributeQueryAll {
     /// Evaluate yielding all matching artifacts.
     pub fn evaluate<'a, Env, M: Selection + 'a>(
         self,
-        source: &'a Source<'a, Env>,
+        env: &'a Env,
         selection: M,
     ) -> impl Selection + 'a
     where
-        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
     {
         let selector = self;
         try_stream! {
@@ -200,7 +199,7 @@ impl AttributeQueryAll {
                 let base = candidate?;
                 let selection = selector.resolve(&base);
 
-                let stream = source.select((&selection).try_into()?).await?;
+                let stream = Provider::<Select<'_>>::execute(env, (&selection).try_into()?).await?;
                 for await artifact in stream {
                     let artifact = artifact?;
                     let mut extension = base.clone();
@@ -212,27 +211,23 @@ impl AttributeQueryAll {
     }
 
     /// Execute this query, returning a stream of claims.
-    pub fn perform<'a, Env>(self, source: &'a Source<'a, Env>) -> impl Output<Claim> + 'a
+    pub fn perform<'a, Env>(self, env: &'a Env) -> impl Output<Claim> + 'a
     where
-        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
         Self: Sized,
     {
-        Application::perform(self, source)
+        Application::perform(self, env)
     }
 }
 
 impl Application for AttributeQueryAll {
     type Conclusion = Claim;
 
-    fn evaluate<'a, Env, M: Selection + 'a>(
-        self,
-        selection: M,
-        source: &'a Source<'a, Env>,
-    ) -> impl Selection + 'a
+    fn evaluate<'a, Env, M: Selection + 'a>(self, selection: M, env: &'a Env) -> impl Selection + 'a
     where
-        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
     {
-        self.evaluate(source, selection)
+        self.evaluate(env, selection)
     }
 
     fn realize(&self, input: Match) -> Result<Claim, EvaluationError> {
@@ -302,7 +297,7 @@ mod tests {
     use crate::Transaction;
     use crate::query::Output;
     use crate::session::RuleRegistry;
-    use crate::source::Source;
+    use crate::source::test::TestEnv;
     use crate::the;
     use dialog_repository::helpers::{test_operator, test_repo};
 
@@ -329,7 +324,7 @@ mod tests {
             Term::var("cause"),
         );
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1);
@@ -364,7 +359,7 @@ mod tests {
             Term::var("cause"),
         );
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1);
@@ -405,7 +400,7 @@ mod tests {
             Term::var("cause"),
         );
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(
@@ -445,7 +440,7 @@ mod tests {
             Term::var("cause"),
         );
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1);

@@ -110,7 +110,7 @@ mod tests {
     use super::*;
     use crate::AttributeStatement;
     use crate::Query;
-    use crate::artifact::{ArtifactSelector, ArtifactsAttribute, Type, Value};
+    use crate::artifact::{ArtifactSelector, ArtifactsAttribute, Select, Type, Value};
     use crate::attribute::{Attribute as _, AttributeDescriptor};
     use crate::error::EvaluationError;
     use crate::query::Application;
@@ -119,7 +119,8 @@ mod tests {
 
     use crate::attribute::query::AttributeQuery;
     use crate::session::RuleRegistry;
-    use crate::source::Source;
+    use crate::source::SelectRules;
+    use crate::source::test::TestEnv;
     use crate::term::Term;
     use crate::the;
     use crate::types::Any;
@@ -127,7 +128,6 @@ mod tests {
     use anyhow::Result;
     use dialog_capability::Provider;
     use dialog_common::ConditionalSync;
-    use dialog_effects::archive;
     use dialog_repository::helpers::{test_operator, test_repo};
 
     // Define a Person concept for testing using raw concept API
@@ -311,13 +311,13 @@ mod tests {
         fn evaluate<'a, Env, M: Selection + 'a>(
             self,
             selection: M,
-            source: &'a Source<'a, Env>,
+            env: &'a Env,
         ) -> impl Selection + 'a
         where
-            Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
+            Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
         {
             let application: ConceptQuery = self.into();
-            application.evaluate(selection, source)
+            application.evaluate(selection, env)
         }
 
         fn realize(&self, source: Match) -> result::Result<Self::Conclusion, EvaluationError> {
@@ -566,7 +566,7 @@ mod tests {
             None,
         );
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let no_results = missing_query.perform(&source).try_vec().await?;
         assert_eq!(no_results.len(), 0, "Should find no non-existent people");
 
@@ -631,7 +631,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let employee = Query::<Employee> {
             this: Term::var("this"),
             name: Term::var("name"),
@@ -899,12 +899,12 @@ mod tests {
         );
 
         let name_facts: Vec<_> = name_query
-            .perform(&Source::new(&branch, &operator, RuleRegistry::new()))
+            .perform(&TestEnv::new(&branch, &operator, RuleRegistry::new()))
             .try_collect()
             .await?;
 
         let birthday_facts: Vec<_> = birthday_query
-            .perform(&Source::new(&branch, &operator, RuleRegistry::new()))
+            .perform(&TestEnv::new(&branch, &operator, RuleRegistry::new()))
             .try_collect()
             .await?;
 
@@ -951,7 +951,7 @@ mod tests {
             birthday: Term::var("birthday"),
         };
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results: Vec<DerivedPerson> = query.perform(&source).try_collect().await?;
 
         assert_eq!(results.len(), 2);
@@ -1002,7 +1002,7 @@ mod tests {
             birthday: Term::var("birthday"),
         };
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results: Vec<DerivedPerson> = query.perform(&source).try_collect().await?;
 
         assert_eq!(results.len(), 1);
@@ -1067,17 +1067,17 @@ mod tests {
         );
 
         let name_facts: Vec<_> = name_query
-            .perform(&Source::new(&branch, &operator, RuleRegistry::new()))
+            .perform(&TestEnv::new(&branch, &operator, RuleRegistry::new()))
             .try_collect()
             .await?;
 
         let email_facts: Vec<_> = email_query
-            .perform(&Source::new(&branch, &operator, RuleRegistry::new()))
+            .perform(&TestEnv::new(&branch, &operator, RuleRegistry::new()))
             .try_collect()
             .await?;
 
         let birthday_facts: Vec<_> = birthday_query
-            .perform(&Source::new(&branch, &operator, RuleRegistry::new()))
+            .perform(&TestEnv::new(&branch, &operator, RuleRegistry::new()))
             .try_collect()
             .await?;
 
@@ -1129,12 +1129,12 @@ mod tests {
         );
 
         let name_facts: Vec<_> = name_query
-            .perform(&Source::new(&branch, &operator, RuleRegistry::new()))
+            .perform(&TestEnv::new(&branch, &operator, RuleRegistry::new()))
             .try_collect()
             .await?;
 
         let birthday_facts: Vec<_> = birthday_query
-            .perform(&Source::new(&branch, &operator, RuleRegistry::new()))
+            .perform(&TestEnv::new(&branch, &operator, RuleRegistry::new()))
             .try_collect()
             .await?;
 
@@ -1185,7 +1185,7 @@ mod tests {
         });
         branch.commit(edit.into_stream()).perform(&operator).await?;
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let employees_shortcut: Vec<ShortcutEmployee> = Query::<ShortcutEmployee>::default()
             .perform(&source)
             .try_collect()
@@ -1235,7 +1235,7 @@ mod tests {
         });
         branch.commit(edit.into_stream()).perform(&operator).await?;
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let result1: Vec<ShortcutEmployee> = Query::<ShortcutEmployee>::default()
             .perform(&source)
             .try_collect()
@@ -1313,7 +1313,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let alice_query = Query::<HelperPerson> {
             this: Term::var("person"),
             name: Term::from("Alice".to_string()),
@@ -1353,7 +1353,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let alice_engineering_query = Query::<HelperEmployee> {
             this: Term::var("employee"),
             name: Term::from("Alice".to_string()),
@@ -1388,7 +1388,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let source = Source::new(&branch, &operator, RuleRegistry::new());
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let engineering_query = Query::<HelperEmployee> {
             this: Term::var("employee"),
             name: Term::var("name"),

@@ -253,16 +253,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
             fn evaluate<'__a, __Env, __M: dialog_query::Selection + '__a>(
                 self,
                 selection: __M,
-                source: &'__a dialog_query::source::Source<'__a, __Env>,
+                env: &'__a __Env,
             ) -> impl dialog_query::Selection + '__a
             where
-                __Env: dialog_query::Provider<dialog_query::archive::Get>
-                    + dialog_query::Provider<dialog_query::archive::Put>
-                    + dialog_query::ConditionalSync
-                    + 'static,
+                __Env: dialog_query::Provider<dialog_query::Select<'__a>>
+                    + dialog_query::Provider<dialog_query::source::SelectRules>
+                    + dialog_query::ConditionalSync,
             {
                 let application: dialog_query::ConceptQuery = self.into();
-                application.evaluate(selection, source)
+                application.evaluate(selection, env)
             }
 
             fn realize(&self, source: dialog_query::Match) -> std::result::Result<Self::Conclusion, dialog_query::EvaluationError> {
@@ -275,18 +274,17 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         // Add inherent perform method so users don't need to import Application trait
         impl #query_name {
-            /// Execute this query against the given source
+            /// Execute this query against the given environment
             pub fn perform<'__a, __Env>(
                 self,
-                source: &'__a dialog_query::source::Source<'__a, __Env>,
+                env: &'__a __Env,
             ) -> impl dialog_query::Output<#struct_name> + '__a
             where
-                __Env: dialog_query::Provider<dialog_query::archive::Get>
-                    + dialog_query::Provider<dialog_query::archive::Put>
-                    + dialog_query::ConditionalSync
-                    + 'static,
+                __Env: dialog_query::Provider<dialog_query::Select<'__a>>
+                    + dialog_query::Provider<dialog_query::source::SelectRules>
+                    + dialog_query::ConditionalSync,
             {
-                dialog_query::Application::perform(self, source)
+                dialog_query::Application::perform(self, env)
             }
         }
 
