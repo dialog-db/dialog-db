@@ -9,16 +9,24 @@ license.workspace = true
 [features]
 default = []
 # UCAN support (IPLD serialization for capabilities)
-ucan = ["dep:ipld-core", "dep:dialog-ucan"]
+ucan = ["dep:ipld-core", "dep:dialog-ucan", "dep:serde_ipld_dagcbor"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+  "cfg(feature, values(\"web-integration-tests\"))",
+] }
 
 [dependencies]
 convert_case = { workspace = true }
 dialog-common = { workspace = true }
 dialog-macros = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+serde_bytes = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 signature = { workspace = true }
 dialog-varsig = { workspace = true }
+url = { workspace = true }
 ipld-core = { workspace = true, optional = true }
 dialog-ucan = { workspace = true, optional = true }
+serde_ipld_dagcbor = { workspace = true, optional = true }

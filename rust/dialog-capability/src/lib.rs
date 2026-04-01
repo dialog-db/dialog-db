@@ -10,7 +10,7 @@
 //!
 //! ```rust
 //! # mod example {
-//! use dialog_capability::{did, Subject, Did, Ability, Attenuation, Policy, Effect};
+//! use dialog_capability::{did, Subject, Did, Ability, Attenuation, Policy, Effect, Claim};
 //! use serde::{Serialize, Deserialize};
 //!
 //! // Attenuation: narrows ability (adds "/storage" to path) and adds parameters
@@ -28,7 +28,7 @@
 //! }
 //!
 //! // Effect: narrows ability (adds "/get"), and is invocable
-//! #[derive(Debug, Clone, Serialize, Deserialize)]
+//! #[derive(Debug, Clone, Serialize, Deserialize, Claim)]
 //! struct Get { key: Vec<u8> }
 //! impl Effect for Get {
 //!     type Of = Store;
@@ -149,10 +149,12 @@
 //! | Type | Role |
 //! |------|------|
 //! | [`Ability`] | Trait providing `subject()` and `ability()` |
-//! | [`Provider<I>`] | Executes capabilities |
-//! | [`Authorization`] | Proof of delegated authority |
-//! | [`Delegation<C, A>`] | Grants capability to another principal |
-//! | [`Access`] | Looks up authorization proofs |
+//! | [`Provider<C>`] | Executes commands |
+//! | [`access::Authorization`] | Capability paired with format-specific authorization proof |
+//! | [`site::Site`] | Trait for site configuration types |
+
+// Allow `#[derive(Claim)]` to resolve `::dialog_capability::Claim` inside this crate.
+extern crate self as dialog_capability;
 
 mod error;
 pub use error::*;
@@ -181,6 +183,9 @@ pub use policy::*;
 mod attenuation;
 pub use attenuation::*;
 
+mod claim;
+pub use claim::*;
+
 mod effect;
 pub use effect::*;
 
@@ -196,26 +201,22 @@ pub use capability::*;
 mod provider;
 pub use provider::*;
 
-mod router;
-pub use router::*;
+mod issuer;
+pub use issuer::*;
 
-mod authority;
-pub use authority::*;
+/// Derive macro that generates `Claim` trait impls for effect types.
+pub use dialog_macros::Claim;
 
-mod authorization;
-pub use authorization::*;
+pub mod access;
 
-mod access;
-pub use access::*;
+pub mod authority;
 
-mod claim;
-pub use claim::*;
+pub mod site;
 
-mod authorized;
-pub use authorized::*;
+pub mod storage;
 
-mod invocation;
-pub use invocation::*;
+pub mod command;
+pub use command::*;
 
-mod delegation;
-pub use delegation::*;
+pub mod fork;
+pub use fork::*;
