@@ -26,6 +26,7 @@ mod push;
 mod reset;
 mod select;
 mod selector;
+mod session;
 mod set_upstream;
 
 pub use commit::Commit;
@@ -130,8 +131,8 @@ impl Branch {
     }
 
     /// Create a command to select artifacts from this branch.
-    pub fn select(&self, selector: ArtifactSelector<Constrained>) -> Select {
-        Select::new(self.subject().clone(), self.revision(), selector)
+    pub fn select(&self, selector: ArtifactSelector<Constrained>) -> Select<'_> {
+        Select::new(self, selector)
     }
 
     /// Create a command to reset the branch to a given revision.

@@ -551,3 +551,122 @@ async fn it_pushes_and_pulls_via_ucan(ucan: UcanS3Address) -> anyhow::Result<()>
 
     Ok(())
 }
+
+/// Query an empty local replica. Data replicates on demand from the
+/// remote. After removing the upstream, data is still available locally.
+#[dialog_common::test]
+async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> anyhow::Result<()> {
+    let operator = test_operator().await;
+
+    // Alice: create repo, commit data, push to remote
+    let (alice_repo, alice_branch) =
+        setup_repo_with_s3_remote(&operator, &s3, "replicate-alice").await?;
+
+    alice_branch
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:alice".parse()?,
+            is: crate::Value::String("Alice".into()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+    alice_branch.push().perform(&operator).await?;
+    let alice_revision = alice_branch.revision().expect("should have revision");
+
+    // Bob: empty repo pointing at Alice's remote
+    let bob_repo = Repository::open(unique_location("replicate-bob"))
+        .perform(&operator)
+        .await?;
+
+    let site_address = s3_remote_address(&s3, alice_repo.did());
+    bob_repo
+        .remote("origin")
+        .create(site_address)
+        .perform(&operator)
+        .await?;
+
+    let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
+    bob_branch
+        .set_upstream(UpstreamState::Remote {
+            name: RemoteName::from("origin"),
+            branch: "main".into(),
+            tree: NodeReference::default(),
+        })
+        .perform(&operator)
+        .await?;
+
+    // Set Bob's revision to Alice's without pulling blocks
+    bob_branch.reset(alice_revision).perform(&operator).await?;
+
+    // First, remove upstream so select has no remote to fall back to.
+    // This should fail because tree blocks aren't local.
+    bob_branch
+        .set_upstream(UpstreamState::Local {
+            branch: "nowhere".into(),
+            tree: NodeReference::default(),
+        })
+        .perform(&operator)
+        .await?;
+
+    let no_remote_result = bob_branch
+        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .perform(&operator)
+        .await;
+    assert!(
+        no_remote_result.is_err(),
+        "select should fail without remote when blocks aren't local"
+    );
+
+    // Restore upstream so fallback can reach the remote
+    bob_branch
+        .set_upstream(UpstreamState::Remote {
+            name: RemoteName::from("origin"),
+            branch: "main".into(),
+            tree: NodeReference::default(),
+        })
+        .perform(&operator)
+        .await?;
+
+    // Now query replicates tree blocks on demand from the remote
+    let results: Vec<_> = bob_branch
+        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .perform(&operator)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+
+    assert_eq!(results.len(), 1, "should replicate and find Alice's data");
+    assert_eq!(results[0].is, crate::Value::String("Alice".into()));
+
+    // Remove upstream (simulates remote going away) by pointing
+    // at a non-existent local branch instead
+    bob_branch
+        .set_upstream(UpstreamState::Local {
+            branch: "nowhere".into(),
+            tree: NodeReference::default(),
+        })
+        .perform(&operator)
+        .await?;
+
+    // Query again with no remote. Data should be cached locally.
+    let cached_results: Vec<_> = bob_branch
+        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .perform(&operator)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+
+    assert_eq!(
+        cached_results.len(),
+        1,
+        "data should be available from local cache"
+    );
+    assert_eq!(cached_results[0].is, crate::Value::String("Alice".into()));
+
+    Ok(())
+}

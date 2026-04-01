@@ -18,7 +18,7 @@ pub struct FallbackStore<'a, Env> {
     env: &'a Env,
     encoder: CborEncoder,
     local_catalog: Capability<Catalog>,
-    remote: &'a RemoteRepository,
+    remote: Option<RemoteRepository>,
 }
 
 impl<Env> Clone for FallbackStore<'_, Env> {
@@ -27,16 +27,18 @@ impl<Env> Clone for FallbackStore<'_, Env> {
             env: self.env,
             encoder: self.encoder.clone(),
             local_catalog: self.local_catalog.clone(),
-            remote: self.remote,
+            remote: self.remote.clone(),
         }
     }
 }
 
 impl<'a, Env> FallbackStore<'a, Env> {
+    /// Create a fallback store. If `remote` is `Some`, reads that miss
+    /// locally will fall back to the remote and cache the result.
     pub fn new(
         env: &'a Env,
         local_catalog: Capability<Catalog>,
-        remote: &'a RemoteRepository,
+        remote: Option<RemoteRepository>,
     ) -> Self {
         Self {
             env,
@@ -83,7 +85,12 @@ where
             return Ok(Some(value));
         }
 
-        let address = self.remote.address();
+        let remote = match &self.remote {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+
+        let address = remote.address();
         let remote_catalog = dialog_capability::Subject::from(address.subject.clone())
             .attenuate(archive_fx::Archive)
             .attenuate(Catalog::new("index"));

@@ -293,7 +293,7 @@ where
     }
 
     // Use FallbackStore for three-way merge (reads fall through to remote)
-    let mut store = FallbackStore::new(env, branch.archive().index(), &remote_repo);
+    let mut store = FallbackStore::new(env, branch.archive().index(), Some(remote_repo.clone()));
 
     let mut target: Index = Tree::from_hash(upstream_revision.tree.hash(), &store)
         .await
