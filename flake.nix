@@ -318,24 +318,23 @@
 
           tests-native-debug = buildTestArchive {
             name = "native-debug";
-            args = "--features s3,s3-list,integration-tests";
+            args = "--features integration-tests";
           };
 
           tests-native-release = buildTestArchive {
             name = "native-release";
-            args = "--release --features s3,s3-list,integration-tests";
+            args = "--release --features integration-tests";
           };
 
           tests-web-debug = buildTestArchive {
             name = "web-debug";
             target = "wasm32-unknown-unknown";
-            args = "--features s3,s3-list";
           };
 
           tests-web-release = buildTestArchive {
             name = "web-debug";
             target = "wasm32-unknown-unknown";
-            args = "--features s3,s3-list --release";
+            args = "--release";
           };
 
           tests-native-ucan = buildTestArchive {
@@ -351,7 +350,7 @@
 
           tests-cross-integration = buildTestArchive {
             name = "cross-integration";
-            args = "--features s3,s3-list,web-integration-tests";
+            args = "--features web-integration-tests";
           };
         };
 
