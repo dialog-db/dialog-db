@@ -111,13 +111,10 @@ impl Branch {
         Archive::new(Subject::from(self.subject.clone()))
     }
 
-    /// Get a sibling branch reference by name.
-    pub fn branch(&self, name: impl Into<BranchName>) -> BranchRef<'_> {
-        BranchRef {
-            subject: self.subject.clone(),
-            memory: &self.memory,
-            name: name.into(),
-        }
+    /// Load a sibling branch by name.
+    pub(crate) fn load_branch(&self, name: impl Into<BranchName>) -> LoadBranch {
+        let trace = self.memory.trace(name.into());
+        LoadBranch::new(self.subject.clone(), self.memory.clone(), trace)
     }
 
     /// Get a remote reference by name.
@@ -128,8 +125,7 @@ impl Branch {
         RemoteSelector(Site::from(space))
     }
 
-    /// Create a command to commit instructions to this branch.
-    pub fn commit<I>(&self, instructions: I) -> Commit<'_, I> {
+    pub(crate) fn commit<I>(&self, instructions: I) -> Commit<'_, I> {
         Commit::new(self, instructions)
     }
 
@@ -177,26 +173,5 @@ impl Branch {
     /// `impl Into<UpstreamState>`.
     pub fn set_upstream(&self, upstream: impl Into<UpstreamState>) -> SetUpstream<'_> {
         SetUpstream::new(self, upstream.into())
-    }
-}
-
-/// A reference to a named branch, obtained from another branch.
-pub struct BranchRef<'a> {
-    subject: Did,
-    memory: &'a super::memory::Memory,
-    name: state::BranchName,
-}
-
-impl BranchRef<'_> {
-    /// Open the branch (create if missing).
-    pub fn open(self) -> OpenBranch {
-        let trace = self.memory.trace(self.name);
-        OpenBranch::new(self.subject, self.memory.clone(), trace)
-    }
-
-    /// Load the branch (error if missing).
-    pub fn load(self) -> LoadBranch {
-        let trace = self.memory.trace(self.name);
-        LoadBranch::new(self.subject, self.memory.clone(), trace)
     }
 }

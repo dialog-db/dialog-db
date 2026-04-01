@@ -72,8 +72,7 @@ where
     Env: Provider<memory_fx::Resolve>,
 {
     let upstream = branch
-        .branch(upstream_name.clone())
-        .load()
+        .load_branch(upstream_name.clone())
         .perform(env)
         .await?;
 

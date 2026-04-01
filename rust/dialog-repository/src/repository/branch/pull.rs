@@ -97,8 +97,7 @@ impl Pull<'_> {
             UpstreamState::Local { branch: id, .. } => {
                 let upstream_branch = self
                     .branch
-                    .branch(id)
-                    .load()
+                    .load_branch(id)
                     .perform(env)
                     .await
                     .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;

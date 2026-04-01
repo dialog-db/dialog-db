@@ -89,8 +89,7 @@ where
         + 'static,
 {
     let upstream = branch
-        .branch(upstream_name.clone())
-        .load()
+        .load_branch(upstream_name.clone())
         .perform(env)
         .await?;
 
