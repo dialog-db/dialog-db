@@ -330,4 +330,96 @@ mod tests {
         let archive: &Archive = cap.policy();
         assert_eq!(archive, &Archive);
     }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, crate::Claim)]
+    struct Upload {
+        digest: Vec<u8>,
+        #[claim(into = u64, with = byte_len, rename = size)]
+        content: Vec<u8>,
+    }
+
+    fn byte_len(v: Vec<u8>) -> u64 {
+        v.len() as u64
+    }
+
+    impl Effect for Upload {
+        type Of = Catalog;
+        type Output = Result<(), String>;
+    }
+
+    #[cfg(feature = "ucan")]
+    mod parameters_tests {
+        use super::*;
+        use crate::ucan::parameters;
+        use ipld_core::ipld::Ipld;
+
+        #[test]
+        fn it_collects_parameters_from_chain() {
+            let cap: Capability<Get> = Subject::from(did!("key:zSpace"))
+                .attenuate(Archive)
+                .attenuate(Catalog {
+                    name: "blobs".into(),
+                })
+                .invoke(Get {
+                    digest: vec![1, 2, 3],
+                });
+
+            let params = parameters(&cap);
+
+            assert_eq!(params.get("name"), Some(&Ipld::String("blobs".into())));
+            assert_eq!(
+                params.get("digest"),
+                Some(&Ipld::List(vec![
+                    Ipld::Integer(1),
+                    Ipld::Integer(2),
+                    Ipld::Integer(3)
+                ]))
+            );
+        }
+
+        #[test]
+        fn it_collects_parameters_from_attenuations() {
+            let cap: Capability<Lookup> = Subject::from(did!("key:zSpace"))
+                .attenuate(Storage)
+                .attenuate(Store {
+                    name: "index".into(),
+                })
+                .invoke(Lookup {
+                    key: b"hello".to_vec(),
+                });
+
+            let params = parameters(&cap);
+
+            assert_eq!(params.get("name"), Some(&Ipld::String("index".into())));
+            let hello_bytes: Vec<Ipld> =
+                b"hello".iter().map(|&b| Ipld::Integer(b as i128)).collect();
+            assert_eq!(params.get("key"), Some(&Ipld::List(hello_bytes)));
+        }
+
+        #[test]
+        fn it_uses_claim_projection_for_invocation_parameters() {
+            let cap: Capability<Upload> = Subject::from(did!("key:zSpace"))
+                .attenuate(Archive)
+                .attenuate(Catalog {
+                    name: "blobs".into(),
+                })
+                .invoke(Upload {
+                    digest: vec![1, 2, 3],
+                    content: b"hello world".to_vec(),
+                });
+
+            let invoke = crate::ucan::Ucan::invoke(&cap);
+            let params = invoke.scope.parameters.as_map();
+
+            assert!(
+                !params.contains_key("content"),
+                "parameters should not contain raw 'content' field"
+            );
+            assert_eq!(
+                params.get("size"),
+                Some(&Ipld::Integer(11)),
+                "parameters should contain claim-projected 'size' field"
+            );
+        }
+    }
 }

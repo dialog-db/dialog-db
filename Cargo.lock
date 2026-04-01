@@ -921,15 +921,20 @@ dependencies = [
  "async-trait",
  "convert_case",
  "dialog-common",
+ "dialog-credentials",
  "dialog-macros",
  "dialog-ucan",
  "dialog-varsig",
  "ipld-core",
  "serde",
  "serde_bytes",
+ "serde_ipld_dagcbor",
+ "serde_json",
  "signature",
  "thiserror 2.0.18",
+ "tokio",
  "url",
+ "wasm-bindgen-test",
 ]
 
 [[package]]

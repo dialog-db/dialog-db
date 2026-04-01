@@ -39,12 +39,17 @@ impl From<Subject> for Capability<Subject> {
 /// DID used to represent "any subject" in delegation scope.
 pub const ANY_SUBJECT: &str = "did:_:_";
 
+/// Parse the wildcard DID for "any subject".
+pub fn any_did() -> Did {
+    ANY_SUBJECT.parse::<Did>().expect("valid wildcard DID")
+}
+
 impl Subject {
     /// Create a wildcard subject representing "any resource".
     ///
     /// Used in delegation to grant unrestricted access across all subjects.
     pub fn any() -> Self {
-        Self::from(ANY_SUBJECT.parse::<Did>().expect("valid wildcard DID"))
+        Self::from(any_did())
     }
 
     /// Whether this is the wildcard "any" subject.
