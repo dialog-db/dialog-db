@@ -42,6 +42,9 @@ pub mod time;
 mod hash;
 pub use hash::*;
 
+mod checksum;
+pub use checksum::*;
+
 /// Async utilities for cross-platform task management.
 pub mod r#async;
 pub use r#async::*;
