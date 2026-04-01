@@ -18,21 +18,21 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn platform_specific_storage() -> Result<()> {
     let (backend, _temp) = make_target_storage().await?;
-    let storage = Storage {
+    let mut storage = Storage {
         backend,
         encoder: CborEncoder,
     };
-    let mut tree = Tree::<GeometricDistribution, _, _, _, _>::new(storage);
+    let mut tree = Tree::<GeometricDistribution, _, _, _>::new();
 
     let mut ledger = vec![];
     for _ in 1..1024 {
         let key_value = (random(), random());
         ledger.push(key_value.clone());
-        tree.set(key_value.0, key_value.1).await?;
+        tree.set(key_value.0, key_value.1, &mut storage).await?;
     }
 
     for entry in ledger {
-        assert_eq!(tree.get(&entry.0).await?, Some(entry.1));
+        assert_eq!(tree.get(&entry.0, &storage).await?, Some(entry.1));
     }
     Ok(())
 }

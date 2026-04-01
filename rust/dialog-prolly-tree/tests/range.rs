@@ -11,16 +11,11 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 async fn create_test_tree(
     size: u32,
-) -> Result<
-    Tree<
-        GeometricDistribution,
-        Vec<u8>,
-        Vec<u8>,
-        [u8; 32],
-        Storage<CborEncoder, MemoryStorageBackend<[u8; 32], Vec<u8>>>,
-    >,
-> {
-    let storage = Storage {
+) -> Result<(
+    Tree<GeometricDistribution, Vec<u8>, Vec<u8>, [u8; 32]>,
+    Storage<CborEncoder, MemoryStorageBackend<[u8; 32], Vec<u8>>>,
+)> {
+    let mut storage = Storage {
         backend: MemoryStorageBackend::default(),
         encoder: CborEncoder,
     };
@@ -30,14 +25,15 @@ async fn create_test_tree(
         let value = <[u8; 32] as From<blake3::Hash>>::from(blake3::hash(&key)).to_vec();
         collection.insert(key, value);
     }
-    Ok(Tree::from_collection(collection, storage).await?)
+    let tree = Tree::from_collection(collection, &mut storage).await?;
+    Ok((tree, storage))
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn gets_full_range() -> Result<()> {
-    let tree = create_test_tree(1024).await?;
-    let stream = tree.stream();
+    let (tree, storage) = create_test_tree(1024).await?;
+    let stream = tree.stream(&storage);
     tokio::pin!(stream);
     let mut i = 0u32;
     while (stream.try_next().await?).is_some() {
@@ -55,13 +51,13 @@ async fn stream_range_on_empty_trees() -> Result<()> {
         backend: MemoryStorageBackend::default(),
     };
 
-    let empty = Tree::<GeometricDistribution, Vec<u8>, Vec<u8>, _, _>::new(storage);
+    let empty = Tree::<GeometricDistribution, Vec<u8>, Vec<u8>, _>::new();
 
-    let stream = empty.stream_range(..);
+    let stream = empty.stream_range(.., &storage);
     tokio::pin!(stream);
     assert!(stream.try_next().await?.is_none());
 
-    let stream = empty.stream();
+    let stream = empty.stream(&storage);
     tokio::pin!(stream);
     assert!(stream.try_next().await?.is_none());
 
@@ -71,14 +67,14 @@ async fn stream_range_on_empty_trees() -> Result<()> {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn gets_range() -> Result<()> {
-    let tree = create_test_tree(1024).await?;
+    let (tree, storage) = create_test_tree(1024).await?;
 
     const OFFSET: u32 = 2;
     const MAX: u32 = 10;
 
     let start = OFFSET.to_be_bytes().to_vec();
     let end = MAX.to_be_bytes().to_vec();
-    let stream = tree.stream_range(start..end);
+    let stream = tree.stream_range(start..end, &storage);
     tokio::pin!(stream);
     let mut i = 0u32;
     while let Some(entry) = stream.try_next().await? {
@@ -96,24 +92,25 @@ async fn gets_range() -> Result<()> {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn request_out_of_range() -> Result<()> {
-    let tree = create_test_tree(1024).await?;
+    let (tree, storage) = create_test_tree(1024).await?;
     let start = 1_000_000u32.to_be_bytes().to_vec();
-    let stream = tree.stream_range(start..);
+    let stream = tree.stream_range(start.., &storage);
     tokio::pin!(stream);
     assert!(
         stream.try_next().await?.is_none(),
         "start range out of tree range yields no items"
     );
 
-    let storage = Storage {
+    let mut storage = Storage {
         encoder: CborEncoder,
         backend: MemoryStorageBackend::default(),
     };
-    let mut tree = Tree::<GeometricDistribution, _, _, _, _>::new(storage);
-    tree.set(10u32.to_be_bytes().to_vec(), vec![1]).await?;
+    let mut tree = Tree::<GeometricDistribution, _, _, _>::new();
+    tree.set(10u32.to_be_bytes().to_vec(), vec![1], &mut storage)
+        .await?;
     let start = 0u32.to_be_bytes().to_vec();
     let end = 5u32.to_be_bytes().to_vec();
-    let stream = tree.stream_range(start..end);
+    let stream = tree.stream_range(start..end, &storage);
     tokio::pin!(stream);
     assert!(
         stream.try_next().await?.is_none(),

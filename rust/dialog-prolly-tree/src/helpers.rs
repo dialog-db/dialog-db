@@ -141,27 +141,32 @@ where
     /// * `order` - The traversal order:
     ///   - `DepthFirst`: Visit children before siblings (pre-order)
     ///   - `BreadthFirst`: Visit all nodes at each level before going deeper
-    fn traverse(
-        &self,
+    fn traverse<'a, Storage>(
+        &'a self,
         order: TraversalOrder,
-    ) -> impl Stream<Item = Result<Node<Key, Value, Hash>, DialogProllyTreeError>>;
+        storage: &'a Storage,
+    ) -> impl Stream<Item = Result<Node<Key, Value, Hash>, DialogProllyTreeError>> + 'a
+    where
+        Storage: ContentAddressedStorage<Hash = Hash> + 'a;
 }
 
-impl<Distribution, Key, Value, Hash, Storage> Traversable<Key, Value, Hash>
-    for Tree<Distribution, Key, Value, Hash, Storage>
+impl<Distribution, Key, Value, Hash> Traversable<Key, Value, Hash>
+    for Tree<Distribution, Key, Value, Hash>
 where
     Distribution: crate::Distribution<Key, Hash>,
     Key: KeyType,
     Value: ValueType,
     Hash: HashType,
-    Storage: ContentAddressedStorage<Hash = Hash>,
 {
-    fn traverse(
-        &self,
+    fn traverse<'a, Storage>(
+        &'a self,
         order: TraversalOrder,
-    ) -> impl Stream<Item = Result<Node<Key, Value, Hash>, DialogProllyTreeError>> {
+        storage: &'a Storage,
+    ) -> impl Stream<Item = Result<Node<Key, Value, Hash>, DialogProllyTreeError>> + 'a
+    where
+        Storage: ContentAddressedStorage<Hash = Hash> + 'a,
+    {
         let root = self.root().cloned();
-        let storage = self.storage();
 
         try_stream! {
             if let Some(root) = root {
@@ -227,7 +232,7 @@ pub type TestStorage = dialog_storage::Storage<dialog_storage::CborEncoder, Jour
 
 /// Type alias for the tree type used in tree specs.
 pub type TestTree =
-    crate::Tree<DistributionSimulator, Vec<u8>, Vec<u8>, dialog_storage::Blake3Hash, TestStorage>;
+    crate::Tree<DistributionSimulator, Vec<u8>, Vec<u8>, dialog_storage::Blake3Hash>;
 
 /// A distribution that reads ranks directly from keys.
 /// Keys are encoded as: [actual_key_bytes, 0x00, rank_byte]
@@ -395,7 +400,7 @@ impl TreeDescriptor {
     /// for asserting read patterns during differential operations.
     pub async fn build(
         self,
-        storage: TestStorage,
+        mut storage: TestStorage,
     ) -> Result<TreeSpec, Box<dyn std::error::Error + Send + Sync>> {
         use std::collections::BTreeMap;
 
@@ -404,13 +409,7 @@ impl TreeDescriptor {
 
         // Handle empty tree case
         if self.0.is_empty() {
-            let tree = crate::Tree::<
-                DistributionSimulator,
-                Vec<u8>,
-                Vec<u8>,
-                dialog_storage::Blake3Hash,
-                _,
-            >::new(storage.clone());
+            let tree = TestTree::new();
             return Ok(TreeSpec {
                 spec: Vec::new(),
                 tree,
@@ -480,7 +479,7 @@ impl TreeDescriptor {
             btree_collection.insert(encoded_key, key.clone());
         }
 
-        let temp_tree = crate::Tree::from_collection(btree_collection, storage.clone()).await?;
+        let temp_tree = crate::Tree::from_collection(btree_collection, &mut storage).await?;
 
         // Now build NodeSpec levels from the actual tree
         let max_height = self.0.len() - 1;
@@ -508,7 +507,7 @@ impl TreeDescriptor {
 
         // Load tree from hash so root is freshly loaded (not from temp_tree)
         let tree = if let Some(hash) = root_hash {
-            crate::Tree::from_hash(&hash, storage.clone()).await?
+            crate::Tree::from_hash(&hash, &storage).await?
         } else {
             temp_tree
         };
@@ -650,6 +649,11 @@ impl TreeSpec {
     /// Get a reference to the compiled tree
     pub fn tree(&self) -> &TestTree {
         &self.tree
+    }
+
+    /// Get a reference to the storage backend
+    pub fn storage(&self) -> &TestStorage {
+        &self.storage
     }
 
     /// Visualize the full tree structure by loading all nodes
