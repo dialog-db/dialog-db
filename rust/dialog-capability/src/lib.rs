@@ -205,6 +205,15 @@ pub use authority::*;
 mod authorization;
 pub use authorization::*;
 
+mod issuer;
+pub use issuer::*;
+
+/// Derive macro that generates `Provider<Fx>` impls for composite structs.
+pub use dialog_macros::Provider;
+
+pub mod command;
+pub use command::*;
+
 mod access;
 pub use access::*;
 
