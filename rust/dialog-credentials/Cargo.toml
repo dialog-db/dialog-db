@@ -18,6 +18,7 @@ ed25519 = [
 ucan = ["dep:dialog-ucan", "dialog-capability/ucan"]
 
 [dependencies]
+async-trait = { workspace = true }
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
 dialog-varsig = { workspace = true }
