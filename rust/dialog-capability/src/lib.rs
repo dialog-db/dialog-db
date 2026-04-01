@@ -149,10 +149,9 @@
 //! | Type | Role |
 //! |------|------|
 //! | [`Ability`] | Trait providing `subject()` and `ability()` |
-//! | [`Provider<I>`] | Executes capabilities |
-//! | [`Authorization`] | Proof of delegated authority |
-//! | [`Delegation<C, A>`] | Grants capability to another principal |
-//! | [`Access`] | Looks up authorization proofs |
+//! | [`Provider<C>`] | Executes commands |
+//! | [`access::Authorization`] | Capability paired with format-specific authorization proof |
+//! | [`site::Site`] | Trait for site configuration types |
 
 // Allow `#[derive(Claim)]` to resolve `::dialog_capability::Claim` inside this crate.
 extern crate self as dialog_capability;
@@ -215,3 +214,12 @@ pub use command::*;
 
 mod claim;
 pub use claim::*;
+
+pub mod access;
+
+pub mod site;
+
+pub mod storage;
+
+pub mod fork;
+pub use fork::*;

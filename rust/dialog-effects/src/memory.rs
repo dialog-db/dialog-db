@@ -14,7 +14,8 @@
 //!                     └── Retract { when } → Effect → Result<(), MemoryError>
 //! ```
 
-pub use dialog_capability::{Attenuation, Capability, Effect, Policy, Subject};
+pub use dialog_capability::{Attenuation, Capability, Claim, Effect, Policy, Subject};
+use dialog_common::Checksum;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -65,7 +66,19 @@ impl Policy for Cell {
 }
 
 /// Edition identifier for CAS operations.
-pub type Edition = String;
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Edition(pub String);
+
+impl From<Vec<u8>> for Edition {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self(String::from_utf8_lossy(&bytes).into_owned())
+    }
+}
+
+fn optional_edition(bytes: Option<serde_bytes::ByteBuf>) -> Option<Edition> {
+    bytes.map(|b| Edition::from(b.into_vec()))
+}
 
 /// A cell's current state: content and its edition.
 ///
@@ -83,7 +96,7 @@ pub struct Publication {
 /// Resolve operation - reads current cell content and edition.
 ///
 /// Returns `None` if the cell has no content (empty/uninitialized).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Claim)]
 pub struct Resolve;
 
 impl Effect for Resolve {
@@ -115,13 +128,15 @@ impl ResolveCapability for Capability<Resolve> {
 /// - If `when` is `Some(edition)`, expects current edition to match
 /// - Returns new edition on success
 /// - Returns `MemoryError::EditionMismatch` if expectation doesn't match
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Claim)]
 pub struct Publish {
     /// The content to publish.
     #[serde(with = "serde_bytes")]
+    #[claim(into = Checksum, with = Checksum::sha256, rename = checksum)]
     pub content: Vec<u8>,
     /// The expected current edition, or None if expecting empty cell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[claim(into = Option<Edition>, with = optional_edition)]
     pub when: Option<serde_bytes::ByteBuf>,
 }
 
@@ -138,6 +153,13 @@ impl Publish {
 impl Effect for Publish {
     type Of = Cell;
     type Output = Result<Vec<u8>, MemoryError>;
+}
+
+impl Attenuation for PublishClaim {
+    type Of = Cell;
+    fn attenuation() -> &'static str {
+        "publish"
+    }
 }
 
 /// Extension trait for `Capability<Publish>` to access its fields.
@@ -174,10 +196,11 @@ impl PublishCapability for Capability<Publish> {
 ///
 /// - Requires `when` to match current edition
 /// - Returns `MemoryError::EditionMismatch` if edition doesn't match
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Claim)]
 pub struct Retract {
     /// The expected current edition.
     #[serde(with = "serde_bytes")]
+    #[claim(into = Edition)]
     pub when: Vec<u8>,
 }
 
@@ -191,6 +214,13 @@ impl Retract {
 impl Effect for Retract {
     type Of = Cell;
     type Output = Result<(), MemoryError>;
+}
+
+impl Attenuation for RetractClaim {
+    type Of = Cell;
+    fn attenuation() -> &'static str {
+        "retract"
+    }
 }
 
 /// Extension trait for `Capability<Retract>` to access its fields.
@@ -217,6 +247,8 @@ impl RetractCapability for Capability<Retract> {
     }
 }
 
+pub mod prelude;
+
 /// Errors that can occur during memory operations.
 #[derive(Debug, Error)]
 pub enum MemoryError {
@@ -236,6 +268,12 @@ pub enum MemoryError {
     /// IO error.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+impl From<dialog_capability::storage::StorageError> for MemoryError {
+    fn from(e: dialog_capability::storage::StorageError) -> Self {
+        Self::Storage(e.to_string())
+    }
 }
 
 #[cfg(test)]
