@@ -154,6 +154,9 @@
 //! | [`Delegation<C, A>`] | Grants capability to another principal |
 //! | [`Access`] | Looks up authorization proofs |
 
+// Allow `#[derive(Claim)]` to resolve `::dialog_capability::Claim` inside this crate.
+extern crate self as dialog_capability;
+
 mod error;
 pub use error::*;
 
@@ -199,23 +202,16 @@ pub use provider::*;
 mod router;
 pub use router::*;
 
-mod authority;
-pub use authority::*;
+mod issuer;
+pub use issuer::*;
 
-mod authorization;
-pub use authorization::*;
+/// Derive macro that generates `Claim` trait impls for effect types.
+pub use dialog_macros::Claim;
 
-mod access;
-pub use access::*;
+pub mod authority;
+
+pub mod command;
+pub use command::*;
 
 mod claim;
 pub use claim::*;
-
-mod authorized;
-pub use authorized::*;
-
-mod invocation;
-pub use invocation::*;
-
-mod delegation;
-pub use delegation::*;

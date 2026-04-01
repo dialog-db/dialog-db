@@ -1,24 +1,24 @@
 mod route;
 pub use route::*;
 
-use crate::Invocation;
+use crate::Command;
 
-/// Trait for environments that can execute invocations.
+/// Trait for environments that can execute commands.
 ///
-/// The type parameter `I` implements `Invocation`, which determines:
-/// - `I::Input` - what the provider receives
-/// - `I::Output` - what the provider returns
+/// The type parameter `C` implements `Command`, which determines:
+/// - `C::Input` - what the provider receives
+/// - `C::Output` - what the provider returns
 ///
 /// # Example
 ///
 /// ```
-/// use dialog_capability::{Provider, Invocation};
+/// use dialog_capability::{Provider, Command};
 /// use async_trait::async_trait;
 ///
-/// // Define an invocation type
-/// struct MyInvocation;
+/// // Define a command type
+/// struct MyCommand;
 ///
-/// impl Invocation for MyInvocation {
+/// impl Command for MyCommand {
 ///     type Input = String;
 ///     type Output = usize;
 /// }
@@ -28,7 +28,7 @@ use crate::Invocation;
 ///
 /// #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 /// #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-/// impl Provider<MyInvocation> for MyEnv {
+/// impl Provider<MyCommand> for MyEnv {
 ///     async fn execute(&self, input: String) -> usize {
 ///         input.len()
 ///     }
@@ -36,7 +36,7 @@ use crate::Invocation;
 /// ```
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-pub trait Provider<I: Invocation> {
-    /// Execute an invocation and return the output.
-    async fn execute(&self, input: I::Input) -> I::Output;
+pub trait Provider<C: Command> {
+    /// Execute a command and return the output.
+    async fn execute(&self, input: C::Input) -> C::Output;
 }

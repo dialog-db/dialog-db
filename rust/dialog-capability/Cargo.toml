@@ -16,6 +16,7 @@ convert_case = { workspace = true }
 dialog-common = { workspace = true }
 dialog-macros = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+serde_bytes = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 signature = { workspace = true }
