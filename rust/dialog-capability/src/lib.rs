@@ -207,6 +207,9 @@ pub use issuer::*;
 /// Derive macro that generates `Claim` trait impls for effect types.
 pub use dialog_macros::Claim;
 
+/// Derive macro that generates `Provider<Fx>` impls for composite structs.
+pub use dialog_macros::Provider;
+
 pub mod authority;
 
 pub mod command;

@@ -12,6 +12,7 @@
 
 use proc_macro::TokenStream;
 mod claim;
+mod compose;
 mod provider;
 mod query;
 mod router;
@@ -419,4 +420,28 @@ pub fn router(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(Claim, attributes(claim))]
 pub fn derive_claim(input: TokenStream) -> TokenStream {
     claim::derive(input)
+}
+
+/// Derive macro that generates `Provider<Fx>` impls for composite structs
+/// where each field is annotated with `#[provide(...)]` listing the effects
+/// it handles.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// #[derive(Provider)]
+/// pub struct Env {
+///     #[provide(archive::Get, archive::Put)]
+///     local: FileSystem,
+///     #[provide(credential::Identify, credential::Sign)]
+///     credentials: KeyStore,
+/// }
+/// ```
+///
+/// This generates concrete `Provider<archive::Get>`, `Provider<archive::Put>`,
+/// `Provider<credential::Identify>`, and `Provider<credential::Sign>` impls,
+/// each delegating to the annotated field.
+#[proc_macro_derive(Provider, attributes(provide))]
+pub fn derive_provider(input: TokenStream) -> TokenStream {
+    compose::generate(input)
 }
