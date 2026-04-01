@@ -10,7 +10,7 @@
 //!
 //! ```rust
 //! # mod example {
-//! use dialog_capability::{did, Subject, Did, Ability, Attenuation, Policy, Effect};
+//! use dialog_capability::{did, Subject, Did, Ability, Attenuation, Policy, Effect, Claim};
 //! use serde::{Serialize, Deserialize};
 //!
 //! // Attenuation: narrows ability (adds "/storage" to path) and adds parameters
@@ -28,7 +28,7 @@
 //! }
 //!
 //! // Effect: narrows ability (adds "/get"), and is invocable
-//! #[derive(Debug, Clone, Serialize, Deserialize)]
+//! #[derive(Debug, Clone, Serialize, Deserialize, Claim)]
 //! struct Get { key: Vec<u8> }
 //! impl Effect for Get {
 //!     type Of = Store;

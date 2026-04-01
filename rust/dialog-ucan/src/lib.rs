@@ -27,6 +27,8 @@ pub mod unset;
 mod ipld;
 mod sealed;
 
+pub use container::delegation::DelegationChain;
+pub use container::invocation::InvocationChain;
 pub use delegation::{
     Delegation,
     builder::{BuildError as DelegationBuildError, DelegationBuilder},
