@@ -31,7 +31,13 @@ pub struct QuerySession<'a> {
 }
 
 impl<'a> QuerySession<'a> {
-    /// Install a deductive rule.
+    /// Register a pre-built deductive rule.
+    pub fn register(mut self, rule: DeductiveRule) -> Result<Self, EvaluationError> {
+        self.rules.register(rule)?;
+        Ok(self)
+    }
+
+    /// Install a deductive rule from a function.
     pub fn install<M, W>(mut self, rule: impl Fn(M) -> W) -> Result<Self, EvaluationError>
     where
         M: Application + Default + Into<ConceptDescriptor>,

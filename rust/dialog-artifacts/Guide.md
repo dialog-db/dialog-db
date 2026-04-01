@@ -52,24 +52,62 @@ let main = repo.branch("main").open().perform(&operator).await?;
 
 Data is stored as semantic triples: *the `attribute` of `entity` is `value`*.
 
+Typed writes use `branch.transaction()`:
+
 ```rs
-main.commit(stream::iter([
-    Instruction::Assert(Artifact {
-        the: "user/name".parse()?,
-        of: "user:alice".parse()?,
-        is: Value::String("Alice".into()),
-        cause: None,
-    }),
-])).perform(&operator).await?;
+main.transaction()
+    .assert(Name::of(alice).is("Alice"))
+    .assert(Age::of(alice).is(30u32))
+    .commit()
+    .perform(&operator)
+    .await?;
 ```
 
 ## Querying
 
+Typed queries use concepts defined with derive macros:
+
 ```rs
-let users = main
+#[derive(Concept)]
+struct Employee {
+    this: Entity,
+    name: employee::Name,
+    role: employee::Role,
+}
+
+let results: Vec<Employee> = main
+    .select(Query::<Employee> {
+        this: Term::var("this"),
+        name: Term::var("name"),
+        role: Term::var("role"),
+    })
+    .perform(&operator)
+    .try_vec()
+    .await?;
+```
+
+For queries with deductive rules:
+
+```rs
+let results: Vec<Employee> = main
+    .query()
+    .install(my_rule)?
+    .select(Query::<Employee> { ... })
+    .perform(&operator)
+    .try_vec()
+    .await?;
+```
+
+Raw artifact selection (with automatic remote fallback):
+
+```rs
+let artifacts = main
+    .claims()
     .select(ArtifactSelector::new().the("user/name".parse()?))
-    .perform(&operator).await?
-    .collect::<Vec<_>>().await;
+    .perform(&operator)
+    .await?
+    .collect::<Vec<_>>()
+    .await;
 ```
 
 ## Syncing
@@ -96,6 +134,8 @@ main.push().perform(&operator).await?;
 main.pull().perform(&operator).await?;
 ```
 
+When a branch has a remote upstream, queries automatically replicate missing blocks on demand.
+
 ## Collaboration
 
 Access is shared through UCAN delegation: signed tokens forming a chain of trust.
@@ -103,7 +143,6 @@ Access is shared through UCAN delegation: signed tokens forming a chain of trust
 ### Alice sets up a shared repo
 
 ```rs
-// Create a repo and delegate ownership to Alice's profile
 let repo = Repository::open(Storage::current("shared"))
     .perform(&alice_operator).await?;
 
@@ -112,7 +151,6 @@ let chain = repo.ownership()
     .perform(&alice_operator).await?;
 alice_profile.save(chain).perform(&alice_operator).await?;
 
-// Wire up UCAN remote and push
 let remote_address = RemoteAddress::new(
     SiteAddress::Ucan(UcanAddress::new("https://access.example.com")),
     repo.did(),
@@ -127,7 +165,12 @@ main.set_upstream(UpstreamState::Remote {
     tree: NodeReference::default(),
 }).perform(&alice_operator).await?;
 
-// ... commit data, then push ...
+main.transaction()
+    .assert(Name::of(alice).is("Alice"))
+    .commit()
+    .perform(&alice_operator)
+    .await?;
+
 main.push().perform(&alice_operator).await?;
 ```
 
@@ -149,13 +192,12 @@ Bob saves the delegation under his profile. This is what authorizes his operator
 ```rs
 bob_profile.save(delegation).perform(&bob_operator).await?;
 
-// Bob's repo is separate (different DID), but points at Alice's remote
 let bob_repo = Repository::open(Storage::current("bob-copy"))
     .perform(&bob_operator).await?;
 
 let remote_address = RemoteAddress::new(
     SiteAddress::Ucan(UcanAddress::new("https://access.example.com")),
-    alice_repo_did,  // points at Alice's repo subject
+    alice_repo_did,
 );
 bob_repo.remote("origin").create(remote_address)
     .perform(&bob_operator).await?;
@@ -167,9 +209,15 @@ main.set_upstream(UpstreamState::Remote {
     tree: NodeReference::default(),
 }).perform(&bob_operator).await?;
 
-// Pull Alice's data, make changes, push back
+// Pull, edit, push
 main.pull().perform(&bob_operator).await?;
-// ... commit changes ...
+
+main.transaction()
+    .assert(Name::of(bob).is("Bob"))
+    .commit()
+    .perform(&bob_operator)
+    .await?;
+
 main.push().perform(&bob_operator).await?;
 ```
 
