@@ -208,7 +208,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_performs_typed_query() -> anyhow::Result<()> {
-        use crate::Transaction;
         use crate::session::RuleRegistry;
         use crate::source::test::TestEnv;
         use dialog_repository::helpers::{test_operator, test_repo};
@@ -219,9 +218,12 @@ mod tests {
 
         let alice = Entity::new()?;
 
-        let mut tx = Transaction::new();
-        tx.assert(person::Name::of(alice.clone()).is("Alice"));
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(person::Name::of(alice.clone()).is("Alice"))
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let query = StaticAttributeQuery::<person::Name> {
             of: Term::from(alice.clone()),
@@ -242,7 +244,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_roundtrips_assert_and_typed_query() -> anyhow::Result<()> {
-        use crate::Transaction;
         use crate::session::RuleRegistry;
         use crate::source::test::TestEnv;
         use dialog_repository::helpers::{test_operator, test_repo};
@@ -254,13 +255,19 @@ mod tests {
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        let mut tx = Transaction::new();
-        tx.assert(person::Name::of(alice.clone()).is("Alice"));
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(person::Name::of(alice.clone()).is("Alice"))
+            .commit()
+            .perform(&operator)
+            .await?;
 
-        let mut tx = Transaction::new();
-        tx.assert(person::Name::of(bob.clone()).is("Bob"));
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(person::Name::of(bob.clone()).is("Bob"))
+            .commit()
+            .perform(&operator)
+            .await?;
 
         // Query all entities with default (all-variable) query.
         let query = StaticAttributeQuery::<person::Name>::default();

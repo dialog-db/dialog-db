@@ -140,6 +140,20 @@ impl Transaction {
     }
 }
 
+impl dialog_artifacts::Update for Transaction {
+    fn associate(&mut self, the: ArtifactsAttribute, of: Entity, is: Value) {
+        self.insert(The::from(the), of, Change::Assert(is));
+    }
+
+    fn associate_unique(&mut self, the: ArtifactsAttribute, of: Entity, is: Value) {
+        self.replace(The::from(the), of, Change::Assert(is));
+    }
+
+    fn dissociate(&mut self, the: ArtifactsAttribute, of: Entity, is: Value) {
+        self.insert(The::from(the), of, Change::Retract(is));
+    }
+}
+
 impl Default for Transaction {
     fn default() -> Self {
         Self::new()

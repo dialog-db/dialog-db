@@ -14,6 +14,7 @@ use crate::{Key, State};
 pub mod state;
 
 mod commit;
+mod edit;
 mod fetch;
 #[cfg(all(test, feature = "integration-tests"))]
 mod integration_tests;

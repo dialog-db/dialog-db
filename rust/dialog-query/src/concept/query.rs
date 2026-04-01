@@ -294,7 +294,7 @@ mod tests {
     use crate::source::test::TestEnv;
     use crate::{
         AttributeDescriptor, Cardinality, DeductiveRule, Negation, Parameters, Premise,
-        Proposition, Term, Transaction, Type, Value,
+        Proposition, Term, Type, Value,
     };
 
     // Note: Async tests are commented out due to Rust recursion limit issues in test compilation
@@ -313,18 +313,20 @@ mod tests {
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        {
-            let mut tx = Transaction::new();
-            tx.assert(
+        branch
+            .edit()
+            .assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
             .assert(the!("person/age").of(alice.clone()).is(25u32))
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
-            .assert(the!("person/age").of(bob.clone()).is(30u32));
-            branch.commit(tx.into_stream()).perform(&operator).await?;
-        }
+            .assert(the!("person/age").of(bob.clone()).is(30u32))
+            .commit()
+            .perform(&operator)
+            .await?;
+
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         // Create a person concept
@@ -408,16 +410,18 @@ mod tests {
 
         let alice = Entity::new()?;
 
-        {
-            let mut tx = Transaction::new();
-            tx.assert(
+        branch
+            .edit()
+            .assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
-            .assert(the!("person/age").of(alice.clone()).is(25u32));
-            branch.commit(tx.into_stream()).perform(&operator).await?;
-        }
+            .assert(the!("person/age").of(alice.clone()).is(25u32))
+            .commit()
+            .perform(&operator)
+            .await?;
+
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         // Create a person concept
@@ -721,14 +725,17 @@ mod tests {
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        let mut tx = Transaction::new();
-        tx.assert(
-            the!("person/name")
-                .of(alice.clone())
-                .is("Alice".to_string()),
-        );
-        tx.assert(the!("person/name").of(bob.clone()).is("Bob".to_string()));
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let concept = ConceptDescriptor::from(vec![(
             "name",
@@ -783,18 +790,19 @@ mod tests {
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        {
-            let mut tx = Transaction::new();
-            tx.assert(
+        branch
+            .edit()
+            .assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
             .assert(the!("person/age").of(alice.clone()).is(25u32))
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
-            .assert(the!("person/age").of(bob.clone()).is(30u32));
-            branch.commit(tx.into_stream()).perform(&operator).await?;
-        }
+            .assert(the!("person/age").of(bob.clone()).is(30u32))
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let concept = ConceptDescriptor::from(vec![
             (
@@ -858,18 +866,19 @@ mod tests {
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        {
-            let mut tx = Transaction::new();
-            tx.assert(
+        branch
+            .edit()
+            .assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
             .assert(the!("person/age").of(alice.clone()).is(25u32))
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
-            .assert(the!("person/age").of(bob.clone()).is(30u32));
-            branch.commit(tx.into_stream()).perform(&operator).await?;
-        }
+            .assert(the!("person/age").of(bob.clone()).is(30u32))
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let concept = ConceptDescriptor::from(vec![
             (

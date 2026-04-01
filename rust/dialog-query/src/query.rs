@@ -31,7 +31,7 @@ mod tests {
     use crate::attribute::query::AttributeQuery;
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
-    use crate::{Term, Transaction, the};
+    use crate::{Term, the};
     use anyhow::Result;
     use dialog_repository::helpers::{test_operator, test_repo};
 
@@ -44,15 +44,18 @@ mod tests {
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        let mut tx = Transaction::new();
-        tx.assert(the!("user/name").of(alice.clone()).is("Alice".to_string()));
-        tx.assert(
-            the!("user/email")
-                .of(alice.clone())
-                .is("alice@example.com".to_string()),
-        );
-        tx.assert(the!("user/name").of(bob.clone()).is("Bob".to_string()));
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(the!("user/name").of(alice.clone()).is("Alice".to_string()))
+            .assert(
+                the!("user/email")
+                    .of(alice.clone())
+                    .is("alice@example.com".to_string()),
+            )
+            .assert(the!("user/name").of(bob.clone()).is("Bob".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let alice_query = AttributeQuery::new(
             Term::from(the!("user/name")),
@@ -119,9 +122,12 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
-        let mut tx = Transaction::new();
-        tx.assert(the!("user/name").of(alice.clone()).is("Alice".to_string()));
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(the!("user/name").of(alice.clone()).is("Alice".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let fact_selector = AttributeQuery::new(
             Term::from(the!("user/name")),
@@ -147,12 +153,15 @@ mod tests {
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        let mut tx = Transaction::new();
-        tx.assert(the!("user/name").of(alice.clone()).is("Alice".to_string()));
-        tx.assert(the!("user/role").of(alice.clone()).is("admin".to_string()));
-        tx.assert(the!("user/name").of(bob.clone()).is("Bob".to_string()));
-        tx.assert(the!("user/role").of(bob.clone()).is("user".to_string()));
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(the!("user/name").of(alice.clone()).is("Alice".to_string()))
+            .assert(the!("user/role").of(alice.clone()).is("admin".to_string()))
+            .assert(the!("user/name").of(bob.clone()).is("Bob".to_string()))
+            .assert(the!("user/role").of(bob.clone()).is("user".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let admin_result = AttributeQuery::new(

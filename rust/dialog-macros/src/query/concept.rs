@@ -404,15 +404,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         // Implement Statement trait
         impl dialog_query::Statement for #struct_name {
-            fn assert(self, transaction: &mut dialog_query::Transaction) {
+            fn assert(self, update: &mut impl dialog_query::Update) {
                 #(
-                    dialog_query::Statement::assert(#instance_expressions, transaction);
+                    dialog_query::Statement::assert(#instance_expressions, update);
                 )*
             }
 
-            fn retract(self, transaction: &mut dialog_query::Transaction) {
+            fn retract(self, update: &mut impl dialog_query::Update) {
                 #(
-                    dialog_query::Statement::retract(#instance_expressions, transaction);
+                    dialog_query::Statement::retract(#instance_expressions, update);
                 )*
             }
         }
@@ -422,7 +422,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             type Output = dialog_query::Retraction<Self>;
 
             fn not(self) -> Self::Output {
-                dialog_query::Statement::revert(self)
+                dialog_query::StatementExt::revert(self)
             }
         }
 

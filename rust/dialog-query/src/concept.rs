@@ -127,7 +127,7 @@ mod tests {
     use crate::term::Term;
     use crate::the;
     use crate::types::Any;
-    use crate::{Cardinality, Concept, Match, Statement, Transaction};
+    use crate::{Cardinality, Concept, Match, Statement};
     use anyhow::Result;
     use dialog_capability::Provider;
     use dialog_common::ConditionalSync;
@@ -237,20 +237,20 @@ mod tests {
     }
 
     impl Statement for Person {
-        fn assert(self, transaction: &mut Transaction) {
+        fn assert(self, update: &mut impl dialog_artifacts::Update) {
             let name_the = the!("person/name");
             let age_the = the!("person/age");
 
-            transaction.associate(name_the, self.this.clone(), Value::from(self.name));
-            transaction.associate(age_the, self.this.clone(), Value::from(self.age));
+            update.associate(name_the.into(), self.this.clone(), Value::from(self.name));
+            update.associate(age_the.into(), self.this.clone(), Value::from(self.age));
         }
 
-        fn retract(self, transaction: &mut Transaction) {
+        fn retract(self, update: &mut impl dialog_artifacts::Update) {
             let name_the = the!("person/name");
             let age_the = the!("person/age");
 
-            transaction.dissociate(name_the, self.this.clone(), Value::from(self.name));
-            transaction.dissociate(age_the, self.this.clone(), Value::from(self.age));
+            update.dissociate(name_the.into(), self.this.clone(), Value::from(self.name));
+            update.dissociate(age_the.into(), self.this.clone(), Value::from(self.age));
         }
     }
 
@@ -553,13 +553,16 @@ mod tests {
 
         let alice = Entity::new()?;
 
-        let mut tx = Transaction::new();
-        tx.assert(
-            the!("person/name")
-                .of(alice.clone())
-                .is("Alice".to_string()),
-        );
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let missing_query = AttributeQuery::new(
             Term::from(the!("person/name")),
@@ -605,9 +608,8 @@ mod tests {
         let bob = Entity::new()?;
         let mallory = Entity::new()?;
 
-        let mut transaction = Transaction::new();
-
-        transaction
+        branch
+            .edit()
             .assert(Employee {
                 this: alice.clone(),
                 name: employee::Name("Alice".to_string()),
@@ -627,10 +629,8 @@ mod tests {
                 the!("employee/role")
                     .of(mallory.clone())
                     .is("Hacker".to_string()),
-            );
-
-        branch
-            .commit(transaction.into_stream())
+            )
+            .commit()
             .perform(&operator)
             .await?;
 
@@ -697,9 +697,12 @@ mod tests {
             age: person::Age(25),
         };
 
-        let mut tx = Transaction::new();
-        tx.assert(alice_person.clone());
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(alice_person.clone())
+            .commit()
+            .perform(&operator)
+            .await?;
 
         // Verify Alice exists
         use futures_util::TryStreamExt;
@@ -738,9 +741,12 @@ mod tests {
         assert_eq!(age_facts[0].is, Value::UnsignedInt(25), "Age should be 25");
 
         // Now retract using !operator
-        let mut tx = Transaction::new();
-        tx.retract(alice_person);
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .retract(alice_person)
+            .commit()
+            .perform(&operator)
+            .await?;
 
         // Verify Alice has been retracted
         let name_facts_after: Vec<_> = branch
@@ -793,9 +799,12 @@ mod tests {
             .is("Alice".to_string())
             .into();
 
-        let mut tx = Transaction::new();
-        tx.assert(name_relation.clone());
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(name_relation.clone())
+            .commit()
+            .perform(&operator)
+            .await?;
 
         // Verify relation exists
         use futures_util::TryStreamExt;
@@ -813,9 +822,12 @@ mod tests {
         assert_eq!(facts.len(), 1, "Should have name relation");
 
         // Retract using .revert()
-        let mut tx = Transaction::new();
-        tx.retract(name_relation);
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .retract(name_relation)
+            .commit()
+            .perform(&operator)
+            .await?;
 
         // Verify relation has been retracted
         let facts_after: Vec<_> = branch
@@ -881,9 +893,12 @@ mod tests {
             birthday: person_attr_concept::Birthday(19830703),
         };
 
-        let mut tx = Transaction::new();
-        tx.assert(alice.clone());
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(alice.clone())
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let name_query = AttributeQuery::new(
             Term::from(the!("person-attr-concept/name")),
@@ -943,10 +958,13 @@ mod tests {
             birthday: person_attr_concept::Birthday(19900515),
         };
 
-        let mut tx = Transaction::new();
-        tx.assert(alice);
-        tx.assert(bob);
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(alice)
+            .assert(bob)
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let query = Query::<DerivedPerson> {
             this: Term::var("person"),
@@ -994,10 +1012,13 @@ mod tests {
             birthday: person_attr_concept::Birthday(19900515),
         };
 
-        let mut tx = Transaction::new();
-        tx.assert(alice);
-        tx.assert(bob);
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(alice)
+            .assert(bob)
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let query = Query::<DerivedPerson> {
             this: Term::var("person"),
@@ -1031,9 +1052,12 @@ mod tests {
             email: person_attr_concept::Email("alice@example.com".to_string()),
         };
 
-        let mut tx = Transaction::new();
-        tx.assert(alice_with_email);
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(alice_with_email)
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let alice_with_birthday = DerivedPerson {
             this: alice_id.clone(),
@@ -1041,9 +1065,12 @@ mod tests {
             birthday: person_attr_concept::Birthday(19830703),
         };
 
-        let mut tx = Transaction::new();
-        tx.assert(alice_with_birthday);
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(alice_with_birthday)
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let name_query = AttributeQuery::new(
             Term::from(the!("person-attr-concept/name")),
@@ -1107,13 +1134,19 @@ mod tests {
             birthday: person_attr_concept::Birthday(19830703),
         };
 
-        let mut tx = Transaction::new();
-        tx.assert(alice.clone());
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(alice.clone())
+            .commit()
+            .perform(&operator)
+            .await?;
 
-        let mut tx = Transaction::new();
-        tx.retract(alice);
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .retract(alice)
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let name_query = AttributeQuery::new(
             Term::from(the!("person-attr-concept/name")),
@@ -1175,18 +1208,21 @@ mod tests {
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        let mut edit = Transaction::new();
-        edit.assert(ShortcutEmployee {
-            this: alice.clone(),
-            name: shortcut_employee::Name("Alice".into()),
-            job: shortcut_employee::Job("Engineer".into()),
-        })
-        .assert(ShortcutEmployee {
-            this: bob.clone(),
-            name: shortcut_employee::Name("Bob".into()),
-            job: shortcut_employee::Job("Designer".into()),
-        });
-        branch.commit(edit.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(ShortcutEmployee {
+                this: alice.clone(),
+                name: shortcut_employee::Name("Alice".into()),
+                job: shortcut_employee::Job("Engineer".into()),
+            })
+            .assert(ShortcutEmployee {
+                this: bob.clone(),
+                name: shortcut_employee::Name("Bob".into()),
+                job: shortcut_employee::Job("Designer".into()),
+            })
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let employees_shortcut: Vec<ShortcutEmployee> = Query::<ShortcutEmployee>::default()
@@ -1230,13 +1266,16 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
 
-        let mut edit = Transaction::new();
-        edit.assert(ShortcutEmployee {
-            this: alice.clone(),
-            name: shortcut_employee::Name("Alice".into()),
-            job: shortcut_employee::Job("Engineer".into()),
-        });
-        branch.commit(edit.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(ShortcutEmployee {
+                this: alice.clone(),
+                name: shortcut_employee::Name("Alice".into()),
+                job: shortcut_employee::Job("Engineer".into()),
+            })
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let result1: Vec<ShortcutEmployee> = Query::<ShortcutEmployee>::default()
@@ -1308,11 +1347,11 @@ mod tests {
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        let mut transaction = Transaction::new();
-        transaction.assert(helper_person::Name::of(alice).is("Alice"));
-        transaction.assert(helper_person::Name::of(bob).is("Bob"));
         branch
-            .commit(transaction.into_stream())
+            .edit()
+            .assert(helper_person::Name::of(alice).is("Alice"))
+            .assert(helper_person::Name::of(bob).is("Bob"))
+            .commit()
             .perform(&operator)
             .await?;
 
@@ -1346,13 +1385,13 @@ mod tests {
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        let mut transaction = Transaction::new();
-        transaction.assert(helper_employee::Name::of(alice.clone()).is("Alice"));
-        transaction.assert(helper_employee::Department::of(alice.clone()).is("Engineering"));
-        transaction.assert(helper_employee::Name::of(bob.clone()).is("Bob"));
-        transaction.assert(helper_employee::Department::of(bob).is("Sales"));
         branch
-            .commit(transaction.into_stream())
+            .edit()
+            .assert(helper_employee::Name::of(alice.clone()).is("Alice"))
+            .assert(helper_employee::Department::of(alice.clone()).is("Engineering"))
+            .assert(helper_employee::Name::of(bob.clone()).is("Bob"))
+            .assert(helper_employee::Department::of(bob).is("Sales"))
+            .commit()
             .perform(&operator)
             .await?;
 
@@ -1381,13 +1420,13 @@ mod tests {
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        let mut transaction = Transaction::new();
-        transaction.assert(helper_employee::Name::of(alice.clone()).is("Alice"));
-        transaction.assert(helper_employee::Department::of(alice.clone()).is("Engineering"));
-        transaction.assert(helper_employee::Name::of(bob.clone()).is("Bob"));
-        transaction.assert(helper_employee::Department::of(bob.clone()).is("Sales"));
         branch
-            .commit(transaction.into_stream())
+            .edit()
+            .assert(helper_employee::Name::of(alice.clone()).is("Alice"))
+            .assert(helper_employee::Department::of(alice.clone()).is("Engineering"))
+            .assert(helper_employee::Name::of(bob.clone()).is("Bob"))
+            .assert(helper_employee::Department::of(bob.clone()).is("Sales"))
+            .commit()
             .perform(&operator)
             .await?;
 

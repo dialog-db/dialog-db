@@ -297,7 +297,6 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use crate::Transaction;
     use crate::query::Output;
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
@@ -312,13 +311,12 @@ mod tests {
 
         let alice = Entity::new()?;
 
-        let mut tx = Transaction::new();
-        tx.assert(
-            the!("person/name")
-                .of(alice.clone())
-                .is("Alice".to_string()),
-        );
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(the!("person/name").of(alice.clone()).is("Alice".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let query = AttributeQueryAll::new(
             Term::from(the!("person/name")),
@@ -346,14 +344,17 @@ mod tests {
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        let mut tx = Transaction::new();
-        tx.assert(
-            the!("person/name")
-                .of(alice.clone())
-                .is("Alice".to_string()),
-        );
-        tx.assert(the!("person/name").of(bob.clone()).is("Bob".to_string()));
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let query = AttributeQueryAll::new(
             Term::from(the!("person/name")),
@@ -380,21 +381,27 @@ mod tests {
 
         let alice = Entity::new()?;
 
-        let mut tx = Transaction::new();
-        tx.assert(
-            the!("person/name")
-                .of(alice.clone())
-                .is("Alice".to_string()),
-        );
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
 
-        let mut tx = Transaction::new();
-        tx.assert(
-            the!("person/name")
-                .of(alice.clone())
-                .is("Alicia".to_string()),
-        );
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alicia".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let query = AttributeQueryAll::new(
             Term::from(the!("person/name")),
@@ -423,18 +430,21 @@ mod tests {
 
         let alice = Entity::new()?;
 
-        let mut tx = Transaction::new();
-        tx.assert(
-            the!("person/name")
-                .of(alice.clone())
-                .is("Alice".to_string()),
-        );
-        tx.assert(
-            the!("person/name")
-                .of(alice.clone())
-                .is("Alicia".to_string()),
-        );
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alicia".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let query = AttributeQueryAll::new(
             Term::from(the!("person/name")),

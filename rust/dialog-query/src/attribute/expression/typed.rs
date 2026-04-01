@@ -6,7 +6,8 @@ use crate::descriptor::Descriptor;
 use crate::negation::Negation;
 use crate::statement::Statement;
 use crate::types::Scalar;
-use crate::{Cardinality, Entity, Premise, Proposition, Term, Transaction};
+use crate::{Cardinality, Entity, Premise, Proposition, Term};
+use dialog_artifacts::Update;
 use std::iter;
 use std::marker::PhantomData;
 use std::ops::Not;
@@ -155,24 +156,24 @@ where
     A: Attribute + Descriptor<AttributeDescriptor> + Clone,
     Is: Into<A>,
 {
-    fn assert(self, transaction: &mut Transaction) {
+    fn assert(self, update: &mut impl Update) {
         let (of, is, _) = self.into_parts();
         let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
         let the = desc.the().clone();
         let attr: A = is.into();
         let value = attr.value().clone().into();
         if desc.cardinality() == Cardinality::One {
-            transaction.associate_unique(the, of, value);
+            update.associate_unique(the.into(), of, value);
         } else {
-            transaction.associate(the, of, value);
+            update.associate(the.into(), of, value);
         }
     }
 
-    fn retract(self, transaction: &mut Transaction) {
+    fn retract(self, update: &mut impl Update) {
         let (of, is, _) = self.into_parts();
         let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
         let attr: A = is.into();
-        transaction.dissociate(desc.the().clone(), of, attr.value().clone().into());
+        update.dissociate(desc.the().clone().into(), of, attr.value().clone().into());
     }
 }
 
@@ -270,6 +271,7 @@ mod tests {
 
     use super::*;
     use crate::Match;
+    use crate::Transaction;
     use crate::artifact::Value;
     use crate::premise::Premise;
     use crate::proposition::Proposition;
@@ -482,9 +484,12 @@ mod tests {
 
         let alice = Entity::new()?;
 
-        let mut tx = Transaction::new();
-        tx.assert(person::Name::of(alice.clone()).is("Alice"));
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(person::Name::of(alice.clone()).is("Alice"))
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let premise: Premise = person::Name::of(alice.clone())
             .is(Term::<String>::var("name"))

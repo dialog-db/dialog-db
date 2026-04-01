@@ -233,7 +233,6 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use crate::Transaction;
     use crate::query::Output;
     use crate::selection::{Match, Selection};
     use crate::session::RuleRegistry;
@@ -243,10 +242,10 @@ mod tests {
 
     macro_rules! assert_relation {
         ($branch:expr, $operator:expr, $the:expr, $of:expr, $is:expr) => {{
-            let mut tx = Transaction::new();
-            tx.assert($the.clone().of($of.clone()).is($is));
             $branch
-                .commit(tx.into_stream())
+                .edit()
+                .assert($the.clone().of($of.clone()).is($is))
+                .commit()
                 .perform($operator)
                 .await
                 .unwrap();
@@ -262,9 +261,12 @@ mod tests {
         let alice = Entity::new()?;
         let name_attr = the!("person/name");
 
-        let mut tx = Transaction::new();
-        tx.assert(name_attr.clone().of(alice.clone()).is("Alice".to_string()));
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(name_attr.clone().of(alice.clone()).is("Alice".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let query = DynamicAttributeQuery::new(
             Term::from(the!("person/name")),
@@ -304,13 +306,19 @@ mod tests {
         let alice = Entity::new()?;
         let name_attr = the!("person/name");
 
-        let mut tx = Transaction::new();
-        tx.assert(name_attr.clone().of(alice.clone()).is("Alice".to_string()));
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(name_attr.clone().of(alice.clone()).is("Alice".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
 
-        let mut tx = Transaction::new();
-        tx.assert(name_attr.clone().of(alice.clone()).is("Alicia".to_string()));
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(name_attr.clone().of(alice.clone()).is("Alicia".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let query = DynamicAttributeQuery::new(
             Term::from(the!("person/name")),
@@ -566,9 +574,12 @@ mod tests {
         let alice = Entity::new()?;
         let name_attr = the!("person/name");
 
-        let mut tx = Transaction::new();
-        tx.assert(name_attr.of(alice.clone()).is("Alice".to_string()));
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(name_attr.of(alice.clone()).is("Alice".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let query = DynamicAttributeQuery::new(
             Term::from(the!("person/name")),
@@ -599,9 +610,12 @@ mod tests {
         let alice = Entity::new()?;
         let name_attr = the!("person/name");
 
-        let mut tx = Transaction::new();
-        tx.assert(name_attr.clone().of(alice.clone()).is("Alice".to_string()));
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(name_attr.clone().of(alice.clone()).is("Alice".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let query = DynamicAttributeQuery::new(
             Term::from(the!("person/name")),
@@ -638,9 +652,12 @@ mod tests {
             .is("Alice".to_string())
             .into();
 
-        let mut tx = Transaction::new();
-        tx.assert(alice_name.clone());
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(alice_name.clone())
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let query = DynamicAttributeQuery::new(
             Term::from(the!("user/name")),
@@ -657,9 +674,12 @@ mod tests {
         assert_eq!(results[0].of(), &alice);
         assert_eq!(results[0].is(), &crate::Value::String("Alice".to_string()));
 
-        let mut tx = Transaction::new();
-        tx.retract(alice_name);
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .retract(alice_name)
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let query2 = DynamicAttributeQuery::new(
             Term::from(the!("user/name")),
@@ -685,9 +705,12 @@ mod tests {
 
         let alice = Entity::new()?;
 
-        let mut tx = Transaction::new();
-        tx.assert(the!("user/name").of(alice.clone()).is("Alice".to_string()));
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(the!("user/name").of(alice.clone()).is("Alice".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let query = DynamicAttributeQuery::new(
             Term::from(the!("user/name")),
@@ -718,10 +741,13 @@ mod tests {
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        let mut tx = Transaction::new();
-        tx.assert(the!("user/name").of(alice.clone()).is("Alice".to_string()));
-        tx.assert(the!("user/name").of(bob.clone()).is("Bob".to_string()));
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(the!("user/name").of(alice.clone()).is("Alice".to_string()))
+            .assert(the!("user/name").of(bob.clone()).is("Bob".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let query = DynamicAttributeQuery::new(
             Term::from(the!("user/name")),
@@ -755,9 +781,12 @@ mod tests {
 
         let alice = Entity::new()?;
 
-        let mut tx = Transaction::new();
-        tx.assert(the!("user/name").of(alice.clone()).is("Alice".to_string()));
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(the!("user/name").of(alice.clone()).is("Alice".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let query = DynamicAttributeQuery::new(
             Term::from(the!("user/name")),
@@ -782,13 +811,16 @@ mod tests {
 
         let alice = Entity::new()?;
 
-        let mut tx = Transaction::new();
-        tx.assert(
-            the!("person/name")
-                .of(alice.clone())
-                .is("Alice".to_string()),
-        );
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let premise: Premise = the!("person/name")
             .of(alice.clone())
@@ -825,9 +857,12 @@ mod tests {
 
         let alice = Entity::new()?;
 
-        let mut tx = Transaction::new();
-        tx.assert(person::Name::of(alice.clone()).is("Alice"));
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(person::Name::of(alice.clone()).is("Alice"))
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let premise: Premise = person::Name::of(alice.clone())
             .is(Term::<String>::var("name"))

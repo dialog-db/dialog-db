@@ -379,9 +379,9 @@ mod tests {
         let bob = Entity::new()?;
         let mallory = Entity::new()?;
 
-        {
-            let mut tx = Transaction::new();
-            tx.assert(
+        branch
+            .edit()
+            .assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alice".to_string()),
@@ -393,9 +393,11 @@ mod tests {
                 the!("person/name")
                     .of(mallory.clone())
                     .is("Mallory".to_string()),
-            );
-            branch.commit(tx.into_stream()).perform(&operator).await?;
-        }
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
         let session = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let person = ConceptDescriptor::from([
@@ -535,10 +537,13 @@ mod tests {
             .with("age", 30usize)
             .build()?;
 
-        let mut tx = Transaction::new();
-        tx.assert(alice);
-        tx.assert(bob);
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(alice)
+            .assert(bob)
+            .commit()
+            .perform(&operator)
+            .await?;
         let session = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let name_param = Term::var("name");

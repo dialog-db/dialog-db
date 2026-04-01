@@ -21,7 +21,6 @@ thiserror = { workspace = true }
 
 # Dialog-DB dependencies
 dialog-artifacts = { workspace = true }
-dialog-repository = { workspace = true }
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true, features = ["helpers"] }
 dialog-effects = { workspace = true }

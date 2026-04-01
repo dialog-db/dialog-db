@@ -296,17 +296,17 @@ mod tests {
     use crate::query::Output;
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
-    use crate::{Transaction, Value, the};
+    use crate::{Value, the};
     use dialog_artifacts::{Artifact, Cause};
     use dialog_repository::helpers::{test_operator, test_repo};
     use std::str::FromStr;
 
     macro_rules! assert_relation {
         ($branch:expr, $operator:expr, $the:expr, $of:expr, $is:expr) => {{
-            let mut tx = Transaction::new();
-            tx.assert($the.clone().of($of.clone()).is($is));
             $branch
-                .commit(tx.into_stream())
+                .edit()
+                .assert($the.clone().of($of.clone()).is($is))
+                .commit()
                 .perform($operator)
                 .await
                 .unwrap();
@@ -444,32 +444,28 @@ mod tests {
         let entity = Entity::new()?;
 
         // Assert two competing values for the same (attribute, entity) pair.
-        {
-            let mut tx = Transaction::new();
-            tx.assert(
+        branch
+            .edit()
+            .assert(
                 the!("person/name")
                     .of(entity.clone())
                     .is("Alice".to_string()),
-            );
-            branch
-                .commit(tx.into_stream())
-                .perform(&operator)
-                .await
-                .unwrap();
-        }
-        {
-            let mut tx = Transaction::new();
-            tx.assert(
+            )
+            .commit()
+            .perform(&operator)
+            .await
+            .unwrap();
+        branch
+            .edit()
+            .assert(
                 the!("person/name")
                     .of(entity.clone())
                     .is("Alicia".to_string()),
-            );
-            branch
-                .commit(tx.into_stream())
-                .perform(&operator)
-                .await
-                .unwrap();
-        }
+            )
+            .commit()
+            .perform(&operator)
+            .await
+            .unwrap();
 
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         // First, determine which value is the actual winner via an
@@ -532,32 +528,28 @@ mod tests {
 
         let entity = Entity::new()?;
 
-        {
-            let mut tx = Transaction::new();
-            tx.assert(
+        branch
+            .edit()
+            .assert(
                 the!("person/name")
                     .of(entity.clone())
                     .is("Alice".to_string()),
-            );
-            branch
-                .commit(tx.into_stream())
-                .perform(&operator)
-                .await
-                .unwrap();
-        }
-        {
-            let mut tx = Transaction::new();
-            tx.assert(
+            )
+            .commit()
+            .perform(&operator)
+            .await
+            .unwrap();
+        branch
+            .edit()
+            .assert(
                 the!("person/name")
                     .of(entity.clone())
                     .is("Alicia".to_string()),
-            );
-            branch
-                .commit(tx.into_stream())
-                .perform(&operator)
-                .await
-                .unwrap();
-        }
+            )
+            .commit()
+            .perform(&operator)
+            .await
+            .unwrap();
 
         // Determine the winner via EAV (entity known, value unknown).
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
@@ -622,32 +614,28 @@ mod tests {
 
         let entity = Entity::new()?;
 
-        {
-            let mut tx = Transaction::new();
-            tx.assert(
+        branch
+            .edit()
+            .assert(
                 the!("person/name")
                     .of(entity.clone())
                     .is("Alice".to_string()),
-            );
-            branch
-                .commit(tx.into_stream())
-                .perform(&operator)
-                .await
-                .unwrap();
-        }
-        {
-            let mut tx = Transaction::new();
-            tx.assert(
+            )
+            .commit()
+            .perform(&operator)
+            .await
+            .unwrap();
+        branch
+            .edit()
+            .assert(
                 the!("person/name")
                     .of(entity.clone())
                     .is("Alicia".to_string()),
-            );
-            branch
-                .commit(tx.into_stream())
-                .perform(&operator)
-                .await
-                .unwrap();
-        }
+            )
+            .commit()
+            .perform(&operator)
+            .await
+            .unwrap();
 
         // Determine the winner via EAV.
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());

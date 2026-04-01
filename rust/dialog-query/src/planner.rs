@@ -264,7 +264,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_executes_planned_query() -> anyhow::Result<()> {
-        use crate::Transaction;
         use crate::attribute::query::AttributeQuery;
         use crate::session::RuleRegistry;
         use crate::source::test::TestEnv;
@@ -280,18 +279,19 @@ mod tests {
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        {
-            let mut tx = Transaction::new();
-            tx.assert(
+        branch
+            .edit()
+            .assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
             .assert(the!("person/age").of(alice.clone()).is(25u32))
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
-            .assert(the!("person/age").of(bob.clone()).is(30u32));
-            branch.commit(tx.into_stream()).perform(&operator).await?;
-        }
+            .assert(the!("person/age").of(bob.clone()).is(30u32))
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let fact1 = AttributeQuery::new(
             Term::from(the!("person/name")),

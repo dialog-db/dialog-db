@@ -3,24 +3,22 @@ pub use crate::error::TransactionError;
 pub use crate::session::transaction::{Edit, Transaction};
 use std::ops::Not;
 
-/// A domain-level write operation that can be asserted or retracted.
-///
-/// `Statement` is the high-level write API. Types like [`Association`],
-/// [`StaticAttributeStatement<A>`](crate::attribute::expression::typed::StaticAttributeStatement), and user-defined concept structs
-/// implement this trait. Asserting a statement adds facts to the knowledge
-/// base; retracting it removes them. The [`Retraction`] wrapper inverts the
-/// direction — asserting a `Retraction<S>` retracts the inner statement.
-pub trait Statement: Sized {
-    /// Asserts the statement into a given transaction.
-    fn assert(self, transaction: &mut Transaction);
-    /// Retracts the statement from a given transaction.
-    fn retract(self, transaction: &mut Transaction);
+// Re-export Statement and Update from dialog-artifacts
+pub use dialog_artifacts::{Statement, Update};
 
+/// Extension trait adding `revert()` to all [`Statement`] implementors.
+///
+/// The core [`Statement`] trait lives in `dialog-artifacts` and provides
+/// `assert`/`retract`. This extension adds a convenience method that wraps
+/// the statement in a [`Retraction`], inverting its merge direction.
+pub trait StatementExt: Statement {
     /// Creates a statement that is inverse of this one.
     fn revert(self) -> Retraction<Self> {
         Retraction(self)
     }
 }
+
+impl<S: Statement> StatementExt for S {}
 
 impl<S: Statement> Edit for S {
     fn merge(self, transaction: &mut Transaction) {
@@ -34,7 +32,7 @@ impl<S: Statement> Edit for S {
 /// a `Retraction<S>` calls `S::retract` instead of `S::assert`, effectively
 /// undoing the original statement. Applying `Not` to a `Retraction` recovers the
 /// original statement.
-pub struct Retraction<S: Statement>(S);
+pub struct Retraction<S: Statement>(pub S);
 impl<S: Statement> Edit for Retraction<S> {
     fn merge(self, transaction: &mut Transaction) {
         self.0.retract(transaction);

@@ -9,8 +9,9 @@ use crate::source::SelectRules;
 use crate::statement::Statement;
 use crate::term::Term;
 use crate::types::{Scalar, Typed};
-use crate::{Claim, Premise, Proposition, Transaction};
+use crate::{Claim, Premise, Proposition};
 use dialog_artifacts::Select;
+use dialog_artifacts::Update;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use std::ops::Not;
@@ -151,23 +152,23 @@ where
 
 // Statement: requires all three positions to be concrete.
 impl<Is: Scalar> Statement for DynamicAttributeExpression<The, Entity, Is> {
-    fn assert(self, transaction: &mut Transaction) {
+    fn assert(self, update: &mut impl Update) {
         let the = self.the;
         let value: Value = self.is.into();
         match self.cardinality {
             Some(Cardinality::One) => {
-                transaction.associate_unique(the, self.of, value);
+                update.associate_unique(the.into(), self.of, value);
             }
             _ => {
-                transaction.associate(the, self.of, value);
+                update.associate(the.into(), self.of, value);
             }
         }
     }
 
-    fn retract(self, transaction: &mut Transaction) {
+    fn retract(self, update: &mut impl Update) {
         let the = self.the;
         let value: Value = self.is.into();
-        transaction.dissociate(the, self.of, value);
+        update.dissociate(the.into(), self.of, value);
     }
 }
 
@@ -227,7 +228,7 @@ mod tests {
 
     use super::*;
 
-    use crate::{Match, the};
+    use crate::{Match, Transaction, the};
 
     #[dialog_common::test]
     fn it_asserts_with_string() {
@@ -430,13 +431,16 @@ mod tests {
 
         let alice = Entity::new()?;
 
-        let mut tx = Transaction::new();
-        tx.assert(
-            the!("person/name")
-                .of(alice.clone())
-                .is("Alice".to_string()),
-        );
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+        branch
+            .edit()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let premise: Premise = the!("person/name")
             .of(alice.clone())
@@ -474,11 +478,14 @@ mod tests {
         let bob = Entity::new()?;
 
         // Assert multiple relations between alice and bob
-        let mut tx = Transaction::new();
-        tx.assert(the!("team/colleague").of(alice.clone()).is(bob.clone()))
+        branch
+            .edit()
+            .assert(the!("team/colleague").of(alice.clone()).is(bob.clone()))
             .assert(the!("team/manager").of(alice.clone()).is(bob.clone()))
-            .assert(the!("team/mentor").of(alice.clone()).is(bob.clone()));
-        branch.commit(tx.into_stream()).perform(&operator).await?;
+            .assert(the!("team/mentor").of(alice.clone()).is(bob.clone()))
+            .commit()
+            .perform(&operator)
+            .await?;
 
         // Use Term::<The>::var to find all relations between alice and bob
         let premise: Premise = Term::<The>::var("relation")

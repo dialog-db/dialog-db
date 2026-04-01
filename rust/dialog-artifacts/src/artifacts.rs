@@ -19,6 +19,9 @@ pub use query::{ArtifactStream, Select};
 mod store;
 pub use store::*;
 
+mod update;
+pub use update::{Change, ChangeStream, Changes, Statement, Update};
+
 mod attribute;
 pub use attribute::*;
 

@@ -17,9 +17,10 @@ use crate::term::Term;
 use crate::types::Scalar;
 use crate::{
     Cardinality, Entity, EvaluationError, Field, Parameters, Proposition, Requirement, Schema,
-    Statement, Transaction, Type, Value,
+    Statement, Type, Value,
 };
 use dialog_artifacts::Select;
+use dialog_artifacts::Update;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 
@@ -300,14 +301,14 @@ impl ConceptStatement {
 }
 
 impl Statement for ConceptStatement {
-    fn assert(self, transaction: &mut Transaction) {
+    fn assert(self, update: &mut impl Update) {
         for attribution in self.with {
-            transaction.associate(attribution.the.into(), self.this.clone(), attribution.is);
+            update.associate(attribution.the, self.this.clone(), attribution.is);
         }
     }
-    fn retract(self, transaction: &mut Transaction) {
+    fn retract(self, update: &mut impl Update) {
         for attribution in self.with {
-            transaction.dissociate(attribution.the.into(), self.this.clone(), attribution.is);
+            update.dissociate(attribution.the, self.this.clone(), attribution.is);
         }
     }
 }
@@ -316,7 +317,7 @@ impl Not for ConceptStatement {
     type Output = Retraction<Self>;
 
     fn not(self) -> Self::Output {
-        self.revert()
+        Retraction(self)
     }
 }
 

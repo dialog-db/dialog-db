@@ -71,9 +71,7 @@ mod tests {
     use crate::statement::Statement;
     use crate::term::Term;
     use crate::the;
-    use crate::{
-        AttributeStatement, EvaluationError, Parameters, Proposition, Query, Session, Transaction,
-    };
+    use crate::{AttributeStatement, EvaluationError, Parameters, Proposition, Query, Session};
     use dialog_artifacts::Select;
     use dialog_capability::Provider;
     use dialog_common::ConditionalSync;
@@ -186,26 +184,26 @@ mod tests {
     }
 
     impl Statement for Person {
-        fn assert(self, transaction: &mut Transaction) {
+        fn assert(self, update: &mut impl dialog_artifacts::Update) {
             the!("person/name")
                 .of(self.this.clone())
                 .is(self.name.clone())
-                .assert(transaction);
+                .assert(update);
             the!("person/age")
                 .of(self.this.clone())
                 .is(self.age)
-                .assert(transaction);
+                .assert(update);
         }
 
-        fn retract(self, transaction: &mut Transaction) {
+        fn retract(self, update: &mut impl dialog_artifacts::Update) {
             the!("person/name")
                 .of(self.this.clone())
                 .is(self.name.clone())
-                .retract(transaction);
+                .retract(update);
             the!("person/age")
                 .of(self.this.clone())
                 .is(self.age)
-                .retract(transaction);
+                .retract(update);
         }
     }
 

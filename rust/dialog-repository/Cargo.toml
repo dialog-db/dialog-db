@@ -22,6 +22,7 @@ ucan = ["s3", "dep:dialog-remote-ucan-s3", "dep:dialog-ucan", "dialog-capability
 dialog-artifacts = { workspace = true }
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
+dialog-query = { workspace = true }
 dialog-credentials = { workspace = true }
 dialog-effects = { workspace = true }
 dialog-ucan = { workspace = true, optional = true }

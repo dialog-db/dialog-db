@@ -1227,6 +1227,7 @@ dependencies = [
  "dialog-credentials",
  "dialog-effects",
  "dialog-prolly-tree",
+ "dialog-query",
  "dialog-remote-s3",
  "dialog-remote-ucan-s3",
  "dialog-storage",
