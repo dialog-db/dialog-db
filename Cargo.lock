@@ -964,6 +964,7 @@ dependencies = [
 name = "dialog-credentials"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base58",
  "dialog-capability",
  "dialog-common",
