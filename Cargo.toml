@@ -29,7 +29,6 @@ members = [
     "rust/dialog-query",
     "rust/dialog-search-tree",
     "rust/dialog-storage",
-    "rust/dialog-s3-credentials",
     "rust/dialog-ucan",
     "rust/dialog-varsig",
     "rust/dialog-blobs",
@@ -184,9 +183,6 @@ path = "./rust/dialog-macros"
 
 [workspace.dependencies.dialog-query]
 path = "./rust/dialog-query"
-
-[workspace.dependencies.dialog-s3-credentials]
-path = "./rust/dialog-s3-credentials"
 
 [workspace.dependencies.dialog-blobs]
 path = "./rust/dialog-blobs"
