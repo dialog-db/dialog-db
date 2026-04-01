@@ -280,7 +280,7 @@ mod tests {
         let bob = Entity::new()?;
 
         branch
-            .edit()
+            .transaction()
             .assert(
                 the!("person/name")
                     .of(alice.clone())

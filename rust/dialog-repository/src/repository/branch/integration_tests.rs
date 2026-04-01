@@ -205,6 +205,7 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> anyhow::Result
 
     // Verify Bob can query Alice's artifact
     let results: Vec<_> = bob_branch
+        .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
         .perform(&operator)
         .await?
@@ -286,6 +287,7 @@ async fn it_two_party_convergence(s3: S3Address) -> anyhow::Result<()> {
 
     // Both should have both artifacts
     let alice_results: Vec<_> = alice_branch
+        .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
         .perform(&operator)
         .await?
@@ -295,6 +297,7 @@ async fn it_two_party_convergence(s3: S3Address) -> anyhow::Result<()> {
         .collect::<Result<Vec<_>, _>>()?;
 
     let bob_results: Vec<_> = bob_branch
+        .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
         .perform(&operator)
         .await?
@@ -434,6 +437,7 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> anyhow::Res
 
     // Verify Bob has Alice's artifact
     let bob_results: Vec<_> = bob_branch
+        .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
         .perform(&bob_operator)
         .await?
@@ -464,6 +468,7 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> anyhow::Res
 
     // Alice should have both artifacts
     let alice_results: Vec<_> = alice_branch
+        .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
         .perform(&alice_operator)
         .await?
@@ -538,6 +543,7 @@ async fn it_pushes_and_pulls_via_ucan(ucan: UcanS3Address) -> anyhow::Result<()>
 
     // Verify data survives select
     let results: Vec<_> = branch
+        .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
         .perform(&operator)
         .await?
@@ -610,6 +616,7 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> anyhow::Re
         .await?;
 
     let no_remote_result = bob_branch
+        .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
         .perform(&operator)
         .await;
@@ -630,6 +637,7 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> anyhow::Re
 
     // Now query replicates tree blocks on demand from the remote
     let results: Vec<_> = bob_branch
+        .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
         .perform(&operator)
         .await?
@@ -653,6 +661,7 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> anyhow::Re
 
     // Query again with no remote. Data should be cached locally.
     let cached_results: Vec<_> = bob_branch
+        .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
         .perform(&operator)
         .await?

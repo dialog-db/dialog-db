@@ -1,11 +1,11 @@
 use dialog_capability::{Did, Subject};
 use dialog_prolly_tree::{GeometricDistribution, Tree};
+use dialog_query::query::Application;
 use dialog_storage::Blake3Hash;
 
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{ArtifactSelector, Datum};
+use dialog_artifacts::Datum;
 
 use crate::repository::RemoteSelector;
 use crate::{Key, State};
@@ -16,6 +16,7 @@ pub mod state;
 mod commit;
 mod edit;
 mod fetch;
+mod index;
 #[cfg(all(test, feature = "integration-tests"))]
 mod integration_tests;
 mod load;
@@ -36,6 +37,8 @@ pub use open::OpenBranch;
 pub use pull::{Pull, PullLocal};
 pub use push::Push;
 pub use reset::Reset;
+// Select is used internally by index module
+#[allow(unused_imports)]
 pub use select::Select;
 pub use selector::*;
 pub use set_upstream::SetUpstream;
@@ -130,9 +133,9 @@ impl Branch {
         Commit::new(self, instructions)
     }
 
-    /// Create a command to select artifacts from this branch.
-    pub fn select(&self, selector: ArtifactSelector<Constrained>) -> Select<'_> {
-        Select::new(self, selector)
+    /// Query with an application. Shortcut for `branch.query().select(query)`.
+    pub fn select<Q: Application>(&self, query: Q) -> session::SelectQuery<'_, Q> {
+        session::SelectQuery::new(self, query)
     }
 
     /// Create a command to reset the branch to a given revision.

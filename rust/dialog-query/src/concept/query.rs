@@ -314,7 +314,7 @@ mod tests {
         let bob = Entity::new()?;
 
         branch
-            .edit()
+            .transaction()
             .assert(
                 the!("person/name")
                     .of(alice.clone())
@@ -411,7 +411,7 @@ mod tests {
         let alice = Entity::new()?;
 
         branch
-            .edit()
+            .transaction()
             .assert(
                 the!("person/name")
                     .of(alice.clone())
@@ -726,7 +726,7 @@ mod tests {
         let bob = Entity::new()?;
 
         branch
-            .edit()
+            .transaction()
             .assert(
                 the!("person/name")
                     .of(alice.clone())
@@ -791,7 +791,7 @@ mod tests {
         let bob = Entity::new()?;
 
         branch
-            .edit()
+            .transaction()
             .assert(
                 the!("person/name")
                     .of(alice.clone())
@@ -867,7 +867,7 @@ mod tests {
         let bob = Entity::new()?;
 
         branch
-            .edit()
+            .transaction()
             .assert(
                 the!("person/name")
                     .of(alice.clone())

@@ -554,7 +554,7 @@ mod tests {
         let alice = Entity::new()?;
 
         branch
-            .edit()
+            .transaction()
             .assert(
                 the!("person/name")
                     .of(alice.clone())
@@ -609,7 +609,7 @@ mod tests {
         let mallory = Entity::new()?;
 
         branch
-            .edit()
+            .transaction()
             .assert(Employee {
                 this: alice.clone(),
                 name: employee::Name("Alice".to_string()),
@@ -698,7 +698,7 @@ mod tests {
         };
 
         branch
-            .edit()
+            .transaction()
             .assert(alice_person.clone())
             .commit()
             .perform(&operator)
@@ -711,6 +711,7 @@ mod tests {
         let age_attr: ArtifactsAttribute = "person/age".parse()?;
 
         let name_facts: Vec<_> = branch
+            .claims()
             .select(
                 ArtifactSelector::new()
                     .the(name_attr.clone())
@@ -728,6 +729,7 @@ mod tests {
         );
 
         let age_facts: Vec<_> = branch
+            .claims()
             .select(
                 ArtifactSelector::new()
                     .the(age_attr.clone())
@@ -742,7 +744,7 @@ mod tests {
 
         // Now retract using !operator
         branch
-            .edit()
+            .transaction()
             .retract(alice_person)
             .commit()
             .perform(&operator)
@@ -750,6 +752,7 @@ mod tests {
 
         // Verify Alice has been retracted
         let name_facts_after: Vec<_> = branch
+            .claims()
             .select(
                 ArtifactSelector::new()
                     .the(name_attr.clone())
@@ -766,6 +769,7 @@ mod tests {
         );
 
         let age_facts_after: Vec<_> = branch
+            .claims()
             .select(
                 ArtifactSelector::new()
                     .the(age_attr.clone())
@@ -800,7 +804,7 @@ mod tests {
             .into();
 
         branch
-            .edit()
+            .transaction()
             .assert(name_relation.clone())
             .commit()
             .perform(&operator)
@@ -810,6 +814,7 @@ mod tests {
         use futures_util::TryStreamExt;
 
         let facts: Vec<_> = branch
+            .claims()
             .select(
                 ArtifactSelector::new()
                     .the(name_attr.clone().into())
@@ -823,7 +828,7 @@ mod tests {
 
         // Retract using .revert()
         branch
-            .edit()
+            .transaction()
             .retract(name_relation)
             .commit()
             .perform(&operator)
@@ -831,6 +836,7 @@ mod tests {
 
         // Verify relation has been retracted
         let facts_after: Vec<_> = branch
+            .claims()
             .select(
                 ArtifactSelector::new()
                     .the(name_attr.clone().into())
@@ -894,7 +900,7 @@ mod tests {
         };
 
         branch
-            .edit()
+            .transaction()
             .assert(alice.clone())
             .commit()
             .perform(&operator)
@@ -959,7 +965,7 @@ mod tests {
         };
 
         branch
-            .edit()
+            .transaction()
             .assert(alice)
             .assert(bob)
             .commit()
@@ -1013,7 +1019,7 @@ mod tests {
         };
 
         branch
-            .edit()
+            .transaction()
             .assert(alice)
             .assert(bob)
             .commit()
@@ -1053,7 +1059,7 @@ mod tests {
         };
 
         branch
-            .edit()
+            .transaction()
             .assert(alice_with_email)
             .commit()
             .perform(&operator)
@@ -1066,7 +1072,7 @@ mod tests {
         };
 
         branch
-            .edit()
+            .transaction()
             .assert(alice_with_birthday)
             .commit()
             .perform(&operator)
@@ -1135,14 +1141,14 @@ mod tests {
         };
 
         branch
-            .edit()
+            .transaction()
             .assert(alice.clone())
             .commit()
             .perform(&operator)
             .await?;
 
         branch
-            .edit()
+            .transaction()
             .retract(alice)
             .commit()
             .perform(&operator)
@@ -1209,7 +1215,7 @@ mod tests {
         let bob = Entity::new()?;
 
         branch
-            .edit()
+            .transaction()
             .assert(ShortcutEmployee {
                 this: alice.clone(),
                 name: shortcut_employee::Name("Alice".into()),
@@ -1267,7 +1273,7 @@ mod tests {
         let alice = Entity::new()?;
 
         branch
-            .edit()
+            .transaction()
             .assert(ShortcutEmployee {
                 this: alice.clone(),
                 name: shortcut_employee::Name("Alice".into()),
@@ -1348,7 +1354,7 @@ mod tests {
         let bob = Entity::new()?;
 
         branch
-            .edit()
+            .transaction()
             .assert(helper_person::Name::of(alice).is("Alice"))
             .assert(helper_person::Name::of(bob).is("Bob"))
             .commit()
@@ -1386,7 +1392,7 @@ mod tests {
         let bob = Entity::new()?;
 
         branch
-            .edit()
+            .transaction()
             .assert(helper_employee::Name::of(alice.clone()).is("Alice"))
             .assert(helper_employee::Department::of(alice.clone()).is("Engineering"))
             .assert(helper_employee::Name::of(bob.clone()).is("Bob"))
@@ -1421,7 +1427,7 @@ mod tests {
         let bob = Entity::new()?;
 
         branch
-            .edit()
+            .transaction()
             .assert(helper_employee::Name::of(alice.clone()).is("Alice"))
             .assert(helper_employee::Department::of(alice.clone()).is("Engineering"))
             .assert(helper_employee::Name::of(bob.clone()).is("Bob"))

@@ -243,7 +243,7 @@ mod tests {
     macro_rules! assert_relation {
         ($branch:expr, $operator:expr, $the:expr, $of:expr, $is:expr) => {{
             $branch
-                .edit()
+                .transaction()
                 .assert($the.clone().of($of.clone()).is($is))
                 .commit()
                 .perform($operator)
@@ -262,7 +262,7 @@ mod tests {
         let name_attr = the!("person/name");
 
         branch
-            .edit()
+            .transaction()
             .assert(name_attr.clone().of(alice.clone()).is("Alice".to_string()))
             .commit()
             .perform(&operator)
@@ -307,14 +307,14 @@ mod tests {
         let name_attr = the!("person/name");
 
         branch
-            .edit()
+            .transaction()
             .assert(name_attr.clone().of(alice.clone()).is("Alice".to_string()))
             .commit()
             .perform(&operator)
             .await?;
 
         branch
-            .edit()
+            .transaction()
             .assert(name_attr.clone().of(alice.clone()).is("Alicia".to_string()))
             .commit()
             .perform(&operator)
@@ -575,7 +575,7 @@ mod tests {
         let name_attr = the!("person/name");
 
         branch
-            .edit()
+            .transaction()
             .assert(name_attr.of(alice.clone()).is("Alice".to_string()))
             .commit()
             .perform(&operator)
@@ -611,7 +611,7 @@ mod tests {
         let name_attr = the!("person/name");
 
         branch
-            .edit()
+            .transaction()
             .assert(name_attr.clone().of(alice.clone()).is("Alice".to_string()))
             .commit()
             .perform(&operator)
@@ -653,7 +653,7 @@ mod tests {
             .into();
 
         branch
-            .edit()
+            .transaction()
             .assert(alice_name.clone())
             .commit()
             .perform(&operator)
@@ -675,7 +675,7 @@ mod tests {
         assert_eq!(results[0].is(), &crate::Value::String("Alice".to_string()));
 
         branch
-            .edit()
+            .transaction()
             .retract(alice_name)
             .commit()
             .perform(&operator)
@@ -706,7 +706,7 @@ mod tests {
         let alice = Entity::new()?;
 
         branch
-            .edit()
+            .transaction()
             .assert(the!("user/name").of(alice.clone()).is("Alice".to_string()))
             .commit()
             .perform(&operator)
@@ -742,7 +742,7 @@ mod tests {
         let bob = Entity::new()?;
 
         branch
-            .edit()
+            .transaction()
             .assert(the!("user/name").of(alice.clone()).is("Alice".to_string()))
             .assert(the!("user/name").of(bob.clone()).is("Bob".to_string()))
             .commit()
@@ -782,7 +782,7 @@ mod tests {
         let alice = Entity::new()?;
 
         branch
-            .edit()
+            .transaction()
             .assert(the!("user/name").of(alice.clone()).is("Alice".to_string()))
             .commit()
             .perform(&operator)
@@ -812,7 +812,7 @@ mod tests {
         let alice = Entity::new()?;
 
         branch
-            .edit()
+            .transaction()
             .assert(
                 the!("person/name")
                     .of(alice.clone())
@@ -858,7 +858,7 @@ mod tests {
         let alice = Entity::new()?;
 
         branch
-            .edit()
+            .transaction()
             .assert(person::Name::of(alice.clone()).is("Alice"))
             .commit()
             .perform(&operator)

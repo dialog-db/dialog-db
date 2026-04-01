@@ -49,7 +49,12 @@ pub(crate) mod test {
             &self,
             input: ArtifactSelector<Constrained>,
         ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
-            let stream = self.branch.select(input).perform(self.operator).await?;
+            let stream = self
+                .branch
+                .claims()
+                .select(input)
+                .perform(self.operator)
+                .await?;
             Ok(Box::pin(stream))
         }
     }

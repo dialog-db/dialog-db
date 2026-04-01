@@ -41,7 +41,7 @@ mod tests {
 
         {
             branch
-                .edit()
+                .transaction()
                 .assert(
                     the!("person/name")
                         .of(alice.clone())
@@ -199,7 +199,7 @@ mod tests {
             .build()?;
 
         branch
-            .edit()
+            .transaction()
             .assert(alice)
             .assert(bob)
             .commit()
@@ -340,7 +340,7 @@ mod tests {
         };
 
         branch
-            .edit()
+            .transaction()
             .assert(alice)
             .assert(bob)
             .commit()
@@ -468,7 +468,7 @@ mod tests {
             .build()?;
 
         branch
-            .edit()
+            .transaction()
             .assert(alice)
             .assert(bob)
             .commit()
@@ -695,7 +695,7 @@ mod tests {
         rules.register(rule_m)?;
 
         branch
-            .edit()
+            .transaction()
             .assert(Note {
                 this: Entity::new()?,
                 title: note_like_test::Title("Hello World".into()),
@@ -794,7 +794,7 @@ mod tests {
         rules.register(rule_n)?;
 
         branch
-            .edit()
+            .transaction()
             .assert(Note {
                 this: Entity::new()?,
                 title: note_not_like_test::Title("Draft: My Ideas".into()),
@@ -900,7 +900,7 @@ mod tests {
         rules.register(rule_e)?;
 
         branch
-            .edit()
+            .transaction()
             .assert(Employee {
                 this: Entity::new()?,
                 name: Name("Alice".into()),
@@ -1188,7 +1188,7 @@ mod tests {
 
         {
             branch
-                .edit()
+                .transaction()
                 .assert(
                     the!("person/name")
                         .of(alice.clone())
@@ -1256,7 +1256,7 @@ mod tests {
 
         {
             branch
-                .edit()
+                .transaction()
                 .assert(
                     the!("person/name")
                         .of(alice.clone())

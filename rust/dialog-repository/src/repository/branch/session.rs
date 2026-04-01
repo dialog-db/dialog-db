@@ -25,12 +25,12 @@ use crate::repository::branch::state::UpstreamState;
 ///
 /// Created by [`Branch::session`]. Install rules with `.install()`,
 /// then run queries with `.query(q).perform(&operator)`.
-pub struct Session<'a> {
+pub struct QuerySession<'a> {
     branch: &'a Branch,
     rules: RuleRegistry,
 }
 
-impl<'a> Session<'a> {
+impl<'a> QuerySession<'a> {
     /// Install a deductive rule.
     pub fn install<M, W>(mut self, rule: impl Fn(M) -> W) -> Result<Self, EvaluationError>
     where
@@ -49,27 +49,38 @@ impl<'a> Session<'a> {
         Ok(self)
     }
 
-    /// Start a query. Call `.perform(&operator)` on the result to execute.
-    pub fn query<Q: Application>(&self, query: Q) -> QueryCommand<'_, Q> {
-        QueryCommand {
-            session: self,
-            query,
-        }
-    }
-
-    /// Alias for [`query`](Session::query).
-    pub fn select<Q: Application>(&self, query: Q) -> QueryCommand<'_, Q> {
-        self.query(query)
+    /// Select with a query application. Call `.perform(&operator)` to execute.
+    pub fn select<Q: Application>(&self, query: Q) -> SelectQuery<'_, Q> {
+        SelectQuery::with_rules(self.branch, self.rules.clone(), query)
     }
 }
 
 /// A query command ready to be performed against an environment.
-pub struct QueryCommand<'a, Q> {
-    session: &'a Session<'a>,
+pub struct SelectQuery<'a, Q> {
+    branch: &'a Branch,
+    rules: RuleRegistry,
     query: Q,
 }
 
-impl<'a, Q: Application> QueryCommand<'a, Q> {
+impl<'a, Q> SelectQuery<'a, Q> {
+    pub(crate) fn new(branch: &'a Branch, query: Q) -> Self {
+        Self {
+            branch,
+            rules: RuleRegistry::new(),
+            query,
+        }
+    }
+
+    fn with_rules(branch: &'a Branch, rules: RuleRegistry, query: Q) -> Self {
+        Self {
+            branch,
+            rules,
+            query,
+        }
+    }
+}
+
+impl<'a, Q: Application> SelectQuery<'a, Q> {
     /// Execute the query, returning a stream of results.
     pub fn perform<Env>(self, env: &'a Env) -> impl Output<Q::Conclusion> + 'a
     where
@@ -87,10 +98,7 @@ impl<'a, Q: Application> QueryCommand<'a, Q> {
             + ConditionalSync
             + 'static,
     {
-        let source = SessionEnv {
-            session: self.session,
-            env,
-        };
+        let source = QueryEnv::new(self.branch, env, self.rules);
         let query = self.query;
         async_stream::try_stream! {
             let results = Box::pin(query.perform(&source));
@@ -101,24 +109,32 @@ impl<'a, Q: Application> QueryCommand<'a, Q> {
     }
 }
 
-/// Internal type that bridges Session + Env for the query engine.
-struct SessionEnv<'a, Env> {
-    session: &'a Session<'a>,
+/// Bridges a Branch + Env + RuleRegistry for the query engine's Provider bounds.
+pub(crate) struct QueryEnv<'a, Env> {
+    branch: &'a Branch,
     env: &'a Env,
+    rules: RuleRegistry,
 }
 
-impl<Env> Clone for SessionEnv<'_, Env> {
+impl<'a, Env> QueryEnv<'a, Env> {
+    pub(crate) fn new(branch: &'a Branch, env: &'a Env, rules: RuleRegistry) -> Self {
+        Self { branch, env, rules }
+    }
+}
+
+impl<Env> Clone for QueryEnv<'_, Env> {
     fn clone(&self) -> Self {
         Self {
-            session: self.session,
+            branch: self.branch,
             env: self.env,
+            rules: self.rules.clone(),
         }
     }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<'a, Env> Provider<Select<'a>> for SessionEnv<'a, Env>
+impl<'a, Env> Provider<Select<'a>> for QueryEnv<'a, Env>
 where
     Env: Provider<archive_fx::Get>
         + Provider<archive_fx::Put>
@@ -138,17 +154,12 @@ where
         &self,
         input: ArtifactSelector<Constrained>,
     ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
-        let select = self.session.branch.select(input);
+        let select = self.branch.claims().select(input);
 
-        let remote = match self.session.branch.upstream() {
-            Some(UpstreamState::Remote { name, .. }) => self
-                .session
-                .branch
-                .remote(name)
-                .load()
-                .perform(self.env)
-                .await
-                .ok(),
+        let remote = match self.branch.upstream() {
+            Some(UpstreamState::Remote { name, .. }) => {
+                self.branch.remote(name).load().perform(self.env).await.ok()
+            }
             _ => None,
         };
 
@@ -160,16 +171,16 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Env: ConditionalSync> Provider<SelectRules> for SessionEnv<'_, Env> {
+impl<Env: ConditionalSync> Provider<SelectRules> for QueryEnv<'_, Env> {
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
-        self.session.rules.acquire(&input)
+        self.rules.acquire(&input)
     }
 }
 
 impl Branch {
     /// Open a query session on this branch.
-    pub fn session(&self) -> Session<'_> {
-        Session {
+    pub fn query(&self) -> QuerySession<'_> {
+        QuerySession {
             branch: self,
             rules: RuleRegistry::new(),
         }

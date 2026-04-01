@@ -219,7 +219,7 @@ mod tests {
         let alice = Entity::new()?;
 
         branch
-            .edit()
+            .transaction()
             .assert(person::Name::of(alice.clone()).is("Alice"))
             .commit()
             .perform(&operator)
@@ -256,14 +256,14 @@ mod tests {
         let bob = Entity::new()?;
 
         branch
-            .edit()
+            .transaction()
             .assert(person::Name::of(alice.clone()).is("Alice"))
             .commit()
             .perform(&operator)
             .await?;
 
         branch
-            .edit()
+            .transaction()
             .assert(person::Name::of(bob.clone()).is("Bob"))
             .commit()
             .perform(&operator)

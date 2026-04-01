@@ -304,7 +304,7 @@ mod tests {
     macro_rules! assert_relation {
         ($branch:expr, $operator:expr, $the:expr, $of:expr, $is:expr) => {{
             $branch
-                .edit()
+                .transaction()
                 .assert($the.clone().of($of.clone()).is($is))
                 .commit()
                 .perform($operator)
@@ -445,7 +445,7 @@ mod tests {
 
         // Assert two competing values for the same (attribute, entity) pair.
         branch
-            .edit()
+            .transaction()
             .assert(
                 the!("person/name")
                     .of(entity.clone())
@@ -456,7 +456,7 @@ mod tests {
             .await
             .unwrap();
         branch
-            .edit()
+            .transaction()
             .assert(
                 the!("person/name")
                     .of(entity.clone())
@@ -529,7 +529,7 @@ mod tests {
         let entity = Entity::new()?;
 
         branch
-            .edit()
+            .transaction()
             .assert(
                 the!("person/name")
                     .of(entity.clone())
@@ -540,7 +540,7 @@ mod tests {
             .await
             .unwrap();
         branch
-            .edit()
+            .transaction()
             .assert(
                 the!("person/name")
                     .of(entity.clone())
@@ -615,7 +615,7 @@ mod tests {
         let entity = Entity::new()?;
 
         branch
-            .edit()
+            .transaction()
             .assert(
                 the!("person/name")
                     .of(entity.clone())
@@ -626,7 +626,7 @@ mod tests {
             .await
             .unwrap();
         branch
-            .edit()
+            .transaction()
             .assert(
                 the!("person/name")
                     .of(entity.clone())

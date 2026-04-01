@@ -432,7 +432,7 @@ mod tests {
         let alice = Entity::new()?;
 
         branch
-            .edit()
+            .transaction()
             .assert(
                 the!("person/name")
                     .of(alice.clone())
@@ -479,7 +479,7 @@ mod tests {
 
         // Assert multiple relations between alice and bob
         branch
-            .edit()
+            .transaction()
             .assert(the!("team/colleague").of(alice.clone()).is(bob.clone()))
             .assert(the!("team/manager").of(alice.clone()).is(bob.clone()))
             .assert(the!("team/mentor").of(alice.clone()).is(bob.clone()))

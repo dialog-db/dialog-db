@@ -36,7 +36,7 @@ impl Branch {
     ///
     /// Use `.assert()` and `.retract()` to accumulate changes,
     /// then `.commit().perform(&env)` to apply them.
-    pub fn edit(&self) -> Transaction<'_> {
+    pub fn transaction(&self) -> Transaction<'_> {
         Transaction {
             branch: self,
             changes: Changes::new(),

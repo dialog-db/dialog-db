@@ -45,7 +45,7 @@ mod tests {
         let bob = Entity::new()?;
 
         branch
-            .edit()
+            .transaction()
             .assert(the!("user/name").of(alice.clone()).is("Alice".to_string()))
             .assert(
                 the!("user/email")
@@ -123,7 +123,7 @@ mod tests {
 
         let alice = Entity::new()?;
         branch
-            .edit()
+            .transaction()
             .assert(the!("user/name").of(alice.clone()).is("Alice".to_string()))
             .commit()
             .perform(&operator)
@@ -154,7 +154,7 @@ mod tests {
         let bob = Entity::new()?;
 
         branch
-            .edit()
+            .transaction()
             .assert(the!("user/name").of(alice.clone()).is("Alice".to_string()))
             .assert(the!("user/role").of(alice.clone()).is("admin".to_string()))
             .assert(the!("user/name").of(bob.clone()).is("Bob".to_string()))

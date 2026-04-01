@@ -225,7 +225,7 @@ mod tests {
 
         // Select should find the artifact
         let selector = ArtifactSelector::new().the("user/name".parse()?);
-        let stream = branch.select(selector).perform(&operator).await?;
+        let stream = branch.claims().select(selector).perform(&operator).await?;
         tokio::pin!(stream);
 
         let results: Vec<_> = stream.filter_map(|r| async { r.ok() }).collect().await;

@@ -471,6 +471,7 @@ mod tests {
             .await?;
 
         let results: Vec<_> = branch
+            .claims()
             .select(ArtifactSelector::new().the("user/name".parse()?))
             .perform(&operator)
             .await?
@@ -532,6 +533,7 @@ mod tests {
             .await?;
 
         let results: Vec<_> = branch
+            .claims()
             .select(ArtifactSelector::new().of("user:alice".parse()?))
             .perform(&operator)
             .await?
@@ -558,6 +560,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let results: Vec<_> = branch
+            .claims()
             .select(ArtifactSelector::new().the("user/name".parse()?))
             .perform(&operator)
             .await?
@@ -597,6 +600,7 @@ mod tests {
 
         // Verify it's there
         let before: Vec<_> = branch
+            .claims()
             .select(ArtifactSelector::new().the("user/name".parse()?))
             .perform(&operator)
             .await?
@@ -613,6 +617,7 @@ mod tests {
             .await?;
 
         let after: Vec<_> = branch
+            .claims()
             .select(ArtifactSelector::new().the("user/name".parse()?))
             .perform(&operator)
             .await?
@@ -787,7 +792,7 @@ mod tests {
             let branch = repo.branch("main").open().perform(&operator).await?;
 
             branch
-                .edit()
+                .transaction()
                 .assert(Employee {
                     this: Entity::new()?,
                     name: employee::Name("Alice".into()),
@@ -803,8 +808,8 @@ mod tests {
                 .await?;
 
             let results: Vec<Employee> = branch
-                .session()
-                .query(Query::<Employee> {
+                .query()
+                .select(Query::<Employee> {
                     this: Term::var("this"),
                     name: Term::var("name"),
                     role: Term::var("role"),
