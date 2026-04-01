@@ -57,7 +57,7 @@ mod tests {
     use std::vec::IntoIter;
 
     use super::*;
-    use crate::artifact::{Artifacts, Entity, Type};
+    use crate::artifact::{Entity, Type};
     use crate::attribute::{AttributeDescriptor, Cardinality};
     use crate::concept::descriptor::ConceptDescriptor;
     use crate::concept::query::ConceptQuery;
@@ -71,7 +71,7 @@ mod tests {
     use crate::statement::Statement;
     use crate::term::Term;
     use crate::the;
-    use crate::{AttributeStatement, EvaluationError, Parameters, Proposition, Query, Session};
+    use crate::{AttributeStatement, EvaluationError, Parameters, Proposition, Query};
     use dialog_artifacts::Select;
     use dialog_capability::Provider;
     use dialog_common::ConditionalSync;
@@ -291,8 +291,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_installs_rule() {
-        use dialog_storage::MemoryStorageBackend;
-
         // Define a rule function using the clean API
         fn person_rule(person: Query<Person>) -> impl When {
             (Query::<Person> {
@@ -302,12 +300,19 @@ mod tests {
             },)
         }
 
-        // Create a session
-        let storage = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage).await.unwrap();
-
-        let result = Session::open(artifacts).install(person_rule);
-        assert!(result.is_ok(), "install should work");
+        // Verify rule installs into registry
+        use crate::ConceptDescriptor;
+        use crate::rule::deductive::DeductiveRule;
+        use crate::session::RuleRegistry;
+        let mut rules = RuleRegistry::new();
+        let person_query = Query::<Person>::default();
+        let concept: ConceptDescriptor = person_query.into();
+        let premises = person_rule(Query::<Person>::default())
+            .into_premises()
+            .into_vec();
+        let rule = DeductiveRule::new(concept, premises).unwrap();
+        let result = rules.register(rule);
+        assert!(result.is_ok(), "register should work");
     }
 
     mod macro_person {

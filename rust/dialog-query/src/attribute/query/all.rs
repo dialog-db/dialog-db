@@ -313,7 +313,11 @@ mod tests {
 
         branch
             .edit()
-            .assert(the!("person/name").of(alice.clone()).is("Alice".to_string()))
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
             .commit()
             .perform(&operator)
             .await?;

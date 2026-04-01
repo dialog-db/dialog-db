@@ -228,16 +228,16 @@ mod tests {
 
     use super::*;
 
-    use crate::{Match, Transaction, the};
+    use crate::{Changes, Match, the};
 
     #[dialog_common::test]
     fn it_asserts_with_string() {
         let alice = Entity::new().unwrap();
         let statement = the!("person/name").of(alice).is("Alice".to_string());
 
-        let mut transaction = Transaction::new();
-        statement.assert(&mut transaction);
-        assert!(!transaction.is_empty());
+        let mut changes = Changes::new();
+        statement.assert(&mut changes);
+        assert!(!changes.is_empty());
     }
 
     #[dialog_common::test]
@@ -245,9 +245,9 @@ mod tests {
         let alice = Entity::new().unwrap();
         let statement = the!("person/age").of(alice).is(25u32);
 
-        let mut transaction = Transaction::new();
-        statement.assert(&mut transaction);
-        assert!(!transaction.is_empty());
+        let mut changes = Changes::new();
+        statement.assert(&mut changes);
+        assert!(!changes.is_empty());
     }
 
     #[dialog_common::test]
@@ -255,9 +255,9 @@ mod tests {
         let alice = Entity::new().unwrap();
         let statement = the!("person/name").of(alice).is("Alice".to_string());
 
-        let mut transaction = Transaction::new();
-        statement.retract(&mut transaction);
-        assert!(!transaction.is_empty());
+        let mut changes = Changes::new();
+        statement.retract(&mut changes);
+        assert!(!changes.is_empty());
     }
 
     #[dialog_common::test]
@@ -368,9 +368,9 @@ mod tests {
         let expr = the!("person/name")
             .of(alice.clone())
             .is("Alice".to_string());
-        let mut transaction = Transaction::new();
-        expr.assert(&mut transaction);
-        assert!(!transaction.is_empty());
+        let mut changes = Changes::new();
+        expr.assert(&mut changes);
+        assert!(!changes.is_empty());
 
         let expression = the!("person/name").of(alice).is("Alice".to_string());
         let premise: Premise = expression.into();
@@ -413,9 +413,9 @@ mod tests {
             .is("Alice".to_string())
             .cardinality(Cardinality::One);
 
-        let mut transaction = Transaction::new();
-        statement.assert(&mut transaction);
-        assert!(!transaction.is_empty());
+        let mut changes = Changes::new();
+        statement.assert(&mut changes);
+        assert!(!changes.is_empty());
     }
 
     #[dialog_common::test]

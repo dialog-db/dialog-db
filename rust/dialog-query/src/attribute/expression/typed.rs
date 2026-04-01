@@ -270,8 +270,8 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
+    use crate::Changes;
     use crate::Match;
-    use crate::Transaction;
     use crate::artifact::Value;
     use crate::premise::Premise;
     use crate::proposition::Proposition;
@@ -290,9 +290,9 @@ mod tests {
         let alice = Entity::new().unwrap();
         let statement = person::Name::of(alice).is("Alice");
 
-        let mut transaction = Transaction::new();
-        statement.assert(&mut transaction);
-        assert!(!transaction.is_empty());
+        let mut changes = Changes::new();
+        statement.assert(&mut changes);
+        assert!(!changes.is_empty());
     }
 
     #[dialog_common::test]
@@ -300,9 +300,9 @@ mod tests {
         let alice = Entity::new().unwrap();
         let statement = person::Name::of(alice).is(person::Name("Alice".into()));
 
-        let mut transaction = Transaction::new();
-        statement.assert(&mut transaction);
-        assert!(!transaction.is_empty());
+        let mut changes = Changes::new();
+        statement.assert(&mut changes);
+        assert!(!changes.is_empty());
     }
 
     #[dialog_common::test]
@@ -310,9 +310,9 @@ mod tests {
         let alice = Entity::new().unwrap();
         let statement = person::Name::of(alice).is("Alice");
 
-        let mut transaction = Transaction::new();
-        statement.retract(&mut transaction);
-        assert!(!transaction.is_empty());
+        let mut changes = Changes::new();
+        statement.retract(&mut changes);
+        assert!(!changes.is_empty());
     }
 
     #[dialog_common::test]
@@ -451,9 +451,9 @@ mod tests {
         let alice = Entity::new().unwrap();
 
         let expr = person::Name::of(alice.clone()).is("Alice");
-        let mut transaction = Transaction::new();
-        expr.assert(&mut transaction);
-        assert!(!transaction.is_empty());
+        let mut changes = Changes::new();
+        expr.assert(&mut changes);
+        assert!(!changes.is_empty());
 
         let expression = person::Name::of(alice).is("Alice");
         let premise: Premise = expression.into();
