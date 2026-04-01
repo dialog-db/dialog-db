@@ -21,39 +21,46 @@ impl From<super::IndexedDbError> for ArchiveError {
 
 #[async_trait(?Send)]
 impl Provider<Get> for IndexedDb {
-    async fn execute(&mut self, effect: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
+    async fn execute(&self, effect: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
         let subject = effect.subject().into();
         let catalog = effect.catalog();
         let digest = effect.digest();
 
-        let store = format!("archive/{}", catalog);
+        let store_path = format!("archive/{}", catalog);
         let key = JsValue::from_str(&digest.as_bytes().to_base58());
 
-        self.open(&subject)
-            .await?
-            .store(&store)
-            .await?
-            .query(|object_store| async move {
-                let value = object_store.get(key).await.map_err(storage_error)?;
+        self.open(&subject).await?;
+        let mut session = self.take_session(&subject)?;
 
-                let Some(value) = value else {
-                    return Ok(None);
-                };
+        let result = async {
+            let store = session.store(&store_path).await?;
+            store
+                .query(|object_store| async move {
+                    let value = object_store.get(key).await.map_err(storage_error)?;
 
-                let bytes = value
-                    .dyn_into::<Uint8Array>()
-                    .map_err(|_| ArchiveError::Storage("Value is not Uint8Array".to_string()))?
-                    .to_vec();
+                    let Some(value) = value else {
+                        return Ok(None);
+                    };
 
-                Ok(Some(bytes))
-            })
-            .await
+                    let bytes = value
+                        .dyn_into::<Uint8Array>()
+                        .map_err(|_| ArchiveError::Storage("Value is not Uint8Array".to_string()))?
+                        .to_vec();
+
+                    Ok(Some(bytes))
+                })
+                .await
+        }
+        .await;
+
+        self.return_session(subject, session);
+        result
     }
 }
 
 #[async_trait(?Send)]
 impl Provider<Put> for IndexedDb {
-    async fn execute(&mut self, effect: Capability<Put>) -> Result<(), ArchiveError> {
+    async fn execute(&self, effect: Capability<Put>) -> Result<(), ArchiveError> {
         let subject = effect.subject().into();
         let catalog = effect.catalog();
         let digest = effect.digest();
@@ -68,22 +75,29 @@ impl Provider<Put> for IndexedDb {
             });
         }
 
-        let store = format!("archive/{}", catalog);
+        let store_path = format!("archive/{}", catalog);
         let key = JsValue::from_str(&digest.as_bytes().to_base58());
         let value: JsValue = to_uint8array(content).into();
 
-        self.open(&subject)
-            .await?
-            .store(&store)
-            .await?
-            .transact(|object_store| async move {
-                object_store
-                    .put(&value, Some(&key))
-                    .await
-                    .map_err(storage_error)?;
-                Ok(())
-            })
-            .await
+        self.open(&subject).await?;
+        let mut session = self.take_session(&subject)?;
+
+        let result = async {
+            let store = session.store(&store_path).await?;
+            store
+                .transact(|object_store| async move {
+                    object_store
+                        .put(&value, Some(&key))
+                        .await
+                        .map_err(storage_error)?;
+                    Ok(())
+                })
+                .await
+        }
+        .await;
+
+        self.return_session(subject, session);
+        result
     }
 }
 
@@ -102,7 +116,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_returns_none_for_missing_content() -> anyhow::Result<()> {
-        let mut provider = IndexedDb::new();
+        let provider = IndexedDb::new();
         let subject = unique_subject("archive-get-none");
         let digest = Blake3Hash::hash(b"nonexistent");
 
@@ -111,7 +125,7 @@ mod tests {
             .attenuate(Catalog::new("index"))
             .invoke(Get::new(digest));
 
-        let result = effect.perform(&mut provider).await?;
+        let result = effect.perform(&provider).await?;
         assert!(result.is_none());
 
         Ok(())
@@ -119,7 +133,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_stores_and_retrieves_content() -> anyhow::Result<()> {
-        let mut provider = IndexedDb::new();
+        let provider = IndexedDb::new();
         let subject = unique_subject("archive-put-get");
         let content = b"hello world".to_vec();
         let digest = Blake3Hash::hash(&content);
@@ -131,7 +145,7 @@ mod tests {
             .attenuate(Catalog::new("index"))
             .invoke(Put::new(digest.clone(), content.clone()));
 
-        put_effect.perform(&mut provider).await?;
+        put_effect.perform(&provider).await?;
 
         // Get content
         let get_effect = subject
@@ -139,7 +153,7 @@ mod tests {
             .attenuate(Catalog::new("index"))
             .invoke(Get::new(digest));
 
-        let result = get_effect.perform(&mut provider).await?;
+        let result = get_effect.perform(&provider).await?;
         assert_eq!(result, Some(content));
 
         Ok(())
@@ -147,7 +161,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_rejects_digest_mismatch() -> anyhow::Result<()> {
-        let mut provider = IndexedDb::new();
+        let provider = IndexedDb::new();
         let subject = unique_subject("archive-mismatch");
         let content = b"hello world".to_vec();
         let wrong_digest = Blake3Hash::hash(b"different content");
@@ -157,7 +171,7 @@ mod tests {
             .attenuate(Catalog::new("index"))
             .invoke(Put::new(wrong_digest, content));
 
-        let result = effect.perform(&mut provider).await;
+        let result = effect.perform(&provider).await;
         assert!(matches!(result, Err(ArchiveError::DigestMismatch { .. })));
 
         Ok(())
@@ -165,7 +179,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_handles_different_catalogs() -> anyhow::Result<()> {
-        let mut provider = IndexedDb::new();
+        let provider = IndexedDb::new();
         let subject = unique_subject("archive-catalogs");
         let content1 = b"content for catalog 1".to_vec();
         let content2 = b"content for catalog 2".to_vec();
@@ -178,7 +192,7 @@ mod tests {
             .attenuate(Archive)
             .attenuate(Catalog::new("catalog1"))
             .invoke(Put::new(digest1.clone(), content1.clone()))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         subject
@@ -186,7 +200,7 @@ mod tests {
             .attenuate(Archive)
             .attenuate(Catalog::new("catalog2"))
             .invoke(Put::new(digest2.clone(), content2.clone()))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         // Retrieve from catalog1
@@ -195,7 +209,7 @@ mod tests {
             .attenuate(Archive)
             .attenuate(Catalog::new("catalog1"))
             .invoke(Get::new(digest1))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
         assert_eq!(result1, Some(content1));
 
@@ -205,7 +219,7 @@ mod tests {
             .attenuate(Archive)
             .attenuate(Catalog::new("catalog2"))
             .invoke(Get::new(digest2.clone()))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
         assert_eq!(result2, Some(content2));
 
@@ -214,7 +228,7 @@ mod tests {
             .attenuate(Archive)
             .attenuate(Catalog::new("catalog1"))
             .invoke(Get::new(digest2))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
         assert!(cross.is_none());
 

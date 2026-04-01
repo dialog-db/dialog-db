@@ -29,7 +29,7 @@
 //! use std::path::PathBuf;
 //!
 //! # async fn example() -> anyhow::Result<()> {
-//! let mut provider = FileSystem::mount("file:///tmp/storage")?;
+//! let provider = FileSystem::mount("file:///tmp/storage")?;
 //! let digest = Blake3Hash::hash(b"hello");
 //!
 //! let effect = Subject::from(did!("key:z6Mk..."))
@@ -37,7 +37,7 @@
 //!     .attenuate(Catalog::new("index"))
 //!     .invoke(Get::new(digest));
 //!
-//! let result = effect.perform(&mut provider).await?;
+//! let result = effect.perform(&provider).await?;
 //! # Ok(())
 //! # }
 //! ```

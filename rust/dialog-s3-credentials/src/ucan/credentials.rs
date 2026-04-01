@@ -163,7 +163,7 @@ where
     Capability<Do>: ConditionalSend + S3Request,
 {
     async fn execute(
-        &mut self,
+        &self,
         authorized: Authorized<Do, UcanAuthorization>,
     ) -> Result<AuthorizedRequest, AccessError> {
         authorized
@@ -265,7 +265,7 @@ pub mod tests {
             .invoke(archive::Get {
                 digest: Blake3Hash::hash(b"hello"),
             })
-            .acquire(&mut session.clone())
+            .acquire(&session.clone())
             .await?;
 
         let authorization = read.authorization().invoke(&session).await?;
@@ -320,7 +320,7 @@ pub mod tests {
             });
 
         // Acquire authorization - should return Owned since subject == audience
-        let authorized = capability.acquire(&mut session.clone()).await?;
+        let authorized = capability.acquire(&session.clone()).await?;
 
         // Verify it's an Owned authorization
         match authorized.authorization() {
@@ -366,7 +366,7 @@ pub mod tests {
                 digest: Blake3Hash::hash(b"hello"),
             });
 
-        let result = capability.acquire(&mut session.clone()).await;
+        let result = capability.acquire(&session.clone()).await;
 
         assert!(
             result.is_ok(),
@@ -398,7 +398,7 @@ pub mod tests {
             .invoke(archive::Get {
                 digest: Blake3Hash::hash(b"hello"),
             })
-            .acquire(&mut session.clone())
+            .acquire(&session.clone())
             .await?;
 
         // Invoke the authorization - should create an Invocation with empty proofs

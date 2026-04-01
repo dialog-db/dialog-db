@@ -26,7 +26,7 @@
 //!     "my-bucket",
 //! );
 //! let credentials = S3Credentials::public(address)?;
-//! let mut bucket = S3::from_s3(credentials, issuer);
+//! let bucket = S3::from_s3(credentials, issuer);
 //!
 //! let subject: dialog_capability::Did = "did:key:zMySubject".parse().unwrap();
 //! Subject::from(subject)
@@ -36,7 +36,7 @@
 //!         key: b"key".to_vec().into(),
 //!         value: b"value".to_vec().into(),
 //!     })
-//!     .perform(&mut bucket)
+//!     .perform(&bucket)
 //!     .await?;
 //! # Ok(())
 //! # }
@@ -60,7 +60,7 @@
 //!     std::env::var("AWS_SECRET_ACCESS_KEY")?,
 //! )?;
 //!
-//! let mut bucket = S3::from_s3(credentials, issuer);
+//! let bucket = S3::from_s3(credentials, issuer);
 //!
 //! let subject: dialog_capability::Did = "did:key:zMySubject".parse().unwrap();
 //! Subject::from(subject)
@@ -70,7 +70,7 @@
 //!         key: b"key".to_vec().into(),
 //!         value: b"value".to_vec().into(),
 //!     })
-//!     .perform(&mut bucket)
+//!     .perform(&bucket)
 //!     .await?;
 //! # Ok(())
 //! # }
@@ -329,7 +329,7 @@ where
     Capability<Do>: ConditionalSend + S3Request,
 {
     async fn execute(
-        &mut self,
+        &self,
         authorized: Authorized<Do, dialog_s3_credentials::Authorization>,
     ) -> Result<AuthorizedRequest, AccessError> {
         self.credentials.execute(authorized).await
@@ -349,7 +349,7 @@ where
 ///
 /// # async fn example(s3: S3<impl dialog_capability::Authority<Signature = dialog_varsig::eddsa::Ed25519Signature> + Clone + Send + Sync>) -> Result<(), Box<dyn std::error::Error>> {
 /// let subject: dialog_capability::Did = "did:key:zMySubject".parse().unwrap();
-/// let mut storage = Bucket::new(s3, subject, "my-store");
+/// let storage = Bucket::new(s3, subject, "my-store");
 /// storage.set(b"key".to_vec(), b"value".to_vec()).await?;
 /// let value = storage.get(&b"key".to_vec()).await?;
 /// # Ok(())
@@ -428,7 +428,7 @@ where
             .attenuate(storage::Store::new(&self.path))
             .invoke(storage::Delete { key: key.to_vec() });
 
-        Provider::<storage::Delete>::execute(&mut self.bucket, capability)
+        Provider::<storage::Delete>::execute(&self.bucket, capability)
             .await
             .map_err(|e| S3StorageError::ServiceError(e.to_string()))
     }
@@ -480,7 +480,7 @@ where
     Capability<Do>: ConditionalSend + S3Request,
 {
     async fn execute(
-        &mut self,
+        &self,
         authorized: Authorized<Do, dialog_s3_credentials::Authorization>,
     ) -> Result<AuthorizedRequest, AccessError> {
         self.bucket.execute(authorized).await
@@ -509,7 +509,7 @@ where
             });
 
         // Execute via Provider
-        Provider::<storage::Set>::execute(&mut self.bucket, capability)
+        Provider::<storage::Set>::execute(&self.bucket, capability)
             .await
             .map_err(|e| S3StorageError::ServiceError(e.to_string()))
     }
@@ -521,9 +521,8 @@ where
             .attenuate(storage::Store::new(&self.path))
             .invoke(storage::Get { key: key.clone() });
 
-        // We need a mutable reference for Provider, so clone the bucket
-        let mut bucket = self.bucket.clone();
-        Provider::<storage::Get>::execute(&mut bucket, capability)
+        let bucket = self.bucket.clone();
+        Provider::<storage::Get>::execute(&bucket, capability)
             .await
             .map(|opt| opt.map(|b| b.to_vec()))
             .map_err(|e| S3StorageError::ServiceError(e.to_string()))
@@ -557,7 +556,7 @@ where
             .invoke(memory::Resolve);
 
         // Execute via Provider
-        let result = Provider::<memory::Resolve>::execute(&mut self.bucket, capability)
+        let result = Provider::<memory::Resolve>::execute(&self.bucket, capability)
             .await
             .map_err(|e| S3StorageError::ServiceError(e.to_string()))?;
 
@@ -590,18 +589,17 @@ where
                         when: edition.map(|e| e.as_bytes().to_vec().into()),
                     });
 
-                let new_edition =
-                    Provider::<memory::Publish>::execute(&mut self.bucket, capability)
-                        .await
-                        .map_err(|e| match e {
-                            memory::MemoryError::EditionMismatch { .. } => {
-                                S3StorageError::EditionMismatch {
-                                    expected: edition.map(|e| e.to_string()),
-                                    actual: None,
-                                }
+                let new_edition = Provider::<memory::Publish>::execute(&self.bucket, capability)
+                    .await
+                    .map_err(|e| match e {
+                        memory::MemoryError::EditionMismatch { .. } => {
+                            S3StorageError::EditionMismatch {
+                                expected: edition.map(|e| e.to_string()),
+                                actual: None,
                             }
-                            e => S3StorageError::ServiceError(e.to_string()),
-                        })?;
+                        }
+                        e => S3StorageError::ServiceError(e.to_string()),
+                    })?;
 
                 Ok(Some(String::from_utf8_lossy(&new_edition).to_string()))
             }
@@ -619,7 +617,7 @@ where
                         when: when.as_bytes().to_vec(),
                     });
 
-                Provider::<memory::Retract>::execute(&mut self.bucket, capability)
+                Provider::<memory::Retract>::execute(&self.bucket, capability)
                     .await
                     .map_err(|e| match e {
                         memory::MemoryError::EditionMismatch { .. } => {
@@ -671,7 +669,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn it_performs_storage_get_and_set(env: PublicS3Address) -> anyhow::Result<()> {
-            let mut bucket = create_test_bucket(&env);
+            let bucket = create_test_bucket(&env);
 
             // Create a storage Set capability
             let key = b"test-provider-key".to_vec();
@@ -685,7 +683,7 @@ mod tests {
                     key: key.clone(),
                     value: value.clone(),
                 })
-                .perform(&mut bucket)
+                .perform(&bucket)
                 .await?;
 
             // Execute the get operation using perform()
@@ -693,7 +691,7 @@ mod tests {
                 .attenuate(storage::Storage)
                 .attenuate(storage::Store::new("test"))
                 .invoke(storage::Get { key: key.clone() })
-                .perform(&mut bucket)
+                .perform(&bucket)
                 .await?;
 
             assert_eq!(result, Some(value));
@@ -703,7 +701,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn it_performs_archive_get_and_put(env: PublicS3Address) -> anyhow::Result<()> {
-            let mut bucket = create_test_bucket(&env);
+            let bucket = create_test_bucket(&env);
 
             // Create content and compute its digest
             let content = b"test archive content".to_vec();
@@ -717,7 +715,7 @@ mod tests {
                     digest: digest.clone(),
                     content: content.clone(),
                 })
-                .perform(&mut bucket)
+                .perform(&bucket)
                 .await?;
 
             // Execute the get operation using perform()
@@ -727,7 +725,7 @@ mod tests {
                 .invoke(archive::Get {
                     digest: digest.clone(),
                 })
-                .perform(&mut bucket)
+                .perform(&bucket)
                 .await?;
 
             assert_eq!(result, Some(content));
@@ -776,7 +774,7 @@ mod tests {
             let subject_did = signer.did();
 
             // Create bucket with UCAN credentials
-            let mut bucket = create_ucan_bucket(&env, signer, delegation);
+            let bucket = create_ucan_bucket(&env, signer, delegation);
 
             // Create content and compute its digest
             let content = b"test ucan archive content".to_vec();
@@ -793,7 +791,7 @@ mod tests {
                     digest: digest.clone(),
                     content: content.clone(),
                 })
-                .perform(&mut bucket)
+                .perform(&bucket)
                 .await;
 
             match &result {
@@ -809,7 +807,7 @@ mod tests {
                 .invoke(archive::Get {
                     digest: digest.clone(),
                 })
-                .perform(&mut bucket)
+                .perform(&bucket)
                 .await?;
 
             assert_eq!(result, Some(content));
@@ -1364,7 +1362,7 @@ mod tests {
                 DelegationChain::new(delegation)
             };
             let ucan_credentials = UcanCredentials::new(env.access_service_url.clone(), delegation);
-            let mut bucket = S3::new(Credentials::Ucan(ucan_credentials), signer);
+            let bucket = S3::new(Credentials::Ucan(ucan_credentials), signer);
 
             let store_name = "test-store";
             let key = b"ucan-delete-key".to_vec();
@@ -1378,7 +1376,7 @@ mod tests {
                     key: key.clone(),
                     value: value.clone(),
                 })
-                .perform(&mut bucket)
+                .perform(&bucket)
                 .await?;
 
             // Verify it exists
@@ -1386,7 +1384,7 @@ mod tests {
                 .attenuate(storage::Storage)
                 .attenuate(storage::Store::new(store_name))
                 .invoke(storage::Get { key: key.clone() })
-                .perform(&mut bucket)
+                .perform(&bucket)
                 .await?;
             assert_eq!(result, Some(value));
 
@@ -1395,7 +1393,7 @@ mod tests {
                 .attenuate(storage::Storage)
                 .attenuate(storage::Store::new(store_name))
                 .invoke(storage::Delete { key: key.clone() })
-                .perform(&mut bucket)
+                .perform(&bucket)
                 .await?;
 
             // Verify it's gone
@@ -1403,7 +1401,7 @@ mod tests {
                 .attenuate(storage::Storage)
                 .attenuate(storage::Store::new(store_name))
                 .invoke(storage::Get { key: key.clone() })
-                .perform(&mut bucket)
+                .perform(&bucket)
                 .await?;
             assert_eq!(result, None);
 

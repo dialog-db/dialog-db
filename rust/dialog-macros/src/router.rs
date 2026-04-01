@@ -31,7 +31,7 @@
 //!     Router<s3::Address, s3::Connection<Issuer>>: ProviderRoute
 //!         + Provider<RemoteInvocation<Fx, <Router<s3::Address, s3::Connection<Issuer>> as ProviderRoute>::Address>>,
 //! {
-//!     async fn execute(&mut self, input: RemoteInvocation<Fx, ...>) -> Fx::Output {
+//!     async fn execute(&self, input: RemoteInvocation<Fx, ...>) -> Fx::Output {
 //!         self.s3.execute(input).await
 //!     }
 //! }
@@ -129,13 +129,13 @@ fn generate_router(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream>
                     + ::dialog_capability::Provider<
                         ::dialog_effects::remote::RemoteInvocation<__Fx, #address_projection>
                     > + ::dialog_common::ConditionalSend,
-                Self: ::dialog_common::ConditionalSend,
+                Self: ::dialog_common::ConditionalSend + ::dialog_common::ConditionalSync,
             {
                 async fn execute(
-                    &mut self,
+                    &self,
                     input: ::dialog_effects::remote::RemoteInvocation<__Fx, #address_projection>,
                 ) -> __Fx::Output {
-                    ::dialog_capability::Provider::execute(&mut self.#field_name, input).await
+                    ::dialog_capability::Provider::execute(&self.#field_name, input).await
                 }
             }
         };

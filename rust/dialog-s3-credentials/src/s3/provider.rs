@@ -39,10 +39,7 @@ where
     Do: Effect<Output = Result<AuthorizedRequest, AccessError>> + 'static,
     Capability<Do>: ConditionalSend + S3Request,
 {
-    async fn execute(
-        &mut self,
-        capability: Capability<Do>,
-    ) -> Result<AuthorizedRequest, AccessError> {
+    async fn execute(&self, capability: Capability<Do>) -> Result<AuthorizedRequest, AccessError> {
         self.grant(&capability).await
     }
 }
@@ -91,7 +88,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_generates_correct_url_for_storage_get() {
-        let mut creds = public_creds();
+        let creds = public_creds();
         let key = b"test-key";
 
         let capability = Subject::from(test_subject())
@@ -99,7 +96,7 @@ mod tests {
             .attenuate(storage::Store::new("index"))
             .invoke(storage::Get::new(key));
 
-        let req = capability.perform(&mut creds).await.unwrap();
+        let req = capability.perform(&creds).await.unwrap();
 
         assert_eq!(req.method, "GET");
         assert_eq!(
@@ -111,7 +108,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_handles_binary_key_for_storage_get() {
-        let mut creds = public_creds();
+        let creds = public_creds();
         let binary_key: [u8; 32] = [
             0xde, 0xad, 0xbe, 0xef, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99,
             0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
@@ -123,7 +120,7 @@ mod tests {
             .attenuate(storage::Store::new("blob"))
             .invoke(storage::Get::new(binary_key));
 
-        let req = capability.perform(&mut creds).await.unwrap();
+        let req = capability.perform(&creds).await.unwrap();
 
         assert_eq!(req.method, "GET");
         // Binary key should be base58 encoded in path
@@ -132,7 +129,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_generates_correct_url_and_checksum_for_storage_set() {
-        let mut creds = public_creds();
+        let creds = public_creds();
         let key = b"my-key";
         let checksum_bytes = [0x12u8; 32];
         let checksum = crate::Checksum::Sha256(checksum_bytes);
@@ -142,7 +139,7 @@ mod tests {
             .attenuate(storage::Store::new("blob"))
             .invoke(storage::Set::new(key, checksum));
 
-        let req = capability.perform(&mut creds).await.unwrap();
+        let req = capability.perform(&creds).await.unwrap();
 
         assert_eq!(req.method, "PUT");
         assert_eq!(
@@ -164,7 +161,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_generates_correct_url_for_storage_delete() {
-        let mut creds = public_creds();
+        let creds = public_creds();
         let key = b"key-to-delete";
 
         let capability = Subject::from(test_subject())
@@ -172,7 +169,7 @@ mod tests {
             .attenuate(storage::Store::new("index"))
             .invoke(storage::Delete::new(key));
 
-        let req = capability.perform(&mut creds).await.unwrap();
+        let req = capability.perform(&creds).await.unwrap();
 
         assert_eq!(req.method, "DELETE");
         assert_eq!(
@@ -183,14 +180,14 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_generates_correct_query_params_for_storage_list() {
-        let mut creds = public_creds();
+        let creds = public_creds();
 
         let capability = Subject::from(test_subject())
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("index"))
             .invoke(storage::List::new(None));
 
-        let req = capability.perform(&mut creds).await.unwrap();
+        let req = capability.perform(&creds).await.unwrap();
 
         assert_eq!(req.method, "GET");
 
@@ -212,7 +209,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_handles_continuation_token_for_storage_list() {
-        let mut creds = public_creds();
+        let creds = public_creds();
         let token = "next-page-token-abc123";
 
         let capability = Subject::from(test_subject())
@@ -220,7 +217,7 @@ mod tests {
             .attenuate(storage::Store::new("data"))
             .invoke(storage::List::new(Some(token.to_string())));
 
-        let req = capability.perform(&mut creds).await.unwrap();
+        let req = capability.perform(&creds).await.unwrap();
 
         let query: Vec<(String, String)> = req
             .url
@@ -234,7 +231,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_generates_correct_url_for_memory_resolve() {
-        let mut creds = public_creds();
+        let creds = public_creds();
 
         let capability = Subject::from(test_subject())
             .attenuate(memory::Memory)
@@ -242,7 +239,7 @@ mod tests {
             .attenuate(memory::Cell::new("main"))
             .invoke(memory::Resolve);
 
-        let req = capability.perform(&mut creds).await.unwrap();
+        let req = capability.perform(&creds).await.unwrap();
 
         assert_eq!(req.method, "GET");
         assert_eq!(
@@ -253,7 +250,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_publishes_memory_without_prior_edition() {
-        let mut creds = public_creds();
+        let creds = public_creds();
         let checksum = crate::Checksum::Sha256([0xab; 32]);
 
         let capability = Subject::from(test_subject())
@@ -265,7 +262,7 @@ mod tests {
                 when: None, // No prior edition - creating new cell
             });
 
-        let req = capability.perform(&mut creds).await.unwrap();
+        let req = capability.perform(&creds).await.unwrap();
 
         assert_eq!(req.method, "PUT");
         assert_eq!(
@@ -283,7 +280,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_publishes_memory_with_prior_edition() {
-        let mut creds = public_creds();
+        let creds = public_creds();
         let checksum = crate::Checksum::Sha256([0xcd; 32]);
         let prior_etag = "abc123etag".to_string();
 
@@ -296,7 +293,7 @@ mod tests {
                 when: Some(prior_etag),
             });
 
-        let req = capability.perform(&mut creds).await.unwrap();
+        let req = capability.perform(&creds).await.unwrap();
 
         assert_eq!(req.method, "PUT");
         assert!(
@@ -308,7 +305,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_generates_correct_url_for_memory_retract() {
-        let mut creds = public_creds();
+        let creds = public_creds();
 
         let capability = Subject::from(test_subject())
             .attenuate(memory::Memory)
@@ -316,7 +313,7 @@ mod tests {
             .attenuate(memory::Cell::new("temp"))
             .invoke(memory::Retract::new("etag-to-match"));
 
-        let req = capability.perform(&mut creds).await.unwrap();
+        let req = capability.perform(&creds).await.unwrap();
 
         assert_eq!(req.method, "DELETE");
         assert_eq!(
@@ -327,7 +324,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_generates_correct_url_for_archive_get() {
-        let mut creds = public_creds();
+        let creds = public_creds();
         let digest: [u8; 32] = [0x42; 32];
 
         let capability = Subject::from(test_subject())
@@ -335,7 +332,7 @@ mod tests {
             .attenuate(archive::Catalog::new("blobs"))
             .invoke(archive::Get::new(digest));
 
-        let req = capability.perform(&mut creds).await.unwrap();
+        let req = capability.perform(&creds).await.unwrap();
 
         assert_eq!(req.method, "GET");
         assert_eq!(
@@ -346,7 +343,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_generates_correct_url_and_checksum_for_archive_put() {
-        let mut creds = public_creds();
+        let creds = public_creds();
         let digest: [u8; 32] = [0x99; 32];
         let checksum = crate::Checksum::Sha256([0x11; 32]);
 
@@ -355,7 +352,7 @@ mod tests {
             .attenuate(archive::Catalog::new("index"))
             .invoke(archive::Put::new(digest, checksum));
 
-        let req = capability.perform(&mut creds).await.unwrap();
+        let req = capability.perform(&creds).await.unwrap();
 
         assert_eq!(req.method, "PUT");
         assert_eq!(
@@ -371,7 +368,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_generates_signed_url_for_get_with_private_creds() {
-        let mut creds = private_creds();
+        let creds = private_creds();
         let key = b"signed-key";
 
         let capability = Subject::from(test_subject())
@@ -379,7 +376,7 @@ mod tests {
             .attenuate(storage::Store::new("data"))
             .invoke(storage::Get::new(key));
 
-        let req = capability.perform(&mut creds).await.unwrap();
+        let req = capability.perform(&creds).await.unwrap();
 
         assert_eq!(req.method, "GET");
 
@@ -399,7 +396,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_generates_signed_url_for_put_with_private_creds() {
-        let mut creds = private_creds();
+        let creds = private_creds();
         let key = b"upload-key";
         let checksum = crate::Checksum::Sha256([0xff; 32]);
 
@@ -408,7 +405,7 @@ mod tests {
             .attenuate(storage::Store::new("uploads"))
             .invoke(storage::Set::new(key, checksum));
 
-        let req = capability.perform(&mut creds).await.unwrap();
+        let req = capability.perform(&creds).await.unwrap();
 
         assert_eq!(req.method, "PUT");
 
@@ -430,14 +427,14 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_generates_signed_url_for_list_with_private_creds() {
-        let mut creds = private_creds();
+        let creds = private_creds();
 
         let capability = Subject::from(test_subject())
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("files"))
             .invoke(storage::List::new(None));
 
-        let req = capability.perform(&mut creds).await.unwrap();
+        let req = capability.perform(&creds).await.unwrap();
 
         assert_eq!(req.method, "GET");
 
@@ -457,14 +454,14 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_uses_virtual_hosted_style_for_aws() {
-        let mut creds = public_creds();
+        let creds = public_creds();
 
         let capability = Subject::from(test_subject())
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("test"))
             .invoke(storage::Get::new(b"key"));
 
-        let req = capability.perform(&mut creds).await.unwrap();
+        let req = capability.perform(&creds).await.unwrap();
 
         // Virtual hosted style: bucket is in the hostname
         assert!(req.url.host_str().unwrap().starts_with("my-bucket."));
@@ -472,14 +469,14 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_uses_path_style_for_localhost() {
-        let mut creds = localhost_creds();
+        let creds = localhost_creds();
 
         let capability = Subject::from(test_subject())
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("test"))
             .invoke(storage::Get::new(b"key"));
 
-        let req = capability.perform(&mut creds).await.unwrap();
+        let req = capability.perform(&creds).await.unwrap();
 
         // Path style: bucket is in the path
         assert_eq!(req.url.host_str().unwrap(), "localhost");
@@ -488,7 +485,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_supports_different_store_names() {
-        let mut creds = public_creds();
+        let creds = public_creds();
         let stores = ["index", "blob", "metadata", "cache", ""];
 
         for store_name in stores {
@@ -497,7 +494,7 @@ mod tests {
                 .attenuate(storage::Store::new(store_name))
                 .invoke(storage::Get::new(b"key"));
 
-            let req = capability.perform(&mut creds).await.unwrap();
+            let req = capability.perform(&creds).await.unwrap();
 
             if store_name.is_empty() {
                 assert!(req.url.path().contains(&format!("/{}/", TEST_SUBJECT)));
@@ -513,7 +510,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_supports_different_catalog_names() {
-        let mut creds = public_creds();
+        let creds = public_creds();
         let catalogs = ["blobs", "index", "refs"];
         let digest: [u8; 32] = [0x55; 32];
 
@@ -523,7 +520,7 @@ mod tests {
                 .attenuate(archive::Catalog::new(catalog_name))
                 .invoke(archive::Get::new(digest));
 
-            let req = capability.perform(&mut creds).await.unwrap();
+            let req = capability.perform(&creds).await.unwrap();
 
             assert!(
                 req.url

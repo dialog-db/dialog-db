@@ -40,155 +40,183 @@ impl From<super::IndexedDbError> for MemoryError {
 #[async_trait(?Send)]
 impl Provider<Resolve> for IndexedDb {
     async fn execute(
-        &mut self,
+        &self,
         effect: Capability<Resolve>,
     ) -> Result<Option<Publication>, MemoryError> {
         let subject = effect.subject().into();
         let key = make_key(effect.space(), effect.cell());
 
-        let store = self.open(&subject).await?.store(MEMORY_STORE).await?;
+        self.open(&subject).await?;
+        let mut session = self.take_session(&subject)?;
 
-        store
-            .query(|object_store| async move {
-                let value = object_store.get(key).await.map_err(storage_error)?;
+        let result = async {
+            let store = session.store(MEMORY_STORE).await?;
+            store
+                .query(|object_store| async move {
+                    let value = object_store.get(key).await.map_err(storage_error)?;
 
-                let Some(value) = value else {
-                    return Ok(None);
-                };
+                    let Some(value) = value else {
+                        return Ok(None);
+                    };
 
-                let bytes = value
-                    .dyn_into::<Uint8Array>()
-                    .map_err(|_| MemoryError::Storage("Value is not Uint8Array".to_string()))?
-                    .to_vec();
+                    let bytes = value
+                        .dyn_into::<Uint8Array>()
+                        .map_err(|_| MemoryError::Storage("Value is not Uint8Array".to_string()))?
+                        .to_vec();
 
-                let edition = Blake3Hash::hash(&bytes);
+                    let edition = Blake3Hash::hash(&bytes);
 
-                Ok(Some(Publication {
-                    content: bytes,
-                    edition: edition.as_bytes().to_vec(),
-                }))
-            })
-            .await
+                    Ok(Some(Publication {
+                        content: bytes,
+                        edition: edition.as_bytes().to_vec(),
+                    }))
+                })
+                .await
+        }
+        .await;
+
+        self.return_session(subject, session);
+        result
     }
 }
 
 #[async_trait(?Send)]
 impl Provider<Publish> for IndexedDb {
-    async fn execute(&mut self, effect: Capability<Publish>) -> Result<Vec<u8>, MemoryError> {
+    async fn execute(&self, effect: Capability<Publish>) -> Result<Vec<u8>, MemoryError> {
         let subject = effect.subject().into();
         let key = make_key(effect.space(), effect.cell());
         let content = effect.content().to_vec();
         let expected_edition = effect.when().map(|e| e.to_vec());
 
-        let store = self.open(&subject).await?.store(MEMORY_STORE).await?;
+        self.open(&subject).await?;
+        let mut session = self.take_session(&subject)?;
 
-        store
-            .transact(|object_store| async move {
-                // Read current value to check CAS condition
-                let current = object_store.get(key.clone()).await.map_err(storage_error)?;
+        let result = async {
+            let store = session.store(MEMORY_STORE).await?;
+            store
+                .transact(|object_store| async move {
+                    // Read current value to check CAS condition
+                    let current = object_store.get(key.clone()).await.map_err(storage_error)?;
 
-                let current_edition = if let Some(value) = &current {
-                    let bytes = value
-                        .clone()
-                        .dyn_into::<Uint8Array>()
-                        .map_err(|_| MemoryError::Storage("Value is not Uint8Array".to_string()))?
-                        .to_vec();
-                    Some(Blake3Hash::hash(&bytes))
-                } else {
-                    None
-                };
+                    let current_edition = if let Some(value) = &current {
+                        let bytes = value
+                            .clone()
+                            .dyn_into::<Uint8Array>()
+                            .map_err(|_| {
+                                MemoryError::Storage("Value is not Uint8Array".to_string())
+                            })?
+                            .to_vec();
+                        Some(Blake3Hash::hash(&bytes))
+                    } else {
+                        None
+                    };
 
-                // Compute new edition
-                let new_edition = Blake3Hash::hash(&content);
+                    // Compute new edition
+                    let new_edition = Blake3Hash::hash(&content);
 
-                // If current value already matches desired value, succeed without writing
-                if current_edition.as_ref().map(|h| h.as_bytes()) == Some(new_edition.as_bytes()) {
-                    return Ok(new_edition.as_bytes().to_vec());
-                }
-
-                // Check CAS condition
-                match (expected_edition.as_deref(), &current_edition) {
-                    // Creating new: require cell doesn't exist
-                    (None, Some(_)) => {
-                        return Err(MemoryError::EditionMismatch {
-                            expected: None,
-                            actual: format_edition(
-                                current_edition.as_ref().map(|h| h.as_bytes().as_slice()),
-                            ),
-                        });
+                    // If current value already matches desired value, succeed without writing
+                    if current_edition.as_ref().map(|h| h.as_bytes())
+                        == Some(new_edition.as_bytes())
+                    {
+                        return Ok(new_edition.as_bytes().to_vec());
                     }
-                    // Updating existing: require edition matches
-                    (Some(expected), Some(current)) => {
-                        if expected != current.as_bytes() {
+
+                    // Check CAS condition
+                    match (expected_edition.as_deref(), &current_edition) {
+                        // Creating new: require cell doesn't exist
+                        (None, Some(_)) => {
                             return Err(MemoryError::EditionMismatch {
-                                expected: format_edition(Some(expected)),
-                                actual: format_edition(Some(current.as_bytes())),
+                                expected: None,
+                                actual: format_edition(
+                                    current_edition.as_ref().map(|h| h.as_bytes().as_slice()),
+                                ),
                             });
                         }
+                        // Updating existing: require edition matches
+                        (Some(expected), Some(current)) => {
+                            if expected != current.as_bytes() {
+                                return Err(MemoryError::EditionMismatch {
+                                    expected: format_edition(Some(expected)),
+                                    actual: format_edition(Some(current.as_bytes())),
+                                });
+                            }
+                        }
+                        // Updating non-existent: fail
+                        (Some(expected), None) => {
+                            return Err(MemoryError::EditionMismatch {
+                                expected: format_edition(Some(expected)),
+                                actual: None,
+                            });
+                        }
+                        // Creating new when cell doesn't exist: valid
+                        (None, None) => {}
                     }
-                    // Updating non-existent: fail
-                    (Some(expected), None) => {
-                        return Err(MemoryError::EditionMismatch {
-                            expected: format_edition(Some(expected)),
-                            actual: None,
-                        });
-                    }
-                    // Creating new when cell doesn't exist: valid
-                    (None, None) => {}
-                }
 
-                // Write the new value
-                let js_value: JsValue = to_uint8array(&content).into();
-                object_store
-                    .put(&js_value, Some(&key))
-                    .await
-                    .map_err(storage_error)?;
+                    // Write the new value
+                    let js_value: JsValue = to_uint8array(&content).into();
+                    object_store
+                        .put(&js_value, Some(&key))
+                        .await
+                        .map_err(storage_error)?;
 
-                Ok(new_edition.as_bytes().to_vec())
-            })
-            .await
+                    Ok(new_edition.as_bytes().to_vec())
+                })
+                .await
+        }
+        .await;
+
+        self.return_session(subject, session);
+        result
     }
 }
 
 #[async_trait(?Send)]
 impl Provider<Retract> for IndexedDb {
-    async fn execute(&mut self, effect: Capability<Retract>) -> Result<(), MemoryError> {
+    async fn execute(&self, effect: Capability<Retract>) -> Result<(), MemoryError> {
         let subject = effect.subject().into();
         let key = make_key(effect.space(), effect.cell());
         let expected_edition = effect.when().to_vec();
 
-        let store = self.open(&subject).await?.store(MEMORY_STORE).await?;
+        self.open(&subject).await?;
+        let mut session = self.take_session(&subject)?;
 
-        store
-            .transact(|object_store| async move {
-                // Read current value to check CAS condition
-                let current = object_store.get(key.clone()).await.map_err(storage_error)?;
+        let result = async {
+            let store = session.store(MEMORY_STORE).await?;
+            store
+                .transact(|object_store| async move {
+                    // Read current value to check CAS condition
+                    let current = object_store.get(key.clone()).await.map_err(storage_error)?;
 
-                // If already deleted, succeed
-                let Some(value) = current else {
-                    return Ok(());
-                };
+                    // If already deleted, succeed
+                    let Some(value) = current else {
+                        return Ok(());
+                    };
 
-                let bytes = value
-                    .dyn_into::<Uint8Array>()
-                    .map_err(|_| MemoryError::Storage("Value is not Uint8Array".to_string()))?
-                    .to_vec();
-                let current_edition = Blake3Hash::hash(&bytes);
+                    let bytes = value
+                        .dyn_into::<Uint8Array>()
+                        .map_err(|_| MemoryError::Storage("Value is not Uint8Array".to_string()))?
+                        .to_vec();
+                    let current_edition = Blake3Hash::hash(&bytes);
 
-                // Check CAS condition
-                if expected_edition != current_edition.as_bytes() {
-                    return Err(MemoryError::EditionMismatch {
-                        expected: format_edition(Some(&expected_edition)),
-                        actual: format_edition(Some(current_edition.as_bytes())),
-                    });
-                }
+                    // Check CAS condition
+                    if expected_edition != current_edition.as_bytes() {
+                        return Err(MemoryError::EditionMismatch {
+                            expected: format_edition(Some(&expected_edition)),
+                            actual: format_edition(Some(current_edition.as_bytes())),
+                        });
+                    }
 
-                // Delete the value
-                object_store.delete(key).await.map_err(storage_error)?;
+                    // Delete the value
+                    object_store.delete(key).await.map_err(storage_error)?;
 
-                Ok(())
-            })
-            .await
+                    Ok(())
+                })
+                .await
+        }
+        .await;
+
+        self.return_session(subject, session);
+        result
     }
 }
 
@@ -207,7 +235,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_resolves_non_existent_cell() -> anyhow::Result<()> {
-        let mut provider = IndexedDb::new();
+        let provider = IndexedDb::new();
         let subject = unique_subject("memory-resolve-none");
 
         let effect = subject
@@ -216,7 +244,7 @@ mod tests {
             .attenuate(Cell::new("missing"))
             .invoke(Resolve);
 
-        let result = effect.perform(&mut provider).await?;
+        let result = effect.perform(&provider).await?;
         assert!(result.is_none());
 
         Ok(())
@@ -224,7 +252,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_publishes_new_content() -> anyhow::Result<()> {
-        let mut provider = IndexedDb::new();
+        let provider = IndexedDb::new();
         let subject = unique_subject("memory-publish-new");
         let content = b"hello world".to_vec();
 
@@ -235,7 +263,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Publish::new(content.clone(), None))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         assert!(!edition.is_empty());
@@ -246,7 +274,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Resolve)
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         let publication = resolved.expect("should have content");
@@ -258,7 +286,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_updates_existing_content() -> anyhow::Result<()> {
-        let mut provider = IndexedDb::new();
+        let provider = IndexedDb::new();
         let subject = unique_subject("memory-publish-update");
 
         // Create initial content
@@ -268,7 +296,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Publish::new(b"initial", None))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         // Update with correct edition
@@ -278,7 +306,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Publish::new(b"updated", Some(edition1.clone())))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         assert_ne!(edition1, edition2);
@@ -289,7 +317,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Resolve)
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         let publication = resolved.expect("should have content");
@@ -300,7 +328,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_fails_on_edition_mismatch() -> anyhow::Result<()> {
-        let mut provider = IndexedDb::new();
+        let provider = IndexedDb::new();
         let subject = unique_subject("memory-mismatch");
 
         // Create initial content
@@ -310,7 +338,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Publish::new(b"initial", None))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         // Try to update with wrong edition
@@ -320,7 +348,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Publish::new(b"updated", Some(wrong_edition)))
-            .perform(&mut provider)
+            .perform(&provider)
             .await;
 
         assert!(matches!(result, Err(MemoryError::EditionMismatch { .. })));
@@ -330,7 +358,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_fails_creating_when_exists() -> anyhow::Result<()> {
-        let mut provider = IndexedDb::new();
+        let provider = IndexedDb::new();
         let subject = unique_subject("memory-create-exists");
 
         // Create initial content
@@ -340,7 +368,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Publish::new(b"initial", None))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         // Try to create again (when = None means expect empty)
@@ -349,7 +377,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Publish::new(b"new", None))
-            .perform(&mut provider)
+            .perform(&provider)
             .await;
 
         assert!(matches!(result, Err(MemoryError::EditionMismatch { .. })));
@@ -359,7 +387,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_retracts_content() -> anyhow::Result<()> {
-        let mut provider = IndexedDb::new();
+        let provider = IndexedDb::new();
         let subject = unique_subject("memory-retract");
 
         // Create content
@@ -369,7 +397,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Publish::new(b"to be deleted", None))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         // Retract with correct edition
@@ -379,7 +407,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Retract::new(edition))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         // Verify deleted
@@ -388,7 +416,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Resolve)
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         assert!(resolved.is_none());
@@ -398,7 +426,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_fails_retract_on_edition_mismatch() -> anyhow::Result<()> {
-        let mut provider = IndexedDb::new();
+        let provider = IndexedDb::new();
         let subject = unique_subject("memory-retract-mismatch");
 
         // Create content
@@ -408,7 +436,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Publish::new(b"content", None))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         // Try to retract with wrong edition
@@ -418,7 +446,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Retract::new(wrong_edition))
-            .perform(&mut provider)
+            .perform(&provider)
             .await;
 
         assert!(matches!(result, Err(MemoryError::EditionMismatch { .. })));
@@ -428,7 +456,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_handles_different_spaces() -> anyhow::Result<()> {
-        let mut provider = IndexedDb::new();
+        let provider = IndexedDb::new();
         let subject = unique_subject("memory-spaces");
 
         // Publish to different spaces
@@ -438,7 +466,7 @@ mod tests {
             .attenuate(Space::new("space1"))
             .attenuate(Cell::new("cell"))
             .invoke(Publish::new(b"content1", None))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         subject
@@ -447,7 +475,7 @@ mod tests {
             .attenuate(Space::new("space2"))
             .attenuate(Cell::new("cell"))
             .invoke(Publish::new(b"content2", None))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         // Resolve from space1
@@ -457,7 +485,7 @@ mod tests {
             .attenuate(Space::new("space1"))
             .attenuate(Cell::new("cell"))
             .invoke(Resolve)
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
         assert_eq!(result1.unwrap().content, b"content1".to_vec());
 
@@ -467,7 +495,7 @@ mod tests {
             .attenuate(Space::new("space2"))
             .attenuate(Cell::new("cell"))
             .invoke(Resolve)
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
         assert_eq!(result2.unwrap().content, b"content2".to_vec());
 
@@ -476,7 +504,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_succeeds_with_stale_edition_when_value_matches() -> anyhow::Result<()> {
-        let mut provider = IndexedDb::new();
+        let provider = IndexedDb::new();
         let subject = unique_subject("memory-stale-ok");
         let content = b"desired value".to_vec();
 
@@ -487,7 +515,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Publish::new(content.clone(), None))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         // Try to publish same content with wrong edition - should succeed
@@ -497,7 +525,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
             .invoke(Publish::new(content.clone(), Some(wrong_edition)))
-            .perform(&mut provider)
+            .perform(&provider)
             .await;
 
         assert!(result.is_ok());
@@ -511,7 +539,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_produces_deterministic_content_hash() -> anyhow::Result<()> {
-        let mut provider = IndexedDb::new();
+        let provider = IndexedDb::new();
         let subject = unique_subject("memory-deterministic-hash");
         let content = b"same content".to_vec();
 
@@ -522,7 +550,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("cell1"))
             .invoke(Publish::new(content.clone(), None))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         // Create same value at cell2
@@ -531,7 +559,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("cell2"))
             .invoke(Publish::new(content, None))
-            .perform(&mut provider)
+            .perform(&provider)
             .await?;
 
         // Same content should produce same edition (content hash)
@@ -542,7 +570,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_succeeds_retracting_already_retracted() -> anyhow::Result<()> {
-        let mut provider = IndexedDb::new();
+        let provider = IndexedDb::new();
         let subject = unique_subject("memory-retract-already-retracted");
 
         // Try to retract non-existent cell - should succeed
@@ -552,7 +580,7 @@ mod tests {
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("nonexistent"))
             .invoke(Retract::new(wrong_edition))
-            .perform(&mut provider)
+            .perform(&provider)
             .await;
 
         assert!(result.is_ok());

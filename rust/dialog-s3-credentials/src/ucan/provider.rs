@@ -646,7 +646,7 @@ mod tests {
             test_delegation_chain(&operator, &operator, &["archive"]).await,
         );
 
-        let mut session = Session::open(credentials, &[0u8; 32]).await;
+        let session = Session::open(credentials, &[0u8; 32]).await;
 
         let read = Subject::from(session.did())
             .attenuate(archive::Archive)
@@ -656,7 +656,7 @@ mod tests {
             .invoke(archive::Get {
                 digest: Blake3Hash::hash(b"hello"),
             })
-            .acquire(&mut session)
+            .acquire(&session)
             .await?;
 
         let authorization = read.authorization().invoke(&session).await?;

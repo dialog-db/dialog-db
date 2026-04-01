@@ -105,7 +105,7 @@ where
     Address: ConditionalSend,
 {
     /// Perform the remote invocation against a provider.
-    pub async fn perform<Env>(self, env: &mut Env) -> Fx::Output
+    pub async fn perform<Env>(self, env: &Env) -> Fx::Output
     where
         Env: Provider<RemoteInvocation<Fx, Address>>,
     {

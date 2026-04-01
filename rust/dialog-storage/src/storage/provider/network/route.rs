@@ -7,6 +7,7 @@
 
 use std::convert::Infallible;
 use std::hash::Hash;
+use std::sync::Arc;
 
 use crate::resource::{Pool, Resource};
 use dialog_capability::{Capability, Constraint, Effect, Provider, ProviderRoute};
@@ -22,10 +23,13 @@ use dialog_effects::remote::RemoteInvocation;
 /// The `Connection` type must implement `Resource<(Address, Issuer)>` so
 /// that new connections can be opened from the (address, issuer) pair.
 ///
+/// Connections are cached in `Arc` wrappers so they can be cloned out of the
+/// pool's `RwLock` before any `.await` points.
+///
 /// [`RemoteInvocation`]: dialog_effects::remote::RemoteInvocation
 pub struct Route<Issuer, Address, Connection> {
     issuer: Issuer,
-    connections: Pool<Address, Connection>,
+    connections: Pool<Address, Arc<Connection>>,
 }
 
 impl<Issuer, Address, Connection> Route<Issuer, Address, Connection> {
@@ -52,20 +56,33 @@ where
     Capability<Fx>: ConditionalSend,
     Issuer: Clone + ConditionalSend + ConditionalSync + 'static,
     Address: Clone + Eq + Hash + ConditionalSend + ConditionalSync + 'static,
-    Connection:
-        Resource<(Address, Issuer), Error = Infallible> + Provider<Fx> + ConditionalSend + 'static,
+    Connection: Resource<(Address, Issuer), Error = Infallible>
+        + Provider<Fx>
+        + ConditionalSend
+        + ConditionalSync
+        + 'static,
 {
-    async fn execute(&mut self, input: RemoteInvocation<Fx, Address>) -> Fx::Output {
+    async fn execute(&self, input: RemoteInvocation<Fx, Address>) -> Fx::Output {
         let (capability, address) = input.into_parts();
-        if self.connections.get_mut(&address).is_none() {
-            let connection = match Connection::open(&(address.clone(), self.issuer.clone())).await {
-                Ok(c) => c,
-                Err(error) => match error {},
-            };
-            self.connections.insert(address.clone(), connection);
-        }
-        let connection = self.connections.get_mut(&address).unwrap();
-        <Connection as Provider<Fx>>::execute(connection, capability).await
+
+        // Check the pool (read lock, dropped immediately).
+        let connection = match self.connections.get(&address) {
+            Some(conn) => conn,
+            None => {
+                // Open a new connection with no lock held during the await.
+                let new_conn = match Connection::open(&(address.clone(), self.issuer.clone())).await
+                {
+                    Ok(c) => Arc::new(c),
+                    Err(error) => match error {},
+                };
+                // Insert into pool (write lock, dropped immediately).
+                self.connections.insert(address.clone(), new_conn.clone());
+                new_conn
+            }
+        };
+
+        // Execute on the Arc'd connection — no lock held.
+        <Connection as Provider<Fx>>::execute(&connection, capability).await
     }
 }
 
@@ -104,7 +121,7 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl Provider<Get> for MockConnection {
-        async fn execute(&mut self, effect: Capability<Get>) -> Option<Vec<u8>> {
+        async fn execute(&self, effect: Capability<Get>) -> Option<Vec<u8>> {
             let get: &Get = effect.policy();
             self.data.get(&get.key).cloned()
         }
@@ -124,7 +141,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_routes_and_caches_connections() {
-        let mut route: Route<TestIssuer, TestCredentials, MockConnection> =
+        let route: Route<TestIssuer, TestCredentials, MockConnection> =
             Route::new(TestIssuer("issuer-1".into()));
 
         let creds = TestCredentials("site-a".into());
@@ -138,25 +155,24 @@ mod tests {
 
         // First invocation opens and caches the connection
         let remote = RemoteInvocation::new(capability, creds.clone());
-        let result = remote.perform(&mut route).await;
+        let result = remote.perform(&route).await;
         assert_eq!(result, None); // empty connection, no data
 
-        // Insert data into the cached connection directly
-        route
-            .connections
-            .get_mut(&creds)
-            .unwrap()
-            .data
-            .insert("my-key".into(), b"hello".to_vec());
+        // Pre-populate a connection with data and insert it
+        let mut conn = MockConnection {
+            data: HashMap::new(),
+        };
+        conn.data.insert("my-key".into(), b"hello".to_vec());
+        route.connections.insert(creds.clone(), Arc::new(conn));
 
-        // Second invocation reuses the cached connection
+        // Second invocation uses the newly inserted connection
         let capability = dialog_capability::Subject::from(did)
             .attenuate(Archive)
             .invoke(Get {
                 key: "my-key".into(),
             });
         let remote = RemoteInvocation::new(capability, creds);
-        let result = remote.perform(&mut route).await;
+        let result = remote.perform(&route).await;
         assert_eq!(result, Some(b"hello".to_vec()));
     }
 
@@ -195,7 +211,7 @@ mod tests {
         #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
         #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
         impl Provider<RemoteInvocation<Fetch, AlphaAddr>> for AlphaBackend {
-            async fn execute(&mut self, input: RemoteInvocation<Fetch, AlphaAddr>) -> String {
+            async fn execute(&self, input: RemoteInvocation<Fetch, AlphaAddr>) -> String {
                 let (cap, addr) = input.into_parts();
                 let fetch: &Fetch = cap.policy();
                 format!("alpha:{}:{}", addr.0, fetch.key)
@@ -211,7 +227,7 @@ mod tests {
         #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
         #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
         impl Provider<RemoteInvocation<Fetch, BetaAddr>> for BetaBackend {
-            async fn execute(&mut self, input: RemoteInvocation<Fetch, BetaAddr>) -> String {
+            async fn execute(&self, input: RemoteInvocation<Fetch, BetaAddr>) -> String {
                 let (cap, addr) = input.into_parts();
                 let fetch: &Fetch = cap.policy();
                 format!("beta:{}:{}", addr.0, fetch.key)
@@ -226,7 +242,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn it_routes_via_derive_macro() {
-            let mut router = CompositeRouter {
+            let router = CompositeRouter {
                 alpha: AlphaBackend,
                 beta: BetaBackend,
             };
@@ -237,7 +253,7 @@ mod tests {
                     key: "doc-1".into(),
                 });
             let remote_a = RemoteInvocation::new(cap_a, AlphaAddr("site-a".into()));
-            let result_a = remote_a.perform(&mut router).await;
+            let result_a = remote_a.perform(&router).await;
             assert_eq!(result_a, "alpha:site-a:doc-1");
 
             let cap_b = Subject::from("did:key:zBeta".parse::<Did>().unwrap())
@@ -246,7 +262,7 @@ mod tests {
                     key: "doc-2".into(),
                 });
             let remote_b = RemoteInvocation::new(cap_b, BetaAddr("site-b".into()));
-            let result_b = remote_b.perform(&mut router).await;
+            let result_b = remote_b.perform(&router).await;
             assert_eq!(result_b, "beta:site-b:doc-2");
         }
     }
