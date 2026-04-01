@@ -7,6 +7,7 @@ pub mod cid;
 pub mod codec;
 pub mod collection;
 pub mod command;
+pub mod container;
 pub mod crypto;
 pub mod delegation;
 pub mod envelope;
