@@ -22,9 +22,9 @@ pub use dialog_artifacts::{
     KeyView, KeyViewConstruct, KeyViewMut, State, Value, ValueKey,
 };
 
-/// Credentials — opened profile with signers and authority chain.
-pub mod credentials;
-pub use credentials::Credentials;
+/// Authority — opened profile with signers and authority chain.
+pub mod authority;
+pub use authority::Authority;
 
 /// Profile — named identity with signing credential.
 pub mod profile;

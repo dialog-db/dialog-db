@@ -1,6 +1,6 @@
 //! Builder for constructing an Operator from a Profile.
 
-use crate::Credentials;
+use crate::Authority;
 use crate::profile::Profile;
 use crate::remote::Remote;
 use crate::storage::Storage;
@@ -81,7 +81,7 @@ impl NetworkBuilder {
     /// profile → operator and stores it under the profile's DID.
     pub async fn build(self, storage: Storage) -> Result<Operator, OperatorError> {
         let operator_signer = derive_operator(&self.credential, &self.context).await?;
-        let credentials = Credentials::new(
+        let credentials = Authority::new(
             "operator",
             Ed25519Signer::from(self.credential.clone()),
             operator_signer,

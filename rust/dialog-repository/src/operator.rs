@@ -8,7 +8,7 @@ mod test;
 
 pub use builder::{NetworkBuilder, OperatorBuilder, OperatorError};
 
-use crate::Credentials;
+use crate::Authority;
 use crate::remote::Remote;
 use crate::storage::Storage;
 use dialog_capability::Capability;
@@ -29,7 +29,7 @@ use dialog_varsig::{Did, Principal};
 pub struct Operator {
     #[provide(Identify, Sign)]
     /// Provider for authority effects (identity + signing).
-    authority: Credentials,
+    authority: Authority,
 
     #[provide(
         archive::Get,
