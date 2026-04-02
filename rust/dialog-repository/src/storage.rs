@@ -9,7 +9,6 @@
 use dialog_capability::storage::{Location, StorageError};
 use dialog_capability::{Capability, Effect, Policy, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_credentials::credential::Credential;
 use dialog_storage::provider::{Address, Store};
 use dialog_varsig::Did;
 use parking_lot::RwLock;
@@ -85,7 +84,7 @@ where
     }
 }
 
-use dialog_effects::{archive, credential, memory, storage as fx_storage};
+use dialog_effects::{archive, memory, storage as fx_storage};
 
 /// Address-dispatched storage with DID-routed effect table.
 #[derive(Clone, Provider)]
@@ -99,9 +98,7 @@ pub struct Storage {
         fx_storage::Get,
         fx_storage::Set,
         fx_storage::Delete,
-        fx_storage::List,
-        credential::Load,
-        credential::Save
+        fx_storage::List
     )]
     stores: Stores,
 }
@@ -334,5 +331,4 @@ macro_rules! impl_addressed {
     };
 }
 
-impl_addressed!(Credential);
 impl_addressed!(Vec<u8>);

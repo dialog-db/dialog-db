@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::provider::{Volatile, volatile};
-use dialog_effects::{archive, credential, memory, storage};
+use dialog_effects::{archive, memory, storage};
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::provider::{FileStore, fs};
@@ -119,9 +119,7 @@ impl Address {
     storage::Get,
     storage::Set,
     storage::Delete,
-    storage::List,
-    credential::Load,
-    credential::Save
+    storage::List
 )]
 pub enum Store {
     /// Filesystem-backed store (native only).

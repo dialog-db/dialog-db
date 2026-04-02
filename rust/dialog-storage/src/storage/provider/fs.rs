@@ -42,7 +42,6 @@
 //! ```
 
 mod archive;
-mod credential;
 mod error;
 mod memory;
 mod mount;
@@ -56,7 +55,6 @@ use std::path::PathBuf;
 use url::Url;
 
 const ARCHIVE: &str = "archive";
-const CREDENTIALS: &str = "credentials";
 const MEMORY: &str = "memory";
 const STORAGE: &str = "storage";
 
@@ -250,11 +248,6 @@ impl FileStore {
     /// Returns the location for a subject's memory storage.
     fn memory(&self, subject: &Did) -> Result<Location, FileSystemError> {
         self.0.resolve(subject.as_ref())?.resolve(MEMORY)
-    }
-
-    /// Returns the location for a subject's credential storage.
-    fn credentials(&self, subject: &Did) -> Result<Location, FileSystemError> {
-        self.0.resolve(subject.as_ref())?.resolve(CREDENTIALS)
     }
 
     /// Returns the location for a subject's key-value storage.

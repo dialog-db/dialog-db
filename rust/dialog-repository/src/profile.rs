@@ -8,7 +8,7 @@ use dialog_capability::storage::{
 use dialog_capability::ucan::import_delegation_chain;
 use dialog_capability::{Capability, Policy, Provider};
 use dialog_common::ConditionalSync;
-use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
+use dialog_credentials::{Credential, CredentialExport, Ed25519Signer, SignerCredential};
 use dialog_storage::provider::Address;
 use dialog_ucan::DelegationChain;
 use dialog_varsig::{Did, Principal};
@@ -123,8 +123,8 @@ impl OpenProfile {
     /// Mounts the profile DID at `{location}` in the storage store table.
     pub async fn perform<S>(self, storage: &S) -> Result<Profile, ProfileError>
     where
-        S: Provider<Load<Credential, Address>>
-            + Provider<Save<Credential, Address>>
+        S: Provider<Load<Vec<u8>, Address>>
+            + Provider<Save<Vec<u8>, Address>>
             + Provider<Mount<Address>>
             + ConditionalSync,
     {
@@ -136,11 +136,7 @@ impl OpenProfile {
 
         let credential = match self.mode {
             OpenMode::Load => {
-                let cred = cred_location
-                    .load::<Credential>()
-                    .perform(storage)
-                    .await
-                    .map_err(|e| ProfileError::Storage(e.to_string()))?;
+                let cred = load_credential(cred_location, storage).await?;
 
                 match cred {
                     Credential::Signer(signer) => signer,
@@ -152,11 +148,7 @@ impl OpenProfile {
                 }
             }
             OpenMode::Create => {
-                let existing = cred_location
-                    .clone()
-                    .load::<Credential>()
-                    .perform(storage)
-                    .await;
+                let existing = load_credential(cred_location.clone(), storage).await;
 
                 if existing.is_ok() {
                     return Err(ProfileError::AlreadyExists);
@@ -167,20 +159,17 @@ impl OpenProfile {
                     .map_err(|e| ProfileError::Key(e.to_string()))?;
                 let credential = SignerCredential::from(signer);
 
-                cred_location
-                    .save(Credential::Signer(credential.clone()))
-                    .perform(storage)
-                    .await
-                    .map_err(|e| ProfileError::Storage(e.to_string()))?;
+                save_credential(
+                    cred_location,
+                    &Credential::Signer(credential.clone()),
+                    storage,
+                )
+                .await?;
 
                 credential
             }
             OpenMode::OpenOrCreate => {
-                let load = cred_location
-                    .clone()
-                    .load::<Credential>()
-                    .perform(storage)
-                    .await;
+                let load = load_credential(cred_location.clone(), storage).await;
 
                 match load {
                     Ok(cred) => match cred {
@@ -197,11 +186,12 @@ impl OpenProfile {
                             .map_err(|e| ProfileError::Key(e.to_string()))?;
                         let credential = SignerCredential::from(signer);
 
-                        cred_location
-                            .save(Credential::Signer(credential.clone()))
-                            .perform(storage)
-                            .await
-                            .map_err(|e| ProfileError::Storage(e.to_string()))?;
+                        save_credential(
+                            cred_location,
+                            &Credential::Signer(credential.clone()),
+                            storage,
+                        )
+                        .await?;
 
                         credential
                     }
@@ -221,6 +211,46 @@ impl OpenProfile {
             location,
         })
     }
+}
+
+/// Load a credential from a storage location by reading raw bytes.
+async fn load_credential<S>(
+    location: Capability<Location<Address>>,
+    storage: &S,
+) -> Result<Credential, ProfileError>
+where
+    S: Provider<Load<Vec<u8>, Address>> + ConditionalSync,
+{
+    let bytes = location
+        .load::<Vec<u8>>()
+        .perform(storage)
+        .await
+        .map_err(|e| ProfileError::Storage(e.to_string()))?;
+    let export =
+        CredentialExport::try_from(bytes).map_err(|e| ProfileError::Storage(e.to_string()))?;
+    Credential::import(export)
+        .await
+        .map_err(|e| ProfileError::Storage(e.to_string()))
+}
+
+/// Save a credential to a storage location by writing raw bytes.
+async fn save_credential<S>(
+    location: Capability<Location<Address>>,
+    credential: &Credential,
+    storage: &S,
+) -> Result<(), ProfileError>
+where
+    S: Provider<Save<Vec<u8>, Address>> + ConditionalSync,
+{
+    let export = credential
+        .export()
+        .await
+        .map_err(|e| ProfileError::Storage(e.to_string()))?;
+    location
+        .save(export.as_bytes().to_vec())
+        .perform(storage)
+        .await
+        .map_err(|e| ProfileError::Storage(e.to_string()))
 }
 
 /// Errors that can occur when opening a profile.

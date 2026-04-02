@@ -35,13 +35,11 @@
 //! ```
 
 mod archive;
-mod credential;
 mod memory;
 mod mount;
 mod storage;
 
 use dialog_capability::Did;
-use dialog_effects::credential::CredentialExport;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 
@@ -61,8 +59,6 @@ struct Session {
     archive: HashMap<ArchiveKey, Vec<u8>>,
     /// Transactional memory storage keyed by (space, cell).
     memory: HashMap<MemoryKey, Vec<u8>>,
-    /// Credential storage keyed by address ID.
-    credentials: HashMap<String, CredentialExport>,
     /// Mounted byte storage keyed by address prefix.
     mounted: HashMap<String, Vec<u8>>,
     /// Key-value storage keyed by (store, key).

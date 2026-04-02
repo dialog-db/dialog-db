@@ -20,7 +20,6 @@ web-integration-tests = ["dialog-common/web-integration-tests"]
 [dependencies]
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
-dialog-credentials = { workspace = true }
 dialog-effects = { workspace = true }
 dialog-varsig = { workspace = true }
 signature = { workspace = true }
@@ -63,7 +62,6 @@ web-time = { workspace = true }
 anyhow = { workspace = true }
 blake3 = { workspace = true }
 dialog-common = { workspace = true, features = ["helpers"] }
-dialog-credentials = { workspace = true }
 ipld-core = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

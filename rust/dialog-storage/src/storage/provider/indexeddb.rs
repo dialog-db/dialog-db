@@ -40,7 +40,6 @@
 //! ```
 
 mod archive;
-mod credential;
 mod memory;
 mod mount;
 mod storage;

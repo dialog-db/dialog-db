@@ -26,9 +26,7 @@
 #![warn(missing_docs)]
 
 pub mod archive;
-pub mod credential;
 pub mod memory;
-pub mod repository;
 pub mod storage;
 
 // Re-export capability primitives for convenience

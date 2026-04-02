@@ -14,8 +14,7 @@ use crate::storage::Storage;
 use dialog_capability::Provider;
 use dialog_capability::authority::{Authority, Identify, Sign};
 use dialog_capability::storage::{Load, Mount, Save};
-use dialog_credentials::credential::Credential;
-use dialog_effects::{archive, credential, memory, storage as fx_storage};
+use dialog_effects::{archive, memory, storage as fx_storage};
 use dialog_storage::provider::Address;
 use dialog_varsig::{Did, Principal};
 
@@ -41,10 +40,6 @@ pub struct Operator {
         fx_storage::Set,
         fx_storage::Delete,
         fx_storage::List,
-        credential::Load,
-        credential::Save,
-        Load<Credential, Address>,
-        Save<Credential, Address>,
         Load<Vec<u8>, Address>,
         Save<Vec<u8>, Address>,
         Mount<Address>
