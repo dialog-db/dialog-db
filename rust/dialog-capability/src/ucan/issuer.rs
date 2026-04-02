@@ -4,8 +4,8 @@
 //! UCAN's `Principal` + `Signer` interface, allowing the UCAN
 //! `InvocationBuilder` to work with the capability system.
 
-use crate::authority::{Authority, Operator, Sign};
-use crate::{Did, Policy, Provider};
+use crate::authority::{Operator, Sign};
+use crate::{Capability, Did, Policy, Provider};
 use dialog_common::ConditionalSync;
 use dialog_varsig::eddsa::Ed25519Signature;
 use dialog_varsig::{Principal, Signer};
@@ -17,17 +17,17 @@ use dialog_varsig::{Principal, Signer};
 pub struct Issuer<'a, Env> {
     env: &'a Env,
     /// The authority capability chain (`Subject → Profile → Operator`).
-    capability: Authority,
+    capability: Capability<Operator>,
 }
 
 impl<'a, Env> Issuer<'a, Env> {
     /// Create an issuer from an authority chain and environment.
-    pub fn new(env: &'a Env, capability: Authority) -> Self {
+    pub fn new(env: &'a Env, capability: Capability<Operator>) -> Self {
         Self { env, capability }
     }
 
     /// Get the authority capability chain.
-    pub fn capability(&self) -> &Authority {
+    pub fn capability(&self) -> &Capability<Operator> {
         &self.capability
     }
 }

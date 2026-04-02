@@ -27,6 +27,7 @@ members = [
     "rust/dialog-encoding",
     "rust/dialog-prolly-tree",
     "rust/dialog-query",
+    "rust/dialog-operator",
     "rust/dialog-remote-s3",
     "rust/dialog-remote-ucan-s3",
     "rust/dialog-search-tree",
@@ -185,6 +186,9 @@ path = "./rust/dialog-macros"
 
 [workspace.dependencies.dialog-query]
 path = "./rust/dialog-query"
+
+[workspace.dependencies.dialog-operator]
+path = "./rust/dialog-operator"
 
 [workspace.dependencies.dialog-remote-s3]
 path = "./rust/dialog-remote-s3"

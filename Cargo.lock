@@ -1086,6 +1086,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-operator"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "dialog-artifacts",
+ "dialog-capability",
+ "dialog-common",
+ "dialog-credentials",
+ "dialog-remote-s3",
+ "dialog-remote-ucan-s3",
+ "dialog-ucan",
+ "dialog-varsig",
+ "serde",
+ "signature",
+]
+
+[[package]]
 name = "dialog-prolly-tree"
 version = "0.1.0"
 dependencies = [

@@ -207,7 +207,7 @@ mod tests {
             async fn execute(
                 &self,
                 input: Capability<authority::Identify>,
-            ) -> Result<authority::Authority, authority::AuthorityError> {
+            ) -> Result<Capability<authority::Operator>, authority::AuthorityError> {
                 let did = Principal::did(&self.signer);
                 let subject_did = input.subject().clone();
                 Ok(Subject::from(subject_did)

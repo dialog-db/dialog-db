@@ -9,9 +9,8 @@
 //!         └── Sign { payload } -> Effect -> Result<Vec<u8>, CredentialError>
 //! ```
 //!
-//! [`Authority`] is a type alias for `Capability<Operator>` — the chain itself
-//! is the identity. [`Identify`] is an effect on `Subject` that returns the
-//! current `Authority`.
+//! The authority chain `Capability<Operator>` is the identity itself.
+//! [`Identify`] is an effect on `Subject` that returns the current chain.
 
 use crate::{Attenuation, Capability, Did, Effect, Policy, Subject};
 use serde::{Deserialize, Serialize};
@@ -85,21 +84,6 @@ impl Attenuation for Operator {
     type Of = Profile;
 }
 
-/// The authority chain — `Subject → Profile → Operator`.
-///
-/// This is the identity itself, encoded as a capability chain.
-/// Extract DIDs by reading the chain:
-///
-/// ```no_run
-/// # use dialog_capability::{Subject, Policy, did};
-/// # use dialog_capability::authority::{Profile, Operator, Authority};
-/// # let authority: Authority = todo!();
-/// let repo_subject = authority.subject();
-/// let profile = Profile::of(&authority);
-/// let operator = Operator::of(&authority);
-/// ```
-pub type Authority = Capability<Operator>;
-
 /// Sign operation — signs a payload using the operator's key.
 #[derive(Debug, Clone, Serialize, Deserialize, crate::Claim)]
 pub struct Sign {
@@ -134,15 +118,15 @@ impl SignCapability for Capability<Sign> {
     }
 }
 
-/// Identify operation — returns the current [`Authority`] chain.
+/// Identify operation — returns the current authority chain.
 ///
 /// This is an effect directly on `Subject` — no intermediate attenuation.
-/// The returned `Authority` (`Capability<Operator>`) encodes the full
-/// identity hierarchy: subject, profile, and operator.
+/// The returned `Capability<Operator>` encodes the full identity hierarchy:
+/// subject, profile, and operator.
 #[derive(Debug, Clone, Serialize, Deserialize, crate::Claim)]
 pub struct Identify;
 
 impl Effect for Identify {
     type Of = Subject;
-    type Output = Result<Authority, AuthorityError>;
+    type Output = Result<Capability<Operator>, AuthorityError>;
 }
