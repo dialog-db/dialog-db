@@ -11,14 +11,6 @@ helpers = [
   "anyhow",
   "rand",
   "dialog-common/helpers",
-  "dep:s3s",
-  "dep:hyper",
-  "dep:hyper-util",
-  "dep:http-body-util",
-  "dep:bytes",
-  "dep:tokio-test",
-  "dep:tower",
-  "dep:tower-http",
 ]
 # Enable integration tests (tests with service provisioning)
 integration-tests = ["dialog-common/integration-tests"]
@@ -29,37 +21,34 @@ web-integration-tests = ["dialog-common/web-integration-tests"]
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
 dialog-effects = { workspace = true }
-dialog-varsig = { workspace = true }
-signature = { workspace = true }
 
 anyhow = { workspace = true, optional = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 base58 = { workspace = true }
+base64 = { workspace = true }
 blake3 = { workspace = true }
 brotli = { workspace = true }
 futures-util = { workspace = true }
 hyper = { workspace = true, optional = true }
 hyper-util = { workspace = true, features = ["server", "tokio", "service"], optional = true }
+md5 = { workspace = true }
 parking_lot = { workspace = true }
 s3s = { workspace = true, optional = true }
 sieve-cache = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_ipld_dagcbor = { workspace = true }
+serde_json = { workspace = true }
 rand = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+dirs = { workspace = true }
 url = { workspace = true }
 pidlock = { workspace = true }
 tempfile = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["sync", "fs", "macros", "rt", "net"] }
-http-body-util = { workspace = true, optional = true }
-bytes = { workspace = true, optional = true }
-tokio-test = { workspace = true, optional = true }
-tower = { workspace = true, optional = true }
-tower-http = { workspace = true, features = ["cors"], optional = true }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 js-sys = { workspace = true }
@@ -71,19 +60,13 @@ web-time = { workspace = true }
 anyhow = { workspace = true }
 blake3 = { workspace = true }
 dialog-common = { workspace = true, features = ["helpers"] }
+dialog-credentials = { workspace = true }
 ipld-core = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 rand = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-bytes = { workspace = true }
-clap = { workspace = true, features = ["derive"] }
-s3s = { workspace = true }
-hyper = { workspace = true }
-hyper-util = { workspace = true, features = ["server", "tokio", "service"] }
-http-body-util = { workspace = true }
-serde_ipld_dagcbor = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = [
   "sync",
@@ -92,11 +75,8 @@ tokio = { workspace = true, features = [
   "fs",
   "rt-multi-thread",
 ] }
-tower = { workspace = true }
-tower-http = { workspace = true, features = ["cors"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
-# getrandom = { workspace = true, features = ["wasm_js"] }
 getrandom = { workspace = true, features = ["js"] }
 wasm-bindgen-test = { workspace = true }
 

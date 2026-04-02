@@ -26,13 +26,16 @@
 pub mod fs;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use fs::*;
+pub use fs::{FileStore, FileSystem, FileSystemError};
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub mod indexeddb;
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-pub use indexeddb::*;
+pub use indexeddb::IndexedDb;
 
 pub mod volatile;
-pub use volatile::*;
+pub use volatile::Volatile;
+
+mod store;
+pub use store::{Address, Store};

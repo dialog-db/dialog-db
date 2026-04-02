@@ -1141,21 +1141,21 @@ dependencies = [
  "async-stream",
  "async-trait",
  "base58",
+ "base64",
  "blake3",
  "brotli",
- "bytes",
- "clap",
  "dialog-capability",
  "dialog-common",
+ "dialog-credentials",
  "dialog-effects",
- "dialog-varsig",
+ "dirs",
  "futures-util",
  "getrandom 0.2.16",
- "http-body-util",
  "hyper",
  "hyper-util",
  "ipld-core",
  "js-sys",
+ "md5",
  "parking_lot",
  "pidlock",
  "rand 0.8.5",
@@ -1165,13 +1165,9 @@ dependencies = [
  "serde_ipld_dagcbor",
  "serde_json",
  "sieve-cache",
- "signature",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tokio-test",
- "tower",
- "tower-http",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-test",
@@ -2185,6 +2181,12 @@ dependencies = [
  "cfg-if",
  "digest 0.11.2",
 ]
+
+[[package]]
+name = "md5"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae960838283323069879657ca3de837e9f7bbb4c7bf6ea7f1b290d5e9476d2e0"
 
 [[package]]
 name = "memchr"

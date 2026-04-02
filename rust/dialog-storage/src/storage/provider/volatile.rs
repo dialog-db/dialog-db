@@ -35,6 +35,8 @@
 
 mod archive;
 mod memory;
+mod resource;
+mod storage;
 
 use dialog_capability::Did;
 use parking_lot::RwLock;
@@ -46,6 +48,9 @@ type ArchiveKey = (String, String);
 /// Memory key: (space, cell)
 type MemoryKey = (String, String);
 
+/// Storage key: (store, key_bytes)
+type StorageKey = (String, Vec<u8>);
+
 /// A session holds the in-memory storage for a single subject.
 #[derive(Default, Debug)]
 struct Session {
@@ -53,6 +58,10 @@ struct Session {
     archive: HashMap<ArchiveKey, Vec<u8>>,
     /// Transactional memory storage keyed by (space, cell).
     memory: HashMap<MemoryKey, Vec<u8>>,
+    /// Mounted byte storage keyed by address prefix.
+    mounted: HashMap<String, Vec<u8>>,
+    /// Key-value storage keyed by (store, key).
+    storage: HashMap<StorageKey, Vec<u8>>,
 }
 
 /// Volatile in-memory storage provider.
@@ -60,19 +69,84 @@ struct Session {
 /// A simple provider that stores all data in memory. Each subject DID gets its
 /// own session with separate archive and memory storage. Data is not persisted.
 ///
+use serde::{Deserialize, Serialize};
+
+/// Address for volatile (in-memory) storage.
+///
+/// A string prefix that scopes storage operations.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(transparent)]
+pub struct Address(String);
+
+impl Address {
+    /// Create an address with the given prefix.
+    pub fn new(prefix: impl Into<String>) -> Self {
+        Self(prefix.into())
+    }
+
+    /// Profile storage address with the given name.
+    pub fn profile(name: &str) -> Self {
+        Self(format!("profile/{name}"))
+    }
+
+    /// Current/working storage address with the given name.
+    pub fn current(name: &str) -> Self {
+        Self(format!("storage/{name}"))
+    }
+
+    /// Temporary storage address with the given name.
+    pub fn temp(name: &str) -> Self {
+        Self(format!("temp/{name}"))
+    }
+
+    /// The prefix string.
+    pub fn prefix(&self) -> &str {
+        &self.0
+    }
+
+    /// Resolve a sub-path under this address.
+    pub fn resolve(&self, segment: &str) -> Self {
+        if self.0.is_empty() {
+            Self(segment.to_string())
+        } else {
+            Self(format!("{}/{}", self.0, segment))
+        }
+    }
+}
+
 /// Uses `parking_lot::RwLock` for interior mutability so that
 /// `Provider::execute` can take `&self`. All lock guards are dropped before
 /// any `.await` points. Unlike `std::sync::RwLock`, `parking_lot` locks are
 /// infallible (no poisoning).
-#[derive(Default, Debug)]
+#[derive(Debug, Clone)]
 pub struct Volatile {
-    sessions: RwLock<HashMap<Did, Session>>,
+    /// Mount prefix prepended to session keys.
+    mount: String,
+    /// Shared session storage.
+    sessions: std::sync::Arc<RwLock<HashMap<Did, Session>>>,
+}
+
+impl Default for Volatile {
+    fn default() -> Self {
+        Self {
+            mount: String::new(),
+            sessions: std::sync::Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
 }
 
 impl Volatile {
     /// Creates a new volatile provider.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a volatile store mounted at the given address.
+    pub fn mount(address: &Address) -> Self {
+        Self {
+            mount: address.prefix().to_string(),
+            sessions: std::sync::Arc::new(RwLock::new(HashMap::new())),
+        }
     }
 }
 
