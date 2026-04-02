@@ -28,6 +28,7 @@ members = [
     "rust/dialog-prolly-tree",
     "rust/dialog-query",
     "rust/dialog-remote-s3",
+    "rust/dialog-remote-ucan-s3",
     "rust/dialog-search-tree",
     "rust/dialog-storage",
     "rust/dialog-ucan",
@@ -187,6 +188,9 @@ path = "./rust/dialog-query"
 
 [workspace.dependencies.dialog-remote-s3]
 path = "./rust/dialog-remote-s3"
+
+[workspace.dependencies.dialog-remote-ucan-s3]
+path = "./rust/dialog-remote-ucan-s3"
 
 [workspace.dependencies.dialog-blobs]
 path = "./rust/dialog-blobs"

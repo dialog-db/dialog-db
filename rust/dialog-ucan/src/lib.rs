@@ -29,6 +29,7 @@ mod sealed;
 
 pub use container::delegation::DelegationChain;
 pub use container::invocation::InvocationChain;
+pub use container::{Container, ContainerError};
 pub use delegation::{
     Delegation,
     builder::{BuildError as DelegationBuildError, DelegationBuilder},
