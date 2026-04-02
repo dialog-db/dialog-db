@@ -71,7 +71,6 @@ pub use key::*;
 mod uri;
 pub use uri::*;
 
+/// Test helpers for generating deterministic test data.
 #[cfg(any(test, feature = "helpers"))]
-mod helpers;
-#[cfg(any(test, feature = "helpers"))]
-pub use helpers::*;
+pub mod helpers;

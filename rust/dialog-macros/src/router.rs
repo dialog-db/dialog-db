@@ -16,11 +16,11 @@
 //!
 //! ```rust,ignore
 //! #[derive(Router)]
-//! pub struct Network<Issuer: Clone> {
+//! pub struct Network {
 //!     #[cfg(feature = "s3")]
-//!     s3: Route<Issuer, s3::Credentials, s3::Connection<Issuer>>,
+//!     s3: route::Route<s3::Credentials, s3::Connection>,
 //!     #[cfg(feature = "ucan")]
-//!     ucan: Route<Issuer, ucan::Credentials, ucan::Connection<Issuer>>,
+//!     ucan: route::Route<ucan::Credentials, ucan::Connection>,
 //! }
 //! ```
 //!

@@ -6,7 +6,8 @@ use crate::descriptor::Descriptor;
 use crate::negation::Negation;
 use crate::statement::Statement;
 use crate::types::Scalar;
-use crate::{Cardinality, Entity, Premise, Proposition, Term, Transaction};
+use crate::{Cardinality, Entity, Premise, Proposition, Term};
+use dialog_artifacts::Update;
 use std::iter;
 use std::marker::PhantomData;
 use std::ops::Not;
@@ -155,24 +156,24 @@ where
     A: Attribute + Descriptor<AttributeDescriptor> + Clone,
     Is: Into<A>,
 {
-    fn assert(self, transaction: &mut Transaction) {
+    fn assert(self, update: &mut impl Update) {
         let (of, is, _) = self.into_parts();
         let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
         let the = desc.the().clone();
         let attr: A = is.into();
         let value = attr.value().clone().into();
         if desc.cardinality() == Cardinality::One {
-            transaction.associate_unique(the, of, value);
+            update.associate_unique(the.into(), of, value);
         } else {
-            transaction.associate(the, of, value);
+            update.associate(the.into(), of, value);
         }
     }
 
-    fn retract(self, transaction: &mut Transaction) {
+    fn retract(self, update: &mut impl Update) {
         let (of, is, _) = self.into_parts();
         let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
         let attr: A = is.into();
-        transaction.dissociate(desc.the().clone(), of, attr.value().clone().into());
+        update.dissociate(desc.the().clone().into(), of, attr.value().clone().into());
     }
 }
 
@@ -263,9 +264,13 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "repository-tests"))]
 mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
     use super::*;
+    use crate::Changes;
     use crate::Match;
     use crate::artifact::Value;
     use crate::premise::Premise;
@@ -285,9 +290,9 @@ mod tests {
         let alice = Entity::new().unwrap();
         let statement = person::Name::of(alice).is("Alice");
 
-        let mut transaction = Transaction::new();
-        statement.assert(&mut transaction);
-        assert!(!transaction.is_empty());
+        let mut changes = Changes::new();
+        statement.assert(&mut changes);
+        assert!(!changes.is_empty());
     }
 
     #[dialog_common::test]
@@ -295,9 +300,9 @@ mod tests {
         let alice = Entity::new().unwrap();
         let statement = person::Name::of(alice).is(person::Name("Alice".into()));
 
-        let mut transaction = Transaction::new();
-        statement.assert(&mut transaction);
-        assert!(!transaction.is_empty());
+        let mut changes = Changes::new();
+        statement.assert(&mut changes);
+        assert!(!changes.is_empty());
     }
 
     #[dialog_common::test]
@@ -305,9 +310,9 @@ mod tests {
         let alice = Entity::new().unwrap();
         let statement = person::Name::of(alice).is("Alice");
 
-        let mut transaction = Transaction::new();
-        statement.retract(&mut transaction);
-        assert!(!transaction.is_empty());
+        let mut changes = Changes::new();
+        statement.retract(&mut changes);
+        assert!(!changes.is_empty());
     }
 
     #[dialog_common::test]
@@ -446,9 +451,9 @@ mod tests {
         let alice = Entity::new().unwrap();
 
         let expr = person::Name::of(alice.clone()).is("Alice");
-        let mut transaction = Transaction::new();
-        expr.assert(&mut transaction);
-        assert!(!transaction.is_empty());
+        let mut changes = Changes::new();
+        expr.assert(&mut changes);
+        assert!(!changes.is_empty());
 
         let expression = person::Name::of(alice).is("Alice");
         let premise: Premise = expression.into();
@@ -467,19 +472,23 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_roundtrips_assert_and_query() -> anyhow::Result<()> {
-        use crate::artifact::Artifacts;
-        use crate::{Session, Term};
-        use dialog_storage::MemoryStorageBackend;
+        use crate::Term;
+        use crate::session::RuleRegistry;
+        use crate::source::test::TestEnv;
+        use dialog_repository::helpers::{test_operator, test_repo};
         use futures_util::TryStreamExt;
 
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
 
-        let mut session = Session::open(store.clone());
-        session
-            .transact(person::Name::of(alice.clone()).is("Alice"))
+        branch
+            .transaction()
+            .assert(person::Name::of(alice.clone()).is("Alice"))
+            .commit()
+            .perform(&operator)
             .await?;
 
         let premise: Premise = person::Name::of(alice.clone())
@@ -491,17 +500,13 @@ mod tests {
             _ => panic!("Expected Assert"),
         };
 
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = prop
-            .evaluate(Match::new().seed(), &Session::open(store.clone()))
+            .evaluate(Match::new().seed(), &source)
             .try_collect::<Vec<_>>()
             .await?;
 
         assert_eq!(results.len(), 1);
-
-        let mut session = Session::open(store.clone());
-        session
-            .transact(person::Name::of(alice.clone()).is("Alice"))
-            .await?;
 
         Ok(())
     }

@@ -9,15 +9,20 @@ use crate::attribute::{AttributeDescriptor, Attribution};
 use crate::concept::query::ConceptQuery;
 use crate::concept::{Concept, Conclusion};
 use crate::error::TypeError;
-use crate::query::{Application, Source};
+use crate::query::Application;
 use crate::selection::{Match, Selection};
+use crate::source::SelectRules;
 use crate::statement::Retraction;
 use crate::term::Term;
 use crate::types::Scalar;
 use crate::{
     Cardinality, Entity, EvaluationError, Field, Parameters, Proposition, Requirement, Schema,
-    Statement, Transaction, Type, Value,
+    Statement, Type, Value,
 };
+use dialog_artifacts::Select;
+use dialog_artifacts::Update;
+use dialog_capability::Provider;
+use dialog_common::ConditionalSync;
 
 use base58::ToBase58;
 use serde::{Deserialize, Serialize};
@@ -296,14 +301,14 @@ impl ConceptStatement {
 }
 
 impl Statement for ConceptStatement {
-    fn assert(self, transaction: &mut Transaction) {
+    fn assert(self, update: &mut impl Update) {
         for attribution in self.with {
-            transaction.associate(attribution.the.into(), self.this.clone(), attribution.is);
+            update.associate(attribution.the, self.this.clone(), attribution.is);
         }
     }
-    fn retract(self, transaction: &mut Transaction) {
+    fn retract(self, update: &mut impl Update) {
         for attribution in self.with {
-            transaction.dissociate(attribution.the.into(), self.this.clone(), attribution.is);
+            update.dissociate(attribution.the, self.this.clone(), attribution.is);
         }
     }
 }
@@ -312,7 +317,7 @@ impl Not for ConceptStatement {
     type Output = Retraction<Self>;
 
     fn not(self) -> Self::Output {
-        self.revert()
+        Retraction(self)
     }
 }
 
@@ -432,8 +437,11 @@ impl From<ConceptQuery> for ConceptDescriptor {
 impl Application for ConceptQuery {
     type Conclusion = ConceptConclusion;
 
-    fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
-        ConceptQuery::evaluate(self, selection, source)
+    fn evaluate<'a, Env, M: Selection + 'a>(self, selection: M, env: &'a Env) -> impl Selection + 'a
+    where
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    {
+        ConceptQuery::evaluate(self, selection, env)
     }
 
     fn realize(&self, source: Match) -> Result<Self::Conclusion, EvaluationError> {

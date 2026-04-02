@@ -1,3 +1,5 @@
+//! Test helpers for generating deterministic test data.
+
 use std::str::FromStr;
 
 use crate::{Artifact, Attribute, Entity, Value};

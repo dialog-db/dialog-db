@@ -13,8 +13,14 @@ pub use instruction::*;
 pub mod selector;
 pub use selector::ArtifactSelector;
 
+mod query;
+pub use query::{ArtifactStream, Select};
+
 mod store;
 pub use store::*;
+
+mod update;
+pub use update::{Change, ChangeStream, Changes, Statement, Update};
 
 mod attribute;
 pub use attribute::*;
@@ -569,10 +575,10 @@ mod tests {
     use futures_util::{StreamExt, TryStreamExt};
     use tokio::sync::Mutex;
 
+    use crate::helpers::generate_data;
     use crate::{
         Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMutExt, Artifacts, Attribute,
-        DialogArtifactsError, Entity, Instruction, NULL_REVISION_HASH, Value, generate_data,
-        make_reference,
+        DialogArtifactsError, Entity, Instruction, NULL_REVISION_HASH, Value, make_reference,
     };
 
     #[cfg(target_arch = "wasm32")]

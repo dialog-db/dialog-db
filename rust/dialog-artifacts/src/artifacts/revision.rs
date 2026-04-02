@@ -30,6 +30,7 @@ impl Revision {
 
     /// Encodes the [`Revision`] as IPLD-compatible CBOR and returns the raw
     /// bytes
+    #[allow(dead_code)]
     pub async fn as_cbor(&self) -> Result<Vec<u8>, DialogArtifactsError> {
         Ok(CborEncoder.encode(self).await?.1)
     }

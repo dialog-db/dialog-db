@@ -125,8 +125,11 @@ impl Modulo {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "repository-tests"))]
 mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
     use crate::formula::math::*;
     use crate::formula::query::FormulaQuery;
     use crate::*;
@@ -519,8 +522,9 @@ mod tests {
     #[dialog_common::test]
     async fn it_performs_formula_with_all_variables() -> anyhow::Result<()> {
         use crate::query::Application;
-        use crate::{Session, artifact::Artifacts};
-        use dialog_storage::MemoryStorageBackend;
+        use crate::session::RuleRegistry;
+        use crate::source::test::TestEnv;
+        use dialog_repository::helpers::{test_operator, test_repo};
 
         // Create a SumQuery with all variables
         let query = Query::<Sum> {
@@ -530,9 +534,10 @@ mod tests {
         };
 
         // Create a minimal session (formulas don't need stored data)
-        let storage = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage).await?;
-        let session = Session::open(artifacts);
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         // perform = evaluate(new_context) -> realize for each match
         // But first we need to seed the context with input values.
@@ -544,7 +549,7 @@ mod tests {
         input.bind(&Term::var("y"), 3u32.into())?;
 
         let query_copy = query.clone();
-        let matches: Vec<Match> = query.evaluate(input.seed(), &session).try_collect().await?;
+        let matches: Vec<Match> = query.evaluate(input.seed(), &source).try_collect().await?;
 
         assert_eq!(matches.len(), 1);
 
@@ -560,8 +565,9 @@ mod tests {
     #[dialog_common::test]
     async fn it_performs_formula_with_constant_inputs() -> anyhow::Result<()> {
         use crate::query::Application;
-        use crate::{Session, artifact::Artifacts};
-        use dialog_storage::MemoryStorageBackend;
+        use crate::session::RuleRegistry;
+        use crate::source::test::TestEnv;
+        use dialog_repository::helpers::{test_operator, test_repo};
 
         // Input fields are constants, output field is a variable
         let query = Query::<Sum> {
@@ -570,15 +576,16 @@ mod tests {
             is: Term::var("result"),
         };
 
-        let storage = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage).await?;
-        let session = Session::open(artifacts);
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         // Constants are already bound — empty starting Match should work
         let input = Match::new();
 
         let query_copy = query.clone();
-        let selection: Vec<Match> = { query.evaluate(input.seed(), &session).try_collect().await? };
+        let selection: Vec<Match> = { query.evaluate(input.seed(), &source).try_collect().await? };
 
         assert_eq!(selection.len(), 1);
         let proof = query_copy.realize(selection[0].clone())?;
@@ -592,8 +599,9 @@ mod tests {
     #[dialog_common::test]
     async fn it_performs_formula_with_constant_output() -> anyhow::Result<()> {
         use crate::query::Application;
-        use crate::{Session, artifact::Artifacts};
-        use dialog_storage::MemoryStorageBackend;
+        use crate::session::RuleRegistry;
+        use crate::source::test::TestEnv;
+        use dialog_repository::helpers::{test_operator, test_repo};
 
         // Output field is a constant matching the expected result
         let query = Query::<Sum> {
@@ -602,16 +610,17 @@ mod tests {
             is: Term::from(8u32),
         };
 
-        let storage = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage).await?;
-        let session = Session::open(artifacts);
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let mut input = Match::new();
         input.bind(&Term::var("x"), 5u32.into())?;
         input.bind(&Term::var("y"), 3u32.into())?;
 
         let query_copy = query.clone();
-        let matches: Vec<Match> = query.evaluate(input.seed(), &session).try_collect().await?;
+        let matches: Vec<Match> = query.evaluate(input.seed(), &source).try_collect().await?;
 
         // Should succeed — the formula computes 8, and the constant 8 is consistent
         assert_eq!(matches.len(), 1);
@@ -626,8 +635,9 @@ mod tests {
     #[dialog_common::test]
     async fn it_rejects_inconsistent_constant_in_formula() -> anyhow::Result<()> {
         use crate::query::Application;
-        use crate::{Session, artifact::Artifacts};
-        use dialog_storage::MemoryStorageBackend;
+        use crate::session::RuleRegistry;
+        use crate::source::test::TestEnv;
+        use dialog_repository::helpers::{test_operator, test_repo};
 
         // Output field is a constant that does NOT match (5 + 3 ≠ 99)
         let query = Query::<Sum> {
@@ -636,15 +646,16 @@ mod tests {
             is: Term::from(99u32),
         };
 
-        let storage = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage).await?;
-        let session = Session::open(artifacts);
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let mut input = Match::new();
         input.bind(&Term::var("x"), 5u32.into())?;
         input.bind(&Term::var("y"), 3u32.into())?;
 
-        let selection: Vec<Match> = query.evaluate(input.seed(), &session).try_collect().await?;
+        let selection: Vec<Match> = query.evaluate(input.seed(), &source).try_collect().await?;
 
         // The formula computes 8 but "is" is constant 99 — inconsistency
         // should filter this out (0 results)
@@ -660,8 +671,9 @@ mod tests {
     #[dialog_common::test]
     async fn it_performs_formula_with_mixed_terms() -> anyhow::Result<()> {
         use crate::query::Application;
-        use crate::{Session, artifact::Artifacts};
-        use dialog_storage::MemoryStorageBackend;
+        use crate::session::RuleRegistry;
+        use crate::source::test::TestEnv;
+        use dialog_repository::helpers::{test_operator, test_repo};
 
         // Mix: one input is constant, one is variable, output is variable
         let query = Query::<Sum> {
@@ -670,15 +682,16 @@ mod tests {
             is: Term::var("result"),
         };
 
-        let storage = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage).await?;
-        let session = Session::open(artifacts);
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let mut input = Match::new();
         input.bind(&Term::var("y"), 7u32.into())?;
 
         let query_copy = query.clone();
-        let selection: Vec<Match> = query.evaluate(input.seed(), &session).try_collect().await?;
+        let selection: Vec<Match> = query.evaluate(input.seed(), &source).try_collect().await?;
 
         assert_eq!(selection.len(), 1);
         let proof = query_copy.realize(selection[0].clone())?;
@@ -692,8 +705,9 @@ mod tests {
     #[dialog_common::test]
     async fn it_performs_formula_with_shared_variable() -> anyhow::Result<()> {
         use crate::query::Application;
-        use crate::{Session, artifact::Artifacts};
-        use dialog_storage::MemoryStorageBackend;
+        use crate::session::RuleRegistry;
+        use crate::source::test::TestEnv;
+        use dialog_repository::helpers::{test_operator, test_repo};
 
         // Both inputs use the same variable (x + x)
         let query = Query::<Sum> {
@@ -702,15 +716,16 @@ mod tests {
             is: Term::var("result"),
         };
 
-        let storage = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage).await?;
-        let session = Session::open(artifacts);
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let mut input = Match::new();
         input.bind(&Term::var("x"), 4u32.into())?;
 
         let query_copy = query.clone();
-        let matches: Vec<Match> = query.evaluate(input.seed(), &session).try_collect().await?;
+        let matches: Vec<Match> = query.evaluate(input.seed(), &source).try_collect().await?;
 
         assert_eq!(matches.len(), 1);
         let proof = query_copy.realize(matches[0].clone())?;

@@ -180,8 +180,11 @@ impl From<&Vec<Plan>> for Planner {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "repository-tests"))]
 mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
     use super::*;
     use crate::selection::Match;
     use crate::the;
@@ -262,31 +265,33 @@ mod tests {
     #[dialog_common::test]
     async fn it_executes_planned_query() -> anyhow::Result<()> {
         use crate::attribute::query::AttributeQuery;
-        use crate::session::Session;
+        use crate::session::RuleRegistry;
+        use crate::source::test::TestEnv;
 
         use crate::{Cardinality, Proposition, Term, Value, the};
-        use dialog_artifacts::{Artifacts, Entity};
-        use dialog_storage::MemoryStorageBackend;
+        use dialog_artifacts::Entity;
+        use dialog_repository::helpers::{test_operator, test_repo};
 
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
-        let mut session = Session::open(store);
+        let operator = test_operator().await;
+        let repo = test_repo(&operator).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        {
-            let mut tx = session.edit();
-            tx.assert(
+        branch
+            .transaction()
+            .assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
             .assert(the!("person/age").of(alice.clone()).is(25u32))
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
-            .assert(the!("person/age").of(bob.clone()).is(30u32));
-            session.commit(tx).await?;
-        }
+            .assert(the!("person/age").of(bob.clone()).is(30u32))
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let fact1 = AttributeQuery::new(
             Term::from(the!("person/name")),
@@ -310,8 +315,9 @@ mod tests {
         ];
         let plan = Planner::from(premises).plan(&Environment::new())?;
 
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            plan.evaluate(Match::new().seed(), &session),
+            plan.evaluate(Match::new().seed(), &source),
         )
         .await?;
 

@@ -380,11 +380,11 @@ pub fn derive_attribute(input: TokenStream) -> TokenStream {
 ///
 /// ```rust,ignore
 /// #[derive(Router)]
-/// pub struct Network<Issuer> {
+/// pub struct Network {
 ///     #[cfg(feature = "s3")]
-///     s3: Router<s3::Address, s3::Connection<Issuer>>,
+///     s3: route::Route<s3::Credentials, s3::Connection>,
 ///     #[cfg(feature = "ucan")]
-///     ucan: Router<ucan::Address, ucan::Connection<Issuer>>,
+///     ucan: route::Route<ucan::Credentials, ucan::Connection>,
 /// }
 /// ```
 ///
