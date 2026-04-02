@@ -15,6 +15,7 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 
 use dialog_capability::storage::{Load, Save};
+use dialog_credentials::credential::Credential;
 
 use std::sync::Arc;
 
@@ -332,3 +333,4 @@ macro_rules! impl_addressed {
 }
 
 impl_addressed!(Vec<u8>);
+impl_addressed!(Credential);

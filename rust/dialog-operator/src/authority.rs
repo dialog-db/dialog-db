@@ -11,9 +11,9 @@ use dialog_varsig::{Did, Principal};
 
 /// An opened profile with profile and operator signers.
 ///
-/// Created by [`environment::open`](crate::environment::open).
-/// Implements the credential provider traits (`Provider<authority::Identify>`,
-/// `Provider<authority::Sign>`, `Principal`, `Issuer`) needed by the Environment.
+/// Implements `Provider<Identify>`, `Provider<Sign>`, `Principal`, and
+/// `Issuer` so the capability system can resolve identity and produce
+/// signatures. Built by [`OperatorBuilder`](crate::operator::OperatorBuilder).
 #[derive(Debug, Clone)]
 pub struct Authority {
     name: String,

@@ -40,6 +40,7 @@ mod mount;
 mod storage;
 
 use dialog_capability::Did;
+use dialog_credentials::credential::CredentialExport;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 
@@ -61,6 +62,8 @@ struct Session {
     memory: HashMap<MemoryKey, Vec<u8>>,
     /// Mounted byte storage keyed by address prefix.
     mounted: HashMap<String, Vec<u8>>,
+    /// Credential storage keyed by address prefix.
+    credentials: HashMap<String, CredentialExport>,
     /// Key-value storage keyed by (store, key).
     storage: HashMap<StorageKey, Vec<u8>>,
 }

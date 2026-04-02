@@ -15,6 +15,7 @@ use dialog_capability::Capability;
 use dialog_capability::Provider;
 use dialog_capability::authority::{Identify, Operator as AuthOperator, Sign};
 use dialog_capability::storage::{Load, Mount, Save};
+use dialog_credentials::credential::Credential;
 use dialog_effects::{archive, memory, storage as fx_storage};
 use dialog_storage::provider::Address;
 use dialog_varsig::{Did, Principal};
@@ -43,6 +44,8 @@ pub struct Operator {
         fx_storage::List,
         Load<Vec<u8>, Address>,
         Save<Vec<u8>, Address>,
+        Load<Credential, Address>,
+        Save<Credential, Address>,
         Mount<Address>
     )]
     /// Storage — routes DID-based effects and addressed Load/Save/Mount.

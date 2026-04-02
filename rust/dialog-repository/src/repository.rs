@@ -34,7 +34,7 @@ use dialog_capability::storage::{self as cap_storage, Location};
 use dialog_capability::{Capability, Did, Policy, Provider, Subject};
 use dialog_common::ConditionalSync;
 use dialog_credentials::Ed25519Signer;
-use dialog_credentials::credential::{Credential, CredentialExport, SignerCredential};
+use dialog_credentials::credential::{Credential, SignerCredential};
 use dialog_storage::provider::Address;
 use dialog_varsig::Principal;
 
@@ -165,8 +165,8 @@ impl OpenRepository {
     /// Mounts the repository DID at `{location}` in the storage store table.
     pub async fn perform<S>(self, storage: &S) -> Result<Repository, RepositoryError>
     where
-        S: Provider<cap_storage::Load<Vec<u8>, Address>>
-            + Provider<cap_storage::Save<Vec<u8>, Address>>
+        S: Provider<cap_storage::Load<Credential, Address>>
+            + Provider<cap_storage::Save<Credential, Address>>
             + Provider<cap_storage::Mount<Address>>
             + ConditionalSync,
     {
@@ -176,9 +176,17 @@ impl OpenRepository {
             .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
 
         let credential = match self.mode {
-            OpenMode::Load => load_credential(cred_location, storage).await?,
+            OpenMode::Load => cred_location
+                .load::<Credential>()
+                .perform(storage)
+                .await
+                .map_err(|e| RepositoryError::StorageError(e.to_string()))?,
             OpenMode::Create => {
-                let existing = load_credential(cred_location.clone(), storage).await;
+                let existing = cred_location
+                    .clone()
+                    .load::<Credential>()
+                    .perform(storage)
+                    .await;
 
                 if existing.is_ok() {
                     return Err(RepositoryError::AlreadyExists(String::new()));
@@ -189,12 +197,20 @@ impl OpenRepository {
                     .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
                 let credential = Credential::Signer(SignerCredential::from(signer));
 
-                save_credential(cred_location, &credential, storage).await?;
+                cred_location
+                    .save(credential.clone())
+                    .perform(storage)
+                    .await
+                    .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
 
                 credential
             }
             OpenMode::OpenOrCreate => {
-                let load = load_credential(cred_location.clone(), storage).await;
+                let load = cred_location
+                    .clone()
+                    .load::<Credential>()
+                    .perform(storage)
+                    .await;
 
                 match load {
                     Ok(cred) => cred,
@@ -204,7 +220,11 @@ impl OpenRepository {
                             .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
                         let credential = Credential::Signer(SignerCredential::from(signer));
 
-                        save_credential(cred_location, &credential, storage).await?;
+                        cred_location
+                            .save(credential.clone())
+                            .perform(storage)
+                            .await
+                            .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
 
                         credential
                     }
@@ -221,46 +241,6 @@ impl OpenRepository {
 
         Ok(credential.into())
     }
-}
-
-/// Load a credential from a storage location by reading raw bytes.
-async fn load_credential<S>(
-    location: Capability<cap_storage::Location<Address>>,
-    storage: &S,
-) -> Result<Credential, RepositoryError>
-where
-    S: Provider<cap_storage::Load<Vec<u8>, Address>> + ConditionalSync,
-{
-    let bytes = location
-        .load::<Vec<u8>>()
-        .perform(storage)
-        .await
-        .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
-    let export = CredentialExport::try_from(bytes)
-        .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
-    Credential::import(export)
-        .await
-        .map_err(|e| RepositoryError::StorageError(e.to_string()))
-}
-
-/// Save a credential to a storage location by writing raw bytes.
-async fn save_credential<S>(
-    location: Capability<cap_storage::Location<Address>>,
-    credential: &Credential,
-    storage: &S,
-) -> Result<(), RepositoryError>
-where
-    S: Provider<cap_storage::Save<Vec<u8>, Address>> + ConditionalSync,
-{
-    let export = credential
-        .export()
-        .await
-        .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
-    location
-        .save(export.as_bytes().to_vec())
-        .perform(storage)
-        .await
-        .map_err(|e| RepositoryError::StorageError(e.to_string()))
 }
 
 #[cfg(test)]
