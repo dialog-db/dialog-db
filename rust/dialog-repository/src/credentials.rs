@@ -3,7 +3,7 @@
 //! [`Credentials`] holds the profile and operator signers and implements
 //! the provider traits needed by `Operator` for identity and signing effects.
 
-use dialog_capability::authority::{self, Authority, AuthorityError};
+use dialog_capability::authority::{self, AuthorityError, Operator};
 use dialog_capability::{Capability, Policy, Provider, Subject};
 use dialog_credentials::Ed25519Signer;
 use dialog_varsig::eddsa::Ed25519Signature;
@@ -70,7 +70,7 @@ impl Credentials {
     }
 
     /// Build the authority chain for the given subject DID.
-    pub fn build_authority(&self, subject: Did) -> Authority {
+    pub fn build_authority(&self, subject: Did) -> Capability<Operator> {
         Subject::from(subject)
             .attenuate(authority::Profile {
                 profile: self.profile_did(),
@@ -94,7 +94,7 @@ impl Provider<authority::Identify> for Credentials {
     async fn execute(
         &self,
         input: Capability<authority::Identify>,
-    ) -> Result<Authority, AuthorityError> {
+    ) -> Result<Capability<Operator>, AuthorityError> {
         let subject_did = input.subject().clone();
         Ok(self.build_authority(subject_did))
     }

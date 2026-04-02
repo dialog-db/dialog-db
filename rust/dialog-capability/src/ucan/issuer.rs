@@ -1,11 +1,11 @@
 //! Credential bridge for UCAN signing.
 //!
-//! [`Issuer`] adapts an [`Authority`] chain and environment into
+//! [`Issuer`] adapts an authority chain (`Capability<Operator>`) and environment into
 //! UCAN's `Principal` + `Signer` interface, allowing the UCAN
 //! `InvocationBuilder` to work with the capability system.
 
-use crate::authority::{self, Authority, Operator};
-use crate::{Did, Policy, Provider};
+use crate::authority::{Operator, Sign};
+use crate::{Capability, Did, Policy, Provider};
 use dialog_common::ConditionalSync;
 use dialog_varsig::eddsa::Ed25519Signature;
 
@@ -16,17 +16,17 @@ use dialog_varsig::eddsa::Ed25519Signature;
 pub struct Issuer<'a, Env> {
     env: &'a Env,
     /// The authority capability chain (`Subject → Profile → Operator`).
-    capability: Authority,
+    capability: Capability<Operator>,
 }
 
 impl<'a, Env> Issuer<'a, Env> {
     /// Create an issuer from an authority chain and environment.
-    pub fn new(env: &'a Env, capability: Authority) -> Self {
+    pub fn new(env: &'a Env, capability: Capability<Operator>) -> Self {
         Self { env, capability }
     }
 
     /// Get the authority capability chain.
-    pub fn capability(&self) -> &Authority {
+    pub fn capability(&self) -> &Capability<Operator> {
         &self.capability
     }
 }
@@ -39,13 +39,10 @@ impl<Env> dialog_varsig::Principal for Issuer<'_, Env> {
 
 impl<Env> dialog_varsig::Signer<Ed25519Signature> for Issuer<'_, Env>
 where
-    Env: Provider<authority::Sign> + ConditionalSync,
+    Env: Provider<Sign> + ConditionalSync,
 {
     async fn sign(&self, payload: &[u8]) -> Result<Ed25519Signature, signature::Error> {
-        let sign_cap = self
-            .capability
-            .clone()
-            .invoke(authority::Sign::new(payload));
+        let sign_cap = self.capability.clone().invoke(Sign::new(payload));
 
         let bytes = self
             .env

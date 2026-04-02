@@ -70,7 +70,7 @@ impl Provider<authority::Identify> for Session {
     async fn execute(
         &self,
         _input: Capability<authority::Identify>,
-    ) -> Result<authority::Authority, authority::AuthorityError> {
+    ) -> Result<Capability<authority::Operator>, authority::AuthorityError> {
         Err(authority::AuthorityError::Identity(
             "Session does not provide identity".into(),
         ))

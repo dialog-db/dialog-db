@@ -11,8 +11,9 @@ pub use builder::{NetworkBuilder, OperatorBuilder, OperatorError};
 use crate::Credentials;
 use crate::remote::Remote;
 use crate::storage::Storage;
+use dialog_capability::Capability;
 use dialog_capability::Provider;
-use dialog_capability::authority::{Authority, Identify, Sign};
+use dialog_capability::authority::{Identify, Operator as AuthOperator, Sign};
 use dialog_capability::storage::{Load, Mount, Save};
 use dialog_effects::{archive, memory, storage as fx_storage};
 use dialog_storage::provider::Address;
@@ -63,7 +64,7 @@ impl Operator {
     }
 
     /// Build the authority chain for a given subject DID.
-    pub fn build_authority(&self, subject: Did) -> Authority {
+    pub fn build_authority(&self, subject: Did) -> Capability<AuthOperator> {
         self.authority.build_authority(subject)
     }
 
