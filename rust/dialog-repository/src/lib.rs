@@ -11,34 +11,32 @@
 
 //! Repository layer for Dialog-DB.
 //!
-//! This crate provides the capability-based repository system, profiles,
-//! operators, credentials, storage dispatch, and remote fork dispatch
-//! that together form the operational layer above the core artifact store.
+//! This crate provides the capability-based repository system built on top
+//! of the operator layer (`dialog-operator`). It re-exports operator types
+//! and adds the repository abstraction with branches, remotes, and archives.
 
-// Re-export core artifact types for convenience.
-pub use dialog_artifacts::{
+// Re-export everything from dialog-operator for backwards compatibility.
+pub use dialog_operator::{
     Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMut, Artifacts, Attribute,
-    AttributeKey, Cause, Datum, DialogArtifactsError, Entity, EntityKey, FromKey, Instruction, Key,
-    KeyView, KeyViewConstruct, KeyViewMut, State, Value, ValueKey,
+    AttributeKey, Authority, Cause, Datum, DialogArtifactsError, Entity, EntityKey, FromKey,
+    Instruction, Key, KeyView, KeyViewConstruct, KeyViewMut, Operator, Remote, State, Value,
+    ValueKey,
 };
 
 /// Authority — opened profile with signers and authority chain.
-pub mod authority;
-pub use authority::Authority;
+pub use dialog_operator::authority;
 
 /// Profile — named identity with signing credential.
-pub mod profile;
+pub use dialog_operator::profile;
 
 /// DID-routed storage dispatcher.
-pub mod storage;
+pub use dialog_operator::storage;
 
 /// Operator — operating environment built from a profile.
-pub mod operator;
-pub use operator::Operator;
+pub use dialog_operator::operator;
 
 /// Remote dispatch for fork invocations.
-pub mod remote;
-pub use remote::Remote;
+pub use dialog_operator::remote;
 
 /// Capability-based repository system.
 mod repository;

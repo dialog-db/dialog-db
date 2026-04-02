@@ -76,39 +76,6 @@ mod tests {
         assert_ne!(alice.did(), bob.did());
     }
 
-    #[dialog_common::test]
-    async fn end_to_end_profile_operator_repository() {
-        use dialog_capability::Subject;
-        use dialog_effects::archive::prelude::{ArchiveExt, SubjectExt as ArchiveSubjectExt};
-        use dialog_effects::memory::prelude::{MemoryExt, SubjectExt as MemorySubjectExt};
-
-        let storage = Storage::temp_storage();
-
-        let profile = Profile::open(Storage::temp(&unique_name("e2e")))
-            .perform(&storage)
-            .await
-            .unwrap();
-
-        let operator = profile
-            .derive(b"alice")
-            .allow(Subject::any().archive().catalog("index"))
-            .allow(Subject::any().archive().catalog("content"))
-            .allow(Subject::any().memory().space("local"))
-            .network(Remote)
-            .build(storage)
-            .await
-            .unwrap();
-
-        let home = crate::Repository::open(Storage::temp(&unique_name("home")))
-            .perform(&operator)
-            .await
-            .unwrap();
-
-        assert!(!home.did().to_string().is_empty());
-        assert_ne!(profile.did(), home.did());
-        assert!(operator.storage().stores().contains(&home.did()));
-    }
-
     #[cfg(feature = "ucan")]
     mod delegation_tests {
         use super::*;

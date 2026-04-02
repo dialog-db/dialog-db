@@ -1,5 +1,5 @@
 [package]
-name = "dialog-repository"
+name = "dialog-operator"
 edition = "2024"
 version.workspace = true
 authors.workspace = true
@@ -10,36 +10,37 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["s3", "ucan"]
-helpers = ["dep:anyhow", "dialog-operator/helpers"]
+helpers = ["dep:anyhow"]
 # Enable integration tests (tests with service provisioning)
 integration-tests = ["dialog-common/integration-tests"]
 # Enable web integration tests
 web-integration-tests = ["dialog-common/web-integration-tests"]
-s3 = ["dep:dialog-remote-s3", "dialog-operator/s3"]
-ucan = ["s3", "dep:dialog-remote-ucan-s3", "dep:dialog-ucan", "dialog-capability/ucan", "dialog-operator/ucan"]
+s3 = ["dep:dialog-remote-s3"]
+ucan = ["s3", "dep:dialog-remote-ucan-s3", "dep:dialog-ucan", "dialog-capability/ucan"]
 
 [dependencies]
 dialog-artifacts = { workspace = true }
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
-dialog-operator = { workspace = true }
-dialog-query = { workspace = true }
 dialog-credentials = { workspace = true }
 dialog-effects = { workspace = true }
 dialog-ucan = { workspace = true, optional = true }
 dialog-remote-s3 = { workspace = true, optional = true }
 dialog-remote-ucan-s3 = { workspace = true, optional = true }
 dialog-storage = { workspace = true }
-dialog-prolly-tree = { workspace = true }
 dialog-varsig = { workspace = true }
 parking_lot = { workspace = true }
 
 anyhow = { workspace = true, optional = true }
-async-stream = { workspace = true }
 async-trait = { workspace = true }
 base58 = { workspace = true }
-futures-util = { workspace = true }
+blake3 = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+rand_core = { workspace = true }
+rand_chacha = { workspace = true }
 serde = { workspace = true }
+signature = { workspace = true }
 serde_ipld_dagcbor = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "io-util"] }
@@ -54,6 +55,7 @@ anyhow = { workspace = true }
 serde_json = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+dirs = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "io-util", "fs"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
