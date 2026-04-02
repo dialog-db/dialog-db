@@ -25,3 +25,10 @@ pub use dialog_artifacts::{
 /// Authority — profile and operator signers for identity and signing.
 pub mod authority;
 pub use authority::Authority;
+
+/// DID-routed storage dispatcher.
+pub mod storage;
+
+/// Remote dispatch for fork invocations.
+pub mod remote;
+pub use remote::Remote;

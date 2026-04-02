@@ -21,6 +21,8 @@ dialog-artifacts = { workspace = true }
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
 dialog-credentials = { workspace = true }
+dialog-effects = { workspace = true }
+dialog-storage = { workspace = true }
 dialog-varsig = { workspace = true }
 dialog-ucan = { workspace = true, optional = true }
 dialog-remote-s3 = { workspace = true, optional = true }
@@ -28,6 +30,7 @@ dialog-remote-ucan-s3 = { workspace = true, optional = true }
 
 anyhow = { workspace = true, optional = true }
 async-trait = { workspace = true }
+parking_lot = { workspace = true }
 serde = { workspace = true }
 signature = { workspace = true }
 

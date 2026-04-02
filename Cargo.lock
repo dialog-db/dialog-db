@@ -1095,10 +1095,13 @@ dependencies = [
  "dialog-capability",
  "dialog-common",
  "dialog-credentials",
+ "dialog-effects",
  "dialog-remote-s3",
  "dialog-remote-ucan-s3",
+ "dialog-storage",
  "dialog-ucan",
  "dialog-varsig",
+ "parking_lot",
  "serde",
  "signature",
 ]
