@@ -3,9 +3,6 @@
 //! [`Credentials`] holds the profile and operator signers and implements
 //! the provider traits needed by `Operator` for identity and signing effects.
 
-pub mod open;
-pub mod provider;
-
 use dialog_capability::authority::{self, Authority, AuthorityError};
 use dialog_capability::{Capability, Policy, Provider, Subject};
 use dialog_credentials::Ed25519Signer;
