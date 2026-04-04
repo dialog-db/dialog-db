@@ -9,7 +9,7 @@
 
 use async_trait::async_trait;
 use dialog_capability::access::{
-    AuthorizeError, Claim, Delegation, ProofChain, ProofStore, Protocol, Save, Scope,
+    AuthorizeError, Claim, Delegation, ProofStore, Protocol, Save,
 };
 use dialog_capability::{Policy, Provider};
 use dialog_varsig::Did;
@@ -97,8 +97,14 @@ impl<P: Protocol> ProofStore<P> for IndexedDb {
         result.map_err(|e| e.0)
     }
 
-    async fn save(&self, permit: &P::ProofChain) -> Result<(), AuthorizeError> {
-        let subject_str = permit.access().subject().to_string();
+    async fn save(&self, delegation: &P::Delegation) -> Result<(), AuthorizeError> {
+        let proofs = P::proofs(delegation);
+        if proofs.is_empty() {
+            return Ok(());
+        }
+
+        // Use the first proof's audience to determine the session key
+        let subject_str = proofs[0].audience().to_string();
 
         self.open(&subject_str)
             .await
@@ -113,7 +119,7 @@ impl<P: Protocol> ProofStore<P> for IndexedDb {
             .await
             .map_err(|e| AuthorizeError::Configuration(e.to_string()))?;
 
-        for proof in permit.proofs() {
+        for proof in &proofs {
             let bytes = proof.encode()?;
             let id = base58::ToBase58::to_base58(blake3::hash(&bytes).as_bytes().as_slice());
 
@@ -168,7 +174,7 @@ impl<P: Protocol> Provider<Save<P>> for IndexedDb {
         &self,
         input: dialog_capability::Capability<Save<P>>,
     ) -> Result<(), AuthorizeError> {
-        let proof_chain = &Save::<P>::of(&input).proof_chain;
-        ProofStore::<P>::save(self, proof_chain).await
+        let delegation = &Save::<P>::of(&input).delegation;
+        ProofStore::<P>::save(self, delegation).await
     }
 }
