@@ -684,3 +684,158 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> anyhow::Re
 
     Ok(())
 }
+
+/// Delegate repo to profile, push data to S3, pull from a new operator.
+#[dialog_common::test]
+async fn it_delegates_and_pushes_to_s3(s3: S3Address) -> anyhow::Result<()> {
+    let (operator, profile) = test_operator_with_profile().await;
+    let repo = Repository::open(unique_location("deleg-push"))
+        .perform(&operator)
+        .await?;
+
+    // Delegate repo ownership to the profile
+    let chain = repo
+        .access()
+        .claim(&repo)
+        .delegate(profile.did())
+        .perform(&operator)
+        .await?;
+    profile.access().save(chain).perform(&operator).await?;
+
+    // Set up S3 remote
+    let site_address = s3_remote_address(&s3, repo.did());
+    repo.remote("origin")
+        .create(site_address)
+        .perform(&operator)
+        .await?;
+
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    branch
+        .set_upstream(UpstreamState::Remote {
+            name: RemoteName::from("origin"),
+            branch: "main".into(),
+            tree: NodeReference::default(),
+        })
+        .perform(&operator)
+        .await?;
+
+    // Commit and push
+    branch
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:delegated".parse()?,
+            is: crate::Value::String("Delegated Push".into()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+
+    let result = branch.push().perform(&operator).await?;
+    assert!(result.is_some(), "push with delegation should succeed");
+
+    Ok(())
+}
+
+/// Alice delegates, pushes to S3; Bob pulls and verifies data arrived.
+#[dialog_common::test]
+async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> anyhow::Result<()> {
+    let (alice_operator, alice_profile) = test_operator_with_profile().await;
+    let alice_repo = Repository::open(unique_location("deleg-pull-a"))
+        .perform(&alice_operator)
+        .await?;
+
+    // Delegate repo to Alice's profile
+    let chain = alice_repo
+        .access()
+        .claim(&alice_repo)
+        .delegate(alice_profile.did())
+        .perform(&alice_operator)
+        .await?;
+    alice_profile
+        .access()
+        .save(chain)
+        .perform(&alice_operator)
+        .await?;
+
+    // Alice pushes to S3
+    let site_address = s3_remote_address(&s3, alice_repo.did());
+    alice_repo
+        .remote("origin")
+        .create(site_address)
+        .perform(&alice_operator)
+        .await?;
+
+    let alice_branch = alice_repo
+        .branch("main")
+        .open()
+        .perform(&alice_operator)
+        .await?;
+    alice_branch
+        .set_upstream(UpstreamState::Remote {
+            name: RemoteName::from("origin"),
+            branch: "main".into(),
+            tree: NodeReference::default(),
+        })
+        .perform(&alice_operator)
+        .await?;
+
+    alice_branch
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:alice".parse()?,
+            is: crate::Value::String("Alice Delegated".into()),
+            cause: None,
+        })]))
+        .perform(&alice_operator)
+        .await?;
+
+    let push_result = alice_branch.push().perform(&alice_operator).await?;
+    assert!(push_result.is_some(), "push should succeed");
+
+    // Bob: fresh operator pulls from the same S3 remote
+    let bob_operator = test_operator().await;
+    let bob_repo = Repository::open(unique_location("deleg-pull-b"))
+        .perform(&bob_operator)
+        .await?;
+
+    bob_repo
+        .remote("origin")
+        .create(s3_remote_address(&s3, alice_repo.did()))
+        .perform(&bob_operator)
+        .await?;
+
+    let bob_branch = bob_repo
+        .branch("main")
+        .open()
+        .perform(&bob_operator)
+        .await?;
+    bob_branch
+        .set_upstream(UpstreamState::Remote {
+            name: RemoteName::from("origin"),
+            branch: "main".into(),
+            tree: NodeReference::default(),
+        })
+        .perform(&bob_operator)
+        .await?;
+
+    let pull_result = bob_branch.pull().perform(&bob_operator).await?;
+    assert!(pull_result.is_some(), "pull should find Alice's data");
+
+    let results: Vec<_> = bob_branch
+        .claims()
+        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .perform(&bob_operator)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+
+    assert_eq!(results.len(), 1, "should have Alice's artifact");
+    assert_eq!(
+        results[0].is,
+        crate::Value::String("Alice Delegated".into())
+    );
+
+    Ok(())
+}
