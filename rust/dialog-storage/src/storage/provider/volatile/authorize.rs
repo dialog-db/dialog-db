@@ -8,7 +8,7 @@
 
 use async_trait::async_trait;
 use dialog_capability::access::{
-    Claim, AuthorizeError, Delegation, ProofChain, ProofStore, Protocol, Save, Scope,
+    AuthorizeError, Claim, Delegation, ProofChain, ProofStore, Protocol, Save, Scope,
 };
 use dialog_capability::{Policy, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -48,12 +48,10 @@ where
         Ok(proofs)
     }
 
-    async fn save(&self, permit: &P::ProofChain) -> Result<(), AuthorizeError> {
-        let subject_did = permit.access().subject().clone();
+    async fn save(&self, delegation: &P::Delegation) -> Result<(), AuthorizeError> {
         let mut sessions = self.sessions.write();
-        let session = sessions.entry(subject_did).or_default();
 
-        for proof in permit.proofs() {
+        for proof in P::proofs(delegation) {
             let bytes = proof.encode()?;
             let id = base58::ToBase58::to_base58(blake3::hash(&bytes).as_bytes().as_slice());
 
@@ -65,6 +63,9 @@ where
             let issuer = proof.issuer().to_string();
 
             let key = format!("{audience}/{subject_segment}/{issuer}.{id}");
+            let session = sessions
+                .entry(proof.audience().clone())
+                .or_default();
             session.proofs.insert(key, bytes);
         }
 
@@ -97,15 +98,14 @@ where
 impl<P> Provider<Save<P>> for Volatile
 where
     P: Protocol,
-    P::Proof: ConditionalSend + ConditionalSync,
-    P::ProofChain: ConditionalSend + ConditionalSync,
+    P::Delegation: ConditionalSend + ConditionalSync,
     Self: ConditionalSend + ConditionalSync,
 {
     async fn execute(
         &self,
         input: dialog_capability::Capability<Save<P>>,
     ) -> Result<(), AuthorizeError> {
-        let proof_chain = &Save::<P>::of(&input).proof_chain;
-        ProofStore::<P>::save(self, proof_chain).await
+        let delegation = &Save::<P>::of(&input).delegation;
+        ProofStore::<P>::save(self, delegation).await
     }
 }

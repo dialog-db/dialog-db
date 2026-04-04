@@ -96,7 +96,9 @@ impl NetworkBuilder {
         // Create delegations for allowed capabilities
         #[cfg(feature = "ucan")]
         if !self.allowed.is_empty() {
-            use dialog_capability::ucan::import_delegation_chain;
+            use dialog_capability::Subject;
+            use dialog_capability::access::{Permit, Save};
+            use dialog_capability_ucan::{Ucan, UcanPermit};
             use dialog_ucan::DelegationChain;
             use dialog_ucan::delegation::builder::DelegationBuilder;
 
@@ -115,7 +117,11 @@ impl NetworkBuilder {
                     .map_err(|e| OperatorError::Delegation(format!("{e:?}")))?;
 
                 let chain = DelegationChain::new(delegation);
-                import_delegation_chain(&operator, &profile_did, &chain)
+
+                Subject::from(profile_did.clone())
+                    .attenuate(Permit)
+                    .invoke(Save::<Ucan>::new(chain))
+                    .perform(&operator)
                     .await
                     .map_err(|e| OperatorError::Delegation(e.to_string()))?;
             }

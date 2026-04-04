@@ -149,8 +149,31 @@ impl<T: Ability> From<&T> for Scope {
 }
 
 impl Scope {
+    /// Build a scope from a delegation chain.
+    ///
+    /// Extracts subject, command, and an empty parameter set from the chain.
+    pub fn from_chain(chain: &dialog_ucan::DelegationChain) -> Self {
+        let subject = chain
+            .subject()
+            .map(|did| UcanSubject::Specific(did.clone()))
+            .unwrap_or(UcanSubject::Any);
+
+        let ability = chain.ability();
+        let command = ability_to_command(&ability);
+
+        Self {
+            subject,
+            command,
+            parameters: Parameters::default(),
+        }
+    }
+
     /// Build a scope from an effect capability, projecting through Claim.
-    pub(crate) fn invoke<Fx>(capability: &Capability<Fx>) -> Self
+    ///
+    /// Unlike `Scope::from`, this projects effect fields through their
+    /// [`Claim`](dialog_capability::Claim) type, so payload fields like
+    /// `content` become `checksum` in the scope parameters.
+    pub fn invoke<Fx>(capability: &Capability<Fx>) -> Self
     where
         Fx: Effect + Clone,
         Capability<Fx>: Ability,

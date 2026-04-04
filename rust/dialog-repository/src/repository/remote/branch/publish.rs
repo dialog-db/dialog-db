@@ -1,10 +1,7 @@
 //! Publish command for remote branches.
 
-use dialog_capability::access::{Allow, Claim};
 use dialog_capability::fork::Fork;
-use dialog_capability::site::Site;
-use dialog_capability::site::SiteAddress;
-use dialog_capability::ucan::Ucan;
+use dialog_capability::site::{Site, SiteAddress};
 use dialog_capability::{Capability, Provider, Subject};
 use dialog_common::ConditionalSync;
 use dialog_effects::memory as memory_fx;
@@ -37,10 +34,6 @@ impl<'a> Publish<'a> {
             + Provider<Fork<S3, memory_fx::Publish>>
             + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Resolve>>
             + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Publish>>
-            + Provider<Claim<memory_fx::Resolve, Allow>>
-            + Provider<Claim<memory_fx::Resolve, Ucan>>
-            + Provider<Claim<memory_fx::Publish, Allow>>
-            + Provider<Claim<memory_fx::Publish, Ucan>>
             + Provider<memory_fx::Publish>
             + ConditionalSync,
     {
@@ -86,8 +79,6 @@ where
     A::Site: Site,
     Env: Provider<Fork<A::Site, memory_fx::Resolve>>
         + Provider<Fork<A::Site, memory_fx::Publish>>
-        + Provider<Claim<memory_fx::Resolve, <A::Site as Site>::Protocol>>
-        + Provider<Claim<memory_fx::Publish, <A::Site as Site>::Protocol>>
         + ConditionalSync,
 {
     // Resolve to get current edition

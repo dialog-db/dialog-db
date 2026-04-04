@@ -10,6 +10,7 @@ ucan = ["dep:ipld-core", "dep:dialog-ucan", "dialog-capability/ucan"]
 
 [dependencies]
 dialog-capability = { workspace = true }
+dialog-credentials = { workspace = true }
 dialog-common = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

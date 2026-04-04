@@ -1,7 +1,5 @@
 use dialog_capability::Provider;
-use dialog_capability::access::{Allow, Claim};
 use dialog_capability::fork::Fork;
-use dialog_capability::ucan::Ucan;
 use dialog_common::ConditionalSync;
 use dialog_effects::memory as memory_fx;
 use dialog_remote_s3::S3;
@@ -38,8 +36,6 @@ impl Fetch<'_> {
             + Provider<memory_fx::Publish>
             + Provider<Fork<S3, memory_fx::Resolve>>
             + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Resolve>>
-            + Provider<Claim<memory_fx::Resolve, Allow>>
-            + Provider<Claim<memory_fx::Resolve, Ucan>>
             + ConditionalSync,
     {
         let upstream =
@@ -93,8 +89,6 @@ where
         + Provider<memory_fx::Publish>
         + Provider<Fork<S3, memory_fx::Resolve>>
         + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Resolve>>
-        + Provider<Claim<memory_fx::Resolve, Allow>>
-        + Provider<Claim<memory_fx::Resolve, Ucan>>
         + ConditionalSync,
 {
     let remote_repo = branch.remote(remote.clone()).load().perform(env).await?;

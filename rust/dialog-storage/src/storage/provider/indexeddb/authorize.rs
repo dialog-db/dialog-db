@@ -9,7 +9,7 @@
 
 use async_trait::async_trait;
 use dialog_capability::access::{
-    Claim, AuthorizeError, Delegation, ProofChain, ProofStore, Protocol, Save, Scope,
+    AuthorizeError, Claim, Delegation, ProofChain, ProofStore, Protocol, Save, Scope,
 };
 use dialog_capability::{Policy, Provider};
 use dialog_varsig::Did;
@@ -54,13 +54,13 @@ impl<P: Protocol> ProofStore<P> for IndexedDb {
         };
 
         let subject_str = audience.to_string();
-        self.open(&subject_str).await.map_err(|e| {
-            AuthorizeError::Configuration(format!("Failed to open store: {e}"))
-        })?;
+        self.open(&subject_str)
+            .await
+            .map_err(|e| AuthorizeError::Configuration(format!("Failed to open store: {e}")))?;
 
-        let mut session = self.take_session(&subject_str).map_err(|e| {
-            AuthorizeError::Configuration(format!("Failed to take session: {e}"))
-        })?;
+        let mut session = self
+            .take_session(&subject_str)
+            .map_err(|e| AuthorizeError::Configuration(format!("Failed to take session: {e}")))?;
 
         if !session.stores.contains(PERMIT_STORE) {
             self.return_session(&subject_str, session);
@@ -79,9 +79,7 @@ impl<P: Protocol> ProofStore<P> for IndexedDb {
                 let values = object_store
                     .get_all(Some(range), None)
                     .await
-                    .map_err(|e| {
-                        Err(AuthorizeError::Configuration(format!("query: {e:?}")))
-                    })?;
+                    .map_err(|e| Err(AuthorizeError::Configuration(format!("query: {e:?}"))))?;
 
                 let mut proofs = Vec::new();
                 for value in values {
@@ -102,13 +100,13 @@ impl<P: Protocol> ProofStore<P> for IndexedDb {
     async fn save(&self, permit: &P::ProofChain) -> Result<(), AuthorizeError> {
         let subject_str = permit.access().subject().to_string();
 
-        self.open(&subject_str).await.map_err(|e| {
-            AuthorizeError::Configuration(format!("Failed to open store: {e}"))
-        })?;
+        self.open(&subject_str)
+            .await
+            .map_err(|e| AuthorizeError::Configuration(format!("Failed to open store: {e}")))?;
 
-        let mut session = self.take_session(&subject_str).map_err(|e| {
-            AuthorizeError::Configuration(format!("Failed to take session: {e}"))
-        })?;
+        let mut session = self
+            .take_session(&subject_str)
+            .map_err(|e| AuthorizeError::Configuration(format!("Failed to take session: {e}")))?;
 
         let idb_store = session
             .store(PERMIT_STORE)
@@ -132,9 +130,10 @@ impl<P: Protocol> ProofStore<P> for IndexedDb {
 
             idb_store
                 .transact(|object_store| async move {
-                    object_store.put(&js_val, Some(&js_key)).await.map_err(|e| {
-                        Err(AuthorizeError::Configuration(format!("write: {e:?}")))
-                    })?;
+                    object_store
+                        .put(&js_val, Some(&js_key))
+                        .await
+                        .map_err(|e| Err(AuthorizeError::Configuration(format!("write: {e:?}"))))?;
                     Ok::<(), Err>(())
                 })
                 .await

@@ -1,9 +1,10 @@
 //! Fork — remote execution of capabilities at a site address.
 //!
 //! A [`Fork`] pairs a [`Capability`] with a site address for remote execution.
-//! The `Provider<Fork<S, Fx>>` implementation handles authorization internally.
+//! The Operator builds a [`ForkInvocation`] by attaching protocol-specific
+//! authorization, then the site provider executes it.
 
-use crate::access::AuthorizeError;
+use crate::access::{AuthorizeError, Protocol};
 use crate::command::Command;
 use crate::effect::Effect;
 use crate::site::Site;
@@ -13,12 +14,27 @@ use std::marker::PhantomData;
 
 /// Fork pairs a capability with a site address for remote execution.
 ///
-/// Used as a [`Command`]: the provider handles authorization
-/// and dispatch internally. Callers only need `Provider<Fork<S, Fx>>`.
+/// Created by [`Capability::fork`]. Call [`.perform(&env)`](Fork::perform)
+/// to authorize and execute. The Operator builds the authorization
+/// material and delegates to the site provider via [`ForkInvocation`].
 pub struct Fork<S: Site, Fx: Effect> {
     capability: Capability<Fx>,
     address: S::Address,
     _site: PhantomData<S>,
+}
+
+/// A fork with protocol-specific invocation attached.
+///
+/// Created by the Operator's `Provider<Fork<S, Fx>>` impl after building
+/// the signed invocation. The site provider receives this and
+/// executes the authorized request.
+pub struct ForkInvocation<S: Site, Fx: Effect> {
+    /// The capability being executed.
+    pub capability: Capability<Fx>,
+    /// The site address.
+    pub address: S::Address,
+    /// Protocol-specific invocation (e.g., signed UCAN chain for UCAN sites, () for S3).
+    pub invocation: <S::Protocol as Protocol>::Invocation,
 }
 
 impl<S: Site, Fx: Effect> Command for Fork<S, Fx>
@@ -27,6 +43,14 @@ where
 {
     type Input = Self;
     type Output = Result<Fx::Output, AuthorizeError>;
+}
+
+impl<S: Site, Fx: Effect> Command for ForkInvocation<S, Fx>
+where
+    Fx::Of: Constraint,
+{
+    type Input = Self;
+    type Output = Fx::Output;
 }
 
 impl<S, Fx> Fork<S, Fx>
@@ -60,6 +84,9 @@ where
     }
 
     /// Execute the fork against a provider.
+    ///
+    /// The provider (typically the Operator) builds protocol-specific
+    /// authorization and delegates to the site provider.
     pub async fn perform<Env>(self, env: &Env) -> Result<Fx::Output, AuthorizeError>
     where
         Fx: ConditionalSend + 'static,
@@ -67,6 +94,26 @@ where
         Env: Provider<Fork<S, Fx>> + dialog_common::ConditionalSync,
     {
         env.execute(self).await
+    }
+}
+
+impl<S, Fx> ForkInvocation<S, Fx>
+where
+    S: Site,
+    Fx: Effect,
+    Fx::Of: Constraint,
+{
+    /// Create a new fork invocation with authorization.
+    pub fn new(
+        capability: Capability<Fx>,
+        address: S::Address,
+        invocation: <S::Protocol as Protocol>::Invocation,
+    ) -> Self {
+        Self {
+            capability,
+            address,
+            invocation,
+        }
     }
 }
 

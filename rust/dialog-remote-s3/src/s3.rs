@@ -146,10 +146,7 @@ mod protocol {
         fn subject(&self) -> Option<&Did> {
             None
         }
-        fn verify(
-            &self,
-            _: &S3Access,
-        ) -> Result<access::TimeRange, AuthorizeError> {
+        fn verify(&self, _: &S3Access) -> Result<access::TimeRange, AuthorizeError> {
             Ok(access::TimeRange {
                 not_before: None,
                 expiration: None,
@@ -213,6 +210,10 @@ mod protocol {
         type Invocation = ();
         type ProofChain = S3Permit;
         type Authorization = S3;
+
+        fn proofs(_delegation: &()) -> Vec<S3Proof> {
+            Vec::new()
+        }
     }
 }
 

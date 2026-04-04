@@ -46,7 +46,9 @@ pub struct Operator {
         Save<Vec<u8>, Address>,
         Load<Credential, Address>,
         Save<Credential, Address>,
-        Mount<Address>
+        Mount<Address>,
+        dialog_capability::access::Claim<dialog_capability_ucan::Ucan>,
+        dialog_capability::access::Save<dialog_capability_ucan::Ucan>
     )]
     /// Storage — routes DID-based effects and addressed Load/Save/Mount.
     storage: Storage,
@@ -84,23 +86,75 @@ impl Principal for Operator {
 }
 
 use dialog_capability::access::AuthorizeError;
-use dialog_capability::fork::Fork;
-use dialog_capability::site::Site;
+use dialog_capability::fork::{Fork, ForkInvocation};
 use dialog_capability::{Constraint, Effect};
 use dialog_common::{ConditionalSend, ConditionalSync};
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S, Fx> Provider<Fork<S, Fx>> for Operator
-where
-    S: Site,
-    Fx: Effect + 'static,
-    Fx::Of: Constraint,
-    Fork<S, Fx>: ConditionalSend,
-    Remote: Provider<Fork<S, Fx>> + ConditionalSync,
-    Self: ConditionalSend + ConditionalSync,
-{
-    async fn execute(&self, input: Fork<S, Fx>) -> Result<Fx::Output, AuthorizeError> {
-        self.remote.execute(input).await
+#[cfg(feature = "s3")]
+mod s3_fork {
+    use super::*;
+    use dialog_remote_s3::S3;
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl<Fx> Provider<Fork<S3, Fx>> for Operator
+    where
+        Fx: Effect + 'static,
+        Fx::Of: Constraint,
+        Fork<S3, Fx>: ConditionalSend,
+        ForkInvocation<S3, Fx>: ConditionalSend,
+        Remote: Provider<ForkInvocation<S3, Fx>> + ConditionalSync,
+        Self: ConditionalSend + ConditionalSync,
+    {
+        async fn execute(&self, input: Fork<S3, Fx>) -> Result<Fx::Output, AuthorizeError> {
+            let (capability, address) = input.into_parts();
+            let invocation = ForkInvocation::new(capability, address, ());
+            Ok(self.remote.execute(invocation).await)
+        }
+    }
+}
+
+#[cfg(feature = "ucan")]
+mod ucan_fork {
+    use super::*;
+    use dialog_capability::Ability;
+    use dialog_capability::access::{self, Authorization as _, ProofChain as _, Scope};
+    use dialog_capability_ucan::{Ucan, UcanProofChain};
+    use dialog_capability_ucan::scope::Scope as UcanScope;
+    use dialog_remote_ucan_s3::UcanSite;
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl<Fx> Provider<Fork<UcanSite, Fx>> for Operator
+    where
+        Fx: Effect + Clone + ConditionalSend + 'static,
+        Fx::Of: Constraint,
+        Capability<Fx>: Ability + ConditionalSend + ConditionalSync,
+        Fork<UcanSite, Fx>: ConditionalSend,
+        ForkInvocation<UcanSite, Fx>: ConditionalSend,
+        Remote: Provider<ForkInvocation<UcanSite, Fx>> + ConditionalSync,
+        Self: ConditionalSend + ConditionalSync,
+    {
+        async fn execute(&self, input: Fork<UcanSite, Fx>) -> Result<Fx::Output, AuthorizeError> {
+            let (capability, address) = input.into_parts();
+
+            // Build access scope with claim projection (content -> checksum etc.)
+            let scope = UcanScope::invoke(&capability);
+
+            // Claim authorization via capability chain
+            // Subject is the profile DID (where delegations are stored)
+            let proof_chain: UcanProofChain = dialog_capability::Subject::from(self.profile_did())
+                .attenuate(access::Permit)
+                .invoke(access::Claim::<Ucan>::new(self.did(), scope))
+                .perform(self)
+                .await?;
+
+            // Bind signer and build invocation
+            let authorization = proof_chain.claim(self.authority.operator_signer().clone())?;
+            let ucan_invocation = authorization.invoke().await?;
+
+            let invocation = ForkInvocation::new(capability, address, ucan_invocation);
+            Ok(self.remote.execute(invocation).await)
+        }
     }
 }

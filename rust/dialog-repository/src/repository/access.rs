@@ -119,18 +119,53 @@ where
     Capability<C>: Ability,
 {
     /// Sign the delegation and return the chain.
+    ///
+    /// Uses the new `Claim<Ucan>` effect to discover the delegation chain,
+    /// then builds and signs a new delegation extending it.
     pub async fn perform<Env>(self, env: &Env) -> Result<DelegationChain, AuthorizeError>
     where
-        Env: Provider<authority::Identify>
+        Env: Provider<dialog_capability::access::Claim<dialog_capability_ucan::Ucan>>
+            + Provider<authority::Identify>
             + Provider<authority::Sign>
-            + Provider<storage::List>
-            + Provider<storage::Get>
             + ConditionalSync,
     {
-        let base = Ucan::delegate(&self.capability).audience(self.audience);
-        match self.signer {
-            Some(signer) => base.issuer(signer).perform(env).await,
-            None => base.perform(env).await,
-        }
+        use dialog_capability::access::{Permit, ProofChain as _};
+        use dialog_capability_ucan::{Ucan, UcanPermit};
+        use dialog_capability_ucan::scope::Scope;
+
+        // Resolve signer: use explicit signer or resolve via Identify
+        let signer = match self.signer {
+            Some(s) => s,
+            None => {
+                let auth = Subject::from(self.capability.subject().clone())
+                    .invoke(authority::Identify)
+                    .perform(env)
+                    .await
+                    .map_err(|e| AuthorizeError::Configuration(e.to_string()))?;
+                let profile = authority::Profile::of(&auth);
+                // Use the profile's credential to find delegation chain
+                // The operator doesn't have a signer, so we use Identify
+                return Err(AuthorizeError::Configuration(
+                    "delegation without explicit signer not yet supported in new API".into(),
+                ));
+            }
+        };
+
+        let scope = Scope::from(&self.capability);
+        let issuer_did = dialog_varsig::Principal::did(&signer);
+
+        // Find delegation chain from issuer to subject
+        let proof_chain: UcanPermit = Subject::from(issuer_did.clone())
+            .attenuate(Permit)
+            .invoke(dialog_capability::access::Claim::<Ucan>::new(
+                issuer_did,
+                scope,
+            ))
+            .perform(env)
+            .await?;
+
+        // Build and sign the new delegation
+        let authorization = proof_chain.claim(signer)?;
+        authorization.delegate(self.audience).await
     }
 }

@@ -143,7 +143,10 @@ pub trait Protocol: Sized + ConditionalSend + 'static {
     type Proof: Delegation<Access = Self::Access> + ConditionalSend + ConditionalSync;
 
     /// A delegation chain — what [`Authorization::delegate`] produces.
-    type Delegation: ConditionalSend;
+    type Delegation: ConditionalSend + ConditionalSync + Serialize + for<'de> Deserialize<'de>;
+
+    /// Extract individual proofs from a delegation for storage.
+    fn proofs(delegation: &Self::Delegation) -> Vec<Self::Proof>;
 
     /// An invocation chain — what [`Authorization::invoke`] produces.
     type Invocation: ConditionalSend;
@@ -212,30 +215,30 @@ where
     type Output = Result<P::ProofChain, AuthorizeError>;
 }
 
-/// Save effect — stores a proof chain's proofs for future authorization lookups.
+/// Save effect — stores a delegation for future authorization lookups.
 ///
 /// An [`Effect`](crate::Effect) on [`Permit`]. The subject DID
 /// in the capability chain determines where proofs are stored.
 #[derive(Serialize, Deserialize, crate::Claim)]
 #[serde(bound(
-    serialize = "P::ProofChain: Serialize",
-    deserialize = "P::ProofChain: for<'a> Deserialize<'a>"
+    serialize = "P::Delegation: Serialize",
+    deserialize = "P::Delegation: for<'a> Deserialize<'a>"
 ))]
 pub struct Save<P: Protocol> {
-    /// The proof chain whose proofs should be stored.
-    pub proof_chain: P::ProofChain,
+    /// The delegation to store.
+    pub delegation: P::Delegation,
 }
 
 impl<P: Protocol> Save<P> {
     /// Create a new save effect.
-    pub fn new(proof_chain: P::ProofChain) -> Self {
-        Self { proof_chain }
+    pub fn new(delegation: P::Delegation) -> Self {
+        Self { delegation }
     }
 }
 
 impl<P: Protocol> crate::Effect for Save<P>
 where
-    P::ProofChain: ConditionalSend + 'static,
+    P::Delegation: ConditionalSend + 'static,
 {
     type Of = Permit;
     type Output = Result<(), AuthorizeError>;
@@ -262,8 +265,8 @@ pub trait ProofStore<P: Protocol> {
         subject: Option<&Did>,
     ) -> Result<Vec<P::Proof>, AuthorizeError>;
 
-    /// Store a proof chain's proofs for future authorization lookups.
-    async fn save(&self, proof_chain: &P::ProofChain) -> Result<(), AuthorizeError>;
+    /// Store a delegation for future authorization lookups.
+    async fn save(&self, delegation: &P::Delegation) -> Result<(), AuthorizeError>;
 
     /// Resolve a delegation chain for the given claim.
     ///
@@ -341,4 +344,10 @@ pub enum AuthorizeError {
     /// Configuration error (e.g., missing delegation chain).
     #[error("Authorization configuration error: {0}")]
     Configuration(String),
+}
+
+impl From<crate::storage::StorageError> for AuthorizeError {
+    fn from(e: crate::storage::StorageError) -> Self {
+        AuthorizeError::Configuration(e.to_string())
+    }
 }

@@ -17,7 +17,6 @@ mod provider;
 pub mod site;
 
 pub use authorizer::UcanAuthorizer;
-pub use dialog_capability::ucan::import_delegation_chain;
 pub use site::{Ucan, UcanAddress, UcanInvocation, UcanSite};
 
 // Re-export container types from dialog-ucan

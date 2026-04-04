@@ -1,7 +1,5 @@
 use dialog_capability::Provider;
-use dialog_capability::access::{Allow, Claim};
 use dialog_capability::fork::Fork;
-use dialog_capability::ucan::Ucan;
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
@@ -42,18 +40,11 @@ impl Push<'_> {
             + Provider<Fork<S3, archive_fx::Put>>
             + Provider<Fork<S3, memory_fx::Resolve>>
             + Provider<Fork<dialog_remote_ucan_s3::UcanSite, archive_fx::Get>>
+            + Provider<Fork<dialog_remote_ucan_s3::UcanSite, archive_fx::Get>>
             + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Resolve>>
             + Provider<Fork<S3, memory_fx::Publish>>
             + Provider<Fork<dialog_remote_ucan_s3::UcanSite, archive_fx::Put>>
-            + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Resolve>>
             + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Publish>>
-            + Provider<Claim<archive_fx::Put, Allow>>
-            + Provider<Claim<archive_fx::Put, Ucan>>
-            + Provider<Claim<archive_fx::Get, Ucan>>
-            + Provider<Claim<memory_fx::Resolve, Allow>>
-            + Provider<Claim<memory_fx::Resolve, Ucan>>
-            + Provider<Claim<memory_fx::Publish, Allow>>
-            + Provider<Claim<memory_fx::Publish, Ucan>>
             + ConditionalSync
             + 'static,
     {
@@ -147,12 +138,6 @@ where
         + Provider<Fork<dialog_remote_ucan_s3::UcanSite, archive_fx::Put>>
         + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Resolve>>
         + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Publish>>
-        + Provider<Claim<archive_fx::Put, Allow>>
-        + Provider<Claim<archive_fx::Put, Ucan>>
-        + Provider<Claim<memory_fx::Resolve, Allow>>
-        + Provider<Claim<memory_fx::Resolve, Ucan>>
-        + Provider<Claim<memory_fx::Publish, Allow>>
-        + Provider<Claim<memory_fx::Publish, Ucan>>
         + ConditionalSync
         + 'static,
 {

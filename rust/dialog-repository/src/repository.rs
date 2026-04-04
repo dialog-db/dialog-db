@@ -634,7 +634,9 @@ mod tests {
     mod delegation_tests {
         use super::*;
         use crate::helpers::test_operator;
-        use dialog_capability::ucan::{Issuer, Ucan, claim, import_delegation_chain};
+        use dialog_capability::ucan::{Issuer, Ucan, claim};
+        use dialog_capability::access::{Permit, Save};
+        use dialog_capability_ucan::{self as ucan, UcanPermit};
         use dialog_effects::storage as fx_storage;
 
         #[dialog_common::test]
@@ -650,7 +652,7 @@ mod tests {
                 .audience(operator.profile_did())
                 .perform(&operator)
                 .await?;
-            import_delegation_chain(&operator, &operator.profile_did(), &chain).await?;
+            dialog_capability::Subject::from(operator.profile_did()).attenuate(dialog_capability::access::Permit).invoke(dialog_capability::access::Save::<dialog_capability_ucan::Ucan>::new(chain.clone())).perform(&operator).await?;
 
             let capability = repo
                 .subject()
@@ -685,7 +687,7 @@ mod tests {
                 .issuer(signer)
                 .perform(&operator)
                 .await?;
-            import_delegation_chain(&operator, &operator.profile_did(), &chain).await?;
+            dialog_capability::Subject::from(operator.profile_did()).attenuate(dialog_capability::access::Permit).invoke(dialog_capability::access::Save::<dialog_capability_ucan::Ucan>::new(chain.clone())).perform(&operator).await?;
 
             let data_cap = repo
                 .subject()
@@ -730,7 +732,7 @@ mod tests {
                 .issuer(signer)
                 .perform(&operator)
                 .await?;
-            import_delegation_chain(&operator, &operator.profile_did(), &chain).await?;
+            dialog_capability::Subject::from(operator.profile_did()).attenuate(dialog_capability::access::Permit).invoke(dialog_capability::access::Save::<dialog_capability_ucan::Ucan>::new(chain.clone())).perform(&operator).await?;
 
             // Delegating for 'data' store should succeed (chain exists)
             let data_cap = repo

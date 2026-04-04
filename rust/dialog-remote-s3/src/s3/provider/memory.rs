@@ -1,11 +1,10 @@
 //! Memory capability providers for S3.
 //!
-//! Each effect is paired: `Provider<Fork<S3, Fx>>` authorizes via SigV4,
+//! Each effect is paired: `Provider<ForkInvocation<S3, Fx>>` authorizes via SigV4,
 //! then delegates to `Provider<Authorized<Fx>>` for HTTP execution.
 
 use async_trait::async_trait;
-use dialog_capability::access::AuthorizeError;
-use dialog_capability::fork::Fork;
+use dialog_capability::fork::ForkInvocation;
 use dialog_capability::{Policy, Provider};
 use dialog_effects::memory::*;
 
@@ -14,22 +13,22 @@ use crate::s3::{RequestDescriptorExt, S3};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<Fork<S3, Resolve>> for S3 {
+impl Provider<ForkInvocation<S3, Resolve>> for S3 {
     async fn execute(
         &self,
-        fork: Fork<S3, Resolve>,
-    ) -> Result<Result<Option<Publication>, MemoryError>, AuthorizeError> {
-        let (capability, address) = fork.into_parts();
-        let permit = address
-            .authorize(&capability)
+        invocation: ForkInvocation<S3, Resolve>,
+    ) -> Result<Option<Publication>, MemoryError> {
+        let permit = invocation
+            .address
+            .authorize(&invocation.capability)
             .await
-            .map_err(|e| AuthorizeError::Denied(e.to_string()))?;
+            .map_err(|e| MemoryError::Storage(e.to_string()))?;
 
-        Ok(<S3 as Provider<Authorized<Resolve>>>::execute(
+        <S3 as Provider<Authorized<Resolve>>>::execute(
             self,
-            Authorized::new(permit, capability),
+            Authorized::new(permit, invocation.capability),
         )
-        .await)
+        .await
     }
 }
 
@@ -78,22 +77,22 @@ impl Provider<Authorized<Resolve>> for S3 {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<Fork<S3, Publish>> for S3 {
+impl Provider<ForkInvocation<S3, Publish>> for S3 {
     async fn execute(
         &self,
-        fork: Fork<S3, Publish>,
-    ) -> Result<Result<Vec<u8>, MemoryError>, AuthorizeError> {
-        let (capability, address) = fork.into_parts();
-        let permit = address
-            .authorize(&capability)
+        invocation: ForkInvocation<S3, Publish>,
+    ) -> Result<Vec<u8>, MemoryError> {
+        let permit = invocation
+            .address
+            .authorize(&invocation.capability)
             .await
-            .map_err(|e| AuthorizeError::Denied(e.to_string()))?;
+            .map_err(|e| MemoryError::Storage(e.to_string()))?;
 
-        Ok(<S3 as Provider<Authorized<Publish>>>::execute(
+        <S3 as Provider<Authorized<Publish>>>::execute(
             self,
-            Authorized::new(permit, capability),
+            Authorized::new(permit, invocation.capability),
         )
-        .await)
+        .await
     }
 }
 
@@ -142,22 +141,19 @@ impl Provider<Authorized<Publish>> for S3 {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<Fork<S3, Retract>> for S3 {
-    async fn execute(
-        &self,
-        fork: Fork<S3, Retract>,
-    ) -> Result<Result<(), MemoryError>, AuthorizeError> {
-        let (capability, address) = fork.into_parts();
-        let permit = address
-            .authorize(&capability)
+impl Provider<ForkInvocation<S3, Retract>> for S3 {
+    async fn execute(&self, invocation: ForkInvocation<S3, Retract>) -> Result<(), MemoryError> {
+        let permit = invocation
+            .address
+            .authorize(&invocation.capability)
             .await
-            .map_err(|e| AuthorizeError::Denied(e.to_string()))?;
+            .map_err(|e| MemoryError::Storage(e.to_string()))?;
 
-        Ok(<S3 as Provider<Authorized<Retract>>>::execute(
+        <S3 as Provider<Authorized<Retract>>>::execute(
             self,
-            Authorized::new(permit, capability),
+            Authorized::new(permit, invocation.capability),
         )
-        .await)
+        .await
     }
 }
 

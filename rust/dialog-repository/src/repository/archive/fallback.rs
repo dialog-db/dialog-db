@@ -1,8 +1,6 @@
 use async_trait::async_trait;
-use dialog_capability::access::{Allow, Claim};
 use dialog_capability::fork::Fork;
 use dialog_capability::site::{Site, SiteAddress};
-use dialog_capability::ucan::Ucan;
 use dialog_capability::{Capability, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{self as archive_fx, Catalog, Get, Put};
@@ -59,8 +57,6 @@ where
         + Provider<Put>
         + Provider<Fork<S3, Get>>
         + Provider<Fork<dialog_remote_ucan_s3::UcanSite, Get>>
-        + Provider<Claim<Get, Allow>>
-        + Provider<Claim<Get, Ucan>>
         + ConditionalSync
         + 'static,
 {
@@ -145,9 +141,7 @@ async fn download_block<A, Env>(
 where
     A: SiteAddress,
     A::Site: Site,
-    Env: Provider<Fork<A::Site, Get>>
-        + Provider<Claim<Get, <A::Site as Site>::Protocol>>
-        + ConditionalSync,
+    Env: Provider<Fork<A::Site, Get>> + ConditionalSync,
 {
     catalog
         .clone()

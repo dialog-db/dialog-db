@@ -119,6 +119,9 @@ impl Provider<storage::List> for Session {
 }
 
 /// Helper macro to implement Provider<Fork<S3, Fx>> for Session by delegating to S3.
+///
+/// Session builds a `ForkInvocation` with `()` invocation (S3 protocol) and
+/// delegates to the S3 `Provider<ForkInvocation<S3, Fx>>` impl.
 macro_rules! impl_fork_provider {
     ($fx:ty, $output:ty) => {
         #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -128,8 +131,14 @@ macro_rules! impl_fork_provider {
                 &self,
                 fork: dialog_capability::fork::Fork<crate::s3::S3, $fx>,
             ) -> Result<$output, dialog_capability::access::AuthorizeError> {
+                let (capability, address) = fork.into_parts();
+                let invocation =
+                    dialog_capability::fork::ForkInvocation::new(capability, address, ());
                 let s3 = crate::s3::S3;
-                <crate::s3::S3 as Provider<dialog_capability::fork::Fork<crate::s3::S3, $fx>>>::execute(&s3, fork).await
+                Ok(<crate::s3::S3 as Provider<
+                    dialog_capability::fork::ForkInvocation<crate::s3::S3, $fx>,
+                >>::execute(&s3, invocation)
+                .await)
             }
         }
     };

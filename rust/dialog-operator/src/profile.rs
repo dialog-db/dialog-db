@@ -5,7 +5,6 @@ use crate::storage::LocationExt;
 use dialog_capability::storage::{
     self as cap_storage, Load, Location, Mount, Save, Storage as StorageCap,
 };
-use dialog_capability::ucan::import_delegation_chain;
 use dialog_capability::{Capability, Policy, Provider};
 use dialog_common::ConditionalSync;
 use dialog_credentials::credential::Credential;
@@ -97,9 +96,17 @@ impl SaveDelegation {
     /// Execute against the environment.
     pub async fn perform<Env>(self, env: &Env) -> Result<(), ProfileError>
     where
-        Env: Provider<cap_storage::Set> + ConditionalSync,
+        Env: Provider<dialog_capability::access::Save<dialog_capability_ucan::Ucan>>
+            + ConditionalSync,
     {
-        import_delegation_chain(env, &self.did, &self.chain)
+        use dialog_capability::Subject;
+        use dialog_capability::access::{Permit, Save};
+        use dialog_capability_ucan::Ucan;
+
+        Subject::from(self.did)
+            .attenuate(Permit)
+            .invoke(Save::<Ucan>::new(self.chain))
+            .perform(env)
             .await
             .map_err(|e| ProfileError::Storage(e.to_string()))
     }

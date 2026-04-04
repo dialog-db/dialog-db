@@ -15,7 +15,7 @@ use super::scope::Scope;
 /// A single UCAN delegation — one proof link in a chain.
 ///
 /// Implements [`Delegation`](access::Delegation) for generic chain verification.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct UcanProof(pub dialog_ucan::Delegation<Ed25519Signature>);
 
@@ -89,6 +89,20 @@ pub struct UcanPermit {
     pub proofs: Vec<UcanProof>,
     /// The scope of access being authorized.
     pub scope: Scope,
+}
+
+impl UcanPermit {
+    /// Build a permit from a delegation chain and scope.
+    ///
+    /// Used when importing externally-built delegation chains.
+    pub fn from_chain(chain: &DelegationChain, scope: Scope) -> Self {
+        let proofs = chain
+            .delegations()
+            .values()
+            .map(|d| UcanProof(d.as_ref().clone()))
+            .collect();
+        Self { proofs, scope }
+    }
 }
 
 impl access::ProofChain<Ucan> for UcanPermit {
@@ -171,7 +185,7 @@ impl access::Authorization<Ucan> for UcanAuthorization {
         }
     }
 
-    async fn invoke(&self) -> Result<super::UcanInvocation, AuthorizeError> {
+    async fn invoke(&self) -> Result<dialog_capability::ucan::UcanInvocation, AuthorizeError> {
         use dialog_capability::ANY_SUBJECT;
         use dialog_ucan::InvocationBuilder;
         use dialog_ucan::subject::Subject as UcanSubject;
@@ -208,7 +222,7 @@ impl access::Authorization<Ucan> for UcanAuthorization {
 
         let chain = dialog_ucan::InvocationChain::new(invocation, delegations_map);
 
-        Ok(super::UcanInvocation {
+        Ok(dialog_capability::ucan::UcanInvocation {
             chain: Box::new(chain),
             subject: subject_did,
             ability,
@@ -221,7 +235,15 @@ impl access::Protocol for Ucan {
     type Signer = Ed25519Signer;
     type Proof = UcanProof;
     type Delegation = DelegationChain;
-    type Invocation = super::UcanInvocation;
+    type Invocation = dialog_capability::ucan::UcanInvocation;
     type ProofChain = UcanPermit;
     type Authorization = UcanAuthorization;
+
+    fn proofs(delegation: &DelegationChain) -> Vec<UcanProof> {
+        delegation
+            .delegations()
+            .values()
+            .map(|d| UcanProof(d.as_ref().clone()))
+            .collect()
+    }
 }

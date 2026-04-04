@@ -1,9 +1,7 @@
 //! Remote archive operations — upload blocks to remote storage.
 
-use dialog_capability::access::{Allow, Claim};
 use dialog_capability::fork::Fork;
 use dialog_capability::site::{Site, SiteAddress};
-use dialog_capability::ucan::Ucan;
 use dialog_capability::{Capability, Provider, Subject};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
@@ -85,8 +83,6 @@ where
         Env: Provider<archive_fx::Get>
             + Provider<Fork<S3, archive_fx::Put>>
             + Provider<Fork<dialog_remote_ucan_s3::UcanSite, archive_fx::Put>>
-            + Provider<Claim<archive_fx::Put, Allow>>
-            + Provider<Claim<archive_fx::Put, Ucan>>
             + ConditionalSync,
     {
         let address = self.index.repository.address();
@@ -116,10 +112,7 @@ where
     S: Stream<Item = Result<Node<Key, State<Datum>, Blake3Hash>, DialogArtifactsError>>,
     A: SiteAddress,
     A::Site: Site,
-    Env: Provider<archive_fx::Get>
-        + Provider<Fork<A::Site, archive_fx::Put>>
-        + Provider<Claim<archive_fx::Put, <A::Site as Site>::Protocol>>
-        + ConditionalSync,
+    Env: Provider<archive_fx::Get> + Provider<Fork<A::Site, archive_fx::Put>> + ConditionalSync,
 {
     nodes
         .map(|node_result| async move {
@@ -161,9 +154,7 @@ async fn upload_block<A, Env>(
 where
     A: SiteAddress,
     A::Site: Site,
-    Env: Provider<Fork<A::Site, archive_fx::Put>>
-        + Provider<Claim<archive_fx::Put, <A::Site as Site>::Protocol>>
-        + ConditionalSync,
+    Env: Provider<Fork<A::Site, archive_fx::Put>> + ConditionalSync,
 {
     // Build archive Put capability using the same subject/catalog as the remote
     // The catalog is already scoped to the right subject from RemoteArchiveIndex
