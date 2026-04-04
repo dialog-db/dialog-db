@@ -268,7 +268,199 @@ mod tests {
             assert!(result.is_err(), "should fail with no delegations");
         }
 
-        /// 7. No issuer set: resolves via profile DID
+        /// Helper: create and save a time-bounded delegation from profile to operator.
+        use dialog_common::time::{Duration, UNIX_EPOCH};
+        use dialog_ucan::time::Timestamp;
+
+        async fn save_timed_delegation(
+            operator: &Operator,
+            profile: &Profile,
+            scope: &impl dialog_capability::Ability,
+            not_before: Option<Timestamp>,
+            expiration: Option<Timestamp>,
+        ) {
+            use cap_access::Save;
+            use dialog_ucan::DelegationChain;
+            use dialog_ucan::delegation::builder::DelegationBuilder;
+
+            let scope = Scope::from(scope);
+            let mut builder = DelegationBuilder::new()
+                .issuer(profile.credential().signer().clone())
+                .audience(&operator.did())
+                .subject(scope.subject.clone())
+                .command(scope.command.segments().clone())
+                .policy(scope.policy());
+
+            if let Some(exp) = expiration {
+                builder = builder.expiration(exp);
+            }
+            if let Some(nbf) = not_before {
+                builder = builder.not_before(nbf);
+            }
+
+            let delegation = builder.try_build().await.unwrap();
+            let chain = DelegationChain::new(delegation);
+
+            Subject::from(profile.did())
+                .attenuate(Permit)
+                .invoke(Save::<Ucan>::new(chain))
+                .perform(operator)
+                .await
+                .unwrap();
+        }
+
+        /// Helper: claim with a time duration constraint.
+        async fn claim_access_during(
+            operator: &Operator,
+            capability: &impl dialog_capability::Ability,
+            duration: cap_access::TimeRange,
+        ) -> Result<UcanPermit, AuthorizeError> {
+            let scope = Scope::from(capability);
+            let mut claim = cap_access::Claim::<Ucan>::new(operator.did(), scope);
+            claim.duration = duration;
+
+            Subject::from(operator.profile_did())
+                .attenuate(Permit)
+                .invoke(claim)
+                .perform(operator)
+                .await
+        }
+
+        /// 7. Expired delegation is rejected when claiming during a later time.
+        #[dialog_common::test]
+        async fn expired_delegation_rejected() {
+            let storage = Storage::temp_storage();
+            let profile = Profile::open(Storage::temp(&unique_name("exp")))
+                .perform(&storage)
+                .await
+                .unwrap();
+            let operator = profile
+                .derive(b"alice")
+                .network(Remote)
+                .build(storage)
+                .await
+                .unwrap();
+
+            let cap = Subject::from(profile.did()).archive().catalog("index");
+
+            // Delegation expires at t=1000
+            let exp = Timestamp::new(UNIX_EPOCH + Duration::from_secs(1000)).unwrap();
+            save_timed_delegation(&operator, &profile, &cap, None, Some(exp)).await;
+
+            // Claim requiring validity at t=2000 should fail (delegation expired)
+            let duration = cap_access::TimeRange {
+                not_before: Some(2000),
+                expiration: None,
+            };
+            let result = claim_access_during(&operator, &cap, duration).await;
+            assert!(
+                result.is_err(),
+                "should reject expired delegation: {:?}",
+                result.ok().map(|_| "found")
+            );
+        }
+
+        /// 8. Not-yet-valid delegation is rejected when claiming during an earlier time.
+        #[dialog_common::test]
+        async fn not_yet_valid_delegation_rejected() {
+            let storage = Storage::temp_storage();
+            let profile = Profile::open(Storage::temp(&unique_name("nbf")))
+                .perform(&storage)
+                .await
+                .unwrap();
+            let operator = profile
+                .derive(b"alice")
+                .network(Remote)
+                .build(storage)
+                .await
+                .unwrap();
+
+            let cap = Subject::from(profile.did()).archive().catalog("index");
+
+            // Delegation not valid before t=5000
+            let nbf = Timestamp::new(UNIX_EPOCH + Duration::from_secs(5000)).unwrap();
+            save_timed_delegation(&operator, &profile, &cap, Some(nbf), None).await;
+
+            // Claim requiring validity before t=3000 should fail
+            let duration = cap_access::TimeRange {
+                not_before: None,
+                expiration: Some(3000),
+            };
+            let result = claim_access_during(&operator, &cap, duration).await;
+            assert!(
+                result.is_err(),
+                "should reject not-yet-valid delegation: {:?}",
+                result.ok().map(|_| "found")
+            );
+        }
+
+        /// 9. Delegation within the required time range succeeds.
+        #[dialog_common::test]
+        async fn valid_time_range_succeeds() {
+            let storage = Storage::temp_storage();
+            let profile = Profile::open(Storage::temp(&unique_name("valid")))
+                .perform(&storage)
+                .await
+                .unwrap();
+            let operator = profile
+                .derive(b"alice")
+                .network(Remote)
+                .build(storage)
+                .await
+                .unwrap();
+
+            let cap = Subject::from(profile.did()).archive().catalog("index");
+
+            // Delegation valid from t=1000 to t=5000
+            let nbf = Timestamp::new(UNIX_EPOCH + Duration::from_secs(1000)).unwrap();
+            let exp = Timestamp::new(UNIX_EPOCH + Duration::from_secs(5000)).unwrap();
+            save_timed_delegation(&operator, &profile, &cap, Some(nbf), Some(exp)).await;
+
+            // Claim requiring validity from t=2000 to t=4000 should succeed (within range)
+            let duration = cap_access::TimeRange {
+                not_before: Some(2000),
+                expiration: Some(4000),
+            };
+            let result = claim_access_during(&operator, &cap, duration).await;
+            assert!(
+                result.is_ok(),
+                "should accept delegation within time range: {:?}",
+                result.err()
+            );
+        }
+
+        /// 10. Unbounded claim accepts any time-bounded delegation.
+        #[dialog_common::test]
+        async fn unbounded_claim_accepts_bounded_delegation() {
+            let storage = Storage::temp_storage();
+            let profile = Profile::open(Storage::temp(&unique_name("unb")))
+                .perform(&storage)
+                .await
+                .unwrap();
+            let operator = profile
+                .derive(b"alice")
+                .network(Remote)
+                .build(storage)
+                .await
+                .unwrap();
+
+            let cap = Subject::from(profile.did()).archive().catalog("index");
+
+            // Delegation with bounds
+            let nbf = Timestamp::new(UNIX_EPOCH + Duration::from_secs(1000)).unwrap();
+            let exp = Timestamp::new(UNIX_EPOCH + Duration::from_secs(5000)).unwrap();
+            save_timed_delegation(&operator, &profile, &cap, Some(nbf), Some(exp)).await;
+
+            // Unbounded claim should accept any delegation
+            let result = claim_access(&operator, &cap).await;
+            assert!(
+                result.is_ok(),
+                "unbounded claim should accept bounded delegation: {:?}",
+                result.err()
+            );
+        }
+
+        /// 11. No issuer set: resolves via profile DID
         #[dialog_common::test]
         async fn no_issuer_uses_profile_did() {
             let storage = Storage::temp_storage();

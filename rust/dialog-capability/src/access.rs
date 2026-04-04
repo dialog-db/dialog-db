@@ -31,7 +31,7 @@ pub trait Scope {
 }
 
 /// The time range during which a delegation is valid.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct TimeRange {
     /// Earliest time this delegation is valid.
     pub not_before: Option<u64>,
@@ -40,6 +40,14 @@ pub struct TimeRange {
 }
 
 impl TimeRange {
+    /// An unbounded time range (no constraints).
+    pub fn unbounded() -> Self {
+        Self {
+            not_before: None,
+            expiration: None,
+        }
+    }
+
     /// Check whether the given time falls within this range.
     pub fn contains(&self, time: u64) -> bool {
         if let Some(nbf) = self.not_before
@@ -53,6 +61,30 @@ impl TimeRange {
             return false;
         }
         true
+    }
+
+    /// Check whether this range overlaps with the required duration.
+    ///
+    /// A delegation's time range overlaps the required duration when:
+    /// - The delegation doesn't expire before the required not_before
+    /// - The delegation isn't not-yet-valid after the required expiration
+    pub fn overlaps(&self, required: &TimeRange) -> bool {
+        if let (Some(req_nbf), Some(exp)) = (required.not_before, self.expiration)
+            && exp <= req_nbf
+        {
+            return false;
+        }
+        if let (Some(req_exp), Some(nbf)) = (required.expiration, self.not_before)
+            && nbf >= req_exp
+        {
+            return false;
+        }
+        true
+    }
+
+    /// Whether this range has any constraints.
+    pub fn is_unbounded(&self) -> bool {
+        self.not_before.is_none() && self.expiration.is_none()
     }
 }
 
@@ -165,8 +197,12 @@ pub trait Protocol: Sized + ConditionalSend + 'static {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait Authorization<P: Protocol> {
-    /// Delegate this authorization to another principal.
-    async fn delegate(&self, audience: Did) -> Result<P::Delegation, AuthorizeError>;
+    /// Delegate this authorization to another principal with time bounds.
+    async fn delegate(
+        &self,
+        audience: Did,
+        duration: TimeRange,
+    ) -> Result<P::Delegation, AuthorizeError>;
 
     /// Create a signed invocation from this authorization.
     async fn invoke(&self) -> Result<P::Invocation, AuthorizeError>;
@@ -186,23 +222,23 @@ pub struct Claim<P: Protocol> {
     pub by: Did,
     /// The access being claimed.
     pub access: P::Access,
-    /// Optional time bound for validation.
-    pub time: Option<u64>,
+    /// Time range the authorization must cover.
+    pub duration: TimeRange,
 }
 
 impl<P: Protocol> Claim<P> {
-    /// Create a new claim request.
+    /// Create a new claim request with unbounded duration.
     pub fn new(by: Did, access: P::Access) -> Self {
         Self {
             by,
             access,
-            time: None,
+            duration: TimeRange::unbounded(),
         }
     }
 
-    /// Set the time bound for validation.
-    pub fn at(mut self, time: u64) -> Self {
-        self.time = Some(time);
+    /// Constrain the claim to a specific time range.
+    pub fn during(mut self, duration: TimeRange) -> Self {
+        self.duration = duration;
         self
     }
 }
@@ -280,7 +316,7 @@ pub trait ProofStore<P: Protocol> {
     {
         let authority = &input.by;
         let access = &input.access;
-        let time = input.time;
+        let duration = &input.duration;
         let subject = access.subject().clone();
 
         if *authority == subject {
@@ -299,9 +335,7 @@ pub trait ProofStore<P: Protocol> {
 
             let candidates = specific.into_iter().chain(powerline).filter_map(|proof| {
                 let range = proof.verify(access).ok()?;
-                if let Some(t) = time
-                    && !range.contains(t)
-                {
+                if !range.overlaps(duration) {
                     return None;
                 }
                 Some(proof)
@@ -349,5 +383,75 @@ pub enum AuthorizeError {
 impl From<crate::storage::StorageError> for AuthorizeError {
     fn from(e: crate::storage::StorageError) -> Self {
         AuthorizeError::Configuration(e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TimeRange;
+
+    #[test]
+    fn expired_delegation_does_not_overlap() {
+        // Delegation expires at t=1000
+        let delegation = TimeRange {
+            not_before: None,
+            expiration: Some(1000),
+        };
+        // Required: must be valid at t=2000+
+        let required = TimeRange {
+            not_before: Some(2000),
+            expiration: None,
+        };
+        assert!(
+            !delegation.overlaps(&required),
+            "expired delegation should not overlap"
+        );
+    }
+
+    #[test]
+    fn not_yet_valid_delegation_does_not_overlap() {
+        // Delegation not valid before t=5000
+        let delegation = TimeRange {
+            not_before: Some(5000),
+            expiration: None,
+        };
+        // Required: must be valid before t=3000
+        let required = TimeRange {
+            not_before: None,
+            expiration: Some(3000),
+        };
+        assert!(
+            !delegation.overlaps(&required),
+            "not-yet-valid delegation should not overlap"
+        );
+    }
+
+    #[test]
+    fn overlapping_ranges_overlap() {
+        let delegation = TimeRange {
+            not_before: Some(1000),
+            expiration: Some(5000),
+        };
+        let required = TimeRange {
+            not_before: Some(2000),
+            expiration: Some(4000),
+        };
+        assert!(
+            delegation.overlaps(&required),
+            "overlapping ranges should overlap"
+        );
+    }
+
+    #[test]
+    fn unbounded_always_overlaps() {
+        let delegation = TimeRange {
+            not_before: Some(1000),
+            expiration: Some(5000),
+        };
+        let required = TimeRange::unbounded();
+        assert!(
+            delegation.overlaps(&required),
+            "unbounded should always overlap"
+        );
     }
 }

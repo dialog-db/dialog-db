@@ -128,7 +128,8 @@ where
         input: dialog_capability::Capability<Claim<P>>,
     ) -> Result<P::ProofChain, AuthorizeError> {
         let auth = Claim::<P>::of(&input);
-        let authorize = Claim::new(auth.by.clone(), auth.access.clone());
+        let mut authorize = Claim::new(auth.by.clone(), auth.access.clone());
+        authorize.duration = auth.duration;
         ProofStore::<P>::authorize(self, authorize).await
     }
 }

@@ -8,9 +8,7 @@
 //! for powerlines). Uses IDBKeyRange for efficient prefix queries.
 
 use async_trait::async_trait;
-use dialog_capability::access::{
-    AuthorizeError, Claim, Delegation, ProofStore, Protocol, Save,
-};
+use dialog_capability::access::{AuthorizeError, Claim, Delegation, ProofStore, Protocol, Save};
 use dialog_capability::{Policy, Provider};
 use dialog_varsig::Did;
 use rexie::KeyRange;
@@ -163,7 +161,8 @@ where
         input: dialog_capability::Capability<Claim<P>>,
     ) -> Result<P::ProofChain, AuthorizeError> {
         let auth = Claim::<P>::of(&input);
-        let authorize = Claim::new(auth.by.clone(), auth.access.clone());
+        let mut authorize = Claim::new(auth.by.clone(), auth.access.clone());
+        authorize.duration = auth.duration;
         ProofStore::<P>::authorize(self, authorize).await
     }
 }

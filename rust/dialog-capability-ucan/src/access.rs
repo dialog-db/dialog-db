@@ -164,15 +164,34 @@ pub struct UcanAuthorization {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl access::Authorization<Ucan> for UcanAuthorization {
-    async fn delegate(&self, audience: Did) -> Result<DelegationChain, AuthorizeError> {
+    async fn delegate(
+        &self,
+        audience: Did,
+        duration: access::TimeRange,
+    ) -> Result<DelegationChain, AuthorizeError> {
+        use dialog_common::time::UNIX_EPOCH;
         use dialog_ucan::delegation::builder::DelegationBuilder;
+        use dialog_ucan::time::Timestamp;
 
-        let delegation = DelegationBuilder::new()
+        let mut builder = DelegationBuilder::new()
             .issuer(self.signer.clone())
             .audience(&audience)
             .subject(self.scope.subject.clone())
             .command(self.scope.command.segments().clone())
-            .policy(self.scope.policy())
+            .policy(self.scope.policy());
+
+        if let Some(exp) = duration.expiration
+            && let Ok(ts) = Timestamp::new(UNIX_EPOCH + std::time::Duration::from_secs(exp))
+        {
+            builder = builder.expiration(ts);
+        }
+        if let Some(nbf) = duration.not_before
+            && let Ok(ts) = Timestamp::new(UNIX_EPOCH + std::time::Duration::from_secs(nbf))
+        {
+            builder = builder.not_before(ts);
+        }
+
+        let delegation = builder
             .try_build()
             .await
             .map_err(|e| AuthorizeError::Configuration(format!("{e:?}")))?;

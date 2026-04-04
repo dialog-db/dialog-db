@@ -191,7 +191,11 @@ mod protocol {
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl access::Authorization<S3> for S3 {
-        async fn delegate(&self, _audience: Did) -> Result<(), AuthorizeError> {
+        async fn delegate(
+            &self,
+            _audience: Did,
+            _duration: access::TimeRange,
+        ) -> Result<(), AuthorizeError> {
             Err(AuthorizeError::Denied(
                 "S3 does not support delegation".into(),
             ))

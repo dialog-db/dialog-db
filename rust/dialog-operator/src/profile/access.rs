@@ -89,15 +89,25 @@ impl<C: Constraint> Claim<'_, C>
 where
     Capability<C>: Ability,
 {
+    fn duration(&self) -> access::TimeRange {
+        access::TimeRange {
+            not_before: self.not_before.map(|t| t.to_unix()),
+            expiration: self.expiration.map(|t| t.to_unix()),
+        }
+    }
+
     /// Execute the claim, returning a proof chain.
     pub async fn perform<Env>(self, env: &Env) -> Result<UcanPermit, AuthorizeError>
     where
         Env: Provider<access::Claim<Ucan>> + ConditionalSync,
     {
         let scope = Scope::from(&self.capability);
+        let duration = self.duration();
+        let mut claim = access::Claim::<Ucan>::new(self.by.did(), scope);
+        claim.duration = duration;
         Subject::from(self.by.did())
             .attenuate(access::Permit)
-            .invoke(access::Claim::<Ucan>::new(self.by.did(), scope))
+            .invoke(claim)
             .perform(env)
             .await
     }
@@ -149,8 +159,9 @@ where
         Env: Provider<access::Claim<Ucan>> + ConditionalSync,
     {
         let signer = self.claim.by.signer().clone();
+        let duration = self.claim.duration();
         let proof_chain = self.claim.perform(env).await?;
         let authorization = proof_chain.claim(signer)?;
-        authorization.delegate(self.audience).await
+        authorization.delegate(self.audience, duration).await
     }
 }
