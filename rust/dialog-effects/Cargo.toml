@@ -6,10 +6,11 @@ authors.workspace = true
 license.workspace = true
 
 [features]
-ucan = ["dep:ipld-core", "dep:dialog-ucan", "dialog-capability/ucan"]
+ucan = ["dep:ipld-core", "dep:dialog-ucan", "dep:dialog-capability-ucan"]
 
 [dependencies]
 dialog-capability = { workspace = true }
+dialog-capability-ucan = { workspace = true, optional = true }
 dialog-credentials = { workspace = true }
 dialog-common = { workspace = true }
 async-trait = { workspace = true }

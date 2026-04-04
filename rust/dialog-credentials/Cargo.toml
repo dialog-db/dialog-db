@@ -15,7 +15,7 @@ ed25519 = [
     "dialog-varsig/edwards25519",
     "dialog-varsig/sha2_512",
 ]
-ucan = ["dep:dialog-ucan", "dialog-capability/ucan"]
+ucan = ["dep:dialog-ucan"]
 
 [dependencies]
 async-trait = { workspace = true }

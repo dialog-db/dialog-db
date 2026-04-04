@@ -168,9 +168,6 @@ pub use selector::*;
 mod settings;
 pub use settings::*;
 
-#[cfg(feature = "ucan")]
-pub mod ucan;
-
 mod ability;
 pub use ability::*;
 

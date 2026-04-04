@@ -204,7 +204,7 @@ impl access::Authorization<Ucan> for UcanAuthorization {
         }
     }
 
-    async fn invoke(&self) -> Result<dialog_capability::ucan::UcanInvocation, AuthorizeError> {
+    async fn invoke(&self) -> Result<super::UcanInvocation, AuthorizeError> {
         use dialog_capability::ANY_SUBJECT;
         use dialog_ucan::InvocationBuilder;
         use dialog_ucan::subject::Subject as UcanSubject;
@@ -241,7 +241,7 @@ impl access::Authorization<Ucan> for UcanAuthorization {
 
         let chain = dialog_ucan::InvocationChain::new(invocation, delegations_map);
 
-        Ok(dialog_capability::ucan::UcanInvocation {
+        Ok(super::UcanInvocation {
             chain: Box::new(chain),
             subject: subject_did,
             ability,
@@ -254,7 +254,7 @@ impl access::Protocol for Ucan {
     type Signer = Ed25519Signer;
     type Proof = UcanProof;
     type Delegation = DelegationChain;
-    type Invocation = dialog_capability::ucan::UcanInvocation;
+    type Invocation = super::UcanInvocation;
     type ProofChain = UcanPermit;
     type Authorization = UcanAuthorization;
 

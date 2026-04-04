@@ -1,6 +1,6 @@
 //! Signed UCAN invocation.
 
-use crate::Did;
+use dialog_capability::Did;
 use dialog_ucan::InvocationChain;
 use dialog_varsig::eddsa::Ed25519Signature;
 

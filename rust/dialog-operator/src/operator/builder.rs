@@ -5,7 +5,7 @@ use crate::profile::Profile;
 use crate::remote::Remote;
 use crate::storage::Storage;
 use dialog_capability::Ability;
-use dialog_capability::ucan::Scope;
+use dialog_capability_ucan::Scope;
 use dialog_credentials::key::KeyExport;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
 use dialog_varsig::Principal;

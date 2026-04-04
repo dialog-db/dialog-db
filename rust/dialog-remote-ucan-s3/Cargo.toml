@@ -26,7 +26,7 @@ web-integration-tests = ["dialog-common/web-integration-tests"]
 [dependencies]
 async-trait = { workspace = true }
 base58 = { workspace = true }
-dialog-capability = { workspace = true, features = ["ucan"] }
+dialog-capability = { workspace = true }
 dialog-capability-ucan = { workspace = true }
 dialog-common = { workspace = true }
 dialog-credentials = { workspace = true }

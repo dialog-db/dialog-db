@@ -19,7 +19,7 @@ s3 = ["dep:dialog-remote-s3"]
 
 [dependencies]
 dialog-artifacts = { workspace = true }
-dialog-capability = { workspace = true, features = ["ucan"] }
+dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
 dialog-credentials = { workspace = true }
 dialog-effects = { workspace = true }
