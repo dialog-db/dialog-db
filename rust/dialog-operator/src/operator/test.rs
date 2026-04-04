@@ -269,8 +269,8 @@ mod tests {
         }
 
         /// Helper: create and save a time-bounded delegation from profile to operator.
-        use dialog_common::time::{Duration, UNIX_EPOCH};
         use dialog_ucan::time::Timestamp;
+        use dialog_ucan::time::timestamp::{Duration, UNIX_EPOCH};
 
         async fn save_timed_delegation(
             operator: &Operator,

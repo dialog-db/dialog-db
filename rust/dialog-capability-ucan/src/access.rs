@@ -169,9 +169,9 @@ impl access::Authorization<Ucan> for UcanAuthorization {
         audience: Did,
         duration: access::TimeRange,
     ) -> Result<DelegationChain, AuthorizeError> {
-        use dialog_common::time::UNIX_EPOCH;
         use dialog_ucan::delegation::builder::DelegationBuilder;
         use dialog_ucan::time::Timestamp;
+        use dialog_ucan::time::timestamp::{Duration, UNIX_EPOCH};
 
         let mut builder = DelegationBuilder::new()
             .issuer(self.signer.clone())
@@ -181,12 +181,12 @@ impl access::Authorization<Ucan> for UcanAuthorization {
             .policy(self.scope.policy());
 
         if let Some(exp) = duration.expiration
-            && let Ok(ts) = Timestamp::new(UNIX_EPOCH + std::time::Duration::from_secs(exp))
+            && let Ok(ts) = Timestamp::new(UNIX_EPOCH + Duration::from_secs(exp))
         {
             builder = builder.expiration(ts);
         }
         if let Some(nbf) = duration.not_before
-            && let Ok(ts) = Timestamp::new(UNIX_EPOCH + std::time::Duration::from_secs(nbf))
+            && let Ok(ts) = Timestamp::new(UNIX_EPOCH + Duration::from_secs(nbf))
         {
             builder = builder.not_before(ts);
         }
