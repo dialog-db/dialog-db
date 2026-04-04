@@ -660,7 +660,7 @@ mod tests {
     mod delegation_tests {
         use super::*;
         use crate::helpers::test_operator_with_profile;
-        use dialog_effects::storage as fx_storage;
+        use dialog_effects::memory as fx_memory;
 
         #[dialog_common::test]
         async fn it_delegates_repo_to_profile_and_claims() -> anyhow::Result<()> {
@@ -670,19 +670,19 @@ mod tests {
                 .await?;
 
             // Repo delegates full ownership to the profile
-            let access = repo.access();
-            let chain = access
+            let chain = repo
+                .access()
                 .claim(&repo)
                 .delegate(profile.did())
                 .perform(&operator)
                 .await?;
             profile.access().save(chain).perform(&operator).await?;
 
-            // Profile should be able to claim access to any store
+            // Profile should be able to claim access to any memory space
             let capability = repo
                 .subject()
-                .attenuate(fx_storage::Storage)
-                .attenuate(fx_storage::Store::new("data"));
+                .attenuate(fx_memory::Memory)
+                .attenuate(fx_memory::Space::new("data"));
 
             let result = profile.access().claim(capability).perform(&operator).await;
             assert!(
@@ -701,40 +701,40 @@ mod tests {
                 .perform(&operator)
                 .await?;
 
-            // Repo delegates only "data" store access to the profile
+            // Repo delegates only memory/space("data") to the profile
             let scoped_cap = repo
                 .subject()
-                .attenuate(fx_storage::Storage)
-                .attenuate(fx_storage::Store::new("data"));
-            let access = repo.access();
-            let chain = access
+                .attenuate(fx_memory::Memory)
+                .attenuate(fx_memory::Space::new("data"));
+            let chain = repo
+                .access()
                 .claim(scoped_cap)
                 .delegate(profile.did())
                 .perform(&operator)
                 .await?;
             profile.access().save(chain).perform(&operator).await?;
 
-            // Claiming "data" store should succeed
+            // Claiming "data" space should succeed
             let data_cap = repo
                 .subject()
-                .attenuate(fx_storage::Storage)
-                .attenuate(fx_storage::Store::new("data"));
+                .attenuate(fx_memory::Memory)
+                .attenuate(fx_memory::Space::new("data"));
             let result = profile.access().claim(data_cap).perform(&operator).await;
             assert!(
                 result.is_ok(),
-                "claim on delegated store 'data' should succeed: {:?}",
+                "claim on delegated space 'data' should succeed: {:?}",
                 result.err()
             );
 
-            // Claiming "secret" store should fail
+            // Claiming "secret" space should fail
             let secret_cap = repo
                 .subject()
-                .attenuate(fx_storage::Storage)
-                .attenuate(fx_storage::Store::new("secret"));
+                .attenuate(fx_memory::Memory)
+                .attenuate(fx_memory::Space::new("secret"));
             let result = profile.access().claim(secret_cap).perform(&operator).await;
             assert!(
                 result.is_err(),
-                "claim on non-delegated store 'secret' should be denied"
+                "claim on non-delegated space 'secret' should be denied"
             );
 
             Ok(())
@@ -747,24 +747,24 @@ mod tests {
                 .perform(&operator)
                 .await?;
 
-            // Repo delegates "data" store to the profile
+            // Repo delegates memory/space("data") to the profile
             let scoped_cap = repo
                 .subject()
-                .attenuate(fx_storage::Storage)
-                .attenuate(fx_storage::Store::new("data"));
-            let access = repo.access();
-            let chain = access
+                .attenuate(fx_memory::Memory)
+                .attenuate(fx_memory::Space::new("data"));
+            let chain = repo
+                .access()
                 .claim(scoped_cap)
                 .delegate(profile.did())
                 .perform(&operator)
                 .await?;
             profile.access().save(chain).perform(&operator).await?;
 
-            // Profile can re-delegate "data" store to operator
+            // Profile can re-delegate "data" space to operator
             let data_cap = repo
                 .subject()
-                .attenuate(fx_storage::Storage)
-                .attenuate(fx_storage::Store::new("data"));
+                .attenuate(fx_memory::Memory)
+                .attenuate(fx_memory::Space::new("data"));
             let result = profile
                 .access()
                 .claim(data_cap)
@@ -773,15 +773,15 @@ mod tests {
                 .await;
             assert!(
                 result.is_ok(),
-                "delegation for store 'data' should succeed: {:?}",
+                "delegation for space 'data' should succeed: {:?}",
                 result.err()
             );
 
-            // Profile cannot delegate "secret" store (no chain)
+            // Profile cannot delegate "secret" space (no chain)
             let secret_cap = repo
                 .subject()
-                .attenuate(fx_storage::Storage)
-                .attenuate(fx_storage::Store::new("secret"));
+                .attenuate(fx_memory::Memory)
+                .attenuate(fx_memory::Space::new("secret"));
             let result = profile
                 .access()
                 .claim(secret_cap)
@@ -790,7 +790,7 @@ mod tests {
                 .await;
             assert!(
                 result.is_err(),
-                "delegation for non-delegated store 'secret' should fail"
+                "delegation for non-delegated space 'secret' should fail"
             );
 
             Ok(())
