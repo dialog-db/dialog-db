@@ -6,13 +6,11 @@
 
 mod access;
 mod invocation;
-pub mod issuer;
 pub mod parameters;
 pub mod scope;
 
 pub use access::{UcanAuthorization, UcanPermit, UcanPermit as UcanProofChain, UcanProof};
 pub use invocation::UcanInvocation;
-pub use issuer::Issuer;
 pub use parameters::{parameters, parameters_to_args, parameters_to_policy};
 pub use scope::{Args, Parameters, Scope};
 
