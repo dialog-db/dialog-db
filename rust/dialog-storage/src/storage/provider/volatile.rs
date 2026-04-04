@@ -35,6 +35,7 @@
 //! ```
 
 mod archive;
+mod authorize;
 mod memory;
 mod mount;
 mod storage;
@@ -53,6 +54,9 @@ type MemoryKey = (String, String);
 /// Storage key: (store, key_bytes)
 type StorageKey = (String, Vec<u8>);
 
+/// Proof key: (audience, subject_or_wildcard, filename)
+type ProofKey = String;
+
 /// A session holds the in-memory storage for a single subject.
 #[derive(Default, Debug)]
 struct Session {
@@ -66,6 +70,8 @@ struct Session {
     credentials: HashMap<String, CredentialExport>,
     /// Key-value storage keyed by (store, key).
     storage: HashMap<StorageKey, Vec<u8>>,
+    /// Proof storage keyed by "{audience}/{subject}/{issuer}.{hash}".
+    proofs: HashMap<ProofKey, Vec<u8>>,
 }
 
 /// Volatile in-memory storage provider.

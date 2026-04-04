@@ -87,6 +87,7 @@ where
 
 use dialog_effects::{archive, memory, storage as fx_storage};
 
+
 /// Address-dispatched storage with DID-routed effect table.
 #[derive(Clone, Provider)]
 pub struct Storage {

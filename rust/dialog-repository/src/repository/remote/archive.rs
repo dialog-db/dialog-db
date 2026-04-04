@@ -1,8 +1,10 @@
 //! Remote archive operations — upload blocks to remote storage.
 
+use dialog_capability::access::{Allow, Claim};
 use dialog_capability::fork::Fork;
 use dialog_capability::site::{Site, SiteAddress};
-use dialog_capability::{Capability, Provider, Subject, authority, storage};
+use dialog_capability::ucan::Ucan;
+use dialog_capability::{Capability, Provider, Subject};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_prolly_tree::Node;
@@ -83,10 +85,8 @@ where
         Env: Provider<archive_fx::Get>
             + Provider<Fork<S3, archive_fx::Put>>
             + Provider<Fork<dialog_remote_ucan_s3::UcanSite, archive_fx::Put>>
-            + Provider<authority::Identify>
-            + Provider<authority::Sign>
-            + Provider<storage::List>
-            + Provider<storage::Get>
+            + Provider<Claim<archive_fx::Put, Allow>>
+            + Provider<Claim<archive_fx::Put, Ucan>>
             + ConditionalSync,
     {
         let address = self.index.repository.address();
@@ -118,10 +118,7 @@ where
     A::Site: Site,
     Env: Provider<archive_fx::Get>
         + Provider<Fork<A::Site, archive_fx::Put>>
-        + Provider<authority::Identify>
-        + Provider<authority::Sign>
-        + Provider<storage::List>
-        + Provider<storage::Get>
+        + Provider<Claim<archive_fx::Put, <A::Site as Site>::Protocol>>
         + ConditionalSync,
 {
     nodes
@@ -165,10 +162,7 @@ where
     A: SiteAddress,
     A::Site: Site,
     Env: Provider<Fork<A::Site, archive_fx::Put>>
-        + Provider<authority::Identify>
-        + Provider<authority::Sign>
-        + Provider<storage::List>
-        + Provider<storage::Get>
+        + Provider<Claim<archive_fx::Put, <A::Site as Site>::Protocol>>
         + ConditionalSync,
 {
     // Build archive Put capability using the same subject/catalog as the remote

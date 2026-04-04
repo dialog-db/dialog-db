@@ -968,6 +968,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-capability-ucan"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base58",
+ "blake3",
+ "dialog-capability",
+ "dialog-common",
+ "dialog-credentials",
+ "dialog-ucan",
+ "dialog-varsig",
+ "ipld-core",
+ "serde",
+ "serde_bytes",
+ "serde_ipld_dagcbor",
+ "signature",
+ "thiserror 2.0.18",
+ "tokio",
+ "wasm-bindgen-test",
+]
+
+[[package]]
 name = "dialog-common"
 version = "0.1.0"
 dependencies = [
@@ -1095,6 +1117,7 @@ dependencies = [
  "blake3",
  "dialog-artifacts",
  "dialog-capability",
+ "dialog-capability-ucan",
  "dialog-common",
  "dialog-credentials",
  "dialog-effects",
@@ -1224,6 +1247,7 @@ dependencies = [
  "base58",
  "bytes",
  "dialog-capability",
+ "dialog-capability-ucan",
  "dialog-common",
  "dialog-credentials",
  "dialog-effects",

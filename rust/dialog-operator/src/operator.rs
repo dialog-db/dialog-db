@@ -83,7 +83,8 @@ impl Principal for Operator {
     }
 }
 
-use dialog_capability::fork::{Fork, ForkInvocation};
+use dialog_capability::access::AuthorizeError;
+use dialog_capability::fork::Fork;
 use dialog_capability::site::Site;
 use dialog_capability::{Constraint, Effect};
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -95,11 +96,11 @@ where
     S: Site,
     Fx: Effect + 'static,
     Fx::Of: Constraint,
-    ForkInvocation<S, Fx>: ConditionalSend,
+    Fork<S, Fx>: ConditionalSend,
     Remote: Provider<Fork<S, Fx>> + ConditionalSync,
     Self: ConditionalSend + ConditionalSync,
 {
-    async fn execute(&self, input: ForkInvocation<S, Fx>) -> Fx::Output {
+    async fn execute(&self, input: Fork<S, Fx>) -> Result<Fx::Output, AuthorizeError> {
         self.remote.execute(input).await
     }
 }

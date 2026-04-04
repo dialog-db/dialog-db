@@ -14,7 +14,6 @@ pub use crate::Address;
 pub use credentials::S3Credentials;
 
 use dialog_capability::Did;
-use dialog_capability::access::Allow;
 use dialog_capability::site::Site;
 use thiserror::Error;
 use url::Url;
@@ -93,12 +92,134 @@ impl From<crate::AccessError> for S3StorageError {
 /// Combines SigV4 credential signing with HTTP execution. Fork provider impls
 /// authorize via `Address::authorize` then delegate to [`Http`] for the
 /// actual HTTP round-trip.
+///
+/// S3 is both a [`Site`] and a [`Protocol`](dialog_capability::access::Protocol).
+/// Authorization is handled via SigV4 presigned URLs, not capability-level
+/// delegation chains.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct S3;
 
 impl Site for S3 {
-    type Protocol = Allow;
+    type Protocol = S3;
     type Address = crate::Address;
+}
+
+mod protocol {
+    use super::S3;
+    use dialog_capability::Did;
+    use dialog_capability::access::{self, AuthorizeError};
+
+    /// S3 access scope — just the subject DID.
+    ///
+    /// S3 authorization is handled by presigned URLs, not capability delegation,
+    /// so the scope is minimal.
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    pub struct S3Access {
+        subject: Did,
+    }
+
+    impl S3Access {
+        /// Create a new S3 access scope.
+        pub fn new(subject: Did) -> Self {
+            Self { subject }
+        }
+    }
+
+    impl access::Scope for S3Access {
+        fn subject(&self) -> &Did {
+            &self.subject
+        }
+    }
+
+    /// S3 has no delegation chain — presigned URLs are self-contained.
+    #[derive(serde::Deserialize)]
+    pub struct S3Proof;
+
+    impl access::Delegation for S3Proof {
+        type Access = S3Access;
+        fn issuer(&self) -> &Did {
+            unreachable!("S3 has no delegation chain")
+        }
+        fn audience(&self) -> &Did {
+            unreachable!("S3 has no delegation chain")
+        }
+        fn subject(&self) -> Option<&Did> {
+            None
+        }
+        fn verify(
+            &self,
+            _: &S3Access,
+        ) -> Result<access::TimeRange, AuthorizeError> {
+            Ok(access::TimeRange {
+                not_before: None,
+                expiration: None,
+            })
+        }
+        fn encode(&self) -> Result<Vec<u8>, AuthorizeError> {
+            Err(AuthorizeError::Denied(
+                "S3 does not use stored proofs".into(),
+            ))
+        }
+        fn decode(_bytes: &[u8]) -> Result<Self, AuthorizeError> {
+            Err(AuthorizeError::Denied(
+                "S3 does not use stored proofs".into(),
+            ))
+        }
+    }
+
+    /// S3 permit — trivially allowed (credentials are on the Address).
+    #[derive(serde::Serialize, serde::Deserialize)]
+    pub struct S3Permit(S3Access);
+
+    impl access::ProofChain<S3> for S3Permit {
+        fn new(access: S3Access) -> Self {
+            Self(access)
+        }
+
+        fn access(&self) -> &S3Access {
+            &self.0
+        }
+
+        fn push(&mut self, _proof: S3Proof) {}
+
+        fn proofs(&self) -> &[S3Proof] {
+            &[]
+        }
+
+        fn claim(self, _signer: S3) -> Result<S3, AuthorizeError> {
+            Ok(S3)
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl access::Authorization<S3> for S3 {
+        async fn delegate(&self, _audience: Did) -> Result<(), AuthorizeError> {
+            Err(AuthorizeError::Denied(
+                "S3 does not support delegation".into(),
+            ))
+        }
+
+        async fn invoke(&self) -> Result<(), AuthorizeError> {
+            Ok(())
+        }
+    }
+
+    impl access::Protocol for S3 {
+        type Access = S3Access;
+        type Signer = S3;
+        type Proof = S3Proof;
+        type Delegation = ();
+        type Invocation = ();
+        type ProofChain = S3Permit;
+        type Authorization = S3;
+    }
+}
+
+impl dialog_varsig::Principal for S3 {
+    fn did(&self) -> Did {
+        "did:web:s3".parse().expect("valid DID")
+    }
 }
 
 /// A scoped S3 storage bucket with subject and namespace path.

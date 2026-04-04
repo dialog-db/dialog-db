@@ -1,5 +1,7 @@
+use dialog_capability::access::{Allow, Claim};
 use dialog_capability::fork::Fork;
-use dialog_capability::{Policy, Provider, Subject, authority, storage};
+use dialog_capability::ucan::Ucan;
+use dialog_capability::{Policy, Provider, Subject, authority};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
@@ -79,13 +81,14 @@ impl Pull<'_> {
             + Provider<memory_fx::Resolve>
             + Provider<memory_fx::Publish>
             + Provider<authority::Identify>
-            + Provider<authority::Sign>
-            + Provider<storage::List>
-            + Provider<storage::Get>
             + Provider<Fork<S3, archive_fx::Get>>
             + Provider<Fork<S3, memory_fx::Resolve>>
             + Provider<Fork<dialog_remote_ucan_s3::UcanSite, archive_fx::Get>>
             + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Resolve>>
+            + Provider<Claim<archive_fx::Get, Allow>>
+            + Provider<Claim<archive_fx::Get, Ucan>>
+            + Provider<Claim<memory_fx::Resolve, Allow>>
+            + Provider<Claim<memory_fx::Resolve, Ucan>>
             + ConditionalSync
             + 'static,
     {
@@ -246,13 +249,14 @@ where
         + Provider<memory_fx::Resolve>
         + Provider<memory_fx::Publish>
         + Provider<authority::Identify>
-        + Provider<authority::Sign>
-        + Provider<storage::List>
-        + Provider<storage::Get>
         + Provider<Fork<S3, archive_fx::Get>>
         + Provider<Fork<S3, memory_fx::Resolve>>
-        + Provider<Fork<dialog_remote_ucan_s3::UcanSite, archive_fx::Get>>
-        + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Resolve>>
+        + Provider<Fork<UcanSite, archive_fx::Get>>
+        + Provider<Fork<UcanSite, memory_fx::Resolve>>
+        + Provider<Claim<archive_fx::Get, Allow>>
+        + Provider<Claim<archive_fx::Get, Ucan>>
+        + Provider<Claim<memory_fx::Resolve, Allow>>
+        + Provider<Claim<memory_fx::Resolve, Ucan>>
         + ConditionalSync
         + 'static,
 {

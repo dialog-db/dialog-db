@@ -1,9 +1,11 @@
 //! Fetch command for remote branches.
 
+use dialog_capability::access::{Allow, Claim};
 use dialog_capability::fork::Fork;
 use dialog_capability::site::Site;
 use dialog_capability::site::SiteAddress;
-use dialog_capability::{Capability, Provider, Subject, authority, storage};
+use dialog_capability::ucan::Ucan;
+use dialog_capability::{Capability, Provider, Subject};
 use dialog_common::ConditionalSync;
 use dialog_effects::memory as memory_fx;
 use dialog_remote_s3::S3;
@@ -33,10 +35,8 @@ impl<'a> Fetch<'a> {
     where
         Env: Provider<Fork<S3, memory_fx::Resolve>>
             + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Resolve>>
-            + Provider<authority::Identify>
-            + Provider<authority::Sign>
-            + Provider<storage::List>
-            + Provider<storage::Get>
+            + Provider<Claim<memory_fx::Resolve, Allow>>
+            + Provider<Claim<memory_fx::Resolve, Ucan>>
             + Provider<memory_fx::Publish>
             + ConditionalSync,
     {
@@ -78,10 +78,7 @@ where
     A: SiteAddress,
     A::Site: Site,
     Env: Provider<Fork<A::Site, memory_fx::Resolve>>
-        + Provider<authority::Identify>
-        + Provider<authority::Sign>
-        + Provider<storage::List>
-        + Provider<storage::Get>
+        + Provider<Claim<memory_fx::Resolve, <A::Site as Site>::Protocol>>
         + ConditionalSync,
 {
     let result: Option<memory_fx::Publication> = cell_cap

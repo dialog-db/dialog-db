@@ -2,8 +2,9 @@
 
 use dialog_capability::site::{Site, SiteAddress};
 
-// Re-export UCAN types from dialog-capability for convenience.
-pub use dialog_capability::ucan::{Ucan, UcanInvocation};
+// Re-export UCAN types for convenience.
+pub use dialog_capability::ucan::UcanInvocation;
+pub use dialog_capability_ucan::Ucan;
 
 /// UCAN site address -- wraps the access service endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -25,20 +26,25 @@ impl UcanAddress {
         &self.endpoint
     }
 
-    /// POST the signed invocation to the access service endpoint and get back
+    /// POST the capability to the access service endpoint and get back
     /// a presigned URL for the S3 operation.
     pub async fn authorize(
         &self,
-        invocation: &UcanInvocation,
+        capability: &impl dialog_remote_s3::Access,
     ) -> Result<dialog_remote_s3::Permit, dialog_remote_s3::AccessError> {
-        let ucan = invocation
-            .to_bytes()
-            .map_err(|e| dialog_remote_s3::AccessError::Invocation(e.to_string()))?;
+        let body = serde_json::json!({
+            "method": capability.method(),
+            "path": capability.path(),
+            "checksum": capability.checksum().map(|c| c.to_string()),
+        });
 
         let response = reqwest::Client::new()
             .post(&self.endpoint)
-            .header("Content-Type", "application/cbor")
-            .body(ucan)
+            .header("Content-Type", "application/json")
+            .body(
+                serde_json::to_vec(&body)
+                    .map_err(|e| dialog_remote_s3::AccessError::Invocation(e.to_string()))?,
+            )
             .send()
             .await
             .map_err(|e| dialog_remote_s3::AccessError::Service(e.to_string()))?;

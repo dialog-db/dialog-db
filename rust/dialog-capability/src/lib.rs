@@ -150,7 +150,7 @@
 //! |------|------|
 //! | [`Ability`] | Trait providing `subject()` and `ability()` |
 //! | [`Provider<C>`] | Executes commands |
-//! | [`access::Authorization`] | Capability paired with format-specific authorization proof |
+//! | [`access::Authorize`] | Command for requesting authorization via a protocol |
 //! | [`site::Site`] | Trait for site configuration types |
 
 // Allow `#[derive(Claim)]` to resolve `::dialog_capability::Claim` inside this crate.

@@ -42,50 +42,41 @@ impl TestBucket {
     }
 
     pub async fn set(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), S3StorageError> {
-        let authorized = Subject::from(self.subject.clone())
+        let result: Result<(), StorageError> = Subject::from(self.subject.clone())
             .storage()
             .store(&self.store)
             .set(key, value)
             .fork(&self.address)
-            .acquire(&self.session)
+            .perform(&self.session)
             .await
-            .map_err(|e: dialog_capability::access::AuthorizeError| {
-                S3StorageError::AuthorizationError(e.to_string())
-            })?;
+            .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?;
 
-        let result: Result<(), StorageError> = authorized.perform(&self.s3).await;
         result.map_err(|e| S3StorageError::ServiceError(e.to_string()))
     }
 
     pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, S3StorageError> {
-        let authorized = Subject::from(self.subject.clone())
+        let result: Result<Option<Vec<u8>>, StorageError> = Subject::from(self.subject.clone())
             .storage()
             .store(&self.store)
             .get(key)
             .fork(&self.address)
-            .acquire(&self.session)
+            .perform(&self.session)
             .await
-            .map_err(|e: dialog_capability::access::AuthorizeError| {
-                S3StorageError::AuthorizationError(e.to_string())
-            })?;
+            .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?;
 
-        let result: Result<Option<Vec<u8>>, StorageError> = authorized.perform(&self.s3).await;
         result.map_err(|e| S3StorageError::ServiceError(e.to_string()))
     }
 
     pub async fn delete(&self, key: &[u8]) -> Result<(), S3StorageError> {
-        let authorized = Subject::from(self.subject.clone())
+        let result: Result<(), StorageError> = Subject::from(self.subject.clone())
             .storage()
             .store(&self.store)
             .delete(key)
             .fork(&self.address)
-            .acquire(&self.session)
+            .perform(&self.session)
             .await
-            .map_err(|e: dialog_capability::access::AuthorizeError| {
-                S3StorageError::AuthorizationError(e.to_string())
-            })?;
+            .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?;
 
-        let result: Result<(), StorageError> = authorized.perform(&self.s3).await;
         result.map_err(|e| S3StorageError::ServiceError(e.to_string()))
     }
 
@@ -94,19 +85,16 @@ impl TestBucket {
         space: &str,
         cell: &str,
     ) -> Result<Option<Publication>, S3StorageError> {
-        let authorized = Subject::from(self.subject.clone())
+        let result: Result<Option<Publication>, MemoryError> = Subject::from(self.subject.clone())
             .memory()
             .space(space)
             .cell(cell)
             .resolve()
             .fork(&self.address)
-            .acquire(&self.session)
+            .perform(&self.session)
             .await
-            .map_err(|e: dialog_capability::access::AuthorizeError| {
-                S3StorageError::AuthorizationError(e.to_string())
-            })?;
+            .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?;
 
-        let result: Result<Option<Publication>, MemoryError> = authorized.perform(&self.s3).await;
         result.map_err(|e| S3StorageError::ServiceError(e.to_string()))
     }
 
@@ -117,19 +105,16 @@ impl TestBucket {
         content: Vec<u8>,
         when: Option<Vec<u8>>,
     ) -> Result<Vec<u8>, S3StorageError> {
-        let authorized = Subject::from(self.subject.clone())
+        let result: Result<Vec<u8>, MemoryError> = Subject::from(self.subject.clone())
             .memory()
             .space(space)
             .cell(cell)
             .publish(content, when)
             .fork(&self.address)
-            .acquire(&self.session)
+            .perform(&self.session)
             .await
-            .map_err(|e: dialog_capability::access::AuthorizeError| {
-                S3StorageError::AuthorizationError(e.to_string())
-            })?;
+            .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?;
 
-        let result: Result<Vec<u8>, MemoryError> = authorized.perform(&self.s3).await;
         result.map_err(|e| S3StorageError::ServiceError(e.to_string()))
     }
 
@@ -140,19 +125,16 @@ impl TestBucket {
         cell: &str,
         when: Vec<u8>,
     ) -> Result<(), S3StorageError> {
-        let authorized = Subject::from(self.subject.clone())
+        let result: Result<(), MemoryError> = Subject::from(self.subject.clone())
             .memory()
             .space(space)
             .cell(cell)
             .retract(when)
             .fork(&self.address)
-            .acquire(&self.session)
+            .perform(&self.session)
             .await
-            .map_err(|e: dialog_capability::access::AuthorizeError| {
-                S3StorageError::AuthorizationError(e.to_string())
-            })?;
+            .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?;
 
-        let result: Result<(), MemoryError> = authorized.perform(&self.s3).await;
         result.map_err(|e| S3StorageError::ServiceError(e.to_string()))
     }
 }

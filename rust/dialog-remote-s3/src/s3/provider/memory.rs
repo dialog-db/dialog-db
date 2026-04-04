@@ -4,7 +4,8 @@
 //! then delegates to `Provider<Authorized<Fx>>` for HTTP execution.
 
 use async_trait::async_trait;
-use dialog_capability::fork::{Fork, ForkInvocation};
+use dialog_capability::access::AuthorizeError;
+use dialog_capability::fork::Fork;
 use dialog_capability::{Policy, Provider};
 use dialog_effects::memory::*;
 
@@ -16,19 +17,19 @@ use crate::s3::{RequestDescriptorExt, S3};
 impl Provider<Fork<S3, Resolve>> for S3 {
     async fn execute(
         &self,
-        invocation: ForkInvocation<S3, Resolve>,
-    ) -> Result<Option<Publication>, MemoryError> {
-        let permit = invocation
-            .address
-            .authorize(&invocation.authorization.capability)
+        fork: Fork<S3, Resolve>,
+    ) -> Result<Result<Option<Publication>, MemoryError>, AuthorizeError> {
+        let (capability, address) = fork.into_parts();
+        let permit = address
+            .authorize(&capability)
             .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            .map_err(|e| AuthorizeError::Denied(e.to_string()))?;
 
-        <S3 as Provider<Authorized<Resolve>>>::execute(
+        Ok(<S3 as Provider<Authorized<Resolve>>>::execute(
             self,
-            Authorized::new(permit, invocation.authorization.capability),
+            Authorized::new(permit, capability),
         )
-        .await
+        .await)
     }
 }
 
@@ -80,19 +81,19 @@ impl Provider<Authorized<Resolve>> for S3 {
 impl Provider<Fork<S3, Publish>> for S3 {
     async fn execute(
         &self,
-        invocation: ForkInvocation<S3, Publish>,
-    ) -> Result<Vec<u8>, MemoryError> {
-        let permit = invocation
-            .address
-            .authorize(&invocation.authorization.capability)
+        fork: Fork<S3, Publish>,
+    ) -> Result<Result<Vec<u8>, MemoryError>, AuthorizeError> {
+        let (capability, address) = fork.into_parts();
+        let permit = address
+            .authorize(&capability)
             .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            .map_err(|e| AuthorizeError::Denied(e.to_string()))?;
 
-        <S3 as Provider<Authorized<Publish>>>::execute(
+        Ok(<S3 as Provider<Authorized<Publish>>>::execute(
             self,
-            Authorized::new(permit, invocation.authorization.capability),
+            Authorized::new(permit, capability),
         )
-        .await
+        .await)
     }
 }
 
@@ -142,18 +143,21 @@ impl Provider<Authorized<Publish>> for S3 {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<Fork<S3, Retract>> for S3 {
-    async fn execute(&self, invocation: ForkInvocation<S3, Retract>) -> Result<(), MemoryError> {
-        let permit = invocation
-            .address
-            .authorize(&invocation.authorization.capability)
+    async fn execute(
+        &self,
+        fork: Fork<S3, Retract>,
+    ) -> Result<Result<(), MemoryError>, AuthorizeError> {
+        let (capability, address) = fork.into_parts();
+        let permit = address
+            .authorize(&capability)
             .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            .map_err(|e| AuthorizeError::Denied(e.to_string()))?;
 
-        <S3 as Provider<Authorized<Retract>>>::execute(
+        Ok(<S3 as Provider<Authorized<Retract>>>::execute(
             self,
-            Authorized::new(permit, invocation.authorization.capability),
+            Authorized::new(permit, capability),
         )
-        .await
+        .await)
     }
 }
 

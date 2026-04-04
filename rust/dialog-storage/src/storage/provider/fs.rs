@@ -42,6 +42,8 @@
 //! ```
 
 mod archive;
+#[cfg(not(target_arch = "wasm32"))]
+mod authorize;
 mod error;
 mod memory;
 mod mount;
@@ -56,6 +58,7 @@ use url::Url;
 
 const ARCHIVE: &str = "archive";
 const MEMORY: &str = "memory";
+const PERMIT: &str = "permit";
 const STORAGE: &str = "storage";
 
 /// Address for filesystem-based storage.
@@ -248,6 +251,14 @@ impl FileStore {
     /// Returns the location for a subject's memory storage.
     fn memory(&self, subject: &Did) -> Result<Location, FileSystemError> {
         self.0.resolve(subject.as_ref())?.resolve(MEMORY)
+    }
+
+    /// Returns the location for permit/proof storage.
+    ///
+    /// Stored directly under `{root}/permit/`. Subject routing
+    /// happens at the `Stores` level.
+    pub(crate) fn permit(&self) -> Result<Location, FileSystemError> {
+        self.0.resolve(PERMIT)
     }
 
     /// Returns the location for a subject's key-value storage.

@@ -1,7 +1,9 @@
 use async_trait::async_trait;
+use dialog_capability::access::{Allow, Claim};
 use dialog_capability::fork::Fork;
 use dialog_capability::site::{Site, SiteAddress};
-use dialog_capability::{Capability, Provider, authority, storage};
+use dialog_capability::ucan::Ucan;
+use dialog_capability::{Capability, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{self as archive_fx, Catalog, Get, Put};
 use dialog_remote_s3::S3;
@@ -57,10 +59,8 @@ where
         + Provider<Put>
         + Provider<Fork<S3, Get>>
         + Provider<Fork<dialog_remote_ucan_s3::UcanSite, Get>>
-        + Provider<authority::Identify>
-        + Provider<authority::Sign>
-        + Provider<storage::List>
-        + Provider<storage::Get>
+        + Provider<Claim<Get, Allow>>
+        + Provider<Claim<Get, Ucan>>
         + ConditionalSync
         + 'static,
 {
@@ -146,10 +146,7 @@ where
     A: SiteAddress,
     A::Site: Site,
     Env: Provider<Fork<A::Site, Get>>
-        + Provider<authority::Identify>
-        + Provider<authority::Sign>
-        + Provider<storage::List>
-        + Provider<storage::Get>
+        + Provider<Claim<Get, <A::Site as Site>::Protocol>>
         + ConditionalSync,
 {
     catalog

@@ -1,33 +1,24 @@
-//! UCAN access authorization — Protocol implementation for Ucan.
+//! UCAN access support — implements [`Scope`](crate::access::Scope) for UCAN scope.
 //!
-//! Implements [`Protocol`](access::Protocol) for [`Ucan`], using the
-//! invoke builder to produce signed UCAN invocations.
+//! The full [`Protocol`](crate::access::Protocol) implementation for [`Ucan`](super::Ucan)
+//! lives in the `dialog-capability-ucan` crate, which has access to credential
+//! and delegation types.
 
-use crate::access::{Authorization, AuthorizeError, Protocol};
-use crate::{Ability, Capability, Constraint, Effect, Provider, authority, storage};
-use dialog_common::{ConditionalSend, ConditionalSync};
+use crate::Did;
+use crate::access;
 
-use super::Ucan;
+use super::scope;
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Protocol for Ucan {
-    type Authorization<Fx: Constraint> = super::UcanInvocation;
-
-    async fn authorize<Fx, Env>(
-        env: &Env,
-        capability: Capability<Fx>,
-    ) -> Result<Authorization<Fx, Self>, AuthorizeError>
-    where
-        Fx: Effect + Clone + ConditionalSend + 'static,
-        Capability<Fx>: Ability + ConditionalSend + ConditionalSync,
-        Env: Provider<authority::Identify>
-            + Provider<authority::Sign>
-            + Provider<storage::List>
-            + Provider<storage::Get>
-            + ConditionalSync,
-    {
-        let invocation = Ucan::invoke(&capability).perform(env).await?;
-        Ok(Authorization::new(capability, invocation))
+impl access::Scope for scope::Scope {
+    fn subject(&self) -> &Did {
+        use dialog_ucan::subject::Subject as UcanSubject;
+        match &self.subject {
+            UcanSubject::Specific(did) => did,
+            UcanSubject::Any => {
+                static ANY: std::sync::LazyLock<Did> =
+                    std::sync::LazyLock::new(|| crate::ANY_SUBJECT.parse().expect("valid DID"));
+                &ANY
+            }
+        }
     }
 }

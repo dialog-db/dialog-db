@@ -1,6 +1,6 @@
-use dialog_capability::authority;
+use dialog_capability::access::{Allow, Claim};
 use dialog_capability::fork::Fork;
-use dialog_capability::storage;
+use dialog_capability::ucan::Ucan;
 use dialog_capability::{Provider, Subject};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
@@ -61,10 +61,10 @@ impl Select<'_> {
             + Provider<Fork<S3, memory_fx::Resolve>>
             + Provider<Fork<dialog_remote_ucan_s3::UcanSite, archive_fx::Get>>
             + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Resolve>>
-            + Provider<authority::Identify>
-            + Provider<authority::Sign>
-            + Provider<storage::List>
-            + Provider<storage::Get>
+            + Provider<Claim<archive_fx::Get, Allow>>
+            + Provider<Claim<archive_fx::Get, Ucan>>
+            + Provider<Claim<memory_fx::Resolve, Allow>>
+            + Provider<Claim<memory_fx::Resolve, Ucan>>
             + ConditionalSync
             + 'static,
     {

@@ -16,7 +16,8 @@ pub struct Remote;
 mod s3_dispatch {
     use super::Remote;
     use async_trait::async_trait;
-    use dialog_capability::fork::{Fork, ForkInvocation};
+    use dialog_capability::access::AuthorizeError;
+    use dialog_capability::fork::Fork;
     use dialog_capability::{Constraint, Effect, Provider};
     use dialog_remote_s3::S3;
 
@@ -26,10 +27,10 @@ mod s3_dispatch {
     where
         Fx: Effect + 'static,
         Fx::Of: Constraint,
-        ForkInvocation<S3, Fx>: dialog_common::ConditionalSend,
+        Fork<S3, Fx>: dialog_common::ConditionalSend,
         S3: Provider<Fork<S3, Fx>>,
     {
-        async fn execute(&self, input: ForkInvocation<S3, Fx>) -> Fx::Output {
+        async fn execute(&self, input: Fork<S3, Fx>) -> Result<Fx::Output, AuthorizeError> {
             <S3 as Provider<Fork<S3, Fx>>>::execute(&S3, input).await
         }
     }
@@ -39,7 +40,8 @@ mod s3_dispatch {
 mod ucan_dispatch {
     use super::Remote;
     use async_trait::async_trait;
-    use dialog_capability::fork::{Fork, ForkInvocation};
+    use dialog_capability::access::AuthorizeError;
+    use dialog_capability::fork::Fork;
     use dialog_capability::{Constraint, Effect, Provider};
     use dialog_remote_ucan_s3::UcanSite;
 
@@ -49,10 +51,13 @@ mod ucan_dispatch {
     where
         Fx: Effect + 'static,
         Fx::Of: Constraint,
-        ForkInvocation<UcanSite, Fx>: dialog_common::ConditionalSend,
+        Fork<UcanSite, Fx>: dialog_common::ConditionalSend,
         UcanSite: Provider<Fork<UcanSite, Fx>>,
     {
-        async fn execute(&self, input: ForkInvocation<UcanSite, Fx>) -> Fx::Output {
+        async fn execute(
+            &self,
+            input: Fork<UcanSite, Fx>,
+        ) -> Result<Fx::Output, AuthorizeError> {
             <UcanSite as Provider<Fork<UcanSite, Fx>>>::execute(&UcanSite, input).await
         }
     }

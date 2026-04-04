@@ -126,10 +126,10 @@ macro_rules! impl_fork_provider {
         impl Provider<dialog_capability::fork::Fork<crate::s3::S3, $fx>> for Session {
             async fn execute(
                 &self,
-                invocation: dialog_capability::fork::ForkInvocation<crate::s3::S3, $fx>,
-            ) -> $output {
+                fork: dialog_capability::fork::Fork<crate::s3::S3, $fx>,
+            ) -> Result<$output, dialog_capability::access::AuthorizeError> {
                 let s3 = crate::s3::S3;
-                <crate::s3::S3 as Provider<dialog_capability::fork::Fork<crate::s3::S3, $fx>>>::execute(&s3, invocation).await
+                <crate::s3::S3 as Provider<dialog_capability::fork::Fork<crate::s3::S3, $fx>>>::execute(&s3, fork).await
             }
         }
     };

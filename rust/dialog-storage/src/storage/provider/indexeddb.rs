@@ -40,6 +40,7 @@
 //! ```
 
 mod archive;
+mod authorize;
 mod memory;
 mod mount;
 mod storage;
@@ -307,7 +308,7 @@ impl IndexedDb {
     }
 
     /// Returns the prefixed database name for a given name.
-    fn prefixed(&self, name: &str) -> String {
+    pub(crate) fn prefixed(&self, name: &str) -> String {
         if self.mount.is_empty() {
             name.to_string()
         } else {
