@@ -156,11 +156,13 @@ where
 
         let tree_reference = NodeReference::from(tree_hash);
 
-        // Discover operator identity from the environment
+        // Discover identity from the environment
         let identify_cap = Subject::from(branch.subject().clone()).invoke(authority::Identify);
         let auth = <Env as Provider<authority::Identify>>::execute(env, identify_cap)
             .await
             .map_err(|e| DialogArtifactsError::Storage(format!("Identify failed: {}", e)))?;
+        let subject_did = auth.subject().clone();
+        let authority_did = authority::Profile::of(&auth).profile.clone();
         let issuer_did = authority::Operator::of(&auth).operator.clone();
 
         // Calculate new period and moment
@@ -177,7 +179,9 @@ where
         };
 
         let new_revision = Revision {
+            subject: subject_did,
             issuer: issuer_did,
+            authority: authority_did,
             tree: tree_reference,
             cause,
             period,

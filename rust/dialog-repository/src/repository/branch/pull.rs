@@ -202,7 +202,9 @@ where
         let branch_period = branch_revision.as_ref().map(|r| r.period).unwrap_or(0);
 
         let new_revision = Revision {
+            subject: auth.subject().clone(),
             issuer: authority::Operator::of(&auth).operator.clone(),
+            authority: authority::Profile::of(&auth).profile.clone(),
             tree: NodeReference::from(hash),
             cause: HashSet::from([upstream_revision.tree().clone()]),
             period: upstream_revision.period.max(branch_period) + 1,
@@ -361,7 +363,9 @@ where
         let branch_period = branch_revision.as_ref().map(|r| r.period).unwrap_or(0);
 
         let new_revision = Revision {
+            subject: auth.subject().clone(),
             issuer: authority::Operator::of(&auth).operator.clone(),
+            authority: authority::Profile::of(&auth).profile.clone(),
             tree: NodeReference::from(hash),
             cause: HashSet::from([upstream_revision.tree().clone()]),
             period: upstream_revision.period.max(branch_period) + 1,
