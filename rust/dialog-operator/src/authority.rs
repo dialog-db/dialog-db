@@ -1,19 +1,18 @@
 //! Authority — opened profile with signers and authority chain.
 //!
 //! [`Authority`] holds the profile and operator signers and implements
-//! the provider traits needed by `Operator` for identity and signing effects.
+//! the provider traits needed by `Operator` for identity effects.
 
 use dialog_capability::authority::{self, AuthorityError, Operator as AuthOperator};
-use dialog_capability::{Capability, Policy, Provider, Subject};
+use dialog_capability::{Capability, Provider, Subject};
 use dialog_credentials::Ed25519Signer;
-use dialog_varsig::eddsa::Ed25519Signature;
 use dialog_varsig::{Did, Principal};
 
 /// An opened profile with profile and operator signers.
 ///
-/// Implements `Provider<Identify>`, `Provider<Sign>`, `Principal`, and
-/// `Issuer` so the capability system can resolve identity and produce
-/// signatures. Built by [`OperatorBuilder`](crate::operator::OperatorBuilder).
+/// Implements `Provider<Identify>` and `Principal` so the capability
+/// system can resolve identity.
+/// Built by [`OperatorBuilder`](crate::operator::OperatorBuilder).
 #[derive(Debug, Clone)]
 pub struct Authority {
     name: String,
@@ -97,28 +96,6 @@ impl Provider<authority::Identify> for Authority {
     ) -> Result<Capability<AuthOperator>, AuthorityError> {
         let subject_did = input.subject().clone();
         Ok(self.build_authority(subject_did))
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<authority::Sign> for Authority {
-    async fn execute(&self, input: Capability<authority::Sign>) -> Result<Vec<u8>, AuthorityError> {
-        let payload = authority::Sign::of(&input).payload.as_slice();
-        let sig: Ed25519Signature = dialog_varsig::Signer::sign(&self.operator, payload)
-            .await
-            .map_err(|e| AuthorityError::SigningFailed(e.to_string()))?;
-        Ok(sig.to_bytes().to_vec())
-    }
-}
-
-impl dialog_capability::Issuer for Authority {
-    type Signature = Ed25519Signature;
-}
-
-impl dialog_varsig::Signer<Ed25519Signature> for Authority {
-    async fn sign(&self, msg: &[u8]) -> Result<Ed25519Signature, signature::Error> {
-        dialog_varsig::Signer::sign(&self.operator, msg).await
     }
 }
 

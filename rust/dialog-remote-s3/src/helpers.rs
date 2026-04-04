@@ -77,19 +77,6 @@ impl Provider<authority::Identify> for Session {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<authority::Sign> for Session {
-    async fn execute(
-        &self,
-        _input: Capability<authority::Sign>,
-    ) -> Result<Vec<u8>, authority::AuthorityError> {
-        Err(authority::AuthorityError::SigningFailed(
-            "Session does not provide signing".into(),
-        ))
-    }
-}
-
 use dialog_capability::storage;
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]

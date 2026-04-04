@@ -1,4 +1,4 @@
-//! Authority capability hierarchy — identity chain and signing.
+//! Authority capability hierarchy — identity chain.
 //!
 //! The authority chain encodes the identity hierarchy as a capability chain:
 //!
@@ -6,26 +6,21 @@
 //! Subject (repository DID)
 //! └── Profile { profile: Did, account: Option<Did> }
 //!     └── Operator { operator: Did }
-//!         └── Sign { payload } -> Effect -> Result<Vec<u8>, CredentialError>
 //! ```
 //!
 //! [`Identify`] is an effect on `Subject` that returns the current
 //! `Capability<Operator>` chain.
 
-use crate::{Attenuation, Capability, Did, Effect, Policy, Subject};
+use crate::{Attenuation, Capability, Did, Effect, Subject};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Error type for authority operations (identity and signing).
+/// Error type for authority operations.
 #[derive(Debug, Error)]
 pub enum AuthorityError {
     /// Identity resolution failed.
     #[error("Identity error: {0}")]
     Identity(String),
-
-    /// Signing operation failed.
-    #[error("Signing failed: {0}")]
-    SigningFailed(String),
 }
 
 /// Device identity — attenuates from Subject.
@@ -82,40 +77,6 @@ impl Operator {
 
 impl Attenuation for Operator {
     type Of = Profile;
-}
-
-/// Sign operation — signs a payload using the operator's key.
-#[derive(Debug, Clone, Serialize, Deserialize, crate::Claim)]
-pub struct Sign {
-    /// The payload to sign.
-    #[serde(with = "serde_bytes")]
-    pub payload: Vec<u8>,
-}
-
-impl Sign {
-    /// Create a new Sign effect.
-    pub fn new(payload: impl Into<Vec<u8>>) -> Self {
-        Self {
-            payload: payload.into(),
-        }
-    }
-}
-
-impl Effect for Sign {
-    type Of = Operator;
-    type Output = Result<Vec<u8>, AuthorityError>;
-}
-
-/// Extension trait for `Capability<Sign>` to access its fields.
-pub trait SignCapability {
-    /// Get the payload to sign.
-    fn payload(&self) -> &[u8];
-}
-
-impl SignCapability for Capability<Sign> {
-    fn payload(&self) -> &[u8] {
-        &Sign::of(self).payload
-    }
 }
 
 /// Identify operation — returns the current authority chain.

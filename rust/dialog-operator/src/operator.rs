@@ -13,7 +13,7 @@ use crate::remote::Remote;
 use crate::storage::Storage;
 use dialog_capability::Capability;
 use dialog_capability::Provider;
-use dialog_capability::authority::{Identify, Operator as AuthOperator, Sign};
+use dialog_capability::authority::{Identify, Operator as AuthOperator};
 use dialog_capability::storage::{Load, Mount, Save};
 use dialog_credentials::credential::Credential;
 use dialog_effects::{archive, memory, storage as fx_storage};
@@ -33,13 +33,13 @@ type SaveUcan = AccessSave<Ucan>;
 /// An operating environment built from a [`Profile`](crate::profile::Profile).
 ///
 /// Composes:
-/// - Authority credentials (identify, sign)
+/// - Authority credentials (identity)
 /// - [`Storage`] for addressed Load/Save/Mount and DID-routed effects
 /// - Remote for fork invocations
 #[derive(Provider)]
 pub struct Operator {
-    #[provide(Identify, Sign)]
-    /// Provider for authority effects (identity + signing).
+    #[provide(Identify)]
+    /// Provider for authority effects (identity).
     authority: Authority,
 
     #[provide(
