@@ -8,7 +8,6 @@ use crate::helpers::{test_operator, test_operator_with_profile, unique_location}
 use crate::repository::Repository;
 use crate::repository::branch::state::UpstreamState;
 use crate::repository::node_reference::NodeReference;
-use crate::repository::remote::RemoteName;
 use crate::{Artifact, ArtifactSelector, Instruction};
 use crate::{RemoteAddress, SiteAddress};
 use dialog_capability::Did;
@@ -41,22 +40,15 @@ async fn setup_repo_with_s3_remote(
         .await?;
 
     let site_address = s3_remote_address(s3, repo.did());
-    let _site = repo
+    let origin = repo
         .remote("origin")
         .create(site_address)
         .perform(operator)
         .await?;
 
     let branch = repo.branch("main").open().perform(operator).await?;
-
-    branch
-        .set_upstream(UpstreamState::Remote {
-            name: RemoteName::from("origin"),
-            branch: "main".into(),
-            tree: NodeReference::default(),
-        })
-        .perform(operator)
-        .await?;
+    let remote_branch = origin.branch("main").open().perform(operator).await?;
+    branch.set_upstream(remote_branch).perform(operator).await?;
 
     Ok((repo, branch))
 }
@@ -187,19 +179,16 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> anyhow::Result
         .await?;
 
     let site_address = s3_remote_address(&s3, alice_repo.did());
-    bob_repo
+    let origin = bob_repo
         .remote("origin")
         .create(site_address)
         .perform(&operator)
         .await?;
 
     let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
     bob_branch
-        .set_upstream(UpstreamState::Remote {
-            name: RemoteName::from("origin"),
-            branch: "main".into(),
-            tree: NodeReference::default(),
-        })
+        .set_upstream(remote_branch)
         .perform(&operator)
         .await?;
 
@@ -252,19 +241,16 @@ async fn it_two_party_convergence(s3: S3Address) -> anyhow::Result<()> {
         .perform(&operator)
         .await?;
 
-    bob_repo
+    let origin = bob_repo
         .remote("origin")
         .create(s3_remote_address(&s3, alice_repo.did()))
         .perform(&operator)
         .await?;
 
     let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
     bob_branch
-        .set_upstream(UpstreamState::Remote {
-            name: RemoteName::from("origin"),
-            branch: "main".into(),
-            tree: NodeReference::default(),
-        })
+        .set_upstream(remote_branch)
         .perform(&operator)
         .await?;
 
@@ -359,7 +345,7 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> anyhow::Res
         SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url)),
         alice_repo.did(),
     );
-    alice_repo
+    let alice_origin = alice_repo
         .remote("origin")
         .create(ucan_address.clone())
         .perform(&alice_operator)
@@ -370,12 +356,13 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> anyhow::Res
         .open()
         .perform(&alice_operator)
         .await?;
+    let remote_branch = alice_origin
+        .branch("main")
+        .open()
+        .perform(&alice_operator)
+        .await?;
     alice_branch
-        .set_upstream(UpstreamState::Remote {
-            name: RemoteName::from("origin"),
-            branch: "main".into(),
-            tree: NodeReference::default(),
-        })
+        .set_upstream(remote_branch)
         .perform(&alice_operator)
         .await?;
 
@@ -415,7 +402,7 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> anyhow::Res
         .perform(&bob_operator)
         .await?;
 
-    bob_repo
+    let bob_origin = bob_repo
         .remote("origin")
         .create(ucan_address)
         .perform(&bob_operator)
@@ -426,12 +413,13 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> anyhow::Res
         .open()
         .perform(&bob_operator)
         .await?;
+    let remote_branch = bob_origin
+        .branch("main")
+        .open()
+        .perform(&bob_operator)
+        .await?;
     bob_branch
-        .set_upstream(UpstreamState::Remote {
-            name: RemoteName::from("origin"),
-            branch: "main".into(),
-            tree: NodeReference::default(),
-        })
+        .set_upstream(remote_branch)
         .perform(&bob_operator)
         .await?;
 
@@ -513,18 +501,16 @@ async fn it_pushes_and_pulls_via_ucan(ucan: UcanS3Address) -> anyhow::Result<()>
         SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url)),
         repo.did(),
     );
-    repo.remote("origin")
+    let origin = repo
+        .remote("origin")
         .create(ucan_address)
         .perform(&operator)
         .await?;
 
     let branch = repo.branch("main").open().perform(&operator).await?;
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
     branch
-        .set_upstream(UpstreamState::Remote {
-            name: RemoteName::from("origin"),
-            branch: "main".into(),
-            tree: NodeReference::default(),
-        })
+        .set_upstream(remote_branch)
         .perform(&operator)
         .await?;
 
@@ -591,19 +577,16 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> anyhow::Re
         .await?;
 
     let site_address = s3_remote_address(&s3, alice_repo.did());
-    bob_repo
+    let origin = bob_repo
         .remote("origin")
         .create(site_address)
         .perform(&operator)
         .await?;
 
     let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
     bob_branch
-        .set_upstream(UpstreamState::Remote {
-            name: RemoteName::from("origin"),
-            branch: "main".into(),
-            tree: NodeReference::default(),
-        })
+        .set_upstream(remote_branch)
         .perform(&operator)
         .await?;
 
@@ -631,12 +614,9 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> anyhow::Re
     );
 
     // Restore upstream so fallback can reach the remote
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
     bob_branch
-        .set_upstream(UpstreamState::Remote {
-            name: RemoteName::from("origin"),
-            branch: "main".into(),
-            tree: NodeReference::default(),
-        })
+        .set_upstream(remote_branch)
         .perform(&operator)
         .await?;
 
@@ -704,18 +684,16 @@ async fn it_delegates_and_pushes_to_s3(s3: S3Address) -> anyhow::Result<()> {
 
     // Set up S3 remote
     let site_address = s3_remote_address(&s3, repo.did());
-    repo.remote("origin")
+    let origin = repo
+        .remote("origin")
         .create(site_address)
         .perform(&operator)
         .await?;
 
     let branch = repo.branch("main").open().perform(&operator).await?;
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
     branch
-        .set_upstream(UpstreamState::Remote {
-            name: RemoteName::from("origin"),
-            branch: "main".into(),
-            tree: NodeReference::default(),
-        })
+        .set_upstream(remote_branch)
         .perform(&operator)
         .await?;
 
@@ -759,7 +737,7 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> anyhow::Result<(
 
     // Alice pushes to S3
     let site_address = s3_remote_address(&s3, alice_repo.did());
-    alice_repo
+    let alice_origin = alice_repo
         .remote("origin")
         .create(site_address)
         .perform(&alice_operator)
@@ -770,12 +748,13 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> anyhow::Result<(
         .open()
         .perform(&alice_operator)
         .await?;
+    let remote_branch = alice_origin
+        .branch("main")
+        .open()
+        .perform(&alice_operator)
+        .await?;
     alice_branch
-        .set_upstream(UpstreamState::Remote {
-            name: RemoteName::from("origin"),
-            branch: "main".into(),
-            tree: NodeReference::default(),
-        })
+        .set_upstream(remote_branch)
         .perform(&alice_operator)
         .await?;
 
@@ -798,7 +777,7 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> anyhow::Result<(
         .perform(&bob_operator)
         .await?;
 
-    bob_repo
+    let bob_origin = bob_repo
         .remote("origin")
         .create(s3_remote_address(&s3, alice_repo.did()))
         .perform(&bob_operator)
@@ -809,12 +788,13 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> anyhow::Result<(
         .open()
         .perform(&bob_operator)
         .await?;
+    let remote_branch = bob_origin
+        .branch("main")
+        .open()
+        .perform(&bob_operator)
+        .await?;
     bob_branch
-        .set_upstream(UpstreamState::Remote {
-            name: RemoteName::from("origin"),
-            branch: "main".into(),
-            tree: NodeReference::default(),
-        })
+        .set_upstream(remote_branch)
         .perform(&bob_operator)
         .await?;
 

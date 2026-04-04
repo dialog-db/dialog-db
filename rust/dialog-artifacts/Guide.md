@@ -140,30 +140,53 @@ When a branch has a remote upstream, queries automatically replicate missing blo
 
 Access is shared through UCAN delegation: signed tokens forming a chain of trust.
 
+The access API follows a fluent pattern: `.access().claim(&capability).delegate(audience)`.
+
+- `repo.access()` and `profile.access()` return an `Access` handle
+- `.claim()` takes anything that converts into a `Capability` (a `&repo`, `&profile`, or capability chain)
+- `.delegate(audience_did)` produces a `DelegationChain` on `.perform()`
+- `.save(chain)` stores a received delegation under the profile
+
 ### Alice sets up a shared repo
 
 ```rs
 let repo = Repository::open(Storage::current("shared"))
     .perform(&alice_operator).await?;
 
-let chain = repo.ownership()
-    .delegate(&alice_profile)
-    .perform(&alice_operator).await?;
-alice_profile.save(chain).perform(&alice_operator).await?;
+// Repo delegates to Alice's profile
+let chain = repo.access()
+    .claim(&repo)
+    .delegate(alice_profile.did())
+    .perform(&alice_operator)
+    .await?;
+
+// Alice saves the delegation under her profile
+alice_profile
+    .access()
+    .save(chain)
+    .perform(&alice_operator)
+    .await?;
 
 let remote_address = RemoteAddress::new(
     SiteAddress::Ucan(UcanAddress::new("https://access.example.com")),
     repo.did(),
 );
-repo.remote("origin").create(remote_address)
-    .perform(&alice_operator).await?;
 
-let main = repo.branch("main").open().perform(&alice_operator).await?;
-main.set_upstream(UpstreamState::Remote {
-    name: RemoteName::from("origin"),
-    branch: "main".into(),
-    tree: NodeReference::default(),
-}).perform(&alice_operator).await?;
+let origin = repo
+    .remote("origin")
+    .create(remote_address)
+    .perform(&alice_operator)
+    .await?;
+
+let main = repo
+    .branch("main")
+    .open()
+    .perform(&alice_operator)
+    .await?;
+
+// Open the remote branch, then set as upstream
+let remote_main = origin.branch("main").open().perform(&alice_operator).await?;
+main.set_upstream(remote_main).perform(&alice_operator).await?;
 
 main.transaction()
     .assert(Name::of(alice).is("Alice"))
@@ -176,12 +199,23 @@ main.push().perform(&alice_operator).await?;
 
 ### Alice invites Bob
 
-Alice delegates repo access from her profile to Bob's. The resulting chain includes the full proof path from the repo to Bob.
+Alice claims her authority over the repo and re-delegates to Bob. The resulting chain includes the full proof path from the repo subject through Alice to Bob.
 
 ```rs
-let delegation = Ucan::delegate(&Subject::from(repo.did()))
-    .audience(bob_profile.did())
-    .issuer(alice_profile.credential().signer().clone())
+let chain = alice_profile.access()
+    .claim(&repo)
+    .delegate(bob_profile.did())
+    .perform(&alice_operator).await?;
+```
+
+Optional time bounds can constrain the delegation:
+
+```rs
+let chain = alice_profile.access()
+    .claim(&repo)
+    .not_before(start)
+    .expires(end)
+    .delegate(bob_profile.did())
     .perform(&alice_operator).await?;
 ```
 
@@ -190,24 +224,30 @@ let delegation = Ucan::delegate(&Subject::from(repo.did()))
 Bob saves the delegation under his profile. This is what authorizes his operator to act on Alice's repo.
 
 ```rs
-bob_profile.save(delegation).perform(&bob_operator).await?;
+bob_profile.access().save(chain).perform(&bob_operator).await?;
 
 let bob_repo = Repository::open(Storage::current("bob-copy"))
-    .perform(&bob_operator).await?;
+    .perform(&bob_operator)
+    .await?;
 
 let remote_address = RemoteAddress::new(
     SiteAddress::Ucan(UcanAddress::new("https://access.example.com")),
     alice_repo_did,
 );
-bob_repo.remote("origin").create(remote_address)
-    .perform(&bob_operator).await?;
+let origin = bob_repo
+    .remote("origin")
+    .create(remote_address)
+    .perform(&bob_operator)
+    .await?;
 
-let main = bob_repo.branch("main").open().perform(&bob_operator).await?;
-main.set_upstream(UpstreamState::Remote {
-    name: RemoteName::from("origin"),
-    branch: "main".into(),
-    tree: NodeReference::default(),
-}).perform(&bob_operator).await?;
+let main = bob_repo
+    .branch("main")
+    .open()
+    .perform(&bob_operator)
+    .await?;
+
+let remote_main = origin.branch("main").open().perform(&bob_operator).await?;
+main.set_upstream(remote_main).perform(&bob_operator).await?;
 
 // Pull, edit, push
 main.pull().perform(&bob_operator).await?;
@@ -225,26 +265,4 @@ Alice pulls to get Bob's changes:
 
 ```rs
 main.pull().perform(&operator).await?;
-```
-
-### Scoped delegation
-
-Access can be narrowed to specific domains before delegating:
-
-```rs
-// Full ownership
-let chain = repo.ownership()
-    .delegate(&audience).perform(&operator).await?;
-
-// Archive only
-let chain = repo.ownership().archive()
-    .delegate(&audience).perform(&operator).await?;
-
-// Specific catalog
-let chain = repo.ownership().archive().catalog("index")
-    .delegate(&audience).perform(&operator).await?;
-
-// Memory only
-let chain = repo.ownership().memory()
-    .delegate(&audience).perform(&operator).await?;
 ```

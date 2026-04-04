@@ -8,6 +8,7 @@ use crate::RemoteAddress;
 use crate::repository::branch::BranchName;
 use crate::repository::cell::{Cell, Retain};
 use crate::repository::error::RepositoryError;
+use crate::repository::remote::RemoteName;
 use crate::repository::remote::repository::RemoteRepository;
 use crate::repository::revision::Revision;
 
@@ -35,6 +36,7 @@ impl RemoteBranchSelector<'_> {
         OpenRemoteBranch {
             cell: self.cell,
             address: self.repository.retain_address(),
+            remote_name: self.repository.name(),
         }
     }
 
@@ -43,6 +45,7 @@ impl RemoteBranchSelector<'_> {
         LoadRemoteBranch {
             cell: self.cell,
             address: self.repository.retain_address(),
+            remote_name: self.repository.name(),
         }
     }
 }
@@ -51,6 +54,7 @@ impl RemoteBranchSelector<'_> {
 pub struct OpenRemoteBranch {
     cell: Cell<Revision>,
     address: Retain<RemoteAddress>,
+    remote_name: RemoteName,
 }
 
 impl OpenRemoteBranch {
@@ -63,6 +67,7 @@ impl OpenRemoteBranch {
         Ok(RemoteBranch {
             revision: self.cell,
             address: self.address,
+            remote_name: self.remote_name,
         })
     }
 }
@@ -71,6 +76,7 @@ impl OpenRemoteBranch {
 pub struct LoadRemoteBranch {
     cell: Cell<Revision>,
     address: Retain<RemoteAddress>,
+    remote_name: RemoteName,
 }
 
 impl LoadRemoteBranch {
@@ -93,6 +99,7 @@ impl LoadRemoteBranch {
         Ok(RemoteBranch {
             revision: self.cell,
             address: self.address,
+            remote_name: self.remote_name,
         })
     }
 }
