@@ -15,11 +15,9 @@ use dialog_remote_s3::helpers::S3Address;
 use futures_util::StreamExt;
 use futures_util::stream;
 
-fn s3_site_address(s3: &S3Address) -> SiteAddress {
-    SiteAddress::S3(
-        S3SiteAddress::new(&s3.endpoint, "us-east-1", &s3.bucket).with_credentials(
-            dialog_remote_s3::S3Credentials::new(&s3.access_key_id, &s3.secret_access_key),
-        ),
+fn s3_site_address(s3: &S3Address) -> S3SiteAddress {
+    S3SiteAddress::new(&s3.endpoint, "us-east-1", &s3.bucket).with_credentials(
+        dialog_remote_s3::S3Credentials::new(&s3.access_key_id, &s3.secret_access_key),
     )
 }
 

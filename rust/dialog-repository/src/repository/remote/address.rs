@@ -22,6 +22,19 @@ pub enum SiteAddress {
     Ucan(dialog_remote_ucan_s3::UcanAddress),
 }
 
+impl From<Address> for SiteAddress {
+    fn from(addr: Address) -> Self {
+        Self::S3(addr)
+    }
+}
+
+#[cfg(feature = "ucan")]
+impl From<dialog_remote_ucan_s3::UcanAddress> for SiteAddress {
+    fn from(addr: dialog_remote_ucan_s3::UcanAddress) -> Self {
+        Self::Ucan(addr)
+    }
+}
+
 impl Hash for SiteAddress {
     fn hash<H: Hasher>(&self, state: &mut H) {
         mem::discriminant(self).hash(state);

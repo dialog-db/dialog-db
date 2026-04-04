@@ -43,9 +43,14 @@ A repository has its own keypair, branches, and remotes. Same location always yi
 
 ```rs
 let repo = Repository::open(Storage::current("contacts"))
-    .perform(&operator).await?;
+    .perform(&operator)
+    .await?;
 
-let main = repo.branch("main").open().perform(&operator).await?;
+let main = repo
+    .branch("main")
+    .open()
+    .perform(&operator)
+    .await?;
 ```
 
 ## Writing
@@ -117,7 +122,7 @@ Register a UCAN remote and set the branch's upstream, then push and pull:
 ```rs
 // Create remote (defaults to repo's own DID as subject)
 let origin = repo.remote("origin")
-    .create(SiteAddress::Ucan(UcanAddress::new("https://access.example.com")))
+    .create(UcanAddress::new("https://access.example.com"))
     .perform(&operator).await?;
 
 // Open remote branch and set as upstream
@@ -132,7 +137,7 @@ To point at a different repository (e.g., pulling from someone else's repo):
 
 ```rs
 let origin = bob_repo.remote("origin")
-    .create(SiteAddress::Ucan(UcanAddress::new("https://access.example.com")))
+    .create(UcanAddress::new("https://access.example.com"))
     .subject(alice_repo.did())  // target Alice's repo, not Bob's
     .perform(&bob_operator).await?;
 ```
@@ -171,7 +176,7 @@ alice_profile
     .await?;
 
 let origin = repo.remote("origin")
-    .create(SiteAddress::Ucan(UcanAddress::new("https://access.example.com")))
+    .create(UcanAddress::new("https://access.example.com"))
     .perform(&alice_operator).await?;
 
 let main = repo.branch("main").open().perform(&alice_operator).await?;
@@ -221,7 +226,7 @@ let bob_repo = Repository::open(Storage::current("bob-copy"))
     .await?;
 
 let origin = bob_repo.remote("origin")
-    .create(SiteAddress::Ucan(UcanAddress::new("https://access.example.com")))
+    .create(UcanAddress::new("https://access.example.com"))
     .subject(alice_repo_did)  // point at Alice's repo
     .perform(&bob_operator).await?;
 
