@@ -5,4 +5,3 @@
 
 pub mod archive;
 pub mod memory;
-pub mod storage;

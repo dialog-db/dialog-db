@@ -64,7 +64,7 @@ use std::collections::BTreeMap;
 
 use dialog_capability::{Capability, Constraint, Did, Policy};
 use dialog_credentials::Ed25519KeyResolver;
-use dialog_effects::{archive, memory, storage};
+use dialog_effects::{archive, memory};
 use dialog_remote_s3::Address;
 use dialog_remote_s3::{AccessError, Permit};
 use dialog_ucan::InvocationChain;
@@ -95,20 +95,6 @@ fn deserialize_from_args<T: DeserializeOwned>(args: &Args) -> Result<T, AccessEr
 
     ipld_core::serde::from_ipld(Ipld::Map(ipld_map))
         .map_err(|e| AccessError::Invocation(format!("Failed to deserialize: {}", e)))
-}
-
-/// Build a storage capability from UCAN args: `Subject -> Storage -> Store -> Claim`.
-fn storage_claim_from_args<C>(subject: &Did, args: &Args) -> Result<Capability<C>, AccessError>
-where
-    C: Policy<Of = storage::Store> + DeserializeOwned,
-    <C as Constraint>::Capability: dialog_capability::Ability,
-{
-    let store: storage::Store = deserialize_from_args(args)?;
-    let claim: C = deserialize_from_args(args)?;
-    Ok(dialog_capability::Subject::from(subject.clone())
-        .attenuate(storage::Storage)
-        .attenuate(store)
-        .attenuate(claim))
 }
 
 /// Build a memory capability from UCAN args: `Subject -> Memory -> Space -> Cell -> Claim`.
@@ -157,42 +143,6 @@ trait FromUcanArgs {
     ) -> Result<Capability<Self::Claim>, AccessError>;
 }
 
-impl FromUcanArgs for storage::Get {
-    type Claim = storage::Get;
-    fn capability_from_args(
-        subject: &Did,
-        args: &Args,
-    ) -> Result<Capability<Self::Claim>, AccessError> {
-        storage_claim_from_args(subject, args)
-    }
-}
-impl FromUcanArgs for storage::Set {
-    type Claim = storage::SetClaim;
-    fn capability_from_args(
-        subject: &Did,
-        args: &Args,
-    ) -> Result<Capability<Self::Claim>, AccessError> {
-        storage_claim_from_args(subject, args)
-    }
-}
-impl FromUcanArgs for storage::Delete {
-    type Claim = storage::Delete;
-    fn capability_from_args(
-        subject: &Did,
-        args: &Args,
-    ) -> Result<Capability<Self::Claim>, AccessError> {
-        storage_claim_from_args(subject, args)
-    }
-}
-impl FromUcanArgs for storage::List {
-    type Claim = storage::List;
-    fn capability_from_args(
-        subject: &Did,
-        args: &Args,
-    ) -> Result<Capability<Self::Claim>, AccessError> {
-        storage_claim_from_args(subject, args)
-    }
-}
 impl FromUcanArgs for memory::Resolve {
     type Claim = memory::Resolve;
     fn capability_from_args(
@@ -320,10 +270,6 @@ impl UcanAuthorizer {
         let command_segments: Vec<&str> = command.0.iter().map(|s| s.as_str()).collect();
 
         dispatch!(self, subject_did, args, command_segments.as_slice(), {
-            ["storage", "get"]     => dialog_effects::storage::Get,
-            ["storage", "set"]     => dialog_effects::storage::Set,
-            ["storage", "delete"]  => dialog_effects::storage::Delete,
-            ["storage", "list"]    => dialog_effects::storage::List,
             ["memory", "resolve"]  => dialog_effects::memory::Resolve,
             ["memory", "publish"]  => dialog_effects::memory::Publish,
             ["memory", "retract"]  => dialog_effects::memory::Retract,
@@ -393,79 +339,6 @@ mod tests {
 
         let chain = InvocationChain::new(invocation, delegations);
         chain.to_bytes().expect("Failed to serialize container")
-    }
-
-    #[dialog_common::test]
-    async fn it_acquires_and_performs_storage_get() {
-        let subject_signer = test_signer().await;
-
-        let address = Address::new(
-            "https://s3.us-east-1.amazonaws.com",
-            "us-east-1",
-            "test-bucket",
-        );
-        let credentials = S3Credentials::new("access-key-id", "secret-access-key");
-
-        let authorizer = UcanAuthorizer::new(address.with_credentials(credentials));
-
-        let operator_signer = Ed25519Signer::import(&[1u8; 32]).await.unwrap();
-
-        let mut args = BTreeMap::new();
-        args.insert("store".to_string(), Promised::String("index".to_string()));
-        args.insert("key".to_string(), Promised::Bytes(b"test-key".to_vec()));
-
-        let container = build_test_container(
-            &subject_signer,
-            &operator_signer,
-            vec!["storage".to_string(), "get".to_string()],
-            args,
-        )
-        .await;
-
-        let result = authorizer.authorize(&container).await;
-        assert!(result.is_ok());
-        let descriptor = result.unwrap();
-        assert_eq!(descriptor.method, "GET");
-        assert!(descriptor.url.as_str().contains("test-bucket"));
-    }
-
-    #[dialog_common::test]
-    async fn it_acquires_and_performs_storage_set() {
-        let subject_signer = test_signer().await;
-
-        let address = Address::new(
-            "https://s3.us-east-1.amazonaws.com",
-            "us-east-1",
-            "test-bucket",
-        );
-        let credentials = S3Credentials::new("access-key-id", "secret-access-key");
-
-        let authorizer = UcanAuthorizer::new(address.with_credentials(credentials));
-
-        let operator_signer = Ed25519Signer::import(&[1u8; 32]).await.unwrap();
-
-        // Multihash format: [code, length, ...digest]
-        // SHA-256 code is 0x12, length is 0x20 (32 bytes)
-        let mut checksum_bytes = vec![0x12, 0x20];
-        checksum_bytes.extend_from_slice(&[0u8; 32]);
-
-        let mut args = BTreeMap::new();
-        args.insert("store".to_string(), Promised::String("index".to_string()));
-        args.insert("key".to_string(), Promised::Bytes(b"test-key".to_vec()));
-        args.insert("checksum".to_string(), Promised::Bytes(checksum_bytes));
-
-        let container = build_test_container(
-            &subject_signer,
-            &operator_signer,
-            vec!["storage".to_string(), "set".to_string()],
-            args,
-        )
-        .await;
-
-        let result = authorizer.authorize(&container).await;
-        assert!(result.is_ok());
-        let descriptor = result.unwrap();
-        assert_eq!(descriptor.method, "PUT");
     }
 
     #[dialog_common::test]
@@ -648,85 +521,6 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_authorizes_self_invocation_for_storage_get() {
-        let signer = test_signer().await;
-
-        let address = Address::new(
-            "https://s3.us-east-1.amazonaws.com",
-            "us-east-1",
-            "test-bucket",
-        );
-        let credentials = S3Credentials::new("access-key-id", "secret-access-key");
-
-        let authorizer = UcanAuthorizer::new(address.with_credentials(credentials));
-
-        let mut args = BTreeMap::new();
-        args.insert("store".to_string(), Promised::String("index".to_string()));
-        args.insert("key".to_string(), Promised::Bytes(b"test-key".to_vec()));
-
-        // Build self-invocation (issuer == subject, no delegation)
-        let container = build_self_invocation_container(
-            &signer,
-            vec!["storage".to_string(), "get".to_string()],
-            args,
-        )
-        .await;
-
-        let result = authorizer.authorize(&container).await;
-        assert!(
-            result.is_ok(),
-            "Self-invocation should be authorized: {:?}",
-            result
-        );
-
-        let descriptor = result.unwrap();
-        assert_eq!(descriptor.method, "GET");
-        assert!(descriptor.url.as_str().contains("test-bucket"));
-    }
-
-    #[dialog_common::test]
-    async fn it_authorizes_self_invocation_for_storage_set() {
-        let signer = test_signer().await;
-
-        let address = Address::new(
-            "https://s3.us-east-1.amazonaws.com",
-            "us-east-1",
-            "test-bucket",
-        );
-        let credentials = S3Credentials::new("access-key-id", "secret-access-key");
-
-        let authorizer = UcanAuthorizer::new(address.with_credentials(credentials));
-
-        // Multihash format: [code, length, ...digest]
-        // SHA-256 code is 0x12, length is 0x20 (32 bytes)
-        let mut checksum_bytes = vec![0x12, 0x20];
-        checksum_bytes.extend_from_slice(&[0u8; 32]);
-
-        let mut args = BTreeMap::new();
-        args.insert("store".to_string(), Promised::String("index".to_string()));
-        args.insert("key".to_string(), Promised::Bytes(b"test-key".to_vec()));
-        args.insert("checksum".to_string(), Promised::Bytes(checksum_bytes));
-
-        // Build self-invocation (issuer == subject, no delegation)
-        let container = build_self_invocation_container(
-            &signer,
-            vec!["storage".to_string(), "set".to_string()],
-            args,
-        )
-        .await;
-
-        let result = authorizer.authorize(&container).await;
-        assert!(
-            result.is_ok(),
-            "Self-invocation for storage/set should be authorized: {:?}",
-            result
-        );
-
-        let descriptor = result.unwrap();
-        assert_eq!(descriptor.method, "PUT");
-    }
-
-    #[dialog_common::test]
     async fn it_authorizes_self_invocation_for_archive_get() {
         let signer = test_signer().await;
 
@@ -758,6 +552,85 @@ mod tests {
         assert!(
             result.is_ok(),
             "Self-invocation for archive/get should be authorized: {:?}",
+            result
+        );
+
+        let descriptor = result.unwrap();
+        assert_eq!(descriptor.method, "GET");
+    }
+
+    #[dialog_common::test]
+    async fn it_authorizes_self_invocation_for_archive_put() {
+        let signer = test_signer().await;
+
+        let address = Address::new(
+            "https://s3.us-east-1.amazonaws.com",
+            "us-east-1",
+            "test-bucket",
+        );
+        let credentials = S3Credentials::new("access-key-id", "secret-access-key");
+
+        let authorizer = UcanAuthorizer::new(address.with_credentials(credentials));
+
+        // Multihash format: [code, length, ...digest]
+        // SHA-256 code is 0x12, length is 0x20 (32 bytes)
+        let mut checksum_bytes = vec![0x12, 0x20];
+        checksum_bytes.extend_from_slice(&[0xab; 32]);
+
+        let mut args = BTreeMap::new();
+        args.insert("catalog".to_string(), Promised::String("blobs".to_string()));
+        args.insert("digest".to_string(), Promised::Bytes([0x99; 32].to_vec()));
+        args.insert("checksum".to_string(), Promised::Bytes(checksum_bytes));
+
+        let container = build_self_invocation_container(
+            &signer,
+            vec!["archive".to_string(), "put".to_string()],
+            args,
+        )
+        .await;
+
+        let result = authorizer.authorize(&container).await;
+        assert!(
+            result.is_ok(),
+            "Self-invocation for archive/put should be authorized: {:?}",
+            result
+        );
+
+        let descriptor = result.unwrap();
+        assert_eq!(descriptor.method, "PUT");
+    }
+
+    #[dialog_common::test]
+    async fn it_authorizes_self_invocation_for_memory_resolve() {
+        let signer = test_signer().await;
+
+        let address = Address::new(
+            "https://s3.us-east-1.amazonaws.com",
+            "us-east-1",
+            "test-bucket",
+        );
+        let credentials = S3Credentials::new("access-key-id", "secret-access-key");
+
+        let authorizer = UcanAuthorizer::new(address.with_credentials(credentials));
+
+        let mut args = BTreeMap::new();
+        args.insert(
+            "space".to_string(),
+            Promised::String("did:key:zSpace".to_string()),
+        );
+        args.insert("cell".to_string(), Promised::String("main".to_string()));
+
+        let container = build_self_invocation_container(
+            &signer,
+            vec!["memory".to_string(), "resolve".to_string()],
+            args,
+        )
+        .await;
+
+        let result = authorizer.authorize(&container).await;
+        assert!(
+            result.is_ok(),
+            "Self-invocation for memory/resolve should be authorized: {:?}",
             result
         );
 

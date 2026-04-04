@@ -13,7 +13,7 @@
 //!
 //! ```no_run
 //! use dialog_remote_s3::{Address, S3Credentials};
-//! use dialog_effects::storage::{Storage, Store, Get};
+//! use dialog_effects::archive::{Archive, Catalog, Get};
 //! use dialog_capability::{Subject, did};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -35,9 +35,9 @@
 //!
 //! // Build a capability and authorize it using the address.
 //! let capability = Subject::from(subject)
-//!     .attenuate(Storage)
-//!     .attenuate(Store::new("index"))
-//!     .invoke(Get::new(b"my-key"));
+//!     .attenuate(Archive)
+//!     .attenuate(Catalog::new("blobs"))
+//!     .invoke(Get::new([0u8; 32]));
 //!
 //! let request = address.authorize(&capability).await?;
 //! println!("Presigned URL: {}", request.url);
@@ -64,7 +64,7 @@ pub mod helpers;
 pub use address::*;
 pub use authorized::Authorized;
 pub use capability::{Access, Acl, Precondition};
-pub use capability::{archive, memory, storage};
+pub use capability::{archive, memory};
 pub use checksum::*;
 pub use error::AccessError;
 pub use permit::Permit;

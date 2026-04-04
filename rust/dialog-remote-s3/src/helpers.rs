@@ -77,34 +77,6 @@ impl Provider<authority::Identify> for Session {
     }
 }
 
-use dialog_capability::storage;
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<storage::Get> for Session {
-    async fn execute(
-        &self,
-        _input: Capability<storage::Get>,
-    ) -> Result<Option<Vec<u8>>, storage::StorageError> {
-        Err(storage::StorageError::Storage(
-            "Session does not provide storage".into(),
-        ))
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<storage::List> for Session {
-    async fn execute(
-        &self,
-        _input: Capability<storage::List>,
-    ) -> Result<storage::ListResult, storage::StorageError> {
-        Err(storage::StorageError::Storage(
-            "Session does not provide storage".into(),
-        ))
-    }
-}
-
 /// Helper macro to implement Provider<Fork<S3, Fx>> for Session by delegating to S3.
 ///
 /// Session builds a `ForkInvocation` with `()` invocation (S3 protocol) and
@@ -131,18 +103,6 @@ macro_rules! impl_fork_provider {
     };
 }
 
-impl_fork_provider!(
-    dialog_effects::storage::Get,
-    Result<Option<Vec<u8>>, dialog_effects::storage::StorageError>
-);
-impl_fork_provider!(
-    dialog_effects::storage::Set,
-    Result<(), dialog_effects::storage::StorageError>
-);
-impl_fork_provider!(
-    dialog_effects::storage::Delete,
-    Result<(), dialog_effects::storage::StorageError>
-);
 impl_fork_provider!(
     dialog_effects::memory::Resolve,
     Result<Option<dialog_effects::memory::Publication>, dialog_effects::memory::MemoryError>

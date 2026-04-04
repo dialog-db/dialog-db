@@ -288,8 +288,8 @@ fn current_time() -> DateTime<Utc> {
 mod tests {
     use super::*;
     use crate::Checksum;
-    use dialog_capability::{Capability, Subject, did};
-    use dialog_effects::storage::{self, Storage, Store};
+    use dialog_capability::{Subject, did};
+    use dialog_effects::archive;
 
     fn test_subject() -> dialog_capability::Did {
         did!("key:zTestSubject")
@@ -307,46 +307,29 @@ mod tests {
         Address::new("http://localhost:9000", "us-east-1", "test-bucket")
     }
 
-    /// Helper to build a storage Get capability.
-    fn get_capability(store: &str, key: &[u8]) -> Capability<storage::Get> {
-        Subject::from(test_subject())
-            .attenuate(Storage)
-            .attenuate(Store::new(store))
-            .invoke(storage::Get::new(key))
-    }
-
-    /// Helper to build a storage SetClaim capability (with checksum).
-    fn set_capability(
-        store: &str,
-        key: &[u8],
-        checksum: Checksum,
-    ) -> Capability<storage::SetClaim> {
-        Subject::from(test_subject())
-            .attenuate(Storage)
-            .attenuate(Store::new(store))
-            .attenuate(storage::SetClaim {
-                key: key.to_vec(),
-                checksum,
-            })
-    }
-
     #[dialog_common::test]
     async fn it_signs_with_public_access() {
         let address = test_address();
 
-        let get = get_capability("index", b"test-key");
+        let get = Subject::from(test_subject())
+            .attenuate(archive::Archive)
+            .attenuate(archive::Catalog::new("blobs"))
+            .invoke(archive::Get::new([0x42; 32]));
         let descriptor = address.authorize(&get).await.unwrap();
 
         assert_eq!(descriptor.method, "GET");
         assert!(descriptor.url.as_str().contains("my-bucket"));
-        assert!(descriptor.url.as_str().contains("index/"));
+        assert!(descriptor.url.as_str().contains("blobs/"));
     }
 
     #[dialog_common::test]
     async fn it_signs_with_private_credentials() {
         let address = test_address().with_credentials(S3Credentials::new("AKIATEST", "secret123"));
 
-        let get = get_capability("index", b"test-key");
+        let get = Subject::from(test_subject())
+            .attenuate(archive::Archive)
+            .attenuate(archive::Catalog::new("blobs"))
+            .invoke(archive::Get::new([0x42; 32]));
         let descriptor = address.authorize(&get).await.unwrap();
 
         assert_eq!(descriptor.method, "GET");
@@ -359,8 +342,14 @@ mod tests {
         let address = test_address();
 
         let checksum = Checksum::Sha256([0u8; 32]);
-        let set = set_capability("store", b"key", checksum);
-        let descriptor = address.authorize(&set).await.unwrap();
+        let put = Subject::from(test_subject())
+            .attenuate(archive::Archive)
+            .attenuate(archive::Catalog::new("index"))
+            .attenuate(archive::PutClaim {
+                digest: [0x99; 32].into(),
+                checksum,
+            });
+        let descriptor = address.authorize(&put).await.unwrap();
 
         assert!(
             descriptor
@@ -374,7 +363,10 @@ mod tests {
     async fn it_uses_path_style_for_localhost() {
         let address = localhost_address();
 
-        let get = get_capability("test", b"key");
+        let get = Subject::from(test_subject())
+            .attenuate(archive::Archive)
+            .attenuate(archive::Catalog::new("blobs"))
+            .invoke(archive::Get::new([0x42; 32]));
         let descriptor = address.authorize(&get).await.unwrap();
 
         assert_eq!(descriptor.url.host_str().unwrap(), "localhost");

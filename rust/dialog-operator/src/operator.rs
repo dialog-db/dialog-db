@@ -16,7 +16,7 @@ use dialog_capability::Provider;
 use dialog_capability::authority::{Identify, Operator as AuthOperator};
 use dialog_capability::storage::{Load, Mount, Save};
 use dialog_credentials::credential::Credential;
-use dialog_effects::{archive, memory, storage as fx_storage};
+use dialog_effects::{archive, memory};
 use dialog_storage::provider::Address;
 use dialog_varsig::{Did, Principal};
 
@@ -48,10 +48,6 @@ pub struct Operator {
         memory::Resolve,
         memory::Publish,
         memory::Retract,
-        fx_storage::Get,
-        fx_storage::Set,
-        fx_storage::Delete,
-        fx_storage::List,
         Load<Vec<u8>, Address>,
         Save<Vec<u8>, Address>,
         Load<Credential, Address>,

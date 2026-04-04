@@ -43,7 +43,6 @@ pub const DEFAULT_EXPIRES: u64 = 3600;
 
 pub mod archive;
 pub mod memory;
-pub mod storage;
 
 /// Precondition for conditional S3 operations (CAS semantics).
 #[derive(Debug, Clone)]

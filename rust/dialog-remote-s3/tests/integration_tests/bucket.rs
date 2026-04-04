@@ -8,8 +8,6 @@ use dialog_effects::memory::prelude::{
     CellExt, MemoryExt, SpaceExt, SubjectExt as MemorySubjectExt,
 };
 use dialog_effects::memory::{MemoryError, Publication};
-use dialog_effects::storage::StorageError;
-use dialog_effects::storage::prelude::{StorageExt, StoreExt, SubjectExt as StorageSubjectExt};
 use dialog_remote_s3::{Address, S3, S3Credentials, S3StorageError, helpers::Session};
 
 /// Adds timestamp to the given string to make it unique
@@ -39,45 +37,6 @@ impl TestBucket {
             session: self.session.clone(),
             store: format!("{}/{}", self.store, path),
         }
-    }
-
-    pub async fn set(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), S3StorageError> {
-        let result: Result<(), StorageError> = Subject::from(self.subject.clone())
-            .storage()
-            .store(&self.store)
-            .set(key, value)
-            .fork(&self.address)
-            .perform(&self.session)
-            .await
-            .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?;
-
-        result.map_err(|e| S3StorageError::ServiceError(e.to_string()))
-    }
-
-    pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, S3StorageError> {
-        let result: Result<Option<Vec<u8>>, StorageError> = Subject::from(self.subject.clone())
-            .storage()
-            .store(&self.store)
-            .get(key)
-            .fork(&self.address)
-            .perform(&self.session)
-            .await
-            .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?;
-
-        result.map_err(|e| S3StorageError::ServiceError(e.to_string()))
-    }
-
-    pub async fn delete(&self, key: &[u8]) -> Result<(), S3StorageError> {
-        let result: Result<(), StorageError> = Subject::from(self.subject.clone())
-            .storage()
-            .store(&self.store)
-            .delete(key)
-            .fork(&self.address)
-            .perform(&self.session)
-            .await
-            .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?;
-
-        result.map_err(|e| S3StorageError::ServiceError(e.to_string()))
     }
 
     pub async fn resolve(
