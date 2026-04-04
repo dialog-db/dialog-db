@@ -115,23 +115,26 @@ let artifacts = main
 Register a UCAN remote and set the branch's upstream, then push and pull:
 
 ```rs
-let remote_address = RemoteAddress::new(
-    SiteAddress::Ucan(UcanAddress::new("https://access.example.com")),
-    repo.did(),
-);
-
-repo.remote("origin")
-    .create(remote_address)
+// Create remote (defaults to repo's own DID as subject)
+let origin = repo.remote("origin")
+    .create(SiteAddress::Ucan(UcanAddress::new("https://access.example.com")))
     .perform(&operator).await?;
 
-main.set_upstream(UpstreamState::Remote {
-    name: RemoteName::from("origin"),
-    branch: "main".into(),
-    tree: NodeReference::default(),
-}).perform(&operator).await?;
+// Open remote branch and set as upstream
+let remote_main = origin.branch("main").open().perform(&operator).await?;
+main.set_upstream(remote_main).perform(&operator).await?;
 
 main.push().perform(&operator).await?;
 main.pull().perform(&operator).await?;
+```
+
+To point at a different repository (e.g., pulling from someone else's repo):
+
+```rs
+let origin = bob_repo.remote("origin")
+    .create(SiteAddress::Ucan(UcanAddress::new("https://access.example.com")))
+    .subject(alice_repo.did())  // target Alice's repo, not Bob's
+    .perform(&bob_operator).await?;
 ```
 
 When a branch has a remote upstream, queries automatically replicate missing blocks on demand.
@@ -167,24 +170,11 @@ alice_profile
     .perform(&alice_operator)
     .await?;
 
-let remote_address = RemoteAddress::new(
-    SiteAddress::Ucan(UcanAddress::new("https://access.example.com")),
-    repo.did(),
-);
+let origin = repo.remote("origin")
+    .create(SiteAddress::Ucan(UcanAddress::new("https://access.example.com")))
+    .perform(&alice_operator).await?;
 
-let origin = repo
-    .remote("origin")
-    .create(remote_address)
-    .perform(&alice_operator)
-    .await?;
-
-let main = repo
-    .branch("main")
-    .open()
-    .perform(&alice_operator)
-    .await?;
-
-// Open the remote branch, then set as upstream
+let main = repo.branch("main").open().perform(&alice_operator).await?;
 let remote_main = origin.branch("main").open().perform(&alice_operator).await?;
 main.set_upstream(remote_main).perform(&alice_operator).await?;
 
@@ -230,22 +220,12 @@ let bob_repo = Repository::open(Storage::current("bob-copy"))
     .perform(&bob_operator)
     .await?;
 
-let remote_address = RemoteAddress::new(
-    SiteAddress::Ucan(UcanAddress::new("https://access.example.com")),
-    alice_repo_did,
-);
-let origin = bob_repo
-    .remote("origin")
-    .create(remote_address)
-    .perform(&bob_operator)
-    .await?;
+let origin = bob_repo.remote("origin")
+    .create(SiteAddress::Ucan(UcanAddress::new("https://access.example.com")))
+    .subject(alice_repo_did)  // point at Alice's repo
+    .perform(&bob_operator).await?;
 
-let main = bob_repo
-    .branch("main")
-    .open()
-    .perform(&bob_operator)
-    .await?;
-
+let main = bob_repo.branch("main").open().perform(&bob_operator).await?;
 let remote_main = origin.branch("main").open().perform(&bob_operator).await?;
 main.set_upstream(remote_main).perform(&bob_operator).await?;
 

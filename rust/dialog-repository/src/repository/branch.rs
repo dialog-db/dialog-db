@@ -122,7 +122,10 @@ impl Branch {
         let name = name.into();
         let space = self.memory.space(&format!("remote/{}", name.as_str()));
         use super::memory::Site;
-        RemoteSelector(Site::from(space))
+        RemoteSelector {
+            site: Site::from(space),
+            subject: self.subject.clone(),
+        }
     }
 
     pub(crate) fn commit<I>(&self, instructions: I) -> Commit<'_, I> {

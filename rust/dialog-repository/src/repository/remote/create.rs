@@ -19,6 +19,14 @@ impl CreateRemote {
         Self { site, address }
     }
 
+    /// Override the subject DID for the remote repository.
+    ///
+    /// By default, the subject is the creating repository's own DID.
+    pub fn subject(mut self, subject: impl Into<dialog_capability::Did>) -> Self {
+        self.address.subject = subject.into();
+        self
+    }
+
     /// Execute the create operation.
     pub async fn perform<Env>(self, env: &Env) -> Result<RemoteRepository, RepositoryError>
     where
@@ -47,18 +55,16 @@ mod tests {
     use dialog_remote_s3::Address;
     use dialog_storage::provider::Volatile;
 
+    use crate::SiteAddress;
     use crate::repository::Repository;
     use crate::repository::error::RepositoryError;
-    use crate::{RemoteAddress, SiteAddress};
 
-    fn test_address() -> RemoteAddress {
-        let s3_addr = Address::new(
+    fn test_site_address() -> SiteAddress {
+        SiteAddress::S3(Address::new(
             "https://s3.us-east-1.amazonaws.com",
             "us-east-1",
             "my-bucket",
-        );
-        let did: dialog_varsig::Did = "did:key:z6MkTest".parse().expect("valid DID");
-        RemoteAddress::new(SiteAddress::S3(s3_addr), did)
+        ))
     }
 
     async fn test_signer() -> Ed25519Signer {
@@ -72,12 +78,12 @@ mod tests {
 
         let remote = repo
             .remote("origin")
-            .create(test_address())
+            .create(test_site_address())
             .perform(&env)
             .await?;
 
         assert_eq!(remote.name(), "origin");
-        assert_eq!(remote.address(), test_address());
+        assert_eq!(remote.address().site(), &test_site_address());
 
         Ok(())
     }
@@ -88,13 +94,13 @@ mod tests {
         let repo = Repository::from(test_signer().await);
 
         repo.remote("origin")
-            .create(test_address())
+            .create(test_site_address())
             .perform(&env)
             .await?;
 
         let result = repo
             .remote("origin")
-            .create(test_address())
+            .create(test_site_address())
             .perform(&env)
             .await;
 

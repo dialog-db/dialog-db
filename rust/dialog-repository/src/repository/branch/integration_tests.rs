@@ -4,26 +4,22 @@
 //! local S3 (and UCAN access) servers via `#[dialog_common::test]`.
 
 use crate::Operator;
+use crate::SiteAddress;
 use crate::helpers::{test_operator, test_operator_with_profile, unique_location};
 use crate::repository::Repository;
 use crate::repository::branch::state::UpstreamState;
 use crate::repository::node_reference::NodeReference;
 use crate::{Artifact, ArtifactSelector, Instruction};
-use crate::{RemoteAddress, SiteAddress};
-use dialog_capability::Did;
 use dialog_remote_s3::Address as S3SiteAddress;
 use dialog_remote_s3::helpers::S3Address;
 use futures_util::StreamExt;
 use futures_util::stream;
 
-fn s3_remote_address(s3: &S3Address, subject: Did) -> RemoteAddress {
-    RemoteAddress::new(
-        SiteAddress::S3(
-            S3SiteAddress::new(&s3.endpoint, "us-east-1", &s3.bucket).with_credentials(
-                dialog_remote_s3::S3Credentials::new(&s3.access_key_id, &s3.secret_access_key),
-            ),
+fn s3_site_address(s3: &S3Address) -> SiteAddress {
+    SiteAddress::S3(
+        S3SiteAddress::new(&s3.endpoint, "us-east-1", &s3.bucket).with_credentials(
+            dialog_remote_s3::S3Credentials::new(&s3.access_key_id, &s3.secret_access_key),
         ),
-        subject,
     )
 }
 
@@ -39,7 +35,7 @@ async fn setup_repo_with_s3_remote(
         .perform(operator)
         .await?;
 
-    let site_address = s3_remote_address(s3, repo.did());
+    let site_address = s3_site_address(s3);
     let origin = repo
         .remote("origin")
         .create(site_address)
@@ -178,10 +174,10 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> anyhow::Result
         .perform(&operator)
         .await?;
 
-    let site_address = s3_remote_address(&s3, alice_repo.did());
     let origin = bob_repo
         .remote("origin")
-        .create(site_address)
+        .create(s3_site_address(&s3))
+        .subject(alice_repo.did())
         .perform(&operator)
         .await?;
 
@@ -243,7 +239,8 @@ async fn it_two_party_convergence(s3: S3Address) -> anyhow::Result<()> {
 
     let origin = bob_repo
         .remote("origin")
-        .create(s3_remote_address(&s3, alice_repo.did()))
+        .create(s3_site_address(&s3))
+        .subject(alice_repo.did())
         .perform(&operator)
         .await?;
 
@@ -341,13 +338,10 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> anyhow::Res
         .await?;
 
     // Set up UCAN remote on Alice's repo
-    let ucan_address = RemoteAddress::new(
-        SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url)),
-        alice_repo.did(),
-    );
+    let ucan_site = SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
     let alice_origin = alice_repo
         .remote("origin")
-        .create(ucan_address.clone())
+        .create(ucan_site.clone())
         .perform(&alice_operator)
         .await?;
 
@@ -404,7 +398,8 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> anyhow::Res
 
     let bob_origin = bob_repo
         .remote("origin")
-        .create(ucan_address)
+        .create(ucan_site)
+        .subject(alice_repo.did())
         .perform(&bob_operator)
         .await?;
 
@@ -497,13 +492,11 @@ async fn it_pushes_and_pulls_via_ucan(ucan: UcanS3Address) -> anyhow::Result<()>
     profile.access().save(chain).perform(&operator).await?;
 
     // Set up UCAN remote
-    let ucan_address = RemoteAddress::new(
-        SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url)),
-        repo.did(),
-    );
     let origin = repo
         .remote("origin")
-        .create(ucan_address)
+        .create(SiteAddress::Ucan(UcanAddress::new(
+            &ucan.access_service_url,
+        )))
         .perform(&operator)
         .await?;
 
@@ -576,10 +569,10 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> anyhow::Re
         .perform(&operator)
         .await?;
 
-    let site_address = s3_remote_address(&s3, alice_repo.did());
     let origin = bob_repo
         .remote("origin")
-        .create(site_address)
+        .create(s3_site_address(&s3))
+        .subject(alice_repo.did())
         .perform(&operator)
         .await?;
 
@@ -683,10 +676,9 @@ async fn it_delegates_and_pushes_to_s3(s3: S3Address) -> anyhow::Result<()> {
     profile.access().save(chain).perform(&operator).await?;
 
     // Set up S3 remote
-    let site_address = s3_remote_address(&s3, repo.did());
     let origin = repo
         .remote("origin")
-        .create(site_address)
+        .create(s3_site_address(&s3))
         .perform(&operator)
         .await?;
 
@@ -736,10 +728,9 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> anyhow::Result<(
         .await?;
 
     // Alice pushes to S3
-    let site_address = s3_remote_address(&s3, alice_repo.did());
     let alice_origin = alice_repo
         .remote("origin")
-        .create(site_address)
+        .create(s3_site_address(&s3))
         .perform(&alice_operator)
         .await?;
 
@@ -779,7 +770,8 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> anyhow::Result<(
 
     let bob_origin = bob_repo
         .remote("origin")
-        .create(s3_remote_address(&s3, alice_repo.did()))
+        .create(s3_site_address(&s3))
+        .subject(alice_repo.did())
         .perform(&bob_operator)
         .await?;
 

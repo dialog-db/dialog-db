@@ -289,12 +289,12 @@ mod tests {
     use dialog_remote_s3::Address as S3Address;
     use futures_util::stream;
 
-    fn test_remote_address() -> RemoteAddress {
-        let s3_addr = S3Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "bucket");
-        RemoteAddress::new(
-            SiteAddress::S3(s3_addr),
-            "did:key:z6MkTest".parse().unwrap(),
-        )
+    fn test_site_address() -> SiteAddress {
+        SiteAddress::S3(S3Address::new(
+            "https://s3.us-east-1.amazonaws.com",
+            "us-east-1",
+            "bucket",
+        ))
     }
 
     #[dialog_common::test]
@@ -392,14 +392,14 @@ mod tests {
 
         let site = space
             .remote("origin")
-            .create(test_remote_address())
+            .create(test_site_address())
             .perform(&operator)
             .await?;
         assert_eq!(site.name(), "origin");
 
         let loaded = space.remote("origin").load().perform(&operator).await?;
         assert_eq!(loaded.name(), "origin");
-        assert_eq!(loaded.address(), test_remote_address());
+        assert_eq!(loaded.address().site(), &test_site_address());
 
         Ok(())
     }
