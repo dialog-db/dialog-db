@@ -7,9 +7,7 @@
 //! (or `{audience}/_/{issuer}.{hash}` for powerlines).
 
 use async_trait::async_trait;
-use dialog_capability::access::{
-    AuthorizeError, Claim, Delegation, ProofChain, ProofStore, Protocol, Save, Scope,
-};
+use dialog_capability::access::{AuthorizeError, Claim, Delegation, ProofStore, Protocol, Save};
 use dialog_capability::{Policy, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_varsig::Did;
@@ -37,10 +35,10 @@ where
 
         for session in sessions.values() {
             for (key, bytes) in &session.proofs {
-                if key.starts_with(&prefix) {
-                    if let Ok(proof) = <P::Proof as Delegation>::decode(bytes) {
-                        proofs.push(proof);
-                    }
+                if key.starts_with(&prefix)
+                    && let Ok(proof) = <P::Proof as Delegation>::decode(bytes)
+                {
+                    proofs.push(proof);
                 }
             }
         }
@@ -63,9 +61,7 @@ where
             let issuer = proof.issuer().to_string();
 
             let key = format!("{audience}/{subject_segment}/{issuer}.{id}");
-            let session = sessions
-                .entry(proof.audience().clone())
-                .or_default();
+            let session = sessions.entry(proof.audience().clone()).or_default();
             session.proofs.insert(key, bytes);
         }
 

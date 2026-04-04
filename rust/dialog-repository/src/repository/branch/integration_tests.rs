@@ -32,7 +32,10 @@ async fn setup_repo_with_s3_remote(
     operator: &Operator,
     s3: &S3Address,
     name: &str,
-) -> anyhow::Result<(Repository, super::Branch)> {
+) -> anyhow::Result<(
+    Repository<dialog_credentials::SignerCredential>,
+    super::Branch,
+)> {
     let repo = Repository::open(unique_location(name))
         .perform(operator)
         .await?;
@@ -332,9 +335,6 @@ use dialog_remote_ucan_s3::helpers::UcanS3Address;
 #[cfg(feature = "ucan")]
 #[dialog_common::test]
 async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> anyhow::Result<()> {
-    use dialog_capability::Subject;
-    use dialog_capability::ucan::Ucan;
-
     // Alice: create profile, operator, repo
     let (alice_operator, alice_profile) = test_operator_with_profile().await;
     let alice_repo = Repository::open(unique_location("collab-alice"))
@@ -342,12 +342,14 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> anyhow::Res
         .await?;
 
     // Delegate repo ownership to Alice's profile
-    let ownership_chain = alice_repo
-        .ownership()
-        .delegate(&alice_profile)
+    let alice_access = alice_repo.access();
+    let ownership_chain = alice_access
+        .claim(&alice_repo)
+        .delegate(alice_profile.did())
         .perform(&alice_operator)
         .await?;
     alice_profile
+        .access()
         .save(ownership_chain)
         .perform(&alice_operator)
         .await?;
@@ -394,14 +396,16 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> anyhow::Res
     let (bob_operator, bob_profile) = test_operator_with_profile().await;
 
     // Alice delegates repo access to Bob's profile
-    let delegation_to_bob = Ucan::delegate(&Subject::from(alice_repo.did()))
-        .audience(bob_profile.did())
-        .issuer(alice_profile.credential().signer().clone())
+    let delegation_to_bob = alice_profile
+        .access()
+        .claim(&alice_repo)
+        .delegate(bob_profile.did())
         .perform(&alice_operator)
         .await?;
 
     // Bob saves the delegation chain under his profile
     bob_profile
+        .access()
         .save(delegation_to_bob)
         .perform(&bob_operator)
         .await?;
@@ -496,12 +500,13 @@ async fn it_pushes_and_pulls_via_ucan(ucan: UcanS3Address) -> anyhow::Result<()>
         .perform(&operator)
         .await?;
 
-    let chain = repo
-        .ownership()
-        .delegate(&profile)
+    let repo_access = repo.access();
+    let chain = repo_access
+        .claim(&repo)
+        .delegate(profile.did())
         .perform(&operator)
         .await?;
-    profile.save(chain).perform(&operator).await?;
+    profile.access().save(chain).perform(&operator).await?;
 
     // Set up UCAN remote
     let ucan_address = RemoteAddress::new(

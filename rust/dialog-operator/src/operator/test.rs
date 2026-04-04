@@ -2,7 +2,6 @@ use crate::helpers::unique_name;
 use crate::profile::Profile;
 use crate::remote::Remote;
 use crate::storage::Storage;
-use dialog_capability::Provider;
 
 #[cfg(test)]
 mod tests {
@@ -80,36 +79,30 @@ mod tests {
         assert_ne!(op1.did(), op2.did());
     }
 
-    #[cfg(feature = "ucan")]
     mod delegation_tests {
         use super::*;
-        use dialog_capability::access::{Permit, ProofChain as _};
+        use crate::Operator;
         use dialog_capability::Subject;
+        use dialog_capability::access::{self as cap_access, AuthorizeError, Permit};
         use dialog_capability_ucan::scope::Scope;
-        use dialog_capability_ucan::Ucan;
-        use dialog_credentials::Ed25519Signer;
+        use dialog_capability_ucan::{Ucan, UcanPermit};
         use dialog_effects::archive::prelude::{ArchiveExt, SubjectExt as ArchiveSubjectExt};
         use dialog_effects::storage as fx_storage;
-        use dialog_varsig::Principal;
 
         /// Helper: claim authorization via the new Claim<Ucan> effect.
         ///
         /// Uses the profile DID as the capability subject (where the permit
         /// store is mounted), and operator DID as the claimant.
         async fn claim_access(
-            operator: &crate::operator::Operator,
+            operator: &Operator,
             capability: &impl dialog_capability::Ability,
-        ) -> Result<dialog_capability_ucan::UcanPermit, dialog_capability::access::AuthorizeError>
-        {
+        ) -> Result<UcanPermit, AuthorizeError> {
             let scope = Scope::from(capability);
 
             // Subject is the profile DID (where delegations are stored)
             Subject::from(operator.profile_did())
                 .attenuate(Permit)
-                .invoke(dialog_capability::access::Claim::<Ucan>::new(
-                    operator.did(),
-                    scope,
-                ))
+                .invoke(cap_access::Claim::<Ucan>::new(operator.did(), scope))
                 .perform(operator)
                 .await
         }

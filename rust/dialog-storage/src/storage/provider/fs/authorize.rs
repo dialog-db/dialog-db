@@ -10,10 +10,8 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use dialog_capability::access::{
-    AuthorizeError, Claim, Delegation, ProofChain, ProofStore, Protocol, Save,
-};
-use dialog_capability::{Ability, Policy, Provider};
+use dialog_capability::access::{AuthorizeError, Claim, Delegation, ProofStore, Protocol, Save};
+use dialog_capability::{Policy, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_varsig::Did;
 

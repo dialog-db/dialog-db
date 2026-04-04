@@ -21,8 +21,11 @@ impl Provider<ForkInvocation<UcanSite, Get>> for UcanSite {
             .await
             .map_err(|e| ArchiveError::Io(e.to_string()))?;
 
-        <S3 as Provider<Authorized<Get>>>::execute(&S3, Authorized::new(permit, invocation.capability))
-            .await
+        <S3 as Provider<Authorized<Get>>>::execute(
+            &S3,
+            Authorized::new(permit, invocation.capability),
+        )
+        .await
     }
 }
 
@@ -36,7 +39,10 @@ impl Provider<ForkInvocation<UcanSite, Put>> for UcanSite {
             .await
             .map_err(|e| ArchiveError::Io(e.to_string()))?;
 
-        <S3 as Provider<Authorized<Put>>>::execute(&S3, Authorized::new(permit, invocation.capability))
-            .await
+        <S3 as Provider<Authorized<Put>>>::execute(
+            &S3,
+            Authorized::new(permit, invocation.capability),
+        )
+        .await
     }
 }

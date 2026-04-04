@@ -8,8 +8,6 @@
 //! - [`cell`] — Transactional memory cells with edition tracking
 //! - [`revision`] — Revision tracking and logical timestamps
 
-/// Capability access and delegation for repositories.
-pub mod access;
 /// Archive capabilities and CAS adapters.
 pub mod archive;
 /// Capability-based branch operations (command pattern).
@@ -35,6 +33,7 @@ use dialog_capability::{Capability, Did, Policy, Provider, Subject};
 use dialog_common::ConditionalSync;
 use dialog_credentials::Ed25519Signer;
 use dialog_credentials::credential::{Credential, SignerCredential};
+use dialog_operator::profile::access::Access as ProfileAccess;
 use dialog_storage::provider::Address;
 use dialog_varsig::Principal;
 
@@ -90,13 +89,30 @@ impl<C: Principal> Repository<C> {
     pub fn archive(&self) -> &Archive {
         &self.archive
     }
+}
 
-    /// Delegation scope for this repository's capabilities.
+impl<C: Principal> From<&Repository<C>> for Capability<Subject> {
+    fn from(r: &Repository<C>) -> Self {
+        Subject::from(r.did()).into()
+    }
+}
+
+impl Repository<SignerCredential> {
+    /// Access handle for claiming and delegating capabilities.
+    pub fn access(&self) -> ProfileAccess<'_> {
+        ProfileAccess::new(&self.credential)
+    }
+}
+
+impl Repository {
+    /// Access handle for claiming and delegating capabilities.
     ///
-    /// From here you can delegate full ownership or narrow to specific
-    /// domains (archive, memory) before delegating.
-    pub fn ownership(&self) -> access::Access<'_, C, Subject> {
-        access::Access::new(self.subject().into(), &self.credential)
+    /// Returns `None` if the credential is verifier-only.
+    pub fn try_access(&self) -> Option<ProfileAccess<'_>> {
+        match &self.credential {
+            Credential::Signer(s) => Some(ProfileAccess::new(s)),
+            Credential::Verifier(_) => None,
+        }
     }
 }
 
@@ -130,7 +146,7 @@ pub struct OpenRepository {
     mode: OpenMode,
 }
 
-impl Repository {
+impl Repository<SignerCredential> {
     /// Open a repository — loads existing or creates new.
     ///
     /// Use `Storage::current("name")` to get the location.
@@ -163,7 +179,10 @@ impl OpenRepository {
     ///
     /// Reads credentials from `{location}/credential/space`.
     /// Mounts the repository DID at `{location}` in the storage store table.
-    pub async fn perform<S>(self, storage: &S) -> Result<Repository, RepositoryError>
+    pub async fn perform<S>(
+        self,
+        storage: &S,
+    ) -> Result<Repository<SignerCredential>, RepositoryError>
     where
         S: Provider<cap_storage::Load<Credential, Address>>
             + Provider<cap_storage::Save<Credential, Address>>
@@ -176,11 +195,21 @@ impl OpenRepository {
             .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
 
         let credential = match self.mode {
-            OpenMode::Load => cred_location
-                .load::<Credential>()
-                .perform(storage)
-                .await
-                .map_err(|e| RepositoryError::StorageError(e.to_string()))?,
+            OpenMode::Load => {
+                let cred = cred_location
+                    .load::<Credential>()
+                    .perform(storage)
+                    .await
+                    .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
+                match cred {
+                    Credential::Signer(s) => s,
+                    Credential::Verifier(_) => {
+                        return Err(RepositoryError::StorageError(
+                            "repository credential is verifier-only".into(),
+                        ));
+                    }
+                }
+            }
             OpenMode::Create => {
                 let existing = cred_location
                     .clone()
@@ -195,10 +224,10 @@ impl OpenRepository {
                 let signer = Ed25519Signer::generate()
                     .await
                     .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
-                let credential = Credential::Signer(SignerCredential::from(signer));
+                let credential = SignerCredential::from(signer);
 
                 cred_location
-                    .save(credential.clone())
+                    .save(Credential::Signer(credential.clone()))
                     .perform(storage)
                     .await
                     .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
@@ -213,15 +242,20 @@ impl OpenRepository {
                     .await;
 
                 match load {
-                    Ok(cred) => cred,
+                    Ok(Credential::Signer(s)) => s,
+                    Ok(Credential::Verifier(_)) => {
+                        return Err(RepositoryError::StorageError(
+                            "repository credential is verifier-only".into(),
+                        ));
+                    }
                     Err(_) => {
                         let signer = Ed25519Signer::generate()
                             .await
                             .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
-                        let credential = Credential::Signer(SignerCredential::from(signer));
+                        let credential = SignerCredential::from(signer);
 
                         cred_location
-                            .save(credential.clone())
+                            .save(Credential::Signer(credential.clone()))
                             .perform(storage)
                             .await
                             .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
@@ -261,14 +295,6 @@ mod tests {
             SiteAddress::S3(s3_addr),
             "did:key:z6MkTest".parse().unwrap(),
         )
-    }
-
-    /// Extract the Ed25519Signer from a Credential that is known to be a Signer variant.
-    fn extract_signer(credential: &Credential) -> Ed25519Signer {
-        match credential {
-            Credential::Signer(s) => s.clone().into(),
-            Credential::Verifier(_) => panic!("expected Signer credential"),
-        }
     }
 
     #[dialog_common::test]
@@ -633,34 +659,32 @@ mod tests {
     #[cfg(feature = "ucan")]
     mod delegation_tests {
         use super::*;
-        use crate::helpers::test_operator;
-        use dialog_capability::ucan::{Issuer, Ucan, claim};
-        use dialog_capability::access::{Permit, Save};
-        use dialog_capability_ucan::{self as ucan, UcanPermit};
+        use crate::helpers::test_operator_with_profile;
         use dialog_effects::storage as fx_storage;
 
         #[dialog_common::test]
         async fn it_delegates_repo_to_profile_and_claims() -> anyhow::Result<()> {
-            let operator = test_operator().await;
+            let (operator, profile) = test_operator_with_profile().await;
             let repo = Repository::create(unique_location("home"))
                 .perform(&operator)
                 .await?;
 
-            let signer = extract_signer(repo.credential());
-            let chain = Ucan::delegate(&repo.subject())
-                .issuer(signer)
-                .audience(operator.profile_did())
+            // Repo delegates full ownership to the profile
+            let access = repo.access();
+            let chain = access
+                .claim(&repo)
+                .delegate(profile.did())
                 .perform(&operator)
                 .await?;
-            dialog_capability::Subject::from(operator.profile_did()).attenuate(dialog_capability::access::Permit).invoke(dialog_capability::access::Save::<dialog_capability_ucan::Ucan>::new(chain.clone())).perform(&operator).await?;
+            profile.access().save(chain).perform(&operator).await?;
 
+            // Profile should be able to claim access to any store
             let capability = repo
                 .subject()
                 .attenuate(fx_storage::Storage)
                 .attenuate(fx_storage::Store::new("data"));
 
-            let authority = operator.build_authority(repo.did());
-            let result = claim(&operator, Issuer::new(&operator, authority), &capability).await;
+            let result = profile.access().claim(capability).perform(&operator).await;
             assert!(
                 result.is_ok(),
                 "should find delegation chain: {:?}",
@@ -672,41 +696,42 @@ mod tests {
 
         #[dialog_common::test]
         async fn it_enforces_scoped_delegation_policy() -> anyhow::Result<()> {
-            let operator = test_operator().await;
+            let (operator, profile) = test_operator_with_profile().await;
             let repo = Repository::create(unique_location("home"))
                 .perform(&operator)
                 .await?;
 
-            let signer = extract_signer(repo.credential());
+            // Repo delegates only "data" store access to the profile
             let scoped_cap = repo
                 .subject()
                 .attenuate(fx_storage::Storage)
                 .attenuate(fx_storage::Store::new("data"));
-            let chain = Ucan::delegate(&scoped_cap)
-                .audience(operator.profile_did())
-                .issuer(signer)
+            let access = repo.access();
+            let chain = access
+                .claim(scoped_cap)
+                .delegate(profile.did())
                 .perform(&operator)
                 .await?;
-            dialog_capability::Subject::from(operator.profile_did()).attenuate(dialog_capability::access::Permit).invoke(dialog_capability::access::Save::<dialog_capability_ucan::Ucan>::new(chain.clone())).perform(&operator).await?;
+            profile.access().save(chain).perform(&operator).await?;
 
+            // Claiming "data" store should succeed
             let data_cap = repo
                 .subject()
                 .attenuate(fx_storage::Storage)
                 .attenuate(fx_storage::Store::new("data"));
-            let authority = operator.build_authority(repo.did());
-            let result = claim(&operator, Issuer::new(&operator, authority), &data_cap).await;
+            let result = profile.access().claim(data_cap).perform(&operator).await;
             assert!(
                 result.is_ok(),
                 "claim on delegated store 'data' should succeed: {:?}",
                 result.err()
             );
 
+            // Claiming "secret" store should fail
             let secret_cap = repo
                 .subject()
                 .attenuate(fx_storage::Storage)
                 .attenuate(fx_storage::Store::new("secret"));
-            let authority = operator.build_authority(repo.did());
-            let result = claim(&operator, Issuer::new(&operator, authority), &secret_cap).await;
+            let result = profile.access().claim(secret_cap).perform(&operator).await;
             assert!(
                 result.is_err(),
                 "claim on non-delegated store 'secret' should be denied"
@@ -717,30 +742,33 @@ mod tests {
 
         #[dialog_common::test]
         async fn it_validates_delegation_against_policy() -> anyhow::Result<()> {
-            let operator = test_operator().await;
+            let (operator, profile) = test_operator_with_profile().await;
             let repo = Repository::create(unique_location("home"))
                 .perform(&operator)
                 .await?;
 
-            let signer = extract_signer(repo.credential());
+            // Repo delegates "data" store to the profile
             let scoped_cap = repo
                 .subject()
                 .attenuate(fx_storage::Storage)
                 .attenuate(fx_storage::Store::new("data"));
-            let chain = Ucan::delegate(&scoped_cap)
-                .audience(operator.profile_did())
-                .issuer(signer)
+            let access = repo.access();
+            let chain = access
+                .claim(scoped_cap)
+                .delegate(profile.did())
                 .perform(&operator)
                 .await?;
-            dialog_capability::Subject::from(operator.profile_did()).attenuate(dialog_capability::access::Permit).invoke(dialog_capability::access::Save::<dialog_capability_ucan::Ucan>::new(chain.clone())).perform(&operator).await?;
+            profile.access().save(chain).perform(&operator).await?;
 
-            // Delegating for 'data' store should succeed (chain exists)
+            // Profile can re-delegate "data" store to operator
             let data_cap = repo
                 .subject()
                 .attenuate(fx_storage::Storage)
                 .attenuate(fx_storage::Store::new("data"));
-            let result = Ucan::delegate(&data_cap)
-                .audience(operator.did())
+            let result = profile
+                .access()
+                .claim(data_cap)
+                .delegate(operator.did())
                 .perform(&operator)
                 .await;
             assert!(
@@ -749,13 +777,15 @@ mod tests {
                 result.err()
             );
 
-            // Delegating for 'secret' store should fail (no chain)
+            // Profile cannot delegate "secret" store (no chain)
             let secret_cap = repo
                 .subject()
                 .attenuate(fx_storage::Storage)
                 .attenuate(fx_storage::Store::new("secret"));
-            let result = Ucan::delegate(&secret_cap)
-                .audience(operator.did())
+            let result = profile
+                .access()
+                .claim(secret_cap)
+                .delegate(operator.did())
                 .perform(&operator)
                 .await;
             assert!(

@@ -20,6 +20,16 @@ use dialog_effects::{archive, memory, storage as fx_storage};
 use dialog_storage::provider::Address;
 use dialog_varsig::{Did, Principal};
 
+use dialog_capability::access::Claim as AccessClaim;
+
+use dialog_capability::access::Save as AccessSave;
+
+use dialog_capability_ucan::Ucan;
+
+type ClaimUcan = AccessClaim<Ucan>;
+
+type SaveUcan = AccessSave<Ucan>;
+
 /// An operating environment built from a [`Profile`](crate::profile::Profile).
 ///
 /// Composes:
@@ -47,8 +57,8 @@ pub struct Operator {
         Load<Credential, Address>,
         Save<Credential, Address>,
         Mount<Address>,
-        dialog_capability::access::Claim<dialog_capability_ucan::Ucan>,
-        dialog_capability::access::Save<dialog_capability_ucan::Ucan>
+        ClaimUcan,
+        SaveUcan
     )]
     /// Storage — routes DID-based effects and addressed Load/Save/Mount.
     storage: Storage,
@@ -114,13 +124,12 @@ mod s3_fork {
     }
 }
 
-#[cfg(feature = "ucan")]
 mod ucan_fork {
     use super::*;
     use dialog_capability::Ability;
-    use dialog_capability::access::{self, Authorization as _, ProofChain as _, Scope};
-    use dialog_capability_ucan::{Ucan, UcanProofChain};
+    use dialog_capability::access::{self, Authorization as _, ProofChain as _};
     use dialog_capability_ucan::scope::Scope as UcanScope;
+    use dialog_capability_ucan::{Ucan, UcanProofChain};
     use dialog_remote_ucan_s3::UcanSite;
 
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]

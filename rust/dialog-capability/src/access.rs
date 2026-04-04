@@ -42,15 +42,15 @@ pub struct TimeRange {
 impl TimeRange {
     /// Check whether the given time falls within this range.
     pub fn contains(&self, time: u64) -> bool {
-        if let Some(nbf) = self.not_before {
-            if time < nbf {
-                return false;
-            }
+        if let Some(nbf) = self.not_before
+            && time < nbf
+        {
+            return false;
         }
-        if let Some(exp) = self.expiration {
-            if time >= exp {
-                return false;
-            }
+        if let Some(exp) = self.expiration
+            && time >= exp
+        {
+            return false;
         }
         true
     }
@@ -299,10 +299,10 @@ pub trait ProofStore<P: Protocol> {
 
             let candidates = specific.into_iter().chain(powerline).filter_map(|proof| {
                 let range = proof.verify(access).ok()?;
-                if let Some(t) = time {
-                    if !range.contains(t) {
-                        return None;
-                    }
+                if let Some(t) = time
+                    && !range.contains(t)
+                {
+                    return None;
                 }
                 Some(proof)
             });

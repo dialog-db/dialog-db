@@ -16,7 +16,7 @@ integration-tests = ["dialog-common/integration-tests"]
 # Enable web integration tests
 web-integration-tests = ["dialog-common/web-integration-tests"]
 s3 = ["dep:dialog-remote-s3", "dialog-operator/s3"]
-ucan = ["s3", "dep:dialog-remote-ucan-s3", "dep:dialog-ucan", "dep:dialog-capability-ucan", "dialog-capability/ucan", "dialog-operator/ucan"]
+ucan = ["s3", "dep:dialog-remote-ucan-s3", "dep:dialog-ucan", "dep:dialog-capability-ucan", "dialog-capability/ucan"]
 
 [dependencies]
 dialog-artifacts = { workspace = true }
@@ -48,6 +48,7 @@ url = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 dialog-capability-ucan = { workspace = true }
+dialog-operator = { workspace = true, features = ["helpers"] }
 dialog-storage = { workspace = true, features = ["helpers"] }
 dialog-remote-s3 = { workspace = true, features = ["helpers"] }
 dialog-remote-ucan-s3 = { workspace = true, features = ["helpers"] }

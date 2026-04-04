@@ -7,7 +7,7 @@ use crate::Operator;
 use crate::repository::Repository;
 
 /// Open a test repository against the given operator.
-pub async fn test_repo(operator: &Operator) -> Repository {
+pub async fn test_repo(operator: &Operator) -> Repository<dialog_credentials::SignerCredential> {
     Repository::open(unique_location("repo"))
         .perform(operator)
         .await

@@ -15,7 +15,6 @@ impl Provider<ForkInvocation<UcanSite, Get>> for UcanSite {
         &self,
         invocation: ForkInvocation<UcanSite, Get>,
     ) -> Result<Option<Vec<u8>>, StorageError> {
-        
         let permit = invocation
             .address
             .authorize(&invocation.invocation)
@@ -34,7 +33,6 @@ impl Provider<ForkInvocation<UcanSite, Get>> for UcanSite {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<ForkInvocation<UcanSite, Set>> for UcanSite {
     async fn execute(&self, invocation: ForkInvocation<UcanSite, Set>) -> Result<(), StorageError> {
-        
         let permit = invocation
             .address
             .authorize(&invocation.invocation)
@@ -56,7 +54,6 @@ impl Provider<ForkInvocation<UcanSite, Delete>> for UcanSite {
         &self,
         invocation: ForkInvocation<UcanSite, Delete>,
     ) -> Result<(), StorageError> {
-        
         let permit = invocation
             .address
             .authorize(&invocation.invocation)

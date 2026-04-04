@@ -19,6 +19,16 @@ use dialog_credentials::credential::Credential;
 
 use std::sync::Arc;
 
+use dialog_capability::access::Claim as AccessClaim;
+
+use dialog_capability::access::Save as AccessSave;
+
+use dialog_capability_ucan::Ucan;
+
+type ClaimUcan = AccessClaim<Ucan>;
+
+type SaveUcan = AccessSave<Ucan>;
+
 /// DID-routed store table.
 ///
 /// Blanket `Provider<Fx>` impl routes any effect to the [`Store`]
@@ -100,8 +110,8 @@ pub struct Storage {
         fx_storage::Set,
         fx_storage::Delete,
         fx_storage::List,
-        dialog_capability::access::Claim<dialog_capability_ucan::Ucan>,
-        dialog_capability::access::Save<dialog_capability_ucan::Ucan>
+        ClaimUcan,
+        SaveUcan
     )]
     stores: Stores,
 }

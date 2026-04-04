@@ -1,11 +1,11 @@
 //! Profile — a named identity backed by a signing credential.
 
+pub mod access;
+
 use crate::operator::OperatorBuilder;
 use crate::storage::LocationExt;
-use dialog_capability::storage::{
-    self as cap_storage, Load, Location, Mount, Save, Storage as StorageCap,
-};
-use dialog_capability::{Capability, Policy, Provider};
+use dialog_capability::storage::{Load, Location, Mount, Save, Storage as StorageCap};
+use dialog_capability::{Capability, Policy, Provider, Subject};
 use dialog_common::ConditionalSync;
 use dialog_credentials::credential::Credential;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
@@ -71,12 +71,23 @@ impl Profile {
         }
     }
 
+    /// Get an access handle for claiming and delegating capabilities.
+    pub fn access(&self) -> access::Access<'_> {
+        access::Access::new(&self.credential)
+    }
+
     /// Derive an operator from this profile with the given context seed.
     ///
     /// The context determines the derived keypair — same profile + same
     /// context always produces the same operator key.
     pub fn derive(&self, context: impl Into<Vec<u8>>) -> OperatorBuilder {
         OperatorBuilder::new(self, context.into())
+    }
+}
+
+impl From<&Profile> for Capability<Subject> {
+    fn from(p: &Profile) -> Self {
+        Subject::from(p.credential.did()).into()
     }
 }
 
@@ -92,20 +103,24 @@ pub struct SaveDelegation {
     chain: DelegationChain,
 }
 
+use dialog_capability::access::Save as AccessSave;
+
+use dialog_capability_ucan::Ucan;
+
+type SaveUcan = AccessSave<Ucan>;
+
 impl SaveDelegation {
     /// Execute against the environment.
     pub async fn perform<Env>(self, env: &Env) -> Result<(), ProfileError>
     where
-        Env: Provider<dialog_capability::access::Save<dialog_capability_ucan::Ucan>>
-            + ConditionalSync,
+        Env: Provider<SaveUcan> + ConditionalSync,
     {
         use dialog_capability::Subject;
-        use dialog_capability::access::{Permit, Save};
-        use dialog_capability_ucan::Ucan;
+        use dialog_capability::access::Permit;
 
         Subject::from(self.did)
             .attenuate(Permit)
-            .invoke(Save::<Ucan>::new(self.chain))
+            .invoke(SaveUcan::new(self.chain))
             .perform(env)
             .await
             .map_err(|e| ProfileError::Storage(e.to_string()))

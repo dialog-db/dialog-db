@@ -38,7 +38,6 @@ mod s3_dispatch {
     }
 }
 
-#[cfg(feature = "ucan")]
 mod ucan_dispatch {
     use super::Remote;
     use async_trait::async_trait;

@@ -12,16 +12,15 @@ mod access;
 mod builder;
 pub mod claim;
 pub mod delegation;
-mod invocation;
 pub mod issuer;
 pub mod parameters;
 pub mod scope;
 
 pub use access::{UcanAuthorization, UcanPermit as UcanProofChain, UcanPermit, UcanProof};
-pub use builder::{DelegateRequest, InvokeRequest, IssuerUnset};
+pub use builder::{InvokeRequest, IssuerUnset};
 pub use claim::{claim, find_chain};
 pub use delegation::import_delegation_chain;
-pub use invocation::UcanInvocation;
+pub use dialog_capability::ucan::UcanInvocation;
 pub use issuer::Issuer;
 pub use parameters::{parameters, parameters_to_args, parameters_to_policy};
 pub use scope::{Args, Parameters, Scope};
@@ -34,19 +33,11 @@ use dialog_capability::{Ability, Capability, Effect};
 /// that provide identity, signing, and storage effects. Produces
 /// [`UcanInvocation`] as the authorization proof.
 ///
-/// Also provides builder APIs for delegations and invocations:
-/// - [`Ucan::delegate()`] — build and sign a delegation chain
-/// - [`Ucan::invoke()`] — build and sign an invocation chain
+/// Provides [`Ucan::invoke()`] for building signed invocations.
+/// For delegations, use [`profile.access().claim(&cap).delegate(&audience)`](dialog_operator::profile::access).
 pub struct Ucan;
 
 impl Ucan {
-    /// Start building a delegation for the given capability.
-    ///
-    /// Accepts any `Ability` — including `Subject` for powerline delegation.
-    pub fn delegate(capability: &impl Ability) -> DelegateRequest<IssuerUnset> {
-        DelegateRequest::new(capability)
-    }
-
     /// Start building a signed invocation for an effect capability.
     ///
     /// Projects the effect through [`Claim`](dialog_capability::Claim) so that

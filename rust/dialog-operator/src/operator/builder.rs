@@ -94,11 +94,10 @@ impl NetworkBuilder {
         };
 
         // Create delegations for allowed capabilities
-        #[cfg(feature = "ucan")]
         if !self.allowed.is_empty() {
             use dialog_capability::Subject;
             use dialog_capability::access::{Permit, Save};
-            use dialog_capability_ucan::{Ucan, UcanPermit};
+            use dialog_capability_ucan::Ucan;
             use dialog_ucan::DelegationChain;
             use dialog_ucan::delegation::builder::DelegationBuilder;
 

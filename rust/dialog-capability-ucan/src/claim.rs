@@ -965,8 +965,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn find_chain_with_parameters_to_policy() {
-        use dialog_capability::storage::{self, Storage, Store};
         use crate::parameters::{parameters, parameters_to_policy};
+        use dialog_capability::storage::{self, Storage, Store};
 
         let subject_signer = signer_async(1).await;
         let operator_signer = signer_async(2).await;

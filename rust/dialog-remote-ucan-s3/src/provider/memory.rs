@@ -15,7 +15,6 @@ impl Provider<ForkInvocation<UcanSite, Resolve>> for UcanSite {
         &self,
         invocation: ForkInvocation<UcanSite, Resolve>,
     ) -> Result<Option<Publication>, MemoryError> {
-        
         let permit = invocation
             .address
             .authorize(&invocation.invocation)
@@ -37,7 +36,6 @@ impl Provider<ForkInvocation<UcanSite, Publish>> for UcanSite {
         &self,
         invocation: ForkInvocation<UcanSite, Publish>,
     ) -> Result<Vec<u8>, MemoryError> {
-        
         let permit = invocation
             .address
             .authorize(&invocation.invocation)
@@ -59,7 +57,6 @@ impl Provider<ForkInvocation<UcanSite, Retract>> for UcanSite {
         &self,
         invocation: ForkInvocation<UcanSite, Retract>,
     ) -> Result<(), MemoryError> {
-        
         let permit = invocation
             .address
             .authorize(&invocation.invocation)

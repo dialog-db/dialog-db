@@ -136,7 +136,7 @@ pub enum Store {
 
 use dialog_capability::storage::StorageError;
 
-use dialog_capability::access::{AuthorizeError, Claim, ProofChain, ProofStore, Protocol, Save};
+use dialog_capability::access::{AuthorizeError, Claim, ProofStore, Protocol, Save};
 use dialog_common::{ConditionalSend, ConditionalSync};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -157,7 +157,9 @@ where
             #[cfg(not(target_arch = "wasm32"))]
             Self::FileSystem(fs) => <FileStore as ProofStore<P>>::list(fs, audience, subject).await,
             #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-            Self::IndexedDb(idb) => <IndexedDb as ProofStore<P>>::list(idb, audience, subject).await,
+            Self::IndexedDb(idb) => {
+                <IndexedDb as ProofStore<P>>::list(idb, audience, subject).await
+            }
             Self::Volatile(v) => <Volatile as ProofStore<P>>::list(v, audience, subject).await,
         }
     }
@@ -189,10 +191,16 @@ where
     ) -> Result<P::ProofChain, AuthorizeError> {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
-            Self::FileSystem(fs) => <FileStore as dialog_capability::Provider<Claim<P>>>::execute(fs, input).await,
+            Self::FileSystem(fs) => {
+                <FileStore as dialog_capability::Provider<Claim<P>>>::execute(fs, input).await
+            }
             #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-            Self::IndexedDb(idb) => <IndexedDb as dialog_capability::Provider<Claim<P>>>::execute(idb, input).await,
-            Self::Volatile(v) => <Volatile as dialog_capability::Provider<Claim<P>>>::execute(v, input).await,
+            Self::IndexedDb(idb) => {
+                <IndexedDb as dialog_capability::Provider<Claim<P>>>::execute(idb, input).await
+            }
+            Self::Volatile(v) => {
+                <Volatile as dialog_capability::Provider<Claim<P>>>::execute(v, input).await
+            }
         }
     }
 }
@@ -211,10 +219,16 @@ where
     ) -> Result<(), AuthorizeError> {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
-            Self::FileSystem(fs) => <FileStore as dialog_capability::Provider<Save<P>>>::execute(fs, input).await,
+            Self::FileSystem(fs) => {
+                <FileStore as dialog_capability::Provider<Save<P>>>::execute(fs, input).await
+            }
             #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-            Self::IndexedDb(idb) => <IndexedDb as dialog_capability::Provider<Save<P>>>::execute(idb, input).await,
-            Self::Volatile(v) => <Volatile as dialog_capability::Provider<Save<P>>>::execute(v, input).await,
+            Self::IndexedDb(idb) => {
+                <IndexedDb as dialog_capability::Provider<Save<P>>>::execute(idb, input).await
+            }
+            Self::Volatile(v) => {
+                <Volatile as dialog_capability::Provider<Save<P>>>::execute(v, input).await
+            }
         }
     }
 }
