@@ -27,12 +27,12 @@ pub mod remote;
 /// Revision type and edition tracking.
 pub mod revision;
 
-use crate::storage::LocationExt;
-use dialog_capability::storage::{self as cap_storage, Location};
+use dialog_capability::storage::{self as cap_storage, Location, StorageError};
 use dialog_capability::{Capability, Did, Policy, Provider, Subject};
 use dialog_common::ConditionalSync;
 use dialog_credentials::Ed25519Signer;
 use dialog_credentials::credential::{Credential, SignerCredential};
+use dialog_effects::credential as cred_fx;
 use dialog_operator::profile::access::Access as ProfileAccess;
 use dialog_storage::provider::Address;
 use dialog_varsig::Principal;
@@ -177,27 +177,46 @@ impl Repository<SignerCredential> {
 impl OpenRepository {
     /// Execute against a storage provider.
     ///
-    /// Reads credentials from `{location}/credential/space`.
-    /// Mounts the repository DID at `{location}` in the storage store table.
+    /// Mounts a bootstrap store at the location, reads credentials from
+    /// `credential/space` via the credential capability chain, then
+    /// mounts the repository DID at the location in the storage store table.
     pub async fn perform<S>(
         self,
         storage: &S,
     ) -> Result<Repository<SignerCredential>, RepositoryError>
     where
-        S: Provider<cap_storage::Load<Credential, Address>>
-            + Provider<cap_storage::Save<Credential, Address>>
+        S: Provider<cred_fx::Load>
+            + Provider<cred_fx::Save>
             + Provider<cap_storage::Mount<Address>>
             + ConditionalSync,
     {
         let location = self.location;
-        let cred_location = location
-            .resolve("credential/space")
-            .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
+
+        // Mount a bootstrap store so credential effects can route to this location.
+        let bootstrap_did = dialog_capability::did!("local:storage");
+        let address = Location::of(&location).address().clone();
+        cap_storage::Storage::mount(bootstrap_did.clone(), address.clone())
+            .perform(storage)
+            .await
+            .map_err(|e: StorageError| RepositoryError::StorageError(e.to_string()))?;
+
+        let load_credential = || {
+            Subject::from(bootstrap_did.clone())
+                .attenuate(cred_fx::Credential)
+                .attenuate(cred_fx::Address::new("credential/space"))
+                .invoke(cred_fx::Load)
+        };
+
+        let save_credential = |credential: Credential| {
+            Subject::from(bootstrap_did.clone())
+                .attenuate(cred_fx::Credential)
+                .attenuate(cred_fx::Address::new("credential/space"))
+                .invoke(cred_fx::Save { credential })
+        };
 
         let credential = match self.mode {
             OpenMode::Load => {
-                let cred = cred_location
-                    .load::<Credential>()
+                let cred = load_credential()
                     .perform(storage)
                     .await
                     .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
@@ -211,11 +230,7 @@ impl OpenRepository {
                 }
             }
             OpenMode::Create => {
-                let existing = cred_location
-                    .clone()
-                    .load::<Credential>()
-                    .perform(storage)
-                    .await;
+                let existing = load_credential().perform(storage).await;
 
                 if existing.is_ok() {
                     return Err(RepositoryError::AlreadyExists(String::new()));
@@ -226,8 +241,7 @@ impl OpenRepository {
                     .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
                 let credential = SignerCredential::from(signer);
 
-                cred_location
-                    .save(Credential::Signer(credential.clone()))
+                save_credential(Credential::Signer(credential.clone()))
                     .perform(storage)
                     .await
                     .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
@@ -235,11 +249,7 @@ impl OpenRepository {
                 credential
             }
             OpenMode::OpenOrCreate => {
-                let load = cred_location
-                    .clone()
-                    .load::<Credential>()
-                    .perform(storage)
-                    .await;
+                let load = load_credential().perform(storage).await;
 
                 match load {
                     Ok(Credential::Signer(s)) => s,
@@ -254,8 +264,7 @@ impl OpenRepository {
                             .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
                         let credential = SignerCredential::from(signer);
 
-                        cred_location
-                            .save(Credential::Signer(credential.clone()))
+                        save_credential(Credential::Signer(credential.clone()))
                             .perform(storage)
                             .await
                             .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
@@ -267,11 +276,10 @@ impl OpenRepository {
         };
 
         // Mount the repository DID at the root location
-        let address = Location::of(&location).address().clone();
         cap_storage::Storage::mount(credential.did(), address)
             .perform(storage)
             .await
-            .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
+            .map_err(|e: StorageError| RepositoryError::StorageError(e.to_string()))?;
 
         Ok(credential.into())
     }

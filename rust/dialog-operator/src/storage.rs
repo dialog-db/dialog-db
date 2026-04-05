@@ -15,7 +15,6 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 
 use dialog_capability::storage::{Load, Save};
-use dialog_credentials::credential::Credential;
 
 use std::sync::Arc;
 
@@ -95,7 +94,7 @@ where
     }
 }
 
-use dialog_effects::{archive, memory};
+use dialog_effects::{archive, credential, memory};
 
 /// Address-dispatched storage with DID-routed effect table.
 #[derive(Clone, Provider)]
@@ -103,6 +102,8 @@ pub struct Storage {
     #[provide(
         archive::Get,
         archive::Put,
+        credential::Load,
+        credential::Save,
         memory::Resolve,
         memory::Publish,
         memory::Retract,
@@ -341,4 +342,3 @@ macro_rules! impl_addressed {
 }
 
 impl_addressed!(Vec<u8>);
-impl_addressed!(Credential);

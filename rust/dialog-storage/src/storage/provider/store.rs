@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::provider::{Volatile, volatile};
-use dialog_effects::{archive, memory};
+use dialog_effects::{archive, credential, memory};
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::provider::{FileStore, fs};
@@ -113,6 +113,8 @@ impl Address {
 #[provide(
     archive::Get,
     archive::Put,
+    credential::Load,
+    credential::Save,
     memory::Resolve,
     memory::Publish,
     memory::Retract
