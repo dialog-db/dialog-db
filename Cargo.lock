@@ -974,6 +974,7 @@ dependencies = [
  "dialog-capability",
  "dialog-common",
  "dialog-credentials",
+ "dialog-effects",
  "dialog-ucan",
  "dialog-varsig",
  "ipld-core",

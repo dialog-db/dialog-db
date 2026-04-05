@@ -233,9 +233,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let cap = Subject::from(profile.did())
-                .attenuate(fx_storage::Storage)
-                .attenuate(fx_storage::Store::new("anything"));
+            let cap = Subject::from(profile.did()).attenuate(fx_storage::Storage);
             let result = claim_access(&operator, &cap).await;
 
             assert!(

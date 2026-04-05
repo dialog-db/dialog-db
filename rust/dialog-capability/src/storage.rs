@@ -1,21 +1,19 @@
 //! Storage capability hierarchy.
 //!
-//! Storage provides key-value store operations.
+//! Storage provides location-based storage operations using typed addresses.
 //!
 //! # Capability Hierarchy
 //!
 //! ```text
 //! Subject (repository DID)
 //! └── Storage (ability: /storage)
-//!     └── Store { store: String }
-//!         ├── Get { key } → Effect → Result<Option<Bytes>, StorageError>
-//!         ├── Set { key, value } → Effect → Result<(), StorageError>
-//!         ├── Delete { key } → Effect → Result<(), StorageError>
-//!         └── List { continuation_token } → Effect → Result<ListResult, StorageError>
+//!     └── Location<A> { address: A }
+//!         ├── Mount → Effect → Result<(), StorageError>
+//!         ├── Load<Content> → Effect → Result<Content, StorageError>
+//!         └── Save<Content> → Effect → Result<(), StorageError>
 //! ```
 
 pub use crate::{Attenuation, Capability, Caveat, Claim, Did, Effect, Policy, Subject, did};
-use dialog_common::Checksum;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -65,229 +63,6 @@ impl Storage {
 
 impl Attenuation for Storage {
     type Of = Subject;
-}
-
-/// Store policy that scopes operations to a named store.
-///
-/// This is a policy (not attenuation) so it doesn't contribute to the ability path.
-/// It restricts operations to a specific store (e.g., "index", "blob").
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Store {
-    /// The store name (e.g., "index", "blob").
-    pub store: String,
-}
-
-impl Store {
-    /// Create a new Store policy.
-    pub fn new(name: impl Into<String>) -> Self {
-        Self { store: name.into() }
-    }
-}
-
-impl Policy for Store {
-    type Of = Storage;
-}
-
-/// Get operation - retrieves a value by key.
-#[derive(Debug, Clone, Serialize, Deserialize, Claim)]
-pub struct Get {
-    /// The key to look up.
-    #[serde(with = "serde_bytes")]
-    pub key: Vec<u8>,
-}
-
-impl Get {
-    /// Create a new Get effect.
-    pub fn new(key: impl Into<Vec<u8>>) -> Self {
-        Self { key: key.into() }
-    }
-}
-
-impl Effect for Get {
-    type Of = Store;
-    type Output = Result<Option<Vec<u8>>, StorageError>;
-}
-
-/// Extension trait for `Capability<Get>` to access its fields.
-pub trait GetCapability {
-    /// Get the store name from the capability chain.
-    fn store(&self) -> &str;
-    /// Get the key from the capability chain.
-    fn key(&self) -> &[u8];
-}
-
-impl GetCapability for Capability<Get> {
-    fn store(&self) -> &str {
-        &Store::of(self).store
-    }
-
-    fn key(&self) -> &[u8] {
-        &Get::of(self).key
-    }
-}
-
-/// Set operation - sets a value for a key.
-#[derive(Debug, Clone, Serialize, Deserialize, Claim)]
-pub struct Set {
-    /// The key to update.
-    #[serde(with = "serde_bytes")]
-    pub key: Vec<u8>,
-    /// The value to set.
-    #[serde(with = "serde_bytes")]
-    #[claim(into = Checksum, with = Checksum::sha256, rename = checksum)]
-    pub value: Vec<u8>,
-}
-
-impl Set {
-    /// Create a new Set effect.
-    pub fn new(key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Self {
-        Self {
-            key: key.into(),
-            value: value.into(),
-        }
-    }
-}
-
-impl Effect for Set {
-    type Of = Store;
-    type Output = Result<(), StorageError>;
-}
-
-impl Attenuation for SetClaim {
-    type Of = Store;
-    fn attenuation() -> &'static str {
-        "set"
-    }
-}
-
-/// Extension trait for `Capability<Set>` to access its fields.
-pub trait SetCapability {
-    /// Get the store name from the capability chain.
-    fn store(&self) -> &str;
-    /// Get the key from the capability chain.
-    fn key(&self) -> &[u8];
-    /// Get the value from the capability chain.
-    fn value(&self) -> &[u8];
-}
-
-impl SetCapability for Capability<Set> {
-    fn store(&self) -> &str {
-        &Store::of(self).store
-    }
-
-    fn key(&self) -> &[u8] {
-        &Set::of(self).key
-    }
-
-    fn value(&self) -> &[u8] {
-        &Set::of(self).value
-    }
-}
-
-/// Delete operation - removes a key.
-#[derive(Debug, Clone, Serialize, Deserialize, Claim)]
-pub struct Delete {
-    /// The key to delete.
-    #[serde(with = "serde_bytes")]
-    pub key: Vec<u8>,
-}
-
-impl Delete {
-    /// Create a new Delete effect.
-    pub fn new(key: impl Into<Vec<u8>>) -> Self {
-        Self { key: key.into() }
-    }
-}
-
-impl Effect for Delete {
-    type Of = Store;
-    type Output = Result<(), StorageError>;
-}
-
-/// Extension trait for `Capability<Delete>` to access its fields.
-pub trait DeleteCapability {
-    /// Get the store name from the capability chain.
-    fn store(&self) -> &str;
-    /// Get the key from the capability chain.
-    fn key(&self) -> &[u8];
-}
-
-impl DeleteCapability for Capability<Delete> {
-    fn store(&self) -> &str {
-        &Store::of(self).store
-    }
-
-    fn key(&self) -> &[u8] {
-        &Delete::of(self).key
-    }
-}
-
-/// List operation - lists keys in a store by prefix.
-#[derive(Debug, Clone, Serialize, Deserialize, Claim)]
-pub struct List {
-    /// Key prefix to filter by. Empty string means list all.
-    #[serde(with = "serde_bytes")]
-    pub prefix: Vec<u8>,
-    /// Continuation token for pagination.
-    pub continuation_token: Option<String>,
-}
-
-impl List {
-    /// Create a new List effect with optional continuation token.
-    pub fn new(continuation_token: Option<String>) -> Self {
-        Self {
-            prefix: Vec::new(),
-            continuation_token,
-        }
-    }
-
-    /// Create a List effect filtered by key prefix.
-    pub fn with_prefix(prefix: impl Into<Vec<u8>>) -> Self {
-        Self {
-            prefix: prefix.into(),
-            continuation_token: None,
-        }
-    }
-}
-
-impl Effect for List {
-    type Of = Store;
-    type Output = Result<ListResult, StorageError>;
-}
-
-/// Result of a list operation.
-#[derive(Debug, Clone)]
-pub struct ListResult {
-    /// Object keys returned in this response.
-    pub keys: Vec<String>,
-    /// If true, there are more results to fetch.
-    pub is_truncated: bool,
-    /// Token to use for fetching the next page of results.
-    pub next_continuation_token: Option<String>,
-}
-
-/// Extension trait for `Capability<List>` to access its fields.
-pub trait ListCapability {
-    /// Get the store name from the capability chain.
-    fn store(&self) -> &str;
-    /// Get the key prefix to filter by.
-    fn prefix(&self) -> &[u8];
-    /// Get the continuation token from the capability chain.
-    fn continuation_token(&self) -> Option<&str>;
-}
-
-impl ListCapability for Capability<List> {
-    fn store(&self) -> &str {
-        &Store::of(self).store
-    }
-
-    fn prefix(&self) -> &[u8] {
-        &List::of(self).prefix
-    }
-
-    fn continuation_token(&self) -> Option<&str> {
-        List::of(self).continuation_token.as_deref()
-    }
 }
 
 /// Errors that can occur during storage operations.
@@ -449,6 +224,10 @@ mod tests {
     use super::*;
     use crate::did;
 
+    /// A test address type for location capabilities.
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    struct TestAddress(String);
+
     #[test]
     fn it_builds_storage_claim_path() {
         let claim = Subject::from(did!("key:zSpace")).attenuate(Storage);
@@ -458,37 +237,36 @@ mod tests {
     }
 
     #[test]
-    fn it_builds_store_claim_path() {
-        let claim = Subject::from(did!("key:zSpace"))
-            .attenuate(Storage)
-            .attenuate(Store::new("index"));
+    fn it_builds_location_claim_path() {
+        let claim = Storage::locate(TestAddress("test".into()));
 
-        assert_eq!(claim.subject(), &did!("key:zSpace"));
-        // Store is Policy, not Ability, so it doesn't add to path
+        // Location is a Policy, not an Ability, so path stays /storage
         assert_eq!(claim.ability(), "/storage");
+        assert_eq!(
+            Location::<TestAddress>::of(&claim).address(),
+            &TestAddress("test".into())
+        );
     }
 
     #[test]
-    fn it_builds_get_claim_path() {
-        let claim = Subject::from(did!("key:zSpace"))
-            .attenuate(Storage)
-            .attenuate(Store::new("index"))
-            .invoke(Get::new(vec![1, 2, 3]));
+    fn it_builds_load_claim_path() {
+        let claim = Storage::load::<Vec<u8>, _>(TestAddress("data".into()));
 
-        assert_eq!(claim.ability(), "/storage/get");
+        assert_eq!(claim.ability(), "/storage/load");
     }
 
     #[test]
-    fn it_builds_set_claim_path() {
-        let claim = Subject::from(did!("key:zSpace"))
-            .attenuate(Storage)
-            .attenuate(Store::new("index"))
-            .invoke(Set::new(vec![1, 2, 3], vec![4, 5, 6]));
+    fn it_builds_save_claim_path() {
+        let claim = Storage::save(TestAddress("data".into()), vec![1u8, 2, 3]);
 
-        assert_eq!(claim.ability(), "/storage/set");
+        assert_eq!(claim.ability(), "/storage/save");
+    }
 
-        // Use policy() method to extract nested constraints
-        assert_eq!(claim.policy::<Store, _>().store, "index");
-        assert_eq!(&claim.policy::<Set, _>().key[..], &[1, 2, 3]);
+    #[test]
+    fn it_builds_mount_claim_path() {
+        let claim = Storage::mount(did!("key:zSpace"), TestAddress("repo".into()));
+
+        assert_eq!(claim.ability(), "/storage/mount");
+        assert_eq!(claim.subject(), &did!("key:zSpace"));
     }
 }

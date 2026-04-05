@@ -43,7 +43,6 @@ mod archive;
 mod authorize;
 mod memory;
 mod mount;
-mod storage;
 
 use dialog_capability::Did;
 use js_sys::Uint8Array;

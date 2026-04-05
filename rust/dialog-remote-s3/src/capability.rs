@@ -11,26 +11,29 @@
 //!
 //! ```
 //! use dialog_capability::{Subject, did};
-//! use dialog_effects::storage::{Storage, Store, Get, Set};
+//! use dialog_effects::archive::{Archive, Catalog, Get, Put};
+//! use dialog_common::Blake3Hash;
 //!
 //! let subject = did!("key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK");
 //!
-//! // Build a capability to get a value from the "index" store
+//! // Build a capability to get content from the "index" catalog
+//! let digest = Blake3Hash::hash(b"hello");
 //! let get_capability = Subject::from(subject.clone())
-//!     .attenuate(Storage)
-//!     .attenuate(Store::new("index"))
-//!     .invoke(Get::new(b"my-key"));
+//!     .attenuate(Archive)
+//!     .attenuate(Catalog::new("index"))
+//!     .invoke(Get::new(digest));
 //!
-//! // Build a capability to set a value in the "blob" store
-//! let set_capability = Subject::from(subject)
-//!     .attenuate(Storage)
-//!     .attenuate(Store::new("blob"))
-//!     .invoke(Set::new(b"my-key", b"my-value"));
+//! // Build a capability to put content in the "blob" catalog
+//! let content = b"my-value";
+//! let digest = Blake3Hash::hash(content);
+//! let put_capability = Subject::from(subject)
+//!     .attenuate(Archive)
+//!     .attenuate(Catalog::new("blob"))
+//!     .invoke(Put::new(digest, content.to_vec()));
 //! ```
 //!
 //! # Submodules
 //!
-//! - [`storage`]: `Access` impls for storage capabilities
 //! - [`memory`]: `Access` impls for memory capabilities
 //! - [`archive`]: `Access` impls for archive capabilities
 

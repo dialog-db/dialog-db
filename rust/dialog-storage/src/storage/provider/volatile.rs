@@ -38,7 +38,6 @@ mod archive;
 mod authorize;
 mod memory;
 mod mount;
-mod storage;
 
 use dialog_capability::Did;
 use dialog_credentials::credential::CredentialExport;
@@ -50,9 +49,6 @@ type ArchiveKey = (String, String);
 
 /// Memory key: (space, cell)
 type MemoryKey = (String, String);
-
-/// Storage key: (store, key_bytes)
-type StorageKey = (String, Vec<u8>);
 
 /// Proof key: (audience, subject_or_wildcard, filename)
 type ProofKey = String;
@@ -68,8 +64,6 @@ struct Session {
     mounted: HashMap<String, Vec<u8>>,
     /// Credential storage keyed by address prefix.
     credentials: HashMap<String, CredentialExport>,
-    /// Key-value storage keyed by (store, key).
-    storage: HashMap<StorageKey, Vec<u8>>,
     /// Proof storage keyed by "{audience}/{subject}/{issuer}.{hash}".
     proofs: HashMap<ProofKey, Vec<u8>>,
 }

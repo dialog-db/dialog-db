@@ -3,5 +3,3 @@
 //! Re-exported from `dialog-capability`.
 
 pub use dialog_capability::storage::*;
-
-pub mod prelude;

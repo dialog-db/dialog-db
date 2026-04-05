@@ -47,7 +47,6 @@ mod authorize;
 mod error;
 mod memory;
 mod mount;
-mod storage;
 
 pub use error::FileSystemError;
 
@@ -59,7 +58,6 @@ use url::Url;
 const ARCHIVE: &str = "archive";
 const MEMORY: &str = "memory";
 const PERMIT: &str = "permit";
-const STORAGE: &str = "storage";
 
 /// Address for filesystem-based storage.
 ///
@@ -259,14 +257,6 @@ impl FileStore {
     /// happens at the `Stores` level.
     pub(crate) fn permit(&self) -> Result<Location, FileSystemError> {
         self.0.resolve(PERMIT)
-    }
-
-    /// Returns the location for a subject's key-value storage.
-    fn storage(&self, subject: &Did, store: &str) -> Result<Location, FileSystemError> {
-        self.0
-            .resolve(subject.as_ref())?
-            .resolve(STORAGE)?
-            .resolve(store)
     }
 }
 

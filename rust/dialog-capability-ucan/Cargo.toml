@@ -26,6 +26,7 @@ thiserror = { workspace = true }
 [dev-dependencies]
 dialog-common = { workspace = true, features = ["helpers"] }
 dialog-credentials = { workspace = true }
+dialog-effects = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 wasm-bindgen-test = { workspace = true }
 

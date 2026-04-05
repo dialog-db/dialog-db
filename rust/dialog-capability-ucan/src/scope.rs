@@ -208,8 +208,9 @@ impl Scope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dialog_capability::storage::{Get, Storage, Store};
     use dialog_capability::{Subject, did};
+    use dialog_common::Blake3Hash;
+    use dialog_effects::archive::{Archive, Catalog, Get};
 
     #[test]
     fn scope_from_subject() {
@@ -231,63 +232,65 @@ mod tests {
     }
 
     #[test]
-    fn scope_from_storage_store() {
+    fn scope_from_archive_catalog() {
         let cap = Subject::from(did!("key:z6MkTest"))
-            .attenuate(Storage)
-            .attenuate(Store::new("data"));
+            .attenuate(Archive)
+            .attenuate(Catalog::new("index"));
         let scope = Scope::from(&cap);
 
-        assert_eq!(scope.command, Command::parse("/storage").unwrap());
+        assert_eq!(scope.command, Command::parse("/archive").unwrap());
 
         let policy = scope.policy();
         assert_eq!(policy.len(), 1);
         assert_eq!(
             policy[0],
             Predicate::Equal(
-                Select::new(vec![Filter::Field("store".into())]),
-                Ipld::String("data".into())
+                Select::new(vec![Filter::Field("catalog".into())]),
+                Ipld::String("index".into())
             )
         );
 
         let args = scope.args();
-        assert_eq!(args.get("store"), Some(&Promised::String("data".into())));
+        assert_eq!(args.get("catalog"), Some(&Promised::String("index".into())));
     }
 
     #[test]
-    fn scope_from_storage_get() {
+    fn scope_from_archive_get() {
+        let digest = Blake3Hash::hash(b"hello");
         let cap = Subject::from(did!("key:z6MkTest"))
-            .attenuate(Storage)
-            .attenuate(Store::new("data"))
-            .invoke(Get::new(b"my-key"));
+            .attenuate(Archive)
+            .attenuate(Catalog::new("index"))
+            .invoke(Get::new(digest.clone()));
         let scope = Scope::from(&cap);
 
-        assert_eq!(scope.command, Command::parse("/storage/get").unwrap());
+        assert_eq!(scope.command, Command::parse("/archive/get").unwrap());
 
         let policy = scope.policy();
         assert!(
             policy.contains(&Predicate::Equal(
-                Select::new(vec![Filter::Field("store".into())]),
-                Ipld::String("data".into())
+                Select::new(vec![Filter::Field("catalog".into())]),
+                Ipld::String("index".into())
             )),
-            "policy should contain store=data constraint"
+            "policy should contain catalog=index constraint"
         );
         assert!(
-            policy.contains(&Predicate::Equal(
-                Select::new(vec![Filter::Field("key".into())]),
-                Ipld::Bytes(b"my-key".to_vec())
-            )),
-            "policy should contain key=my-key constraint"
+            policy
+                .iter()
+                .any(|p| matches!(p, Predicate::Equal(sel, Ipld::Bytes(_))
+                    if sel == &Select::new(vec![Filter::Field("digest".into())])
+                )),
+            "policy should contain digest constraint"
         );
 
         let args = scope.args();
-        assert_eq!(args.get("store"), Some(&Promised::String("data".into())));
-        assert_eq!(args.get("key"), Some(&Promised::Bytes(b"my-key".to_vec())));
+        assert_eq!(args.get("catalog"), Some(&Promised::String("index".into())));
+        assert!(args.contains_key("digest"), "args should contain digest");
     }
 
     #[test]
     fn parameters_to_policy() {
         let mut map = BTreeMap::new();
-        map.insert("store".into(), Ipld::String("data".into()));
+        map.insert("catalog".into(), Ipld::String("index".into()));
         let params = Parameters(map);
         let policy = params.policy();
 
@@ -295,8 +298,8 @@ mod tests {
         assert_eq!(
             policy[0],
             Predicate::Equal(
-                Select::new(vec![Filter::Field("store".into())]),
-                Ipld::String("data".into())
+                Select::new(vec![Filter::Field("catalog".into())]),
+                Ipld::String("index".into())
             )
         );
     }

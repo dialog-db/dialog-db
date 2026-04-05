@@ -78,8 +78,9 @@ pub fn parameters_to_policy(parameters: Parameters) -> Vec<Predicate> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dialog_capability::storage::{Get, Set, Storage, Store};
     use dialog_capability::{Subject, did};
+    use dialog_common::Blake3Hash;
+    use dialog_effects::archive::{Archive, Catalog, Get, Put};
 
     #[test]
     fn parameters_from_empty_subject() {
@@ -89,23 +90,27 @@ mod tests {
     }
 
     #[test]
-    fn parameters_from_storage_store() {
+    fn parameters_from_archive_catalog() {
         let cap = Subject::from(did!("key:z6MkTest"))
-            .attenuate(Storage)
-            .attenuate(Store::new("index"));
+            .attenuate(Archive)
+            .attenuate(Catalog::new("index"));
         let params = parameters(&cap);
-        assert_eq!(params.get("store"), Some(&Ipld::String("index".into())));
+        assert_eq!(params.get("catalog"), Some(&Ipld::String("index".into())));
     }
 
     #[test]
-    fn parameters_from_storage_get() {
+    fn parameters_from_archive_get() {
+        let digest = Blake3Hash::hash(b"my-content");
         let cap = Subject::from(did!("key:z6MkTest"))
-            .attenuate(Storage)
-            .attenuate(Store::new("data"))
-            .invoke(Get::new(b"my-key"));
+            .attenuate(Archive)
+            .attenuate(Catalog::new("data"))
+            .invoke(Get::new(digest));
         let params = parameters(&cap);
-        assert_eq!(params.get("store"), Some(&Ipld::String("data".into())));
-        assert_eq!(params.get("key"), Some(&Ipld::Bytes(b"my-key".to_vec())));
+        assert_eq!(params.get("catalog"), Some(&Ipld::String("data".into())));
+        assert!(
+            params.contains_key("digest"),
+            "should contain digest parameter"
+        );
     }
 
     #[test]
@@ -117,15 +122,15 @@ mod tests {
     #[test]
     fn parameters_to_policy_produces_equality_constraints() {
         let cap = Subject::from(did!("key:z6MkTest"))
-            .attenuate(Storage)
-            .attenuate(Store::new("data"));
+            .attenuate(Archive)
+            .attenuate(Catalog::new("data"));
         let policy = parameters_to_policy(parameters(&cap));
 
         assert_eq!(policy.len(), 1);
         assert_eq!(
             policy[0],
             Predicate::Equal(
-                Select::new(vec![Filter::Field("store".into())]),
+                Select::new(vec![Filter::Field("catalog".into())]),
                 Ipld::String("data".into())
             )
         );
@@ -133,38 +138,39 @@ mod tests {
 
     #[test]
     fn parameters_to_policy_multiple_constraints() {
+        let content = b"hello world";
+        let digest = Blake3Hash::hash(content);
         let cap = Subject::from(did!("key:z6MkTest"))
-            .attenuate(Storage)
-            .attenuate(Store::new("index"))
-            .invoke(Set::new(b"key1", b"val1"));
+            .attenuate(Archive)
+            .attenuate(Catalog::new("index"))
+            .invoke(Put::new(digest, content.to_vec()));
         let policy = parameters_to_policy(parameters(&cap));
 
-        // Should have constraints for store, key, and value (via checksum)
+        // Should have constraints for catalog, digest, and content (via checksum)
         assert!(
             policy.len() >= 2,
             "expected at least 2 constraints, got {}",
             policy.len()
         );
 
-        let has_store = policy.iter().any(|p| {
+        let has_catalog = policy.iter().any(|p| {
             matches!(
                 p,
                 Predicate::Equal(sel, Ipld::String(v))
-                    if sel == &Select::new(vec![Filter::Field("store".into())])
+                    if sel == &Select::new(vec![Filter::Field("catalog".into())])
                     && v == "index"
             )
         });
-        assert!(has_store, "should have store equality constraint");
+        assert!(has_catalog, "should have catalog equality constraint");
 
-        let has_key = policy.iter().any(|p| {
+        let has_digest = policy.iter().any(|p| {
             matches!(
                 p,
-                Predicate::Equal(sel, Ipld::Bytes(v))
-                    if sel == &Select::new(vec![Filter::Field("key".into())])
-                    && v == b"key1"
+                Predicate::Equal(sel, Ipld::Bytes(_))
+                    if sel == &Select::new(vec![Filter::Field("digest".into())])
             )
         });
-        assert!(has_key, "should have key equality constraint");
+        assert!(has_digest, "should have digest equality constraint");
     }
 
     #[test]
