@@ -2,183 +2,260 @@
 
 ## Motivation
 
-Profile and Repository opening currently uses a bootstrap DID hack to load credentials via capability routing before the real DID is known. The `Storage` type is a DID router (`HashMap<Did, Store>`) that requires mounting before capabilities can be dispatched.
+Profile and Repository opening currently uses a bootstrap DID hack to load credentials via capability routing before the real DID is known. Storage is a DID router that requires pre-mounting.
 
-The goal is to make `Space` the self-contained unit: one address, one credential, one composed store. `Storage` becomes a configured router that knows how to create spaces from addresses.
+The goal: Storage holds factories and a DID router. Mounting a Location creates a Space (composed providers). Space routes capabilities to providers. Storage routes DIDs to Spaces.
 
 ## Core Types
 
+### Location
+
+Enum of logical address types. Each backend extracts its platform-specific address via `From` conversions:
+
+```rust
+pub enum Location {
+    Profile(String),      // "alice"
+    Workspace(String),    // "contacts"
+    Temp(String),         // "scratch"
+    Custom { fs: PathBuf, idb: String, opfs: String },
+}
+
+// Each backend resolves from Location
+impl From<&Location> for FsAddress {
+    fn from(loc: &Location) -> Self {
+        match loc {
+            Location::Profile(name) => /* ~/Library/.../dialog/{name} */,
+            Location::Workspace(name) => /* $PWD/.dialog/{name} */,
+            Location::Temp(name) => /* /tmp/.dialog/{name} */,
+            Location::Custom { fs, .. } => FsAddress(fs.clone()),
+        }
+    }
+}
+
+impl From<&Location> for IdbAddress {
+    fn from(loc: &Location) -> Self {
+        match loc {
+            Location::Profile(name) => IdbAddress(format!("{name}.profile")),
+            Location::Workspace(name) => IdbAddress(name.clone()),
+            Location::Temp(name) => IdbAddress(format!("temp.{name}")),
+            Location::Custom { idb, .. } => IdbAddress(idb.clone()),
+        }
+    }
+}
+
+// Same for OpfsAddress
+```
+
+### Factory
+
+Creates a provider from a Location. Each backend type implements this:
+
+```rust
+trait Factory {
+    type Provider;
+    fn create(&self, location: &Location) -> Self::Provider;
+}
+```
+
+For example, an `IdbFactory` with a relative store name:
+
+```rust
+struct IdbFactory {
+    store: &'static str,  // "archive/index", "memory", etc.
+}
+
+impl Factory for IdbFactory {
+    type Provider = IndexedDb;
+    fn create(&self, location: &Location) -> IndexedDb {
+        let addr = IdbAddress::from(location);
+        IndexedDb::open(addr, self.store)
+    }
+}
+```
+
 ### Space
 
-A loaded space with its credential and composed store:
+Product of providers created by factories. Routes capabilities to the right provider:
 
 ```rust
-pub struct Space {
-    credential: Credential,
-    store: ComposedStore,
-}
+#[derive(Provider)]
+pub struct Space<Index, Blob, Memory, Cred, Permit> {
+    #[provide(archive::Get)]
+    index: Index,
 
-impl Space {
-    /// Load an existing space from an address.
-    pub async fn load(address: impl Into<SpaceAddress>) -> Result<Space, SpaceError>;
+    #[provide(archive::Put)]
+    blob: Blob,
 
-    /// Create a new space at an address (generates credential).
-    pub async fn create(address: impl Into<SpaceAddress>) -> Result<Space, SpaceError>;
+    #[provide(memory::Resolve, memory::Publish, memory::Retract)]
+    memory: Memory,
 
-    /// Load or create.
-    pub async fn open(address: impl Into<SpaceAddress>) -> Result<Space, SpaceError>;
+    #[provide(credential::Load, credential::Save)]
+    credential: Cred,
 
-    pub fn did(&self) -> Did { self.credential.did() }
-    pub fn credential(&self) -> &Credential { &self.credential }
-}
-```
-
-`Space::load` opens the backend at the address, reads the credential from a well-known path, and returns the space. No DID routing needed since the store is addressed directly.
-
-### SpaceAddress
-
-Platform-specific address that determines the backend:
-
-```rust
-// Native
-SpaceAddress::FileSystem(path)      // single directory
-// Web  
-SpaceAddress::IndexedDb(name)       // single IDB database + OPFS
-// In-memory
-SpaceAddress::Volatile(prefix)      // HashMap
-```
-
-Convenience constructors:
-
-```rust
-SpaceAddress::profile("work")    // ~/.dialog/profiles/work (native), profile/work (web)
-SpaceAddress::current("myapp")   // ./.dialog/myapp (native), storage/myapp (web)
-SpaceAddress::temp("scratch")    // /tmp/.dialog/scratch (native), temp/scratch (web)
-```
-
-### ComposedStore
-
-The store backing a space. Provides archive, memory, permit, and credential effects. Composition is configurable:
-
-```rust
-pub struct ComposedStore {
-    archive: ArchiveProvider,
-    memory: MemoryProvider,
-    permit: PermitProvider,
-    credential: CredentialProvider,
+    #[provide(access::Claim, access::Save)]
+    permit: Permit,
 }
 ```
 
-Default: all backed by the same platform store (FileStore/IDB/Volatile). Custom compositions allow different backends per concern (e.g., archive on compressed storage, memory on fast cache).
+`#[derive(Provider)]` generates capability dispatch: `archive::Get` goes to `index`, `memory::Resolve` goes to `memory`, etc.
 
-### Storage (Router)
+### Storage
 
-Maps DIDs to Spaces. Configured with address factories for different space types:
+Holds factories (configuration) and a DID router (runtime state). Generic over factory types with platform defaults:
 
 ```rust
-pub struct Storage {
-    spaces: HashMap<Did, Space>,
+pub struct Storage<IF, BF, MF, CF, PF> {
+    index_factory: IF,
+    blob_factory: BF,
+    memory_factory: MF,
+    credential_factory: CF,
+    permit_factory: PF,
+    router: HashMap<Did, Space<IF::Provider, BF::Provider, MF::Provider, CF::Provider, PF::Provider>>,
 }
+```
 
-impl Storage {
-    pub fn new() -> Self;
-    pub fn mount(&mut self, space: Space);
-    // Routes effects by subject DID to the space's composed store
+Storage routes effects by Subject DID to the matching Space, which routes by capability to the right provider.
+
+## Mounting
+
+```rust
+impl<IF: Factory, BF: Factory, MF: Factory, CF: Factory, PF: Factory> Storage<IF, BF, MF, CF, PF> {
+    pub async fn mount(&mut self, location: &Location) -> Result<Did, Error> {
+        // Create providers from factories
+        let space = Space {
+            index: self.index_factory.create(location),
+            blob: self.blob_factory.create(location),
+            memory: self.memory_factory.create(location),
+            credential: self.credential_factory.create(location),
+            permit: self.permit_factory.create(location),
+        };
+
+        // Read credential directly from the credential provider
+        // No DID routing needed, direct provider access
+        let credential = space.credential.load("credential").await?;
+        let did = credential.did();
+
+        self.router.insert(did, space);
+        Ok(did)
+    }
 }
+```
+
+No bootstrap DID hack. The credential is read directly from the provider before registering in the router.
+
+## Platform Defaults
+
+```rust
+#[cfg(not(target_arch = "wasm32"))]
+type DefaultStorage = Storage<FsFactory, FsFactory, FsFactory, FsFactory, FsFactory>;
+
+#[cfg(target_arch = "wasm32")]
+type DefaultStorage = Storage<IdbFactory, OpfsFactory, IdbFactory, IdbFactory, IdbFactory>;
+
+impl DefaultStorage {
+    pub fn new() -> Self {
+        Self {
+            index_factory: FsFactory::new("archive/index"),
+            blob_factory: FsFactory::new("archive/blob"),
+            memory_factory: FsFactory::new("memory"),
+            credential_factory: FsFactory::new("credential"),
+            permit_factory: FsFactory::new("permit"),
+            router: HashMap::new(),
+        }
+    }
+}
+```
+
+Custom configuration:
+
+```rust
+let storage = Storage::new()
+    .index(IdbFactory::new("archive/index"))
+    .blob(OpfsFactory::new("archive/blob"))
+    .memory(IdbFactory::new("memory"))
+    .credential(IdbFactory::new("credential"))
+    .permit(IdbFactory::new("permit"));
 ```
 
 ## Setup Flow
 
 ```rust
-// 1. Open profile space (direct address, no routing needed)
-let profile_space = Space::open(SpaceAddress::profile("work")).await?;
-let profile = Profile::try_from(&profile_space)?;
+// Default storage for the platform
+let mut storage = Storage::default();
 
-// 2. Build operator with storage router
-let mut storage = Storage::new();
-storage.mount(profile_space);
+// Open profile (mounts location, reads credential, registers DID)
+let profile = Profile::open(Location::profile("alice"))
+    .perform(&mut storage)
+    .await?;
 
+// Build operator
 let operator = profile
     .derive(b"alice")
     .network(Remote)
-    .build(storage)?;
+    .build(&mut storage)?;
 
-// 3. Open repos through operator (registers in storage)
-let repo = Repository::open(SpaceAddress::current("contacts"))
-    .perform(&operator)
+// Open repository
+let repo = Repository::open(Location::workspace("contacts"))
+    .perform(&mut storage)
     .await?;
 ```
 
-## Profile and Repository
-
-Profile and Repository become thin wrappers over Space:
+Profile::open and Repository::open just call `storage.mount(location)` and wrap the result:
 
 ```rust
 impl Profile {
-    pub fn try_from(space: &Space) -> Result<Profile, ProfileError> {
-        match space.credential() {
-            Credential::Signer(s) => Ok(Profile { credential: s.clone(), ... }),
+    pub async fn open(location: Location) -> OpenProfile {
+        OpenProfile { location, mode: OpenOrCreate }
+    }
+}
+
+impl OpenProfile {
+    pub async fn perform<S>(self, storage: &mut S) -> Result<Profile, ProfileError> {
+        let did = storage.mount(&self.location).await?;
+        let space = storage.get(&did);
+        let credential = space.credential();
+        match credential {
+            Credential::Signer(s) => Ok(Profile { credential: s, did }),
             Credential::Verifier(_) => Err(ProfileError::Key("verifier-only")),
         }
     }
 }
-
-impl Repository {
-    pub fn from(space: &Space) -> Repository {
-        // Always succeeds, repos work with any credential
-        Repository { credential: space.credential().clone(), ... }
-    }
-}
 ```
 
-## Space Composition
+## Two Levels of Dispatch
 
-Default composition uses a single platform backend:
-
-```rust
-Space::open(SpaceAddress::profile("work")).await?
-// All effects backed by FileStore at ~/.dialog/profiles/work/
 ```
-
-Custom composition for advanced use cases:
-
-```rust
-Space::builder(SpaceAddress::profile("work"))
-    .archive(CompressedFileStore::new(path))
-    .memory(CachedStore::new(volatile, file_backed))
-    .build()
-    .await?
+Effect arrives with Subject DID
+  |
+  v
+Storage routes by DID -> Space
+  |
+  v
+Space routes by capability -> Provider
+  |
+  v
+Provider executes the effect
 ```
 
 ## On-Disk Layout (FileSystem)
 
 ```
-~/.dialog/profiles/work/
-  credential          # Ed25519 keypair (multicodec)
-  archive/
-    {catalog}/
-      {digest}        # content-addressed blobs
-  memory/
-    {space}/
-      {cell}          # cell values (CBOR)
-  permit/
-    {audience}/
-      {subject}/
-        {issuer}.{hash}  # delegation proofs
+~/Library/.../dialog/alice/        <- Location::Profile("alice")
+  credential/                      <- credential factory path
+  archive/index/                   <- index factory path
+  archive/blob/                    <- blob factory path
+  memory/                          <- memory factory path
+  permit/                          <- permit factory path
 ```
 
-## On-Web Layout (IndexedDB)
+## On-Web Layout (IndexedDB + OPFS)
 
-Database: `profile/work`
+Database: `alice.profile`          <- IdbAddress::from(Location::Profile("alice"))
 Object stores:
-- `credential` (key: path, value: CryptoKeyPair JsValue)
-- `archive` (key: `{catalog}/{digest}`, value: Uint8Array)
-- `memory` (key: `{space}/{cell}`, value: Uint8Array)
-- `permit` (key: `{audience}/{subject}/{issuer}.{hash}`, value: Uint8Array)
+- `credential`                     <- credential factory store name
+- `archive/index`                  <- index factory store name
+- `memory`                         <- memory factory store name
+- `permit`                         <- permit factory store name
 
-## Open Questions
-
-- Should Space::open take a builder/config for composition, or is the default always single-backend?
-- How does temp storage work? Volatile space that gets mounted but never persisted?
-- Should Storage be the thing that knows about platform defaults, or should SpaceAddress constructors handle that?
-- How does the operator builder interact with Storage? Currently it takes Storage and creates delegations. With this design, delegations would be stored in the profile space's permit store.
+OPFS:
+- `/dialog/profile/alice/archive/blob/`  <- OpfsAddress::from(loc) + blob factory path
