@@ -37,5 +37,8 @@ pub use indexeddb::*;
 pub mod volatile;
 pub use volatile::Volatile;
 
+pub mod location;
+pub mod space;
+
 mod store;
 pub use store::{Address, Store};
