@@ -46,10 +46,12 @@ mod archive;
 mod authorize;
 mod credential;
 mod error;
+mod factory;
 mod memory;
 mod mount;
 
 pub use error::FileSystemError;
+pub use factory::FileSystemFactory;
 
 use dialog_capability::Did;
 use serde::{Deserialize, Serialize};

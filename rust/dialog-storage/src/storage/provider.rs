@@ -38,6 +38,7 @@ pub mod volatile;
 pub use volatile::Volatile;
 
 pub mod location;
+pub mod router;
 pub mod space;
 
 mod store;

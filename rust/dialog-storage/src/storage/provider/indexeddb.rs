@@ -42,8 +42,11 @@
 mod archive;
 mod authorize;
 mod credential;
+mod factory;
 mod memory;
 mod mount;
+
+pub use factory::IndexedDbFactory;
 
 use dialog_capability::Did;
 use js_sys::Uint8Array;
