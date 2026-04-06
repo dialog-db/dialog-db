@@ -1,27 +1,25 @@
-//! Storage capability hierarchy for mounting spaces.
+//! Storage capability hierarchy for loading and creating spaces.
 //!
 //! A space is a self-contained storage unit with its own identity.
-//! The storage hierarchy provides capabilities for mounting (loading)
-//! and creating spaces at different locations.
+//! The storage hierarchy provides capabilities for loading existing
+//! spaces and creating new ones at different locations.
 //!
 //! # Capability Hierarchy
 //!
 //! ```text
-//! Subject -> Storage -> Profile { name }      -> Mount / Create
-//!                    -> Space { name }        -> Mount / Create
-//!                    -> Location { uri }      -> Mount / Create
+//! Subject -> Storage -> Profile { name }      -> Load / Create
+//!                    -> Space { name }        -> Load / Create
+//!                    -> Location { uri }      -> Load / Create
 //! ```
 //!
-//! After a space is mounted, its DID routes to archive, memory,
+//! After a space is loaded, its DID routes to archive, memory,
 //! credential, and delegation capabilities.
 
-use dialog_capability::{Attenuation, Capability, Claim, Constraint, Did, Effect, Subject, did};
+use dialog_capability::{Attenuation, Capability, Constraint, Did, Effect, Subject};
 use dialog_common::ConditionalSend;
 use dialog_credentials::Credential;
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
-
-pub use dialog_capability::storage::StorageError;
 
 /// Root attenuation for storage operations.
 ///
@@ -36,21 +34,21 @@ impl Attenuation for Storage {
 impl Storage {
     /// Build a capability chain for a profile space.
     pub fn profile(name: impl Into<String>) -> Capability<Profile> {
-        Subject::from(did!("local:storage"))
+        Subject::from(dialog_capability::did!("local:storage"))
             .attenuate(Storage)
             .attenuate(Profile::new(name))
     }
 
     /// Build a capability chain for a project space.
     pub fn space(name: impl Into<String>) -> Capability<Space> {
-        Subject::from(did!("local:storage"))
+        Subject::from(dialog_capability::did!("local:storage"))
             .attenuate(Storage)
             .attenuate(Space::new(name))
     }
 
     /// Build a capability chain for a space at an explicit URI.
     pub fn location(uri: impl Into<String>) -> Capability<Location> {
-        Subject::from(did!("local:storage"))
+        Subject::from(dialog_capability::did!("local:storage"))
             .attenuate(Storage)
             .attenuate(Location::new(uri))
     }
@@ -121,19 +119,21 @@ impl Attenuation for Location {
     type Of = Storage;
 }
 
-/// Mount effect: reads identity from the location and registers the
-/// space in the routing table.
+/// Load an existing space by reading its identity from the location.
 ///
-/// Generic over the attenuation type so `Mount<Profile>`, `Mount<Space>`,
-/// and `Mount<Location>` are distinct effect types with shared behavior.
-#[derive(Debug, Clone, Serialize, Deserialize, Claim)]
-pub struct Mount<T> {
+/// Generic over the attenuation type so `Load<Profile>`, `Load<Space>`,
+/// and `Load<Location>` are distinct effect types with shared behavior.
+///
+/// The environment reads the credential at the resolved location,
+/// registers the DID in its routing table, and returns the DID.
+#[derive(Debug, Clone, Serialize, Deserialize, dialog_capability::Claim)]
+pub struct Load<T> {
     #[serde(skip)]
     _marker: PhantomData<T>,
 }
 
-impl<T> Mount<T> {
-    /// Create a new mount effect.
+impl<T> Load<T> {
+    /// Create a new load effect.
     pub fn new() -> Self {
         Self {
             _marker: PhantomData,
@@ -141,27 +141,27 @@ impl<T> Mount<T> {
     }
 }
 
-impl<T> Default for Mount<T> {
+impl<T> Default for Load<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T> Effect for Mount<T>
+impl<T> Effect for Load<T>
 where
     T: Constraint + ConditionalSend + 'static,
 {
     type Of = T;
-    type Output = Result<Did, MountError>;
+    type Output = Result<Did, StorageError>;
 }
 
 /// Create a new space with the given credential at a location.
 ///
-/// Writes the credential to the resolved location and mounts
-/// the space in the routing table.
+/// Writes the credential to the resolved location, registers the
+/// DID in the routing table, and returns the DID.
 ///
 /// Errors if a space already exists at the location.
-#[derive(Debug, Clone, Serialize, Deserialize, Claim)]
+#[derive(Debug, Clone, Serialize, Deserialize, dialog_capability::Claim)]
 pub struct Create<T> {
     /// The credential to store at the new space.
     pub credential: Credential,
@@ -184,12 +184,12 @@ where
     T: Constraint + ConditionalSend + 'static,
 {
     type Of = T;
-    type Output = Result<Did, MountError>;
+    type Output = Result<Did, StorageError>;
 }
 
-/// Errors during space mount/create operations.
+/// Errors during storage operations (load, create).
 #[derive(Debug, thiserror::Error)]
-pub enum MountError {
+pub enum StorageError {
     /// No space found at the resolved location.
     #[error("Space not found: {0}")]
     NotFound(String),
@@ -198,7 +198,7 @@ pub enum MountError {
     #[error("Space already exists: {0}")]
     AlreadyExists(String),
 
-    /// Storage backend error.
+    /// Backend storage error.
     #[error("Storage error: {0}")]
     Storage(String),
 

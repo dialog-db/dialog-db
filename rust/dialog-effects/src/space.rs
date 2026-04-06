@@ -2,4 +2,4 @@
 //!
 //! See [`storage`](super::storage) for the full hierarchy.
 
-pub use super::storage::{Create, Location, Mount, MountError, Profile, Space, Storage};
+pub use super::storage::{Create, Load, Location, Profile, Space, Storage, StorageError};
