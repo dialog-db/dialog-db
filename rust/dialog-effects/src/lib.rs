@@ -30,6 +30,7 @@
 pub mod archive;
 pub mod credential;
 pub mod memory;
+pub mod space;
 pub mod storage;
 
 // Re-export capability primitives for convenience
