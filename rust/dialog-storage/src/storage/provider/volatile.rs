@@ -37,11 +37,8 @@
 mod archive;
 mod authorize;
 mod credential;
-mod factory;
 mod memory;
 mod mount;
-
-pub use factory::VolatileFactory;
 
 use dialog_capability::Did;
 use dialog_credentials::credential::CredentialExport;

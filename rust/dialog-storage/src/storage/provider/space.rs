@@ -1,32 +1,53 @@
-//! Space: a composed set of providers created from a Location.
+//! MountedSpace: a composed set of providers for a mounted space.
 //!
-//! A Space is the product of mounting a Location with a set of factories.
-//! It routes capabilities to the appropriate provider.
+//! Routes capabilities to the appropriate provider field.
 
+use dialog_capability::Provider;
 use dialog_capability::access::{AuthorizeError, Claim, Protocol, Save as AccessSave};
 use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_effects::{archive, credential, memory};
 
-use super::location::Location;
-
-/// Factory that creates a provider from a location.
+/// Trait for types that can serve as a mounted space provider.
 ///
-/// Each backend type (FileStore, IndexedDb, Volatile) implements this
-/// with its own address resolution logic.
-pub trait Factory: ConditionalSend + ConditionalSync {
-    /// The provider this factory creates.
-    type Provider: ConditionalSend + ConditionalSync;
-
-    /// Create a provider for the given location.
-    fn create(&self, location: &Location) -> Self::Provider;
+/// Combines all the Provider impls needed to back a space:
+/// archive, memory, credential, and delegation effects.
+pub trait SpaceProvider:
+    Provider<archive::Get>
+    + Provider<archive::Put>
+    + Provider<memory::Resolve>
+    + Provider<memory::Publish>
+    + Provider<memory::Retract>
+    + Provider<credential::Load>
+    + Provider<credential::Save>
+    + ConditionalSend
+    + ConditionalSync
+    + Clone
+    + 'static
+{
 }
 
-/// A composed set of providers for a single mounted location.
+impl<T> SpaceProvider for T where
+    T: Provider<archive::Get>
+        + Provider<archive::Put>
+        + Provider<memory::Resolve>
+        + Provider<memory::Publish>
+        + Provider<memory::Retract>
+        + Provider<credential::Load>
+        + Provider<credential::Save>
+        + ConditionalSend
+        + ConditionalSync
+        + Clone
+        + 'static
+{
+}
+
+/// A composed set of providers for a single mounted space.
 ///
 /// Routes capabilities to the appropriate provider field via
 /// `#[derive(Provider)]`. Permit routing for `Claim<P>`/`Save<P>` is
 /// handled by manual impls since they're generic over `Protocol`.
-#[derive(dialog_capability::Provider)]
-pub struct Space<Archive, Memory, Cred, Permit> {
+#[derive(Clone, dialog_capability::Provider)]
+pub struct MountedSpace<Archive, Memory, Cred, Permit> {
     // TODO: Split archive into separate Index and Blob providers
     // (archive::Index::Get/Put and archive::Blob::Get/Put)
     /// Archive operations (content-addressed index and blob storage).
@@ -52,7 +73,7 @@ pub struct Space<Archive, Memory, Cred, Permit> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<Archive, Memory, Cred, Permit, P> dialog_capability::Provider<Claim<P>>
-    for Space<Archive, Memory, Cred, Permit>
+    for MountedSpace<Archive, Memory, Cred, Permit>
 where
     P: Protocol,
     P::Access: Clone + ConditionalSend + ConditionalSync,
@@ -74,7 +95,7 @@ where
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<Archive, Memory, Cred, Permit, P> dialog_capability::Provider<AccessSave<P>>
-    for Space<Archive, Memory, Cred, Permit>
+    for MountedSpace<Archive, Memory, Cred, Permit>
 where
     P: Protocol,
     P::Delegation: ConditionalSend + ConditionalSync,

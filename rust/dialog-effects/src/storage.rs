@@ -1,25 +1,19 @@
-//! Storage capability hierarchy for loading and creating spaces.
+//! Storage capability hierarchy for bootstrap space operations.
 //!
-//! A space is a self-contained storage unit with its own identity.
-//! The storage hierarchy provides capabilities for loading existing
-//! spaces and creating new ones at different locations.
+//! System-level capabilities for loading and creating spaces at
+//! explicit locations. Used during bootstrap before the operator
+//! is built. After bootstrap, use [`space`](super::space) capabilities
+//! which resolve names relative to the operator's base directory.
 //!
 //! # Capability Hierarchy
 //!
 //! ```text
-//! Subject -> Storage -> Profile { name }      -> Load / Create
-//!                    -> Space { name }        -> Load / Create
-//!                    -> Location { uri }      -> Load / Create
+//! Subject -> Storage -> Location { directory, name } -> Load / Create
 //! ```
-//!
-//! After a space is loaded, its DID routes to archive, memory,
-//! credential, and delegation capabilities.
 
-use dialog_capability::{Attenuation, Capability, Constraint, Did, Effect, Subject};
-use dialog_common::ConditionalSend;
-use dialog_credentials::Credential;
+use dialog_capability::{Attenuation, Did, Effect, Subject};
 use serde::{Deserialize, Serialize};
-use std::marker::PhantomData;
+use thiserror::Error;
 
 /// Root attenuation for storage operations.
 ///
@@ -31,87 +25,77 @@ impl Attenuation for Storage {
     type Of = Subject;
 }
 
-impl Storage {
-    /// Build a capability chain for a profile space.
-    pub fn profile(name: impl Into<String>) -> Capability<Profile> {
-        Subject::from(dialog_capability::did!("local:storage"))
-            .attenuate(Storage)
-            .attenuate(Profile::new(name))
-    }
+/// Directory category for platform-specific address resolution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum Directory {
+    /// User profile storage.
+    ///
+    /// Resolves to:
+    /// - FS: `~/Library/Application Support/dialog/` (macOS),
+    ///   `~/.local/share/dialog/` (Linux)
+    /// - IDB: database prefix `.profile`
+    Profile,
 
-    /// Build a capability chain for a project space.
-    pub fn space(name: impl Into<String>) -> Capability<Space> {
-        Subject::from(dialog_capability::did!("local:storage"))
-            .attenuate(Storage)
-            .attenuate(Space::new(name))
-    }
+    /// Working directory storage.
+    ///
+    /// Resolves to:
+    /// - FS: `$PWD/`
+    /// - IDB: no prefix
+    Current,
 
-    /// Build a capability chain for a space at an explicit URI.
-    pub fn location(uri: impl Into<String>) -> Capability<Location> {
-        Subject::from(dialog_capability::did!("local:storage"))
-            .attenuate(Storage)
-            .attenuate(Location::new(uri))
-    }
+    /// Temporary storage.
+    ///
+    /// Resolves to:
+    /// - FS: platform temp dir
+    /// - IDB: database prefix `temp.`
+    Temp,
+
+    /// Custom path.
+    At(String),
 }
 
-/// Profile space attenuation.
+/// A resolved location: directory + name.
 ///
-/// Resolves to platform-specific profile storage:
-/// - FS: `~/Library/Application Support/dialog/{name}/` (macOS),
-///   `~/.local/share/dialog/{name}/` (Linux)
-/// - IDB: database `{name}.profile`
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Profile {
-    /// Profile name.
-    pub name: String,
-}
-
-impl Profile {
-    /// Create a new profile attenuation.
-    pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into() }
-    }
-}
-
-impl Attenuation for Profile {
-    type Of = Storage;
-}
-
-/// Project space attenuation.
-///
-/// Resolves to platform-specific workspace storage:
-/// - FS: `$PWD/{name}/.dialog/`
-/// - IDB: database `{name}`
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Space {
-    /// Space name.
-    pub name: String,
-}
-
-impl Space {
-    /// Create a new space attenuation.
-    pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into() }
-    }
-}
-
-impl Attenuation for Space {
-    type Of = Storage;
-}
-
-/// Explicit location attenuation.
-///
-/// Resolves to the address specified by the URI.
+/// Used as a policy in the storage capability chain. The provider
+/// resolves this to a platform-specific address.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Location {
-    /// URI identifying the storage location.
-    pub uri: String,
+    /// The directory category.
+    pub directory: Directory,
+    /// The name within the directory.
+    pub name: String,
 }
 
 impl Location {
-    /// Create a new explicit location.
-    pub fn new(uri: impl Into<String>) -> Self {
-        Self { uri: uri.into() }
+    /// Create a location.
+    pub fn new(directory: Directory, name: impl Into<String>) -> Self {
+        Self {
+            directory,
+            name: name.into(),
+        }
+    }
+
+    /// Profile location.
+    pub fn profile(name: impl Into<String>) -> Self {
+        Self::new(Directory::Profile, name)
+    }
+
+    /// Current directory location.
+    pub fn current(name: impl Into<String>) -> Self {
+        Self::new(Directory::Current, name)
+    }
+
+    /// Temp location.
+    pub fn temp(name: impl Into<String>) -> Self {
+        Self::new(Directory::Temp, name)
+    }
+
+    /// Explicit path location.
+    pub fn at(path: impl Into<String>) -> Self {
+        Self {
+            directory: Directory::At(path.into()),
+            name: String::new(),
+        }
     }
 }
 
@@ -119,76 +103,41 @@ impl Attenuation for Location {
     type Of = Storage;
 }
 
-/// Load an existing space by reading its identity from the location.
+/// Load an existing space from a location.
 ///
-/// Generic over the attenuation type so `Load<Profile>`, `Load<Space>`,
-/// and `Load<Location>` are distinct effect types with shared behavior.
-///
-/// The environment reads the credential at the resolved location,
-/// registers the DID in its routing table, and returns the DID.
+/// Reads the identity from the resolved location and returns the DID.
+/// The provider handles the credential reading internally.
 #[derive(Debug, Clone, Serialize, Deserialize, dialog_capability::Claim)]
-pub struct Load<T> {
-    #[serde(skip)]
-    _marker: PhantomData<T>,
-}
+pub struct Load;
 
-impl<T> Load<T> {
-    /// Create a new load effect.
-    pub fn new() -> Self {
-        Self {
-            _marker: PhantomData,
-        }
-    }
-}
-
-impl<T> Default for Load<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<T> Effect for Load<T>
-where
-    T: Constraint + ConditionalSend + 'static,
-{
-    type Of = T;
+impl Effect for Load {
+    type Of = Location;
     type Output = Result<Did, StorageError>;
 }
 
-/// Create a new space with the given credential at a location.
+/// Create a new space at a location with the given credential.
 ///
-/// Writes the credential to the resolved location, registers the
-/// DID in the routing table, and returns the DID.
-///
-/// Errors if a space already exists at the location.
+/// Writes the credential to the resolved location and returns the DID.
 #[derive(Debug, Clone, Serialize, Deserialize, dialog_capability::Claim)]
-pub struct Create<T> {
-    /// The credential to store at the new space.
-    pub credential: Credential,
-    #[serde(skip)]
-    _marker: PhantomData<T>,
+pub struct Create {
+    /// The credential establishing the space's identity.
+    pub credential: dialog_credentials::Credential,
 }
 
-impl<T> Create<T> {
+impl Create {
     /// Create a new space creation effect.
-    pub fn new(credential: Credential) -> Self {
-        Self {
-            credential,
-            _marker: PhantomData,
-        }
+    pub fn new(credential: dialog_credentials::Credential) -> Self {
+        Self { credential }
     }
 }
 
-impl<T> Effect for Create<T>
-where
-    T: Constraint + ConditionalSend + 'static,
-{
-    type Of = T;
+impl Effect for Create {
+    type Of = Location;
     type Output = Result<Did, StorageError>;
 }
 
-/// Errors during storage operations (load, create).
-#[derive(Debug, thiserror::Error)]
+/// Errors during storage operations.
+#[derive(Debug, Error)]
 pub enum StorageError {
     /// No space found at the resolved location.
     #[error("Space not found: {0}")]
@@ -205,4 +154,35 @@ pub enum StorageError {
     /// The credential at the location is invalid.
     #[error("Invalid credential: {0}")]
     InvalidCredential(String),
+}
+
+/// Sugar: build a storage capability chain for a profile.
+impl Storage {
+    /// Build a capability chain for loading/creating a profile space.
+    pub fn profile(name: impl Into<String>) -> dialog_capability::Capability<Location> {
+        Subject::from(dialog_capability::did!("local:storage"))
+            .attenuate(Storage)
+            .attenuate(Location::profile(name))
+    }
+
+    /// Build a capability chain for loading/creating a current-dir space.
+    pub fn current(name: impl Into<String>) -> dialog_capability::Capability<Location> {
+        Subject::from(dialog_capability::did!("local:storage"))
+            .attenuate(Storage)
+            .attenuate(Location::current(name))
+    }
+
+    /// Build a capability chain for loading/creating a temp space.
+    pub fn temp(name: impl Into<String>) -> dialog_capability::Capability<Location> {
+        Subject::from(dialog_capability::did!("local:storage"))
+            .attenuate(Storage)
+            .attenuate(Location::temp(name))
+    }
+
+    /// Build a capability chain for loading/creating at an explicit path.
+    pub fn at(path: impl Into<String>) -> dialog_capability::Capability<Location> {
+        Subject::from(dialog_capability::did!("local:storage"))
+            .attenuate(Storage)
+            .attenuate(Location::at(path))
+    }
 }

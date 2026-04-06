@@ -3,15 +3,15 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use dialog_capability::{Capability, Did, Policy, Provider};
+use dialog_capability::{Capability, Did, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use parking_lot::RwLock;
 
 /// Environment: the runtime context for capability dispatch.
 ///
-/// Handles `Load<Profile>`, `Load<Space>`, etc. by creating providers
-/// and registering them by DID. Routes all other effects by subject
-/// DID to the matching store.
+/// Routes effects by subject DID to the matching store `S`.
+/// `S` is typically a [`MountedSpace`](super::space::MountedSpace) but
+/// can be any type implementing the required Provider traits.
 pub struct Environment<S> {
     spaces: RwLock<HashMap<Did, S>>,
 }
@@ -72,45 +72,21 @@ where
     }
 }
 
-/// Provider<Load<Profile>> for Environment<Volatile>:
-/// creates a Volatile store, reads credential, registers by DID.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<dialog_effects::storage::Load<dialog_effects::storage::Profile>>
-    for Environment<super::Volatile>
-{
-    async fn execute(
-        &self,
-        input: Capability<dialog_effects::storage::Load<dialog_effects::storage::Profile>>,
-    ) -> Result<Did, dialog_effects::storage::StorageError> {
-        use dialog_effects::storage::{Profile, StorageError};
+/// Volatile-backed environment.
+pub type VolatileEnvironment = Environment<
+    super::space::MountedSpace<super::Volatile, super::Volatile, super::Volatile, super::Volatile>,
+>;
 
-        let name = &Profile::of(&input).name;
-
-        // Create a volatile store for this profile
-        let address = super::volatile::Address::new(format!("profile/{name}"));
-        let store = super::Volatile::mount(&address);
-
-        // Read credential from the store
-        let cred_cap = dialog_capability::Subject::from(dialog_capability::did!("local:storage"))
-            .attenuate(dialog_effects::credential::Credential)
-            .attenuate(dialog_effects::credential::Address::new("credential/self"))
-            .invoke(dialog_effects::credential::Load);
-
-        let credential: dialog_credentials::Credential = <super::Volatile as Provider<
-            dialog_effects::credential::Load,
-        >>::execute(&store, cred_cap)
-        .await
-        .map_err(|e| StorageError::NotFound(e.to_string()))?;
-
-        let did = dialog_varsig::Principal::did(&credential);
-        self.register(did.clone(), store);
-        Ok(did)
+impl VolatileEnvironment {
+    /// Create a new volatile environment for testing.
+    pub fn volatile() -> Self {
+        Self::new()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::space::MountedSpace;
     use super::*;
     use crate::provider::Volatile;
     use dialog_capability::{Subject, did};
@@ -119,9 +95,7 @@ mod tests {
     use dialog_effects::credential as cred_fx;
     use dialog_varsig::Principal;
 
-    type TestEnv = Environment<Volatile>;
-
-    async fn mount_with_credential(env: &TestEnv) -> Did {
+    async fn seed_and_register(env: &VolatileEnvironment) -> Did {
         let provider = Volatile::new();
 
         let signer = Ed25519Signer::generate().await.unwrap();
@@ -134,14 +108,20 @@ mod tests {
             .invoke(cred_fx::Save { credential });
         save_cap.perform(&provider).await.unwrap();
 
-        env.register(did.clone(), provider);
+        let space = MountedSpace {
+            archive: provider.clone(),
+            memory: provider.clone(),
+            credential: provider.clone(),
+            permit: provider,
+        };
+        env.register(did.clone(), space);
         did
     }
 
     #[dialog_common::test]
     async fn it_routes_archive_effects_by_did() {
-        let env = TestEnv::new();
-        let did = mount_with_credential(&env).await;
+        let env = VolatileEnvironment::volatile();
+        let did = seed_and_register(&env).await;
 
         let content = b"hello world".to_vec();
         let digest = dialog_common::Blake3Hash::hash(&content);
@@ -165,7 +145,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_errors_for_unmounted_did() {
-        let env = TestEnv::new();
+        let env = VolatileEnvironment::volatile();
 
         let result = Subject::from(did!("key:zUnknown"))
             .attenuate(Archive)
@@ -177,35 +157,28 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_loads_profile_via_capability() {
-        let env = TestEnv::new();
+    async fn it_isolates_spaces_by_did() {
+        let env = VolatileEnvironment::volatile();
+        let did1 = seed_and_register(&env).await;
+        let did2 = seed_and_register(&env).await;
 
-        // First, manually create a profile space with a credential
-        let signer = Ed25519Signer::generate().await.unwrap();
-        let profile_did = Principal::did(&signer);
-        let credential = dialog_credentials::Credential::Signer(SignerCredential::from(signer));
+        let content = b"did1 data".to_vec();
+        let digest = dialog_common::Blake3Hash::hash(&content);
 
-        // Create a volatile store and save the credential
-        let address = crate::provider::volatile::Address::new("profile/alice");
-        let store = Volatile::mount(&address);
+        Subject::from(did1)
+            .attenuate(Archive)
+            .attenuate(Catalog::new("index"))
+            .invoke(Put::new(digest.clone(), content))
+            .perform(&env)
+            .await
+            .unwrap();
 
-        let save_cap = Subject::from(did!("local:storage"))
-            .attenuate(cred_fx::Credential)
-            .attenuate(cred_fx::Address::new("credential/self"))
-            .invoke(cred_fx::Save { credential });
-        save_cap.perform(&store).await.unwrap();
-
-        // Register it so the Load provider can find it
-        // (In practice, the Load provider creates the store itself,
-        // but for Volatile the store created by the factory would be
-        // different from the one we seeded. So we pre-register.)
-        env.register(profile_did.clone(), store);
-
-        // Now load via the capability chain
-        // Note: this test verifies the capability chain builds correctly.
-        // The actual Load provider for Volatile has a bootstrapping issue
-        // (factory creates a fresh empty store). Full integration needs
-        // persistent backends.
-        assert!(env.contains(&profile_did));
+        let result = Subject::from(did2)
+            .attenuate(Archive)
+            .attenuate(Catalog::new("index"))
+            .invoke(Get::new(digest))
+            .perform(&env)
+            .await;
+        assert_eq!(result.unwrap(), None, "did2 should not see did1's data");
     }
 }
