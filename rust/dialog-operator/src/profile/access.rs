@@ -7,7 +7,7 @@ use dialog_capability::{Ability, Capability, Constraint, Provider, Subject};
 use dialog_common::ConditionalSync;
 use dialog_credentials::SignerCredential;
 use dialog_ucan::scope::Scope;
-use dialog_ucan::{Ucan, UcanDelegation, UcanPermit};
+use dialog_ucan::{Ucan, UcanDelegation, UcanProof};
 use dialog_ucan_core::time::Timestamp;
 use dialog_varsig::{Did, Principal};
 
@@ -96,7 +96,7 @@ where
     }
 
     /// Execute the claim, returning a proof chain.
-    pub async fn perform<Env>(self, env: &Env) -> Result<UcanPermit, AuthorizeError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<UcanProof, AuthorizeError>
     where
         Env: Provider<access::Prove<Ucan>> + ConditionalSync,
     {

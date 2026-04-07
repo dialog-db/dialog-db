@@ -87,7 +87,7 @@ where
     async fn execute(
         &self,
         input: Capability<ProveUcan>,
-    ) -> Result<dialog_ucan::UcanPermit, AuthorizeError> {
+    ) -> Result<dialog_ucan::UcanProof, AuthorizeError> {
         self.env.execute(input).await
     }
 }

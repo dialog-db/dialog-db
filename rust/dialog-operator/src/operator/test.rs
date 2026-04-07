@@ -61,12 +61,12 @@ mod tests {
         use dialog_capability::access::{self as cap_access, Access, AuthorizeError};
         use dialog_effects::archive::prelude::{ArchiveExt, SubjectExt as ArchiveSubjectExt};
         use dialog_ucan::scope::Scope;
-        use dialog_ucan::{Ucan, UcanPermit};
+        use dialog_ucan::{Ucan, UcanProof};
 
         async fn claim_access(
             operator: &super::super::super::Operator<VolatileSpace>,
             capability: &impl dialog_capability::Ability,
-        ) -> Result<UcanPermit, AuthorizeError> {
+        ) -> Result<UcanProof, AuthorizeError> {
             let scope = Scope::from(capability);
 
             Subject::from(operator.profile_did())

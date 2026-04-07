@@ -17,9 +17,9 @@ use super::scope::Scope;
 /// Implements [`Delegation`](access::Delegation) for generic chain verification.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
-pub struct UcanProof(pub dialog_ucan_core::Delegation<Ed25519Signature>);
+pub struct UcanCertificate(pub dialog_ucan_core::Delegation<Ed25519Signature>);
 
-impl access::Certificate for UcanProof {
+impl access::Certificate for UcanCertificate {
     type Access = Scope;
 
     fn issuer(&self) -> &Did {
@@ -84,14 +84,14 @@ impl access::Certificate for UcanProof {
 /// Built incrementally: create with `new(scope)`, push proofs
 /// as the chain is walked, then `claim(signer)` to authorize.
 #[derive(serde::Serialize, serde::Deserialize)]
-pub struct UcanPermit {
+pub struct UcanProof {
     /// The collected proofs (individual delegations).
-    pub proofs: Vec<UcanProof>,
+    pub proofs: Vec<UcanCertificate>,
     /// The scope of access being authorized.
     pub scope: Scope,
 }
 
-impl UcanPermit {
+impl UcanProof {
     /// Build a permit from a delegation chain and scope.
     ///
     /// Used when importing externally-built delegation chains.
@@ -99,13 +99,13 @@ impl UcanPermit {
         let proofs = chain
             .delegations()
             .values()
-            .map(|d| UcanProof(d.as_ref().clone()))
+            .map(|d| UcanCertificate(d.as_ref().clone()))
             .collect();
         Self { proofs, scope }
     }
 }
 
-impl access::Proof<Ucan> for UcanPermit {
+impl access::Proof<Ucan> for UcanProof {
     fn new(access: Scope) -> Self {
         Self {
             proofs: Vec::new(),
@@ -117,11 +117,11 @@ impl access::Proof<Ucan> for UcanPermit {
         &self.scope
     }
 
-    fn push(&mut self, proof: UcanProof) {
+    fn push(&mut self, proof: UcanCertificate) {
         self.proofs.push(proof);
     }
 
-    fn proofs(&self) -> &[UcanProof] {
+    fn proofs(&self) -> &[UcanCertificate] {
         &self.proofs
     }
 
@@ -150,7 +150,7 @@ impl access::Proof<Ucan> for UcanPermit {
 
 /// Full UCAN authorization — can delegate and invoke.
 ///
-/// Created by [`UcanPermit::claim`]. Holds the verified delegation
+/// Created by [`UcanProof::claim`]. Holds the verified delegation
 /// chain, signer, and scope.
 pub struct UcanAuthorization {
     /// The delegation chain proving authority (None if self-authorized).
@@ -280,13 +280,13 @@ impl From<DelegationChain> for UcanDelegation {
 }
 
 impl access::Delegation for UcanDelegation {
-    type Certificate = UcanProof;
+    type Certificate = UcanCertificate;
 
-    fn certificates(&self) -> Vec<UcanProof> {
+    fn certificates(&self) -> Vec<UcanCertificate> {
         self.0
             .delegations()
             .values()
-            .map(|d| UcanProof(d.as_ref().clone()))
+            .map(|d| UcanCertificate(d.as_ref().clone()))
             .collect()
     }
 }
@@ -294,9 +294,9 @@ impl access::Delegation for UcanDelegation {
 impl access::Protocol for Ucan {
     type Access = Scope;
     type Signer = Ed25519Signer;
-    type Certificate = UcanProof;
+    type Certificate = UcanCertificate;
     type Delegation = UcanDelegation;
     type Invocation = super::UcanInvocation;
-    type Proof = UcanPermit;
+    type Proof = UcanProof;
     type Authorization = UcanAuthorization;
 }

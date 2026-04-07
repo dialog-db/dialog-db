@@ -10,7 +10,7 @@ pub mod parameters;
 pub mod scope;
 
 pub use access::{
-    UcanAuthorization, UcanDelegation, UcanPermit, UcanPermit as UcanProofChain, UcanProof,
+    UcanAuthorization, UcanCertificate, UcanDelegation, UcanProof, UcanProof as UcanProofChain,
 };
 pub use invocation::UcanInvocation;
 pub use parameters::{parameters, parameters_to_args, parameters_to_policy};
