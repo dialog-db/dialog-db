@@ -164,6 +164,31 @@ impl FileSystem {
     }
 }
 
+#[async_trait::async_trait]
+impl crate::resource::Resource<dialog_effects::storage::Location> for FileStore {
+    type Error = FileSystemError;
+
+    async fn open(location: &dialog_effects::storage::Location) -> Result<Self, FileSystemError> {
+        use dialog_effects::storage::Directory;
+        let address = match &location.directory {
+            Directory::Profile => Address::profile(),
+            Directory::Current => Address::current(),
+            Directory::Temp => Address::temp(),
+            Directory::At(path) => url::Url::parse(&format!("file://{path}"))
+                .map(Address)
+                .map_err(|e| FileSystemError::Io(e.to_string()))?,
+        };
+        let address = if location.name.is_empty() {
+            address
+        } else {
+            address
+                .resolve(&location.name)
+                .map_err(|e| FileSystemError::Io(e.to_string()))?
+        };
+        FileSystem::mount(&address)
+    }
+}
+
 /// Mounted filesystem store at a specific root location.
 ///
 /// Filesystem-based storage provider.

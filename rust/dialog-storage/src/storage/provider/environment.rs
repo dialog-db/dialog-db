@@ -449,4 +449,97 @@ mod tests {
 
         assert_eq!(did, profile_did);
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    mod native_tests {
+        use super::*;
+        use dialog_common::time;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        fn unique_name(prefix: &str) -> String {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let ts = time::now()
+                .duration_since(time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+            format!("{prefix}-{ts}-{seq}")
+        }
+
+        type NativeEnv = Environment<NativeSpace>;
+
+        #[dialog_common::test]
+        async fn it_creates_and_loads_on_filesystem() {
+            let env = NativeEnv::default();
+            let name = unique_name("fs-create-load");
+
+            let signer = Ed25519Signer::generate().await.unwrap();
+            let profile_did = Principal::did(&signer);
+            let credential = dialog_credentials::Credential::Signer(SignerCredential::from(signer));
+
+            let did = Storage::temp(&name)
+                .create(credential)
+                .perform(&env)
+                .await
+                .unwrap();
+            assert_eq!(did, profile_did);
+
+            // Load from the same location (reads from disk)
+            let loaded_did = Storage::temp(&name).load().perform(&env).await.unwrap();
+            assert_eq!(loaded_did, profile_did);
+        }
+
+        #[dialog_common::test]
+        async fn it_persists_archive_on_filesystem() {
+            let env = NativeEnv::default();
+            let name = unique_name("fs-archive");
+
+            let signer = Ed25519Signer::generate().await.unwrap();
+            let credential = dialog_credentials::Credential::Signer(SignerCredential::from(signer));
+
+            let did = Storage::temp(&name)
+                .create(credential)
+                .perform(&env)
+                .await
+                .unwrap();
+
+            let content = b"persistent data".to_vec();
+            let digest = dialog_common::Blake3Hash::hash(&content);
+
+            Subject::from(did.clone())
+                .attenuate(Archive)
+                .attenuate(Catalog::new("index"))
+                .invoke(Put::new(digest.clone(), content.clone()))
+                .perform(&env)
+                .await
+                .unwrap();
+
+            let result = Subject::from(did)
+                .attenuate(Archive)
+                .attenuate(Catalog::new("index"))
+                .invoke(Get::new(digest))
+                .perform(&env)
+                .await;
+
+            assert_eq!(result.unwrap(), Some(content));
+        }
+
+        #[dialog_common::test]
+        async fn it_rejects_duplicate_create_on_filesystem() {
+            let env = NativeEnv::default();
+            let name = unique_name("fs-dup");
+
+            let signer = Ed25519Signer::generate().await.unwrap();
+            let credential = dialog_credentials::Credential::Signer(SignerCredential::from(signer));
+
+            Storage::temp(&name)
+                .create(credential.clone())
+                .perform(&env)
+                .await
+                .unwrap();
+
+            let result = Storage::temp(&name).create(credential).perform(&env).await;
+            assert!(result.is_err(), "duplicate create should fail");
+        }
+    }
 }
