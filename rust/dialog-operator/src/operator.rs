@@ -20,12 +20,12 @@ use dialog_storage::provider::environment::Environment;
 use dialog_storage::provider::space::SpaceProvider;
 use dialog_varsig::{Did, Principal};
 
-use dialog_capability::access::Claim as AccessClaim;
-use dialog_capability::access::Save as AccessSave;
+use dialog_capability::access::Prove as AccessProve;
+use dialog_capability::access::Retain as AccessRetain;
 use dialog_ucan::Ucan;
 
-type ClaimUcan = AccessClaim<Ucan>;
-type SaveUcan = AccessSave<Ucan>;
+type ProveUcan = AccessProve<Ucan>;
+type RetainUcan = AccessRetain<Ucan>;
 
 /// An operating environment built from a [`Profile`](crate::profile::Profile).
 ///
@@ -78,15 +78,15 @@ impl<S: Clone> Operator<S> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<ClaimUcan> for Operator<S>
+impl<S> Provider<ProveUcan> for Operator<S>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
-    S: Provider<ClaimUcan>,
+    S: Provider<ProveUcan>,
     Self: ConditionalSend + ConditionalSync,
 {
     async fn execute(
         &self,
-        input: Capability<ClaimUcan>,
+        input: Capability<ProveUcan>,
     ) -> Result<dialog_ucan::UcanPermit, AuthorizeError> {
         self.env.execute(input).await
     }
@@ -94,13 +94,13 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<SaveUcan> for Operator<S>
+impl<S> Provider<RetainUcan> for Operator<S>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
-    S: Provider<SaveUcan>,
+    S: Provider<RetainUcan>,
     Self: ConditionalSend + ConditionalSync,
 {
-    async fn execute(&self, input: Capability<SaveUcan>) -> Result<(), AuthorizeError> {
+    async fn execute(&self, input: Capability<RetainUcan>) -> Result<(), AuthorizeError> {
         self.env.execute(input).await
     }
 }
@@ -211,7 +211,7 @@ mod s3_fork {
 mod ucan_fork {
     use super::*;
     use dialog_capability::Ability;
-    use dialog_capability::access::{self, Authorization as _, ProofChain as _};
+    use dialog_capability::access::{self, Authorization as _, Proof as _};
     use dialog_remote_ucan_s3::UcanSite;
     use dialog_ucan::scope::Scope as UcanScope;
     use dialog_ucan::{Ucan, UcanProofChain};
@@ -220,7 +220,7 @@ mod ucan_fork {
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl<S, Fx> Provider<Fork<UcanSite, Fx>> for Operator<S>
     where
-        S: SpaceProvider + Clone + 'static + Provider<ClaimUcan> + Provider<SaveUcan>,
+        S: SpaceProvider + Clone + 'static + Provider<ProveUcan> + Provider<RetainUcan>,
         Fx: Effect + Clone + ConditionalSend + 'static,
         Fx::Of: Constraint,
         Capability<Fx>: Ability + ConditionalSend + ConditionalSync,
@@ -236,7 +236,7 @@ mod ucan_fork {
 
             let proof_chain: UcanProofChain = dialog_capability::Subject::from(self.profile_did())
                 .attenuate(access::Access)
-                .invoke(access::Claim::<Ucan>::new(self.did(), scope))
+                .invoke(access::Prove::<Ucan>::new(self.did(), scope))
                 .perform(self)
                 .await?;
 

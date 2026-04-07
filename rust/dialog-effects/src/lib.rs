@@ -27,6 +27,7 @@
 
 #![warn(missing_docs)]
 
+pub mod access;
 pub mod archive;
 pub mod credential;
 pub mod memory;

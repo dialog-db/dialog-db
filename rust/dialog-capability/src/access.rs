@@ -5,15 +5,15 @@
 //! ```text
 //! Subject (profile DID)
 //! └── Access
-//!     ├── Claim { access, by, time } → ProofChain
-//!     └── Save { delegation } → ()
+//!     ├── Prove { access, by, time } → ProofChain
+//!     └── Retain { delegation } → ()
 //! ```
 //!
 //! # Authorization Flow
 //!
-//! 1. `Subject.attenuate(Access).invoke(Claim { .. }).perform(&store)`
-//!    returns a [`ProofChain`] (type-erased proof, no signer).
-//! 2. `proof_chain.claim(signer)` binds a signer to produce an
+//! 1. `Subject.attenuate(Access).invoke(Prove { .. }).perform(&store)`
+//!    returns a [`Proof`] (verified chain, no signer).
+//! 2. `proof.claim(signer)` binds a signer to produce an
 //!    [`Authorization`] that can `delegate()` and `invoke()`.
 
 use crate::Did;
@@ -88,12 +88,25 @@ impl TimeRange {
     }
 }
 
+/// A delegation bundle — contains one or more signed certificates.
+///
+/// Produced by [`Authorization::delegate`]. Stored via [`Save`].
+pub trait Delegation:
+    ConditionalSend + ConditionalSync + Serialize + for<'de> Deserialize<'de>
+{
+    /// The certificate type contained in this delegation.
+    type Certificate;
+
+    /// Extract individual certificates from this delegation.
+    fn certificates(&self) -> Vec<Self::Certificate>;
+}
+
 /// An individual delegation record — a single proof link in a chain.
 ///
 /// Each delegation links an issuer to an audience. The [`verify`](Delegation::verify)
 /// method checks whether the delegation covers the requested access and
 /// returns the time range during which it is valid.
-pub trait Delegation {
+pub trait Certificate: ConditionalSend + ConditionalSync {
     /// The access type this delegation verifies against.
     type Access: Scope;
 
@@ -130,7 +143,7 @@ pub trait Delegation {
 /// then [`push`](ProofChain::push) proofs as the chain is walked.
 /// Finally, [`claim`](ProofChain::claim) binds a signer to produce a full
 /// [`Authorization`].
-pub trait ProofChain<P: Protocol>:
+pub trait Proof<P: Protocol>:
     Sized + ConditionalSend + ConditionalSync + Serialize + for<'de> Deserialize<'de>
 {
     /// Create a new empty proof chain for the given access scope.
@@ -140,10 +153,10 @@ pub trait ProofChain<P: Protocol>:
     fn access(&self) -> &P::Access;
 
     /// Add a verified proof to this chain.
-    fn push(&mut self, proof: P::Proof);
+    fn push(&mut self, proof: P::Certificate);
 
     /// The proofs collected in this chain.
-    fn proofs(&self) -> &[P::Proof];
+    fn proofs(&self) -> &[P::Certificate];
 
     /// Bind a signer to this proof chain, producing a full authorization.
     fn claim(self, signer: P::Signer) -> Result<P::Authorization, AuthorizeError>;
@@ -171,23 +184,20 @@ pub trait Protocol: Sized + ConditionalSend + 'static {
     /// The signer type for this protocol.
     type Signer: crate::Principal + ConditionalSend;
 
-    /// An individual delegation record (proof link) in this protocol's format.
-    type Proof: Delegation<Access = Self::Access> + ConditionalSend + ConditionalSync;
+    /// An individual delegation (signed certificate) in this protocol's format.
+    type Certificate: Certificate<Access = Self::Access>;
 
-    /// A delegation chain — what [`Authorization::delegate`] produces.
-    type Delegation: ConditionalSend + ConditionalSync + Serialize + for<'de> Deserialize<'de>;
+    /// A delegation bundle — what [`Authorization::delegate`] produces.
+    type Delegation: Delegation<Certificate = Self::Certificate>;
 
     /// An invocation chain — what [`Authorization::invoke`] produces.
     type Invocation: ConditionalSend;
 
-    /// Verified proof chain (no signer). Returned by [`Authorize`].
-    type ProofChain: ProofChain<Self> + ConditionalSend;
+    /// Verified proof (no signer). Returned by [`Prove`].
+    type Proof: Proof<Self> + ConditionalSend;
 
     /// Full authorization with signer bound. Can delegate and invoke.
     type Authorization: Authorization<Self> + ConditionalSend;
-
-    /// Extract individual proofs from a delegation for storage.
-    fn proofs(delegation: &Self::Delegation) -> Vec<Self::Proof>;
 }
 
 /// Full authorization — can produce delegations and invocations.
@@ -208,29 +218,29 @@ pub trait Authorization<P: Protocol> {
     async fn invoke(&self) -> Result<P::Invocation, AuthorizeError>;
 }
 
-/// Claim effect — requests authorization for a capability.
+/// Proved effect — requests proof of access.
 ///
-/// An [`Effect`](crate::Effect) on [`Permit`]. The subject DID
+/// An [`Effect`](crate::Effect) on [`Access`]. The subject DID
 /// in the capability chain determines which store handles the request.
 #[derive(Serialize, Deserialize, crate::Claim)]
 #[serde(bound(
     serialize = "P::Access: Serialize",
     deserialize = "P::Access: for<'a> Deserialize<'a>"
 ))]
-pub struct Claim<P: Protocol> {
+pub struct Prove<P: Protocol> {
     /// The DID of the principal claiming access.
-    pub by: Did,
+    pub principal: Did,
     /// The access being claimed.
     pub access: P::Access,
     /// Time range the authorization must cover.
     pub duration: TimeRange,
 }
 
-impl<P: Protocol> Claim<P> {
+impl<P: Protocol> Prove<P> {
     /// Create a new claim request with unbounded duration.
     pub fn new(by: Did, access: P::Access) -> Self {
         Self {
-            by,
+            principal: by,
             access,
             duration: TimeRange::unbounded(),
         }
@@ -243,15 +253,15 @@ impl<P: Protocol> Claim<P> {
     }
 }
 
-impl<P: Protocol> crate::Effect for Claim<P>
+impl<P: Protocol> crate::Effect for Prove<P>
 where
     P::Access: ConditionalSend + 'static,
 {
     type Of = Access;
-    type Output = Result<P::ProofChain, AuthorizeError>;
+    type Output = Result<P::Proof, AuthorizeError>;
 }
 
-/// Save effect — stores a delegation for future authorization lookups.
+/// Retain effect — retains a delegation for future proof lookups.
 ///
 /// An [`Effect`](crate::Effect) on [`Access`]. The subject DID
 /// in the capability chain determines where proofs are stored.
@@ -260,19 +270,19 @@ where
     serialize = "P::Delegation: Serialize",
     deserialize = "P::Delegation: for<'a> Deserialize<'a>"
 ))]
-pub struct Save<P: Protocol> {
-    /// The delegation to store.
+pub struct Retain<P: Protocol> {
+    /// The delegation to retain.
     pub delegation: P::Delegation,
 }
 
-impl<P: Protocol> Save<P> {
-    /// Create a new save effect.
+impl<P: Protocol> Retain<P> {
+    /// Create a new retain effect.
     pub fn new(delegation: P::Delegation) -> Self {
         Self { delegation }
     }
 }
 
-impl<P: Protocol> crate::Effect for Save<P>
+impl<P: Protocol> crate::Effect for Retain<P>
 where
     P::Delegation: ConditionalSend + 'static,
 {
@@ -286,11 +296,11 @@ where
 /// to provide proof lookup and storage for the authorization system.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-pub trait ProofStore<P: Protocol> {
+pub trait CertificateStore<P: Protocol> {
     /// Maximum chain depth for BFS delegation chain walking.
     const MAX_DEPTH: usize = 10;
 
-    /// List proofs where the given DID is the audience.
+    /// List certificates where the given DID is the audience.
     ///
     /// `subject` scopes the lookup:
     /// - `Some(did)` — subject-specific delegations
@@ -299,7 +309,7 @@ pub trait ProofStore<P: Protocol> {
         &self,
         audience: &Did,
         subject: Option<&Did>,
-    ) -> Result<Vec<P::Proof>, AuthorizeError>;
+    ) -> Result<Vec<P::Certificate>, AuthorizeError>;
 
     /// Store a delegation for future authorization lookups.
     async fn save(&self, delegation: &P::Delegation) -> Result<(), AuthorizeError>;
@@ -309,21 +319,22 @@ pub trait ProofStore<P: Protocol> {
     /// Default implementation: BFS from claimant toward subject.
     /// Searches subject-specific delegations first, then powerline.
     /// Prioritizes direct grants (issuer == subject) over intermediate links.
-    async fn authorize(&self, input: Claim<P>) -> Result<P::ProofChain, AuthorizeError>
+    async fn prove(&self, input: Prove<P>) -> Result<P::Proof, AuthorizeError>
     where
         P::Access: Clone + ConditionalSend + ConditionalSync,
-        P::Proof: Clone + ConditionalSend + ConditionalSync,
+        P::Certificate: Clone + ConditionalSend + ConditionalSync,
     {
-        let authority = &input.by;
+        let authority = &input.principal;
         let access = &input.access;
         let duration = &input.duration;
         let subject = access.subject().clone();
 
         if *authority == subject {
-            return Ok(P::ProofChain::new(access.clone()));
+            return Ok(P::Proof::new(access.clone()));
         }
 
-        let mut queue: Vec<(Did, Vec<P::Proof>, usize)> = vec![(authority.clone(), vec![], 0)];
+        let mut queue: Vec<(Did, Vec<P::Certificate>, usize)> =
+            vec![(authority.clone(), vec![], 0)];
 
         while let Some((current_audience, chain_so_far, depth)) = queue.pop() {
             if depth >= Self::MAX_DEPTH {
@@ -350,7 +361,7 @@ pub trait ProofStore<P: Protocol> {
                 new_chain.insert(0, proof);
 
                 if issuer == subject {
-                    let mut proof_chain = P::ProofChain::new(access.clone());
+                    let mut proof_chain = P::Proof::new(access.clone());
                     for p in new_chain {
                         proof_chain.push(p);
                     }
@@ -380,8 +391,8 @@ pub enum AuthorizeError {
     Configuration(String),
 }
 
-impl From<crate::storage::StorageError> for AuthorizeError {
-    fn from(e: crate::storage::StorageError) -> Self {
+impl From<crate::StorageError> for AuthorizeError {
+    fn from(e: crate::StorageError) -> Self {
         AuthorizeError::Configuration(e.to_string())
     }
 }

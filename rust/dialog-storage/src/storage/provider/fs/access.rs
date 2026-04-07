@@ -1,7 +1,7 @@
 //! Access provider for filesystem storage.
 //!
 //! Implements [`ProofStore`](dialog_capability::access::ProofStore) for [`FileStore`]
-//! and `Provider<Save<P>>` for granting access.
+//! and `Provider<Retain<P>>` for granting access.
 //!
 //! Proofs are stored at:
 //! - Subject-specific: `{root}/permit/{audience}/{subject}/{issuer}.{id}`
@@ -10,7 +10,9 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use dialog_capability::access::{AuthorizeError, Claim, Delegation, ProofStore, Protocol, Save};
+use dialog_capability::access::{
+    AuthorizeError, Certificate, CertificateStore, Delegation, Protocol, Prove, Retain,
+};
 use dialog_capability::{Policy, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_varsig::Did;
@@ -26,15 +28,15 @@ fn permit_dir(fs: &FileStore) -> Result<PathBuf, AuthorizeError> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<P: Protocol> ProofStore<P> for FileStore
+impl<P: Protocol> CertificateStore<P> for FileStore
 where
-    P::Proof: ConditionalSend,
+    P::Certificate: ConditionalSend,
 {
     async fn list(
         &self,
         audience: &Did,
         subject: Option<&Did>,
-    ) -> Result<Vec<P::Proof>, AuthorizeError> {
+    ) -> Result<Vec<P::Certificate>, AuthorizeError> {
         let base = permit_dir(self)?;
         let subject_segment = match subject {
             Some(did) => did.to_string(),
@@ -75,7 +77,7 @@ where
                 }
             };
 
-            match <P::Proof as Delegation>::decode(&bytes) {
+            match <P::Certificate as Certificate>::decode(&bytes) {
                 Ok(proof) => proofs.push(proof),
                 Err(_) => continue,
             }
@@ -87,7 +89,7 @@ where
     async fn save(&self, delegation: &P::Delegation) -> Result<(), AuthorizeError> {
         let base = permit_dir(self)?;
 
-        for proof in P::proofs(delegation) {
+        for proof in delegation.certificates() {
             let bytes = proof.encode()?;
             let id = base58::ToBase58::to_base58(blake3::hash(&bytes).as_bytes().as_slice());
 
@@ -115,28 +117,28 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<P> Provider<Claim<P>> for FileStore
+impl<P> Provider<Prove<P>> for FileStore
 where
     P: Protocol,
     P::Access: Clone + ConditionalSend + ConditionalSync,
-    P::Proof: Clone + ConditionalSend + ConditionalSync,
-    P::ProofChain: ConditionalSend,
+    P::Certificate: Clone + ConditionalSend + ConditionalSync,
+    P::Proof: ConditionalSend,
     Self: ConditionalSend + ConditionalSync,
 {
     async fn execute(
         &self,
-        input: dialog_capability::Capability<Claim<P>>,
-    ) -> Result<P::ProofChain, AuthorizeError> {
-        let auth = Claim::<P>::of(&input);
-        let mut authorize = Claim::new(auth.by.clone(), auth.access.clone());
+        input: dialog_capability::Capability<Prove<P>>,
+    ) -> Result<P::Proof, AuthorizeError> {
+        let auth = Prove::<P>::of(&input);
+        let mut authorize = Prove::new(auth.principal.clone(), auth.access.clone());
         authorize.duration = auth.duration;
-        ProofStore::<P>::authorize(self, authorize).await
+        CertificateStore::<P>::prove(self, authorize).await
     }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<P> Provider<Save<P>> for FileStore
+impl<P> Provider<Retain<P>> for FileStore
 where
     P: Protocol,
     P::Delegation: ConditionalSend + ConditionalSync,
@@ -144,9 +146,9 @@ where
 {
     async fn execute(
         &self,
-        input: dialog_capability::Capability<Save<P>>,
+        input: dialog_capability::Capability<Retain<P>>,
     ) -> Result<(), AuthorizeError> {
-        let delegation = &Save::<P>::of(&input).delegation;
-        ProofStore::<P>::save(self, delegation).await
+        let delegation = &Retain::<P>::of(&input).delegation;
+        CertificateStore::<P>::save(self, delegation).await
     }
 }

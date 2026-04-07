@@ -3,7 +3,7 @@
 use crate::Authority;
 use crate::profile::Profile;
 use crate::remote::Remote;
-use dialog_capability::access::{Claim as AccessClaim, Save as AccessSave};
+use dialog_capability::access::{Prove as AccessProve, Retain as AccessRetain};
 use dialog_capability::{Ability, Provider};
 use dialog_credentials::key::KeyExport;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
@@ -70,8 +70,8 @@ impl OperatorBuilder {
     pub async fn build<S>(self, env: Environment<S>) -> Result<Operator<S>, OperatorError>
     where
         S: SpaceProvider + Clone + 'static,
-        S: Provider<AccessClaim<Ucan>>,
-        S: Provider<AccessSave<Ucan>>,
+        S: Provider<AccessProve<Ucan>>,
+        S: Provider<AccessRetain<Ucan>>,
     {
         self.network(Remote).build(env).await
     }
@@ -91,8 +91,8 @@ impl NetworkBuilder {
     pub async fn build<S>(self, env: Environment<S>) -> Result<Operator<S>, OperatorError>
     where
         S: SpaceProvider + Clone + 'static,
-        S: Provider<AccessClaim<Ucan>>,
-        S: Provider<AccessSave<Ucan>>,
+        S: Provider<AccessProve<Ucan>>,
+        S: Provider<AccessRetain<Ucan>>,
     {
         let operator_signer = derive_operator(&self.credential, &self.context).await?;
         let credentials = Authority::new(
@@ -111,8 +111,9 @@ impl NetworkBuilder {
         // Create delegations for allowed capabilities
         if !self.allowed.is_empty() {
             use dialog_capability::Subject;
-            use dialog_capability::access::{Access, Save};
+            use dialog_capability::access::{Access, Retain};
             use dialog_ucan::Ucan;
+            use dialog_ucan::UcanDelegation;
             use dialog_ucan_core::DelegationChain;
             use dialog_ucan_core::delegation::builder::DelegationBuilder;
 
@@ -130,11 +131,11 @@ impl NetworkBuilder {
                     .await
                     .map_err(|e| OperatorError::Delegation(format!("{e:?}")))?;
 
-                let chain = DelegationChain::new(delegation);
+                let chain = UcanDelegation::from(DelegationChain::new(delegation));
 
                 Subject::from(profile_did.clone())
                     .attenuate(Access)
-                    .invoke(Save::<Ucan>::new(chain))
+                    .invoke(Retain::<Ucan>::new(chain))
                     .perform(&operator)
                     .await
                     .map_err(|e| OperatorError::Delegation(e.to_string()))?;

@@ -19,7 +19,7 @@ use super::scope::Scope;
 #[serde(transparent)]
 pub struct UcanProof(pub dialog_ucan_core::Delegation<Ed25519Signature>);
 
-impl access::Delegation for UcanProof {
+impl access::Certificate for UcanProof {
     type Access = Scope;
 
     fn issuer(&self) -> &Did {
@@ -105,7 +105,7 @@ impl UcanPermit {
     }
 }
 
-impl access::ProofChain<Ucan> for UcanPermit {
+impl access::Proof<Ucan> for UcanPermit {
     fn new(access: Scope) -> Self {
         Self {
             proofs: Vec::new(),
@@ -168,7 +168,7 @@ impl access::Authorization<Ucan> for UcanAuthorization {
         &self,
         audience: Did,
         duration: access::TimeRange,
-    ) -> Result<DelegationChain, AuthorizeError> {
+    ) -> Result<UcanDelegation, AuthorizeError> {
         use dialog_ucan_core::delegation::builder::DelegationBuilder;
         use dialog_ucan_core::time::Timestamp;
         use dialog_ucan_core::time::timestamp::{Duration, UNIX_EPOCH};
@@ -196,12 +196,14 @@ impl access::Authorization<Ucan> for UcanAuthorization {
             .await
             .map_err(|e| AuthorizeError::Configuration(format!("{e:?}")))?;
 
-        match &self.chain {
+        let chain = match &self.chain {
             Some(chain) => chain
                 .push(delegation)
-                .map_err(|e| AuthorizeError::Configuration(format!("{e}"))),
-            None => Ok(DelegationChain::new(delegation)),
-        }
+                .map_err(|e| AuthorizeError::Configuration(format!("{e}")))?,
+            None => DelegationChain::new(delegation),
+        };
+
+        Ok(UcanDelegation::from(chain))
     }
 
     async fn invoke(&self) -> Result<super::UcanInvocation, AuthorizeError> {
@@ -249,20 +251,52 @@ impl access::Authorization<Ucan> for UcanAuthorization {
     }
 }
 
-impl access::Protocol for Ucan {
-    type Access = Scope;
-    type Signer = Ed25519Signer;
-    type Proof = UcanProof;
-    type Delegation = DelegationChain;
-    type Invocation = super::UcanInvocation;
-    type ProofChain = UcanPermit;
-    type Authorization = UcanAuthorization;
+/// A UCAN delegation bundle — wraps [`DelegationChain`] to implement [`Delegation`](access::Delegation).
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct UcanDelegation(pub DelegationChain);
 
-    fn proofs(delegation: &DelegationChain) -> Vec<UcanProof> {
-        delegation
+impl UcanDelegation {
+    /// Create a new delegation from a chain.
+    pub fn new(chain: DelegationChain) -> Self {
+        Self(chain)
+    }
+
+    /// The inner delegation chain.
+    pub fn chain(&self) -> &DelegationChain {
+        &self.0
+    }
+
+    /// Consume and return the inner delegation chain.
+    pub fn into_chain(self) -> DelegationChain {
+        self.0
+    }
+}
+
+impl From<DelegationChain> for UcanDelegation {
+    fn from(chain: DelegationChain) -> Self {
+        Self(chain)
+    }
+}
+
+impl access::Delegation for UcanDelegation {
+    type Certificate = UcanProof;
+
+    fn certificates(&self) -> Vec<UcanProof> {
+        self.0
             .delegations()
             .values()
             .map(|d| UcanProof(d.as_ref().clone()))
             .collect()
     }
+}
+
+impl access::Protocol for Ucan {
+    type Access = Scope;
+    type Signer = Ed25519Signer;
+    type Certificate = UcanProof;
+    type Delegation = UcanDelegation;
+    type Invocation = super::UcanInvocation;
+    type Proof = UcanPermit;
+    type Authorization = UcanAuthorization;
 }

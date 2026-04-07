@@ -2,13 +2,12 @@
 //!
 //! Provides a fluent builder chain for claiming authority and delegating.
 
-use dialog_capability::access::{self, Authorization as _, AuthorizeError, ProofChain as _};
+use dialog_capability::access::{self, Authorization as _, AuthorizeError, Proof as _};
 use dialog_capability::{Ability, Capability, Constraint, Provider, Subject};
 use dialog_common::ConditionalSync;
 use dialog_credentials::SignerCredential;
 use dialog_ucan::scope::Scope;
-use dialog_ucan::{Ucan, UcanPermit};
-use dialog_ucan_core::DelegationChain;
+use dialog_ucan::{Ucan, UcanDelegation, UcanPermit};
 use dialog_ucan_core::time::Timestamp;
 use dialog_varsig::{Did, Principal};
 
@@ -38,7 +37,7 @@ impl<'a> Access<'a> {
     }
 
     /// Save a delegation chain under this profile.
-    pub fn save(&self, chain: DelegationChain) -> super::SaveDelegation {
+    pub fn save(&self, chain: UcanDelegation) -> super::SaveDelegation {
         super::SaveDelegation {
             did: self.credential.did(),
             chain,
@@ -99,11 +98,11 @@ where
     /// Execute the claim, returning a proof chain.
     pub async fn perform<Env>(self, env: &Env) -> Result<UcanPermit, AuthorizeError>
     where
-        Env: Provider<access::Claim<Ucan>> + ConditionalSync,
+        Env: Provider<access::Prove<Ucan>> + ConditionalSync,
     {
         let scope = Scope::from(&self.capability);
         let duration = self.duration();
-        let mut claim = access::Claim::<Ucan>::new(self.by.did(), scope);
+        let mut claim = access::Prove::<Ucan>::new(self.by.did(), scope);
         claim.duration = duration;
         Subject::from(self.by.did())
             .attenuate(access::Access)
@@ -131,7 +130,7 @@ where
         env: &Env,
     ) -> Result<dialog_ucan::UcanInvocation, AuthorizeError>
     where
-        Env: Provider<access::Claim<Ucan>> + ConditionalSync,
+        Env: Provider<access::Prove<Ucan>> + ConditionalSync,
     {
         let signer = self.claim.by.signer().clone();
         let proof_chain = self.claim.perform(env).await?;
@@ -154,9 +153,9 @@ where
     Capability<C>: Ability,
 {
     /// Claim authority, sign a delegation, and return the chain.
-    pub async fn perform<Env>(self, env: &Env) -> Result<DelegationChain, AuthorizeError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<UcanDelegation, AuthorizeError>
     where
-        Env: Provider<access::Claim<Ucan>> + ConditionalSync,
+        Env: Provider<access::Prove<Ucan>> + ConditionalSync,
     {
         let signer = self.claim.by.signer().clone();
         let duration = self.claim.duration();

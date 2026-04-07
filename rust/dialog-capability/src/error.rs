@@ -56,6 +56,18 @@ pub enum DialogCapabilityAuthorizationError {
     Serialization(String),
 }
 
+/// Errors from capability-routed storage operations.
+#[derive(Debug, thiserror::Error)]
+pub enum StorageError {
+    /// Storage backend error.
+    #[error("Storage error: {0}")]
+    Storage(String),
+
+    /// IO error.
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
 /// Error type for capability execution failures.
 pub enum DialogCapabilityPerformError<E: Error> {
     /// Error during effect execution.

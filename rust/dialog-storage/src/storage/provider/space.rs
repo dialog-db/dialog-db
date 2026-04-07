@@ -3,7 +3,7 @@
 //! Routes capabilities to the appropriate provider field.
 
 use dialog_capability::Provider;
-use dialog_capability::access::{AuthorizeError, Claim, Protocol, Save as AccessSave};
+use dialog_capability::access::{AuthorizeError, Protocol, Prove, Retain as AccessRetain};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::{archive, credential, memory};
 
@@ -63,41 +63,41 @@ pub struct MountedSpace<Archive, Memory, Cred, Permit> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Archive, Memory, Cred, Permit, P> Provider<Claim<P>>
+impl<Archive, Memory, Cred, Permit, P> Provider<Prove<P>>
     for MountedSpace<Archive, Memory, Cred, Permit>
 where
     P: Protocol,
     P::Access: Clone + ConditionalSend + ConditionalSync,
-    P::Proof: Clone + ConditionalSend + ConditionalSync,
-    P::ProofChain: ConditionalSend,
-    Permit: Provider<Claim<P>> + ConditionalSend + ConditionalSync,
+    P::Certificate: Clone + ConditionalSend + ConditionalSync,
+    P::Proof: ConditionalSend,
+    Permit: Provider<Prove<P>> + ConditionalSend + ConditionalSync,
     Archive: ConditionalSend + ConditionalSync,
     Memory: ConditionalSend + ConditionalSync,
     Cred: ConditionalSend + ConditionalSync,
 {
     async fn execute(
         &self,
-        input: dialog_capability::Capability<Claim<P>>,
-    ) -> Result<P::ProofChain, AuthorizeError> {
+        input: dialog_capability::Capability<Prove<P>>,
+    ) -> Result<P::Proof, AuthorizeError> {
         self.permit.execute(input).await
     }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Archive, Memory, Cred, Permit, P> Provider<AccessSave<P>>
+impl<Archive, Memory, Cred, Permit, P> Provider<AccessRetain<P>>
     for MountedSpace<Archive, Memory, Cred, Permit>
 where
     P: Protocol,
     P::Delegation: ConditionalSend + ConditionalSync,
-    Permit: Provider<AccessSave<P>> + ConditionalSend + ConditionalSync,
+    Permit: Provider<AccessRetain<P>> + ConditionalSend + ConditionalSync,
     Archive: ConditionalSend + ConditionalSync,
     Memory: ConditionalSend + ConditionalSync,
     Cred: ConditionalSend + ConditionalSync,
 {
     async fn execute(
         &self,
-        input: dialog_capability::Capability<AccessSave<P>>,
+        input: dialog_capability::Capability<AccessRetain<P>>,
     ) -> Result<(), AuthorizeError> {
         self.permit.execute(input).await
     }

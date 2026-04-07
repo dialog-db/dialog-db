@@ -213,8 +213,6 @@ pub mod authority;
 
 pub mod site;
 
-pub mod storage;
-
 pub mod command;
 pub use command::*;
 

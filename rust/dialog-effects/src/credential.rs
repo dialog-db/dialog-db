@@ -82,8 +82,8 @@ pub enum CredentialError {
     Corrupted(String),
 }
 
-impl From<dialog_capability::storage::StorageError> for CredentialError {
-    fn from(e: dialog_capability::storage::StorageError) -> Self {
-        CredentialError::Storage(e.to_string())
+impl From<dialog_capability::StorageError> for CredentialError {
+    fn from(e: dialog_capability::StorageError) -> Self {
+        Self::Storage(e.to_string())
     }
 }

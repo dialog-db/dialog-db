@@ -132,72 +132,76 @@ pub enum Store {
     Volatile(Volatile),
 }
 
-use dialog_capability::storage::StorageError;
+use dialog_capability::StorageError;
 
-use dialog_capability::access::{AuthorizeError, Claim, ProofStore, Protocol, Save};
+use dialog_capability::access::{AuthorizeError, CertificateStore, Protocol, Prove, Retain};
 use dialog_common::{ConditionalSend, ConditionalSync};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<P> ProofStore<P> for Store
+impl<P> CertificateStore<P> for Store
 where
     P: Protocol,
     P::Access: Clone + ConditionalSend + ConditionalSync,
-    P::Proof: Clone + ConditionalSend + ConditionalSync,
+    P::Certificate: Clone + ConditionalSend + ConditionalSync,
     Self: ConditionalSend + ConditionalSync,
 {
     async fn list(
         &self,
         audience: &dialog_varsig::Did,
         subject: Option<&dialog_varsig::Did>,
-    ) -> Result<Vec<P::Proof>, AuthorizeError> {
+    ) -> Result<Vec<P::Certificate>, AuthorizeError> {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
-            Self::FileSystem(fs) => <FileStore as ProofStore<P>>::list(fs, audience, subject).await,
+            Self::FileSystem(fs) => {
+                <FileStore as CertificateStore<P>>::list(fs, audience, subject).await
+            }
             #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
             Self::IndexedDb(idb) => {
-                <IndexedDb as ProofStore<P>>::list(idb, audience, subject).await
+                <IndexedDb as CertificateStore<P>>::list(idb, audience, subject).await
             }
-            Self::Volatile(v) => <Volatile as ProofStore<P>>::list(v, audience, subject).await,
+            Self::Volatile(v) => {
+                <Volatile as CertificateStore<P>>::list(v, audience, subject).await
+            }
         }
     }
 
     async fn save(&self, delegation: &P::Delegation) -> Result<(), AuthorizeError> {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
-            Self::FileSystem(fs) => <FileStore as ProofStore<P>>::save(fs, delegation).await,
+            Self::FileSystem(fs) => <FileStore as CertificateStore<P>>::save(fs, delegation).await,
             #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-            Self::IndexedDb(idb) => <IndexedDb as ProofStore<P>>::save(idb, delegation).await,
-            Self::Volatile(v) => <Volatile as ProofStore<P>>::save(v, delegation).await,
+            Self::IndexedDb(idb) => <IndexedDb as CertificateStore<P>>::save(idb, delegation).await,
+            Self::Volatile(v) => <Volatile as CertificateStore<P>>::save(v, delegation).await,
         }
     }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<P> dialog_capability::Provider<Claim<P>> for Store
+impl<P> dialog_capability::Provider<Prove<P>> for Store
 where
     P: Protocol,
     P::Access: Clone + ConditionalSend + ConditionalSync,
-    P::Proof: Clone + ConditionalSend + ConditionalSync,
-    P::ProofChain: ConditionalSend,
+    P::Certificate: Clone + ConditionalSend + ConditionalSync,
+    P::Proof: ConditionalSend,
     Self: ConditionalSend + ConditionalSync,
 {
     async fn execute(
         &self,
-        input: dialog_capability::Capability<Claim<P>>,
-    ) -> Result<P::ProofChain, AuthorizeError> {
+        input: dialog_capability::Capability<Prove<P>>,
+    ) -> Result<P::Proof, AuthorizeError> {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
             Self::FileSystem(fs) => {
-                <FileStore as dialog_capability::Provider<Claim<P>>>::execute(fs, input).await
+                <FileStore as dialog_capability::Provider<Prove<P>>>::execute(fs, input).await
             }
             #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
             Self::IndexedDb(idb) => {
-                <IndexedDb as dialog_capability::Provider<Claim<P>>>::execute(idb, input).await
+                <IndexedDb as dialog_capability::Provider<Prove<P>>>::execute(idb, input).await
             }
             Self::Volatile(v) => {
-                <Volatile as dialog_capability::Provider<Claim<P>>>::execute(v, input).await
+                <Volatile as dialog_capability::Provider<Prove<P>>>::execute(v, input).await
             }
         }
     }
@@ -205,7 +209,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<P> dialog_capability::Provider<Save<P>> for Store
+impl<P> dialog_capability::Provider<Retain<P>> for Store
 where
     P: Protocol,
     P::Delegation: ConditionalSend + ConditionalSync,
@@ -213,19 +217,19 @@ where
 {
     async fn execute(
         &self,
-        input: dialog_capability::Capability<Save<P>>,
+        input: dialog_capability::Capability<Retain<P>>,
     ) -> Result<(), AuthorizeError> {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
             Self::FileSystem(fs) => {
-                <FileStore as dialog_capability::Provider<Save<P>>>::execute(fs, input).await
+                <FileStore as dialog_capability::Provider<Retain<P>>>::execute(fs, input).await
             }
             #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
             Self::IndexedDb(idb) => {
-                <IndexedDb as dialog_capability::Provider<Save<P>>>::execute(idb, input).await
+                <IndexedDb as dialog_capability::Provider<Retain<P>>>::execute(idb, input).await
             }
             Self::Volatile(v) => {
-                <Volatile as dialog_capability::Provider<Save<P>>>::execute(v, input).await
+                <Volatile as dialog_capability::Provider<Retain<P>>>::execute(v, input).await
             }
         }
     }

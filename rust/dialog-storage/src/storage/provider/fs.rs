@@ -47,7 +47,6 @@ mod archive;
 mod credential;
 mod error;
 mod memory;
-mod mount;
 
 pub use error::FileSystemError;
 

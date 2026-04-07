@@ -7,7 +7,7 @@ use dialog_capability::{Capability, Provider, Subject};
 use dialog_common::ConditionalSync;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
 use dialog_effects::storage::{self as storage_fx, LocationExt};
-use dialog_ucan_core::DelegationChain;
+use dialog_ucan::UcanDelegation;
 use dialog_varsig::{Did, Principal};
 
 /// An opened profile — holds a signing credential.
@@ -52,7 +52,7 @@ impl Profile {
     }
 
     /// Store a delegation chain under this profile's DID.
-    pub fn save(&self, chain: DelegationChain) -> SaveDelegation {
+    pub fn save(&self, chain: UcanDelegation) -> SaveDelegation {
         SaveDelegation {
             did: self.did(),
             chain,
@@ -109,24 +109,24 @@ impl TryFrom<dialog_credentials::Credential> for Profile {
 /// Command to store a delegation chain under a profile's DID.
 pub struct SaveDelegation {
     did: Did,
-    chain: DelegationChain,
+    chain: UcanDelegation,
 }
 
-use dialog_capability::access::Save as AccessSave;
+use dialog_capability::access::Retain as AccessRetain;
 use dialog_ucan::Ucan;
-type SaveUcan = AccessSave<Ucan>;
+type RetainUcan = AccessRetain<Ucan>;
 
 impl SaveDelegation {
     /// Execute against the environment.
     pub async fn perform<Env>(self, env: &Env) -> Result<(), ProfileError>
     where
-        Env: Provider<SaveUcan> + ConditionalSync,
+        Env: Provider<RetainUcan> + ConditionalSync,
     {
         use dialog_capability::access::Access;
 
         Subject::from(self.did)
             .attenuate(Access)
-            .invoke(AccessSave::<Ucan>::new(self.chain))
+            .invoke(AccessRetain::<Ucan>::new(self.chain))
             .perform(env)
             .await
             .map_err(|e| ProfileError::Storage(e.to_string()))

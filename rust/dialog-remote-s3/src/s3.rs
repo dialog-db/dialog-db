@@ -135,7 +135,7 @@ mod protocol {
     #[derive(serde::Deserialize)]
     pub struct S3Proof;
 
-    impl access::Delegation for S3Proof {
+    impl access::Certificate for S3Proof {
         type Access = S3Access;
         fn issuer(&self) -> &Did {
             unreachable!("S3 has no delegation chain")
@@ -168,7 +168,7 @@ mod protocol {
     #[derive(serde::Serialize, serde::Deserialize)]
     pub struct S3Permit(S3Access);
 
-    impl access::ProofChain<S3> for S3Permit {
+    impl access::Proof<S3> for S3Permit {
         fn new(access: S3Access) -> Self {
             Self(access)
         }
@@ -195,7 +195,7 @@ mod protocol {
             &self,
             _audience: Did,
             _duration: access::TimeRange,
-        ) -> Result<(), AuthorizeError> {
+        ) -> Result<S3Delegation, AuthorizeError> {
             Err(AuthorizeError::Denied(
                 "S3 does not support delegation".into(),
             ))
@@ -206,18 +206,26 @@ mod protocol {
         }
     }
 
+    /// S3 does not use delegation. This is a no-op placeholder.
+    #[derive(serde::Serialize, serde::Deserialize)]
+    pub struct S3Delegation;
+
+    impl access::Delegation for S3Delegation {
+        type Certificate = S3Proof;
+
+        fn certificates(&self) -> Vec<S3Proof> {
+            Vec::new()
+        }
+    }
+
     impl access::Protocol for S3 {
         type Access = S3Access;
         type Signer = S3;
-        type Proof = S3Proof;
-        type Delegation = ();
+        type Certificate = S3Proof;
+        type Delegation = S3Delegation;
         type Invocation = ();
-        type ProofChain = S3Permit;
+        type Proof = S3Permit;
         type Authorization = S3;
-
-        fn proofs(_delegation: &()) -> Vec<S3Proof> {
-            Vec::new()
-        }
     }
 }
 

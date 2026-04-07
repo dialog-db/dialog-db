@@ -10,6 +10,7 @@ use dialog_varsig::Principal;
 
 use super::space::SpaceProvider;
 use crate::resource::{Pool, Resource};
+use dialog_capability::StorageError;
 
 /// Routes effects by subject DID to the matching store.
 #[derive(Clone)]
@@ -27,9 +28,9 @@ trait FromUnmounted {
     fn unmounted(did: &Did) -> Self;
 }
 
-impl<T, E: From<dialog_capability::storage::StorageError>> FromUnmounted for Result<T, E> {
+impl<T, E: From<StorageError>> FromUnmounted for Result<T, E> {
     fn unmounted(did: &Did) -> Self {
-        Err(dialog_capability::storage::StorageError::Storage(format!("no mount for {did}")).into())
+        Err(StorageError::Storage(format!("no mount for {did}")).into())
     }
 }
 
@@ -204,7 +205,7 @@ pub struct Environment<S: Clone> {
 }
 
 use dialog_capability::access::{
-    AuthorizeError, Claim as AccessClaim, Protocol, Save as AccessSave,
+    AuthorizeError, Protocol, Prove as AccessClaim, Retain as AccessRetain,
 };
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -214,30 +215,27 @@ where
     S: Clone + ConditionalSync,
     P: Protocol,
     P::Access: Clone + ConditionalSend + ConditionalSync,
-    P::Proof: Clone + ConditionalSend + ConditionalSync,
-    P::ProofChain: ConditionalSend,
+    P::Certificate: Clone + ConditionalSend + ConditionalSync,
+    P::Proof: ConditionalSend,
     Router<S>: Provider<AccessClaim<P>>,
     Self: ConditionalSend + ConditionalSync,
 {
-    async fn execute(
-        &self,
-        input: Capability<AccessClaim<P>>,
-    ) -> Result<P::ProofChain, AuthorizeError> {
+    async fn execute(&self, input: Capability<AccessClaim<P>>) -> Result<P::Proof, AuthorizeError> {
         self.router.execute(input).await
     }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<S, P> Provider<AccessSave<P>> for Environment<S>
+impl<S, P> Provider<AccessRetain<P>> for Environment<S>
 where
     S: Clone + ConditionalSync,
     P: Protocol,
     P::Delegation: ConditionalSend + ConditionalSync,
-    Router<S>: Provider<AccessSave<P>>,
+    Router<S>: Provider<AccessRetain<P>>,
     Self: ConditionalSend + ConditionalSync,
 {
-    async fn execute(&self, input: Capability<AccessSave<P>>) -> Result<(), AuthorizeError> {
+    async fn execute(&self, input: Capability<AccessRetain<P>>) -> Result<(), AuthorizeError> {
         self.router.execute(input).await
     }
 }

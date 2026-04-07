@@ -38,7 +38,6 @@ mod access;
 mod archive;
 mod credential;
 mod memory;
-mod mount;
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
@@ -86,8 +85,6 @@ struct Session {
     archive: HashMap<ArchiveKey, Vec<u8>>,
     /// Transactional memory storage keyed by (space, cell).
     memory: HashMap<MemoryKey, Vec<u8>>,
-    /// Mounted byte storage keyed by address prefix.
-    mounted: HashMap<String, Vec<u8>>,
     /// Credential storage keyed by address prefix.
     credentials: HashMap<String, CredentialExport>,
     /// Proof storage keyed by "{audience}/{subject}/{issuer}.{hash}".

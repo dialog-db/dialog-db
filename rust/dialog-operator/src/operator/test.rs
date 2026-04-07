@@ -71,7 +71,7 @@ mod tests {
 
             Subject::from(operator.profile_did())
                 .attenuate(Access)
-                .invoke(cap_access::Claim::<Ucan>::new(operator.did(), scope))
+                .invoke(cap_access::Prove::<Ucan>::new(operator.did(), scope))
                 .perform(operator)
                 .await
         }
