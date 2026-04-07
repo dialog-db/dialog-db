@@ -40,6 +40,31 @@ mod credential;
 mod memory;
 mod mount;
 
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl crate::resource::Resource<dialog_effects::storage::Location> for Volatile {
+    type Error = std::convert::Infallible;
+
+    async fn open(
+        location: &dialog_effects::storage::Location,
+    ) -> Result<Self, std::convert::Infallible> {
+        use dialog_effects::storage::Directory;
+        let prefix = match &location.directory {
+            Directory::Profile => format!("profile/{}", location.name),
+            Directory::Current => format!("current/{}", location.name),
+            Directory::Temp => format!("temp/{}", location.name),
+            Directory::At(path) => {
+                if location.name.is_empty() {
+                    path.clone()
+                } else {
+                    format!("{path}/{}", location.name)
+                }
+            }
+        };
+        Ok(Volatile::mount(&Address::new(prefix)))
+    }
+}
+
 use dialog_capability::Did;
 use dialog_credentials::credential::CredentialExport;
 use parking_lot::RwLock;

@@ -8,9 +8,6 @@ use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::{archive, credential, memory};
 
 /// Trait for types that can serve as a mounted space provider.
-///
-/// Combines all the Provider impls needed to back a space:
-/// archive, memory, credential, and delegation effects.
 pub trait SpaceProvider:
     Provider<archive::Get>
     + Provider<archive::Put>
@@ -42,19 +39,13 @@ impl<T> SpaceProvider for T where
 }
 
 /// A composed set of providers for a single mounted space.
-///
-/// Routes capabilities to the appropriate provider field via
-/// `#[derive(Provider)]`. Permit routing for `Claim<P>`/`Save<P>` is
-/// handled by manual impls since they're generic over `Protocol`.
 #[derive(Clone, dialog_capability::Provider)]
 pub struct MountedSpace<Archive, Memory, Cred, Permit> {
-    // TODO: Split archive into separate Index and Blob providers
-    // (archive::Index::Get/Put and archive::Blob::Get/Put)
-    /// Archive operations (content-addressed index and blob storage).
+    /// Archive provider. TODO: Split into separate Index and Blob providers.
     #[provide(dialog_effects::archive::Get, dialog_effects::archive::Put)]
     pub archive: Archive,
 
-    /// Memory cell operations.
+    /// Memory provider.
     #[provide(
         dialog_effects::memory::Resolve,
         dialog_effects::memory::Publish,
@@ -62,24 +53,24 @@ pub struct MountedSpace<Archive, Memory, Cred, Permit> {
     )]
     pub memory: Memory,
 
-    /// Credential load/save.
+    /// Credential provider.
     #[provide(dialog_effects::credential::Load, dialog_effects::credential::Save)]
     pub credential: Cred,
 
-    /// Delegation proof storage.
+    /// Permit (delegation proof) provider.
     pub permit: Permit,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Archive, Memory, Cred, Permit, P> dialog_capability::Provider<Claim<P>>
+impl<Archive, Memory, Cred, Permit, P> Provider<Claim<P>>
     for MountedSpace<Archive, Memory, Cred, Permit>
 where
     P: Protocol,
     P::Access: Clone + ConditionalSend + ConditionalSync,
     P::Proof: Clone + ConditionalSend + ConditionalSync,
     P::ProofChain: ConditionalSend,
-    Permit: dialog_capability::Provider<Claim<P>> + ConditionalSend + ConditionalSync,
+    Permit: Provider<Claim<P>> + ConditionalSend + ConditionalSync,
     Archive: ConditionalSend + ConditionalSync,
     Memory: ConditionalSend + ConditionalSync,
     Cred: ConditionalSend + ConditionalSync,
@@ -94,12 +85,12 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Archive, Memory, Cred, Permit, P> dialog_capability::Provider<AccessSave<P>>
+impl<Archive, Memory, Cred, Permit, P> Provider<AccessSave<P>>
     for MountedSpace<Archive, Memory, Cred, Permit>
 where
     P: Protocol,
     P::Delegation: ConditionalSend + ConditionalSync,
-    Permit: dialog_capability::Provider<AccessSave<P>> + ConditionalSend + ConditionalSync,
+    Permit: Provider<AccessSave<P>> + ConditionalSend + ConditionalSync,
     Archive: ConditionalSend + ConditionalSync,
     Memory: ConditionalSend + ConditionalSync,
     Cred: ConditionalSend + ConditionalSync,
@@ -109,5 +100,43 @@ where
         input: dialog_capability::Capability<AccessSave<P>>,
     ) -> Result<(), AuthorizeError> {
         self.permit.execute(input).await
+    }
+}
+
+/// Resource<Location> for MountedSpace: each field opens from the same Location.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<A, M, C, P> crate::resource::Resource<dialog_effects::storage::Location>
+    for MountedSpace<A, M, C, P>
+where
+    A: crate::resource::Resource<dialog_effects::storage::Location> + ConditionalSend,
+    M: crate::resource::Resource<dialog_effects::storage::Location> + ConditionalSend,
+    C: crate::resource::Resource<dialog_effects::storage::Location> + ConditionalSend,
+    P: crate::resource::Resource<dialog_effects::storage::Location> + ConditionalSend,
+    A::Error: std::fmt::Display,
+    M::Error: std::fmt::Display,
+    C::Error: std::fmt::Display,
+    P::Error: std::fmt::Display,
+{
+    type Error = dialog_effects::storage::StorageError;
+
+    async fn open(
+        location: &dialog_effects::storage::Location,
+    ) -> Result<Self, dialog_effects::storage::StorageError> {
+        use dialog_effects::storage::StorageError;
+        Ok(MountedSpace {
+            archive: A::open(location)
+                .await
+                .map_err(|e| StorageError::Storage(e.to_string()))?,
+            memory: M::open(location)
+                .await
+                .map_err(|e| StorageError::Storage(e.to_string()))?,
+            credential: C::open(location)
+                .await
+                .map_err(|e| StorageError::Storage(e.to_string()))?,
+            permit: P::open(location)
+                .await
+                .map_err(|e| StorageError::Storage(e.to_string()))?,
+        })
     }
 }
