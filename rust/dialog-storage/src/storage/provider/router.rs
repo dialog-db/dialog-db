@@ -194,7 +194,44 @@ impl<S: Clone> Environment<S> {
     }
 }
 
-impl<S: Clone> Default for Environment<S> {
+/// MountedSpace backed by Volatile providers.
+pub type VolatileSpace =
+    super::space::MountedSpace<super::Volatile, super::Volatile, super::Volatile, super::Volatile>;
+
+#[cfg(not(target_arch = "wasm32"))]
+/// MountedSpace backed by FileStore providers.
+pub type NativeSpace = super::space::MountedSpace<
+    super::FileStore,
+    super::FileStore,
+    super::FileStore,
+    super::FileStore,
+>;
+
+impl Environment<VolatileSpace> {
+    /// Create a volatile (in-memory) environment for testing.
+    pub fn volatile() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Default for Environment<NativeSpace> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+impl Default
+    for Environment<
+        super::space::MountedSpace<
+            super::IndexedDb,
+            super::IndexedDb,
+            super::IndexedDb,
+            super::IndexedDb,
+        >,
+    >
+{
     fn default() -> Self {
         Self::new()
     }
@@ -202,27 +239,23 @@ impl<S: Clone> Default for Environment<S> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::space::MountedSpace;
     use super::*;
-    use crate::provider::Volatile;
     use dialog_capability::{Subject, did};
     use dialog_credentials::{Ed25519Signer, SignerCredential};
     use dialog_effects::archive::{Archive, Catalog, Get, Put};
-    use dialog_effects::storage::Storage;
-
-    type TestSpace = MountedSpace<Volatile, Volatile, Volatile, Volatile>;
-    type TestEnv = Environment<TestSpace>;
+    use dialog_effects::memory::{self, Memory};
+    use dialog_effects::storage::{LocationExt, Storage};
 
     #[dialog_common::test]
-    async fn it_creates_and_mounts_profile() {
-        let env = TestEnv::new();
+    async fn it_creates_profile_with_sugar() {
+        let env = Environment::volatile();
 
         let signer = Ed25519Signer::generate().await.unwrap();
         let profile_did = Principal::did(&signer);
         let credential = dialog_credentials::Credential::Signer(SignerCredential::from(signer));
 
         let did = Storage::profile("alice")
-            .invoke(dialog_effects::storage::Create::new(credential))
+            .create(credential)
             .perform(&env)
             .await
             .unwrap();
@@ -231,44 +264,20 @@ mod tests {
         assert!(env.contains(&did));
     }
 
-    // Volatile creates fresh stores each time, so duplicate detection
-    // doesn't work. This test passes with persistent backends (FileStore, IDB).
     #[dialog_common::test]
-    #[should_panic(expected = "duplicate create should fail")]
-    async fn it_rejects_duplicate_create() {
-        let env = TestEnv::new();
+    async fn it_archives_after_create() {
+        let env = Environment::volatile();
 
         let signer = Ed25519Signer::generate().await.unwrap();
         let credential = dialog_credentials::Credential::Signer(SignerCredential::from(signer));
 
-        Storage::profile("bob")
-            .invoke(dialog_effects::storage::Create::new(credential.clone()))
+        let did = Storage::profile("bob")
+            .create(credential)
             .perform(&env)
             .await
             .unwrap();
 
-        let result = Storage::profile("bob")
-            .invoke(dialog_effects::storage::Create::new(credential))
-            .perform(&env)
-            .await;
-
-        assert!(result.is_err(), "duplicate create should fail");
-    }
-
-    #[dialog_common::test]
-    async fn it_routes_effects_after_create() {
-        let env = TestEnv::new();
-
-        let signer = Ed25519Signer::generate().await.unwrap();
-        let credential = dialog_credentials::Credential::Signer(SignerCredential::from(signer));
-
-        let did = Storage::profile("charlie")
-            .invoke(dialog_effects::storage::Create::new(credential))
-            .perform(&env)
-            .await
-            .unwrap();
-
-        let content = b"hello".to_vec();
+        let content = b"hello world".to_vec();
         let digest = dialog_common::Blake3Hash::hash(&content);
 
         Subject::from(did.clone())
@@ -290,8 +299,47 @@ mod tests {
     }
 
     #[dialog_common::test]
+    async fn it_publishes_memory_after_create() {
+        let env = Environment::volatile();
+
+        let signer = Ed25519Signer::generate().await.unwrap();
+        let credential = dialog_credentials::Credential::Signer(SignerCredential::from(signer));
+
+        let did = Storage::profile("charlie")
+            .create(credential)
+            .perform(&env)
+            .await
+            .unwrap();
+
+        let content = b"cell value".to_vec();
+
+        let etag = Subject::from(did.clone())
+            .attenuate(Memory)
+            .attenuate(memory::Space::new("data"))
+            .attenuate(memory::Cell::new("head"))
+            .invoke(memory::Publish::new(content.clone(), None))
+            .perform(&env)
+            .await
+            .unwrap();
+
+        assert!(!etag.is_empty());
+
+        let resolved = Subject::from(did)
+            .attenuate(Memory)
+            .attenuate(memory::Space::new("data"))
+            .attenuate(memory::Cell::new("head"))
+            .invoke(memory::Resolve)
+            .perform(&env)
+            .await
+            .unwrap();
+
+        assert!(resolved.is_some());
+        assert_eq!(resolved.unwrap().content, content);
+    }
+
+    #[dialog_common::test]
     async fn it_errors_for_unmounted_did() {
-        let env = TestEnv::new();
+        let env = Environment::volatile();
 
         let result = Subject::from(did!("key:zUnknown"))
             .attenuate(Archive)
@@ -302,25 +350,88 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // Volatile creates fresh stores each time, so load-after-create
-    // doesn't see the saved credential. Passes with persistent backends.
+    #[dialog_common::test]
+    async fn it_isolates_spaces() {
+        let env = Environment::volatile();
+
+        let signer1 = Ed25519Signer::generate().await.unwrap();
+        let cred1 = dialog_credentials::Credential::Signer(SignerCredential::from(signer1));
+        let did1 = Storage::profile("dave")
+            .create(cred1)
+            .perform(&env)
+            .await
+            .unwrap();
+
+        let signer2 = Ed25519Signer::generate().await.unwrap();
+        let cred2 = dialog_credentials::Credential::Signer(SignerCredential::from(signer2));
+        let did2 = Storage::profile("eve")
+            .create(cred2)
+            .perform(&env)
+            .await
+            .unwrap();
+
+        let content = b"dave only".to_vec();
+        let digest = dialog_common::Blake3Hash::hash(&content);
+
+        Subject::from(did1)
+            .attenuate(Archive)
+            .attenuate(Catalog::new("index"))
+            .invoke(Put::new(digest.clone(), content))
+            .perform(&env)
+            .await
+            .unwrap();
+
+        let result = Subject::from(did2)
+            .attenuate(Archive)
+            .attenuate(Catalog::new("index"))
+            .invoke(Get::new(digest))
+            .perform(&env)
+            .await;
+
+        assert_eq!(result.unwrap(), None, "eve should not see dave's data");
+    }
+
+    // Volatile creates fresh stores each time, so duplicate detection
+    // and load-after-create don't work. These pass with persistent backends.
+    #[dialog_common::test]
+    #[should_panic(expected = "duplicate create should fail")]
+    async fn it_rejects_duplicate_create() {
+        let env = Environment::volatile();
+
+        let signer = Ed25519Signer::generate().await.unwrap();
+        let credential = dialog_credentials::Credential::Signer(SignerCredential::from(signer));
+
+        Storage::profile("frank")
+            .create(credential.clone())
+            .perform(&env)
+            .await
+            .unwrap();
+
+        let result = Storage::profile("frank")
+            .create(credential)
+            .perform(&env)
+            .await;
+
+        assert!(result.is_err(), "duplicate create should fail");
+    }
+
     #[dialog_common::test]
     #[should_panic]
     async fn it_creates_then_loads() {
-        let env = TestEnv::new();
+        let env = Environment::volatile();
 
         let signer = Ed25519Signer::generate().await.unwrap();
         let profile_did = Principal::did(&signer);
         let credential = dialog_credentials::Credential::Signer(SignerCredential::from(signer));
 
-        Storage::profile("dave")
-            .invoke(dialog_effects::storage::Create::new(credential))
+        Storage::profile("grace")
+            .create(credential)
             .perform(&env)
             .await
             .unwrap();
 
-        let did = Storage::profile("dave")
-            .invoke(dialog_effects::storage::Load)
+        let did = Storage::profile("grace")
+            .load()
             .perform(&env)
             .await
             .unwrap();

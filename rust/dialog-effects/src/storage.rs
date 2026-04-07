@@ -103,6 +103,31 @@ impl Attenuation for Location {
     type Of = Storage;
 }
 
+/// Extension trait adding `.load()` and `.create()` sugar on Location capabilities.
+pub trait LocationExt {
+    /// Load an existing space from this location.
+    fn load(self) -> dialog_capability::Capability<Load>;
+
+    /// Create a new space at this location with the given credential.
+    fn create(
+        self,
+        credential: dialog_credentials::Credential,
+    ) -> dialog_capability::Capability<Create>;
+}
+
+impl LocationExt for dialog_capability::Capability<Location> {
+    fn load(self) -> dialog_capability::Capability<Load> {
+        self.invoke(Load)
+    }
+
+    fn create(
+        self,
+        credential: dialog_credentials::Credential,
+    ) -> dialog_capability::Capability<Create> {
+        self.invoke(Create::new(credential))
+    }
+}
+
 /// Load an existing space from a location.
 ///
 /// Reads the identity from the resolved location and returns the DID.
