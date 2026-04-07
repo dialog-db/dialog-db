@@ -11,7 +11,7 @@
 //! [`Identify`] is an effect on `Subject` that returns the current
 //! `Capability<Operator>` chain.
 
-use crate::{Attenuation, Capability, Did, Effect, Subject};
+use dialog_capability::{Attenuation, Capability, Did, Effect, Subject};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -84,7 +84,7 @@ impl Attenuation for Operator {
 /// This is an effect directly on `Subject` — no intermediate attenuation.
 /// The returned `Capability<Operator>` encodes the full identity hierarchy:
 /// subject, profile, and operator.
-#[derive(Debug, Clone, Serialize, Deserialize, crate::Claim)]
+#[derive(Debug, Clone, Serialize, Deserialize, dialog_capability::Claim)]
 pub struct Identify;
 
 impl Effect for Identify {

@@ -1,7 +1,8 @@
 use dialog_capability::fork::Fork;
-use dialog_capability::{Policy, Provider, Subject, authority};
+use dialog_capability::{Policy, Provider, Subject};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
+use dialog_effects::authority;
 use dialog_effects::memory as memory_fx;
 use dialog_prolly_tree::{EMPT_TREE_HASH, Tree};
 use dialog_remote_s3::S3;

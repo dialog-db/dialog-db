@@ -12,7 +12,7 @@ use crate::Authority;
 use crate::remote::Remote;
 use dialog_capability::Capability;
 use dialog_capability::Provider;
-use dialog_capability::authority::{Identify, Operator as AuthOperator};
+use dialog_effects::authority::{Identify, Operator as AuthOperator};
 use dialog_effects::space as space_fx;
 use dialog_effects::storage as storage_fx;
 use dialog_effects::{archive, credential, memory};

@@ -1,6 +1,7 @@
-use dialog_capability::{Policy, Provider, Subject, authority};
+use dialog_capability::{Policy, Provider, Subject};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive as archive_fx;
+use dialog_effects::authority;
 use dialog_effects::memory as memory_fx;
 use dialog_prolly_tree::Tree;
 use dialog_storage::Blake3Hash;

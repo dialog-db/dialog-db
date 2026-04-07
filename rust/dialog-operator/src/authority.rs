@@ -3,9 +3,9 @@
 //! [`Authority`] holds the profile and operator signers and implements
 //! the provider traits needed by `Operator` for identity effects.
 
-use dialog_capability::authority::{self, AuthorityError, Operator as AuthOperator};
 use dialog_capability::{Capability, Provider, Subject};
 use dialog_credentials::Ed25519Signer;
+use dialog_effects::authority::{self, AuthorityError, Operator as AuthOperator};
 use dialog_varsig::{Did, Principal};
 
 /// An opened profile with profile and operator signers.

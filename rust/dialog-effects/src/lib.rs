@@ -29,6 +29,7 @@
 
 pub mod access;
 pub mod archive;
+pub mod authority;
 pub mod credential;
 pub mod memory;
 pub mod space;

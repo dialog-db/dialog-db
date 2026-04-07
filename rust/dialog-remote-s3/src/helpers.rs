@@ -7,7 +7,8 @@
 //! - Address types (available on all platforms for deserialization in WASM tests)
 //! - Server implementation (native-only, in the `server` submodule)
 //! - Test operator types for capability-based testing
-use dialog_capability::{Capability, Did, Principal, Provider, authority};
+use dialog_capability::{Capability, Did, Principal, Provider};
+use dialog_effects::authority;
 
 use serde::{Deserialize, Serialize};
 

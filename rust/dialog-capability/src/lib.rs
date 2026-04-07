@@ -209,8 +209,6 @@ pub use dialog_macros::Claim;
 
 pub mod access;
 
-pub mod authority;
-
 pub mod site;
 
 pub mod command;
