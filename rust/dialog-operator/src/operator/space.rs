@@ -5,14 +5,14 @@ use dialog_capability::{Capability, Policy, Provider, Subject};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::space as space_fx;
 use dialog_effects::storage::{self as storage_fx, LocationExt as _};
-use dialog_storage::provider::environment::Environment;
+use dialog_storage::provider::environment::Storage;
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<S> Provider<space_fx::Load> for Operator<S>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
-    Environment<S>: Provider<storage_fx::Load>,
+    Storage<S>: Provider<storage_fx::Load>,
     Self: ConditionalSend + ConditionalSync,
 {
     async fn execute(
@@ -33,7 +33,7 @@ where
             .attenuate(storage_fx::Storage)
             .attenuate(location)
             .load()
-            .perform(&self.env)
+            .perform(&self.storage)
             .await
     }
 }
@@ -43,7 +43,7 @@ where
 impl<S> Provider<space_fx::Create> for Operator<S>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
-    Environment<S>: Provider<storage_fx::Create>,
+    Storage<S>: Provider<storage_fx::Create>,
     Self: ConditionalSend + ConditionalSync,
 {
     async fn execute(
@@ -65,7 +65,7 @@ where
             .attenuate(storage_fx::Storage)
             .attenuate(location)
             .create(credential)
-            .perform(&self.env)
+            .perform(&self.storage)
             .await
     }
 }

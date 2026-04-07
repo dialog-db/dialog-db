@@ -1,7 +1,7 @@
 use crate::helpers::unique_name;
 use crate::network::Network;
 use crate::profile::Profile;
-use dialog_storage::provider::environment::{Environment, VolatileSpace};
+use dialog_storage::provider::environment::{Storage, VolatileSpace};
 
 #[cfg(test)]
 mod tests {
@@ -9,17 +9,17 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_builds_operator_from_profile() {
-        let env = Environment::volatile();
+        let storage = Storage::volatile();
 
         let profile = Profile::open(unique_name("test"))
-            .perform(&env)
+            .perform(&storage)
             .await
             .unwrap();
 
         let operator = profile
             .derive(b"test")
             .network(Network)
-            .build(env)
+            .build(storage)
             .await
             .unwrap();
 
@@ -28,27 +28,27 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_derives_different_operators_from_different_contexts() {
-        let env1 = Environment::volatile();
+        let storage1 = Storage::volatile();
         let profile1 = Profile::open(unique_name("ctx1"))
-            .perform(&env1)
+            .perform(&storage1)
             .await
             .unwrap();
         let op1 = profile1
             .derive(b"context-a")
             .network(Network)
-            .build(env1)
+            .build(storage1)
             .await
             .unwrap();
 
-        let env2 = Environment::volatile();
+        let storage2 = Storage::volatile();
         let profile2 = Profile::open(unique_name("ctx2"))
-            .perform(&env2)
+            .perform(&storage2)
             .await
             .unwrap();
         let op2 = profile2
             .derive(b"context-b")
             .network(Network)
-            .build(env2)
+            .build(storage2)
             .await
             .unwrap();
 
@@ -78,17 +78,17 @@ mod tests {
 
         #[dialog_common::test]
         async fn self_grant_produces_delegation() {
-            let env = Environment::volatile();
+            let storage = Storage::volatile();
 
             let profile = Profile::open(unique_name("self"))
-                .perform(&env)
+                .perform(&storage)
                 .await
                 .unwrap();
 
             let operator = profile
                 .derive(b"alice")
                 .network(Network)
-                .build(env)
+                .build(storage)
                 .await
                 .unwrap();
 
@@ -104,17 +104,17 @@ mod tests {
 
         #[dialog_common::test]
         async fn powerline_self_grant_produces_delegation() {
-            let env = Environment::volatile();
+            let storage = Storage::volatile();
 
             let profile = Profile::open(unique_name("psg"))
-                .perform(&env)
+                .perform(&storage)
                 .await
                 .unwrap();
 
             let operator = profile
                 .derive(b"alice")
                 .network(Network)
-                .build(env)
+                .build(storage)
                 .await
                 .unwrap();
 
@@ -130,10 +130,10 @@ mod tests {
 
         #[dialog_common::test]
         async fn scoped_delegation_found() {
-            let env = Environment::volatile();
+            let storage = Storage::volatile();
 
             let profile = Profile::open(unique_name("found"))
-                .perform(&env)
+                .perform(&storage)
                 .await
                 .unwrap();
 
@@ -141,7 +141,7 @@ mod tests {
                 .derive(b"alice")
                 .allow(Subject::any().archive().catalog("index"))
                 .network(Network)
-                .build(env)
+                .build(storage)
                 .await
                 .unwrap();
 
@@ -157,10 +157,10 @@ mod tests {
 
         #[dialog_common::test]
         async fn scoped_delegation_denied() {
-            let env = Environment::volatile();
+            let storage = Storage::volatile();
 
             let profile = Profile::open(unique_name("deny"))
-                .perform(&env)
+                .perform(&storage)
                 .await
                 .unwrap();
 
@@ -168,7 +168,7 @@ mod tests {
                 .derive(b"alice")
                 .allow(Subject::any().archive().catalog("index"))
                 .network(Network)
-                .build(env)
+                .build(storage)
                 .await
                 .unwrap();
 
@@ -180,10 +180,10 @@ mod tests {
 
         #[dialog_common::test]
         async fn powerline_delegation_allows_anything() {
-            let env = Environment::volatile();
+            let storage = Storage::volatile();
 
             let profile = Profile::open(unique_name("power"))
-                .perform(&env)
+                .perform(&storage)
                 .await
                 .unwrap();
 
@@ -192,7 +192,7 @@ mod tests {
                 .derive(b"admin")
                 .allow(Subject::any())
                 .network(Network)
-                .build(env)
+                .build(storage)
                 .await
                 .unwrap();
 
@@ -208,17 +208,17 @@ mod tests {
 
         #[dialog_common::test]
         async fn no_delegation_fails() {
-            let env = Environment::volatile();
+            let storage = Storage::volatile();
 
             let profile = Profile::open(unique_name("none"))
-                .perform(&env)
+                .perform(&storage)
                 .await
                 .unwrap();
 
             let operator = profile
                 .derive(b"alice")
                 .network(Network)
-                .build(env)
+                .build(storage)
                 .await
                 .unwrap();
 
@@ -230,10 +230,10 @@ mod tests {
 
         #[dialog_common::test]
         async fn no_issuer_uses_profile_did() {
-            let env = Environment::volatile();
+            let storage = Storage::volatile();
 
             let profile = Profile::open(unique_name("nois"))
-                .perform(&env)
+                .perform(&storage)
                 .await
                 .unwrap();
 
@@ -241,7 +241,7 @@ mod tests {
                 .derive(b"alice")
                 .allow(Subject::any().archive().catalog("index"))
                 .network(Network)
-                .build(env)
+                .build(storage)
                 .await
                 .unwrap();
 
@@ -275,15 +275,15 @@ mod tests {
 
         async fn build_operator_with_profile()
         -> (super::super::super::Operator<VolatileSpace>, Profile) {
-            let env = Environment::volatile();
+            let storage = Storage::volatile();
             let profile = Profile::open(unique_name("time"))
-                .perform(&env)
+                .perform(&storage)
                 .await
                 .unwrap();
             let operator = profile
                 .derive(b"test")
                 .allow(Subject::any())
-                .build(env)
+                .build(storage)
                 .await
                 .unwrap();
             (operator, profile)
@@ -293,12 +293,12 @@ mod tests {
         /// Only explicitly delegated capabilities will be available.
         async fn build_restricted_operator_with_profile()
         -> (super::super::super::Operator<VolatileSpace>, Profile) {
-            let env = Environment::volatile();
+            let storage = Storage::volatile();
             let profile = Profile::open(unique_name("time-restricted"))
-                .perform(&env)
+                .perform(&storage)
                 .await
                 .unwrap();
-            let operator = profile.derive(b"test").build(env).await.unwrap();
+            let operator = profile.derive(b"test").build(storage).await.unwrap();
             (operator, profile)
         }
 
@@ -650,9 +650,9 @@ mod tests {
 
         #[dialog_common::test]
         async fn it_denies_space_load_for_wrong_subject() {
-            let env = Environment::volatile();
+            let storage = Storage::volatile();
             let profile = Profile::open(unique_name("space-deny"))
-                .perform(&env)
+                .perform(&storage)
                 .await
                 .unwrap();
 
@@ -660,7 +660,7 @@ mod tests {
                 .derive(b"test")
                 .allow(Subject::any())
                 .network(Network)
-                .build(env)
+                .build(storage)
                 .await
                 .unwrap();
 
@@ -677,9 +677,9 @@ mod tests {
 
         #[dialog_common::test]
         async fn it_allows_space_for_profile_subject() {
-            let env = Environment::volatile();
+            let storage = Storage::volatile();
             let profile = Profile::open(unique_name("space-allow"))
-                .perform(&env)
+                .perform(&storage)
                 .await
                 .unwrap();
 
@@ -687,7 +687,7 @@ mod tests {
                 .derive(b"test")
                 .allow(Subject::any())
                 .network(Network)
-                .build(env)
+                .build(storage)
                 .await
                 .unwrap();
 

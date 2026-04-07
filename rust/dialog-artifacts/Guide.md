@@ -15,16 +15,16 @@ Every capability invocation carries a delegation chain: `subject -> profile -> o
 ## Setup
 
 ```rs
-let env = Environment::default();
+let storage = Storage::default();
 
 let profile = Profile::open("alice")
-    .perform(&env)
+    .perform(&storage)
     .await?;
 
 let operator = profile
     .derive(b"my-app")
     .allow(Subject::any())
-    .build(env)
+    .build(storage)
     .await?;
 ```
 
@@ -35,7 +35,7 @@ let operator = profile
     .derive(b"my-app")
     .base(Directory::Temp)
     .allow(Subject::any())
-    .build(env)
+    .build(storage)
     .await?;
 ```
 

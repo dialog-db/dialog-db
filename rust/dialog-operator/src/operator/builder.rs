@@ -9,7 +9,7 @@ use dialog_capability::{Ability, Provider, Subject};
 use dialog_credentials::key::KeyExport;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
 use dialog_effects::storage::Directory;
-use dialog_storage::provider::environment::Environment;
+use dialog_storage::provider::environment::Storage;
 use dialog_storage::provider::space::SpaceProvider;
 use dialog_ucan::{Scope, Ucan};
 use dialog_varsig::Principal;
@@ -67,7 +67,7 @@ impl OperatorBuilder {
     }
 
     /// Build the operator, deriving the operator key.
-    pub async fn build<S>(self, env: Environment<S>) -> Result<Operator<S>, OperatorError>
+    pub async fn build<S>(self, storage: Storage<S>) -> Result<Operator<S>, OperatorError>
     where
         S: SpaceProvider + Clone + 'static,
         S: Provider<Prove<Ucan>>,
@@ -82,7 +82,7 @@ impl OperatorBuilder {
 
         let operator = Operator {
             authority: credentials.clone(),
-            env,
+            storage,
             directory: self.directory,
             network: self.network,
         };

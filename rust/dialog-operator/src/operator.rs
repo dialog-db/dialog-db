@@ -17,14 +17,14 @@ use dialog_capability::Capability;
 use dialog_effects::authority::{Identify, Operator as AuthOperator};
 use dialog_effects::storage as storage_fx;
 use dialog_effects::{archive, credential, memory};
-use dialog_storage::provider::environment::Environment;
+use dialog_storage::provider::environment::Storage;
 use dialog_varsig::{Did, Principal};
 
 /// An operating environment built from a [`Profile`](crate::profile::Profile).
 ///
 /// Composes:
 /// - Authority credentials (identity)
-/// - [`Environment`] for DID-routed effects
+/// - [`Storage`] for DID-routed effects
 /// - Base directory for resolving space names to storage locations
 /// - Remote for fork invocations
 #[derive(dialog_capability::Provider)]
@@ -42,8 +42,8 @@ pub struct Operator<S: Clone> {
         memory::Publish,
         memory::Retract
     )]
-    /// Environment — routes DID-based effects.
-    env: Environment<S>,
+    /// Storage — routes DID-based effects.
+    storage: Storage<S>,
 
     /// Base directory for resolving space names.
     directory: storage_fx::Directory,

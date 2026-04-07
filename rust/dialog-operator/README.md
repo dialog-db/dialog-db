@@ -9,21 +9,21 @@ A **Profile** is a named identity on a device, backed by a signing credential. A
 ```rust
 use dialog_operator::profile::Profile;
 use dialog_capability::Subject;
-use dialog_storage::provider::environment::Environment;
+use dialog_storage::provider::environment::Storage;
 
 // Create the environment (platform-specific storage)
-let env = Environment::default();
+let storage = Storage::default();
 
 // Open or create a profile
 let profile = Profile::open("alice")
-    .perform(&env)
+    .perform(&storage)
     .await?;
 
 // Derive an operator (narrows access, scoped to profile)
 let operator = profile
     .derive(b"my-app")
     .allow(Subject::any())
-    .build(env)
+    .build(storage)
     .await?;
 
 // Open a repository through the profile

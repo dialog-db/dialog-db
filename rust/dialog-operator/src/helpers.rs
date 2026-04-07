@@ -7,7 +7,7 @@ use crate::{Artifact, Attribute, Entity, Value};
 use anyhow::Result;
 use base58::ToBase58;
 use dialog_capability::Subject;
-use dialog_storage::provider::environment::{Environment, VolatileSpace};
+use dialog_storage::provider::environment::{Storage, VolatileSpace};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -26,32 +26,32 @@ pub fn unique_name(prefix: &str) -> String {
 
 /// Build a test operator with a fresh profile and powerline delegation.
 pub async fn test_operator() -> Operator<VolatileSpace> {
-    let env = Environment::volatile();
+    let storage = Storage::volatile();
     let profile = Profile::open(unique_name("test"))
-        .perform(&env)
+        .perform(&storage)
         .await
         .unwrap();
     profile
         .derive(b"test")
         .allow(Subject::any())
         .network(Network)
-        .build(env)
+        .build(storage)
         .await
         .unwrap()
 }
 
 /// Build a test operator and return both the operator and the profile.
 pub async fn test_operator_with_profile() -> (Operator<VolatileSpace>, Profile) {
-    let env = Environment::volatile();
+    let storage = Storage::volatile();
     let profile = Profile::open(unique_name("test"))
-        .perform(&env)
+        .perform(&storage)
         .await
         .unwrap();
     let operator = profile
         .derive(b"test")
         .allow(Subject::any())
         .network(Network)
-        .build(env)
+        .build(storage)
         .await
         .unwrap();
     (operator, profile)

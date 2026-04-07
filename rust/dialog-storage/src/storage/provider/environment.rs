@@ -188,9 +188,9 @@ where
     }
 }
 
-/// Environment: the runtime context for capability dispatch.
+/// Storage: the runtime context for capability dispatch.
 #[derive(dialog_capability::Provider)]
-pub struct Environment<S: Clone> {
+pub struct Storage<S: Clone> {
     #[provide(dialog_effects::storage::Load, dialog_effects::storage::Create)]
     loader: Loader<S>,
 
@@ -212,7 +212,7 @@ use dialog_capability::access::{
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<S, P> Provider<AccessClaim<P>> for Environment<S>
+impl<S, P> Provider<AccessClaim<P>> for Storage<S>
 where
     S: Clone + ConditionalSync,
     P: Protocol,
@@ -229,7 +229,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<S, P> Provider<AccessRetain<P>> for Environment<S>
+impl<S, P> Provider<AccessRetain<P>> for Storage<S>
 where
     S: Clone + ConditionalSync,
     P: Protocol,
@@ -242,7 +242,7 @@ where
     }
 }
 
-impl<S: Clone> Environment<S> {
+impl<S: Clone> Storage<S> {
     /// Create a new empty environment.
     pub fn new() -> Self {
         let spaces = Arc::new(Pool::new());
@@ -271,7 +271,7 @@ pub type NativeSpace = super::space::MountedSpace<
     super::FileStore,
 >;
 
-impl Environment<VolatileSpace> {
+impl Storage<VolatileSpace> {
     /// Create a volatile (in-memory) environment for testing.
     pub fn volatile() -> Self {
         Self::new()
@@ -279,7 +279,7 @@ impl Environment<VolatileSpace> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl Default for Environment<NativeSpace> {
+impl Default for Storage<NativeSpace> {
     fn default() -> Self {
         Self::new()
     }
@@ -287,7 +287,7 @@ impl Default for Environment<NativeSpace> {
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 impl Default
-    for Environment<
+    for Storage<
         super::space::MountedSpace<
             super::IndexedDb,
             super::IndexedDb,
@@ -308,7 +308,7 @@ mod tests {
     use dialog_credentials::{Ed25519Signer, SignerCredential};
     use dialog_effects::archive::{Archive, Catalog, Get, Put};
     use dialog_effects::memory::{self, Memory};
-    use dialog_effects::storage::{LocationExt, Storage};
+    use dialog_effects::storage::{LocationExt, Storage as StorageFx};
 
     /// Helper: create a credential and return (credential, expected_did).
     async fn test_credential() -> (dialog_credentials::Credential, Did) {
@@ -320,10 +320,10 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_creates_profile_with_sugar() {
-        let env = Environment::volatile();
+        let env = Storage::volatile();
         let (credential, expected_did) = test_credential().await;
 
-        let cred = Storage::profile("alice")
+        let cred = StorageFx::profile("alice")
             .create(credential)
             .perform(&env)
             .await
@@ -335,10 +335,10 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_archives_after_create() {
-        let env = Environment::volatile();
+        let env = Storage::volatile();
         let (credential, _) = test_credential().await;
 
-        let cred = Storage::profile("bob")
+        let cred = StorageFx::profile("bob")
             .create(credential)
             .perform(&env)
             .await
@@ -368,10 +368,10 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_publishes_memory_after_create() {
-        let env = Environment::volatile();
+        let env = Storage::volatile();
         let (credential, _) = test_credential().await;
 
-        let did = Storage::profile("charlie")
+        let did = StorageFx::profile("charlie")
             .create(credential)
             .perform(&env)
             .await
@@ -406,7 +406,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_errors_for_unmounted_did() {
-        let env = Environment::volatile();
+        let env = Storage::volatile();
 
         let result = Subject::from(did!("key:zUnknown"))
             .attenuate(Archive)
@@ -419,10 +419,10 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_isolates_spaces() {
-        let env = Environment::volatile();
+        let env = Storage::volatile();
 
         let (cred1, _) = test_credential().await;
-        let did1 = Storage::profile("dave")
+        let did1 = StorageFx::profile("dave")
             .create(cred1)
             .perform(&env)
             .await
@@ -430,7 +430,7 @@ mod tests {
             .did();
 
         let (cred2, _) = test_credential().await;
-        let did2 = Storage::profile("eve")
+        let did2 = StorageFx::profile("eve")
             .create(cred2)
             .perform(&env)
             .await
@@ -460,16 +460,16 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_rejects_duplicate_create() {
-        let env = Environment::volatile();
+        let env = Storage::volatile();
         let (credential, _) = test_credential().await;
 
-        Storage::profile("frank")
+        StorageFx::profile("frank")
             .create(credential.clone())
             .perform(&env)
             .await
             .unwrap();
 
-        let result = Storage::profile("frank")
+        let result = StorageFx::profile("frank")
             .create(credential)
             .perform(&env)
             .await;
@@ -479,16 +479,16 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_creates_then_loads() {
-        let env = Environment::volatile();
+        let env = Storage::volatile();
         let (credential, expected_did) = test_credential().await;
 
-        Storage::profile("grace")
+        StorageFx::profile("grace")
             .create(credential)
             .perform(&env)
             .await
             .unwrap();
 
-        let loaded = Storage::profile("grace")
+        let loaded = StorageFx::profile("grace")
             .load()
             .perform(&env)
             .await
@@ -513,34 +513,34 @@ mod tests {
             format!("{prefix}-{ts}-{seq}")
         }
 
-        type NativeEnv = Environment<NativeSpace>;
+        type NativeStorage = Storage<NativeSpace>;
 
         #[dialog_common::test]
         async fn it_creates_and_loads_on_filesystem() {
-            let env = NativeEnv::default();
+            let env = NativeStorage::default();
             let name = unique_name("fs-create-load");
 
             let (credential, expected_did) = super::test_credential().await;
 
-            let cred = Storage::temp(&name)
+            let cred = StorageFx::temp(&name)
                 .create(credential)
                 .perform(&env)
                 .await
                 .unwrap();
             assert_eq!(cred.did(), expected_did);
 
-            let loaded = Storage::temp(&name).load().perform(&env).await.unwrap();
+            let loaded = StorageFx::temp(&name).load().perform(&env).await.unwrap();
             assert_eq!(loaded.did(), expected_did);
         }
 
         #[dialog_common::test]
         async fn it_persists_archive_on_filesystem() {
-            let env = NativeEnv::default();
+            let env = NativeStorage::default();
             let name = unique_name("fs-archive");
 
             let (credential, _) = super::test_credential().await;
 
-            let did = Storage::temp(&name)
+            let did = StorageFx::temp(&name)
                 .create(credential)
                 .perform(&env)
                 .await
@@ -570,18 +570,21 @@ mod tests {
 
         #[dialog_common::test]
         async fn it_rejects_duplicate_create_on_filesystem() {
-            let env = NativeEnv::default();
+            let env = NativeStorage::default();
             let name = unique_name("fs-dup");
 
             let (credential, _) = super::test_credential().await;
 
-            Storage::temp(&name)
+            StorageFx::temp(&name)
                 .create(credential.clone())
                 .perform(&env)
                 .await
                 .unwrap();
 
-            let result = Storage::temp(&name).create(credential).perform(&env).await;
+            let result = StorageFx::temp(&name)
+                .create(credential)
+                .perform(&env)
+                .await;
             assert!(result.is_err(), "duplicate create should fail");
         }
     }

@@ -9,16 +9,16 @@ Provides repositories with branches, remotes, push/pull, and merge, but for stru
 ```rust
 use dialog_repository::RepositoryExt;
 use dialog_operator::profile::Profile;
-use dialog_storage::provider::environment::Environment;
+use dialog_storage::provider::environment::Storage;
 use dialog_capability::Subject;
 
 // Setup
-let env = Environment::default();
-let profile = Profile::open("alice").perform(&env).await?;
+let storage = Storage::default();
+let profile = Profile::open("alice").perform(&storage).await?;
 let operator = profile
     .derive(b"my-app")
     .allow(Subject::any())
-    .build(env)
+    .build(storage)
     .await?;
 
 // Open or create a repository
