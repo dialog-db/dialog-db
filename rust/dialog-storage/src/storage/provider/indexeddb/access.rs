@@ -1,6 +1,6 @@
 //! Access provider for IndexedDB storage.
 //!
-//! Implements [`ProofStore`](dialog_capability::access::ProofStore) for [`IndexedDb`]
+//! Implements [`CertificateStore`](dialog_capability::access::CertificateStore) for [`IndexedDb`]
 //! and `Provider<Retain<P>>` for granting access.
 //!
 //! Proofs are stored in a `permit` object store with keys
@@ -8,7 +8,9 @@
 //! for powerlines). Uses IDBKeyRange for efficient prefix queries.
 
 use async_trait::async_trait;
-use dialog_capability::access::{AuthorizeError, Claim, Delegation, ProofStore, Protocol, Retain};
+use dialog_capability::access::{
+    AuthorizeError, Certificate, CertificateStore, Delegation, Protocol, Prove, Retain,
+};
 use dialog_capability::{Policy, Provider};
 use dialog_varsig::Did;
 use rexie::KeyRange;
@@ -40,12 +42,12 @@ fn prefix_range(prefix: &str) -> Result<KeyRange, AuthorizeError> {
 }
 
 #[async_trait(?Send)]
-impl<P: Protocol> ProofStore<P> for IndexedDb {
+impl<P: Protocol> CertificateStore<P> for IndexedDb {
     async fn list(
         &self,
         audience: &Did,
         subject: Option<&Did>,
-    ) -> Result<Vec<P::Proof>, AuthorizeError> {
+    ) -> Result<Vec<P::Certificate>, AuthorizeError> {
         let prefix = match subject {
             Some(did) => format!("{}/{}/", audience, did),
             None => format!("{}/_/", audience),
@@ -72,7 +74,7 @@ impl<P: Protocol> ProofStore<P> for IndexedDb {
 
         let range = prefix_range(&prefix)?;
 
-        let result: Result<Vec<P::Proof>, Err> = idb_store
+        let result: Result<Vec<P::Certificate>, Err> = idb_store
             .query(|object_store| async move {
                 let values = object_store
                     .get_all(Some(range), None)
@@ -83,7 +85,7 @@ impl<P: Protocol> ProofStore<P> for IndexedDb {
                 for value in values {
                     let array = js_sys::Uint8Array::new(&value);
                     let bytes = array.to_vec();
-                    if let Ok(proof) = <P::Proof as Delegation>::decode(&bytes) {
+                    if let Ok(proof) = <P::Certificate as Certificate>::decode(&bytes) {
                         proofs.push(proof);
                     }
                 }
@@ -150,20 +152,20 @@ impl<P: Protocol> ProofStore<P> for IndexedDb {
 }
 
 #[async_trait(?Send)]
-impl<P> Provider<Claim<P>> for IndexedDb
+impl<P> Provider<Prove<P>> for IndexedDb
 where
     P: Protocol,
     P::Access: Clone,
-    P::Proof: Clone,
+    P::Certificate: Clone,
 {
     async fn execute(
         &self,
-        input: dialog_capability::Capability<Claim<P>>,
-    ) -> Result<P::ProofChain, AuthorizeError> {
-        let auth = Claim::<P>::of(&input);
-        let mut authorize = Claim::new(auth.by.clone(), auth.access.clone());
-        authorize.duration = auth.duration;
-        ProofStore::<P>::authorize(self, authorize).await
+        input: dialog_capability::Capability<Prove<P>>,
+    ) -> Result<P::Proof, AuthorizeError> {
+        let auth = Prove::<P>::of(&input);
+        let mut prove = Prove::new(auth.principal.clone(), auth.access.clone());
+        prove.duration = auth.duration;
+        CertificateStore::<P>::prove(self, prove).await
     }
 }
 
@@ -174,6 +176,6 @@ impl<P: Protocol> Provider<Retain<P>> for IndexedDb {
         input: dialog_capability::Capability<Retain<P>>,
     ) -> Result<(), AuthorizeError> {
         let delegation = &Retain::<P>::of(&input).delegation;
-        ProofStore::<P>::save(self, delegation).await
+        CertificateStore::<P>::save(self, delegation).await
     }
 }
