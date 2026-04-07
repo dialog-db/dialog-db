@@ -12,7 +12,7 @@ mod test;
 pub use builder::{OperatorBuilder, OperatorError};
 
 use crate::Authority;
-use crate::remote::Remote;
+use crate::network::Network;
 use dialog_capability::Capability;
 use dialog_effects::authority::{Identify, Operator as AuthOperator};
 use dialog_effects::storage as storage_fx;
@@ -48,8 +48,8 @@ pub struct Operator<S: Clone> {
     /// Base directory for resolving space names.
     directory: storage_fx::Directory,
 
-    /// Provider for remote invocations.
-    remote: Remote,
+    /// Network dispatch for fork invocations.
+    network: Network,
 }
 
 impl<S: Clone> Operator<S> {

@@ -24,7 +24,6 @@ let profile = Profile::open("alice")
 let operator = profile
     .derive(b"my-app")
     .allow(Subject::any())
-    .network(Remote)
     .build(env)
     .await?;
 ```
@@ -36,7 +35,6 @@ let operator = profile
     .derive(b"my-app")
     .base(Directory::Temp)
     .allow(Subject::any())
-    .network(Remote)
     .build(env)
     .await?;
 ```

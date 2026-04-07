@@ -8,7 +8,6 @@ A **Profile** is a named identity on a device, backed by a signing credential. A
 
 ```rust
 use dialog_operator::profile::Profile;
-use dialog_operator::remote::Remote;
 use dialog_capability::Subject;
 use dialog_storage::provider::environment::Environment;
 
@@ -24,7 +23,6 @@ let profile = Profile::open("alice")
 let operator = profile
     .derive(b"my-app")
     .allow(Subject::any())
-    .network(Remote)
     .build(env)
     .await?;
 

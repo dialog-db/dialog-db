@@ -1,9 +1,9 @@
 //! Builder for constructing an Operator from a Profile.
 
 use crate::Authority;
+use crate::network::Network;
 use crate::profile::Profile;
 use crate::profile::access::Access as ProfileAccess;
-use crate::remote::Remote;
 use dialog_capability::access::{Access, Authorization as _, Proof as _, Prove, Retain};
 use dialog_capability::{Ability, Provider, Subject};
 use dialog_credentials::key::KeyExport;
@@ -26,7 +26,7 @@ pub struct OperatorBuilder {
     context: Vec<u8>,
     allowed: Vec<Scope>,
     directory: Directory,
-    remote: Remote,
+    network: Network,
 }
 
 impl OperatorBuilder {
@@ -36,7 +36,7 @@ impl OperatorBuilder {
             context,
             allowed: Vec::new(),
             directory: Directory::Current,
-            remote: Remote,
+            network: Network,
         }
     }
 
@@ -60,9 +60,9 @@ impl OperatorBuilder {
         self
     }
 
-    /// Set the remote dispatch provider.
-    pub fn network(mut self, remote: Remote) -> Self {
-        self.remote = remote;
+    /// Set the network dispatch provider.
+    pub fn network(mut self, network: Network) -> Self {
+        self.network = network;
         self
     }
 
@@ -84,7 +84,7 @@ impl OperatorBuilder {
             authority: credentials.clone(),
             env,
             directory: self.directory,
-            remote: self.remote,
+            network: self.network,
         };
 
         // Create delegations for allowed capabilities

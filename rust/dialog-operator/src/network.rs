@@ -1,23 +1,23 @@
-//! Remote dispatch — routes `ForkInvocation<S, Fx>` to the appropriate site provider.
+//! Network dispatch — routes `ForkInvocation<S, Fx>` to the appropriate site provider.
 //!
-//! [`Remote`] implements `Provider<ForkInvocation<S3, Fx>>` (and optionally
+//! [`Network`] implements `Provider<ForkInvocation<S3, Fx>>` (and optionally
 //! `Provider<ForkInvocation<UcanSite, Fx>>` with the `ucan` feature) by delegating
 //! to the stateless site executors.
 //!
 //! The Operator builds the authorization (converting `Fork` to `ForkInvocation`)
 //! before delegating here.
 
-/// Remote dispatch — routes fork invocations to the appropriate site.
+/// Network dispatch — routes fork invocations to the appropriate site.
 ///
-/// Both `S3` and `UcanSite` are stateless, so `Remote::default()` is all
+/// Both `S3` and `UcanSite` are stateless, so `Network::default()` is all
 /// you need. The Operator routes `ForkInvocation<S, Fx>` here after building
 /// the protocol-specific authorization.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct Remote;
+pub struct Network;
 
 #[cfg(feature = "s3")]
 mod s3_dispatch {
-    use super::Remote;
+    use super::Network;
     use async_trait::async_trait;
     use dialog_capability::fork::ForkInvocation;
     use dialog_capability::{Constraint, Effect, Provider};
@@ -25,7 +25,7 @@ mod s3_dispatch {
 
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    impl<Fx> Provider<ForkInvocation<S3, Fx>> for Remote
+    impl<Fx> Provider<ForkInvocation<S3, Fx>> for Network
     where
         Fx: Effect + 'static,
         Fx::Of: Constraint,
@@ -39,7 +39,7 @@ mod s3_dispatch {
 }
 
 mod ucan_dispatch {
-    use super::Remote;
+    use super::Network;
     use async_trait::async_trait;
     use dialog_capability::fork::ForkInvocation;
     use dialog_capability::{Constraint, Effect, Provider};
@@ -47,7 +47,7 @@ mod ucan_dispatch {
 
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    impl<Fx> Provider<ForkInvocation<UcanSite, Fx>> for Remote
+    impl<Fx> Provider<ForkInvocation<UcanSite, Fx>> for Network
     where
         Fx: Effect + 'static,
         Fx::Of: Constraint,

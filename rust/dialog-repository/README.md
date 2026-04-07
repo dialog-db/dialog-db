@@ -7,7 +7,7 @@ Provides repositories with branches, remotes, push/pull, and merge, but for stru
 ## Usage
 
 ```rust
-use dialog_repository::{RepositoryExt, Operator, Remote};
+use dialog_repository::RepositoryExt;
 use dialog_operator::profile::Profile;
 use dialog_storage::provider::environment::Environment;
 use dialog_capability::Subject;
@@ -18,7 +18,6 @@ let profile = Profile::open("alice").perform(&env).await?;
 let operator = profile
     .derive(b"my-app")
     .allow(Subject::any())
-    .network(Remote)
     .build(env)
     .await?;
 

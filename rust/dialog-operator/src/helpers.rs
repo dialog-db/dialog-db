@@ -1,8 +1,8 @@
 use std::str::FromStr;
 
+use crate::network::Network;
 use crate::operator::Operator;
 use crate::profile::Profile;
-use crate::remote::Remote;
 use crate::{Artifact, Attribute, Entity, Value};
 use anyhow::Result;
 use base58::ToBase58;
@@ -34,7 +34,7 @@ pub async fn test_operator() -> Operator<VolatileSpace> {
     profile
         .derive(b"test")
         .allow(Subject::any())
-        .network(Remote)
+        .network(Network)
         .build(env)
         .await
         .unwrap()
@@ -50,7 +50,7 @@ pub async fn test_operator_with_profile() -> (Operator<VolatileSpace>, Profile) 
     let operator = profile
         .derive(b"test")
         .allow(Subject::any())
-        .network(Remote)
+        .network(Network)
         .build(env)
         .await
         .unwrap();

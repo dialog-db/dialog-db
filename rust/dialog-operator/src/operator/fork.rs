@@ -8,7 +8,7 @@ use dialog_capability::fork::{Fork, ForkInvocation};
 use dialog_capability::{Constraint, Effect};
 use dialog_common::{ConditionalSend, ConditionalSync};
 
-use crate::remote::Remote;
+use crate::network::Network;
 
 #[cfg(feature = "s3")]
 mod s3 {
@@ -25,13 +25,13 @@ mod s3 {
         Fx::Output: ConditionalSend,
         Fork<S3, Fx>: ConditionalSend,
         ForkInvocation<S3, Fx>: ConditionalSend,
-        Remote: Provider<ForkInvocation<S3, Fx>> + ConditionalSync,
+        Network: Provider<ForkInvocation<S3, Fx>> + ConditionalSync,
         Self: ConditionalSend + ConditionalSync,
     {
         async fn execute(&self, input: Fork<S3, Fx>) -> Result<Fx::Output, AuthorizeError> {
             let (capability, address) = input.into_parts();
             let invocation = ForkInvocation::new(capability, address, ());
-            Ok(self.remote.execute(invocation).await)
+            Ok(self.network.execute(invocation).await)
         }
     }
 }
@@ -55,7 +55,7 @@ mod ucan {
         Capability<Fx>: Ability + ConditionalSend + ConditionalSync,
         Fork<UcanSite, Fx>: ConditionalSend,
         ForkInvocation<UcanSite, Fx>: ConditionalSend,
-        Remote: Provider<ForkInvocation<UcanSite, Fx>> + ConditionalSync,
+        Network: Provider<ForkInvocation<UcanSite, Fx>> + ConditionalSync,
         Self: ConditionalSend + ConditionalSync,
     {
         async fn execute(&self, input: Fork<UcanSite, Fx>) -> Result<Fx::Output, AuthorizeError> {
@@ -73,7 +73,7 @@ mod ucan {
             let ucan_invocation = authorization.invoke().await?;
 
             let invocation = ForkInvocation::new(capability, address, ucan_invocation);
-            Ok(self.remote.execute(invocation).await)
+            Ok(self.network.execute(invocation).await)
         }
     }
 }

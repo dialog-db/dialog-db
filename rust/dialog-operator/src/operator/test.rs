@@ -1,6 +1,6 @@
 use crate::helpers::unique_name;
+use crate::network::Network;
 use crate::profile::Profile;
-use crate::remote::Remote;
 use dialog_storage::provider::environment::{Environment, VolatileSpace};
 
 #[cfg(test)]
@@ -18,7 +18,7 @@ mod tests {
 
         let operator = profile
             .derive(b"test")
-            .network(Remote)
+            .network(Network)
             .build(env)
             .await
             .unwrap();
@@ -35,7 +35,7 @@ mod tests {
             .unwrap();
         let op1 = profile1
             .derive(b"context-a")
-            .network(Remote)
+            .network(Network)
             .build(env1)
             .await
             .unwrap();
@@ -47,7 +47,7 @@ mod tests {
             .unwrap();
         let op2 = profile2
             .derive(b"context-b")
-            .network(Remote)
+            .network(Network)
             .build(env2)
             .await
             .unwrap();
@@ -87,7 +87,7 @@ mod tests {
 
             let operator = profile
                 .derive(b"alice")
-                .network(Remote)
+                .network(Network)
                 .build(env)
                 .await
                 .unwrap();
@@ -113,7 +113,7 @@ mod tests {
 
             let operator = profile
                 .derive(b"alice")
-                .network(Remote)
+                .network(Network)
                 .build(env)
                 .await
                 .unwrap();
@@ -140,7 +140,7 @@ mod tests {
             let operator = profile
                 .derive(b"alice")
                 .allow(Subject::any().archive().catalog("index"))
-                .network(Remote)
+                .network(Network)
                 .build(env)
                 .await
                 .unwrap();
@@ -167,7 +167,7 @@ mod tests {
             let operator = profile
                 .derive(b"alice")
                 .allow(Subject::any().archive().catalog("index"))
-                .network(Remote)
+                .network(Network)
                 .build(env)
                 .await
                 .unwrap();
@@ -191,7 +191,7 @@ mod tests {
             let operator = profile
                 .derive(b"admin")
                 .allow(Subject::any())
-                .network(Remote)
+                .network(Network)
                 .build(env)
                 .await
                 .unwrap();
@@ -217,7 +217,7 @@ mod tests {
 
             let operator = profile
                 .derive(b"alice")
-                .network(Remote)
+                .network(Network)
                 .build(env)
                 .await
                 .unwrap();
@@ -240,7 +240,7 @@ mod tests {
             let operator = profile
                 .derive(b"alice")
                 .allow(Subject::any().archive().catalog("index"))
-                .network(Remote)
+                .network(Network)
                 .build(env)
                 .await
                 .unwrap();
@@ -659,7 +659,7 @@ mod tests {
             let operator = profile
                 .derive(b"test")
                 .allow(Subject::any())
-                .network(Remote)
+                .network(Network)
                 .build(env)
                 .await
                 .unwrap();
@@ -686,7 +686,7 @@ mod tests {
             let operator = profile
                 .derive(b"test")
                 .allow(Subject::any())
-                .network(Remote)
+                .network(Network)
                 .build(env)
                 .await
                 .unwrap();

@@ -19,7 +19,7 @@
 pub use dialog_operator::{
     Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMut, Artifacts, Attribute,
     AttributeKey, Authority, Cause, Datum, DialogArtifactsError, Entity, EntityKey, FromKey,
-    Instruction, Key, KeyView, KeyViewConstruct, KeyViewMut, Operator, Remote, State, Value,
+    Instruction, Key, KeyView, KeyViewConstruct, KeyViewMut, Network, Operator, State, Value,
     ValueKey,
 };
 
@@ -32,8 +32,8 @@ pub use dialog_operator::profile;
 /// Operator — operating environment built from a profile.
 pub use dialog_operator::operator;
 
-/// Remote dispatch for fork invocations.
-pub use dialog_operator::remote;
+/// Network dispatch for fork invocations.
+pub use dialog_operator::network;
 
 /// Capability-based repository system.
 mod repository;

@@ -12,9 +12,8 @@
 //! Operator layer for Dialog-DB.
 //!
 //! This crate provides the capability-based operator system: authority
-//! credentials, profiles, operator builders, storage dispatch, and remote
-//! fork dispatch that together form the operational layer above the core
-//! artifact store.
+//! credentials, profiles, operator builders, and network dispatch that
+//! together form the operational layer above the core artifact store.
 
 // Re-export core artifact types for convenience.
 pub use dialog_artifacts::{
@@ -34,9 +33,9 @@ pub mod profile;
 pub mod operator;
 pub use operator::Operator;
 
-/// Remote dispatch for fork invocations.
-pub mod remote;
-pub use remote::Remote;
+/// Network dispatch for fork invocations.
+pub mod network;
+pub use network::Network;
 
 /// Test helpers for setting up profiles, operators, and test data.
 #[cfg(any(test, feature = "helpers"))]
