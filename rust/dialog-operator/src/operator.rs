@@ -235,7 +235,7 @@ mod ucan_fork {
             let scope = UcanScope::invoke(&capability);
 
             let proof_chain: UcanProofChain = dialog_capability::Subject::from(self.profile_did())
-                .attenuate(access::Permit)
+                .attenuate(access::Access)
                 .invoke(access::Claim::<Ucan>::new(self.did(), scope))
                 .perform(self)
                 .await?;

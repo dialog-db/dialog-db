@@ -58,7 +58,7 @@ mod tests {
     mod delegation_tests {
         use super::*;
         use dialog_capability::Subject;
-        use dialog_capability::access::{self as cap_access, AuthorizeError, Permit};
+        use dialog_capability::access::{self as cap_access, Access, AuthorizeError};
         use dialog_effects::archive::prelude::{ArchiveExt, SubjectExt as ArchiveSubjectExt};
         use dialog_ucan::scope::Scope;
         use dialog_ucan::{Ucan, UcanPermit};
@@ -70,7 +70,7 @@ mod tests {
             let scope = Scope::from(capability);
 
             Subject::from(operator.profile_did())
-                .attenuate(Permit)
+                .attenuate(Access)
                 .invoke(cap_access::Claim::<Ucan>::new(operator.did(), scope))
                 .perform(operator)
                 .await

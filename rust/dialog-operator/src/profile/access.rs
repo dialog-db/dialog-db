@@ -106,7 +106,7 @@ where
         let mut claim = access::Claim::<Ucan>::new(self.by.did(), scope);
         claim.duration = duration;
         Subject::from(self.by.did())
-            .attenuate(access::Permit)
+            .attenuate(access::Access)
             .invoke(claim)
             .perform(env)
             .await

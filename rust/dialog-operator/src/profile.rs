@@ -122,10 +122,10 @@ impl SaveDelegation {
     where
         Env: Provider<SaveUcan> + ConditionalSync,
     {
-        use dialog_capability::access::Permit;
+        use dialog_capability::access::Access;
 
         Subject::from(self.did)
-            .attenuate(Permit)
+            .attenuate(Access)
             .invoke(AccessSave::<Ucan>::new(self.chain))
             .perform(env)
             .await

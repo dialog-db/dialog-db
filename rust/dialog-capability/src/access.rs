@@ -4,14 +4,14 @@
 //!
 //! ```text
 //! Subject (profile DID)
-//! └── Permit
+//! └── Access
 //!     ├── Claim { access, by, time } → ProofChain
-//!     └── Save { permit: ProofChain } → ()
+//!     └── Save { delegation } → ()
 //! ```
 //!
 //! # Authorization Flow
 //!
-//! 1. `Subject.attenuate(Permit).invoke(Authorize { .. }).perform(&store)`
+//! 1. `Subject.attenuate(Access).invoke(Claim { .. }).perform(&store)`
 //!    returns a [`ProofChain`] (type-erased proof, no signer).
 //! 2. `proof_chain.claim(signer)` binds a signer to produce an
 //!    [`Authorization`] that can `delegate()` and `invoke()`.
@@ -149,14 +149,14 @@ pub trait ProofChain<P: Protocol>:
     fn claim(self, signer: P::Signer) -> Result<P::Authorization, AuthorizeError>;
 }
 
-/// Permit attenuation — parent for authorization effects.
+/// Access attenuation — parent for authorization effects.
 ///
-/// Attaches to [`Subject`](crate::Subject) and provides the `/permit`
+/// Attaches to [`Subject`](crate::Subject) and provides the `/access`
 /// ability path segment.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Permit;
+pub struct Access;
 
-impl crate::Attenuation for Permit {
+impl crate::Attenuation for Access {
     type Of = crate::Subject;
 }
 
@@ -177,9 +177,6 @@ pub trait Protocol: Sized + ConditionalSend + 'static {
     /// A delegation chain — what [`Authorization::delegate`] produces.
     type Delegation: ConditionalSend + ConditionalSync + Serialize + for<'de> Deserialize<'de>;
 
-    /// Extract individual proofs from a delegation for storage.
-    fn proofs(delegation: &Self::Delegation) -> Vec<Self::Proof>;
-
     /// An invocation chain — what [`Authorization::invoke`] produces.
     type Invocation: ConditionalSend;
 
@@ -188,6 +185,9 @@ pub trait Protocol: Sized + ConditionalSend + 'static {
 
     /// Full authorization with signer bound. Can delegate and invoke.
     type Authorization: Authorization<Self> + ConditionalSend;
+
+    /// Extract individual proofs from a delegation for storage.
+    fn proofs(delegation: &Self::Delegation) -> Vec<Self::Proof>;
 }
 
 /// Full authorization — can produce delegations and invocations.
@@ -247,13 +247,13 @@ impl<P: Protocol> crate::Effect for Claim<P>
 where
     P::Access: ConditionalSend + 'static,
 {
-    type Of = Permit;
+    type Of = Access;
     type Output = Result<P::ProofChain, AuthorizeError>;
 }
 
 /// Save effect — stores a delegation for future authorization lookups.
 ///
-/// An [`Effect`](crate::Effect) on [`Permit`]. The subject DID
+/// An [`Effect`](crate::Effect) on [`Access`]. The subject DID
 /// in the capability chain determines where proofs are stored.
 #[derive(Serialize, Deserialize, crate::Claim)]
 #[serde(bound(
@@ -276,7 +276,7 @@ impl<P: Protocol> crate::Effect for Save<P>
 where
     P::Delegation: ConditionalSend + 'static,
 {
-    type Of = Permit;
+    type Of = Access;
     type Output = Result<(), AuthorizeError>;
 }
 

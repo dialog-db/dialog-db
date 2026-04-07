@@ -1,7 +1,7 @@
-//! Authorization provider for filesystem storage.
+//! Access provider for filesystem storage.
 //!
 //! Implements [`ProofStore`](dialog_capability::access::ProofStore) for [`FileStore`]
-//! and `Provider<Save<P>>` for storing permits.
+//! and `Provider<Save<P>>` for granting access.
 //!
 //! Proofs are stored at:
 //! - Subject-specific: `{root}/permit/{audience}/{subject}/{issuer}.{id}`

@@ -34,8 +34,8 @@
 //! # }
 //! ```
 
+mod access;
 mod archive;
-mod authorize;
 mod credential;
 mod memory;
 mod mount;

@@ -1,9 +1,9 @@
-//! Authorization provider for volatile (in-memory) storage.
+//! Access provider for volatile (in-memory) storage.
 //!
 //! Implements [`ProofStore`](dialog_capability::access::ProofStore) for [`Volatile`]
-//! and `Provider<Save<P>>` for storing permits.
+//! and `Provider<Save<P>>` for granting access.
 //!
-//! Permits are stored in-memory keyed by `{audience}/{subject}/{issuer}.{hash}`
+//! Proofs are stored in-memory keyed by `{audience}/{subject}/{issuer}.{hash}`
 //! (or `{audience}/_/{issuer}.{hash}` for powerlines).
 
 use async_trait::async_trait;

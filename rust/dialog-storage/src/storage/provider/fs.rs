@@ -41,9 +41,9 @@
 //! # }
 //! ```
 
-mod archive;
 #[cfg(not(target_arch = "wasm32"))]
-mod authorize;
+mod access;
+mod archive;
 mod credential;
 mod error;
 mod memory;

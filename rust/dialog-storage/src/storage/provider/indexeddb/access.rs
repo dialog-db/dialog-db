@@ -1,9 +1,9 @@
-//! Authorization provider for IndexedDB storage.
+//! Access provider for IndexedDB storage.
 //!
 //! Implements [`ProofStore`](dialog_capability::access::ProofStore) for [`IndexedDb`]
-//! and `Provider<Save<P>>` for storing permits.
+//! and `Provider<Save<P>>` for granting access.
 //!
-//! Permits are stored in a `permit` object store with keys
+//! Proofs are stored in a `permit` object store with keys
 //! `{audience}/{subject}/{issuer}.{hash}` (or `{audience}/_/{issuer}.{hash}`
 //! for powerlines). Uses IDBKeyRange for efficient prefix queries.
 
