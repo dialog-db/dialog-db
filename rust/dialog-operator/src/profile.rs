@@ -68,6 +68,17 @@ impl Profile {
     pub fn derive(&self, context: impl Into<Vec<u8>>) -> OperatorBuilder {
         OperatorBuilder::new(self, context.into())
     }
+
+    /// Get a handle to a named repository space under this profile.
+    ///
+    /// The returned handle can open, load, or create a repository
+    /// through an operator that verifies the profile DID.
+    pub fn repository(&self, name: impl Into<String>) -> SpaceHandle {
+        SpaceHandle {
+            profile_did: self.did(),
+            name: name.into(),
+        }
+    }
 }
 
 impl From<&Profile> for Capability<Subject> {
@@ -115,11 +126,23 @@ impl SaveDelegation {
 
         Subject::from(self.did)
             .attenuate(Permit)
-            .invoke(dialog_capability::access::Save::<Ucan>::new(self.chain))
+            .invoke(AccessSave::<Ucan>::new(self.chain))
             .perform(env)
             .await
             .map_err(|e| ProfileError::Storage(e.to_string()))
     }
+}
+
+/// Handle to a named space under a profile.
+///
+/// Knows the profile DID and space name. Use `.open()`, `.load()`,
+/// or `.create()` to build a command, then `.perform(&operator)` to
+/// execute it.
+pub struct SpaceHandle {
+    /// The profile DID that owns this space.
+    pub profile_did: Did,
+    /// The space name.
+    pub name: String,
 }
 
 enum OpenMode {
@@ -215,13 +238,10 @@ mod tests {
 
     use super::*;
     use dialog_storage::provider::environment::Environment;
-    use dialog_storage::provider::environment::VolatileSpace;
-
-    type TestEnv = Environment<VolatileSpace>;
 
     #[dialog_common::test]
     async fn it_opens_profile() {
-        let env = TestEnv::new();
+        let env = Environment::volatile();
 
         let profile = Profile::open("alice").perform(&env).await.unwrap();
         assert!(!profile.did().to_string().is_empty());
@@ -229,7 +249,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_opens_same_profile_twice() {
-        let env = TestEnv::new();
+        let env = Environment::volatile();
 
         let first = Profile::open("bob").perform(&env).await.unwrap();
         let second = Profile::open("bob").perform(&env).await.unwrap();
@@ -239,7 +259,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_creates_then_loads() {
-        let env = TestEnv::new();
+        let env = Environment::volatile();
 
         let created = Profile::create("charlie").perform(&env).await.unwrap();
         let loaded = Profile::load("charlie").perform(&env).await.unwrap();
@@ -249,7 +269,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_fails_to_create_duplicate() {
-        let env = TestEnv::new();
+        let env = Environment::volatile();
 
         Profile::create("dave").perform(&env).await.unwrap();
         let result = Profile::create("dave").perform(&env).await;
@@ -259,7 +279,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_fails_to_load_missing() {
-        let env = TestEnv::new();
+        let env = Environment::volatile();
 
         let result = Profile::load("missing").perform(&env).await;
         assert!(result.is_err());

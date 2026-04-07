@@ -422,11 +422,11 @@ mod tests {
     async fn it_roundtrips_assert_and_query() -> anyhow::Result<()> {
         use crate::session::RuleRegistry;
         use crate::source::test::TestEnv;
-        use dialog_repository::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
         use futures_util::TryStreamExt;
 
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
@@ -467,11 +467,11 @@ mod tests {
     async fn it_finds_all_relations_between_entities() -> anyhow::Result<()> {
         use crate::session::RuleRegistry;
         use crate::source::test::TestEnv;
-        use dialog_repository::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
         use futures_util::TryStreamExt;
 
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;

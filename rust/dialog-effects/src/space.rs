@@ -6,23 +6,24 @@
 //! # Capability Hierarchy
 //!
 //! ```text
-//! Subject -> Space -> { name } -> Mount / Create
+//! Subject (profile DID) -> Space { name } -> Load / Create
 //! ```
 //!
-//! `Mount` resolves the name against the operator's base directory
+//! `Load` resolves the name against the operator's base directory
 //! and delegates to `storage::Load` internally.
 //!
 //! `Create` resolves the name and delegates to `storage::Create`.
 
-use dialog_capability::{Attenuation, Did, Effect, Subject};
+use dialog_capability::{Attenuation, Capability, Effect, Subject};
+use dialog_credentials::Credential;
 use serde::{Deserialize, Serialize};
 
 use super::storage::StorageError;
 
-/// Root attenuation for space operations.
+/// Attenuation for space operations scoped by name.
 ///
-/// Attaches to Subject and provides the `/space` ability path segment.
-/// The operator's base directory determines where names resolve to.
+/// Attaches to Subject (profile DID) and carries the space name.
+/// The operator resolves this name against its base directory.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Space {
     /// Space name, resolved relative to the operator's base directory.
@@ -40,38 +41,55 @@ impl Attenuation for Space {
     type Of = Subject;
 }
 
-/// Mount an existing space by name.
-///
-/// Resolves the name against the operator's base directory, reads the
-/// identity, creates providers, and registers the DID in the routing
-/// table. Returns the DID.
-#[derive(Debug, Clone, Serialize, Deserialize, dialog_capability::Claim)]
-pub struct Mount;
+/// Extension trait adding `.load()` and `.create()` sugar on Space capabilities.
+pub trait SpaceExt {
+    /// Load an existing space by name.
+    fn load(self) -> Capability<Load>;
 
-impl Effect for Mount {
+    /// Create a new space with the given credential.
+    fn create(self, credential: Credential) -> Capability<Create>;
+}
+
+impl SpaceExt for Capability<Space> {
+    fn load(self) -> Capability<Load> {
+        self.invoke(Load)
+    }
+
+    fn create(self, credential: Credential) -> Capability<Create> {
+        self.invoke(Create::new(credential))
+    }
+}
+
+/// Load an existing space by name.
+///
+/// The operator resolves the name against its base directory,
+/// loads the credential, mounts the space, and returns the credential.
+#[derive(Debug, Clone, Serialize, Deserialize, dialog_capability::Claim)]
+pub struct Load;
+
+impl Effect for Load {
     type Of = Space;
-    type Output = Result<Did, StorageError>;
+    type Output = Result<Credential, StorageError>;
 }
 
 /// Create a new space by name with the given credential.
 ///
-/// Resolves the name against the operator's base directory, writes
-/// the credential, creates providers, and registers the DID in the
-/// routing table. Returns the DID.
+/// The operator resolves the name against its base directory,
+/// stores the credential, mounts the space, and returns the credential.
 #[derive(Debug, Clone, Serialize, Deserialize, dialog_capability::Claim)]
 pub struct Create {
     /// The credential to store at the new space.
-    pub credential: dialog_credentials::Credential,
+    pub credential: Credential,
 }
 
 impl Create {
     /// Create a new space creation effect.
-    pub fn new(credential: dialog_credentials::Credential) -> Self {
+    pub fn new(credential: Credential) -> Self {
         Self { credential }
     }
 }
 
 impl Effect for Create {
     type Of = Space;
-    type Output = Result<Did, StorageError>;
+    type Output = Result<Credential, StorageError>;
 }

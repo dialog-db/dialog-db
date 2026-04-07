@@ -524,7 +524,7 @@ mod tests {
         use crate::query::Application;
         use crate::session::RuleRegistry;
         use crate::source::test::TestEnv;
-        use dialog_repository::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
 
         // Create a SumQuery with all variables
         let query = Query::<Sum> {
@@ -534,8 +534,8 @@ mod tests {
         };
 
         // Create a minimal session (formulas don't need stored data)
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
@@ -567,7 +567,7 @@ mod tests {
         use crate::query::Application;
         use crate::session::RuleRegistry;
         use crate::source::test::TestEnv;
-        use dialog_repository::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
 
         // Input fields are constants, output field is a variable
         let query = Query::<Sum> {
@@ -576,8 +576,8 @@ mod tests {
             is: Term::var("result"),
         };
 
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
@@ -601,7 +601,7 @@ mod tests {
         use crate::query::Application;
         use crate::session::RuleRegistry;
         use crate::source::test::TestEnv;
-        use dialog_repository::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
 
         // Output field is a constant matching the expected result
         let query = Query::<Sum> {
@@ -610,8 +610,8 @@ mod tests {
             is: Term::from(8u32),
         };
 
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
@@ -637,7 +637,7 @@ mod tests {
         use crate::query::Application;
         use crate::session::RuleRegistry;
         use crate::source::test::TestEnv;
-        use dialog_repository::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
 
         // Output field is a constant that does NOT match (5 + 3 ≠ 99)
         let query = Query::<Sum> {
@@ -646,8 +646,8 @@ mod tests {
             is: Term::from(99u32),
         };
 
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
@@ -673,7 +673,7 @@ mod tests {
         use crate::query::Application;
         use crate::session::RuleRegistry;
         use crate::source::test::TestEnv;
-        use dialog_repository::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
 
         // Mix: one input is constant, one is variable, output is variable
         let query = Query::<Sum> {
@@ -682,8 +682,8 @@ mod tests {
             is: Term::var("result"),
         };
 
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
@@ -707,7 +707,7 @@ mod tests {
         use crate::query::Application;
         use crate::session::RuleRegistry;
         use crate::source::test::TestEnv;
-        use dialog_repository::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
 
         // Both inputs use the same variable (x + x)
         let query = Query::<Sum> {
@@ -716,8 +716,8 @@ mod tests {
             is: Term::var("result"),
         };
 
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 

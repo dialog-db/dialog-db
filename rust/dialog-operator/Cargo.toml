@@ -29,8 +29,6 @@ dialog-remote-ucan-s3 = { workspace = true }
 dialog-capability-ucan = { workspace = true }
 dialog-storage = { workspace = true }
 dialog-varsig = { workspace = true }
-parking_lot = { workspace = true }
-
 anyhow = { workspace = true, optional = true }
 async-trait = { workspace = true }
 base58 = { workspace = true }
@@ -44,8 +42,6 @@ signature = { workspace = true }
 serde_ipld_dagcbor = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "io-util"] }
-url = { workspace = true, features = ["serde"] }
-
 [dev-dependencies]
 dialog-storage = { workspace = true, features = ["helpers"] }
 dialog-remote-s3 = { workspace = true, features = ["helpers"] }

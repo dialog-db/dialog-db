@@ -58,13 +58,13 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use crate::helpers::{test_operator, test_repo};
+    use crate::helpers::{test_operator_with_profile, test_repo};
     use crate::repository::error::RepositoryError;
 
     #[dialog_common::test]
     async fn it_loads_existing_branch() -> anyhow::Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
 
         let _ = repo.branch("main").open().perform(&operator).await?;
         let branch = repo.branch("main").load().perform(&operator).await?;
@@ -75,8 +75,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_fails_loading_missing_branch() -> anyhow::Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
 
         let result = repo.branch("nonexistent").load().perform(&operator).await;
 

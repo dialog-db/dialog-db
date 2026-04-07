@@ -7,13 +7,11 @@ use dialog_storage::provider::environment::{Environment, VolatileSpace};
 mod tests {
     use super::*;
 
-    type TestEnv = Environment<VolatileSpace>;
-
     #[dialog_common::test]
     async fn it_builds_operator_from_profile() {
-        let env = TestEnv::new();
+        let env = Environment::volatile();
 
-        let profile = Profile::open(&unique_name("test"))
+        let profile = Profile::open(unique_name("test"))
             .perform(&env)
             .await
             .unwrap();
@@ -30,8 +28,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_derives_different_operators_from_different_contexts() {
-        let env1 = TestEnv::new();
-        let profile1 = Profile::open(&unique_name("ctx1"))
+        let env1 = Environment::volatile();
+        let profile1 = Profile::open(unique_name("ctx1"))
             .perform(&env1)
             .await
             .unwrap();
@@ -42,8 +40,8 @@ mod tests {
             .await
             .unwrap();
 
-        let env2 = TestEnv::new();
-        let profile2 = Profile::open(&unique_name("ctx2"))
+        let env2 = Environment::volatile();
+        let profile2 = Profile::open(unique_name("ctx2"))
             .perform(&env2)
             .await
             .unwrap();
@@ -63,10 +61,7 @@ mod tests {
         use dialog_capability::access::{self as cap_access, AuthorizeError, Permit};
         use dialog_capability_ucan::scope::Scope;
         use dialog_capability_ucan::{Ucan, UcanPermit};
-        use dialog_common::time::{Duration, UNIX_EPOCH};
         use dialog_effects::archive::prelude::{ArchiveExt, SubjectExt as ArchiveSubjectExt};
-        use dialog_ucan::time::Timestamp;
-        use dialog_varsig::{Did, Principal};
 
         async fn claim_access(
             operator: &super::super::super::Operator<VolatileSpace>,
@@ -83,9 +78,9 @@ mod tests {
 
         #[dialog_common::test]
         async fn self_grant_produces_delegation() {
-            let env = TestEnv::new();
+            let env = Environment::volatile();
 
-            let profile = Profile::open(&unique_name("self"))
+            let profile = Profile::open(unique_name("self"))
                 .perform(&env)
                 .await
                 .unwrap();
@@ -109,9 +104,9 @@ mod tests {
 
         #[dialog_common::test]
         async fn powerline_self_grant_produces_delegation() {
-            let env = TestEnv::new();
+            let env = Environment::volatile();
 
-            let profile = Profile::open(&unique_name("psg"))
+            let profile = Profile::open(unique_name("psg"))
                 .perform(&env)
                 .await
                 .unwrap();
@@ -135,9 +130,9 @@ mod tests {
 
         #[dialog_common::test]
         async fn scoped_delegation_found() {
-            let env = TestEnv::new();
+            let env = Environment::volatile();
 
-            let profile = Profile::open(&unique_name("found"))
+            let profile = Profile::open(unique_name("found"))
                 .perform(&env)
                 .await
                 .unwrap();
@@ -162,9 +157,9 @@ mod tests {
 
         #[dialog_common::test]
         async fn scoped_delegation_denied() {
-            let env = TestEnv::new();
+            let env = Environment::volatile();
 
-            let profile = Profile::open(&unique_name("deny"))
+            let profile = Profile::open(unique_name("deny"))
                 .perform(&env)
                 .await
                 .unwrap();
@@ -185,9 +180,9 @@ mod tests {
 
         #[dialog_common::test]
         async fn powerline_delegation_allows_anything() {
-            let env = TestEnv::new();
+            let env = Environment::volatile();
 
-            let profile = Profile::open(&unique_name("power"))
+            let profile = Profile::open(unique_name("power"))
                 .perform(&env)
                 .await
                 .unwrap();
@@ -213,9 +208,9 @@ mod tests {
 
         #[dialog_common::test]
         async fn no_delegation_fails() {
-            let env = TestEnv::new();
+            let env = Environment::volatile();
 
-            let profile = Profile::open(&unique_name("none"))
+            let profile = Profile::open(unique_name("none"))
                 .perform(&env)
                 .await
                 .unwrap();
@@ -235,9 +230,9 @@ mod tests {
 
         #[dialog_common::test]
         async fn no_issuer_uses_profile_did() {
-            let env = TestEnv::new();
+            let env = Environment::volatile();
 
-            let profile = Profile::open(&unique_name("nois"))
+            let profile = Profile::open(unique_name("nois"))
                 .perform(&env)
                 .await
                 .unwrap();
@@ -257,6 +252,70 @@ mod tests {
                 result.is_ok(),
                 "should find chain via profile DID: {:?}",
                 result.err()
+            );
+        }
+    }
+
+    mod space_tests {
+        use super::*;
+        use dialog_capability::Subject;
+        use dialog_effects::space::{self as space_fx, SpaceExt as _};
+
+        #[dialog_common::test]
+        async fn it_denies_space_load_for_wrong_subject() {
+            let env = Environment::volatile();
+            let profile = Profile::open(unique_name("space-deny"))
+                .perform(&env)
+                .await
+                .unwrap();
+
+            let operator = profile
+                .derive(b"test")
+                .allow(Subject::any())
+                .network(Remote)
+                .build(env)
+                .await
+                .unwrap();
+
+            // Use a wrong DID as subject
+            let wrong_did = dialog_capability::did!("key:z6MkWrongDid");
+            let result: Result<_, _> = Subject::from(wrong_did)
+                .attenuate(space_fx::Space::new("repo"))
+                .load()
+                .perform(&operator)
+                .await;
+
+            assert!(result.is_err(), "should deny space load for wrong subject");
+        }
+
+        #[dialog_common::test]
+        async fn it_allows_space_for_profile_subject() {
+            let env = Environment::volatile();
+            let profile = Profile::open(unique_name("space-allow"))
+                .perform(&env)
+                .await
+                .unwrap();
+
+            let operator = profile
+                .derive(b"test")
+                .allow(Subject::any())
+                .network(Remote)
+                .build(env)
+                .await
+                .unwrap();
+
+            // Use the correct profile DID as subject
+            let result: Result<_, _> = Subject::from(operator.profile_did())
+                .attenuate(space_fx::Space::new("repo"))
+                .load()
+                .perform(&operator)
+                .await;
+
+            // Will fail with NotFound (no space created), not with access denied
+            let err = result.unwrap_err();
+            assert!(
+                err.to_string().contains("not found") || err.to_string().contains("Not found"),
+                "should fail with not-found, not access denied: {err}"
             );
         }
     }

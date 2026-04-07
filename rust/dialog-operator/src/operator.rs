@@ -13,6 +13,8 @@ use crate::remote::Remote;
 use dialog_capability::Capability;
 use dialog_capability::Provider;
 use dialog_capability::authority::{Identify, Operator as AuthOperator};
+use dialog_effects::space as space_fx;
+use dialog_effects::storage as storage_fx;
 use dialog_effects::{archive, credential, memory};
 use dialog_storage::provider::environment::Environment;
 use dialog_storage::provider::space::SpaceProvider;
@@ -30,6 +32,7 @@ type SaveUcan = AccessSave<Ucan>;
 /// Composes:
 /// - Authority credentials (identity)
 /// - [`Environment`] for DID-routed effects and space load/create
+/// - Base directory for resolving space names to storage locations
 /// - Remote for fork invocations
 #[derive(Provider)]
 pub struct Operator<S: Clone> {
@@ -44,12 +47,13 @@ pub struct Operator<S: Clone> {
         credential::Save,
         memory::Resolve,
         memory::Publish,
-        memory::Retract,
-        dialog_effects::storage::Load,
-        dialog_effects::storage::Create
+        memory::Retract
     )]
-    /// Environment — routes DID-based effects and handles space load/create.
+    /// Environment — routes DID-based effects.
     env: Environment<S>,
+
+    /// Base directory for resolving space names.
+    directory: storage_fx::Directory,
 
     /// Provider for remote invocations.
     remote: Remote,
@@ -77,7 +81,7 @@ impl<S: Clone> Operator<S> {
 impl<S> Provider<ClaimUcan> for Operator<S>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
-    S: Provider<dialog_capability::access::Claim<Ucan>>,
+    S: Provider<ClaimUcan>,
     Self: ConditionalSend + ConditionalSync,
 {
     async fn execute(
@@ -93,7 +97,7 @@ where
 impl<S> Provider<SaveUcan> for Operator<S>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
-    S: Provider<dialog_capability::access::Save<Ucan>>,
+    S: Provider<SaveUcan>,
     Self: ConditionalSend + ConditionalSync,
 {
     async fn execute(&self, input: Capability<SaveUcan>) -> Result<(), AuthorizeError> {
@@ -104,6 +108,72 @@ where
 impl<S: Clone> Principal for Operator<S> {
     fn did(&self) -> Did {
         self.authority.operator_did()
+    }
+}
+
+use dialog_capability::{Policy, Subject};
+use dialog_effects::storage::LocationExt as _;
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S> Provider<space_fx::Load> for Operator<S>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Environment<S>: Provider<storage_fx::Load>,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        input: Capability<space_fx::Load>,
+    ) -> Result<dialog_credentials::Credential, storage_fx::StorageError> {
+        let subject = input.subject();
+        if *subject != self.profile_did() {
+            return Err(storage_fx::StorageError::Storage(format!(
+                "space load denied: subject {subject} does not match profile {}",
+                self.profile_did()
+            )));
+        }
+
+        let name = &space_fx::Space::of(&input).name;
+        let location = storage_fx::Location::new(self.directory.clone(), name);
+        Subject::from(dialog_capability::did!("local:storage"))
+            .attenuate(storage_fx::Storage)
+            .attenuate(location)
+            .load()
+            .perform(&self.env)
+            .await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S> Provider<space_fx::Create> for Operator<S>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    Environment<S>: Provider<storage_fx::Create>,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        input: Capability<space_fx::Create>,
+    ) -> Result<dialog_credentials::Credential, storage_fx::StorageError> {
+        let subject = input.subject();
+        if *subject != self.profile_did() {
+            return Err(storage_fx::StorageError::Storage(format!(
+                "space create denied: subject {subject} does not match profile {}",
+                self.profile_did()
+            )));
+        }
+
+        let name = &space_fx::Space::of(&input).name;
+        let credential = space_fx::Create::of(&input).credential.clone();
+        let location = storage_fx::Location::new(self.directory.clone(), name);
+        Subject::from(dialog_capability::did!("local:storage"))
+            .attenuate(storage_fx::Storage)
+            .attenuate(location)
+            .create(credential)
+            .perform(&self.env)
+            .await
     }
 }
 
@@ -150,11 +220,7 @@ mod ucan_fork {
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl<S, Fx> Provider<Fork<UcanSite, Fx>> for Operator<S>
     where
-        S: SpaceProvider
-            + Clone
-            + 'static
-            + Provider<dialog_capability::access::Claim<Ucan>>
-            + Provider<dialog_capability::access::Save<Ucan>>,
+        S: SpaceProvider + Clone + 'static + Provider<ClaimUcan> + Provider<SaveUcan>,
         Fx: Effect + Clone + ConditionalSend + 'static,
         Fx::Of: Constraint,
         Capability<Fx>: Ability + ConditionalSend + ConditionalSync,

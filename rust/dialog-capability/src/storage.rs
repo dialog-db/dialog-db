@@ -31,17 +31,6 @@ impl Storage {
             .attenuate(Location(address))
     }
 
-    /// Build a mount capability for the given DID at the given address.
-    pub fn mount<A>(did: Did, address: A) -> Capability<Mount<A>>
-    where
-        A: Caveat + dialog_common::ConditionalSend + 'static,
-    {
-        Subject::from(did)
-            .attenuate(Storage)
-            .attenuate(Location(address))
-            .mount()
-    }
-
     /// Build a load capability for the given address.
     pub fn load<Content, A>(address: A) -> Capability<Load<Content, A>>
     where
@@ -120,45 +109,6 @@ impl<A: Caveat> Capability<Location<A>> {
     {
         self.invoke(Save::new(content))
     }
-
-    /// Create a mount effect capability for this location.
-    ///
-    /// The subject DID from the capability chain will be registered
-    /// to route to this location's address.
-    pub fn mount(self) -> Capability<Mount<A>>
-    where
-        A: dialog_common::ConditionalSend + 'static,
-    {
-        self.invoke(Mount::default())
-    }
-}
-
-/// Mount effect — registers a subject DID to be routed to this location.
-///
-/// The subject DID in the capability chain is the identity to mount.
-/// The `Location<A>` carries the address where its data lives.
-#[derive(Debug, Clone, Serialize, Deserialize, Claim)]
-pub struct Mount<A>(std::marker::PhantomData<A>);
-
-impl<A> Mount<A> {
-    /// Create a new Mount effect.
-    pub fn new() -> Self {
-        Self(std::marker::PhantomData)
-    }
-}
-
-impl<A> Default for Mount<A> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<A> Effect for Mount<A>
-where
-    A: Caveat + dialog_common::ConditionalSend + 'static,
-{
-    type Of = Location<A>;
-    type Output = Result<(), StorageError>;
 }
 
 /// Load effect — reads typed content from a location.
@@ -260,13 +210,5 @@ mod tests {
         let claim = Storage::save(TestAddress("data".into()), vec![1u8, 2, 3]);
 
         assert_eq!(claim.ability(), "/storage/save");
-    }
-
-    #[test]
-    fn it_builds_mount_claim_path() {
-        let claim = Storage::mount(did!("key:zSpace"), TestAddress("repo".into()));
-
-        assert_eq!(claim.ability(), "/storage/mount");
-        assert_eq!(claim.subject(), &did!("key:zSpace"));
     }
 }

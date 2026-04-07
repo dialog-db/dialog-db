@@ -131,7 +131,7 @@ mod tests {
     use anyhow::Result;
     use dialog_capability::Provider;
     use dialog_common::ConditionalSync;
-    use dialog_repository::helpers::{test_operator, test_repo};
+    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
 
     // Define a Person concept for testing using raw concept API
     // This mirrors what the #[derive(Concept)] macro generates
@@ -547,8 +547,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_returns_empty_for_no_matches() -> Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
@@ -583,8 +583,8 @@ mod tests {
     async fn it_queries_with_concept_dsl() -> Result<()> {
         use crate::Query;
 
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         mod employee {
@@ -668,8 +668,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_negates_concept_with_not_operator() -> Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         mod person {
@@ -790,8 +790,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_negates_relation_with_not_operator() -> Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
@@ -887,8 +887,8 @@ mod tests {
     async fn it_asserts_concept_with_attribute_fields() -> Result<()> {
         use futures_util::TryStreamExt;
 
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice_id = Entity::new()?;
@@ -945,8 +945,8 @@ mod tests {
     async fn it_queries_concept_with_attribute_fields() -> Result<()> {
         use futures_util::TryStreamExt;
 
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice_id = Entity::new()?;
@@ -999,8 +999,8 @@ mod tests {
     async fn it_queries_concept_with_constant_term() -> Result<()> {
         use futures_util::TryStreamExt;
 
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice_id = Entity::new()?;
@@ -1046,8 +1046,8 @@ mod tests {
     async fn it_reuses_attributes_across_concepts() -> Result<()> {
         use futures_util::TryStreamExt;
 
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice_id = Entity::new()?;
@@ -1128,8 +1128,8 @@ mod tests {
     async fn it_retracts_concept_with_attributes() -> Result<()> {
         use futures_util::TryStreamExt;
 
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice_id = Entity::new()?;
@@ -1208,8 +1208,8 @@ mod tests {
     async fn it_queries_concept_via_shortcut() -> Result<()> {
         use futures_util::TryStreamExt;
 
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
         let bob = Entity::new()?;
@@ -1267,8 +1267,8 @@ mod tests {
     async fn it_filters_concept_query_via_shortcut() -> Result<()> {
         use futures_util::TryStreamExt;
 
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
 
@@ -1346,8 +1346,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_queries_single_attribute() -> Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
@@ -1384,8 +1384,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_queries_multi_attribute_with_constants() -> Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
@@ -1419,8 +1419,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_handles_multi_attribute_variable_limitation() -> Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;

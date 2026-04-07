@@ -3,15 +3,16 @@
 //! These tests require `--features integration-tests` and spin up real
 //! local S3 (and UCAN access) servers via `#[dialog_common::test]`.
 
-use crate::Operator;
 use crate::SiteAddress;
-use crate::helpers::{test_operator, test_operator_with_profile, unique_location};
-use crate::repository::Repository;
+use crate::helpers::{test_operator_with_profile, unique_name};
 use crate::repository::branch::state::UpstreamState;
 use crate::repository::node_reference::NodeReference;
+use crate::repository::{Repository, RepositoryExt as _};
 use crate::{Artifact, ArtifactSelector, Instruction};
+use dialog_operator::profile::Profile;
 use dialog_remote_s3::Address as S3SiteAddress;
 use dialog_remote_s3::helpers::S3Address;
+use dialog_storage::provider::environment::VolatileSpace;
 use futures_util::StreamExt;
 use futures_util::stream;
 
@@ -22,14 +23,17 @@ fn s3_site_address(s3: &S3Address) -> S3SiteAddress {
 }
 
 async fn setup_repo_with_s3_remote(
-    operator: &Operator,
+    operator: &crate::Operator<VolatileSpace>,
+    profile: &Profile,
     s3: &S3Address,
     name: &str,
 ) -> anyhow::Result<(
     Repository<dialog_credentials::SignerCredential>,
     super::Branch,
 )> {
-    let repo = Repository::open(unique_location(name))
+    let repo = profile
+        .repository(unique_name(name))
+        .create()
         .perform(operator)
         .await?;
 
@@ -49,8 +53,8 @@ async fn setup_repo_with_s3_remote(
 
 #[dialog_common::test]
 async fn it_pushes_to_s3_remote(s3: S3Address) -> anyhow::Result<()> {
-    let operator = test_operator().await;
-    let (_repo, branch) = setup_repo_with_s3_remote(&operator, &s3, "push").await?;
+    let (operator, profile) = test_operator_with_profile().await;
+    let (_repo, branch) = setup_repo_with_s3_remote(&operator, &profile, &s3, "push").await?;
 
     let artifact = Artifact {
         the: "user/name".parse()?,
@@ -71,8 +75,8 @@ async fn it_pushes_to_s3_remote(s3: S3Address) -> anyhow::Result<()> {
 
 #[dialog_common::test]
 async fn it_fetches_from_s3_remote(s3: S3Address) -> anyhow::Result<()> {
-    let operator = test_operator().await;
-    let (_repo, branch) = setup_repo_with_s3_remote(&operator, &s3, "fetch").await?;
+    let (operator, profile) = test_operator_with_profile().await;
+    let (_repo, branch) = setup_repo_with_s3_remote(&operator, &profile, &s3, "fetch").await?;
 
     let artifact = Artifact {
         the: "user/name".parse()?,
@@ -95,8 +99,8 @@ async fn it_fetches_from_s3_remote(s3: S3Address) -> anyhow::Result<()> {
 
 #[dialog_common::test]
 async fn it_push_and_pull_roundtrip(s3: S3Address) -> anyhow::Result<()> {
-    let operator = test_operator().await;
-    let (_repo, branch) = setup_repo_with_s3_remote(&operator, &s3, "roundtrip").await?;
+    let (operator, profile) = test_operator_with_profile().await;
+    let (_repo, branch) = setup_repo_with_s3_remote(&operator, &profile, &s3, "roundtrip").await?;
 
     let artifact = Artifact {
         the: "user/name".parse()?,
@@ -121,8 +125,8 @@ async fn it_push_and_pull_roundtrip(s3: S3Address) -> anyhow::Result<()> {
 
 #[dialog_common::test]
 async fn it_pull_returns_none_when_no_changes(s3: S3Address) -> anyhow::Result<()> {
-    let operator = test_operator().await;
-    let (_repo, branch) = setup_repo_with_s3_remote(&operator, &s3, "no-change").await?;
+    let (operator, profile) = test_operator_with_profile().await;
+    let (_repo, branch) = setup_repo_with_s3_remote(&operator, &profile, &s3, "no-change").await?;
 
     let artifact = Artifact {
         the: "user/name".parse()?,
@@ -149,10 +153,11 @@ async fn it_pull_returns_none_when_no_changes(s3: S3Address) -> anyhow::Result<(
 
 #[dialog_common::test]
 async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> anyhow::Result<()> {
-    let operator = test_operator().await;
+    let (operator, profile) = test_operator_with_profile().await;
 
     // Alice creates repo, commits, and pushes
-    let (alice_repo, alice_branch) = setup_repo_with_s3_remote(&operator, &s3, "alice").await?;
+    let (alice_repo, alice_branch) =
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "alice").await?;
 
     let artifact = Artifact {
         the: "user/name".parse()?,
@@ -168,7 +173,9 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> anyhow::Result
     alice_branch.push().perform(&operator).await?;
 
     // Bob opens a second repo sharing Alice's subject, pulls
-    let bob_repo = Repository::open(unique_location("bob"))
+    let bob_repo = profile
+        .repository(unique_name("bob"))
+        .open()
         .perform(&operator)
         .await?;
 
@@ -212,11 +219,11 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> anyhow::Result
 
 #[dialog_common::test]
 async fn it_two_party_convergence(s3: S3Address) -> anyhow::Result<()> {
-    let operator = test_operator().await;
+    let (operator, profile) = test_operator_with_profile().await;
 
     // Alice commits and pushes
     let (alice_repo, alice_branch) =
-        setup_repo_with_s3_remote(&operator, &s3, "conv-alice").await?;
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "conv-alice").await?;
 
     alice_branch
         .commit(stream::iter(vec![Instruction::Assert(Artifact {
@@ -231,7 +238,9 @@ async fn it_two_party_convergence(s3: S3Address) -> anyhow::Result<()> {
     alice_branch.push().perform(&operator).await?;
 
     // Bob sets up repo pointing at same remote subject
-    let bob_repo = Repository::open(unique_location("conv-bob"))
+    let bob_repo = profile
+        .repository(unique_name("conv-bob"))
+        .open()
         .perform(&operator)
         .await?;
 
@@ -318,7 +327,9 @@ use dialog_remote_ucan_s3::helpers::UcanS3Address;
 async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> anyhow::Result<()> {
     // Alice: create profile, operator, repo
     let (alice_operator, alice_profile) = test_operator_with_profile().await;
-    let alice_repo = Repository::open(unique_location("collab-alice"))
+    let alice_repo = alice_profile
+        .repository(unique_name("collab-alice"))
+        .create()
         .perform(&alice_operator)
         .await?;
 
@@ -390,7 +401,9 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> anyhow::Res
         .await?;
 
     // Bob creates his own repo (different DID) and adds Alice's remote
-    let bob_repo = Repository::open(unique_location("collab-bob"))
+    let bob_repo = bob_profile
+        .repository(unique_name("collab-bob"))
+        .open()
         .perform(&bob_operator)
         .await?;
 
@@ -477,7 +490,9 @@ async fn it_pushes_and_pulls_via_ucan(ucan: UcanS3Address) -> anyhow::Result<()>
     let (operator, profile) = test_operator_with_profile().await;
 
     // Create repo and delegate ownership to the profile
-    let repo = Repository::open(unique_location("ucan-repo"))
+    let repo = profile
+        .repository(unique_name("ucan-repo"))
+        .create()
         .perform(&operator)
         .await?;
 
@@ -544,11 +559,11 @@ async fn it_pushes_and_pulls_via_ucan(ucan: UcanS3Address) -> anyhow::Result<()>
 /// remote. After removing the upstream, data is still available locally.
 #[dialog_common::test]
 async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> anyhow::Result<()> {
-    let operator = test_operator().await;
+    let (operator, profile) = test_operator_with_profile().await;
 
     // Alice: create repo, commit data, push to remote
     let (alice_repo, alice_branch) =
-        setup_repo_with_s3_remote(&operator, &s3, "replicate-alice").await?;
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "replicate-alice").await?;
 
     alice_branch
         .commit(stream::iter(vec![Instruction::Assert(Artifact {
@@ -563,7 +578,9 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> anyhow::Re
     let alice_revision = alice_branch.revision().expect("should have revision");
 
     // Bob: empty repo pointing at Alice's remote
-    let bob_repo = Repository::open(unique_location("replicate-bob"))
+    let bob_repo = profile
+        .repository(unique_name("replicate-bob"))
+        .open()
         .perform(&operator)
         .await?;
 
@@ -660,7 +677,9 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> anyhow::Re
 #[dialog_common::test]
 async fn it_delegates_and_pushes_to_s3(s3: S3Address) -> anyhow::Result<()> {
     let (operator, profile) = test_operator_with_profile().await;
-    let repo = Repository::open(unique_location("deleg-push"))
+    let repo = profile
+        .repository(unique_name("deleg-push"))
+        .create()
         .perform(&operator)
         .await?;
 
@@ -708,7 +727,9 @@ async fn it_delegates_and_pushes_to_s3(s3: S3Address) -> anyhow::Result<()> {
 #[dialog_common::test]
 async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> anyhow::Result<()> {
     let (alice_operator, alice_profile) = test_operator_with_profile().await;
-    let alice_repo = Repository::open(unique_location("deleg-pull-a"))
+    let alice_repo = alice_profile
+        .repository(unique_name("deleg-pull-a"))
+        .create()
         .perform(&alice_operator)
         .await?;
 
@@ -761,8 +782,10 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> anyhow::Result<(
     assert!(push_result.is_some(), "push should succeed");
 
     // Bob: fresh operator pulls from the same S3 remote
-    let bob_operator = test_operator().await;
-    let bob_repo = Repository::open(unique_location("deleg-pull-b"))
+    let (bob_operator, bob_profile) = test_operator_with_profile().await;
+    let bob_repo = bob_profile
+        .repository(unique_name("deleg-pull-b"))
+        .open()
         .perform(&bob_operator)
         .await?;
 

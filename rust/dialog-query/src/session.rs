@@ -28,12 +28,12 @@ mod tests {
     use crate::error::EvaluationError;
     use crate::rule::deductive::DeductiveRule;
     use crate::{AttributeDescriptor, Cardinality, Concept, Parameters, Query, Term, Type};
-    use dialog_repository::helpers::{test_operator, test_repo};
+    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
 
     #[dialog_common::test]
     async fn it_queries_asserted_facts() -> anyhow::Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
         let bob = Entity::new()?;
@@ -161,8 +161,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_asserts_and_queries_concept() -> anyhow::Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let person = ConceptDescriptor::from([
@@ -314,8 +314,8 @@ mod tests {
             ],
         )?;
 
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let mut rules = RuleRegistry::new();
         rules.register(employee_from_stuff)?;
@@ -437,8 +437,8 @@ mod tests {
             )
         }
 
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         // Replicate Session::install logic for RuleRegistry
@@ -529,8 +529,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_resolves_rules_via_source_trait() -> anyhow::Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let _branch = repo.branch("main").open().perform(&operator).await?;
 
         let adult_conclusion = ConceptDescriptor::from(vec![
@@ -573,8 +573,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_accepts_source_trait_implementations() -> anyhow::Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let concept = ConceptDescriptor::from([(
@@ -601,8 +601,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_converts_source_explicitly() -> anyhow::Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let _branch = repo.branch("main").open().perform(&operator).await?;
 
         let adult_concept = ConceptDescriptor::from([(
@@ -680,8 +680,8 @@ mod tests {
             )
         }
 
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let query_m = Query::<MatchingNote>::default();
         let concept_m: ConceptDescriptor = query_m.clone().into();
@@ -779,8 +779,8 @@ mod tests {
             )
         }
 
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let query_n = Query::<NonDraftNote>::default();
         let concept_n: ConceptDescriptor = query_n.clone().into();
@@ -882,8 +882,8 @@ mod tests {
             )
         }
 
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         // Install the rule using the clean API - no turbofish needed!
@@ -1180,8 +1180,8 @@ mod tests {
     async fn it_produces_correct_results_from_cached_plan() -> anyhow::Result<()> {
         // End-to-end test: verify that evaluating a concept with the plan cache
         // produces the same correct results as the pre-cache implementation.
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
         let bob = Entity::new()?;
@@ -1247,8 +1247,8 @@ mod tests {
     #[dialog_common::test]
     async fn it_produces_correct_results_from_cached_plan_with_bound_entity() -> anyhow::Result<()>
     {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;

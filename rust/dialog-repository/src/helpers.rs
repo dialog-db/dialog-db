@@ -1,15 +1,23 @@
 // Re-export operator-level helpers.
 pub use dialog_operator::helpers::{
-    generate_data, test_operator, test_operator_with_profile, unique_location, unique_name,
+    generate_data, test_operator, test_operator_with_profile, unique_name,
 };
 
-use crate::Operator;
-use crate::repository::Repository;
+use crate::Repository;
+use crate::repository::RepositoryExt as _;
+use dialog_credentials::Credential;
+use dialog_operator::profile::Profile;
+use dialog_storage::provider::environment::VolatileSpace;
 
-/// Open a test repository against the given operator.
-pub async fn test_repo(operator: &Operator) -> Repository<dialog_credentials::SignerCredential> {
-    Repository::open(unique_location("repo"))
+/// Create a test repository using the given operator and profile.
+pub async fn test_repo(
+    operator: &dialog_operator::Operator<VolatileSpace>,
+    profile: &Profile,
+) -> Repository<Credential> {
+    profile
+        .repository(unique_name("repo"))
+        .open()
         .perform(operator)
         .await
-        .unwrap()
+        .expect("test_repo: failed to open repository")
 }

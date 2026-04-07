@@ -301,12 +301,12 @@ mod tests {
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
     use crate::the;
-    use dialog_repository::helpers::{test_operator, test_repo};
+    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
 
     #[dialog_common::test]
     async fn it_scans_with_all_variables() -> anyhow::Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
@@ -341,8 +341,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_scans_with_constant_entity() -> anyhow::Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
@@ -379,8 +379,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_returns_multiple_values() -> anyhow::Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
@@ -428,8 +428,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_scans_with_constant_value() -> anyhow::Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;

@@ -33,12 +33,12 @@ mod tests {
     use crate::source::test::TestEnv;
     use crate::{Term, the};
     use anyhow::Result;
-    use dialog_repository::helpers::{test_operator, test_repo};
+    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
 
     #[dialog_common::test]
     async fn it_queries_via_fact_selector() -> Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
@@ -96,8 +96,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_succeeds_with_variables_and_constants() -> Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let variable_query = AttributeQuery::new(
@@ -117,8 +117,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_queries_polymorphically() -> Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
@@ -146,8 +146,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_chains_query_operations() -> Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;

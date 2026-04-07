@@ -398,14 +398,14 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use crate::helpers::{test_operator, test_repo};
+    use crate::helpers::{test_operator_with_profile, test_repo};
     use crate::{Artifact, Instruction};
     use futures_util::stream;
 
     #[dialog_common::test]
     async fn it_pulls_from_local_upstream_no_changes() -> anyhow::Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
 
@@ -438,8 +438,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_pulls_upstream_changes_without_local_changes() -> anyhow::Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
 
@@ -474,8 +474,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_pulls_and_merges_with_both_sides_changed() -> anyhow::Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
 

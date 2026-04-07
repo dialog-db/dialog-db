@@ -204,7 +204,7 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use crate::helpers::{test_operator, test_repo};
+    use crate::helpers::{test_operator_with_profile, test_repo};
     use crate::repository::branch::state::UpstreamState;
     use crate::repository::node_reference::NodeReference;
     use crate::{Artifact, Instruction};
@@ -212,8 +212,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_pushes_to_local_upstream() -> anyhow::Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
 
         let _main = repo.branch("main").open().perform(&operator).await?;
 
@@ -253,8 +253,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_returns_none_when_local_upstream_diverged() -> anyhow::Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
         let _hash = main
@@ -294,8 +294,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_has_no_upstream_by_default() -> anyhow::Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("feature").open().perform(&operator).await?;
 
         assert!(branch.upstream().is_none());

@@ -29,9 +29,6 @@ pub use dialog_operator::authority;
 /// Profile — named identity with signing credential.
 pub use dialog_operator::profile;
 
-/// DID-routed storage dispatcher.
-pub use dialog_operator::storage;
-
 /// Operator — operating environment built from a profile.
 pub use dialog_operator::operator;
 
@@ -41,8 +38,9 @@ pub use dialog_operator::remote;
 /// Capability-based repository system.
 mod repository;
 pub use repository::{
-    Branch, BranchName, BranchSelector, CreateRemote, LoadBranch, LoadRemote, OpenBranch,
-    RemoteAddress, RemoteName, RemoteRepository, Repository, SiteAddress, UpstreamState,
+    Branch, BranchName, BranchSelector, CreateRemote, CreateRepository, LoadBranch, LoadRemote,
+    LoadRepository, OpenBranch, OpenRepository, RemoteAddress, RemoteName, RemoteRepository,
+    Repository, RepositoryExt, SiteAddress, UpstreamState,
 };
 
 /// Test helpers for setting up profiles, operators, repositories, and test data.

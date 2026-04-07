@@ -298,7 +298,7 @@ mod tests {
     use crate::source::test::TestEnv;
     use crate::{Value, the};
     use dialog_artifacts::{Artifact, Cause};
-    use dialog_repository::helpers::{test_operator, test_repo};
+    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
     use std::str::FromStr;
 
     macro_rules! assert_relation {
@@ -315,8 +315,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_selects_winner_with_constant_entity() -> anyhow::Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
@@ -347,8 +347,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_selects_winner_with_constant_attribute() -> anyhow::Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
@@ -387,8 +387,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_selects_winner_via_vae_path() -> anyhow::Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
@@ -437,8 +437,8 @@ mod tests {
     /// out non-winners.
     #[dialog_common::test]
     async fn it_verifies_winner_for_attribute_and_value_known() -> anyhow::Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let entity = Entity::new()?;
@@ -522,8 +522,8 @@ mod tests {
     /// The challenge path must reject the loser and accept the winner.
     #[dialog_common::test]
     async fn it_verifies_winner_for_entity_and_value_known() -> anyhow::Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let entity = Entity::new()?;
@@ -608,8 +608,8 @@ mod tests {
     /// The challenge path must reject the loser and accept the winner.
     #[dialog_common::test]
     async fn it_verifies_winner_for_value_only_known() -> anyhow::Result<()> {
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let entity = Entity::new()?;
@@ -754,8 +754,8 @@ mod tests {
     async fn it_uses_sliding_window_when_entity_bound_at_eval_time() -> anyhow::Result<()> {
         use crate::selection::Match;
 
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;

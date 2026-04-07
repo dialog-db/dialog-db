@@ -3,10 +3,12 @@
 use crate::Authority;
 use crate::profile::Profile;
 use crate::remote::Remote;
-use dialog_capability::Ability;
-use dialog_capability_ucan::Scope;
+use dialog_capability::access::{Claim as AccessClaim, Save as AccessSave};
+use dialog_capability::{Ability, Provider};
+use dialog_capability_ucan::{Scope, Ucan};
 use dialog_credentials::key::KeyExport;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
+use dialog_effects::storage::Directory;
 use dialog_storage::provider::environment::Environment;
 use dialog_storage::provider::space::SpaceProvider;
 use dialog_varsig::Principal;
@@ -20,6 +22,7 @@ pub struct OperatorBuilder {
     credential: SignerCredential,
     context: Vec<u8>,
     allowed: Vec<Scope>,
+    directory: Directory,
 }
 
 impl OperatorBuilder {
@@ -28,7 +31,16 @@ impl OperatorBuilder {
             credential: profile.credential().clone(),
             context,
             allowed: Vec::new(),
+            directory: Directory::Current,
         }
+    }
+
+    /// Set the base directory for resolving space names.
+    ///
+    /// Defaults to `Directory::Current`.
+    pub fn base(mut self, directory: Directory) -> Self {
+        self.directory = directory;
+        self
     }
 
     /// Allow a capability: creates a delegation from profile to operator.
@@ -49,6 +61,7 @@ impl OperatorBuilder {
             credential: self.credential,
             context: self.context,
             allowed: self.allowed,
+            directory: self.directory,
             remote,
         }
     }
@@ -57,12 +70,8 @@ impl OperatorBuilder {
     pub async fn build<S>(self, env: Environment<S>) -> Result<Operator<S>, OperatorError>
     where
         S: SpaceProvider + Clone + 'static,
-        S: dialog_capability::Provider<
-                dialog_capability::access::Claim<dialog_capability_ucan::Ucan>,
-            >,
-        S: dialog_capability::Provider<
-                dialog_capability::access::Save<dialog_capability_ucan::Ucan>,
-            >,
+        S: Provider<AccessClaim<Ucan>>,
+        S: Provider<AccessSave<Ucan>>,
     {
         self.network(Remote).build(env).await
     }
@@ -73,6 +82,7 @@ pub struct NetworkBuilder {
     credential: SignerCredential,
     context: Vec<u8>,
     allowed: Vec<Scope>,
+    directory: Directory,
     remote: Remote,
 }
 
@@ -81,12 +91,8 @@ impl NetworkBuilder {
     pub async fn build<S>(self, env: Environment<S>) -> Result<Operator<S>, OperatorError>
     where
         S: SpaceProvider + Clone + 'static,
-        S: dialog_capability::Provider<
-                dialog_capability::access::Claim<dialog_capability_ucan::Ucan>,
-            >,
-        S: dialog_capability::Provider<
-                dialog_capability::access::Save<dialog_capability_ucan::Ucan>,
-            >,
+        S: Provider<AccessClaim<Ucan>>,
+        S: Provider<AccessSave<Ucan>>,
     {
         let operator_signer = derive_operator(&self.credential, &self.context).await?;
         let credentials = Authority::new(
@@ -98,6 +104,7 @@ impl NetworkBuilder {
         let operator = Operator {
             authority: credentials.clone(),
             env,
+            directory: self.directory,
             remote: self.remote,
         };
 

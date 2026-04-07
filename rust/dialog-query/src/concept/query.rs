@@ -304,10 +304,10 @@ mod tests {
     #[dialog_common::test]
     async fn it_executes_concept_query() -> anyhow::Result<()> {
         use dialog_artifacts::Entity;
-        use dialog_repository::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
 
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
@@ -402,10 +402,10 @@ mod tests {
     #[dialog_common::test]
     async fn it_executes_query_with_bound_entity() -> anyhow::Result<()> {
         use dialog_artifacts::Entity;
-        use dialog_repository::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
 
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
@@ -716,10 +716,10 @@ mod tests {
     #[dialog_common::test]
     async fn it_respects_constant_entity_parameter() -> anyhow::Result<()> {
         use dialog_artifacts::Entity;
-        use dialog_repository::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
 
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
@@ -781,10 +781,10 @@ mod tests {
     #[dialog_common::test]
     async fn it_respects_constant_attribute_parameter() -> anyhow::Result<()> {
         use dialog_artifacts::Entity;
-        use dialog_repository::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
 
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
@@ -857,10 +857,10 @@ mod tests {
     #[dialog_common::test]
     async fn it_respects_multiple_constant_parameters() -> anyhow::Result<()> {
         use dialog_artifacts::Entity;
-        use dialog_repository::helpers::{test_operator, test_repo};
+        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
 
-        let operator = test_operator().await;
-        let repo = test_repo(&operator).await;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;

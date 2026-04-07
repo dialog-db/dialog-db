@@ -15,34 +15,41 @@ Every capability invocation carries a delegation chain: `subject -> profile -> o
 ## Setup
 
 ```rs
-let storage = Storage::temp_storage();
+let env = Environment::default();
 
-let profile = Profile::open(Storage::profile("alice"))
-    .perform(&storage)
+let profile = Profile::open("alice")
+    .perform(&env)
     .await?;
 
 let operator = profile
     .derive(b"my-app")
     .allow(Subject::any())
     .network(Remote)
-    .build(storage)
+    .build(env)
     .await?;
 ```
 
-Storage locations are capabilities. Point them wherever you want:
+The operator's base directory defaults to `Directory::Current`. Override it with `.base()`:
 
 ```rs
-Storage::profile("my-app");       // platform data dir
-Storage::current("my-project");   // working directory (native)
-Storage::temp("test");            // temporary / in-memory
+let operator = profile
+    .derive(b"my-app")
+    .base(Directory::Temp)
+    .allow(Subject::any())
+    .network(Remote)
+    .build(env)
+    .await?;
 ```
 
 ## Repository
 
-A repository has its own keypair, branches, and remotes. Same location always yields the same identity.
+A repository has its own keypair, branches, and remotes. Same name under the same profile always yields the same identity.
+
+Repositories are opened through the profile, which provides the correct subject DID. The operator resolves the name against its base directory and verifies access.
 
 ```rs
-let repo = Repository::open(Storage::current("contacts"))
+let repo = profile.repository("contacts")
+    .open()
     .perform(&operator)
     .await?;
 
@@ -52,6 +59,12 @@ let main = repo
     .perform(&operator)
     .await?;
 ```
+
+Three modes:
+
+- `.open()` loads existing or creates new. Returns `Repository<Credential>`.
+- `.load()` loads existing, fails if not found. Returns `Repository<Credential>`.
+- `.create()` creates new, fails if exists. Returns `Repository<SignerCredential>`.
 
 ## Writing
 
@@ -158,7 +171,8 @@ The access API follows a fluent pattern: `.access().claim(&capability).delegate(
 ### Alice sets up a shared repo
 
 ```rs
-let repo = Repository::open(Storage::current("shared"))
+let repo = alice_profile.repository("shared")
+    .create()
     .perform(&alice_operator).await?;
 
 // Repo delegates to Alice's profile
@@ -221,7 +235,8 @@ Bob saves the delegation under his profile. This is what authorizes his operator
 ```rs
 bob_profile.access().save(chain).perform(&bob_operator).await?;
 
-let bob_repo = Repository::open(Storage::current("bob-copy"))
+let bob_repo = bob_profile.repository("bob-copy")
+    .open()
     .perform(&bob_operator)
     .await?;
 

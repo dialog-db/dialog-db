@@ -27,14 +27,11 @@ pub mod remote;
 /// Revision type and edition tracking.
 pub mod revision;
 
-use dialog_capability::storage::{self as cap_storage, Location, StorageError};
-use dialog_capability::{Capability, Did, Policy, Provider, Subject};
+use dialog_capability::{Capability, Did, Provider, Subject};
 use dialog_common::ConditionalSync;
-use dialog_credentials::Ed25519Signer;
 use dialog_credentials::credential::{Credential, SignerCredential};
-use dialog_effects::credential as cred_fx;
+use dialog_effects::space as space_fx;
 use dialog_operator::profile::access::Access as ProfileAccess;
-use dialog_storage::provider::Address;
 use dialog_varsig::Principal;
 
 use self::archive::Archive;
@@ -128,160 +125,150 @@ impl From<SignerCredential> for Repository<SignerCredential> {
     }
 }
 
-impl From<Ed25519Signer> for Repository<SignerCredential> {
-    fn from(signer: Ed25519Signer) -> Self {
+impl TryFrom<Credential> for Repository<SignerCredential> {
+    type Error = RepositoryError;
+
+    fn try_from(credential: Credential) -> Result<Self, RepositoryError> {
+        match credential {
+            Credential::Signer(s) => Ok(Self::new(s)),
+            Credential::Verifier(_) => Err(RepositoryError::StorageError(
+                "repository credential is verifier-only".into(),
+            )),
+        }
+    }
+}
+
+impl From<dialog_credentials::Ed25519Signer> for Repository<SignerCredential> {
+    fn from(signer: dialog_credentials::Ed25519Signer) -> Self {
         SignerCredential::from(signer).into()
     }
 }
 
-enum OpenMode {
-    OpenOrCreate,
-    Load,
-    Create,
-}
+use dialog_effects::space::SpaceExt as _;
+use dialog_operator::profile::SpaceHandle;
 
-/// Command to open, load, or create a repository.
-pub struct OpenRepository {
-    location: Capability<Location<Address>>,
-    mode: OpenMode,
-}
-
-impl Repository<SignerCredential> {
-    /// Open a repository — loads existing or creates new.
+/// Extension trait for opening repositories from a [`SpaceHandle`].
+///
+/// Enables `profile.repository("name").open().perform(&operator)`.
+pub trait RepositoryExt {
+    /// Open or create a repository — loads existing or creates new.
     ///
-    /// Use `Storage::current("name")` to get the location.
-    pub fn open(location: Capability<Location<Address>>) -> OpenRepository {
-        OpenRepository {
-            location,
-            mode: OpenMode::OpenOrCreate,
-        }
-    }
+    /// Returns `Repository<Credential>` since a loaded credential
+    /// may be verifier-only.
+    fn open(self) -> OpenRepository;
 
     /// Load an existing repository — fails if not found.
-    pub fn load(location: Capability<Location<Address>>) -> OpenRepository {
-        OpenRepository {
-            location,
-            mode: OpenMode::Load,
-        }
-    }
+    ///
+    /// Returns `Repository<Credential>` since the credential
+    /// may be verifier-only.
+    fn load(self) -> LoadRepository;
 
     /// Create a new repository — fails if one already exists.
-    pub fn create(location: Capability<Location<Address>>) -> OpenRepository {
-        OpenRepository {
-            location,
-            mode: OpenMode::Create,
-        }
+    ///
+    /// Returns `Repository<SignerCredential>` since a freshly
+    /// generated credential always has a private key.
+    fn create(self) -> CreateRepository;
+}
+
+impl RepositoryExt for SpaceHandle {
+    fn open(self) -> OpenRepository {
+        OpenRepository(Subject::from(self.profile_did).attenuate(space_fx::Space::new(self.name)))
+    }
+
+    fn load(self) -> LoadRepository {
+        LoadRepository(Subject::from(self.profile_did).attenuate(space_fx::Space::new(self.name)))
+    }
+
+    fn create(self) -> CreateRepository {
+        CreateRepository(Subject::from(self.profile_did).attenuate(space_fx::Space::new(self.name)))
     }
 }
 
+/// Command to open (load-or-create) or load a repository.
+///
+/// Returns `Repository<Credential>` since the loaded credential
+/// may be verifier-only.
+pub struct OpenRepository(Capability<space_fx::Space>);
+
 impl OpenRepository {
-    /// Execute against a storage provider.
-    ///
-    /// Mounts a bootstrap store at the location, reads credentials from
-    /// `credential/space` via the credential capability chain, then
-    /// mounts the repository DID at the location in the storage store table.
-    pub async fn perform<S>(
+    /// Execute against an operator.
+    pub async fn perform<Env>(self, env: &Env) -> Result<Repository, RepositoryError>
+    where
+        Env: Provider<space_fx::Load> + Provider<space_fx::Create> + ConditionalSync,
+    {
+        let load_result = self.0.clone().load().perform(env).await;
+
+        let credential = match load_result {
+            Ok(cred) => cred,
+            Err(_) => {
+                let signer = dialog_credentials::Ed25519Signer::generate()
+                    .await
+                    .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
+                let cred = Credential::Signer(SignerCredential::from(signer));
+
+                self.0
+                    .create(cred)
+                    .perform(env)
+                    .await
+                    .map_err(|e| RepositoryError::StorageError(e.to_string()))?
+            }
+        };
+
+        Ok(Repository::from(credential))
+    }
+}
+
+/// Command to load an existing repository.
+///
+/// Returns `Repository<Credential>` since the credential
+/// may be verifier-only.
+pub struct LoadRepository(Capability<space_fx::Space>);
+
+impl LoadRepository {
+    /// Execute against an operator.
+    pub async fn perform<Env>(self, env: &Env) -> Result<Repository, RepositoryError>
+    where
+        Env: Provider<space_fx::Load> + ConditionalSync,
+    {
+        let credential = self
+            .0
+            .load()
+            .perform(env)
+            .await
+            .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
+
+        Ok(Repository::from(credential))
+    }
+}
+
+/// Command to create a new repository.
+///
+/// Returns `Repository<SignerCredential>` since a freshly generated
+/// credential always has a private key.
+pub struct CreateRepository(Capability<space_fx::Space>);
+
+impl CreateRepository {
+    /// Execute against an operator.
+    pub async fn perform<Env>(
         self,
-        storage: &S,
+        env: &Env,
     ) -> Result<Repository<SignerCredential>, RepositoryError>
     where
-        S: Provider<cred_fx::Load>
-            + Provider<cred_fx::Save>
-            + Provider<cap_storage::Mount<Address>>
-            + ConditionalSync,
+        Env: Provider<space_fx::Create> + ConditionalSync,
     {
-        let location = self.location;
-
-        // Mount a bootstrap store so credential effects can route to this location.
-        let bootstrap_did = dialog_capability::did!("local:storage");
-        let address = Location::of(&location).address().clone();
-        cap_storage::Storage::mount(bootstrap_did.clone(), address.clone())
-            .perform(storage)
+        let signer = dialog_credentials::Ed25519Signer::generate()
             .await
-            .map_err(|e: StorageError| RepositoryError::StorageError(e.to_string()))?;
+            .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
+        let cred = Credential::Signer(SignerCredential::from(signer));
 
-        let load_credential = || {
-            Subject::from(bootstrap_did.clone())
-                .attenuate(cred_fx::Credential)
-                .attenuate(cred_fx::Address::new("credential/space"))
-                .invoke(cred_fx::Load)
-        };
-
-        let save_credential = |credential: Credential| {
-            Subject::from(bootstrap_did.clone())
-                .attenuate(cred_fx::Credential)
-                .attenuate(cred_fx::Address::new("credential/space"))
-                .invoke(cred_fx::Save { credential })
-        };
-
-        let credential = match self.mode {
-            OpenMode::Load => {
-                let cred = load_credential()
-                    .perform(storage)
-                    .await
-                    .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
-                match cred {
-                    Credential::Signer(s) => s,
-                    Credential::Verifier(_) => {
-                        return Err(RepositoryError::StorageError(
-                            "repository credential is verifier-only".into(),
-                        ));
-                    }
-                }
-            }
-            OpenMode::Create => {
-                let existing = load_credential().perform(storage).await;
-
-                if existing.is_ok() {
-                    return Err(RepositoryError::AlreadyExists(String::new()));
-                }
-
-                let signer = Ed25519Signer::generate()
-                    .await
-                    .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
-                let credential = SignerCredential::from(signer);
-
-                save_credential(Credential::Signer(credential.clone()))
-                    .perform(storage)
-                    .await
-                    .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
-
-                credential
-            }
-            OpenMode::OpenOrCreate => {
-                let load = load_credential().perform(storage).await;
-
-                match load {
-                    Ok(Credential::Signer(s)) => s,
-                    Ok(Credential::Verifier(_)) => {
-                        return Err(RepositoryError::StorageError(
-                            "repository credential is verifier-only".into(),
-                        ));
-                    }
-                    Err(_) => {
-                        let signer = Ed25519Signer::generate()
-                            .await
-                            .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
-                        let credential = SignerCredential::from(signer);
-
-                        save_credential(Credential::Signer(credential.clone()))
-                            .perform(storage)
-                            .await
-                            .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
-
-                        credential
-                    }
-                }
-            }
-        };
-
-        // Mount the repository DID at the root location
-        cap_storage::Storage::mount(credential.did(), address)
-            .perform(storage)
+        let credential = self
+            .0
+            .create(cred)
+            .perform(env)
             .await
-            .map_err(|e: StorageError| RepositoryError::StorageError(e.to_string()))?;
+            .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
 
-        Ok(credential.into())
+        Repository::try_from(credential)
     }
 }
 
@@ -291,8 +278,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use crate::helpers::{test_operator, unique_location};
-    use crate::storage::Storage;
+    use crate::helpers::{test_operator_with_profile, test_repo, unique_name};
     use crate::{Artifact, Instruction};
     use dialog_remote_s3::Address as S3Address;
     use futures_util::stream;
@@ -306,38 +292,43 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn open_creates_and_mounts() {
-        let storage = Storage::temp_storage();
-        let repo = Repository::open(unique_location("open-mount"))
-            .perform(&storage)
+    async fn open_creates_repository() {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = profile
+            .repository(unique_name("open"))
+            .open()
+            .perform(&operator)
             .await
             .unwrap();
 
-        assert!(storage.stores().contains(&repo.did()));
+        assert!(!repo.did().to_string().is_empty());
     }
 
     #[dialog_common::test]
-    async fn create_then_load_mounts() {
-        let storage = Storage::temp_storage();
-        let location = unique_location("create-load-mount");
+    async fn create_then_load() {
+        let (operator, profile) = test_operator_with_profile().await;
+        let name = unique_name("create-load");
 
-        let created = Repository::create(location.clone())
-            .perform(&storage)
+        let created = profile
+            .repository(name.clone())
+            .create()
+            .perform(&operator)
             .await
             .unwrap();
-        assert!(storage.stores().contains(&created.did()));
 
-        let loaded = Repository::load(location).perform(&storage).await.unwrap();
+        let loaded = profile
+            .repository(name)
+            .load()
+            .perform(&operator)
+            .await
+            .unwrap();
         assert_eq!(created.did(), loaded.did());
-        assert!(storage.stores().contains(&loaded.did()));
     }
 
     #[dialog_common::test]
     async fn it_opens_branch_via_repository() -> anyhow::Result<()> {
-        let operator = test_operator().await;
-        let repo = Repository::open(unique_location("branch"))
-            .perform(&operator)
-            .await?;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
 
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -352,10 +343,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_loads_branch_via_repository() -> anyhow::Result<()> {
-        let operator = test_operator().await;
-        let repo = Repository::open(unique_location("load-branch"))
-            .perform(&operator)
-            .await?;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
 
         let _branch = repo.branch("main").open().perform(&operator).await?;
         let branch = repo.branch("main").load().perform(&operator).await?;
@@ -366,10 +355,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_commits_via_repository() -> anyhow::Result<()> {
-        let operator = test_operator().await;
-        let repo = Repository::open(unique_location("commit"))
-            .perform(&operator)
-            .await?;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
 
         let branch = repo.branch("main").open().perform(&operator).await?;
         let artifact = Artifact {
@@ -393,19 +380,17 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_adds_and_loads_remote_via_repository() -> anyhow::Result<()> {
-        let operator = test_operator().await;
-        let space = Repository::open(unique_location("remote"))
-            .perform(&operator)
-            .await?;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
 
-        let site = space
+        let site = repo
             .remote("origin")
             .create(test_site_address())
             .perform(&operator)
             .await?;
         assert_eq!(site.name(), "origin");
 
-        let loaded = space.remote("origin").load().perform(&operator).await?;
+        let loaded = repo.remote("origin").load().perform(&operator).await?;
         assert_eq!(loaded.name(), "origin");
         assert_eq!(loaded.address().site(), &test_site_address());
 
@@ -414,10 +399,12 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_opens_repository_by_name() -> anyhow::Result<()> {
-        let storage = Storage::temp_storage();
+        let (operator, profile) = test_operator_with_profile().await;
 
-        let repo = Repository::open(unique_location("home"))
-            .perform(&storage)
+        let repo = profile
+            .repository(unique_name("home"))
+            .open()
+            .perform(&operator)
             .await?;
         assert!(
             !repo.subject().to_string().is_empty(),
@@ -429,15 +416,19 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_reopens_same_repository() -> anyhow::Result<()> {
-        let storage = Storage::temp_storage();
-        let location = unique_location("home");
+        let (operator, profile) = test_operator_with_profile().await;
+        let name = unique_name("home");
 
-        let did1 = Repository::open(location.clone())
-            .perform(&storage)
+        let did1 = profile
+            .repository(name.clone())
+            .open()
+            .perform(&operator)
             .await?
             .subject();
-        let did2 = Repository::open(location)
-            .perform(&storage)
+        let did2 = profile
+            .repository(name)
+            .open()
+            .perform(&operator)
             .await?
             .subject();
 
@@ -448,13 +439,17 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_isolates_repositories_by_name() -> anyhow::Result<()> {
-        let storage = Storage::temp_storage();
+        let (operator, profile) = test_operator_with_profile().await;
 
-        let repo1 = Repository::open(unique_location("home"))
-            .perform(&storage)
+        let repo1 = profile
+            .repository(unique_name("home"))
+            .open()
+            .perform(&operator)
             .await?;
-        let repo2 = Repository::open(unique_location("work"))
-            .perform(&storage)
+        let repo2 = profile
+            .repository(unique_name("work"))
+            .open()
+            .perform(&operator)
             .await?;
 
         assert_ne!(
@@ -471,10 +466,8 @@ mod tests {
         use crate::ArtifactSelector;
         use futures_util::StreamExt;
 
-        let operator = test_operator().await;
-        let repo = Repository::open(unique_location("select-attr"))
-            .perform(&operator)
-            .await?;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
 
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -533,10 +526,8 @@ mod tests {
         use crate::ArtifactSelector;
         use futures_util::StreamExt;
 
-        let operator = test_operator().await;
-        let repo = Repository::open(unique_location("select-entity"))
-            .perform(&operator)
-            .await?;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
 
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -586,10 +577,8 @@ mod tests {
         use crate::ArtifactSelector;
         use futures_util::StreamExt;
 
-        let operator = test_operator().await;
-        let repo = Repository::open(unique_location("select-empty"))
-            .perform(&operator)
-            .await?;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
 
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -613,10 +602,8 @@ mod tests {
         use crate::ArtifactSelector;
         use futures_util::StreamExt;
 
-        let operator = test_operator().await;
-        let repo = Repository::open(unique_location("retract"))
-            .perform(&operator)
-            .await?;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
 
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -667,13 +654,15 @@ mod tests {
     #[cfg(feature = "ucan")]
     mod delegation_tests {
         use super::*;
-        use crate::helpers::test_operator_with_profile;
+        use crate::helpers::{test_operator_with_profile, unique_name};
         use dialog_effects::memory as fx_memory;
 
         #[dialog_common::test]
         async fn it_delegates_repo_to_profile_and_claims() -> anyhow::Result<()> {
             let (operator, profile) = test_operator_with_profile().await;
-            let repo = Repository::create(unique_location("home"))
+            let repo = profile
+                .repository(unique_name("home"))
+                .create()
                 .perform(&operator)
                 .await?;
 
@@ -705,7 +694,9 @@ mod tests {
         #[dialog_common::test]
         async fn it_enforces_scoped_delegation_policy() -> anyhow::Result<()> {
             let (operator, profile) = test_operator_with_profile().await;
-            let repo = Repository::create(unique_location("home"))
+            let repo = profile
+                .repository(unique_name("home"))
+                .create()
                 .perform(&operator)
                 .await?;
 
@@ -751,7 +742,9 @@ mod tests {
         #[dialog_common::test]
         async fn it_validates_delegation_against_policy() -> anyhow::Result<()> {
             let (operator, profile) = test_operator_with_profile().await;
-            let repo = Repository::create(unique_location("home"))
+            let repo = profile
+                .repository(unique_name("home"))
+                .create()
                 .perform(&operator)
                 .await?;
 
@@ -806,7 +799,7 @@ mod tests {
     }
 
     mod query_engine {
-        use crate::helpers::{test_operator, test_repo};
+        use crate::helpers::{test_operator_with_profile, test_repo};
         use dialog_query::query::Output;
         use dialog_query::{Concept, Entity, Query, Term};
 
@@ -827,8 +820,8 @@ mod tests {
 
         #[dialog_common::test]
         async fn it_queries_via_session() -> anyhow::Result<()> {
-            let operator = test_operator().await;
-            let repo = test_repo(&operator).await;
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
             branch
