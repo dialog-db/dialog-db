@@ -1,16 +1,36 @@
 # dialog-operator
 
-Operator layer for Dialog-DB.
+Profiles, operators, and the runtime capability environment for Dialog.
 
-This crate provides the capability-based operator system: authority credentials,
-profiles, operator builders, storage dispatch, and remote fork dispatch that
-together form the operational layer above the core artifact store.
+A **Profile** is a named identity on a device, backed by a signing credential. An **Operator** is a session-scoped environment derived from a profile that routes all capability effects (storage, archive, memory, access control) through DID-based dispatch with privilege narrowing.
 
-## Modules
+## Usage
 
-- **authority** -- Opened profile with signers and authority chain
-- **profile** -- Named identity with signing credential
-- **operator** -- Operating environment built from a profile
-- **storage** -- DID-routed storage dispatcher
-- **remote** -- Remote dispatch for fork invocations
-- **helpers** -- Test helpers (behind the `helpers` feature flag)
+```rust
+use dialog_operator::profile::Profile;
+use dialog_operator::remote::Remote;
+use dialog_capability::Subject;
+use dialog_storage::provider::environment::Environment;
+
+// Create the environment (platform-specific storage)
+let env = Environment::default();
+
+// Open or create a profile
+let profile = Profile::open("alice")
+    .perform(&env)
+    .await?;
+
+// Derive an operator (narrows access, scoped to profile)
+let operator = profile
+    .derive(b"my-app")
+    .allow(Subject::any())
+    .network(Remote)
+    .build(env)
+    .await?;
+
+// Open a repository through the profile
+let contacts = profile.repository("contacts")
+    .open()
+    .perform(&operator)
+    .await?;
+```
