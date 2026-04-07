@@ -193,16 +193,10 @@ where
     ) -> Result<P::Proof, AuthorizeError> {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
-            Self::FileSystem(fs) => {
-                <FileStore as dialog_capability::Provider<Prove<P>>>::execute(fs, input).await
-            }
+            Self::FileSystem(fs) => input.perform(fs).await,
             #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-            Self::IndexedDb(idb) => {
-                <IndexedDb as dialog_capability::Provider<Prove<P>>>::execute(idb, input).await
-            }
-            Self::Volatile(v) => {
-                <Volatile as dialog_capability::Provider<Prove<P>>>::execute(v, input).await
-            }
+            Self::IndexedDb(idb) => input.perform(idb).await,
+            Self::Volatile(v) => input.perform(v).await,
         }
     }
 }
@@ -221,16 +215,10 @@ where
     ) -> Result<(), AuthorizeError> {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
-            Self::FileSystem(fs) => {
-                <FileStore as dialog_capability::Provider<Retain<P>>>::execute(fs, input).await
-            }
+            Self::FileSystem(fs) => input.perform(fs).await,
             #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-            Self::IndexedDb(idb) => {
-                <IndexedDb as dialog_capability::Provider<Retain<P>>>::execute(idb, input).await
-            }
-            Self::Volatile(v) => {
-                <Volatile as dialog_capability::Provider<Retain<P>>>::execute(v, input).await
-            }
+            Self::IndexedDb(idb) => input.perform(idb).await,
+            Self::Volatile(v) => input.perform(v).await,
         }
     }
 }

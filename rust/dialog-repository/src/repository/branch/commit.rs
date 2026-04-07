@@ -159,7 +159,8 @@ where
 
         // Discover identity from the environment
         let identify_cap = Subject::from(branch.subject().clone()).invoke(authority::Identify);
-        let auth = <Env as Provider<authority::Identify>>::execute(env, identify_cap)
+        let auth = identify_cap
+            .perform(env)
             .await
             .map_err(|e| DialogArtifactsError::Storage(format!("Identify failed: {}", e)))?;
         let subject_did = auth.subject().clone();

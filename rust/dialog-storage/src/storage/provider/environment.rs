@@ -111,7 +111,8 @@ where
                         .attenuate(credential::Credential)
                         .attenuate(credential::Address::new("credential/self"))
                         .invoke(credential::Load);
-                return <S as Provider<credential::Load>>::execute(&store, cred_cap)
+                return cred_cap
+                    .perform(&store)
                     .await
                     .map_err(|e| StorageError::NotFound(e.to_string()));
             }
@@ -126,10 +127,10 @@ where
             .attenuate(credential::Address::new("credential/self"))
             .invoke(credential::Load);
 
-        let cred: dialog_credentials::Credential =
-            <S as Provider<credential::Load>>::execute(&store, cred_cap)
-                .await
-                .map_err(|e| StorageError::NotFound(e.to_string()))?;
+        let cred: dialog_credentials::Credential = cred_cap
+            .perform(&store)
+            .await
+            .map_err(|e| StorageError::NotFound(e.to_string()))?;
 
         let did = cred.did();
         self.register(did, key, store);
@@ -177,7 +178,8 @@ where
                 credential: credential.clone(),
             });
 
-        <S as Provider<dialog_effects::credential::Save>>::execute(&store, save_cap)
+        save_cap
+            .perform(&store)
             .await
             .map_err(|e| StorageError::Storage(e.to_string()))?;
 

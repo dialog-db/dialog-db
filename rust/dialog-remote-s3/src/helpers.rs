@@ -95,10 +95,7 @@ macro_rules! impl_fork_provider {
                 let invocation =
                     dialog_capability::fork::ForkInvocation::new(capability, address, ());
                 let s3 = crate::s3::S3;
-                Ok(<crate::s3::S3 as Provider<
-                    dialog_capability::fork::ForkInvocation<crate::s3::S3, $fx>,
-                >>::execute(&s3, invocation)
-                .await)
+                Ok(invocation.perform(&s3).await)
             }
         }
     };

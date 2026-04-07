@@ -115,6 +115,15 @@ where
             invocation,
         }
     }
+
+    /// Execute this invocation against a provider.
+    pub async fn perform<Env>(self, env: &Env) -> Fx::Output
+    where
+        Self: ConditionalSend,
+        Env: Provider<ForkInvocation<S, Fx>> + dialog_common::ConditionalSync,
+    {
+        env.execute(self).await
+    }
 }
 
 /// Error during fork execution.

@@ -33,7 +33,7 @@ mod s3_dispatch {
         S3: Provider<ForkInvocation<S3, Fx>>,
     {
         async fn execute(&self, input: ForkInvocation<S3, Fx>) -> Fx::Output {
-            <S3 as Provider<ForkInvocation<S3, Fx>>>::execute(&S3, input).await
+            input.perform(&S3).await
         }
     }
 }
@@ -55,7 +55,7 @@ mod ucan_dispatch {
         UcanSite: Provider<ForkInvocation<UcanSite, Fx>>,
     {
         async fn execute(&self, input: ForkInvocation<UcanSite, Fx>) -> Fx::Output {
-            <UcanSite as Provider<ForkInvocation<UcanSite, Fx>>>::execute(&UcanSite, input).await
+            input.perform(&UcanSite).await
         }
     }
 }

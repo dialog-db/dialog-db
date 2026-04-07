@@ -31,7 +31,7 @@ mod s3 {
         async fn execute(&self, input: Fork<S3, Fx>) -> Result<Fx::Output, AuthorizeError> {
             let (capability, address) = input.into_parts();
             let invocation = ForkInvocation::new(capability, address, ());
-            Ok(self.network.execute(invocation).await)
+            Ok(invocation.perform(&self.network).await)
         }
     }
 }
@@ -73,7 +73,7 @@ mod ucan {
             let ucan_invocation = authorization.invoke().await?;
 
             let invocation = ForkInvocation::new(capability, address, ucan_invocation);
-            Ok(self.network.execute(invocation).await)
+            Ok(invocation.perform(&self.network).await)
         }
     }
 }
