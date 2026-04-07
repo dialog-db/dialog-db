@@ -1,12 +1,21 @@
 //! Profile — a named identity backed by a signing credential.
 
 pub mod access;
+mod error;
+mod open;
+mod save;
+mod space;
+#[cfg(test)]
+mod test;
+
+pub use error::ProfileError;
+pub use open::OpenProfile;
+pub use save::SaveDelegation;
+pub use space::SpaceHandle;
 
 use crate::operator::OperatorBuilder;
-use dialog_capability::{Capability, Provider, Subject};
-use dialog_common::ConditionalSync;
-use dialog_credentials::{Ed25519Signer, SignerCredential};
-use dialog_effects::storage::{self as storage_fx, LocationExt};
+use dialog_capability::{Capability, Subject};
+use dialog_credentials::SignerCredential;
 use dialog_ucan::UcanDelegation;
 use dialog_varsig::{Did, Principal};
 
@@ -19,26 +28,17 @@ pub struct Profile {
 impl Profile {
     /// Open a profile — loads existing or creates new.
     pub fn open(name: impl Into<String>) -> OpenProfile {
-        OpenProfile {
-            name: name.into(),
-            mode: OpenMode::OpenOrCreate,
-        }
+        OpenProfile::open(name.into())
     }
 
     /// Load an existing profile — fails if not found.
     pub fn load(name: impl Into<String>) -> OpenProfile {
-        OpenProfile {
-            name: name.into(),
-            mode: OpenMode::Load,
-        }
+        OpenProfile::load(name.into())
     }
 
     /// Create a new profile — fails if one already exists.
     pub fn create(name: impl Into<String>) -> OpenProfile {
-        OpenProfile {
-            name: name.into(),
-            mode: OpenMode::Create,
-        }
+        OpenProfile::create(name.into())
     }
 
     /// The profile's DID.
@@ -103,185 +103,5 @@ impl TryFrom<dialog_credentials::Credential> for Profile {
                 "profile credential is verifier-only".into(),
             )),
         }
-    }
-}
-
-/// Command to store a delegation chain under a profile's DID.
-pub struct SaveDelegation {
-    did: Did,
-    chain: UcanDelegation,
-}
-
-use dialog_capability::access::Retain as AccessRetain;
-use dialog_ucan::Ucan;
-type RetainUcan = AccessRetain<Ucan>;
-
-impl SaveDelegation {
-    /// Execute against the environment.
-    pub async fn perform<Env>(self, env: &Env) -> Result<(), ProfileError>
-    where
-        Env: Provider<RetainUcan> + ConditionalSync,
-    {
-        use dialog_capability::access::Access;
-
-        Subject::from(self.did)
-            .attenuate(Access)
-            .invoke(AccessRetain::<Ucan>::new(self.chain))
-            .perform(env)
-            .await
-            .map_err(|e| ProfileError::Storage(e.to_string()))
-    }
-}
-
-/// Handle to a named space under a profile.
-///
-/// Knows the profile DID and space name. Use `.open()`, `.load()`,
-/// or `.create()` to build a command, then `.perform(&operator)` to
-/// execute it.
-pub struct SpaceHandle {
-    /// The profile DID that owns this space.
-    pub profile_did: Did,
-    /// The space name.
-    pub name: String,
-}
-
-enum OpenMode {
-    OpenOrCreate,
-    Load,
-    Create,
-}
-
-/// Command to open, load, or create a profile.
-pub struct OpenProfile {
-    name: String,
-    mode: OpenMode,
-}
-
-impl OpenProfile {
-    /// Execute against an environment.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Profile, ProfileError>
-    where
-        Env: Provider<storage_fx::Load> + Provider<storage_fx::Create> + ConditionalSync,
-    {
-        let credential = match self.mode {
-            OpenMode::Load => storage_fx::Storage::profile(&self.name)
-                .load()
-                .perform(env)
-                .await
-                .map_err(|e| ProfileError::Storage(e.to_string()))?,
-            OpenMode::Create => {
-                let signer = Ed25519Signer::generate()
-                    .await
-                    .map_err(|e| ProfileError::Key(e.to_string()))?;
-                let credential =
-                    dialog_credentials::Credential::Signer(SignerCredential::from(signer));
-
-                storage_fx::Storage::profile(&self.name)
-                    .create(credential)
-                    .perform(env)
-                    .await
-                    .map_err(|e| ProfileError::Storage(e.to_string()))?
-            }
-            OpenMode::OpenOrCreate => {
-                let load_result = storage_fx::Storage::profile(&self.name)
-                    .load()
-                    .perform(env)
-                    .await;
-
-                match load_result {
-                    Ok(cred) => cred,
-                    Err(_) => {
-                        let signer = Ed25519Signer::generate()
-                            .await
-                            .map_err(|e| ProfileError::Key(e.to_string()))?;
-                        let credential =
-                            dialog_credentials::Credential::Signer(SignerCredential::from(signer));
-
-                        storage_fx::Storage::profile(&self.name)
-                            .create(credential)
-                            .perform(env)
-                            .await
-                            .map_err(|e| ProfileError::Storage(e.to_string()))?
-                    }
-                }
-            }
-        };
-
-        Profile::try_from(credential)
-    }
-}
-
-/// Errors that can occur when opening a profile.
-#[derive(Debug, thiserror::Error)]
-pub enum ProfileError {
-    /// Storage operation failed.
-    #[error("Storage error: {0}")]
-    Storage(String),
-
-    /// Key generation or import failed.
-    #[error("Key error: {0}")]
-    Key(String),
-
-    /// Profile already exists (for create).
-    #[error("Profile already exists")]
-    AlreadyExists,
-
-    /// Profile not found (for load).
-    #[error("Profile not found")]
-    NotFound,
-}
-
-#[cfg(test)]
-mod tests {
-    #[cfg(target_arch = "wasm32")]
-    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
-
-    use super::*;
-    use dialog_storage::provider::environment::Environment;
-
-    #[dialog_common::test]
-    async fn it_opens_profile() {
-        let env = Environment::volatile();
-
-        let profile = Profile::open("alice").perform(&env).await.unwrap();
-        assert!(!profile.did().to_string().is_empty());
-    }
-
-    #[dialog_common::test]
-    async fn it_opens_same_profile_twice() {
-        let env = Environment::volatile();
-
-        let first = Profile::open("bob").perform(&env).await.unwrap();
-        let second = Profile::open("bob").perform(&env).await.unwrap();
-
-        assert_eq!(first.did(), second.did());
-    }
-
-    #[dialog_common::test]
-    async fn it_creates_then_loads() {
-        let env = Environment::volatile();
-
-        let created = Profile::create("charlie").perform(&env).await.unwrap();
-        let loaded = Profile::load("charlie").perform(&env).await.unwrap();
-
-        assert_eq!(created.did(), loaded.did());
-    }
-
-    #[dialog_common::test]
-    async fn it_fails_to_create_duplicate() {
-        let env = Environment::volatile();
-
-        Profile::create("dave").perform(&env).await.unwrap();
-        let result = Profile::create("dave").perform(&env).await;
-
-        assert!(result.is_err());
-    }
-
-    #[dialog_common::test]
-    async fn it_fails_to_load_missing() {
-        let env = Environment::volatile();
-
-        let result = Profile::load("missing").perform(&env).await;
-        assert!(result.is_err());
     }
 }
