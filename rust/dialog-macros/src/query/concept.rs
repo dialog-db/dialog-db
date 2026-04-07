@@ -75,7 +75,7 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Data, DeriveInput, Fields, parse_macro_input};
 
-use super::helpers::extract_doc_comments;
+use super::helpers::{extract_doc_comments, parse_dialog_rename_attribute};
 
 pub fn derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -149,7 +149,11 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
 
         let field_type = &field.ty;
-        let field_name_lit = syn::LitStr::new(&field_name_str, proc_macro2::Span::call_site());
+
+        // Check for #[dialog(rename = "...")] to override the string key
+        let effective_name_str =
+            parse_dialog_rename_attribute(&field.attrs).unwrap_or_else(|| field_name_str.clone());
+        let field_name_lit = syn::LitStr::new(&effective_name_str, proc_macro2::Span::call_site());
 
         // Store field name and type for later use in reconstruction
         field_names.push(field_name);

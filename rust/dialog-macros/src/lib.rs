@@ -173,7 +173,7 @@ pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///     role: Term::var("role"),
 /// };
 /// ```
-#[proc_macro_derive(Concept)]
+#[proc_macro_derive(Concept, attributes(dialog))]
 pub fn derive_concept(input: TokenStream) -> TokenStream {
     query::concept::derive(input)
 }
