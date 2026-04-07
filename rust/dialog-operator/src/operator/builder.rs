@@ -3,11 +3,12 @@
 use crate::Authority;
 use crate::profile::Profile;
 use crate::remote::Remote;
-use crate::storage::Storage;
 use dialog_capability::Ability;
 use dialog_capability_ucan::Scope;
 use dialog_credentials::key::KeyExport;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
+use dialog_storage::provider::environment::Environment;
+use dialog_storage::provider::space::SpaceProvider;
 use dialog_varsig::Principal;
 
 use super::Operator;
@@ -15,8 +16,6 @@ use super::Operator;
 const OPERATOR_DERIVATION_CONTEXT: &str = "dialog-db operator derivation";
 
 /// Builder for constructing an Operator from a Profile.
-///
-/// Created via `Profile::derive(context)`.
 pub struct OperatorBuilder {
     credential: SignerCredential,
     context: Vec<u8>,
@@ -32,13 +31,7 @@ impl OperatorBuilder {
         }
     }
 
-    /// Allow a capability — creates a delegation from profile to operator.
-    ///
-    /// The delegation is created during `.build()`.
-    /// Allow a capability — creates a delegation from profile to operator.
-    ///
-    /// Accepts a `Capability<T>` or anything convertible to one
-    /// (e.g. `Subject::any()` for powerline delegation).
+    /// Allow a capability: creates a delegation from profile to operator.
     pub fn allow<T, C>(mut self, capability: C) -> Self
     where
         T: dialog_capability::Constraint,
@@ -60,9 +53,12 @@ impl OperatorBuilder {
         }
     }
 
-    /// Build with default remote, taking stores from the given storage.
-    pub async fn build(self, storage: Storage) -> Result<Operator, OperatorError> {
-        self.network(Remote).build(storage).await
+    /// Build with default remote.
+    pub async fn build<S>(self, env: Environment<S>) -> Result<Operator<S>, OperatorError>
+    where
+        S: SpaceProvider + Clone,
+    {
+        self.network(Remote).build(env).await
     }
 }
 
@@ -76,10 +72,10 @@ pub struct NetworkBuilder {
 
 impl NetworkBuilder {
     /// Build the operator, deriving the operator key.
-    ///
-    /// For each `.allow()` scope, creates a UCAN delegation from
-    /// profile → operator and stores it under the profile's DID.
-    pub async fn build(self, storage: Storage) -> Result<Operator, OperatorError> {
+    pub async fn build<S>(self, env: Environment<S>) -> Result<Operator<S>, OperatorError>
+    where
+        S: SpaceProvider + Clone,
+    {
         let operator_signer = derive_operator(&self.credential, &self.context).await?;
         let credentials = Authority::new(
             "operator",
@@ -89,7 +85,7 @@ impl NetworkBuilder {
 
         let operator = Operator {
             authority: credentials.clone(),
-            storage,
+            env,
             remote: self.remote,
         };
 
@@ -152,9 +148,6 @@ async fn derive_operator(
         }
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         KeyExport::NonExtractable { .. } => {
-            // Use sign-to-derive: Ed25519 signing is deterministic, so
-            // signing the context produces reproducible bytes we can use
-            // as key material for the derived operator.
             let mut derivation_input = OPERATOR_DERIVATION_CONTEXT.as_bytes().to_vec();
             derivation_input.extend_from_slice(context);
 

@@ -1,6 +1,6 @@
 //! Operator — an operating environment built from a Profile.
 //!
-//! Build one via `Profile::operator()`.
+//! Build one via `Profile::derive()`.
 
 mod builder;
 #[cfg(test)]
@@ -10,33 +10,29 @@ pub use builder::{NetworkBuilder, OperatorBuilder, OperatorError};
 
 use crate::Authority;
 use crate::remote::Remote;
-use crate::storage::Storage;
 use dialog_capability::Capability;
 use dialog_capability::Provider;
 use dialog_capability::authority::{Identify, Operator as AuthOperator};
-use dialog_capability::storage::{Load, Mount, Save};
 use dialog_effects::{archive, credential, memory};
-use dialog_storage::provider::Address;
+use dialog_storage::provider::environment::Environment;
+use dialog_storage::provider::space::SpaceProvider;
 use dialog_varsig::{Did, Principal};
 
 use dialog_capability::access::Claim as AccessClaim;
-
 use dialog_capability::access::Save as AccessSave;
-
 use dialog_capability_ucan::Ucan;
 
 type ClaimUcan = AccessClaim<Ucan>;
-
 type SaveUcan = AccessSave<Ucan>;
 
 /// An operating environment built from a [`Profile`](crate::profile::Profile).
 ///
 /// Composes:
 /// - Authority credentials (identity)
-/// - [`Storage`] for addressed Load/Save/Mount and DID-routed effects
+/// - [`Environment`] for DID-routed effects and space load/create
 /// - Remote for fork invocations
 #[derive(Provider)]
-pub struct Operator {
+pub struct Operator<S: Clone> {
     #[provide(Identify)]
     /// Provider for authority effects (identity).
     authority: Authority,
@@ -49,20 +45,19 @@ pub struct Operator {
         memory::Resolve,
         memory::Publish,
         memory::Retract,
-        Load<Vec<u8>, Address>,
-        Save<Vec<u8>, Address>,
-        Mount<Address>,
+        dialog_effects::storage::Load,
+        dialog_effects::storage::Create,
         ClaimUcan,
         SaveUcan
     )]
-    /// Storage — routes DID-based effects and addressed Load/Save/Mount.
-    storage: Storage,
+    /// Environment — routes DID-based effects and handles space load/create.
+    env: Environment<S>,
 
     /// Provider for remote invocations.
     remote: Remote,
 }
 
-impl Operator {
+impl<S: Clone> Operator<S> {
     /// The operator's DID (the ephemeral/derived session key).
     pub fn did(&self) -> Did {
         self.authority.operator_did()
@@ -77,14 +72,9 @@ impl Operator {
     pub fn build_authority(&self, subject: Did) -> Capability<AuthOperator> {
         self.authority.build_authority(subject)
     }
-
-    /// The storage for this operator.
-    pub fn storage(&self) -> &Storage {
-        &self.storage
-    }
 }
 
-impl Principal for Operator {
+impl<S: Clone> Principal for Operator<S> {
     fn did(&self) -> Did {
         self.authority.operator_did()
     }
@@ -102,10 +92,12 @@ mod s3_fork {
 
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    impl<Fx> Provider<Fork<S3, Fx>> for Operator
+    impl<S, Fx> Provider<Fork<S3, Fx>> for Operator<S>
     where
+        S: Clone + ConditionalSend + ConditionalSync + 'static,
         Fx: Effect + 'static,
         Fx::Of: Constraint,
+        Fx::Output: ConditionalSend,
         Fork<S3, Fx>: ConditionalSend,
         ForkInvocation<S3, Fx>: ConditionalSend,
         Remote: Provider<ForkInvocation<S3, Fx>> + ConditionalSync,
@@ -129,8 +121,9 @@ mod ucan_fork {
 
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    impl<Fx> Provider<Fork<UcanSite, Fx>> for Operator
+    impl<S, Fx> Provider<Fork<UcanSite, Fx>> for Operator<S>
     where
+        S: SpaceProvider + Clone + 'static,
         Fx: Effect + Clone + ConditionalSend + 'static,
         Fx::Of: Constraint,
         Capability<Fx>: Ability + ConditionalSend + ConditionalSync,
@@ -142,18 +135,15 @@ mod ucan_fork {
         async fn execute(&self, input: Fork<UcanSite, Fx>) -> Result<Fx::Output, AuthorizeError> {
             let (capability, address) = input.into_parts();
 
-            // Build access scope with claim projection (content -> checksum etc.)
             let scope = UcanScope::invoke(&capability);
 
-            // Claim authorization via capability chain
-            // Subject is the profile DID (where delegations are stored)
-            let proof_chain: UcanProofChain = dialog_capability::Subject::from(self.profile_did())
-                .attenuate(access::Permit)
-                .invoke(access::Claim::<Ucan>::new(self.did(), scope))
-                .perform(self)
-                .await?;
+            let proof_chain: UcanProofChain =
+                dialog_capability::Subject::from(self.profile_did())
+                    .attenuate(access::Permit)
+                    .invoke(access::Claim::<Ucan>::new(self.did(), scope))
+                    .perform(self)
+                    .await?;
 
-            // Bind signer and build invocation
             let authorization = proof_chain.claim(self.authority.operator_signer().clone())?;
             let ucan_invocation = authorization.invoke().await?;
 
