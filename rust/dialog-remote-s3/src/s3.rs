@@ -183,6 +183,16 @@ mod protocol {
             &[]
         }
 
+        fn duration(&self) -> &access::TimeRange {
+            static UNBOUNDED: access::TimeRange = access::TimeRange {
+                not_before: None,
+                expiration: None,
+            };
+            &UNBOUNDED
+        }
+
+        fn set_duration(&mut self, _duration: access::TimeRange) {}
+
         fn claim(self, _signer: S3) -> Result<S3, AuthorizeError> {
             Ok(S3)
         }
@@ -191,11 +201,23 @@ mod protocol {
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl access::Authorization<S3> for S3 {
-        async fn delegate(
-            &self,
-            _audience: Did,
-            _duration: access::TimeRange,
-        ) -> Result<S3Delegation, AuthorizeError> {
+        fn duration(&self) -> &access::TimeRange {
+            static UNBOUNDED: access::TimeRange = access::TimeRange {
+                not_before: None,
+                expiration: None,
+            };
+            &UNBOUNDED
+        }
+
+        fn not_before(self, _timestamp: u64) -> Result<Self, AuthorizeError> {
+            Ok(self)
+        }
+
+        fn expires(self, _timestamp: u64) -> Result<Self, AuthorizeError> {
+            Ok(self)
+        }
+
+        async fn delegate(&self, _audience: Did) -> Result<S3Delegation, AuthorizeError> {
             Err(AuthorizeError::Denied(
                 "S3 does not support delegation".into(),
             ))

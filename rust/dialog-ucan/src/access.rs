@@ -89,6 +89,8 @@ pub struct UcanProof {
     pub proofs: Vec<UcanCertificate>,
     /// The scope of access being authorized.
     pub scope: Scope,
+    /// The time range this proof covers.
+    pub duration: access::TimeRange,
 }
 
 impl UcanProof {
@@ -101,7 +103,15 @@ impl UcanProof {
             .values()
             .map(|d| UcanCertificate(d.as_ref().clone()))
             .collect();
-        Self { proofs, scope }
+        let duration = access::TimeRange {
+            not_before: chain.not_before().map(|t| t.to_unix()),
+            expiration: chain.expiration().map(|t| t.to_unix()),
+        };
+        Self {
+            proofs,
+            scope,
+            duration,
+        }
     }
 }
 
@@ -110,6 +120,7 @@ impl access::Proof<Ucan> for UcanProof {
         Self {
             proofs: Vec::new(),
             scope: access,
+            duration: access::TimeRange::unbounded(),
         }
     }
 
@@ -123,6 +134,14 @@ impl access::Proof<Ucan> for UcanProof {
 
     fn proofs(&self) -> &[UcanCertificate] {
         &self.proofs
+    }
+
+    fn duration(&self) -> &access::TimeRange {
+        &self.duration
+    }
+
+    fn set_duration(&mut self, duration: access::TimeRange) {
+        self.duration = duration;
     }
 
     fn claim(self, signer: Ed25519Signer) -> Result<UcanAuthorization, AuthorizeError> {
@@ -144,6 +163,7 @@ impl access::Proof<Ucan> for UcanProof {
             chain,
             signer,
             scope: self.scope,
+            duration: self.duration,
         })
     }
 }
@@ -159,16 +179,42 @@ pub struct UcanAuthorization {
     pub signer: Ed25519Signer,
     /// The scope of the capability being authorized.
     pub scope: Scope,
+    /// The time range this authorization is valid for.
+    pub duration: access::TimeRange,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl access::Authorization<Ucan> for UcanAuthorization {
-    async fn delegate(
-        &self,
-        audience: Did,
-        duration: access::TimeRange,
-    ) -> Result<UcanDelegation, AuthorizeError> {
+    fn duration(&self) -> &access::TimeRange {
+        &self.duration
+    }
+
+    fn not_before(mut self, timestamp: u64) -> Result<Self, AuthorizeError> {
+        if let Some(nbf) = self.duration.not_before
+            && timestamp < nbf
+        {
+            return Err(AuthorizeError::Denied(format!(
+                "cannot set not_before to {timestamp}, proof is not valid before {nbf}"
+            )));
+        }
+        self.duration.not_before = Some(timestamp);
+        Ok(self)
+    }
+
+    fn expires(mut self, timestamp: u64) -> Result<Self, AuthorizeError> {
+        if let Some(exp) = self.duration.expiration
+            && timestamp > exp
+        {
+            return Err(AuthorizeError::Denied(format!(
+                "cannot set expiration to {timestamp}, proof expires at {exp}"
+            )));
+        }
+        self.duration.expiration = Some(timestamp);
+        Ok(self)
+    }
+
+    async fn delegate(&self, audience: Did) -> Result<UcanDelegation, AuthorizeError> {
         use dialog_ucan_core::delegation::builder::DelegationBuilder;
         use dialog_ucan_core::time::Timestamp;
         use dialog_ucan_core::time::timestamp::{Duration, UNIX_EPOCH};
@@ -180,12 +226,12 @@ impl access::Authorization<Ucan> for UcanAuthorization {
             .command(self.scope.command.segments().clone())
             .policy(self.scope.policy());
 
-        if let Some(exp) = duration.expiration
+        if let Some(exp) = self.duration.expiration
             && let Ok(ts) = Timestamp::new(UNIX_EPOCH + Duration::from_secs(exp))
         {
             builder = builder.expiration(ts);
         }
-        if let Some(nbf) = duration.not_before
+        if let Some(nbf) = self.duration.not_before
             && let Ok(ts) = Timestamp::new(UNIX_EPOCH + Duration::from_secs(nbf))
         {
             builder = builder.not_before(ts);

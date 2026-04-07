@@ -12,6 +12,7 @@
 use super::{Container, ContainerError};
 use crate::Delegation;
 use crate::subject::Subject;
+use crate::time::Timestamp;
 use dialog_varsig::Did;
 use dialog_varsig::eddsa::Ed25519Signature;
 use ipld_core::cid::Cid;
@@ -153,6 +154,28 @@ impl DelegationChain {
         } else {
             format!("/{}", cmd.0.join("/"))
         }
+    }
+
+    /// The effective earliest validity time across all delegations.
+    ///
+    /// Returns the latest `not_before` in the chain (most restrictive).
+    /// `None` means no lower bound is imposed by any delegation.
+    pub fn not_before(&self) -> Option<Timestamp> {
+        self.proof_cids
+            .iter()
+            .filter_map(|cid| self.delegations.get(cid)?.not_before())
+            .max()
+    }
+
+    /// The effective expiration time across all delegations.
+    ///
+    /// Returns the earliest `expiration` in the chain (most restrictive).
+    /// `None` means no delegation in the chain expires.
+    pub fn expiration(&self) -> Option<Timestamp> {
+        self.proof_cids
+            .iter()
+            .filter_map(|cid| self.delegations.get(cid)?.expiration())
+            .min()
     }
 
     /// Push a delegation onto the chain (closer to invoker).
@@ -367,6 +390,8 @@ mod tests {
     use super::helpers::*;
     use super::*;
     use crate::DelegationBuilder;
+    use crate::time::Timestamp;
+    use crate::time::timestamp::{Duration, UNIX_EPOCH};
     use dialog_varsig::Principal;
 
     #[test]
@@ -641,6 +666,88 @@ mod tests {
 
         assert_eq!(chain, restored);
         assert_eq!(restored.ability(), "/archive");
+    }
+
+    #[dialog_common::test]
+    async fn it_reports_unbounded_when_no_time_constraints() {
+        let space_signer = generate_signer().await;
+        let operator_signer = generate_signer().await;
+
+        let delegation = DelegationBuilder::new()
+            .issuer(space_signer.clone())
+            .audience(&operator_signer)
+            .subject(Subject::Specific(space_signer.did()))
+            .command(vec!["storage".to_string()])
+            .try_build()
+            .await
+            .unwrap();
+
+        let chain = DelegationChain::new(delegation);
+        assert!(chain.not_before().is_none());
+        assert!(chain.expiration().is_none());
+    }
+
+    #[dialog_common::test]
+    async fn it_reports_time_bounds_from_single_delegation() {
+        let space_signer = generate_signer().await;
+        let operator_signer = generate_signer().await;
+
+        let nbf = Timestamp::new(UNIX_EPOCH + Duration::from_secs(1000)).unwrap();
+        let exp = Timestamp::new(UNIX_EPOCH + Duration::from_secs(5000)).unwrap();
+
+        let delegation = DelegationBuilder::new()
+            .issuer(space_signer.clone())
+            .audience(&operator_signer)
+            .subject(Subject::Specific(space_signer.did()))
+            .command(vec!["storage".to_string()])
+            .not_before(nbf)
+            .expiration(exp)
+            .try_build()
+            .await
+            .unwrap();
+
+        let chain = DelegationChain::new(delegation);
+        assert_eq!(chain.not_before(), Some(nbf));
+        assert_eq!(chain.expiration(), Some(exp));
+    }
+
+    #[dialog_common::test]
+    async fn it_computes_tightest_bounds_from_chain() {
+        let space_signer = generate_signer().await;
+        let mid_signer = generate_signer().await;
+        let operator_signer = generate_signer().await;
+
+        // First delegation: valid from 100 to 10000
+        let d1 = DelegationBuilder::new()
+            .issuer(space_signer.clone())
+            .audience(&mid_signer)
+            .subject(Subject::Specific(space_signer.did()))
+            .command(vec!["storage".to_string()])
+            .not_before(Timestamp::new(UNIX_EPOCH + Duration::from_secs(100)).unwrap())
+            .expiration(Timestamp::new(UNIX_EPOCH + Duration::from_secs(10000)).unwrap())
+            .try_build()
+            .await
+            .unwrap();
+
+        // Second delegation: valid from 500 to 5000 (tighter)
+        let d2 = DelegationBuilder::new()
+            .issuer(mid_signer.clone())
+            .audience(&operator_signer)
+            .subject(Subject::Specific(space_signer.did()))
+            .command(vec!["storage".to_string()])
+            .not_before(Timestamp::new(UNIX_EPOCH + Duration::from_secs(500)).unwrap())
+            .expiration(Timestamp::new(UNIX_EPOCH + Duration::from_secs(5000)).unwrap())
+            .try_build()
+            .await
+            .unwrap();
+
+        let chain = DelegationChain::try_from(vec![d1, d2]).unwrap();
+
+        // Effective bounds should be the tightest: not_before=500, expiration=5000
+        let nbf = chain.not_before().unwrap();
+        let exp = chain.expiration().unwrap();
+        assert_eq!(nbf.to_unix(), 500);
+        assert_eq!(exp.to_unix(), 5000);
     }
 
     /// Test that a delegation for archive/put capability roundtrips correctly.

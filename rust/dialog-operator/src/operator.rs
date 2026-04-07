@@ -6,7 +6,7 @@ mod builder;
 #[cfg(test)]
 mod test;
 
-pub use builder::{NetworkBuilder, OperatorBuilder, OperatorError};
+pub use builder::{OperatorBuilder, OperatorError};
 
 use crate::Authority;
 use crate::remote::Remote;

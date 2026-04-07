@@ -160,7 +160,13 @@ where
         let signer = self.claim.by.signer().clone();
         let duration = self.claim.duration();
         let proof_chain = self.claim.perform(env).await?;
-        let authorization = proof_chain.claim(signer)?;
-        authorization.delegate(self.audience, duration).await
+        let mut authorization = proof_chain.claim(signer)?;
+        if let Some(nbf) = duration.not_before {
+            authorization = authorization.not_before(nbf)?;
+        }
+        if let Some(exp) = duration.expiration {
+            authorization = authorization.expires(exp)?;
+        }
+        authorization.delegate(self.audience).await
     }
 }

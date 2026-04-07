@@ -2,17 +2,16 @@
 
 use crate::Authority;
 use crate::profile::Profile;
+use crate::profile::access::Access as ProfileAccess;
 use crate::remote::Remote;
-use dialog_capability::access::{Access, Prove, Retain};
+use dialog_capability::access::{Access, Authorization as _, Proof as _, Prove, Retain};
 use dialog_capability::{Ability, Provider, Subject};
 use dialog_credentials::key::KeyExport;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
 use dialog_effects::storage::Directory;
 use dialog_storage::provider::environment::Environment;
 use dialog_storage::provider::space::SpaceProvider;
-use dialog_ucan::{Scope, Ucan, UcanDelegation};
-use dialog_ucan_core::DelegationChain;
-use dialog_ucan_core::delegation::builder::DelegationBuilder;
+use dialog_ucan::{Scope, Ucan};
 use dialog_varsig::Principal;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use dialog_varsig::Signer;
@@ -27,6 +26,7 @@ pub struct OperatorBuilder {
     context: Vec<u8>,
     allowed: Vec<Scope>,
     directory: Directory,
+    remote: Remote,
 }
 
 impl OperatorBuilder {
@@ -36,6 +36,7 @@ impl OperatorBuilder {
             context,
             allowed: Vec::new(),
             directory: Directory::Current,
+            remote: Remote,
         }
     }
 
@@ -60,37 +61,11 @@ impl OperatorBuilder {
     }
 
     /// Set the remote dispatch provider.
-    pub fn network(self, remote: Remote) -> NetworkBuilder {
-        NetworkBuilder {
-            credential: self.credential,
-            context: self.context,
-            allowed: self.allowed,
-            directory: self.directory,
-            remote,
-        }
+    pub fn network(mut self, remote: Remote) -> Self {
+        self.remote = remote;
+        self
     }
 
-    /// Build with default remote.
-    pub async fn build<S>(self, env: Environment<S>) -> Result<Operator<S>, OperatorError>
-    where
-        S: SpaceProvider + Clone + 'static,
-        S: Provider<Prove<Ucan>>,
-        S: Provider<Retain<Ucan>>,
-    {
-        self.network(Remote).build(env).await
-    }
-}
-
-/// Builder with network configured, ready to build.
-pub struct NetworkBuilder {
-    credential: SignerCredential,
-    context: Vec<u8>,
-    allowed: Vec<Scope>,
-    directory: Directory,
-    remote: Remote,
-}
-
-impl NetworkBuilder {
     /// Build the operator, deriving the operator key.
     pub async fn build<S>(self, env: Environment<S>) -> Result<Operator<S>, OperatorError>
     where
@@ -115,24 +90,32 @@ impl NetworkBuilder {
         // Create delegations for allowed capabilities
         if !self.allowed.is_empty() {
             let profile_did = self.credential.did();
+            let signer = Ed25519Signer::from(self.credential.clone());
+            let access = ProfileAccess::new(&self.credential);
             let operator_did = credentials.operator_did();
 
             for scope in &self.allowed {
-                let delegation = DelegationBuilder::new()
-                    .issuer(self.credential.clone())
-                    .audience(&operator_did)
-                    .subject(scope.subject.clone())
-                    .command(scope.command.segments().clone())
-                    .policy(scope.policy())
-                    .try_build()
-                    .await
-                    .map_err(|e| OperatorError::Delegation(format!("{e:?}")))?;
-
-                let chain = UcanDelegation::from(DelegationChain::new(delegation));
-
-                Subject::from(profile_did.clone())
+                // Prove authority (self-grant for profile)
+                let proof = Subject::from(profile_did.clone())
                     .attenuate(Access)
-                    .invoke(Retain::<Ucan>::new(chain))
+                    .invoke(Prove::<Ucan>::new(profile_did.clone(), scope.clone()))
+                    .perform(&operator)
+                    .await
+                    .map_err(|e| OperatorError::Delegation(e.to_string()))?;
+
+                // Sign and delegate to operator
+                let authorization = proof
+                    .claim(signer.clone())
+                    .map_err(|e| OperatorError::Delegation(e.to_string()))?;
+
+                let delegation = authorization
+                    .delegate(operator_did.clone())
+                    .await
+                    .map_err(|e| OperatorError::Delegation(e.to_string()))?;
+
+                // Retain the delegation under the profile
+                access
+                    .save(delegation)
                     .perform(&operator)
                     .await
                     .map_err(|e| OperatorError::Delegation(e.to_string()))?;

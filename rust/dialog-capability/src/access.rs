@@ -86,6 +86,48 @@ impl TimeRange {
     pub fn is_unbounded(&self) -> bool {
         self.not_before.is_none() && self.expiration.is_none()
     }
+
+    /// Check whether this range covers (is at least as wide as) the required range.
+    ///
+    /// A `None` bound in the requirement means "no constraint" on that side.
+    /// A `None` bound in `self` means unbounded on that side (covers any requirement).
+    ///
+    /// - If required `not_before` is `Some(100)`, this range must start at or before 100.
+    /// - If required `expiration` is `Some(500)`, this range must not expire before 500.
+    /// - If required bound is `None`, any value in `self` is acceptable.
+    pub fn covers(&self, required: &TimeRange) -> bool {
+        if let Some(req_nbf) = required.not_before
+            && let Some(nbf) = self.not_before
+            && nbf > req_nbf
+        {
+            return false;
+        }
+        if let Some(req_exp) = required.expiration
+            && let Some(exp) = self.expiration
+            && exp < req_exp
+        {
+            return false;
+        }
+        true
+    }
+
+    /// Compute the intersection of two time ranges (most restrictive).
+    pub fn intersect(&self, other: &TimeRange) -> TimeRange {
+        let not_before = match (self.not_before, other.not_before) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (None, None) => None,
+        };
+        let expiration = match (self.expiration, other.expiration) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (None, None) => None,
+        };
+        TimeRange {
+            not_before,
+            expiration,
+        }
+    }
 }
 
 /// A delegation bundle — contains one or more signed certificates.
@@ -158,6 +200,15 @@ pub trait Proof<P: Protocol>:
     /// The proofs collected in this chain.
     fn proofs(&self) -> &[P::Certificate];
 
+    /// The effective time range this proof covers.
+    ///
+    /// Computed as the intersection of all certificate time ranges
+    /// in the chain. Unbounded if self-authorized.
+    fn duration(&self) -> &TimeRange;
+
+    /// Set the effective time range for this proof.
+    fn set_duration(&mut self, duration: TimeRange);
+
     /// Bind a signer to this proof chain, producing a full authorization.
     fn claim(self, signer: P::Signer) -> Result<P::Authorization, AuthorizeError>;
 }
@@ -202,17 +253,28 @@ pub trait Protocol: Sized + ConditionalSend + 'static {
 
 /// Full authorization — can produce delegations and invocations.
 ///
-/// Created by [`ProofChain::claim`] after binding a signer. Holds the
+/// Created by [`Proof::claim`] after binding a signer. Holds the
 /// verified delegation chain, signer, and scope.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-pub trait Authorization<P: Protocol> {
-    /// Delegate this authorization to another principal with time bounds.
-    async fn delegate(
-        &self,
-        audience: Did,
-        duration: TimeRange,
-    ) -> Result<P::Delegation, AuthorizeError>;
+pub trait Authorization<P: Protocol>: Sized {
+    /// The time range this authorization is valid for.
+    fn duration(&self) -> &TimeRange;
+
+    /// Constrain the earliest time this authorization is valid.
+    ///
+    /// Fails if the timestamp is earlier than the proof's `not_before`,
+    /// since the authorization cannot be widened beyond what was proven.
+    fn not_before(self, timestamp: u64) -> Result<Self, AuthorizeError>;
+
+    /// Constrain when this authorization expires.
+    ///
+    /// Fails if the timestamp is later than the proof's `expiration`,
+    /// since the authorization cannot be widened beyond what was proven.
+    fn expires(self, timestamp: u64) -> Result<Self, AuthorizeError>;
+
+    /// Delegate this authorization to another principal.
+    async fn delegate(&self, audience: Did) -> Result<P::Delegation, AuthorizeError>;
 
     /// Create a signed invocation from this authorization.
     async fn invoke(&self) -> Result<P::Invocation, AuthorizeError>;
@@ -329,14 +391,14 @@ pub trait CertificateStore<P: Protocol> {
         let duration = &input.duration;
         let subject = access.subject().clone();
 
-        if *authority == subject {
+        if *authority == subject || crate::Subject::from(subject.clone()).is_any() {
             return Ok(P::Proof::new(access.clone()));
         }
 
-        let mut queue: Vec<(Did, Vec<P::Certificate>, usize)> =
-            vec![(authority.clone(), vec![], 0)];
+        let mut queue: Vec<(Did, Vec<(P::Certificate, TimeRange)>, TimeRange, usize)> =
+            vec![(authority.clone(), vec![], TimeRange::unbounded(), 0)];
 
-        while let Some((current_audience, chain_so_far, depth)) = queue.pop() {
+        while let Some((current_audience, chain_so_far, effective_range, depth)) = queue.pop() {
             if depth >= Self::MAX_DEPTH {
                 continue;
             }
@@ -346,29 +408,37 @@ pub trait CertificateStore<P: Protocol> {
 
             let candidates = specific.into_iter().chain(powerline).filter_map(|proof| {
                 let range = proof.verify(access).ok()?;
-                if !range.overlaps(duration) {
+                if !range.covers(duration) {
                     return None;
                 }
-                Some(proof)
+                Some((proof, range))
             });
 
             let (direct, indirect): (Vec<_>, Vec<_>) =
-                candidates.partition(|proof| proof.issuer() == &subject);
+                candidates.partition(|(proof, _)| proof.issuer() == &subject);
 
-            for proof in direct.into_iter().chain(indirect) {
+            for (proof, range) in direct.into_iter().chain(indirect) {
                 let issuer = proof.issuer().clone();
                 let mut new_chain = chain_so_far.clone();
-                new_chain.insert(0, proof);
+                let new_range = effective_range.intersect(&range);
+                new_chain.insert(0, (proof, new_range));
 
                 if issuer == subject {
+                    let effective = new_chain
+                        .iter()
+                        .fold(TimeRange::unbounded(), |acc, (_, r)| acc.intersect(r));
                     let mut proof_chain = P::Proof::new(access.clone());
-                    for p in new_chain {
+                    for (p, _) in new_chain {
                         proof_chain.push(p);
                     }
+                    proof_chain.set_duration(effective);
                     return Ok(proof_chain);
                 }
 
-                queue.push((issuer, new_chain, depth + 1));
+                let chain_range = new_chain
+                    .iter()
+                    .fold(TimeRange::unbounded(), |acc, (_, r)| acc.intersect(r));
+                queue.push((issuer, new_chain, chain_range, depth + 1));
             }
         }
 
@@ -401,68 +471,201 @@ impl From<crate::StorageError> for AuthorizeError {
 mod tests {
     use super::TimeRange;
 
-    #[test]
-    fn expired_delegation_does_not_overlap() {
-        // Delegation expires at t=1000
-        let delegation = TimeRange {
-            not_before: None,
-            expiration: Some(1000),
-        };
-        // Required: must be valid at t=2000+
-        let required = TimeRange {
-            not_before: Some(2000),
-            expiration: None,
-        };
-        assert!(
-            !delegation.overlaps(&required),
-            "expired delegation should not overlap"
-        );
+    mod covers {
+        use super::*;
+
+        #[test]
+        fn unbounded_cert_covers_any_requirement() {
+            let cert = TimeRange::unbounded();
+
+            assert!(cert.covers(&TimeRange::unbounded()));
+            assert!(cert.covers(&TimeRange {
+                not_before: Some(100),
+                expiration: Some(500),
+            }));
+        }
+
+        #[test]
+        fn unbounded_requirement_accepts_any_cert() {
+            // "I don't care about time bounds"
+            let required = TimeRange::unbounded();
+
+            assert!(TimeRange::unbounded().covers(&required));
+            assert!(
+                TimeRange {
+                    not_before: Some(100),
+                    expiration: Some(200),
+                }
+                .covers(&required)
+            );
+            assert!(
+                TimeRange {
+                    not_before: None,
+                    expiration: Some(100),
+                }
+                .covers(&required)
+            );
+        }
+
+        #[test]
+        fn cert_expiring_before_required_does_not_cover() {
+            // "I need it valid until 500"
+            let required = TimeRange {
+                not_before: None,
+                expiration: Some(500),
+            };
+            // cert expires at 300
+            let cert = TimeRange {
+                not_before: None,
+                expiration: Some(300),
+            };
+            assert!(!cert.covers(&required));
+        }
+
+        #[test]
+        fn cert_expiring_after_required_covers() {
+            let required = TimeRange {
+                not_before: None,
+                expiration: Some(500),
+            };
+            let cert = TimeRange {
+                not_before: None,
+                expiration: Some(1000),
+            };
+            assert!(cert.covers(&required));
+        }
+
+        #[test]
+        fn cert_starting_after_required_does_not_cover() {
+            // "I need it valid from 100"
+            let required = TimeRange {
+                not_before: Some(100),
+                expiration: None,
+            };
+            // cert not valid before 200
+            let cert = TimeRange {
+                not_before: Some(200),
+                expiration: None,
+            };
+            assert!(!cert.covers(&required));
+        }
+
+        #[test]
+        fn cert_starting_before_required_covers() {
+            let required = TimeRange {
+                not_before: Some(100),
+                expiration: None,
+            };
+            let cert = TimeRange {
+                not_before: Some(50),
+                expiration: None,
+            };
+            assert!(cert.covers(&required));
+        }
+
+        #[test]
+        fn cert_with_no_expiry_covers_any_expiry_requirement() {
+            // cert has no upper bound (valid forever in UCAN terms)
+            let cert = TimeRange {
+                not_before: Some(100),
+                expiration: None,
+            };
+            let required = TimeRange {
+                not_before: Some(100),
+                expiration: Some(999999),
+            };
+            assert!(cert.covers(&required));
+        }
+
+        #[test]
+        fn no_expiry_requirement_accepts_cert_with_expiry() {
+            // "I don't care when it expires"
+            let required = TimeRange {
+                not_before: Some(100),
+                expiration: None,
+            };
+            let cert = TimeRange {
+                not_before: Some(50),
+                expiration: Some(200),
+            };
+            assert!(cert.covers(&required));
+        }
+
+        #[test]
+        fn exact_match_covers() {
+            let range = TimeRange {
+                not_before: Some(100),
+                expiration: Some(500),
+            };
+            assert!(range.covers(&range));
+        }
+
+        #[test]
+        fn wider_cert_covers_narrower_requirement() {
+            let cert = TimeRange {
+                not_before: Some(50),
+                expiration: Some(1000),
+            };
+            let required = TimeRange {
+                not_before: Some(100),
+                expiration: Some(500),
+            };
+            assert!(cert.covers(&required));
+        }
+
+        #[test]
+        fn narrower_cert_does_not_cover_wider_requirement() {
+            let cert = TimeRange {
+                not_before: Some(200),
+                expiration: Some(400),
+            };
+            let required = TimeRange {
+                not_before: Some(100),
+                expiration: Some(500),
+            };
+            assert!(!cert.covers(&required));
+        }
     }
 
-    #[test]
-    fn not_yet_valid_delegation_does_not_overlap() {
-        // Delegation not valid before t=5000
-        let delegation = TimeRange {
-            not_before: Some(5000),
-            expiration: None,
-        };
-        // Required: must be valid before t=3000
-        let required = TimeRange {
-            not_before: None,
-            expiration: Some(3000),
-        };
-        assert!(
-            !delegation.overlaps(&required),
-            "not-yet-valid delegation should not overlap"
-        );
-    }
+    mod intersect {
+        use super::*;
 
-    #[test]
-    fn overlapping_ranges_overlap() {
-        let delegation = TimeRange {
-            not_before: Some(1000),
-            expiration: Some(5000),
-        };
-        let required = TimeRange {
-            not_before: Some(2000),
-            expiration: Some(4000),
-        };
-        assert!(
-            delegation.overlaps(&required),
-            "overlapping ranges should overlap"
-        );
-    }
+        #[test]
+        fn unbounded_intersect_bounded() {
+            let a = TimeRange::unbounded();
+            let b = TimeRange {
+                not_before: Some(100),
+                expiration: Some(500),
+            };
+            let result = a.intersect(&b);
+            assert_eq!(result.not_before, Some(100));
+            assert_eq!(result.expiration, Some(500));
+        }
 
-    #[test]
-    fn unbounded_always_overlaps() {
-        let delegation = TimeRange {
-            not_before: Some(1000),
-            expiration: Some(5000),
-        };
-        let required = TimeRange::unbounded();
-        assert!(
-            delegation.overlaps(&required),
-            "unbounded should always overlap"
-        );
+        #[test]
+        fn takes_latest_not_before() {
+            let a = TimeRange {
+                not_before: Some(100),
+                expiration: None,
+            };
+            let b = TimeRange {
+                not_before: Some(200),
+                expiration: None,
+            };
+            assert_eq!(a.intersect(&b).not_before, Some(200));
+        }
+
+        #[test]
+        fn takes_earliest_expiration() {
+            let a = TimeRange {
+                not_before: None,
+                expiration: Some(500),
+            };
+            let b = TimeRange {
+                not_before: None,
+                expiration: Some(300),
+            };
+            assert_eq!(a.intersect(&b).expiration, Some(300));
+        }
     }
 }
