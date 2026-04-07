@@ -228,6 +228,11 @@
         inherit (menuHelpers) makeMenu makeDevShellHook menuTestCommand;
 
         commands = {
+          "bench" = {
+            description = "Run all benchmarks";
+            command = "cargo bench";
+          };
+
           "lint" = {
             description = "Lint the full source tree";
             command = "nix flake check";

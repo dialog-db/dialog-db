@@ -4,7 +4,8 @@ use std::{
 };
 
 use async_stream::try_stream;
-use dialog_common::{Blake3Hash, NULL_BLAKE3_HASH};
+use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
+use dialog_storage::{DialogStorageError, StorageBackend};
 use futures_core::Stream;
 use nonempty::NonEmpty;
 use rkyv::{
@@ -16,63 +17,70 @@ use rkyv::{
 };
 
 use crate::{
-    ArchivedNodeBody, DialogSearchTreeError, Entry, Key, Link, Node, SymmetryWith, Value,
+    Accessor, ArchivedNodeBody, DialogSearchTreeError, Entry, Key, Link, Node, SymmetryWith, Value,
     into_owned,
 };
 
 /// A traversal mechanism for walking through a tree structure.
-pub struct TreeWalker<Key, Value, GetNode>
+pub struct TreeWalker<Key, Value>
 where
     Key: self::Key,
     Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
     Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Value: self::Value,
+    Value: self::Value + ConditionalSync + 'static,
     Value::Archived: for<'a> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-    >,
-    GetNode: AsyncFn(&Blake3Hash) -> Result<Node<Key, Value>, DialogSearchTreeError>,
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > + ConditionalSync,
 {
     root: Blake3Hash,
-    get_node: GetNode,
 
     key: PhantomData<Key>,
     value: PhantomData<Value>,
 }
 
-impl<Key, Value, GetNode> TreeWalker<Key, Value, GetNode>
+impl<Key, Value> TreeWalker<Key, Value>
 where
-    Key: self::Key,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
-    Key::Archived: for<'b> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
-    >,
-    Key::Archived: Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
-    Value: self::Value,
+    Key: self::Key
+        + ConditionalSync
+        + 'static
+        + PartialOrd<Key::Archived>
+        + PartialEq<Key::Archived>
+        + std::fmt::Debug,
+    Key::Archived: PartialOrd<Key>
+        + PartialEq<Key>
+        + SymmetryWith<Key>
+        + Ord
+        + ConditionalSync
+        + for<'b> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Value: self::Value + ConditionalSync + 'static,
     Value::Archived: for<'b> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
-    >,
-    Value::Archived: Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    GetNode: AsyncFn(&Blake3Hash) -> Result<Node<Key, Value>, DialogSearchTreeError>,
+            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
+        + ConditionalSync,
 {
     /// Creates a new [`TreeWalker`] with the given root hash and node fetcher.
-    pub fn new(root: Blake3Hash, get_node: GetNode) -> Self {
+    pub fn new(root: Blake3Hash) -> Self {
         Self {
             root,
-            get_node,
+
             key: PhantomData,
             value: PhantomData,
         }
     }
 
     /// Returns a stream of entries within the specified key range.
-    pub fn stream<'a, R>(
+    pub fn stream<R, Backend>(
         self,
         range: R,
-    ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + 'a
+        accessor: Accessor<Backend>,
+    ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend + 'static
     where
-        Self: 'a,
-        R: RangeBounds<Key> + 'a,
+        R: RangeBounds<Key> + ConditionalSend + 'static,
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync
+            + 'static,
     {
         try_stream! {
             // Get the start key. Included/Excluded ranges are identical here,
@@ -86,7 +94,7 @@ where
                     return;
                 },
             };
-            let Some(search_result) = self.search(&start_key).await? else {
+            let Some(search_result) = self.search(&start_key, accessor.clone()).await? else {
                 return;
             };
             let mut search_path = search_result.into_indexed()?;
@@ -103,7 +111,7 @@ where
 
                         match index.links.get(child_index) {
                             Some(link) => {
-                                let next_node = (self.get_node)(<&Blake3Hash>::from(&link.node)).await?;
+                                let next_node = accessor.get_node(<&Blake3Hash>::from(&link.node)).await?;
                                 search_path.push((node, Some(child_index)));
                                 search_path.push((next_node, None));
                             }
@@ -121,7 +129,7 @@ where
                                 yield into_owned(entry)?;
                             } else if entered_range {
                                 // We've surpassed the range; abort.
-                                break;
+                                return;
                             }
                         }
                     },
@@ -131,10 +139,16 @@ where
     }
 
     /// Searches for the leaf segment that would contain the given key.
-    pub async fn search(
+    pub async fn search<Backend>(
         &self,
         key: &Key,
-    ) -> Result<Option<SearchResult<Key, Value>>, DialogSearchTreeError> {
+        accessor: Accessor<Backend>,
+    ) -> Result<Option<SearchResult<Key, Value>>, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync
+            + 'static,
+    {
         if &self.root == NULL_BLAKE3_HASH {
             return Ok(None);
         }
@@ -153,7 +167,7 @@ where
                 )));
             }
 
-            let node = (self.get_node)(&next_node).await?;
+            let node = accessor.get_node(&next_node).await?;
 
             match node.body()? {
                 ArchivedNodeBody::Index(index) => {

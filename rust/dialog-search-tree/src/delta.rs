@@ -1,4 +1,4 @@
-use parking_lot::Mutex;
+use parking_lot::RwLock;
 use std::sync::Arc;
 
 use hashbrown::HashMap;
@@ -6,7 +6,7 @@ use hashbrown::HashMap;
 /// A thread-safe accumulator of pending changes to tree nodes.
 #[derive(Clone, Debug)]
 pub struct Delta<K, V> {
-    contents: Arc<Mutex<HashMap<K, V>>>,
+    contents: Arc<RwLock<HashMap<K, V>>>,
 }
 
 impl<K, V> Delta<K, V>
@@ -24,13 +24,13 @@ where
     /// Creates a new delta that contains a copy of this delta's contents.
     pub fn branch(&self) -> Self {
         Self {
-            contents: Arc::new(Mutex::new(self.contents.lock().clone())),
+            contents: Arc::new(RwLock::new(self.contents.read().clone())),
         }
     }
 
     /// Adds a key-value pair to this delta.
     pub fn add(&mut self, key: K, value: V) {
-        let mut contents = self.contents.lock();
+        let mut contents = self.contents.write();
         contents.insert(key.clone(), value);
     }
 
@@ -39,7 +39,7 @@ where
     where
         Entries: Iterator<Item = (K, V)>,
     {
-        let mut contents = self.contents.lock();
+        let mut contents = self.contents.write();
         for (key, value) in entries {
             contents.insert(key.clone(), value);
         }
@@ -47,7 +47,7 @@ where
 
     /// Removes a key from this delta.
     pub fn subtract(&mut self, key: &K) {
-        let mut contents = self.contents.lock();
+        let mut contents = self.contents.write();
         contents.remove(key);
     }
 
@@ -56,7 +56,7 @@ where
     where
         Keys: Iterator<Item = &'a K>,
     {
-        let mut contents = self.contents.lock();
+        let mut contents = self.contents.write();
         for key in keys {
             contents.remove(key);
         }
@@ -64,13 +64,13 @@ where
 
     /// Retrieves the value associated with a key from this delta.
     pub fn get(&self, key: &K) -> Option<V> {
-        let contents = self.contents.lock();
+        let contents = self.contents.write();
         contents.get(key).cloned()
     }
 
     /// Drains all entries from this delta and returns them as an iterator.
     pub fn flush(&mut self) -> impl Iterator<Item = (K, V)> {
-        std::mem::take(&mut *self.contents.lock()).into_iter()
+        std::mem::take(&mut *self.contents.write()).into_iter()
     }
 }
 

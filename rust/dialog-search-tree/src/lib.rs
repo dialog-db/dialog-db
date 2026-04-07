@@ -114,6 +114,9 @@
 //! # })
 //! ```
 
+mod accessor;
+pub use accessor::*;
+
 mod buffer;
 pub use buffer::*;
 

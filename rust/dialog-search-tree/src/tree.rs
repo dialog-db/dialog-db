@@ -1,6 +1,6 @@
 use std::{marker::PhantomData, ops::RangeBounds};
 
-use dialog_common::{Blake3Hash, NULL_BLAKE3_HASH};
+use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
 use dialog_storage::{DialogStorageError, StorageBackend};
 use futures_core::Stream;
 use rkyv::{
@@ -14,7 +14,7 @@ use rkyv::{
 };
 
 use crate::{
-    Buffer, Cache, ContentAddressedStorage, Delta, DialogSearchTreeError, Entry, Key, Node,
+    Accessor, Buffer, Cache, ContentAddressedStorage, Delta, DialogSearchTreeError, Entry, Key,
     SearchResult, SymmetryWith, TreeShaper, TreeWalker, Value, into_owned,
 };
 
@@ -31,6 +31,16 @@ use crate::{
 /// maintains a [`Delta`] of pending changes that can be flushed to storage in
 /// batches, and uses a [`Cache`] for frequently accessed nodes to minimize
 /// storage I/O operations.
+///
+/// ## Clone Semantics
+///
+/// Cloning a [`Tree`] does **not** fork the internal state. Instead, it shares
+/// the cache and delta via reference counting. Mutations
+/// ([`insert`](Self::insert), [`delete`](Self::delete)) implicitly fork the
+/// tree by returning a new instance with a branched [`Delta`] (independent
+/// copy) and an updated root hash, while continuing to share the [`Cache`].
+/// This enables efficient versioning where multiple tree versions share the
+/// same cache for read operations, but maintain independent mutation state.
 #[derive(Debug, Clone)]
 pub struct Tree<Key, Value>
 where
@@ -50,23 +60,32 @@ where
 
 impl<Key, Value> Tree<Key, Value>
 where
-    Key: self::Key,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
-    Key::Archived: for<'a> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-    >,
-    Key::Archived: Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
-    Key: for<'a> Serialize<
-        Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
-    >,
-    Value: self::Value,
+    Key: self::Key
+        + ConditionalSync
+        + 'static
+        + PartialOrd<Key::Archived>
+        + PartialEq<Key::Archived>
+        + for<'a> Serialize<
+            Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
+        >,
+    Key::Archived: PartialOrd<Key>
+        + PartialEq<Key>
+        + SymmetryWith<Key>
+        + Ord
+        + ConditionalSync
+        + for<'a> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Value: self::Value
+        + ConditionalSync
+        + 'static
+        + for<'a> Serialize<
+            Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
+        >,
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Value: for<'a> Serialize<
-        Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
-    >,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
+        + ConditionalSync,
 {
     /// Returns the [`Blake3Hash`] of the root node of this tree.
     ///
@@ -120,7 +139,9 @@ where
         storage: &ContentAddressedStorage<Backend>,
     ) -> Result<Option<Value>, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync
+            + 'static,
     {
         if let Some(result) = self.search(key, storage).await? {
             if let Some(entry) = result.leaf.body()?.find_entry(key)? {
@@ -145,7 +166,9 @@ where
         storage: &ContentAddressedStorage<Backend>,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync
+            + 'static,
     {
         let search_result = self.search(&key, storage).await?;
         let shaper = TreeShaper::new(self.root.clone(), self.delta.clone());
@@ -164,7 +187,9 @@ where
         storage: &ContentAddressedStorage<Backend>,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync
+            + 'static,
     {
         if let Some(search_result) = self.search(key, storage).await? {
             let shaper = TreeShaper::new(self.root.clone(), self.delta.clone());
@@ -189,7 +214,9 @@ where
         storage: &'a ContentAddressedStorage<Backend>,
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync
+            + 'static,
     {
         self.stream_range(
             <Key as self::Key>::min()..<Key as self::Key>::max(),
@@ -202,19 +229,20 @@ where
     ///
     /// The range can be bounded or unbounded on either end, following Rust's
     /// standard [`RangeBounds`] trait. Entries are yielded in sorted order.
-    pub fn stream_range<'a, R, Backend>(
-        &'a self,
+    pub fn stream_range<R, Backend>(
+        &self,
         range: R,
-        storage: &'a ContentAddressedStorage<Backend>,
-    ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + 'a
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend + 'static
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
-        R: RangeBounds<Key> + 'a,
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync
+            + 'static,
+        R: RangeBounds<Key> + ConditionalSend + 'static,
     {
-        TreeWalker::new(self.root.clone(), async |hash| {
-            self.get_node(hash, storage).await
-        })
-        .stream(range)
+        let accessor = Accessor::new(self.delta.clone(), self.node_cache.clone(), storage.clone());
+
+        TreeWalker::new(self.root.clone()).stream(range, accessor)
     }
 
     /// Flushes all pending changes, returning an iterator of nodes to be
@@ -245,41 +273,6 @@ where
         }
     }
 
-    /// Retrieves a node from cache, delta, or storage.
-    ///
-    /// This method implements a multi-level lookup strategy:
-    /// 1. Check the node cache for a previously loaded node
-    /// 2. Check the delta for a recently created/modified node
-    /// 3. Fetch from persistent storage as a last resort
-    ///
-    /// Fetched nodes are automatically added to the cache for future access.
-    /// This layered approach minimizes expensive storage I/O operations.
-    async fn get_node<Backend>(
-        &self,
-        hash: &Blake3Hash,
-        storage: &ContentAddressedStorage<Backend>,
-    ) -> Result<Node<Key, Value>, DialogSearchTreeError>
-    where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
-    {
-        self.node_cache
-            .get_or_fetch(hash, async move |key| {
-                if let Some(buffer) = self.delta.get(hash) {
-                    Ok(Some(buffer))
-                } else {
-                    storage
-                        .retrieve(key)
-                        .await
-                        .map(|maybe_bytes| maybe_bytes.map(Buffer::from))
-                }
-            })
-            .await?
-            .ok_or_else(|| {
-                DialogSearchTreeError::Node(format!("Blob not found in storage: {}", hash))
-            })
-            .map(|buffer| Node::new(buffer))
-    }
-
     /// Searches for the leaf segment that would contain `key`, recording the
     /// path taken through the tree.
     ///
@@ -299,21 +292,23 @@ where
         storage: &ContentAddressedStorage<Backend>,
     ) -> Result<Option<SearchResult<Key, Value>>, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync
+            + 'static,
     {
-        TreeWalker::new(self.root.clone(), async |hash| {
-            self.get_node(hash, storage).await
-        })
-        .search(key)
-        .await
+        let accessor = Accessor::new(self.delta.clone(), self.node_cache.clone(), storage.clone());
+
+        TreeWalker::new(self.root.clone())
+            .search(key, accessor)
+            .await
     }
 }
 
 impl<Key, Value> From<Blake3Hash> for Tree<Key, Value>
 where
-    Key: self::Key,
+    Key: self::Key + ConditionalSync + 'static,
     Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
+    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord + ConditionalSync,
     Key::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
@@ -321,10 +316,11 @@ where
     Key: for<'a> Serialize<
         Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
     >,
-    Value: self::Value,
+    Value: self::Value + ConditionalSync + 'static,
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
+        + ConditionalSync,
     Value: for<'a> Serialize<
         Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
     >,
