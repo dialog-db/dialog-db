@@ -1,40 +1,21 @@
-//! Core UCAN functionality.
+//! UCAN authorization protocol implementation.
+//!
+//! Provides the [`Ucan`] protocol type and proof chain types.
+//! Delegation is handled via
+//! [`profile.access().claim().delegate()`](dialog_operator::profile::access).
 
-#![cfg_attr(docsrs, feature(doc_cfg))]
+mod access;
+mod invocation;
+pub mod parameters;
+pub mod scope;
 
-pub mod builder;
-pub mod cid;
-pub mod codec;
-pub mod collection;
-pub mod command;
-pub mod container;
-pub mod crypto;
-pub mod delegation;
-pub mod envelope;
-pub mod future;
-pub mod invocation;
-pub mod issuer;
-pub mod number;
-pub mod principal;
-pub mod promise;
-// pub mod receipt; TODO Reenable after first release
-pub mod subject;
-pub mod task;
-pub mod time;
-pub mod unset;
+pub use access::{UcanAuthorization, UcanPermit, UcanPermit as UcanProofChain, UcanProof};
+pub use invocation::UcanInvocation;
+pub use parameters::{parameters, parameters_to_args, parameters_to_policy};
+pub use scope::{Args, Parameters, Scope};
 
-// Internal modules
-mod ipld;
-mod sealed;
-
-pub use container::delegation::DelegationChain;
-pub use container::invocation::InvocationChain;
-pub use container::{Container, ContainerError};
-pub use delegation::{
-    Delegation,
-    builder::{BuildError as DelegationBuildError, DelegationBuilder},
-};
-pub use invocation::{
-    CheckFailed, Invocation, InvocationPayload,
-    builder::{BuildError as InvocationBuildError, InvocationBuilder},
-};
+/// UCAN authorization protocol marker.
+///
+/// Implements [`Protocol`](dialog_capability::access::Protocol) for UCAN-based
+/// authorization with Ed25519 signatures.
+pub struct Ucan;

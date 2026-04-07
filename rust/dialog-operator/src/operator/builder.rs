@@ -5,12 +5,12 @@ use crate::profile::Profile;
 use crate::remote::Remote;
 use dialog_capability::access::{Claim as AccessClaim, Save as AccessSave};
 use dialog_capability::{Ability, Provider};
-use dialog_capability_ucan::{Scope, Ucan};
 use dialog_credentials::key::KeyExport;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
 use dialog_effects::storage::Directory;
 use dialog_storage::provider::environment::Environment;
 use dialog_storage::provider::space::SpaceProvider;
+use dialog_ucan::{Scope, Ucan};
 use dialog_varsig::Principal;
 
 use super::Operator;
@@ -112,9 +112,9 @@ impl NetworkBuilder {
         if !self.allowed.is_empty() {
             use dialog_capability::Subject;
             use dialog_capability::access::{Permit, Save};
-            use dialog_capability_ucan::Ucan;
-            use dialog_ucan::DelegationChain;
-            use dialog_ucan::delegation::builder::DelegationBuilder;
+            use dialog_ucan::Ucan;
+            use dialog_ucan_core::DelegationChain;
+            use dialog_ucan_core::delegation::builder::DelegationBuilder;
 
             let profile_did = self.credential.did();
             let operator_did = credentials.operator_did();

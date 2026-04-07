@@ -3,7 +3,7 @@
 use dialog_capability::site::{Site, SiteAddress};
 
 // Re-export UCAN types for convenience.
-pub use dialog_capability_ucan::{Ucan, UcanInvocation};
+pub use dialog_ucan::{Ucan, UcanInvocation};
 
 /// UCAN site address -- wraps the access service endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

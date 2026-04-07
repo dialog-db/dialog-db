@@ -4,12 +4,12 @@
 
 use dialog_capability::access::{self, Authorization as _, AuthorizeError, ProofChain as _};
 use dialog_capability::{Ability, Capability, Constraint, Provider, Subject};
-use dialog_capability_ucan::scope::Scope;
-use dialog_capability_ucan::{Ucan, UcanPermit};
 use dialog_common::ConditionalSync;
 use dialog_credentials::SignerCredential;
-use dialog_ucan::DelegationChain;
-use dialog_ucan::time::Timestamp;
+use dialog_ucan::scope::Scope;
+use dialog_ucan::{Ucan, UcanPermit};
+use dialog_ucan_core::DelegationChain;
+use dialog_ucan_core::time::Timestamp;
 use dialog_varsig::{Did, Principal};
 
 /// Access handle scoped to a profile's credential.
@@ -129,7 +129,7 @@ where
     pub async fn perform<Env>(
         self,
         env: &Env,
-    ) -> Result<dialog_capability_ucan::UcanInvocation, AuthorizeError>
+    ) -> Result<dialog_ucan::UcanInvocation, AuthorizeError>
     where
         Env: Provider<access::Claim<Ucan>> + ConditionalSync,
     {

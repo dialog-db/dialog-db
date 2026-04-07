@@ -6,7 +6,7 @@
 use dialog_capability::Did;
 use dialog_capability::access::{self, AuthorizeError};
 use dialog_credentials::Ed25519Signer;
-use dialog_ucan::DelegationChain;
+use dialog_ucan_core::DelegationChain;
 use dialog_varsig::eddsa::Ed25519Signature;
 
 use super::Ucan;
@@ -17,7 +17,7 @@ use super::scope::Scope;
 /// Implements [`Delegation`](access::Delegation) for generic chain verification.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
-pub struct UcanProof(pub dialog_ucan::Delegation<Ed25519Signature>);
+pub struct UcanProof(pub dialog_ucan_core::Delegation<Ed25519Signature>);
 
 impl access::Delegation for UcanProof {
     type Access = Scope;
@@ -31,7 +31,7 @@ impl access::Delegation for UcanProof {
     }
 
     fn subject(&self) -> Option<&Did> {
-        use dialog_ucan::subject::Subject as UcanSubject;
+        use dialog_ucan_core::subject::Subject as UcanSubject;
         match self.0.subject() {
             UcanSubject::Specific(did) => Some(did),
             UcanSubject::Any => None,
@@ -169,9 +169,9 @@ impl access::Authorization<Ucan> for UcanAuthorization {
         audience: Did,
         duration: access::TimeRange,
     ) -> Result<DelegationChain, AuthorizeError> {
-        use dialog_ucan::delegation::builder::DelegationBuilder;
-        use dialog_ucan::time::Timestamp;
-        use dialog_ucan::time::timestamp::{Duration, UNIX_EPOCH};
+        use dialog_ucan_core::delegation::builder::DelegationBuilder;
+        use dialog_ucan_core::time::Timestamp;
+        use dialog_ucan_core::time::timestamp::{Duration, UNIX_EPOCH};
 
         let mut builder = DelegationBuilder::new()
             .issuer(self.signer.clone())
@@ -206,8 +206,8 @@ impl access::Authorization<Ucan> for UcanAuthorization {
 
     async fn invoke(&self) -> Result<super::UcanInvocation, AuthorizeError> {
         use dialog_capability::ANY_SUBJECT;
-        use dialog_ucan::InvocationBuilder;
-        use dialog_ucan::subject::Subject as UcanSubject;
+        use dialog_ucan_core::InvocationBuilder;
+        use dialog_ucan_core::subject::Subject as UcanSubject;
 
         let subject_did = match &self.scope.subject {
             UcanSubject::Specific(did) => did.clone(),
@@ -239,7 +239,7 @@ impl access::Authorization<Ucan> for UcanAuthorization {
             .await
             .map_err(|e| AuthorizeError::Denied(format!("{e:?}")))?;
 
-        let chain = dialog_ucan::InvocationChain::new(invocation, delegations_map);
+        let chain = dialog_ucan_core::InvocationChain::new(invocation, delegations_map);
 
         Ok(super::UcanInvocation {
             chain: Box::new(chain),

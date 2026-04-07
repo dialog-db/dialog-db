@@ -2,14 +2,14 @@
 //! Integration tests demonstrating direct UCAN interop.
 //!
 //! Because `Ed25519Signer` implements `Principal + Signer<Ed25519Signature>`,
-//! it automatically satisfies `dialog_ucan::Issuer<Ed25519Signature>` via blanket impl.
+//! it automatically satisfies `dialog_ucan_core::Issuer<Ed25519Signature>` via blanket impl.
 //! No adapter types are needed.
 
 use dialog_capability::Principal;
 use dialog_credentials::ed25519::{Ed25519KeyResolver, Ed25519Signer};
-use dialog_ucan::delegation::builder::DelegationBuilder;
-use dialog_ucan::invocation::builder::InvocationBuilder;
-use dialog_ucan::subject::Subject;
+use dialog_ucan_core::delegation::builder::DelegationBuilder;
+use dialog_ucan_core::invocation::builder::InvocationBuilder;
+use dialog_ucan_core::subject::Subject;
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_service_worker);

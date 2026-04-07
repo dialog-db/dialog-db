@@ -20,7 +20,7 @@ pub use authorizer::UcanAuthorizer;
 pub use site::{Ucan, UcanAddress, UcanInvocation, UcanSite};
 
 // Re-export container types from dialog-ucan
-pub use dialog_ucan::{Container, ContainerError, DelegationChain, InvocationChain};
+pub use dialog_ucan_core::{Container, ContainerError, DelegationChain, InvocationChain};
 
 #[cfg(feature = "helpers")]
 pub mod helpers;
@@ -30,10 +30,10 @@ pub mod helpers;
 #[cfg(any(test, feature = "helpers"))]
 pub mod test_helpers {
     use dialog_credentials::Ed25519Signer;
-    use dialog_ucan::ContainerError;
-    use dialog_ucan::Delegation;
-    use dialog_ucan::DelegationBuilder;
-    use dialog_ucan::subject::Subject;
+    use dialog_ucan_core::ContainerError;
+    use dialog_ucan_core::Delegation;
+    use dialog_ucan_core::DelegationBuilder;
+    use dialog_ucan_core::subject::Subject;
     use dialog_varsig::Principal;
     use dialog_varsig::eddsa::Ed25519Signature;
 

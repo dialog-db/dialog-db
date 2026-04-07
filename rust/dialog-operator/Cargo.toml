@@ -23,10 +23,10 @@ dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
 dialog-credentials = { workspace = true }
 dialog-effects = { workspace = true }
-dialog-ucan = { workspace = true }
+dialog-ucan-core = { workspace = true }
 dialog-remote-s3 = { workspace = true, optional = true }
 dialog-remote-ucan-s3 = { workspace = true }
-dialog-capability-ucan = { workspace = true }
+dialog-ucan = { workspace = true }
 dialog-storage = { workspace = true }
 dialog-varsig = { workspace = true }
 anyhow = { workspace = true, optional = true }

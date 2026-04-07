@@ -67,8 +67,8 @@ use dialog_credentials::Ed25519KeyResolver;
 use dialog_effects::{archive, memory};
 use dialog_remote_s3::Address;
 use dialog_remote_s3::{AccessError, Permit};
-use dialog_ucan::InvocationChain;
-use dialog_ucan::promise::Promised;
+use dialog_ucan_core::InvocationChain;
+use dialog_ucan_core::promise::Promised;
 use ipld_core::ipld::Ipld;
 use serde::de::DeserializeOwned;
 
@@ -289,10 +289,10 @@ mod tests {
     use dialog_remote_s3::Address;
     use dialog_remote_s3::s3;
     use dialog_remote_s3::s3::S3Credentials;
-    use dialog_ucan::DelegationBuilder;
-    use dialog_ucan::InvocationBuilder;
-    use dialog_ucan::InvocationChain;
-    use dialog_ucan::subject::Subject as DelegatedSubject;
+    use dialog_ucan_core::DelegationBuilder;
+    use dialog_ucan_core::InvocationBuilder;
+    use dialog_ucan_core::InvocationChain;
+    use dialog_ucan_core::subject::Subject as DelegatedSubject;
     use std::collections::BTreeMap;
 
     /// Helper to create a test signer

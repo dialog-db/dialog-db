@@ -22,7 +22,7 @@ use dialog_varsig::{Did, Principal};
 
 use dialog_capability::access::Claim as AccessClaim;
 use dialog_capability::access::Save as AccessSave;
-use dialog_capability_ucan::Ucan;
+use dialog_ucan::Ucan;
 
 type ClaimUcan = AccessClaim<Ucan>;
 type SaveUcan = AccessSave<Ucan>;
@@ -87,7 +87,7 @@ where
     async fn execute(
         &self,
         input: Capability<ClaimUcan>,
-    ) -> Result<dialog_capability_ucan::UcanPermit, AuthorizeError> {
+    ) -> Result<dialog_ucan::UcanPermit, AuthorizeError> {
         self.env.execute(input).await
     }
 }
@@ -212,9 +212,9 @@ mod ucan_fork {
     use super::*;
     use dialog_capability::Ability;
     use dialog_capability::access::{self, Authorization as _, ProofChain as _};
-    use dialog_capability_ucan::scope::Scope as UcanScope;
-    use dialog_capability_ucan::{Ucan, UcanProofChain};
     use dialog_remote_ucan_s3::UcanSite;
+    use dialog_ucan::scope::Scope as UcanScope;
+    use dialog_ucan::{Ucan, UcanProofChain};
 
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]

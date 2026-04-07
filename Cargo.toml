@@ -33,9 +33,9 @@ members = [
     "rust/dialog-storage",
     "rust/dialog-remote-s3",
     "rust/dialog-remote-ucan-s3",
-    "rust/dialog-capability-ucan",
-
     "rust/dialog-ucan",
+
+    "rust/dialog-ucan-core",
     "rust/dialog-varsig",
     "rust/dialog-blobs",
 ]
@@ -145,7 +145,7 @@ tokio-util = { version = "0.7", features = ["io"] }
 tower = "0.5"
 tower-http = "0.6"
 tracing = "0.1"
-dialog-ucan = { path = "./rust/dialog-ucan" }
+dialog-ucan-core = { path = "./rust/dialog-ucan-core" }
 dialog-varsig = { path = "./rust/dialog-varsig" }
 ucan = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "main", package = "ucan" }
 varsig = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "main", package = "varsig" }
@@ -166,8 +166,8 @@ path = "./rust/dialog-artifacts"
 [workspace.dependencies.dialog-capability]
 path = "./rust/dialog-capability"
 
-[workspace.dependencies.dialog-capability-ucan]
-path = "./rust/dialog-capability-ucan"
+[workspace.dependencies.dialog-ucan]
+path = "./rust/dialog-ucan"
 
 [workspace.dependencies.dialog-common]
 path = "./rust/dialog-common"

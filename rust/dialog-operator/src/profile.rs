@@ -7,7 +7,7 @@ use dialog_capability::{Capability, Provider, Subject};
 use dialog_common::ConditionalSync;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
 use dialog_effects::storage::{self as storage_fx, LocationExt};
-use dialog_ucan::DelegationChain;
+use dialog_ucan_core::DelegationChain;
 use dialog_varsig::{Did, Principal};
 
 /// An opened profile — holds a signing credential.
@@ -113,7 +113,7 @@ pub struct SaveDelegation {
 }
 
 use dialog_capability::access::Save as AccessSave;
-use dialog_capability_ucan::Ucan;
+use dialog_ucan::Ucan;
 type SaveUcan = AccessSave<Ucan>;
 
 impl SaveDelegation {

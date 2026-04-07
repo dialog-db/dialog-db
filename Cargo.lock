@@ -965,29 +965,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dialog-capability-ucan"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base58",
- "blake3",
- "dialog-capability",
- "dialog-common",
- "dialog-credentials",
- "dialog-effects",
- "dialog-ucan",
- "dialog-varsig",
- "ipld-core",
- "serde",
- "serde_bytes",
- "serde_ipld_dagcbor",
- "signature",
- "thiserror 2.0.18",
- "tokio",
- "wasm-bindgen-test",
-]
-
-[[package]]
 name = "dialog-common"
 version = "0.1.0"
 dependencies = [
@@ -1024,7 +1001,7 @@ dependencies = [
  "base58",
  "dialog-capability",
  "dialog-common",
- "dialog-ucan",
+ "dialog-ucan-core",
  "dialog-varsig",
  "ed25519-dalek",
  "getrandom 0.2.16",
@@ -1070,10 +1047,10 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "dialog-capability",
- "dialog-capability-ucan",
  "dialog-common",
  "dialog-credentials",
  "dialog-ucan",
+ "dialog-ucan-core",
  "ipld-core",
  "serde",
  "serde_bytes",
@@ -1117,7 +1094,6 @@ dependencies = [
  "blake3",
  "dialog-artifacts",
  "dialog-capability",
- "dialog-capability-ucan",
  "dialog-common",
  "dialog-credentials",
  "dialog-effects",
@@ -1125,6 +1101,7 @@ dependencies = [
  "dialog-remote-ucan-s3",
  "dialog-storage",
  "dialog-ucan",
+ "dialog-ucan-core",
  "dialog-varsig",
  "dirs",
  "ed25519-dalek",
@@ -1245,13 +1222,13 @@ dependencies = [
  "base58",
  "bytes",
  "dialog-capability",
- "dialog-capability-ucan",
  "dialog-common",
  "dialog-credentials",
  "dialog-effects",
  "dialog-remote-s3",
  "dialog-storage",
  "dialog-ucan",
+ "dialog-ucan-core",
  "dialog-varsig",
  "getrandom 0.2.16",
  "http-body-util",
@@ -1281,7 +1258,6 @@ dependencies = [
  "base58",
  "dialog-artifacts",
  "dialog-capability",
- "dialog-capability-ucan",
  "dialog-common",
  "dialog-credentials",
  "dialog-effects",
@@ -1292,6 +1268,7 @@ dependencies = [
  "dialog-remote-ucan-s3",
  "dialog-storage",
  "dialog-ucan",
+ "dialog-ucan-core",
  "dialog-varsig",
  "futures-util",
  "getrandom 0.2.16",
@@ -1386,6 +1363,29 @@ dependencies = [
 
 [[package]]
 name = "dialog-ucan"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base58",
+ "blake3",
+ "dialog-capability",
+ "dialog-common",
+ "dialog-credentials",
+ "dialog-effects",
+ "dialog-ucan-core",
+ "dialog-varsig",
+ "ipld-core",
+ "serde",
+ "serde_bytes",
+ "serde_ipld_dagcbor",
+ "signature",
+ "thiserror 2.0.18",
+ "tokio",
+ "wasm-bindgen-test",
+]
+
+[[package]]
+name = "dialog-ucan-core"
 version = "0.1.0"
 dependencies = [
  "arbitrary",

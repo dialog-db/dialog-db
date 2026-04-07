@@ -59,9 +59,9 @@ mod tests {
         use super::*;
         use dialog_capability::Subject;
         use dialog_capability::access::{self as cap_access, AuthorizeError, Permit};
-        use dialog_capability_ucan::scope::Scope;
-        use dialog_capability_ucan::{Ucan, UcanPermit};
         use dialog_effects::archive::prelude::{ArchiveExt, SubjectExt as ArchiveSubjectExt};
+        use dialog_ucan::scope::Scope;
+        use dialog_ucan::{Ucan, UcanPermit};
 
         async fn claim_access(
             operator: &super::super::super::Operator<VolatileSpace>,

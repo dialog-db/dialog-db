@@ -346,7 +346,7 @@ mod tests {
     #[cfg(feature = "ucan")]
     mod parameters_tests {
         use super::*;
-        use dialog_capability_ucan::parameters;
+        use dialog_ucan::parameters;
         use ipld_core::ipld::Ipld;
 
         #[test]

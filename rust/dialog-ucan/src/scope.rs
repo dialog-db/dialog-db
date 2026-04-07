@@ -1,12 +1,12 @@
 //! Capability-derived scope for UCAN delegation and invocation.
 
 use dialog_capability::{Ability, Capability, Constraint, Effect, Policy, Subject};
-use dialog_ucan::command::Command;
-use dialog_ucan::delegation::policy::predicate::Predicate;
-use dialog_ucan::delegation::policy::selector::filter::Filter;
-use dialog_ucan::delegation::policy::selector::select::Select;
-use dialog_ucan::promise::Promised;
-use dialog_ucan::subject::Subject as UcanSubject;
+use dialog_ucan_core::command::Command;
+use dialog_ucan_core::delegation::policy::predicate::Predicate;
+use dialog_ucan_core::delegation::policy::selector::filter::Filter;
+use dialog_ucan_core::delegation::policy::selector::select::Select;
+use dialog_ucan_core::promise::Promised;
+use dialog_ucan_core::subject::Subject as UcanSubject;
 use ipld_core::ipld::Ipld;
 use std::collections::BTreeMap;
 
@@ -71,7 +71,7 @@ pub struct Scope {
 
 impl dialog_capability::access::Scope for Scope {
     fn subject(&self) -> &dialog_varsig::Did {
-        use dialog_ucan::subject::Subject as UcanSubject;
+        use dialog_ucan_core::subject::Subject as UcanSubject;
         match &self.subject {
             UcanSubject::Specific(did) => did,
             UcanSubject::Any => {
@@ -152,7 +152,7 @@ impl Scope {
     /// Build a scope from a delegation chain.
     ///
     /// Extracts subject, command, and an empty parameter set from the chain.
-    pub fn from_chain(chain: &dialog_ucan::DelegationChain) -> Self {
+    pub fn from_chain(chain: &dialog_ucan_core::DelegationChain) -> Self {
         let subject = chain
             .subject()
             .map(|did| UcanSubject::Specific(did.clone()))

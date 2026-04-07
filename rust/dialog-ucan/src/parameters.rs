@@ -1,7 +1,7 @@
 //! IPLD parameter collection and UCAN argument conversion.
 
 use dialog_capability::{Ability, PolicyBuilder};
-use dialog_ucan::promise::Promised;
+use dialog_ucan_core::promise::Promised;
 use ipld_core::ipld::Ipld;
 use ipld_core::serde::to_ipld;
 use serde::Serialize;
@@ -61,9 +61,9 @@ pub fn parameters_to_args(parameters: Parameters) -> Args {
         .collect()
 }
 
-use dialog_ucan::delegation::policy::predicate::Predicate;
-use dialog_ucan::delegation::policy::selector::filter::Filter;
-use dialog_ucan::delegation::policy::selector::select::Select;
+use dialog_ucan_core::delegation::policy::predicate::Predicate;
+use dialog_ucan_core::delegation::policy::selector::filter::Filter;
+use dialog_ucan_core::delegation::policy::selector::select::Select;
 
 /// Convert capability parameters to UCAN delegation policy predicates.
 ///
