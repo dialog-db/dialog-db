@@ -20,12 +20,7 @@ use dialog_storage::provider::environment::Environment;
 use dialog_storage::provider::space::SpaceProvider;
 use dialog_varsig::{Did, Principal};
 
-use dialog_capability::access::Prove as AccessProve;
-use dialog_capability::access::Retain as AccessRetain;
-use dialog_ucan::Ucan;
-
-type ProveUcan = AccessProve<Ucan>;
-type RetainUcan = AccessRetain<Ucan>;
+use dialog_capability::access::{Protocol, Prove, Retain};
 
 /// An operating environment built from a [`Profile`](crate::profile::Profile).
 ///
@@ -78,29 +73,32 @@ impl<S: Clone> Operator<S> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<ProveUcan> for Operator<S>
+impl<S, P> Provider<Prove<P>> for Operator<S>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
-    S: Provider<ProveUcan>,
+    P: Protocol,
+    P::Access: Clone + ConditionalSend + ConditionalSync,
+    P::Certificate: Clone + ConditionalSend + ConditionalSync,
+    P::Proof: ConditionalSend,
+    Environment<S>: Provider<Prove<P>>,
     Self: ConditionalSend + ConditionalSync,
 {
-    async fn execute(
-        &self,
-        input: Capability<ProveUcan>,
-    ) -> Result<dialog_ucan::UcanProof, AuthorizeError> {
+    async fn execute(&self, input: Capability<Prove<P>>) -> Result<P::Proof, AuthorizeError> {
         self.env.execute(input).await
     }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<S> Provider<RetainUcan> for Operator<S>
+impl<S, P> Provider<Retain<P>> for Operator<S>
 where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
-    S: Provider<RetainUcan>,
+    P: Protocol,
+    P::Delegation: ConditionalSend + ConditionalSync,
+    Environment<S>: Provider<Retain<P>>,
     Self: ConditionalSend + ConditionalSync,
 {
-    async fn execute(&self, input: Capability<RetainUcan>) -> Result<(), AuthorizeError> {
+    async fn execute(&self, input: Capability<Retain<P>>) -> Result<(), AuthorizeError> {
         self.env.execute(input).await
     }
 }
@@ -220,7 +218,7 @@ mod ucan_fork {
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl<S, Fx> Provider<Fork<UcanSite, Fx>> for Operator<S>
     where
-        S: SpaceProvider + Clone + 'static + Provider<ProveUcan> + Provider<RetainUcan>,
+        S: SpaceProvider + Clone + 'static + Provider<Prove<Ucan>> + Provider<Retain<Ucan>>,
         Fx: Effect + Clone + ConditionalSend + 'static,
         Fx::Of: Constraint,
         Capability<Fx>: Ability + ConditionalSend + ConditionalSync,

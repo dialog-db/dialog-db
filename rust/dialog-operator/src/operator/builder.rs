@@ -3,15 +3,19 @@
 use crate::Authority;
 use crate::profile::Profile;
 use crate::remote::Remote;
-use dialog_capability::access::{Prove as AccessProve, Retain as AccessRetain};
-use dialog_capability::{Ability, Provider};
+use dialog_capability::access::{Access, Prove, Retain};
+use dialog_capability::{Ability, Provider, Subject};
 use dialog_credentials::key::KeyExport;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
 use dialog_effects::storage::Directory;
 use dialog_storage::provider::environment::Environment;
 use dialog_storage::provider::space::SpaceProvider;
-use dialog_ucan::{Scope, Ucan};
+use dialog_ucan::{Scope, Ucan, UcanDelegation};
+use dialog_ucan_core::DelegationChain;
+use dialog_ucan_core::delegation::builder::DelegationBuilder;
 use dialog_varsig::Principal;
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+use dialog_varsig::Signer;
 
 use super::Operator;
 
@@ -70,8 +74,8 @@ impl OperatorBuilder {
     pub async fn build<S>(self, env: Environment<S>) -> Result<Operator<S>, OperatorError>
     where
         S: SpaceProvider + Clone + 'static,
-        S: Provider<AccessProve<Ucan>>,
-        S: Provider<AccessRetain<Ucan>>,
+        S: Provider<Prove<Ucan>>,
+        S: Provider<Retain<Ucan>>,
     {
         self.network(Remote).build(env).await
     }
@@ -91,8 +95,8 @@ impl NetworkBuilder {
     pub async fn build<S>(self, env: Environment<S>) -> Result<Operator<S>, OperatorError>
     where
         S: SpaceProvider + Clone + 'static,
-        S: Provider<AccessProve<Ucan>>,
-        S: Provider<AccessRetain<Ucan>>,
+        S: Provider<Prove<Ucan>>,
+        S: Provider<Retain<Ucan>>,
     {
         let operator_signer = derive_operator(&self.credential, &self.context).await?;
         let credentials = Authority::new(
@@ -110,13 +114,6 @@ impl NetworkBuilder {
 
         // Create delegations for allowed capabilities
         if !self.allowed.is_empty() {
-            use dialog_capability::Subject;
-            use dialog_capability::access::{Access, Retain};
-            use dialog_ucan::Ucan;
-            use dialog_ucan::UcanDelegation;
-            use dialog_ucan_core::DelegationChain;
-            use dialog_ucan_core::delegation::builder::DelegationBuilder;
-
             let profile_did = self.credential.did();
             let operator_did = credentials.operator_did();
 
@@ -171,7 +168,6 @@ async fn derive_operator(
             let mut derivation_input = OPERATOR_DERIVATION_CONTEXT.as_bytes().to_vec();
             derivation_input.extend_from_slice(context);
 
-            use dialog_varsig::Signer;
             let signature = signer
                 .sign(&derivation_input)
                 .await
