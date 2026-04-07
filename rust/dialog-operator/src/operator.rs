@@ -46,9 +46,7 @@ pub struct Operator<S: Clone> {
         memory::Publish,
         memory::Retract,
         dialog_effects::storage::Load,
-        dialog_effects::storage::Create,
-        ClaimUcan,
-        SaveUcan
+        dialog_effects::storage::Create
     )]
     /// Environment — routes DID-based effects and handles space load/create.
     env: Environment<S>,
@@ -71,6 +69,35 @@ impl<S: Clone> Operator<S> {
     /// Build the authority chain for a given subject DID.
     pub fn build_authority(&self, subject: Did) -> Capability<AuthOperator> {
         self.authority.build_authority(subject)
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S> Provider<ClaimUcan> for Operator<S>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    S: Provider<dialog_capability::access::Claim<Ucan>>,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        input: Capability<ClaimUcan>,
+    ) -> Result<dialog_capability_ucan::UcanPermit, AuthorizeError> {
+        self.env.execute(input).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S> Provider<SaveUcan> for Operator<S>
+where
+    S: Clone + ConditionalSend + ConditionalSync + 'static,
+    S: Provider<dialog_capability::access::Save<Ucan>>,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(&self, input: Capability<SaveUcan>) -> Result<(), AuthorizeError> {
+        self.env.execute(input).await
     }
 }
 
@@ -123,7 +150,11 @@ mod ucan_fork {
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl<S, Fx> Provider<Fork<UcanSite, Fx>> for Operator<S>
     where
-        S: SpaceProvider + Clone + 'static,
+        S: SpaceProvider
+            + Clone
+            + 'static
+            + Provider<dialog_capability::access::Claim<Ucan>>
+            + Provider<dialog_capability::access::Save<Ucan>>,
         Fx: Effect + Clone + ConditionalSend + 'static,
         Fx::Of: Constraint,
         Capability<Fx>: Ability + ConditionalSend + ConditionalSync,
@@ -137,12 +168,11 @@ mod ucan_fork {
 
             let scope = UcanScope::invoke(&capability);
 
-            let proof_chain: UcanProofChain =
-                dialog_capability::Subject::from(self.profile_did())
-                    .attenuate(access::Permit)
-                    .invoke(access::Claim::<Ucan>::new(self.did(), scope))
-                    .perform(self)
-                    .await?;
+            let proof_chain: UcanProofChain = dialog_capability::Subject::from(self.profile_did())
+                .attenuate(access::Permit)
+                .invoke(access::Claim::<Ucan>::new(self.did(), scope))
+                .perform(self)
+                .await?;
 
             let authorization = proof_chain.claim(self.authority.operator_signer().clone())?;
             let ucan_invocation = authorization.invoke().await?;

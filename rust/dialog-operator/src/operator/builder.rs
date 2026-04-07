@@ -56,7 +56,13 @@ impl OperatorBuilder {
     /// Build with default remote.
     pub async fn build<S>(self, env: Environment<S>) -> Result<Operator<S>, OperatorError>
     where
-        S: SpaceProvider + Clone,
+        S: SpaceProvider + Clone + 'static,
+        S: dialog_capability::Provider<
+                dialog_capability::access::Claim<dialog_capability_ucan::Ucan>,
+            >,
+        S: dialog_capability::Provider<
+                dialog_capability::access::Save<dialog_capability_ucan::Ucan>,
+            >,
     {
         self.network(Remote).build(env).await
     }
@@ -74,7 +80,13 @@ impl NetworkBuilder {
     /// Build the operator, deriving the operator key.
     pub async fn build<S>(self, env: Environment<S>) -> Result<Operator<S>, OperatorError>
     where
-        S: SpaceProvider + Clone,
+        S: SpaceProvider + Clone + 'static,
+        S: dialog_capability::Provider<
+                dialog_capability::access::Claim<dialog_capability_ucan::Ucan>,
+            >,
+        S: dialog_capability::Provider<
+                dialog_capability::access::Save<dialog_capability_ucan::Ucan>,
+            >,
     {
         let operator_signer = derive_operator(&self.credential, &self.context).await?;
         let credentials = Authority::new(

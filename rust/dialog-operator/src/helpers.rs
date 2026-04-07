@@ -25,7 +25,7 @@ pub fn unique_name(prefix: &str) -> String {
 }
 
 /// Build a test operator with a fresh profile and powerline delegation.
-pub async fn test_operator() -> Operator {
+pub async fn test_operator() -> Operator<VolatileSpace> {
     let env = Environment::<VolatileSpace>::new();
     let profile = Profile::open(&unique_name("test"))
         .perform(&env)
@@ -41,7 +41,7 @@ pub async fn test_operator() -> Operator {
 }
 
 /// Build a test operator and return both the operator and the profile.
-pub async fn test_operator_with_profile() -> (Operator, Profile) {
+pub async fn test_operator_with_profile() -> (Operator<VolatileSpace>, Profile) {
     let env = Environment::<VolatileSpace>::new();
     let profile = Profile::open(&unique_name("test"))
         .perform(&env)

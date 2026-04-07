@@ -203,6 +203,45 @@ pub struct Environment<S: Clone> {
     router: Router<S>,
 }
 
+use dialog_capability::access::{
+    AuthorizeError, Claim as AccessClaim, Protocol, Save as AccessSave,
+};
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S, P> Provider<AccessClaim<P>> for Environment<S>
+where
+    S: Clone + ConditionalSync,
+    P: Protocol,
+    P::Access: Clone + ConditionalSend + ConditionalSync,
+    P::Proof: Clone + ConditionalSend + ConditionalSync,
+    P::ProofChain: ConditionalSend,
+    Router<S>: Provider<AccessClaim<P>>,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        input: Capability<AccessClaim<P>>,
+    ) -> Result<P::ProofChain, AuthorizeError> {
+        self.router.execute(input).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S, P> Provider<AccessSave<P>> for Environment<S>
+where
+    S: Clone + ConditionalSync,
+    P: Protocol,
+    P::Delegation: ConditionalSend + ConditionalSync,
+    Router<S>: Provider<AccessSave<P>>,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(&self, input: Capability<AccessSave<P>>) -> Result<(), AuthorizeError> {
+        self.router.execute(input).await
+    }
+}
+
 impl<S: Clone> Environment<S> {
     /// Create a new empty environment.
     pub fn new() -> Self {
