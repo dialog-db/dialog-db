@@ -37,8 +37,8 @@ pub use indexeddb::*;
 pub mod volatile;
 pub use volatile::Volatile;
 
+pub mod environment;
 pub mod location;
-pub mod router;
 pub mod space;
 
 mod store;

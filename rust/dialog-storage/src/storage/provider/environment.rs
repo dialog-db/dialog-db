@@ -1,6 +1,5 @@
 //! Environment: composes Router (DID routing) and Loader (space load/create).
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -8,21 +7,18 @@ use dialog_capability::{Capability, Did, Policy, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::storage::Location;
 use dialog_varsig::Principal;
-use parking_lot::RwLock;
 
 use super::space::SpaceProvider;
-use crate::resource::Resource;
-
-type Spaces<S> = Arc<RwLock<HashMap<Did, S>>>;
+use crate::resource::{Pool, Resource};
 
 /// Routes effects by subject DID to the matching store.
 #[derive(Clone)]
 pub struct Router<S> {
-    spaces: Spaces<S>,
+    spaces: Arc<Pool<Did, S>>,
 }
 
-impl<S: Clone> Router<S> {
-    fn new(spaces: Spaces<S>) -> Self {
+impl<S> Router<S> {
+    fn new(spaces: Arc<Pool<Did, S>>) -> Self {
         Self { spaces }
     }
 }
@@ -49,7 +45,7 @@ where
 {
     async fn execute(&self, input: Capability<Fx>) -> Fx::Output {
         let did = input.subject().clone();
-        let store = self.spaces.read().get(&did).cloned();
+        let store = self.spaces.get(&did);
         match store {
             Some(store) => store.execute(input).await,
             None => Fx::Output::unmounted(&did),
@@ -58,18 +54,34 @@ where
 }
 
 /// Handles storage::Load and storage::Create, mutating the shared table.
+///
+/// Maintains a location -> DID mapping so that loading the same location
+/// twice returns the existing DID (important for non-persistent backends).
 pub struct Loader<S> {
-    spaces: Spaces<S>,
+    spaces: Arc<Pool<Did, S>>,
+    mounts: Pool<String, Did>,
 }
 
 impl<S> Loader<S> {
-    fn new(spaces: Spaces<S>) -> Self {
-        Self { spaces }
+    fn new(spaces: Arc<Pool<Did, S>>) -> Self {
+        Self {
+            spaces,
+            mounts: Pool::new(),
+        }
     }
 
-    fn register(&self, did: Did, store: S) {
-        self.spaces.write().insert(did, store);
+    fn register(&self, did: Did, location_key: String, store: S) {
+        self.mounts.insert(location_key, did.clone());
+        self.spaces.insert(did, store);
     }
+
+    fn mounted_did(&self, key: &String) -> Option<Did> {
+        self.mounts.get(key)
+    }
+}
+
+fn location_key(location: &Location) -> String {
+    format!("{:?}/{}", location.directory, location.name)
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -87,6 +99,13 @@ where
         use dialog_effects::{credential, storage::StorageError};
 
         let location = Location::of(&input);
+        let key = location_key(location);
+
+        // Return existing DID if this location is already mounted
+        if let Some(did) = self.mounted_did(&key) {
+            return Ok(did);
+        }
+
         let store = S::open(location)
             .await
             .map_err(|e| StorageError::Storage(e.to_string()))?;
@@ -102,7 +121,7 @@ where
                 .map_err(|e| StorageError::NotFound(e.to_string()))?;
 
         let did = cred.did();
-        self.register(did.clone(), store);
+        self.register(did.clone(), key, store);
         Ok(did)
     }
 }
@@ -123,25 +142,22 @@ where
 
         let location = Location::of(&input);
         let credential = &Create::of(&input).credential;
+        let key = location_key(location);
+
+        // Check if this location is already mounted
+        if self.mounted_did(&key).is_some() {
+            return Err(StorageError::AlreadyExists(key));
+        }
+
+        // Check if this DID is already mounted
+        let did = credential.did();
+        if self.spaces.contains(&did) {
+            return Err(StorageError::AlreadyExists(format!("{did}")));
+        }
 
         let store = S::open(location)
             .await
             .map_err(|e| StorageError::Storage(e.to_string()))?;
-
-        let check_cap = dialog_capability::Subject::from(dialog_capability::did!("local:storage"))
-            .attenuate(dialog_effects::credential::Credential)
-            .attenuate(dialog_effects::credential::Address::new("credential/self"))
-            .invoke(dialog_effects::credential::Load);
-
-        let existing: Result<dialog_credentials::Credential, _> =
-            <S as Provider<dialog_effects::credential::Load>>::execute(&store, check_cap).await;
-
-        if existing.is_ok() {
-            return Err(StorageError::AlreadyExists(format!(
-                "{:?}/{}",
-                location.directory, location.name
-            )));
-        }
 
         let save_cap = dialog_capability::Subject::from(dialog_capability::did!("local:storage"))
             .attenuate(dialog_effects::credential::Credential)
@@ -154,8 +170,7 @@ where
             .await
             .map_err(|e| StorageError::Storage(e.to_string()))?;
 
-        let did = credential.did();
-        self.register(did.clone(), store);
+        self.register(did.clone(), key, store);
         Ok(did)
     }
 }
@@ -181,7 +196,7 @@ pub struct Environment<S: Clone> {
 impl<S: Clone> Environment<S> {
     /// Create a new empty environment.
     pub fn new() -> Self {
-        let spaces: Spaces<S> = Arc::new(RwLock::new(HashMap::new()));
+        let spaces = Arc::new(Pool::new());
         Self {
             loader: Loader::new(Arc::clone(&spaces)),
             router: Router::new(spaces),
@@ -190,7 +205,7 @@ impl<S: Clone> Environment<S> {
 
     /// Check if a DID is mounted.
     pub fn contains(&self, did: &Did) -> bool {
-        self.router.spaces.read().contains_key(did)
+        self.router.spaces.contains(did)
     }
 }
 
@@ -391,10 +406,7 @@ mod tests {
         assert_eq!(result.unwrap(), None, "eve should not see dave's data");
     }
 
-    // Volatile creates fresh stores each time, so duplicate detection
-    // and load-after-create don't work. These pass with persistent backends.
     #[dialog_common::test]
-    #[should_panic(expected = "duplicate create should fail")]
     async fn it_rejects_duplicate_create() {
         let env = Environment::volatile();
 
@@ -416,7 +428,6 @@ mod tests {
     }
 
     #[dialog_common::test]
-    #[should_panic]
     async fn it_creates_then_loads() {
         let env = Environment::volatile();
 
