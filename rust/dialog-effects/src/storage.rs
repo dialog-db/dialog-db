@@ -11,7 +11,7 @@
 //! Subject -> Storage -> Location { directory, name } -> Load / Create
 //! ```
 
-use dialog_capability::{Attenuation, Did, Effect, Subject};
+use dialog_capability::{Attenuation, Effect, Subject};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -130,19 +130,20 @@ impl LocationExt for dialog_capability::Capability<Location> {
 
 /// Load an existing space from a location.
 ///
-/// Reads the identity from the resolved location and returns the DID.
-/// The provider handles the credential reading internally.
+/// Reads the credential from the resolved location, mounts the space,
+/// and returns the credential.
 #[derive(Debug, Clone, Serialize, Deserialize, dialog_capability::Claim)]
 pub struct Load;
 
 impl Effect for Load {
     type Of = Location;
-    type Output = Result<Did, StorageError>;
+    type Output = Result<dialog_credentials::Credential, StorageError>;
 }
 
 /// Create a new space at a location with the given credential.
 ///
-/// Writes the credential to the resolved location and returns the DID.
+/// Writes the credential to the resolved location, mounts the space,
+/// and returns the credential.
 #[derive(Debug, Clone, Serialize, Deserialize, dialog_capability::Claim)]
 pub struct Create {
     /// The credential establishing the space's identity.
@@ -158,7 +159,7 @@ impl Create {
 
 impl Effect for Create {
     type Of = Location;
-    type Output = Result<Did, StorageError>;
+    type Output = Result<dialog_credentials::Credential, StorageError>;
 }
 
 /// Errors during storage operations.

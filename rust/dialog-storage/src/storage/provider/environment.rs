@@ -95,15 +95,25 @@ where
     async fn execute(
         &self,
         input: Capability<dialog_effects::storage::Load>,
-    ) -> Result<Did, dialog_effects::storage::StorageError> {
+    ) -> Result<dialog_credentials::Credential, dialog_effects::storage::StorageError> {
         use dialog_effects::{credential, storage::StorageError};
 
         let location = Location::of(&input);
         let key = location_key(location);
 
-        // Return existing DID if this location is already mounted
+        // Return existing credential if this location is already mounted
         if let Some(did) = self.mounted_did(&key) {
-            return Ok(did);
+            let store = self.spaces.get(&did);
+            if let Some(store) = store {
+                let cred_cap =
+                    dialog_capability::Subject::from(dialog_capability::did!("local:storage"))
+                        .attenuate(credential::Credential)
+                        .attenuate(credential::Address::new("credential/self"))
+                        .invoke(credential::Load);
+                return <S as Provider<credential::Load>>::execute(&store, cred_cap)
+                    .await
+                    .map_err(|e| StorageError::NotFound(e.to_string()));
+            }
         }
 
         let store = S::open(location)
@@ -121,8 +131,8 @@ where
                 .map_err(|e| StorageError::NotFound(e.to_string()))?;
 
         let did = cred.did();
-        self.register(did.clone(), key, store);
-        Ok(did)
+        self.register(did, key, store);
+        Ok(cred)
     }
 }
 
@@ -137,11 +147,11 @@ where
     async fn execute(
         &self,
         input: Capability<dialog_effects::storage::Create>,
-    ) -> Result<Did, dialog_effects::storage::StorageError> {
+    ) -> Result<dialog_credentials::Credential, dialog_effects::storage::StorageError> {
         use dialog_effects::storage::{Create, StorageError};
 
         let location = Location::of(&input);
-        let credential = &Create::of(&input).credential;
+        let credential = Create::of(&input).credential.clone();
         let key = location_key(location);
 
         // Check if this location is already mounted
@@ -170,8 +180,8 @@ where
             .await
             .map_err(|e| StorageError::Storage(e.to_string()))?;
 
-        self.register(did.clone(), key, store);
-        Ok(did)
+        self.register(did, key, store);
+        Ok(credential)
     }
 }
 
@@ -261,36 +271,40 @@ mod tests {
     use dialog_effects::memory::{self, Memory};
     use dialog_effects::storage::{LocationExt, Storage};
 
+    /// Helper: create a credential and return (credential, expected_did).
+    async fn test_credential() -> (dialog_credentials::Credential, Did) {
+        let signer = Ed25519Signer::generate().await.unwrap();
+        let did = Principal::did(&signer);
+        let credential = dialog_credentials::Credential::Signer(SignerCredential::from(signer));
+        (credential, did)
+    }
+
     #[dialog_common::test]
     async fn it_creates_profile_with_sugar() {
         let env = Environment::volatile();
+        let (credential, expected_did) = test_credential().await;
 
-        let signer = Ed25519Signer::generate().await.unwrap();
-        let profile_did = Principal::did(&signer);
-        let credential = dialog_credentials::Credential::Signer(SignerCredential::from(signer));
-
-        let did = Storage::profile("alice")
+        let cred = Storage::profile("alice")
             .create(credential)
             .perform(&env)
             .await
             .unwrap();
 
-        assert_eq!(did, profile_did);
-        assert!(env.contains(&did));
+        assert_eq!(cred.did(), expected_did);
+        assert!(env.contains(&cred.did()));
     }
 
     #[dialog_common::test]
     async fn it_archives_after_create() {
         let env = Environment::volatile();
+        let (credential, _) = test_credential().await;
 
-        let signer = Ed25519Signer::generate().await.unwrap();
-        let credential = dialog_credentials::Credential::Signer(SignerCredential::from(signer));
-
-        let did = Storage::profile("bob")
+        let cred = Storage::profile("bob")
             .create(credential)
             .perform(&env)
             .await
             .unwrap();
+        let did = cred.did();
 
         let content = b"hello world".to_vec();
         let digest = dialog_common::Blake3Hash::hash(&content);
@@ -316,15 +330,14 @@ mod tests {
     #[dialog_common::test]
     async fn it_publishes_memory_after_create() {
         let env = Environment::volatile();
-
-        let signer = Ed25519Signer::generate().await.unwrap();
-        let credential = dialog_credentials::Credential::Signer(SignerCredential::from(signer));
+        let (credential, _) = test_credential().await;
 
         let did = Storage::profile("charlie")
             .create(credential)
             .perform(&env)
             .await
-            .unwrap();
+            .unwrap()
+            .did();
 
         let content = b"cell value".to_vec();
 
@@ -369,21 +382,21 @@ mod tests {
     async fn it_isolates_spaces() {
         let env = Environment::volatile();
 
-        let signer1 = Ed25519Signer::generate().await.unwrap();
-        let cred1 = dialog_credentials::Credential::Signer(SignerCredential::from(signer1));
+        let (cred1, _) = test_credential().await;
         let did1 = Storage::profile("dave")
             .create(cred1)
             .perform(&env)
             .await
-            .unwrap();
+            .unwrap()
+            .did();
 
-        let signer2 = Ed25519Signer::generate().await.unwrap();
-        let cred2 = dialog_credentials::Credential::Signer(SignerCredential::from(signer2));
+        let (cred2, _) = test_credential().await;
         let did2 = Storage::profile("eve")
             .create(cred2)
             .perform(&env)
             .await
-            .unwrap();
+            .unwrap()
+            .did();
 
         let content = b"dave only".to_vec();
         let digest = dialog_common::Blake3Hash::hash(&content);
@@ -409,9 +422,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_rejects_duplicate_create() {
         let env = Environment::volatile();
-
-        let signer = Ed25519Signer::generate().await.unwrap();
-        let credential = dialog_credentials::Credential::Signer(SignerCredential::from(signer));
+        let (credential, _) = test_credential().await;
 
         Storage::profile("frank")
             .create(credential.clone())
@@ -430,10 +441,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_creates_then_loads() {
         let env = Environment::volatile();
-
-        let signer = Ed25519Signer::generate().await.unwrap();
-        let profile_did = Principal::did(&signer);
-        let credential = dialog_credentials::Credential::Signer(SignerCredential::from(signer));
+        let (credential, expected_did) = test_credential().await;
 
         Storage::profile("grace")
             .create(credential)
@@ -441,13 +449,13 @@ mod tests {
             .await
             .unwrap();
 
-        let did = Storage::profile("grace")
+        let loaded = Storage::profile("grace")
             .load()
             .perform(&env)
             .await
             .unwrap();
 
-        assert_eq!(did, profile_did);
+        assert_eq!(loaded.did(), expected_did);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -473,20 +481,17 @@ mod tests {
             let env = NativeEnv::default();
             let name = unique_name("fs-create-load");
 
-            let signer = Ed25519Signer::generate().await.unwrap();
-            let profile_did = Principal::did(&signer);
-            let credential = dialog_credentials::Credential::Signer(SignerCredential::from(signer));
+            let (credential, expected_did) = super::test_credential().await;
 
-            let did = Storage::temp(&name)
+            let cred = Storage::temp(&name)
                 .create(credential)
                 .perform(&env)
                 .await
                 .unwrap();
-            assert_eq!(did, profile_did);
+            assert_eq!(cred.did(), expected_did);
 
-            // Load from the same location (reads from disk)
-            let loaded_did = Storage::temp(&name).load().perform(&env).await.unwrap();
-            assert_eq!(loaded_did, profile_did);
+            let loaded = Storage::temp(&name).load().perform(&env).await.unwrap();
+            assert_eq!(loaded.did(), expected_did);
         }
 
         #[dialog_common::test]
@@ -494,14 +499,14 @@ mod tests {
             let env = NativeEnv::default();
             let name = unique_name("fs-archive");
 
-            let signer = Ed25519Signer::generate().await.unwrap();
-            let credential = dialog_credentials::Credential::Signer(SignerCredential::from(signer));
+            let (credential, _) = super::test_credential().await;
 
             let did = Storage::temp(&name)
                 .create(credential)
                 .perform(&env)
                 .await
-                .unwrap();
+                .unwrap()
+                .did();
 
             let content = b"persistent data".to_vec();
             let digest = dialog_common::Blake3Hash::hash(&content);
@@ -529,8 +534,7 @@ mod tests {
             let env = NativeEnv::default();
             let name = unique_name("fs-dup");
 
-            let signer = Ed25519Signer::generate().await.unwrap();
-            let credential = dialog_credentials::Credential::Signer(SignerCredential::from(signer));
+            let (credential, _) = super::test_credential().await;
 
             Storage::temp(&name)
                 .create(credential.clone())
