@@ -20,7 +20,7 @@ where
     Self: ConditionalSend + ConditionalSync,
 {
     async fn execute(&self, input: Capability<Prove<P>>) -> Result<P::Proof, AuthorizeError> {
-        self.env.execute(input).await
+        input.perform(&self.env).await
     }
 }
 
@@ -35,6 +35,6 @@ where
     Self: ConditionalSend + ConditionalSync,
 {
     async fn execute(&self, input: Capability<Retain<P>>) -> Result<(), AuthorizeError> {
-        self.env.execute(input).await
+        input.perform(&self.env).await
     }
 }

@@ -79,7 +79,7 @@ where
         &self,
         input: dialog_capability::Capability<Prove<P>>,
     ) -> Result<P::Proof, AuthorizeError> {
-        self.permit.execute(input).await
+        input.perform(&self.permit).await
     }
 }
 
@@ -99,7 +99,7 @@ where
         &self,
         input: dialog_capability::Capability<AccessRetain<P>>,
     ) -> Result<(), AuthorizeError> {
-        self.permit.execute(input).await
+        input.perform(&self.permit).await
     }
 }
 

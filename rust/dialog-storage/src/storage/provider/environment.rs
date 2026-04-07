@@ -48,7 +48,7 @@ where
         let did = input.subject().clone();
         let store = self.spaces.get(&did);
         match store {
-            Some(store) => store.execute(input).await,
+            Some(store) => input.perform(&store).await,
             None => Fx::Output::unmounted(&did),
         }
     }
@@ -221,7 +221,7 @@ where
     Self: ConditionalSend + ConditionalSync,
 {
     async fn execute(&self, input: Capability<AccessClaim<P>>) -> Result<P::Proof, AuthorizeError> {
-        self.router.execute(input).await
+        input.perform(&self.router).await
     }
 }
 
@@ -236,7 +236,7 @@ where
     Self: ConditionalSend + ConditionalSync,
 {
     async fn execute(&self, input: Capability<AccessRetain<P>>) -> Result<(), AuthorizeError> {
-        self.router.execute(input).await
+        input.perform(&self.router).await
     }
 }
 
