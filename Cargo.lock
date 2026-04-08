@@ -1109,6 +1109,7 @@ name = "dialog-macros"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "convert_case",
  "proc-macro2",
  "quote",
  "syn",
