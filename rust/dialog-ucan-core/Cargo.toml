@@ -1,5 +1,5 @@
 [package]
-name = "dialog-ucan"
+name = "dialog-ucan-core"
 description = "UCAN authorization tokens"
 edition = "2024"
 license = "Apache-2.0"
