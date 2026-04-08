@@ -240,8 +240,6 @@
               test:native:release
               test:web:debug
               test:web:release
-              test:native:ucan
-              test:web:ucan
               test:cross:integration
               test:npm
             '';
@@ -266,16 +264,6 @@
           "test:web:release" = menuTestCommand {
             description = "Unit and integration tests (wasm32-unknown-unknown, release)";
             package = "tests-web-debug";
-          };
-
-          "test:native:ucan" = menuTestCommand {
-            description = "UCAN-specific tests (${system}, debug)";
-            package = "tests-native-ucan";
-          };
-
-          "test:web:ucan" = menuTestCommand {
-            description = "UCAN-specific tests (wasm32-unknown-unknown, debug)";
-            package = "tests-web-ucan";
           };
 
           "test:cross:integration" = menuTestCommand {
@@ -335,17 +323,6 @@
             name = "web-debug";
             target = "wasm32-unknown-unknown";
             args = "--release";
-          };
-
-          tests-native-ucan = buildTestArchive {
-            name = "native-ucan";
-            args = "--features ucan";
-          };
-
-          tests-web-ucan = buildTestArchive {
-            name = "web-ucan";
-            target = "wasm32-unknown-unknown";
-            args = "--features ucan";
           };
 
           tests-cross-integration = buildTestArchive {

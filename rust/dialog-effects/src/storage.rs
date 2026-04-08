@@ -14,7 +14,7 @@
 //!               └── List { continuation_token } → Effect → Result<ListResult, StorageError>
 //! ```
 
-pub use dialog_capability::{Attenuation, Capability, Effect, Policy, Subject};
+pub use dialog_capability::{Attenuation, Capability, Claim, Effect, Policy, Subject};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -50,7 +50,7 @@ impl Policy for Store {
 }
 
 /// Get operation - retrieves a value by key.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Claim)]
 pub struct Get {
     /// The key to look up.
     #[serde(with = "serde_bytes")]
@@ -88,7 +88,7 @@ impl GetCapability for Capability<Get> {
 }
 
 /// Set operation - sets a value for a key.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Claim)]
 pub struct Set {
     /// The key to update.
     #[serde(with = "serde_bytes")]
@@ -138,7 +138,7 @@ impl SetCapability for Capability<Set> {
 }
 
 /// Delete operation - removes a key.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Claim)]
 pub struct Delete {
     /// The key to delete.
     #[serde(with = "serde_bytes")]
@@ -176,7 +176,7 @@ impl DeleteCapability for Capability<Delete> {
 }
 
 /// List operation - lists keys in a store.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Claim)]
 pub struct List {
     /// Continuation token for pagination.
     pub continuation_token: Option<String>,
@@ -281,68 +281,5 @@ mod tests {
         // Use policy() method to extract nested constraints
         assert_eq!(claim.policy::<Store, _>().store, "index");
         assert_eq!(&claim.policy::<Set, _>().key[..], &[1, 2, 3]);
-    }
-
-    #[cfg(feature = "ucan")]
-    mod parameters_tests {
-        use super::*;
-        use dialog_capability::ucan::parameters;
-        use ipld_core::ipld::Ipld;
-
-        #[test]
-        fn it_collects_storage_parameters() {
-            let cap = Subject::from(did!("key:zSpace")).attenuate(Storage);
-            let params = parameters(&cap);
-
-            // Storage is a unit struct, should produce empty map
-            assert!(params.is_empty());
-        }
-
-        #[test]
-        fn it_collects_store_parameters() {
-            let cap = Subject::from(did!("key:zSpace"))
-                .attenuate(Storage)
-                .attenuate(Store::new("index"));
-            let params = parameters(&cap);
-
-            assert_eq!(params.get("store"), Some(&Ipld::String("index".into())));
-        }
-
-        #[test]
-        fn it_collects_get_parameters() {
-            let cap = Subject::from(did!("key:zSpace"))
-                .attenuate(Storage)
-                .attenuate(Store::new("index"))
-                .invoke(Get::new(vec![1, 2, 3]));
-            let params = parameters(&cap);
-
-            assert_eq!(params.get("store"), Some(&Ipld::String("index".into())));
-            assert_eq!(params.get("key"), Some(&Ipld::Bytes(vec![1, 2, 3])));
-        }
-
-        #[test]
-        fn it_collects_set_parameters() {
-            let cap = Subject::from(did!("key:zSpace"))
-                .attenuate(Storage)
-                .attenuate(Store::new("mystore"))
-                .invoke(Set::new(vec![10, 20], vec![30, 40, 50]));
-            let params = parameters(&cap);
-
-            assert_eq!(params.get("store"), Some(&Ipld::String("mystore".into())));
-            assert_eq!(params.get("key"), Some(&Ipld::Bytes(vec![10, 20])));
-            assert_eq!(params.get("value"), Some(&Ipld::Bytes(vec![30, 40, 50])));
-        }
-
-        #[test]
-        fn it_collects_delete_parameters() {
-            let cap = Subject::from(did!("key:zSpace"))
-                .attenuate(Storage)
-                .attenuate(Store::new("trash"))
-                .invoke(Delete::new(vec![99]));
-            let params = parameters(&cap);
-
-            assert_eq!(params.get("store"), Some(&Ipld::String("trash".into())));
-            assert_eq!(params.get("key"), Some(&Ipld::Bytes(vec![99])));
-        }
     }
 }

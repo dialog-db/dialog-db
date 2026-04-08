@@ -10,7 +10,7 @@
 //!
 //! ```rust
 //! # mod example {
-//! use dialog_capability::{did, Subject, Did, Ability, Attenuation, Policy, Effect};
+//! use dialog_capability::{did, Subject, Did, Ability, Attenuation, Policy, Effect, Claim};
 //! use serde::{Serialize, Deserialize};
 //!
 //! // Attenuation: narrows ability (adds "/storage" to path) and adds parameters
@@ -28,7 +28,7 @@
 //! }
 //!
 //! // Effect: narrows ability (adds "/get"), and is invocable
-//! #[derive(Debug, Clone, Serialize, Deserialize)]
+//! #[derive(Debug, Clone, Serialize, Deserialize, Claim)]
 //! struct Get { key: Vec<u8> }
 //! impl Effect for Get {
 //!     type Of = Store;
@@ -149,10 +149,12 @@
 //! | Type | Role |
 //! |------|------|
 //! | [`Ability`] | Trait providing `subject()` and `ability()` |
-//! | [`Provider<I>`] | Executes capabilities |
-//! | [`Authorization`] | Proof of delegated authority |
-//! | [`Delegation<C, A>`] | Grants capability to another principal |
-//! | [`Access`] | Looks up authorization proofs |
+//! | [`Provider<C>`] | Executes commands |
+//! | [`access::Authorize`] | Command for requesting authorization via a protocol |
+//! | [`site::Site`] | Trait for site configuration types |
+
+// Allow `#[derive(Claim)]` to resolve `::dialog_capability::Claim` inside this crate.
+extern crate self as dialog_capability;
 
 mod error;
 pub use error::*;
@@ -166,9 +168,6 @@ pub use selector::*;
 mod settings;
 pub use settings::*;
 
-#[cfg(feature = "ucan")]
-pub mod ucan;
-
 mod ability;
 pub use ability::*;
 
@@ -180,6 +179,9 @@ pub use policy::*;
 
 mod attenuation;
 pub use attenuation::*;
+
+mod claim;
+pub use claim::*;
 
 mod effect;
 pub use effect::*;
@@ -196,35 +198,21 @@ pub use capability::*;
 mod provider;
 pub use provider::*;
 
-mod router;
-pub use router::*;
-
-mod authority;
-pub use authority::*;
-
-mod authorization;
-pub use authorization::*;
-
 mod issuer;
 pub use issuer::*;
 
 /// Derive macro that generates `Provider<Fx>` impls for composite structs.
 pub use dialog_macros::Provider;
 
+/// Derive macro that generates `Claim` trait impls for effect types.
+pub use dialog_macros::Claim;
+
+pub mod access;
+
+pub mod site;
+
 pub mod command;
 pub use command::*;
 
-mod access;
-pub use access::*;
-
-mod claim;
-pub use claim::*;
-
-mod authorized;
-pub use authorized::*;
-
-mod invocation;
-pub use invocation::*;
-
-mod delegation;
-pub use delegation::*;
+pub mod fork;
+pub use fork::*;
