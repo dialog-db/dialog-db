@@ -204,8 +204,6 @@ pub use dialog_macros::Claim;
 /// Derive macro that generates `Provider<Fx>` impls for composite structs.
 pub use dialog_macros::Provider;
 
-pub mod authority;
-
 pub mod command;
 pub use command::*;
 
@@ -215,8 +213,6 @@ pub use claim::*;
 pub mod access;
 
 pub mod site;
-
-pub mod storage;
 
 pub mod fork;
 pub use fork::*;

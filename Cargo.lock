@@ -1013,6 +1013,7 @@ dependencies = [
  "async-trait",
  "dialog-capability",
  "dialog-common",
+ "dialog-credentials",
  "serde",
  "serde_bytes",
  "thiserror 2.0.18",

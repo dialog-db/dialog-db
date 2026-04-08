@@ -187,8 +187,8 @@ pub enum ArchiveError {
     Io(String),
 }
 
-impl From<dialog_capability::storage::StorageError> for ArchiveError {
-    fn from(e: dialog_capability::storage::StorageError) -> Self {
+impl From<dialog_capability::StorageError> for ArchiveError {
+    fn from(e: dialog_capability::StorageError) -> Self {
         Self::Storage(e.to_string())
     }
 }

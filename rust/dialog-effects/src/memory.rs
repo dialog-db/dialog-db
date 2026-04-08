@@ -66,18 +66,16 @@ impl Policy for Cell {
 }
 
 /// Edition identifier for CAS operations.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Edition(pub String);
+pub type Edition = String;
 
-impl From<Vec<u8>> for Edition {
-    fn from(bytes: Vec<u8>) -> Self {
-        Self(String::from_utf8_lossy(&bytes).into_owned())
-    }
+/// Convert raw bytes to an edition string (used by `#[derive(Claim)]`).
+fn edition(bytes: Vec<u8>) -> Edition {
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
+/// Convert optional raw bytes to an optional edition string (used by `#[derive(Claim)]`).
 fn optional_edition(bytes: Option<serde_bytes::ByteBuf>) -> Option<Edition> {
-    bytes.map(|b| Edition::from(b.into_vec()))
+    bytes.map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
 /// A cell's current state: content and its edition.
@@ -200,7 +198,7 @@ impl PublishCapability for Capability<Publish> {
 pub struct Retract {
     /// The expected current edition.
     #[serde(with = "serde_bytes")]
-    #[claim(into = Edition)]
+    #[claim(into = Edition, with = edition)]
     pub when: Vec<u8>,
 }
 
@@ -270,8 +268,8 @@ pub enum MemoryError {
     Io(#[from] std::io::Error),
 }
 
-impl From<dialog_capability::storage::StorageError> for MemoryError {
-    fn from(e: dialog_capability::storage::StorageError) -> Self {
+impl From<dialog_capability::StorageError> for MemoryError {
+    fn from(e: dialog_capability::StorageError) -> Self {
         Self::Storage(e.to_string())
     }
 }
