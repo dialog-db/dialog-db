@@ -14,7 +14,10 @@
 //!                     └── Retract { when } → Effect → Result<(), MemoryError>
 //! ```
 
-pub use dialog_capability::{Attenuate, Attenuation, Capability, Effect, Policy, Subject};
+pub use dialog_capability::{
+    Attenuate, Attenuation, Capability, Effect, Policy, StorageError, Subject,
+};
+use dialog_common::Checksum;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -66,6 +69,16 @@ impl Policy for Cell {
 
 /// Edition identifier for CAS operations.
 pub type Edition = String;
+
+/// Convert raw bytes to an edition string (used by `#[derive(Claim)]`).
+fn edition(bytes: Vec<u8>) -> Edition {
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Convert optional raw bytes to an optional edition string (used by `#[derive(Claim)]`).
+fn optional_edition(bytes: Option<serde_bytes::ByteBuf>) -> Option<Edition> {
+    bytes.map(|b| String::from_utf8_lossy(&b).into_owned())
+}
 
 /// A cell's current state: content and its edition.
 ///
@@ -119,9 +132,11 @@ impl ResolveCapability for Capability<Resolve> {
 pub struct Publish {
     /// The content to publish.
     #[serde(with = "serde_bytes")]
+    #[attenuate(into = Checksum, with = Checksum::sha256, rename = checksum)]
     pub content: Vec<u8>,
     /// The expected current edition, or None if expecting empty cell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[attenuate(into = Option<Edition>, with = optional_edition)]
     pub when: Option<serde_bytes::ByteBuf>,
 }
 
@@ -178,6 +193,7 @@ impl PublishCapability for Capability<Publish> {
 pub struct Retract {
     /// The expected current edition.
     #[serde(with = "serde_bytes")]
+    #[attenuate(into = Edition, with = edition)]
     pub when: Vec<u8>,
 }
 
@@ -217,6 +233,8 @@ impl RetractCapability for Capability<Retract> {
     }
 }
 
+pub mod prelude;
+
 /// Errors that can occur during memory operations.
 #[derive(Debug, Error)]
 pub enum MemoryError {
@@ -236,6 +254,12 @@ pub enum MemoryError {
     /// IO error.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+impl From<StorageError> for MemoryError {
+    fn from(e: StorageError) -> Self {
+        Self::Storage(e.to_string())
+    }
 }
 
 #[cfg(test)]

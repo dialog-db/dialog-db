@@ -5,17 +5,14 @@ version.workspace = true
 authors.workspace = true
 license.workspace = true
 
-
 [dependencies]
 dialog-capability = { workspace = true }
+dialog-credentials = { workspace = true }
 dialog-common = { workspace = true }
-
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_bytes = { workspace = true }
 thiserror = { workspace = true }
-
-
 
 [lints.rust]
 missing_docs = "warn"
