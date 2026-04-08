@@ -57,22 +57,24 @@ mod tests {
     use std::vec::IntoIter;
 
     use super::*;
-    use crate::artifact::{Artifacts, Entity, Type};
+    use crate::artifact::{Entity, Type};
     use crate::attribute::{AttributeDescriptor, Cardinality};
     use crate::concept::descriptor::ConceptDescriptor;
     use crate::concept::query::ConceptQuery;
     use crate::concept::{Concept, Conclusion};
     use crate::predicate::Predicate;
     use crate::premise::Premise;
-    use crate::query::{Application, Source};
+    use crate::query::Application;
     use crate::selection::Match;
     use crate::selection::Selection;
+    use crate::source::SelectRules;
     use crate::statement::Statement;
     use crate::term::Term;
     use crate::the;
-    use crate::{
-        AttributeStatement, EvaluationError, Parameters, Proposition, Query, Session, Transaction,
-    };
+    use crate::{AttributeStatement, EvaluationError, Parameters, Proposition, Query};
+    use dialog_artifacts::Select;
+    use dialog_capability::Provider;
+    use dialog_common::ConditionalSync;
 
     // Manual implementation of Person struct with Concept and Rule traits
     // This serves as a template for what the derive macro should generate
@@ -182,26 +184,26 @@ mod tests {
     }
 
     impl Statement for Person {
-        fn assert(self, transaction: &mut Transaction) {
+        fn assert(self, update: &mut impl dialog_artifacts::Update) {
             the!("person/name")
                 .of(self.this.clone())
                 .is(self.name.clone())
-                .assert(transaction);
+                .assert(update);
             the!("person/age")
                 .of(self.this.clone())
                 .is(self.age)
-                .assert(transaction);
+                .assert(update);
         }
 
-        fn retract(self, transaction: &mut Transaction) {
+        fn retract(self, update: &mut impl dialog_artifacts::Update) {
             the!("person/name")
                 .of(self.this.clone())
                 .is(self.name.clone())
-                .retract(transaction);
+                .retract(update);
             the!("person/age")
                 .of(self.this.clone())
                 .is(self.age)
-                .retract(transaction);
+                .retract(update);
         }
     }
 
@@ -238,9 +240,16 @@ mod tests {
     impl Application for PersonQuery {
         type Conclusion = Person;
 
-        fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
+        fn evaluate<'a, Env, M: Selection + 'a>(
+            self,
+            selection: M,
+            env: &'a Env,
+        ) -> impl Selection + 'a
+        where
+            Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+        {
             let application: ConceptQuery = self.into();
-            application.evaluate(selection, source)
+            application.evaluate(selection, env)
         }
 
         fn realize(&self, source: Match) -> Result<Self::Conclusion, EvaluationError> {
@@ -282,8 +291,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_installs_rule() {
-        use dialog_storage::MemoryStorageBackend;
-
         // Define a rule function using the clean API
         fn person_rule(person: Query<Person>) -> impl When {
             (Query::<Person> {
@@ -293,12 +300,19 @@ mod tests {
             },)
         }
 
-        // Create a session
-        let storage = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage).await.unwrap();
-
-        let result = Session::open(artifacts).install(person_rule);
-        assert!(result.is_ok(), "install should work");
+        // Verify rule installs into registry
+        use crate::ConceptDescriptor;
+        use crate::rule::deductive::DeductiveRule;
+        use crate::session::RuleRegistry;
+        let mut rules = RuleRegistry::new();
+        let person_query = Query::<Person>::default();
+        let concept: ConceptDescriptor = person_query.into();
+        let premises = person_rule(Query::<Person>::default())
+            .into_premises()
+            .into_vec();
+        let rule = DeductiveRule::new(concept, premises).unwrap();
+        let result = rules.register(rule);
+        assert!(result.is_ok(), "register should work");
     }
 
     mod macro_person {

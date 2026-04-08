@@ -5,6 +5,7 @@ use dialog_capability::{Capability, Did, Subject};
 use dialog_effects::archive::Archive;
 use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_prolly_tree::{GeometricDistribution, Tree};
+use dialog_query::query::Application;
 use dialog_storage::Blake3Hash;
 
 mod claims;
@@ -36,6 +37,9 @@ pub use reset::*;
 
 mod select;
 pub use select::*;
+
+mod session;
+pub use session::*;
 
 mod set_upstream;
 pub use set_upstream::*;
@@ -93,5 +97,10 @@ impl Branch {
     /// Archive capability for this branch's subject.
     pub fn archive(&self) -> Capability<Archive> {
         self.subject().archive()
+    }
+
+    /// Query with an application. Shortcut for `branch.query().select(query)`.
+    pub fn select<Q: Application>(&self, query: Q) -> SelectQuery<'_, Q> {
+        SelectQuery::new(self, query)
     }
 }

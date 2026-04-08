@@ -6,14 +6,17 @@
 //! Note: Premises are only used in rule conditions (the "when" part), not in conclusions.
 
 pub use super::negation::Negation;
-use crate::Source;
 use crate::constraint::Constraint;
 use crate::environment::Environment;
 pub use crate::error::{AnalyzerError, QueryResult};
 use crate::formula::query::FormulaQuery;
 use crate::proposition::Proposition;
 use crate::selection::{Match, Selection};
+use crate::source::SelectRules;
 use crate::{Parameters, Schema};
+use dialog_artifacts::Select;
+use dialog_capability::Provider;
+use dialog_common::ConditionalSync;
 use futures_util::future::Either;
 use std::fmt::{self, Display};
 use std::ops;
@@ -65,17 +68,27 @@ impl Premise {
         }
     }
 
-    /// Evaluate this premise with the given selection and source
-    pub fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
+    /// Evaluate this premise with the given selection and environment
+    pub fn evaluate<'a, Env, M: Selection + 'a>(
+        self,
+        selection: M,
+        env: &'a Env,
+    ) -> impl Selection + 'a
+    where
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    {
         match self {
-            Premise::Assert(application) => Either::Left(application.evaluate(selection, source)),
-            Premise::Unless(negation) => Either::Right(negation.evaluate(selection, source)),
+            Premise::Assert(application) => Either::Left(application.evaluate(selection, env)),
+            Premise::Unless(negation) => Either::Right(negation.evaluate(selection, env)),
         }
     }
 
-    /// Execute this premise against the given store
-    pub fn perform<S: Source>(self, store: &S) -> impl Selection {
-        self.evaluate(Match::new().seed(), store)
+    /// Execute this premise against the given environment
+    pub fn perform<'a, Env>(self, env: &'a Env) -> impl Selection + 'a
+    where
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    {
+        self.evaluate(Match::new().seed(), env)
     }
 }
 
