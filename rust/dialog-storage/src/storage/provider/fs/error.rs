@@ -19,3 +19,18 @@ pub enum FileSystemError {
     #[error("Containment violation: {0}")]
     Containment(String),
 }
+
+use dialog_capability::access::AuthorizeError;
+use dialog_effects::credential::CredentialError;
+
+impl From<FileSystemError> for CredentialError {
+    fn from(e: FileSystemError) -> Self {
+        Self::Storage(e.to_string())
+    }
+}
+
+impl From<FileSystemError> for AuthorizeError {
+    fn from(e: FileSystemError) -> Self {
+        Self::Configuration(e.to_string())
+    }
+}

@@ -34,17 +34,24 @@
 //! ```
 
 mod archive;
+mod certificate;
+mod credential;
 mod memory;
 
 use dialog_capability::Did;
+use dialog_credentials::credential::CredentialExport;
 use parking_lot::RwLock;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Archive key: (catalog, digest_base58)
 type ArchiveKey = (String, String);
 
 /// Memory key: (space, cell)
 type MemoryKey = (String, String);
+
+/// Certificate key: "{audience}/{subject_or_wildcard}/{issuer}.{hash}"
+type CertificateKey = String;
 
 /// A session holds the in-memory storage for a single subject.
 #[derive(Default, Debug)]
@@ -53,6 +60,10 @@ struct Session {
     archive: HashMap<ArchiveKey, Vec<u8>>,
     /// Transactional memory storage keyed by (space, cell).
     memory: HashMap<MemoryKey, Vec<u8>>,
+    /// Credential storage keyed by address.
+    credentials: HashMap<String, CredentialExport>,
+    /// Certificate storage keyed by "{audience}/{subject}/{issuer}.{hash}".
+    certificates: HashMap<CertificateKey, Vec<u8>>,
 }
 
 /// Volatile in-memory storage provider.
@@ -64,15 +75,65 @@ struct Session {
 /// `Provider::execute` can take `&self`. All lock guards are dropped before
 /// any `.await` points. Unlike `std::sync::RwLock`, `parking_lot` locks are
 /// infallible (no poisoning).
-#[derive(Default, Debug)]
+#[derive(Debug, Clone)]
 pub struct Volatile {
-    sessions: RwLock<HashMap<Did, Session>>,
+    /// Prefix for scoping this provider to a location.
+    mount: String,
+    sessions: Arc<RwLock<HashMap<Did, Session>>>,
+}
+
+impl Default for Volatile {
+    fn default() -> Self {
+        Self {
+            mount: String::new(),
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
 }
 
 impl Volatile {
-    /// Creates a new volatile provider.
+    /// Creates a new volatile provider with no prefix.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Returns a scoped key by prepending the mount prefix.
+    fn scoped_key(&self, key: &str) -> String {
+        if self.mount.is_empty() {
+            key.to_string()
+        } else {
+            format!("{}/{}", self.mount, key)
+        }
+    }
+}
+
+use crate::resource::Resource;
+use dialog_effects::storage::{Directory, Location};
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Resource<Location> for Volatile {
+    type Error = std::convert::Infallible;
+
+    /// Open a volatile provider scoped to the given location.
+    ///
+    /// The prefix is derived from the directory and name to match
+    /// the naming convention used by persistent backends:
+    /// - `Directory::Profile` with name "alice" -> prefix "alice.profile"
+    /// - `Directory::Current` with name "contacts" -> prefix "contacts"
+    /// - `Directory::Temp` with name "scratch" -> prefix "temp.scratch"
+    async fn open(location: &Location) -> Result<Self, Self::Error> {
+        let prefix = match &location.directory {
+            Directory::Profile => format!("{}.profile", location.name),
+            Directory::Current => location.name.clone(),
+            Directory::Temp => format!("temp.{}", location.name),
+            Directory::At(path) => format!("{}/{}", path, location.name),
+        };
+
+        Ok(Self {
+            mount: prefix,
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+        })
     }
 }
 
