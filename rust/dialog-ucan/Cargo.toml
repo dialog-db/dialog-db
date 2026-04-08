@@ -1,0 +1,37 @@
+[package]
+name = "dialog-ucan"
+description = "UCAN protocol implementation for dialog capability system"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+dialog-capability = { workspace = true }
+dialog-common = { workspace = true }
+dialog-credentials = { workspace = true }
+dialog-ucan-core = { workspace = true }
+dialog-varsig = { workspace = true }
+
+async-trait = { workspace = true }
+base58 = { workspace = true }
+blake3 = { workspace = true }
+ipld-core = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_bytes = { workspace = true }
+serde_ipld_dagcbor = { workspace = true }
+signature = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+dialog-common = { workspace = true, features = ["helpers"] }
+dialog-credentials = { workspace = true }
+dialog-effects = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
+wasm-bindgen-test = { workspace = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+  "cfg(feature, values(\"web-integration-tests\"))",
+  "cfg(dialog_test_wasm_integration)",
+] }
