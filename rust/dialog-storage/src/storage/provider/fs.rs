@@ -137,6 +137,7 @@ impl FileSystem {
     }
 
     /// Resolve an address to a concrete filesystem path.
+    #[cfg(not(test))]
     fn resolve(address: &Address) -> Result<PathBuf, FileSystemError> {
         let base_path = match address.scheme() {
             "profile" => {
@@ -159,6 +160,32 @@ impl FileSystem {
             Ok(base_path)
         } else {
             Ok(base_path.join(relative))
+        }
+    }
+
+    /// Resolve an address to a concrete filesystem path (test mode).
+    ///
+    /// All directories resolve under the platform temp dir to avoid
+    /// polluting real profile or workspace directories during tests.
+    #[cfg(test)]
+    fn resolve(address: &Address) -> Result<PathBuf, FileSystemError> {
+        let base_path = std::env::temp_dir().join("dialog");
+        let relative = address.path().trim_start_matches('/');
+        let suffix = match address.scheme() {
+            "profile" => ".profile",
+            "storage" => ".space",
+            "temp" => "",
+            scheme => {
+                return Err(FileSystemError::Io(format!(
+                    "unsupported location scheme: {scheme}"
+                )));
+            }
+        };
+
+        if relative.is_empty() {
+            Ok(base_path)
+        } else {
+            Ok(base_path.join(format!("{relative}{suffix}")))
         }
     }
 }
@@ -638,5 +665,43 @@ mod tests {
         let result = memory.resolve("foo/../../../../../../etc/passwd");
         assert!(result.is_err());
         assert!(matches!(result, Err(FileSystemError::Containment(_))));
+    }
+
+    #[dialog_common::test]
+    fn test_resolve_profile_uses_temp_dir() {
+        let address = Address::profile();
+        let resolved = FileSystem::resolve(&address.resolve("alice").unwrap()).unwrap();
+        let expected = std::env::temp_dir().join("dialog").join("alice.profile");
+        assert_eq!(resolved, expected);
+    }
+
+    #[dialog_common::test]
+    fn test_resolve_current_uses_temp_dir() {
+        let address = Address::current();
+        let resolved = FileSystem::resolve(&address.resolve("contacts").unwrap()).unwrap();
+        let expected = std::env::temp_dir().join("dialog").join("contacts.space");
+        assert_eq!(resolved, expected);
+    }
+
+    #[dialog_common::test]
+    fn test_resolve_temp_uses_temp_dir() {
+        let address = Address::temp();
+        let resolved = FileSystem::resolve(&address.resolve("scratch").unwrap()).unwrap();
+        let expected = std::env::temp_dir().join("dialog").join("scratch");
+        assert_eq!(resolved, expected);
+    }
+
+    #[dialog_common::test]
+    fn test_resolve_profile_and_current_are_isolated() {
+        let profile = Address::profile();
+        let current = Address::current();
+
+        let profile_path = FileSystem::resolve(&profile.resolve("same-name").unwrap()).unwrap();
+        let current_path = FileSystem::resolve(&current.resolve("same-name").unwrap()).unwrap();
+
+        assert_ne!(
+            profile_path, current_path,
+            "profile and current with same name should resolve to different paths"
+        );
     }
 }
