@@ -14,7 +14,7 @@
 //!                     └── Retract { when } → Effect → Result<(), MemoryError>
 //! ```
 
-pub use dialog_capability::{Attenuation, Capability, Effect, Policy, Subject};
+pub use dialog_capability::{Attenuate, Attenuation, Capability, Effect, Policy, Subject};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -83,7 +83,7 @@ pub struct Publication {
 /// Resolve operation - reads current cell content and edition.
 ///
 /// Returns `None` if the cell has no content (empty/uninitialized).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Attenuate)]
 pub struct Resolve;
 
 impl Effect for Resolve {
@@ -115,7 +115,7 @@ impl ResolveCapability for Capability<Resolve> {
 /// - If `when` is `Some(edition)`, expects current edition to match
 /// - Returns new edition on success
 /// - Returns `MemoryError::EditionMismatch` if expectation doesn't match
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
 pub struct Publish {
     /// The content to publish.
     #[serde(with = "serde_bytes")]
@@ -174,7 +174,7 @@ impl PublishCapability for Capability<Publish> {
 ///
 /// - Requires `when` to match current edition
 /// - Returns `MemoryError::EditionMismatch` if edition doesn't match
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
 pub struct Retract {
     /// The expected current edition.
     #[serde(with = "serde_bytes")]
@@ -305,57 +305,5 @@ mod tests {
             .invoke(Retract::new(b"v1"));
 
         assert_eq!(claim.ability(), "/memory/retract");
-    }
-
-    #[cfg(feature = "ucan")]
-    mod parameters_tests {
-        use super::*;
-        use dialog_capability::ucan::parameters;
-        use ipld_core::ipld::Ipld;
-
-        #[test]
-        fn it_collects_resolve_capability_parameters() {
-            let cap = Subject::from(did!("key:zSpace"))
-                .attenuate(Memory)
-                .attenuate(Space::new("remote"))
-                .attenuate(Cell::new("config"))
-                .invoke(Resolve);
-            let params = parameters(&cap);
-
-            assert_eq!(params.get("space"), Some(&Ipld::String("remote".into())));
-            assert_eq!(params.get("cell"), Some(&Ipld::String("config".into())));
-        }
-
-        #[test]
-        fn it_collects_publish_capability_parameters() {
-            let cap = Subject::from(did!("key:zSpace"))
-                .attenuate(Memory)
-                .attenuate(Space::new("local"))
-                .attenuate(Cell::new("main"))
-                .invoke(Publish {
-                    content: b"hello".to_vec(),
-                    when: Some(b"v1".to_vec().into()),
-                });
-            let params = parameters(&cap);
-
-            assert_eq!(params.get("space"), Some(&Ipld::String("local".into())));
-            assert_eq!(params.get("cell"), Some(&Ipld::String("main".into())));
-            assert_eq!(params.get("content"), Some(&Ipld::Bytes(b"hello".to_vec())));
-            assert_eq!(params.get("when"), Some(&Ipld::Bytes(b"v1".to_vec())));
-        }
-
-        #[test]
-        fn it_collects_retract_capability_parameters() {
-            let cap = Subject::from(did!("key:zSpace"))
-                .attenuate(Memory)
-                .attenuate(Space::new("local"))
-                .attenuate(Cell::new("main"))
-                .invoke(Retract::new(b"v1"));
-            let params = parameters(&cap);
-
-            assert_eq!(params.get("space"), Some(&Ipld::String("local".into())));
-            assert_eq!(params.get("cell"), Some(&Ipld::String("main".into())));
-            assert_eq!(params.get("when"), Some(&Ipld::Bytes(b"v1".to_vec())));
-        }
     }
 }

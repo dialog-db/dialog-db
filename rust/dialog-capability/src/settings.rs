@@ -1,4 +1,5 @@
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 /// Builder for collecting constrains from a capability chain.
 ///
@@ -12,13 +13,14 @@ pub trait PolicyBuilder {
 /// Trait for types that can contribute constrains to capability invocations.
 ///
 /// Caveats are conditions or restrictions attached to a capability delegation.
-/// This trait is auto-implemented for all `Serialize` types via a blanket impl.
-pub trait Caveat: Serialize {
+/// This trait is auto-implemented for all types that implement both
+/// `Serialize` and `DeserializeOwned` via a blanket impl.
+pub trait Caveat: Serialize + DeserializeOwned {
     /// Push this constrain to the builder.
     fn constrain(&self, builder: &mut impl PolicyBuilder);
 }
 
-impl<T: Serialize> Caveat for T {
+impl<T: Serialize + DeserializeOwned> Caveat for T {
     fn constrain(&self, builder: &mut impl PolicyBuilder) {
         builder.push(self);
     }
