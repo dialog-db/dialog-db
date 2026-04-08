@@ -441,4 +441,242 @@ mod tests {
             "profile location should resolve under temp/dialog with .profile suffix: {path}"
         );
     }
+
+    fn unique_name(prefix: &str) -> String {
+        use dialog_common::time;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let ts = time::now()
+            .duration_since(time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("{prefix}-{ts}-{seq}")
+    }
+
+    #[dialog_common::test]
+    async fn it_writes_credential_to_expected_path() {
+        use dialog_credentials::{Ed25519Signer, SignerCredential};
+        use dialog_effects::prelude::*;
+        use dialog_varsig::Principal;
+
+        let name = unique_name("fs-layout-credential");
+        let location = StorageLocation::new(Directory::Temp, &name);
+        let provider = FileSystem::open(&location).await.unwrap();
+        let root: PathBuf = provider.0.clone().try_into().unwrap();
+
+        let signer = Ed25519Signer::generate().await.unwrap();
+        let did = Principal::did(&signer);
+        let cred = dialog_credentials::Credential::Signer(SignerCredential::from(signer));
+
+        did.credential("self")
+            .save(cred)
+            .perform(&provider)
+            .await
+            .unwrap();
+
+        // Credential should be at {root}/credential/self
+        let expected = root.join("credential").join("self");
+        assert!(
+            expected.exists(),
+            "credential file should exist at {expected:?}"
+        );
+        assert!(
+            expected.is_file(),
+            "credential should be a file, not a directory"
+        );
+    }
+
+    #[dialog_common::test]
+    async fn it_writes_archive_to_expected_path() {
+        use dialog_common::Blake3Hash;
+        use dialog_credentials::Ed25519Signer;
+        use dialog_effects::prelude::*;
+        use dialog_varsig::Principal;
+
+        let name = unique_name("fs-layout-archive");
+        let location = StorageLocation::new(Directory::Temp, &name);
+        let provider = FileSystem::open(&location).await.unwrap();
+        let root: PathBuf = provider.0.clone().try_into().unwrap();
+
+        let signer = Ed25519Signer::generate().await.unwrap();
+        let did = Principal::did(&signer);
+        let content = b"hello archive layout".to_vec();
+        let digest = Blake3Hash::hash(&content);
+
+        did.archive()
+            .catalog("index")
+            .put(digest.clone(), content)
+            .perform(&provider)
+            .await
+            .unwrap();
+
+        // Archive should be at {root}/archive/index/{base58(digest)}
+        let digest_key = base58::ToBase58::to_base58(digest.as_bytes().as_slice());
+        let expected = root.join("archive").join("index").join(&digest_key);
+        assert!(
+            expected.exists(),
+            "archive blob should exist at {expected:?}"
+        );
+    }
+
+    #[dialog_common::test]
+    async fn it_writes_memory_to_expected_path() {
+        use dialog_credentials::Ed25519Signer;
+        use dialog_effects::prelude::*;
+        use dialog_varsig::Principal;
+
+        let name = unique_name("fs-layout-memory");
+        let location = StorageLocation::new(Directory::Temp, &name);
+        let provider = FileSystem::open(&location).await.unwrap();
+        let root: PathBuf = provider.0.clone().try_into().unwrap();
+
+        let signer = Ed25519Signer::generate().await.unwrap();
+        let did = Principal::did(&signer);
+
+        did.memory()
+            .space("local")
+            .cell("head")
+            .publish(b"cell content", None)
+            .perform(&provider)
+            .await
+            .unwrap();
+
+        // Memory should be at {root}/memory/local/head
+        let expected = root.join("memory").join("local").join("head");
+        assert!(
+            expected.exists(),
+            "memory cell should exist at {expected:?}"
+        );
+    }
+
+    #[dialog_common::test]
+    async fn it_loads_credential_from_prefabricated_path() {
+        use dialog_credentials::{Ed25519Signer, SignerCredential};
+        use dialog_effects::prelude::*;
+        use dialog_varsig::Principal;
+
+        let name = unique_name("fs-prefab-credential");
+        let location = StorageLocation::new(Directory::Temp, &name);
+        let provider = FileSystem::open(&location).await.unwrap();
+        let root: PathBuf = provider.0.clone().try_into().unwrap();
+
+        // Generate a credential and export it
+        let signer = Ed25519Signer::generate().await.unwrap();
+        let did = Principal::did(&signer);
+        let cred = dialog_credentials::Credential::Signer(SignerCredential::from(signer));
+        let export = cred.export().await.unwrap();
+
+        // Manually write the exported bytes to the expected path
+        let cred_dir = root.join("credential");
+        std::fs::create_dir_all(&cred_dir).unwrap();
+        std::fs::write(cred_dir.join("self"), export.as_bytes()).unwrap();
+
+        // Provider should load it successfully
+        let loaded = did
+            .credential("self")
+            .load()
+            .perform(&provider)
+            .await
+            .unwrap();
+
+        assert_eq!(loaded.did(), cred.did());
+    }
+
+    #[dialog_common::test]
+    async fn it_rejects_corrupted_credential() {
+        use dialog_credentials::Ed25519Signer;
+        use dialog_effects::prelude::*;
+        use dialog_varsig::Principal;
+
+        let name = unique_name("fs-corrupt-credential");
+        let location = StorageLocation::new(Directory::Temp, &name);
+        let provider = FileSystem::open(&location).await.unwrap();
+        let root: PathBuf = provider.0.clone().try_into().unwrap();
+
+        let signer = Ed25519Signer::generate().await.unwrap();
+        let did = Principal::did(&signer);
+
+        // Write garbage to the credential path
+        let cred_dir = root.join("credential");
+        std::fs::create_dir_all(&cred_dir).unwrap();
+        std::fs::write(cred_dir.join("self"), b"not a valid credential").unwrap();
+
+        let result = did.credential("self").load().perform(&provider).await;
+
+        assert!(result.is_err(), "should reject corrupted credential data");
+    }
+
+    #[dialog_common::test]
+    async fn it_loads_archive_from_prefabricated_path() {
+        use dialog_common::Blake3Hash;
+        use dialog_credentials::Ed25519Signer;
+        use dialog_effects::prelude::*;
+        use dialog_varsig::Principal;
+
+        let name = unique_name("fs-prefab-archive");
+        let location = StorageLocation::new(Directory::Temp, &name);
+        let provider = FileSystem::open(&location).await.unwrap();
+        let root: PathBuf = provider.0.clone().try_into().unwrap();
+
+        let signer = Ed25519Signer::generate().await.unwrap();
+        let did = Principal::did(&signer);
+        let content = b"prefabricated blob".to_vec();
+        let digest = Blake3Hash::hash(&content);
+
+        // Manually write content to the expected archive path
+        let digest_key = base58::ToBase58::to_base58(digest.as_bytes().as_slice());
+        let blob_dir = root.join("archive").join("index");
+        std::fs::create_dir_all(&blob_dir).unwrap();
+        std::fs::write(blob_dir.join(&digest_key), &content).unwrap();
+
+        // Provider should find it
+        let loaded = did
+            .archive()
+            .catalog("index")
+            .get(digest)
+            .perform(&provider)
+            .await
+            .unwrap();
+
+        assert_eq!(loaded, Some(content));
+    }
+
+    #[dialog_common::test]
+    async fn it_loads_memory_from_prefabricated_path() {
+        use dialog_common::Blake3Hash;
+        use dialog_credentials::Ed25519Signer;
+        use dialog_effects::prelude::*;
+        use dialog_varsig::Principal;
+
+        let name = unique_name("fs-prefab-memory");
+        let location = StorageLocation::new(Directory::Temp, &name);
+        let provider = FileSystem::open(&location).await.unwrap();
+        let root: PathBuf = provider.0.clone().try_into().unwrap();
+
+        let signer = Ed25519Signer::generate().await.unwrap();
+        let did = Principal::did(&signer);
+        let content = b"prefabricated cell value".to_vec();
+
+        // Manually write content to the expected memory path
+        let cell_dir = root.join("memory").join("local");
+        std::fs::create_dir_all(&cell_dir).unwrap();
+        std::fs::write(cell_dir.join("head"), &content).unwrap();
+
+        // Provider should resolve it with correct edition
+        let resolved = did
+            .memory()
+            .space("local")
+            .cell("head")
+            .resolve()
+            .perform(&provider)
+            .await
+            .unwrap();
+
+        let publication = resolved.expect("should find prefabricated cell");
+        assert_eq!(publication.content, content);
+
+        let expected_edition = Blake3Hash::hash(&content).as_bytes().to_vec();
+        assert_eq!(publication.edition, expected_edition);
+    }
 }
