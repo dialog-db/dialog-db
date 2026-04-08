@@ -5,8 +5,8 @@
 //! type information and serialization utilities.
 
 use std::{
-    fmt::{Display, Formatter},
-    hash::Hash,
+    fmt::{Debug, Display, Formatter, Result as FmtResult},
+    hash::{Hash, Hasher},
     marker::PhantomData,
     mem,
     str::FromStr,
@@ -15,7 +15,7 @@ use std::{
 use crate::{Attribute, Cause, DialogArtifactsError, Entity, TypeError, make_reference};
 use base58::{FromBase58, ToBase58};
 use dialog_storage::Blake3Hash;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 /// All value type representations that may be stored by [`Artifacts`]
 #[derive(Debug, Clone, PartialOrd, Serialize, Deserialize)]
@@ -96,7 +96,7 @@ impl Value {
 }
 
 impl Hash for Value {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+    fn hash<H: Hasher>(&self, state: &mut H) {
         match self {
             Value::Float(f) => f.to_le_bytes().hash(state),
             Value::Bytes(b) => b.hash(state),
@@ -144,7 +144,7 @@ where
 {
     String::deserialize(deserializer)?
         .parse()
-        .map_err(|error| serde::de::Error::custom(format!("{error}")))
+        .map_err(|error| de::Error::custom(format!("{error}")))
 }
 
 impl FromStr for Value {
@@ -160,7 +160,7 @@ impl FromStr for Value {
 
         fn to_dialog_error_debug<E>(error: E) -> DialogArtifactsError
         where
-            E: std::fmt::Debug,
+            E: Debug,
         {
             DialogArtifactsError::InvalidValue(format!("{:?}", error))
         }
@@ -880,7 +880,7 @@ impl ValueDataType {
 }
 
 impl Display for ValueDataType {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
             ValueDataType::Bytes => write!(f, "Bytes"),
             ValueDataType::Entity => write!(f, "Entity"),
