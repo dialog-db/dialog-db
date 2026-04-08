@@ -1175,7 +1175,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dialog-ucan"
+name = "dialog-ucan-core"
 version = "0.1.0"
 dependencies = [
  "arbitrary",

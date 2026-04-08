@@ -6,7 +6,7 @@ pub use dialog_varsig::{Principal, Signature, Signer};
 /// for a specific [`Signature`](dialog_varsig::Signature) type.
 ///
 /// Any type implementing `Issuer` automatically satisfies
-/// `dialog_ucan::Issuer<Self::Signature>` when the `ucan` feature is enabled,
+/// `dialog_ucan_core::Issuer<Self::Signature>` when the `ucan` feature is enabled,
 /// because `Issuer<S>` is a blanket impl for `Signer<S> + Principal`.
 pub trait Issuer: Principal + Signer<Self::Signature> {
     /// The signature type produced by this issuer.

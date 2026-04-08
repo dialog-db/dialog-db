@@ -2,7 +2,7 @@
 mod invocation_conformance {
     use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::OnceLock};
 
-    use dialog_ucan::{Delegation, Invocation, delegation::store};
+    use dialog_ucan_core::{Delegation, Invocation, delegation::store};
     use dialog_varsig::eddsa::Ed25519Signature;
     use ipld_core::{cid::Cid, ipld::Ipld};
     use testresult::TestResult;
@@ -160,12 +160,12 @@ mod invocation_conformance {
     }
 
     /// Parse the `time` field from a fixture entry as a `Timestamp`.
-    fn parse_time(entry: &serde_json::Value) -> dialog_ucan::time::Timestamp {
+    fn parse_time(entry: &serde_json::Value) -> dialog_ucan_core::time::Timestamp {
         let secs = entry["time"]
             .as_u64()
             .expect("fixture entry has a 'time' field (Unix seconds)");
-        use dialog_ucan::time::timestamp::{Duration, UNIX_EPOCH};
-        dialog_ucan::time::Timestamp::new(UNIX_EPOCH + Duration::from_secs(secs))
+        use dialog_ucan_core::time::timestamp::{Duration, UNIX_EPOCH};
+        dialog_ucan_core::time::Timestamp::new(UNIX_EPOCH + Duration::from_secs(secs))
             .expect("fixture time is in range")
     }
 
@@ -215,7 +215,7 @@ mod invocation_conformance {
     mod invalid {
         use super::*;
         use dialog_credentials::ed25519::Ed25519KeyResolver;
-        use dialog_ucan::invocation::{CheckFailed, InvocationCheckError, StoredCheckError};
+        use dialog_ucan_core::invocation::{CheckFailed, InvocationCheckError, StoredCheckError};
 
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         use wasm_bindgen_test::wasm_bindgen_test;

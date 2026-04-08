@@ -3,7 +3,7 @@ mod delegation_conformance {
     use std::sync::OnceLock;
 
     use base64::prelude::*;
-    use dialog_ucan::Delegation;
+    use dialog_ucan_core::Delegation;
     use dialog_varsig::eddsa::Ed25519Signature;
     use testresult::TestResult;
 

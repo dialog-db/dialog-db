@@ -2,7 +2,7 @@
 mod policy_conformance {
     use std::sync::OnceLock;
 
-    use dialog_ucan::delegation::policy::predicate::Predicate;
+    use dialog_ucan_core::delegation::policy::predicate::Predicate;
     use ipld_core::ipld::Ipld;
     use testresult::TestResult;
 
