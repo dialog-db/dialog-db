@@ -1,5 +1,6 @@
 use dialog_capability::{Did, Subject};
 use dialog_prolly_tree::{GeometricDistribution, Tree};
+use dialog_query::query::Application;
 use dialog_storage::Blake3Hash;
 
 use std::fmt::{Debug, Formatter, Result as FmtResult};
@@ -26,6 +27,7 @@ mod push;
 pub mod reference;
 mod reset;
 mod select;
+mod session;
 mod set_upstream;
 mod transaction;
 
@@ -92,5 +94,10 @@ impl Branch {
     /// Archive capability for this branch's subject.
     pub fn archive(&self) -> Archive {
         Archive::new(Subject::from(self.subject().clone()))
+    }
+
+    /// Query with an application. Shortcut for `branch.query().select(query)`.
+    pub fn select<Q: Application>(&self, query: Q) -> session::SelectQuery<'_, Q> {
+        session::SelectQuery::new(self, query)
     }
 }

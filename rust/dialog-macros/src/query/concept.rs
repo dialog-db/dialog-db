@@ -250,13 +250,18 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl dialog_query::Application for #query_name {
             type Conclusion = #struct_name;
 
-            fn evaluate<S: dialog_query::Source, M: dialog_query::Selection>(
+            fn evaluate<'__a, __Env, __M: dialog_query::Selection + '__a>(
                 self,
-                selection: M,
-                source: &S,
-            ) -> impl dialog_query::Selection {
+                selection: __M,
+                env: &'__a __Env,
+            ) -> impl dialog_query::Selection + '__a
+            where
+                __Env: dialog_query::Provider<dialog_query::Select<'__a>>
+                    + dialog_query::Provider<dialog_query::source::SelectRules>
+                    + dialog_query::ConditionalSync,
+            {
                 let application: dialog_query::ConceptQuery = self.into();
-                application.evaluate(selection, source)
+                application.evaluate(selection, env)
             }
 
             fn realize(&self, source: dialog_query::Match) -> std::result::Result<Self::Conclusion, dialog_query::EvaluationError> {
@@ -269,12 +274,17 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         // Add inherent perform method so users don't need to import Application trait
         impl #query_name {
-            /// Execute this query against the given source
-            pub fn perform<S: dialog_query::Source>(
+            /// Execute this query against the given environment
+            pub fn perform<'__a, __Env>(
                 self,
-                source: &S,
-            ) -> impl dialog_query::Output<#struct_name> {
-                dialog_query::Application::perform(self, source)
+                env: &'__a __Env,
+            ) -> impl dialog_query::Output<#struct_name> + '__a
+            where
+                __Env: dialog_query::Provider<dialog_query::Select<'__a>>
+                    + dialog_query::Provider<dialog_query::source::SelectRules>
+                    + dialog_query::ConditionalSync,
+            {
+                dialog_query::Application::perform(self, env)
             }
         }
 
@@ -394,15 +404,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         // Implement Statement trait
         impl dialog_query::Statement for #struct_name {
-            fn assert(self, transaction: &mut dialog_query::Transaction) {
+            fn assert(self, update: &mut impl dialog_query::Update) {
                 #(
-                    dialog_query::Statement::assert(#instance_expressions, transaction);
+                    dialog_query::Statement::assert(#instance_expressions, update);
                 )*
             }
 
-            fn retract(self, transaction: &mut dialog_query::Transaction) {
+            fn retract(self, update: &mut impl dialog_query::Update) {
                 #(
-                    dialog_query::Statement::retract(#instance_expressions, transaction);
+                    dialog_query::Statement::retract(#instance_expressions, update);
                 )*
             }
         }
@@ -412,7 +422,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             type Output = dialog_query::Retraction<Self>;
 
             fn not(self) -> Self::Output {
-                dialog_query::Statement::revert(self)
+                dialog_query::StatementExt::revert(self)
             }
         }
 
