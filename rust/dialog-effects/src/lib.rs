@@ -6,27 +6,33 @@
 //!
 //! # Capability Domains
 //!
-//! - [`storage`]: Key-value storage operations (`Storage`, `Store`, `Get`, `Set`, `Delete`, `List`)
+//! - [`storage`]: Location-based storage operations (`Storage`, `Location`, `Mount`, `Load`, `Save`)
 //! - [`memory`]: CAS memory cells (`Memory`, `Space`, `Cell`, `Resolve`, `Publish`, `Retract`)
 //! - [`archive`]: Content-addressed archive (`Archive`, `Catalog`, `Get`, `Put`)
 //!
 //! # Example
 //!
 //! ```
-//! use dialog_effects::storage::{Storage, Store, Get};
+//! use dialog_effects::archive::{Archive, Catalog, Get};
 //! use dialog_capability::{did, Subject};
+//! use dialog_common::Blake3Hash;
 //!
-//! // Build a capability to get a value from the "index" store
+//! // Build a capability to get content from the "index" catalog
+//! let digest = Blake3Hash::hash(b"hello");
 //! let get_capability = Subject::from(did!("key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"))
-//!     .attenuate(Storage)              // Domain: storage operations
-//!     .attenuate(Store::new("index"))  // Policy: only the "index" store
-//!     .invoke(Get::new(b"my-key"));    // Effect: get this specific key
+//!     .attenuate(Archive)              // Domain: archive operations
+//!     .attenuate(Catalog::new("index"))  // Policy: only the "index" catalog
+//!     .invoke(Get::new(digest));         // Effect: get this specific digest
 //! ```
 
 #![warn(missing_docs)]
 
+pub mod access;
 pub mod archive;
+pub mod authority;
+pub mod credential;
 pub mod memory;
+pub mod space;
 pub mod storage;
 
 // Re-export capability primitives for convenience
