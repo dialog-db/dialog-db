@@ -1,12 +1,8 @@
-use crate::access::{Authorization, AuthorizeError, Protocol};
-use crate::authority::{Identify, Sign};
 use crate::fork::Fork;
-use crate::site::{Site, SiteAddress};
-use crate::storage::{Get, List};
+use crate::site::SiteAddress;
 use crate::{
     Ability, Constrained, Constraint, Did, Effect, Policy, PolicyBuilder, Provider, Selector,
 };
-use dialog_common::{ConditionalSend, ConditionalSync};
 use std::fmt::{Debug, Formatter};
 
 /// Capability chain — wraps a fully-typed constraint chain.
@@ -118,27 +114,10 @@ impl<Fx: Effect> Capability<Fx> {
         env.execute(self).await
     }
 
-    /// Authorize this capability for a specific site's authorization format.
-    ///
-    /// Delegates to the site's [`Protocol::authorize`](access::Protocol::authorize).
-    pub async fn acquire<S, Env>(
-        self,
-        env: &Env,
-    ) -> Result<Authorization<Fx, S::Protocol>, AuthorizeError>
-    where
-        Fx: Clone + ConditionalSend + 'static,
-        S: Site,
-        S::Protocol: Protocol,
-        Self: Ability + ConditionalSend + ConditionalSync,
-        Env: Provider<Identify> + Provider<Sign> + Provider<List> + Provider<Get> + ConditionalSync,
-    {
-        S::Protocol::authorize(env, self).await
-    }
-
     /// Attach a site address to this capability for remote execution.
     ///
-    /// Returns a [`Fork`] that can be authorized (`.acquire()`) or
-    /// authorized and executed in one step (`.perform()`).
+    /// Returns a [`Fork`] that can be `.perform()`ed against a provider
+    /// that handles authorization internally.
     ///
     /// The site type is inferred from the address via [`SiteAddress`].
     pub fn fork<A: SiteAddress>(self, address: &A) -> Fork<A::Site, Fx>

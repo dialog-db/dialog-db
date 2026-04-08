@@ -6,11 +6,6 @@ version.workspace = true
 authors.workspace = true
 license.workspace = true
 
-[features]
-default = []
-# UCAN support (IPLD serialization for capabilities)
-ucan = ["dep:ipld-core", "dep:dialog-ucan"]
-
 [dependencies]
 convert_case = { workspace = true }
 dialog-common = { workspace = true }
@@ -22,5 +17,6 @@ thiserror = { workspace = true }
 signature = { workspace = true }
 dialog-varsig = { workspace = true }
 url = { workspace = true }
-ipld-core = { workspace = true, optional = true }
-dialog-ucan = { workspace = true, optional = true }
+
+[dev-dependencies]
+wasm-bindgen-test = { workspace = true }

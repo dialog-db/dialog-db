@@ -1,6 +1,3 @@
-mod route;
-pub use route::*;
-
 use crate::Command;
 
 /// Trait for environments that can execute commands.

@@ -10,7 +10,7 @@
 //!
 //! ```rust
 //! # mod example {
-//! use dialog_capability::{did, Subject, Did, Ability, Attenuation, Policy, Effect};
+//! use dialog_capability::{did, Subject, Did, Ability, Attenuation, Policy, Effect, Claim};
 //! use serde::{Serialize, Deserialize};
 //!
 //! // Attenuation: narrows ability (adds "/storage" to path) and adds parameters
@@ -28,7 +28,7 @@
 //! }
 //!
 //! // Effect: narrows ability (adds "/get"), and is invocable
-//! #[derive(Debug, Clone, Serialize, Deserialize)]
+//! #[derive(Debug, Clone, Serialize, Deserialize, Claim)]
 //! struct Get { key: Vec<u8> }
 //! impl Effect for Get {
 //!     type Of = Store;
@@ -150,7 +150,7 @@
 //! |------|------|
 //! | [`Ability`] | Trait providing `subject()` and `ability()` |
 //! | [`Provider<C>`] | Executes commands |
-//! | [`access::Authorization`] | Capability paired with format-specific authorization proof |
+//! | [`access::Authorization`] | Full authorization with signer, can delegate and invoke |
 //! | [`site::Site`] | Trait for site configuration types |
 
 // Allow `#[derive(Claim)]` to resolve `::dialog_capability::Claim` inside this crate.
@@ -167,9 +167,6 @@ pub use selector::*;
 
 mod settings;
 pub use settings::*;
-
-#[cfg(feature = "ucan")]
-pub mod ucan;
 
 mod ability;
 pub use ability::*;
@@ -197,9 +194,6 @@ pub use capability::*;
 
 mod provider;
 pub use provider::*;
-
-mod router;
-pub use router::*;
 
 mod issuer;
 pub use issuer::*;

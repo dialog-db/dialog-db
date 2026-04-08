@@ -66,7 +66,6 @@ jobs:
           - 'test:native:release'
           - 'test:web:debug'
           - 'test:web:release'
-          - 'test:web:ucan'
           - 'test:cross:integration'
           # FIXME: Currently, NPM package tests run / pass locally, but
           # in CI the test runner is picking up the wrong `chromium` binary
