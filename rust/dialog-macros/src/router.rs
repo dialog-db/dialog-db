@@ -27,6 +27,7 @@
 //! Generates per-field `Provider<RemoteInvocation<Fx, FieldAddress>>` impls,
 //! plus a unified `NetworkAddress` enum and dispatch impl.
 
+use convert_case::{Case, Casing};
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{DeriveInput, parse_macro_input};
@@ -46,22 +47,6 @@ struct RoutableField<'a> {
     field_ty: &'a syn::Type,
     cfg_attrs: Vec<&'a syn::Attribute>,
     variant_name: syn::Ident,
-}
-
-/// Convert a snake_case identifier to PascalCase.
-fn to_pascal_case(s: &str) -> String {
-    s.split('_')
-        .map(|segment| {
-            let mut chars = segment.chars();
-            match chars.next() {
-                None => String::new(),
-                Some(c) => {
-                    let upper: String = c.to_uppercase().collect();
-                    upper + chars.as_str()
-                }
-            }
-        })
-        .collect()
 }
 
 /// Extract bare generic param identifiers (without bounds) for use in
@@ -154,7 +139,7 @@ fn generate_router(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream>
                 .iter()
                 .filter(|attr| attr.path().is_ident("cfg"))
                 .collect();
-            let variant_name = format_ident!("{}", to_pascal_case(&field_name.to_string()));
+            let variant_name = format_ident!("{}", field_name.to_string().to_case(Case::Pascal));
 
             Some(RoutableField {
                 field_name,
@@ -381,18 +366,4 @@ fn generate_router(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream>
         #(#from_impls)*
         #unified_provider_impl
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::to_pascal_case;
-
-    #[test]
-    fn pascal_case_simple() {
-        assert_eq!(to_pascal_case("s3"), "S3");
-        assert_eq!(to_pascal_case("ucan"), "Ucan");
-        assert_eq!(to_pascal_case("my_field"), "MyField");
-        assert_eq!(to_pascal_case("a_b_c"), "ABC");
-        assert_eq!(to_pascal_case("hello_world"), "HelloWorld");
-    }
 }
