@@ -134,6 +134,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 
 [[package]]
+name = "async-signature"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "646dcc11163091f40c1618702bcde3d2e152c52b05fc4527fc67cfe077e47c22"
+dependencies = [
+ "signature",
+]
+
+[[package]]
 name = "async-stream"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1154,6 +1163,42 @@ dependencies = [
  "tower",
  "tower-http",
  "url",
+ "wasm-bindgen-test",
+]
+
+[[package]]
+name = "dialog-remote-ucan-s3"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-signature",
+ "async-trait",
+ "base58",
+ "bytes",
+ "dialog-capability",
+ "dialog-common",
+ "dialog-credentials",
+ "dialog-effects",
+ "dialog-remote-s3",
+ "dialog-storage",
+ "dialog-ucan",
+ "dialog-ucan-core",
+ "dialog-varsig",
+ "getrandom 0.2.16",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "ipld-core",
+ "reqwest",
+ "serde",
+ "serde_bytes",
+ "serde_ipld_dagcbor",
+ "serde_json",
+ "signature",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower",
+ "tower-http",
  "wasm-bindgen-test",
 ]
 
