@@ -33,6 +33,7 @@ members = [
     "rust/dialog-ucan",
     "rust/dialog-remote-s3",
     "rust/dialog-remote-ucan-s3",
+    "rust/dialog-operator",
     "rust/dialog-varsig",
     "rust/dialog-blobs",
 ]
@@ -197,3 +198,9 @@ path = "./rust/dialog-blobs"
 
 [workspace.dependencies.dialog-remote-s3]
 path = "./rust/dialog-remote-s3"
+
+[workspace.dependencies.dialog-remote-ucan-s3]
+path = "./rust/dialog-remote-ucan-s3"
+
+[workspace.dependencies.dialog-operator]
+path = "./rust/dialog-operator"
