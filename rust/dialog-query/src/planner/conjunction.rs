@@ -1,8 +1,12 @@
 use super::{Plan, Planner};
+use crate::Environment;
 use crate::error::TypeError;
 use crate::selection::Selection;
-use crate::{Environment, Source};
+use crate::source::SelectRules;
 use core::pin::Pin;
+use dialog_artifacts::Select;
+use dialog_capability::Provider;
+use dialog_common::ConditionalSync;
 
 /// An ordered sequence of [`Plan`] steps produced by the query planner.
 ///
@@ -47,14 +51,17 @@ impl Conjunction {
     /// Returns `Pin<Box<...>>` because each step's output type depends on the
     /// previous step. Boxing erases the nesting from the type and keeps each
     /// step at pointer size on the stack.
-    pub fn evaluate<S: Source, M: Selection>(
+    pub fn evaluate<'a, Env, M: Selection + 'a>(
         self,
         selection: M,
-        source: &S,
-    ) -> Pin<Box<dyn Selection>> {
+        env: &'a Env,
+    ) -> Pin<Box<dyn Selection + 'a>>
+    where
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    {
         self.steps.into_iter().fold(
-            Box::pin(selection) as Pin<Box<dyn Selection>>,
-            |selection, plan| Box::pin(plan.evaluate(selection, source)),
+            Box::pin(selection) as Pin<Box<dyn Selection + 'a>>,
+            |selection, plan| Box::pin(plan.evaluate(selection, env)),
         )
     }
 }

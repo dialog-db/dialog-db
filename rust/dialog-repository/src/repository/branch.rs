@@ -1,5 +1,6 @@
 use dialog_capability::{Did, Subject};
 use dialog_prolly_tree::{GeometricDistribution, Tree};
+use dialog_query::query::Application;
 use dialog_storage::Blake3Hash;
 
 use std::fmt::{Debug, Formatter, Result as FmtResult};
@@ -26,6 +27,7 @@ mod push;
 mod reset;
 mod select;
 mod selector;
+mod session;
 mod set_upstream;
 
 pub use commit::Commit;
@@ -128,6 +130,11 @@ impl Branch {
 
     pub(crate) fn commit<I>(&self, instructions: I) -> Commit<'_, I> {
         Commit::new(self, instructions)
+    }
+
+    /// Query with an application. Shortcut for `branch.query().select(query)`.
+    pub fn select<Q: Application>(&self, query: Q) -> session::SelectQuery<'_, Q> {
+        session::SelectQuery::new(self, query)
     }
 
     /// Create a command to reset the branch to a given revision.

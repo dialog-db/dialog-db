@@ -21,7 +21,9 @@ thiserror = { workspace = true }
 
 # Dialog-DB dependencies
 dialog-artifacts = { workspace = true }
+dialog-capability = { workspace = true }
 dialog-common = { workspace = true, features = ["helpers"] }
+dialog-effects = { workspace = true }
 
 # Async utilities
 futures-util = { workspace = true }
@@ -43,11 +45,14 @@ wasm-bindgen-futures = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
+dialog-artifacts = { workspace = true }
+dialog-repository = { workspace = true, features = ["helpers"] }
 dialog-storage = { workspace = true, features = ["helpers"] }
 anyhow = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "rt"] }
 futures-util = { workspace = true }
 wasm-bindgen-test = { workspace = true }
+async-trait = { workspace = true }
 
 [features]
 default = []

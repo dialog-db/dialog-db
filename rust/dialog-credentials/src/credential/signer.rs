@@ -1,7 +1,6 @@
 //! Signer credential — wraps a full Ed25519 keypair.
 
 use crate::Ed25519Signer;
-use dialog_capability::Issuer;
 use dialog_varsig::{Did, Principal};
 
 use super::export::{CredentialExportError, SignerCredentialExport};
@@ -60,7 +59,7 @@ impl dialog_varsig::Signer<dialog_varsig::eddsa::Ed25519Signature> for SignerCre
     }
 }
 
-impl Issuer for SignerCredential {
+impl dialog_capability::Issuer for SignerCredential {
     type Signature = dialog_varsig::eddsa::Ed25519Signature;
 }
 
