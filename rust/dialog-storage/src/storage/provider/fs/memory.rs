@@ -272,8 +272,8 @@ impl Provider<Retract> for FileSystem {
 mod tests {
     use super::*;
     use crate::resource::Resource;
-    use dialog_capability::Subject;
-    use dialog_effects::memory::{Cell, Memory, Space};
+    use dialog_capability::Did;
+    use dialog_effects::prelude::*;
     use dialog_effects::storage::{Directory, Location as StorageLocation};
 
     fn unique_name(prefix: &str) -> String {
@@ -288,9 +288,9 @@ mod tests {
         format!("{prefix}-{ts}-{seq}")
     }
 
-    async fn unique_subject() -> Subject {
+    async fn unique_did() -> Did {
         let signer = dialog_credentials::Ed25519Signer::generate().await.unwrap();
-        Subject::from(dialog_varsig::Principal::did(&signer))
+        dialog_varsig::Principal::did(&signer)
     }
 
     #[dialog_common::test]
@@ -300,13 +300,9 @@ mod tests {
             unique_name("fs-it_resolves_non_existent_cell"),
         );
         let provider = FileSystem::open(&location).await?;
-        let subject = unique_subject().await;
+        let did = unique_did().await;
 
-        let effect = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("missing"))
-            .invoke(Resolve);
+        let effect = did.memory().space("local").cell("missing").resolve();
 
         let result = effect.perform(&provider).await?;
         assert!(result.is_none());
@@ -319,27 +315,27 @@ mod tests {
         let location =
             StorageLocation::new(Directory::Temp, unique_name("fs-it_publishes_new_content"));
         let provider = FileSystem::open(&location).await?;
-        let subject = unique_subject().await;
+        let did = unique_did().await;
         let content = b"hello world".to_vec();
 
         // Publish new content (when = None means expect empty)
-        let edition = subject
+        let edition = did
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(content.clone(), None))
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(content.clone(), None)
             .perform(&provider)
             .await?;
 
         assert!(!edition.is_empty());
 
         // Resolve to verify
-        let resolved = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Resolve)
+        let resolved = did
+            .memory()
+            .space("local")
+            .cell("test")
+            .resolve()
             .perform(&provider)
             .await?;
 
@@ -357,36 +353,36 @@ mod tests {
             unique_name("fs-it_updates_existing_content"),
         );
         let provider = FileSystem::open(&location).await?;
-        let subject = unique_subject().await;
+        let did = unique_did().await;
 
         // Create initial content
-        let edition1 = subject
+        let edition1 = did
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(b"initial", None))
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(b"initial", None)
             .perform(&provider)
             .await?;
 
         // Update with correct edition
-        let edition2 = subject
+        let edition2 = did
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(b"updated", Some(edition1.clone())))
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(b"updated", Some(edition1.clone()))
             .perform(&provider)
             .await?;
 
         assert_ne!(edition1, edition2);
 
         // Verify update
-        let resolved = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Resolve)
+        let resolved = did
+            .memory()
+            .space("local")
+            .cell("test")
+            .resolve()
             .perform(&provider)
             .await?;
 
@@ -403,25 +399,24 @@ mod tests {
             unique_name("fs-it_fails_on_edition_mismatch"),
         );
         let provider = FileSystem::open(&location).await?;
-        let subject = unique_subject().await;
+        let did = unique_did().await;
 
         // Create initial content
-        subject
-            .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(b"initial", None))
+        did.clone()
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(b"initial", None)
             .perform(&provider)
             .await?;
 
         // Try to update with wrong edition
         let wrong_edition = Blake3Hash::hash(b"wrong").as_bytes().to_vec();
-        let result = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(b"updated", Some(wrong_edition)))
+        let result = did
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(b"updated", Some(wrong_edition))
             .perform(&provider)
             .await;
 
@@ -437,24 +432,23 @@ mod tests {
             unique_name("fs-it_fails_creating_when_exists"),
         );
         let provider = FileSystem::open(&location).await?;
-        let subject = unique_subject().await;
+        let did = unique_did().await;
 
         // Create initial content
-        subject
-            .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(b"initial", None))
+        did.clone()
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(b"initial", None)
             .perform(&provider)
             .await?;
 
         // Try to create again (when = None means expect empty)
-        let result = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(b"new", None))
+        let result = did
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(b"new", None)
             .perform(&provider)
             .await;
 
@@ -467,34 +461,33 @@ mod tests {
     async fn it_retracts_content() -> anyhow::Result<()> {
         let location = StorageLocation::new(Directory::Temp, unique_name("fs-it_retracts_content"));
         let provider = FileSystem::open(&location).await?;
-        let subject = unique_subject().await;
+        let did = unique_did().await;
 
         // Create content
-        let edition = subject
+        let edition = did
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(b"to be deleted", None))
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(b"to be deleted", None)
             .perform(&provider)
             .await?;
 
         // Retract with correct edition
-        subject
-            .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Retract::new(edition))
+        did.clone()
+            .memory()
+            .space("local")
+            .cell("test")
+            .retract(edition)
             .perform(&provider)
             .await?;
 
         // Verify deleted
-        let resolved = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Resolve)
+        let resolved = did
+            .memory()
+            .space("local")
+            .cell("test")
+            .resolve()
             .perform(&provider)
             .await?;
 
@@ -510,25 +503,24 @@ mod tests {
             unique_name("fs-it_fails_retract_on_edition_mismatch"),
         );
         let provider = FileSystem::open(&location).await?;
-        let subject = unique_subject().await;
+        let did = unique_did().await;
 
         // Create content
-        subject
-            .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(b"content", None))
+        did.clone()
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(b"content", None)
             .perform(&provider)
             .await?;
 
         // Try to retract with wrong edition
         let wrong_edition = Blake3Hash::hash(b"wrong").as_bytes().to_vec();
-        let result = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Retract::new(wrong_edition))
+        let result = did
+            .memory()
+            .space("local")
+            .cell("test")
+            .retract(wrong_edition)
             .perform(&provider)
             .await;
 
@@ -544,44 +536,42 @@ mod tests {
             unique_name("fs-it_handles_different_spaces"),
         );
         let provider = FileSystem::open(&location).await?;
-        let subject = unique_subject().await;
+        let did = unique_did().await;
 
         // Publish to different spaces
-        subject
-            .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("space1"))
-            .attenuate(Cell::new("cell"))
-            .invoke(Publish::new(b"content1", None))
+        did.clone()
+            .memory()
+            .space("space1")
+            .cell("cell")
+            .publish(b"content1", None)
             .perform(&provider)
             .await?;
 
-        subject
-            .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("space2"))
-            .attenuate(Cell::new("cell"))
-            .invoke(Publish::new(b"content2", None))
+        did.clone()
+            .memory()
+            .space("space2")
+            .cell("cell")
+            .publish(b"content2", None)
             .perform(&provider)
             .await?;
 
         // Resolve from space1
-        let result1 = subject
+        let result1 = did
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("space1"))
-            .attenuate(Cell::new("cell"))
-            .invoke(Resolve)
+            .memory()
+            .space("space1")
+            .cell("cell")
+            .resolve()
             .perform(&provider)
             .await?;
         assert_eq!(result1.unwrap().content, b"content1".to_vec());
 
         // Resolve from space2
-        let result2 = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("space2"))
-            .attenuate(Cell::new("cell"))
-            .invoke(Resolve)
+        let result2 = did
+            .memory()
+            .space("space2")
+            .cell("cell")
+            .resolve()
             .perform(&provider)
             .await?;
         assert_eq!(result2.unwrap().content, b"content2".to_vec());
@@ -596,26 +586,25 @@ mod tests {
             "fs-it_succeeds_with_stale_edition_when_value_matches",
         );
         let provider = FileSystem::open(&location).await?;
-        let subject = unique_subject().await;
+        let did = unique_did().await;
         let content = b"desired value".to_vec();
 
         // Create initial content
-        subject
-            .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(content.clone(), None))
+        did.clone()
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(content.clone(), None)
             .perform(&provider)
             .await?;
 
         // Try to publish same content with wrong edition - should succeed
         let wrong_edition = Blake3Hash::hash(b"wrong").as_bytes().to_vec();
-        let result = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(content.clone(), Some(wrong_edition)))
+        let result = did
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(content.clone(), Some(wrong_edition))
             .perform(&provider)
             .await;
 
@@ -635,25 +624,25 @@ mod tests {
             unique_name("fs-it_produces_deterministic_content_hash"),
         );
         let provider = FileSystem::open(&location).await?;
-        let subject = unique_subject().await;
+        let did = unique_did().await;
         let content = b"same content".to_vec();
 
         // Create value at cell1
-        let edition1 = subject
+        let edition1 = did
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("cell1"))
-            .invoke(Publish::new(content.clone(), None))
+            .memory()
+            .space("local")
+            .cell("cell1")
+            .publish(content.clone(), None)
             .perform(&provider)
             .await?;
 
         // Create same value at cell2
-        let edition2 = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("cell2"))
-            .invoke(Publish::new(content, None))
+        let edition2 = did
+            .memory()
+            .space("local")
+            .cell("cell2")
+            .publish(content, None)
             .perform(&provider)
             .await?;
 
@@ -670,15 +659,15 @@ mod tests {
             "fs-it_succeeds_retracting_already_retracted",
         );
         let provider = FileSystem::open(&location).await?;
-        let subject = unique_subject().await;
+        let did = unique_did().await;
 
         // Try to retract non-existent cell - should succeed
         let wrong_edition = Blake3Hash::hash(b"wrong").as_bytes().to_vec();
-        let result = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("nonexistent"))
-            .invoke(Retract::new(wrong_edition))
+        let result = did
+            .memory()
+            .space("local")
+            .cell("nonexistent")
+            .retract(wrong_edition)
             .perform(&provider)
             .await;
 
@@ -692,27 +681,27 @@ mod tests {
         let location =
             StorageLocation::new(Directory::Temp, unique_name("fs-it_handles_nested_spaces"));
         let provider = FileSystem::open(&location).await?;
-        let subject = unique_subject().await;
+        let did = unique_did().await;
         let content = b"nested content".to_vec();
 
         // Publish to nested space path
-        let edition = subject
+        let edition = did
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("parent/child/grandchild"))
-            .attenuate(Cell::new("cell"))
-            .invoke(Publish::new(content.clone(), None))
+            .memory()
+            .space("parent/child/grandchild")
+            .cell("cell")
+            .publish(content.clone(), None)
             .perform(&provider)
             .await?;
 
         assert!(!edition.is_empty());
 
         // Resolve to verify
-        let resolved = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("parent/child/grandchild"))
-            .attenuate(Cell::new("cell"))
-            .invoke(Resolve)
+        let resolved = did
+            .memory()
+            .space("parent/child/grandchild")
+            .cell("cell")
+            .resolve()
             .perform(&provider)
             .await?;
 
@@ -729,27 +718,27 @@ mod tests {
             unique_name("fs-it_publishes_to_nested_cell"),
         );
         let provider = FileSystem::open(&location).await?;
-        let subject = unique_subject().await;
+        let did = unique_did().await;
         let content = b"nested cell content".to_vec();
 
         // Publish to a cell with a path separator, without pre-creating dirs.
         // This mirrors how Branch::mount uses "local/main" as an address.
-        let edition = subject
+        let edition = did
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("subdir/cell"))
-            .invoke(Publish::new(content.clone(), None))
+            .memory()
+            .space("local")
+            .cell("subdir/cell")
+            .publish(content.clone(), None)
             .perform(&provider)
             .await?;
 
         assert!(!edition.is_empty());
 
-        let resolved = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("subdir/cell"))
-            .invoke(Resolve)
+        let resolved = did
+            .memory()
+            .space("local")
+            .cell("subdir/cell")
+            .resolve()
             .perform(&provider)
             .await?;
 
@@ -764,25 +753,25 @@ mod tests {
         let location =
             StorageLocation::new(Directory::Temp, unique_name("fs-it_handles_empty_content"));
         let provider = FileSystem::open(&location).await?;
-        let subject = unique_subject().await;
+        let did = unique_did().await;
         let content = vec![];
 
-        let edition = subject
+        let edition = did
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("empty"))
-            .invoke(Publish::new(content.clone(), None))
+            .memory()
+            .space("local")
+            .cell("empty")
+            .publish(content.clone(), None)
             .perform(&provider)
             .await?;
 
         assert!(!edition.is_empty());
 
-        let resolved = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("empty"))
-            .invoke(Resolve)
+        let resolved = did
+            .memory()
+            .space("local")
+            .cell("empty")
+            .resolve()
             .perform(&provider)
             .await?;
 
@@ -797,26 +786,26 @@ mod tests {
         let location =
             StorageLocation::new(Directory::Temp, unique_name("fs-it_handles_large_content"));
         let provider = FileSystem::open(&location).await?;
-        let subject = unique_subject().await;
+        let did = unique_did().await;
         // 1MB content
         let content: Vec<u8> = (0..1024 * 1024).map(|i| (i % 256) as u8).collect();
 
-        let edition = subject
+        let edition = did
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("large"))
-            .invoke(Publish::new(content.clone(), None))
+            .memory()
+            .space("local")
+            .cell("large")
+            .publish(content.clone(), None)
             .perform(&provider)
             .await?;
 
         assert!(!edition.is_empty());
 
-        let resolved = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("large"))
-            .invoke(Resolve)
+        let resolved = did
+            .memory()
+            .space("local")
+            .cell("large")
+            .resolve()
             .perform(&provider)
             .await?;
 
@@ -833,15 +822,14 @@ mod tests {
             unique_name("fs-it_publishes_despite_stale_lock"),
         );
         let provider = FileSystem::open(&location).await?;
-        let subject = unique_subject().await;
+        let did = unique_did().await;
 
         // First publish to create the directory structure
-        subject
-            .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(b"initial", None))
+        did.clone()
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(b"initial", None)
             .perform(&provider)
             .await?;
 
@@ -854,21 +842,21 @@ mod tests {
         assert!(lock_path.exists(), "stale lock file should exist");
 
         // Publish should succeed by clearing the stale lock
-        let resolved = subject
+        let resolved = did
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Resolve)
+            .memory()
+            .space("local")
+            .cell("test")
+            .resolve()
             .perform(&provider)
             .await?;
         let edition = resolved.unwrap().edition;
 
-        let edition2 = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(b"after stale lock", Some(edition)))
+        let edition2 = did
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(b"after stale lock", Some(edition))
             .perform(&provider)
             .await?;
 
