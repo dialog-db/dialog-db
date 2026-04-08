@@ -1,0 +1,75 @@
+[package]
+name = "dialog-remote-ucan-s3"
+description = "UCAN-based remote authorization for S3-compatible storage"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+default = []
+helpers = [
+    "dep:anyhow",
+    "dep:bytes",
+    "dep:http-body-util",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:tokio",
+    "dep:tower",
+    "dep:tower-http",
+    "dialog-common/helpers",
+    "dialog-remote-s3/helpers",
+]
+integration-tests = ["dialog-common/integration-tests"]
+web-integration-tests = ["dialog-common/web-integration-tests"]
+
+[dependencies]
+async-trait = { workspace = true }
+base58 = { workspace = true }
+dialog-capability = { workspace = true }
+dialog-ucan = { workspace = true }
+dialog-common = { workspace = true }
+dialog-credentials = { workspace = true }
+dialog-effects = { workspace = true }
+dialog-remote-s3 = { workspace = true }
+dialog-ucan-core = { workspace = true }
+dialog-varsig = { workspace = true }
+ipld-core = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_bytes = { workspace = true }
+serde_ipld_dagcbor = { workspace = true }
+serde_json = { workspace = true }
+signature = { workspace = true }
+thiserror = { workspace = true }
+
+# Optional dependencies (helpers feature, cross-platform)
+anyhow = { workspace = true, optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Optional dependencies (helpers feature, native-only server infrastructure)
+bytes = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
+hyper = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["net", "rt"], optional = true }
+tower = { workspace = true, optional = true }
+tower-http = { workspace = true, features = ["cors"], optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { workspace = true, features = ["js"] }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+async-signature = { workspace = true }
+dialog-common = { workspace = true, features = ["helpers"] }
+dialog-storage = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
+wasm-bindgen-test = { workspace = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+  "cfg(feature, values(\"web-integration-tests\", \"helpers\"))",
+  "cfg(dialog_test_wasm_integration)"
+] }
