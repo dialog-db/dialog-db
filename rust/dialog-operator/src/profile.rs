@@ -157,4 +157,84 @@ mod tests {
         let result = Profile::load("missing").perform(&storage).await;
         assert!(result.is_err());
     }
+
+    #[dialog_common::test]
+    async fn it_opens_profile_at_temp() {
+        use dialog_effects::storage::Directory;
+
+        let storage = Storage::volatile();
+
+        let profile = Profile::open("temp-alice")
+            .at(Directory::Temp)
+            .perform(&storage)
+            .await
+            .unwrap();
+
+        assert!(!profile.did().to_string().is_empty());
+    }
+
+    #[dialog_common::test]
+    async fn it_isolates_profiles_across_directories() {
+        use dialog_effects::storage::Directory;
+
+        let storage = Storage::volatile();
+
+        let profile = Profile::open("same-name")
+            .at(Directory::Profile)
+            .perform(&storage)
+            .await
+            .unwrap();
+
+        let temp = Profile::open("same-name")
+            .at(Directory::Temp)
+            .perform(&storage)
+            .await
+            .unwrap();
+
+        assert_ne!(
+            profile.did(),
+            temp.did(),
+            "same name in different directories should produce different profiles"
+        );
+    }
+
+    #[dialog_common::test]
+    async fn it_creates_and_loads_at_temp() {
+        use dialog_effects::storage::Directory;
+
+        let storage = Storage::volatile();
+
+        let created = Profile::create("temp-load")
+            .at(Directory::Temp)
+            .perform(&storage)
+            .await
+            .unwrap();
+
+        let loaded = Profile::load("temp-load")
+            .at(Directory::Temp)
+            .perform(&storage)
+            .await
+            .unwrap();
+
+        assert_eq!(created.did(), loaded.did());
+    }
+
+    #[dialog_common::test]
+    async fn it_does_not_find_temp_profile_in_default_directory() {
+        use dialog_effects::storage::Directory;
+
+        let storage = Storage::volatile();
+
+        Profile::create("only-in-temp")
+            .at(Directory::Temp)
+            .perform(&storage)
+            .await
+            .unwrap();
+
+        let result = Profile::load("only-in-temp").perform(&storage).await;
+        assert!(
+            result.is_err(),
+            "profile created at temp should not be found in default directory"
+        );
+    }
 }
