@@ -1242,6 +1242,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-repository"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "base58",
+ "dialog-artifacts",
+ "dialog-capability",
+ "dialog-common",
+ "dialog-credentials",
+ "dialog-effects",
+ "dialog-operator",
+ "dialog-prolly-tree",
+ "dialog-remote-s3",
+ "dialog-remote-ucan-s3",
+ "dialog-storage",
+ "dialog-ucan",
+ "dialog-ucan-core",
+ "dialog-varsig",
+ "futures-util",
+ "getrandom 0.2.16",
+ "parking_lot",
+ "reqwest",
+ "serde",
+ "serde_ipld_dagcbor",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
+]
+
+[[package]]
 name = "dialog-search-tree"
 version = "0.1.0"
 dependencies = [
