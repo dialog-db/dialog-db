@@ -1,0 +1,79 @@
+[package]
+name = "dialog-operator"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["s3"]
+helpers = ["dep:anyhow"]
+# Enable integration tests (tests with service provisioning)
+integration-tests = ["dialog-common/integration-tests"]
+# Enable web integration tests
+web-integration-tests = ["dialog-common/web-integration-tests"]
+s3 = ["dep:dialog-remote-s3"]
+
+[dependencies]
+dialog-artifacts = { workspace = true }
+dialog-capability = { workspace = true }
+dialog-common = { workspace = true }
+dialog-credentials = { workspace = true }
+dialog-effects = { workspace = true }
+dialog-ucan-core = { workspace = true }
+dialog-remote-s3 = { workspace = true, optional = true }
+dialog-remote-ucan-s3 = { workspace = true }
+dialog-ucan = { workspace = true }
+dialog-storage = { workspace = true }
+dialog-varsig = { workspace = true }
+anyhow = { workspace = true, optional = true }
+async-trait = { workspace = true }
+base58 = { workspace = true }
+blake3 = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+rand_core = { workspace = true }
+rand_chacha = { workspace = true }
+serde = { workspace = true }
+signature = { workspace = true }
+serde_ipld_dagcbor = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "macros", "io-util"] }
+[dev-dependencies]
+dialog-storage = { workspace = true, features = ["helpers"] }
+dialog-remote-s3 = { workspace = true, features = ["helpers"] }
+dialog-remote-ucan-s3 = { workspace = true, features = ["helpers"] }
+dialog-common = { workspace = true, features = ["helpers"] }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+dirs = { workspace = true }
+tokio = { workspace = true, features = ["sync", "macros", "io-util", "fs"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { workspace = true, features = ["js"] }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+wasm-bindgen-test = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+reqwest = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = [
+    "io-util",
+    "io-std",
+    "sync",
+    "macros",
+    "rt",
+    "rt-multi-thread",
+] }
+
+[lints.rust]
+# This cfg is used by the dialog_common::test proc macro for wasm inner tests
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(dialog_test_wasm_integration)"] }

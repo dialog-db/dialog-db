@@ -1098,6 +1098,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-operator"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base58",
+ "blake3",
+ "dialog-artifacts",
+ "dialog-capability",
+ "dialog-common",
+ "dialog-credentials",
+ "dialog-effects",
+ "dialog-remote-s3",
+ "dialog-remote-ucan-s3",
+ "dialog-storage",
+ "dialog-ucan",
+ "dialog-ucan-core",
+ "dialog-varsig",
+ "dirs",
+ "ed25519-dalek",
+ "getrandom 0.2.16",
+ "rand 0.8.5",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
+ "reqwest",
+ "serde",
+ "serde_ipld_dagcbor",
+ "serde_json",
+ "signature",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
+]
+
+[[package]]
 name = "dialog-prolly-tree"
 version = "0.1.0"
 dependencies = [
