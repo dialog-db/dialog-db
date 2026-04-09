@@ -24,11 +24,9 @@ impl Provider<ForkInvocation<S3, Get>> for S3 {
             .await
             .map_err(|e| ArchiveError::Io(e.to_string()))?;
 
-        <S3 as Provider<Authorized<Get>>>::execute(
-            self,
-            Authorized::new(permit, invocation.capability),
-        )
-        .await
+        Authorized::new(permit, invocation.capability)
+            .perform(self)
+            .await
     }
 }
 
@@ -71,11 +69,9 @@ impl Provider<ForkInvocation<S3, Put>> for S3 {
             .await
             .map_err(|e| ArchiveError::Io(e.to_string()))?;
 
-        <S3 as Provider<Authorized<Put>>>::execute(
-            self,
-            Authorized::new(permit, invocation.capability),
-        )
-        .await
+        Authorized::new(permit, invocation.capability)
+            .perform(self)
+            .await
     }
 }
 

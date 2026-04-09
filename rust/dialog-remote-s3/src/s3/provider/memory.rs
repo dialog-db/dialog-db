@@ -24,11 +24,9 @@ impl Provider<ForkInvocation<S3, Resolve>> for S3 {
             .await
             .map_err(|e| MemoryError::Storage(e.to_string()))?;
 
-        <S3 as Provider<Authorized<Resolve>>>::execute(
-            self,
-            Authorized::new(permit, invocation.capability),
-        )
-        .await
+        Authorized::new(permit, invocation.capability)
+            .perform(self)
+            .await
     }
 }
 
@@ -88,11 +86,9 @@ impl Provider<ForkInvocation<S3, Publish>> for S3 {
             .await
             .map_err(|e| MemoryError::Storage(e.to_string()))?;
 
-        <S3 as Provider<Authorized<Publish>>>::execute(
-            self,
-            Authorized::new(permit, invocation.capability),
-        )
-        .await
+        Authorized::new(permit, invocation.capability)
+            .perform(self)
+            .await
     }
 }
 
@@ -149,11 +145,9 @@ impl Provider<ForkInvocation<S3, Retract>> for S3 {
             .await
             .map_err(|e| MemoryError::Storage(e.to_string()))?;
 
-        <S3 as Provider<Authorized<Retract>>>::execute(
-            self,
-            Authorized::new(permit, invocation.capability),
-        )
-        .await
+        Authorized::new(permit, invocation.capability)
+            .perform(self)
+            .await
     }
 }
 
