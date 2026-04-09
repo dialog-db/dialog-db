@@ -40,6 +40,7 @@
 //! ```
 
 mod archive;
+mod credential;
 mod memory;
 
 use dialog_capability::Did;
@@ -200,27 +201,23 @@ impl<'a> Store<'a> {
     }
 }
 
+use std::rc::Rc;
+
 /// IndexedDB-based storage provider.
 ///
 /// Manages IndexedDB databases keyed by subject DID. Each subject gets its own
-/// database with object stores for archive and memory operations.
-///
-/// Databases are opened lazily on first access and stores are created dynamically
-/// as needed.
-///
-/// Uses `RefCell` for interior mutability since this provider only targets
-/// wasm32 (single-threaded). This avoids the overhead and poisoning concerns
-/// of `RwLock`.
+/// database with object stores for archive, memory, and credential operations.
+#[derive(Clone)]
 pub struct IndexedDb {
     /// Cached database sessions keyed by subject DID.
-    sessions: RefCell<HashMap<Did, Session>>,
+    sessions: Rc<RefCell<HashMap<Did, Session>>>,
 }
 
 impl IndexedDb {
     /// Creates a new IndexedDB provider.
     pub fn new() -> Self {
         Self {
-            sessions: RefCell::new(HashMap::new()),
+            sessions: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
@@ -262,6 +259,18 @@ impl Default for IndexedDb {
     }
 }
 
+use crate::resource::Resource;
+use dialog_effects::storage::Location;
+
+#[async_trait::async_trait(?Send)]
+impl Resource<Location> for IndexedDb {
+    type Error = std::convert::Infallible;
+
+    async fn open(_location: &Location) -> Result<Self, Self::Error> {
+        Ok(Self::new())
+    }
+}
+
 /// Errors that can occur during IndexedDB operations.
 #[derive(Debug, thiserror::Error)]
 pub enum IndexedDbError {
@@ -282,8 +291,18 @@ pub enum IndexedDbError {
     Conversion(String),
 }
 
+use dialog_effects::credential::CredentialError;
+
+impl From<IndexedDbError> for CredentialError {
+    fn from(e: IndexedDbError) -> Self {
+        Self::Storage(e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
     use super::*;
     use wasm_bindgen::JsValue;
 
