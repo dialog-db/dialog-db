@@ -10,7 +10,7 @@
 
 use crate::permit::Permit;
 use dialog_capability::command::Command;
-use dialog_capability::{Capability, Constraint, Effect};
+use dialog_capability::{Capability, Constraint, Effect, Provider};
 
 /// A pre-authorized operation ready for HTTP execution.
 ///
@@ -30,6 +30,19 @@ where
     /// Create a new authorized operation.
     pub fn new(permit: Permit, capability: Capability<Fx>) -> Self {
         Self { permit, capability }
+    }
+}
+
+impl<Fx: Effect> Authorized<Fx>
+where
+    Fx::Of: Constraint,
+{
+    /// Execute this authorized operation against a provider.
+    pub async fn perform<Env>(self, env: &Env) -> Fx::Output
+    where
+        Env: Provider<Self>,
+    {
+        env.execute(self).await
     }
 }
 
