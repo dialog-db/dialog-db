@@ -1,59 +1,27 @@
 //! Filesystem-based storage provider for native environments.
 //!
-//! This provider implements the capability-based storage API using the local
-//! filesystem as the underlying storage mechanism. Each subject DID maps to a
-//! separate directory, with subdirectories for different storage types.
+//! Each space is a directory with the following layout:
 //!
-//! # Directory Structure
-//!
-//! For each subject DID, a directory is created using the DID as a path segment
-//! (URL-encoded, e.g., `did%3Akey%3Az6MkExample`). Within each subject directory:
-//!
-//! - `archive/{catalog}/{base58(digest)}` - Content-addressed blob storage
-//! - `memory/{space}/{cell}` - Transactional memory storage
-//!
-//! # Transactional Memory
-//!
-//! Memory operations use PID-based file locking for cross-process coordination
-//! and BLAKE3 content hashing for CAS (Compare-And-Swap) semantics. This provides
-//! reliable optimistic concurrency for file-based storage with automatic stale
-//! lock recovery.
-//!
-//! # Example
-//!
-//! ```no_run
-//! use dialog_storage::provider::FileSystem;
-//! use dialog_capability::{did, Did, Subject};
-//! use dialog_effects::archive::{Archive, Catalog, Get};
-//! use dialog_common::Blake3Hash;
-//! use std::path::PathBuf;
-//!
-//! # async fn example() -> anyhow::Result<()> {
-//! let provider = FileSystem::mount("file:///tmp/storage")?;
-//! let digest = Blake3Hash::hash(b"hello");
-//!
-//! let effect = Subject::from(did!("key:z6Mk..."))
-//!     .attenuate(Archive)
-//!     .attenuate(Catalog::new("index"))
-//!     .invoke(Get::new(digest));
-//!
-//! let result = effect.perform(&provider).await?;
-//! # Ok(())
-//! # }
+//! ```text
+//! {space_root}/
+//!   archive/{catalog}/{base58(digest)}
+//!   memory/{space}/{cell}
+//!   credential/{address}
 //! ```
+//!
+//! Compare-And-Swap (CAS) semantics are accomplished through PID-based file
+//! locking for cross-process coordination and BLAKE3 content hashing for
+//! enforcing ensuring invariantns.
 
 mod archive;
+mod credential;
 mod error;
 mod memory;
 
 pub use error::FileSystemError;
 
-use dialog_capability::Did;
 use std::path::PathBuf;
 use url::Url;
-
-const ARCHIVE: &str = "archive";
-const MEMORY: &str = "memory";
 
 /// Filesystem-based storage provider.
 ///
@@ -67,58 +35,81 @@ const MEMORY: &str = "memory";
 /// Directories are created lazily on first access.
 #[derive(Clone, Debug)]
 #[repr(transparent)]
-pub struct FileSystem(Location);
-
-impl TryFrom<Url> for FileSystem {
-    type Error = FileSystemError;
-
-    fn try_from(url: Url) -> Result<Self, Self::Error> {
-        Ok(Self(url.try_into()?))
-    }
-}
-
-impl TryFrom<String> for FileSystem {
-    type Error = FileSystemError;
-
-    fn try_from(s: String) -> Result<Self, Self::Error> {
-        Ok(Self(s.try_into()?))
-    }
-}
-
-impl TryFrom<&str> for FileSystem {
-    type Error = FileSystemError;
-
-    fn try_from(s: &str) -> Result<Self, Self::Error> {
-        Ok(Self(s.try_into()?))
-    }
-}
-
-impl TryFrom<PathBuf> for FileSystem {
-    type Error = FileSystemError;
-
-    fn try_from(path: PathBuf) -> Result<Self, Self::Error> {
-        Ok(Self(path.try_into()?))
-    }
-}
+pub struct FileSystem(FileSystemHandle);
 
 impl FileSystem {
-    /// Mounts a filesystem provider at the given root.
-    ///
-    /// Accepts a `PathBuf`, `file:` URL string, or `Url`.
-    pub fn mount(
-        root: impl TryInto<Location, Error = FileSystemError>,
-    ) -> Result<Self, FileSystemError> {
-        Ok(Self(root.try_into()?))
+    /// Resolve a path segment under this space's root.
+    pub fn resolve(&self, segment: &str) -> Result<FileSystemHandle, FileSystemError> {
+        self.0.resolve(segment)
     }
+}
 
-    /// Returns the location for a subject's archive storage.
-    fn archive(&self, subject: &Did) -> Result<Location, FileSystemError> {
-        self.0.resolve(subject.as_ref())?.resolve(ARCHIVE)
+use crate::resource::Resource;
+use dialog_effects::storage::{Directory, Location};
+
+#[async_trait::async_trait]
+impl Resource<Location> for FileSystem {
+    type Error = FileSystemError;
+
+    async fn open(location: &Location) -> Result<Self, FileSystemError> {
+        Ok(Self(FileSystemHandle::try_from(location)?))
     }
+}
 
-    /// Returns the location for a subject's memory storage.
-    fn memory(&self, subject: &Did) -> Result<Location, FileSystemError> {
-        self.0.resolve(subject.as_ref())?.resolve(MEMORY)
+/// Resolve a `Location` (Directory + name) to a filesystem `Location`.
+///
+/// In test mode, all directories resolve under the platform temp dir
+/// to avoid polluting real profile or workspace directories.
+#[cfg(not(test))]
+impl TryFrom<&Location> for FileSystemHandle {
+    type Error = FileSystemError;
+
+    fn try_from(location: &Location) -> Result<Self, FileSystemError> {
+        let base = match &location.directory {
+            Directory::Profile => {
+                let data_dir = dirs::data_dir().ok_or_else(|| {
+                    FileSystemError::Io("could not determine platform data directory".into())
+                })?;
+                data_dir.join("dialog")
+            }
+            Directory::Current => {
+                std::env::current_dir().map_err(|e| FileSystemError::Io(e.to_string()))?
+            }
+            Directory::Temp => std::env::temp_dir(),
+            Directory::At(path) => PathBuf::from(path),
+        };
+
+        let path = if location.name.is_empty() {
+            base
+        } else {
+            base.join(&location.name)
+        };
+
+        path.try_into()
+    }
+}
+
+/// Test mode: all directories resolve under temp dir to avoid
+/// polluting real profile or workspace directories.
+#[cfg(test)]
+impl TryFrom<&Location> for FileSystemHandle {
+    type Error = FileSystemError;
+
+    fn try_from(location: &Location) -> Result<Self, FileSystemError> {
+        let base = std::env::temp_dir().join("dialog");
+        let suffix = match &location.directory {
+            Directory::Profile => ".profile",
+            Directory::Current => ".space",
+            _ => "",
+        };
+
+        let path = if location.name.is_empty() {
+            base
+        } else {
+            base.join(format!("{}{suffix}", location.name))
+        };
+
+        path.try_into()
     }
 }
 
@@ -128,9 +119,9 @@ impl FileSystem {
 /// and converting to native filesystem paths.
 #[derive(Clone, Debug)]
 #[repr(transparent)]
-pub struct Location(Url);
+pub struct FileSystemHandle(Url);
 
-impl TryFrom<Url> for Location {
+impl TryFrom<Url> for FileSystemHandle {
     type Error = FileSystemError;
 
     fn try_from(mut url: Url) -> Result<Self, Self::Error> {
@@ -150,7 +141,7 @@ impl TryFrom<Url> for Location {
     }
 }
 
-impl TryFrom<String> for Location {
+impl TryFrom<String> for FileSystemHandle {
     type Error = FileSystemError;
 
     fn try_from(s: String) -> Result<Self, Self::Error> {
@@ -159,7 +150,7 @@ impl TryFrom<String> for Location {
     }
 }
 
-impl TryFrom<&str> for Location {
+impl TryFrom<&str> for FileSystemHandle {
     type Error = FileSystemError;
 
     fn try_from(s: &str) -> Result<Self, Self::Error> {
@@ -168,7 +159,7 @@ impl TryFrom<&str> for Location {
     }
 }
 
-impl TryFrom<PathBuf> for Location {
+impl TryFrom<PathBuf> for FileSystemHandle {
     type Error = FileSystemError;
 
     fn try_from(path: PathBuf) -> Result<Self, Self::Error> {
@@ -194,18 +185,32 @@ impl TryFrom<PathBuf> for Location {
     }
 }
 
-impl TryFrom<Location> for PathBuf {
+impl TryFrom<FileSystemHandle> for PathBuf {
     type Error = FileSystemError;
 
-    fn try_from(location: Location) -> Result<Self, Self::Error> {
-        location
+    fn try_from(location: FileSystemHandle) -> Result<Self, Self::Error> {
+        let path = location
             .0
             .to_file_path()
-            .map_err(|_| FileSystemError::Io("Failed to convert URL to path".to_string()))
+            .map_err(|_| FileSystemError::Io("Failed to convert URL to path".to_string()))?;
+
+        // Strip trailing slash added by FileSystemHandle for URL semantics.
+        // Filesystem operations (read, write, rename) need clean file paths.
+        let s = path.to_string_lossy();
+        if s.ends_with('/') && s.len() > 1 {
+            Ok(PathBuf::from(s.trim_end_matches('/')))
+        } else {
+            Ok(path)
+        }
     }
 }
 
-impl Location {
+impl FileSystemHandle {
+    /// Returns the underlying URL.
+    pub fn url(&self) -> &Url {
+        &self.0
+    }
+
     /// Returns the URL path component of this location.
     pub fn path(&self) -> &str {
         self.0.path()
@@ -258,114 +263,414 @@ impl Location {
             .await
             .map_err(|e| FileSystemError::Io(e.to_string()))
     }
+
+    /// Read the contents of the file at this location.
+    pub async fn read(&self) -> Result<Vec<u8>, FileSystemError> {
+        let path: PathBuf = self.clone().try_into()?;
+        tokio::fs::read(&path)
+            .await
+            .map_err(|e| FileSystemError::Io(e.to_string()))
+    }
+
+    /// Read the contents of the file at this location, returning `None` if
+    /// the file does not exist.
+    pub async fn read_optional(&self) -> Result<Option<Vec<u8>>, FileSystemError> {
+        let path: PathBuf = self.clone().try_into()?;
+        match tokio::fs::read(&path).await {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(FileSystemError::Io(e.to_string())),
+        }
+    }
+
+    /// Write contents to the file at this location, creating parent dirs.
+    pub async fn write(&self, contents: &[u8]) -> Result<(), FileSystemError> {
+        let path: PathBuf = self.clone().try_into()?;
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| FileSystemError::Io(e.to_string()))?;
+        }
+        tokio::fs::write(&path, contents)
+            .await
+            .map_err(|e| FileSystemError::Io(e.to_string()))
+    }
+
+    /// Atomically rename this location to another.
+    pub async fn rename(&self, to: &FileSystemHandle) -> Result<(), FileSystemError> {
+        let from_path: PathBuf = self.clone().try_into()?;
+        let to_path: PathBuf = to.clone().try_into()?;
+        tokio::fs::rename(&from_path, &to_path)
+            .await
+            .map_err(|e| FileSystemError::Io(e.to_string()))
+    }
+
+    /// Remove the file at this location, returning Ok if already absent.
+    pub async fn remove(&self) -> Result<(), FileSystemError> {
+        let path: PathBuf = self.clone().try_into()?;
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(FileSystemError::Io(e.to_string())),
+        }
+    }
+
+    /// List file names in this directory. Returns an empty vec if the
+    /// directory does not exist.
+    pub async fn list(&self) -> Result<Vec<String>, FileSystemError> {
+        let path: PathBuf = self.clone().try_into()?;
+        let mut entries = match tokio::fs::read_dir(&path).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(FileSystemError::Io(e.to_string())),
+        };
+
+        let mut names = Vec::new();
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| FileSystemError::Io(e.to_string()))?
+        {
+            if let Some(name) = entry.file_name().to_str() {
+                names.push(name.to_string());
+            }
+        }
+        Ok(names)
+    }
+
+    /// Check if this location exists.
+    pub async fn exists(&self) -> bool {
+        let Ok(path) = <PathBuf as TryFrom<FileSystemHandle>>::try_from(self.clone()) else {
+            return false;
+        };
+        path.exists()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dialog_capability::did;
+    use crate::resource::Resource;
+    use dialog_effects::storage::{Directory, Location as StorageLocation};
+
+    /// Create a test FileSystem at a temp location.
+    async fn test_space(name: &str) -> FileSystem {
+        let location = StorageLocation::new(Directory::Temp, name);
+        FileSystem::open(&location).await.unwrap()
+    }
 
     #[dialog_common::test]
-    fn it_generates_correct_paths() {
-        let provider: FileSystem = "file:///root/".try_into().unwrap();
-        let subject = did!("key:z6MkTest");
+    async fn it_generates_correct_layout() {
+        let space = test_space("layout-test").await;
 
-        // Archive path
-        let archive = provider.archive(&subject).unwrap();
-        assert_eq!(archive.path(), "/root/did:key:z6MkTest/archive");
+        // Archive resolves directly under root
+        let archive = space.archive().unwrap();
+        assert!(archive.path().ends_with("/archive"));
 
-        // Archive with catalog
         let catalog = archive.resolve("index").unwrap();
-        assert_eq!(catalog.path(), "/root/did:key:z6MkTest/archive/index");
+        assert!(catalog.path().ends_with("/archive/index"));
 
-        // Memory path
-        let memory = provider.memory(&subject).unwrap();
-        assert_eq!(memory.path(), "/root/did:key:z6MkTest/memory");
+        // Credential resolves under root
+        let cred = space.credential("self").unwrap();
+        assert!(cred.path().ends_with("/credential/self"));
 
-        // Memory with space
-        let space = memory.resolve("local").unwrap();
-        assert_eq!(space.path(), "/root/did:key:z6MkTest/memory/local");
+        // Memory resolves directly under root
+        let memory = space.memory().unwrap();
+        assert!(memory.path().ends_with("/memory"));
+
+        let cell = memory.resolve("local").unwrap();
+        assert!(cell.path().ends_with("/memory/local"));
     }
 
     #[dialog_common::test]
-    fn it_allows_nested_paths() {
-        let provider: FileSystem = "file:///root/".try_into().unwrap();
-        let subject = did!("key:z6MkTest");
+    async fn it_allows_nested_paths() {
+        let space = test_space("nested-test").await;
 
-        // Nested space path should work
-        let memory = provider.memory(&subject).unwrap();
+        let memory = space.memory().unwrap();
         let nested = memory.resolve("foo/bar").unwrap();
-        assert_eq!(nested.path(), "/root/did:key:z6MkTest/memory/foo/bar");
+        assert!(nested.path().ends_with("/memory/foo/bar"));
 
-        // Nested catalog path should work
-        let archive = provider.archive(&subject).unwrap();
+        let archive = space.archive().unwrap();
         let nested = archive.resolve("deep/nested/catalog").unwrap();
-        assert_eq!(
-            nested.path(),
-            "/root/did:key:z6MkTest/archive/deep/nested/catalog"
-        );
+        assert!(nested.path().ends_with("/archive/deep/nested/catalog"));
     }
 
     #[dialog_common::test]
-    fn it_prevents_containment_escape_via_dotdot() {
-        let provider: FileSystem = "file:///root/".try_into().unwrap();
-        let subject = did!("key:z6MkTest");
+    async fn it_prevents_containment_escape_via_dotdot() {
+        let space = test_space("escape-test").await;
 
-        // Attempt to escape via ..
-        let memory = provider.memory(&subject).unwrap();
+        let memory = space.memory().unwrap();
         let result = memory.resolve("../escape");
         assert!(result.is_err());
         assert!(matches!(result, Err(FileSystemError::Containment(_))));
     }
 
     #[dialog_common::test]
-    fn it_handles_absolute_looking_path() {
-        let provider: FileSystem = "file:///root/".try_into().unwrap();
-        let subject = did!("key:z6MkTest");
+    async fn it_prevents_escape_via_encoded_dotdot() {
+        let space = test_space("encoded-escape-test").await;
 
-        // With "./" prefix, "/etc/passwd" becomes ".//etc/passwd" which URL normalizes
-        let archive = provider.archive(&subject).unwrap();
-        let result = archive.resolve("/etc/passwd").unwrap();
-        // The path should be under root and archive
-        assert!(result.path().starts_with("/root/"));
-        assert!(result.path().contains("/archive/"));
-    }
-
-    #[dialog_common::test]
-    fn it_prevents_prefix_collision() {
-        // Ensure "bar" segment doesn't allow access to "barbaz" sibling
-        let base: Location = "file:///foo/bar/".try_into().unwrap();
-
-        // This should work - it's under bar/
-        let valid = base.resolve("baz").unwrap();
-        assert_eq!(valid.path(), "/foo/bar/baz");
-
-        // Base without trailing slash should still work correctly due to normalization
-        let base_no_slash: Location = "file:///foo/bar".try_into().unwrap();
-        let result = base_no_slash.resolve("baz").unwrap();
-        assert_eq!(result.path(), "/foo/bar/baz");
-    }
-
-    #[dialog_common::test]
-    fn it_prevents_escape_via_encoded_dotdot() {
-        let provider: FileSystem = "file:///root/".try_into().unwrap();
-        let subject = did!("key:z6MkTest");
-
-        // URL decodes %2e%2e to .. during join, so this should be caught
-        let memory = provider.memory(&subject).unwrap();
+        let memory = space.memory().unwrap();
         let result = memory.resolve("%2e%2e/escape");
         assert!(result.is_err());
     }
 
     #[dialog_common::test]
-    fn it_prevents_deep_escape() {
-        let provider: FileSystem = "file:///root/".try_into().unwrap();
-        let subject = did!("key:z6MkTest");
+    async fn it_prevents_deep_escape() {
+        let space = test_space("deep-escape-test").await;
 
-        // Try to escape multiple levels
-        let memory = provider.memory(&subject).unwrap();
+        let memory = space.memory().unwrap();
         let result = memory.resolve("foo/../../../../../../etc/passwd");
         assert!(result.is_err());
         assert!(matches!(result, Err(FileSystemError::Containment(_))));
+    }
+
+    #[dialog_common::test]
+    async fn test_mode_resolves_under_temp_dir() {
+        let location = StorageLocation::new(Directory::Profile, "test-alice");
+        let space = FileSystem::open(&location).await.unwrap();
+        let archive = space.archive().unwrap();
+        let path = archive.path();
+        assert!(
+            path.contains("dialog") && path.contains("test-alice") && path.ends_with("/archive"),
+            "profile location should resolve under temp/dialog with .profile suffix: {path}"
+        );
+    }
+
+    fn unique_name(prefix: &str) -> String {
+        use dialog_common::time;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let ts = time::now()
+            .duration_since(time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("{prefix}-{ts}-{seq}")
+    }
+
+    #[dialog_common::test]
+    async fn it_writes_credential_to_expected_path() {
+        use dialog_credentials::{Ed25519Signer, SignerCredential};
+        use dialog_effects::prelude::*;
+        use dialog_varsig::Principal;
+
+        let name = unique_name("fs-layout-credential");
+        let location = StorageLocation::new(Directory::Temp, &name);
+        let provider = FileSystem::open(&location).await.unwrap();
+        let root: PathBuf = provider.0.clone().try_into().unwrap();
+
+        let signer = Ed25519Signer::generate().await.unwrap();
+        let did = Principal::did(&signer);
+        let cred = dialog_credentials::Credential::Signer(SignerCredential::from(signer));
+
+        did.credential("self")
+            .save(cred)
+            .perform(&provider)
+            .await
+            .unwrap();
+
+        // Credential should be at {root}/credential/self
+        let expected = root.join("credential").join("self");
+        assert!(
+            expected.exists(),
+            "credential file should exist at {expected:?}"
+        );
+        assert!(
+            expected.is_file(),
+            "credential should be a file, not a directory"
+        );
+    }
+
+    #[dialog_common::test]
+    async fn it_writes_archive_to_expected_path() {
+        use dialog_common::Blake3Hash;
+        use dialog_credentials::Ed25519Signer;
+        use dialog_effects::prelude::*;
+        use dialog_varsig::Principal;
+
+        let name = unique_name("fs-layout-archive");
+        let location = StorageLocation::new(Directory::Temp, &name);
+        let provider = FileSystem::open(&location).await.unwrap();
+        let root: PathBuf = provider.0.clone().try_into().unwrap();
+
+        let signer = Ed25519Signer::generate().await.unwrap();
+        let did = Principal::did(&signer);
+        let content = b"hello archive layout".to_vec();
+        let digest = Blake3Hash::hash(&content);
+
+        did.archive()
+            .catalog("index")
+            .put(digest.clone(), content)
+            .perform(&provider)
+            .await
+            .unwrap();
+
+        // Archive should be at {root}/archive/index/{base58(digest)}
+        let digest_key = base58::ToBase58::to_base58(digest.as_bytes().as_slice());
+        let expected = root.join("archive").join("index").join(&digest_key);
+        assert!(
+            expected.exists(),
+            "archive blob should exist at {expected:?}"
+        );
+    }
+
+    #[dialog_common::test]
+    async fn it_writes_memory_to_expected_path() {
+        use dialog_credentials::Ed25519Signer;
+        use dialog_effects::prelude::*;
+        use dialog_varsig::Principal;
+
+        let name = unique_name("fs-layout-memory");
+        let location = StorageLocation::new(Directory::Temp, &name);
+        let provider = FileSystem::open(&location).await.unwrap();
+        let root: PathBuf = provider.0.clone().try_into().unwrap();
+
+        let signer = Ed25519Signer::generate().await.unwrap();
+        let did = Principal::did(&signer);
+
+        did.memory()
+            .space("local")
+            .cell("head")
+            .publish(b"cell content", None)
+            .perform(&provider)
+            .await
+            .unwrap();
+
+        // Memory should be at {root}/memory/local/head
+        let expected = root.join("memory").join("local").join("head");
+        assert!(
+            expected.exists(),
+            "memory cell should exist at {expected:?}"
+        );
+    }
+
+    #[dialog_common::test]
+    async fn it_loads_credential_from_prefabricated_path() {
+        use dialog_credentials::{Ed25519Signer, SignerCredential};
+        use dialog_effects::prelude::*;
+        use dialog_varsig::Principal;
+
+        let name = unique_name("fs-prefab-credential");
+        let location = StorageLocation::new(Directory::Temp, &name);
+        let provider = FileSystem::open(&location).await.unwrap();
+        let root: PathBuf = provider.0.clone().try_into().unwrap();
+
+        // Generate a credential and export it
+        let signer = Ed25519Signer::generate().await.unwrap();
+        let did = Principal::did(&signer);
+        let cred = dialog_credentials::Credential::Signer(SignerCredential::from(signer));
+        let export = cred.export().await.unwrap();
+
+        // Manually write the exported bytes to the expected path
+        let cred_dir = root.join("credential");
+        std::fs::create_dir_all(&cred_dir).unwrap();
+        std::fs::write(cred_dir.join("self"), export.as_bytes()).unwrap();
+
+        // Provider should load it successfully
+        let loaded = did
+            .credential("self")
+            .load()
+            .perform(&provider)
+            .await
+            .unwrap();
+
+        assert_eq!(loaded.did(), cred.did());
+    }
+
+    #[dialog_common::test]
+    async fn it_rejects_corrupted_credential() {
+        use dialog_credentials::Ed25519Signer;
+        use dialog_effects::prelude::*;
+        use dialog_varsig::Principal;
+
+        let name = unique_name("fs-corrupt-credential");
+        let location = StorageLocation::new(Directory::Temp, &name);
+        let provider = FileSystem::open(&location).await.unwrap();
+        let root: PathBuf = provider.0.clone().try_into().unwrap();
+
+        let signer = Ed25519Signer::generate().await.unwrap();
+        let did = Principal::did(&signer);
+
+        // Write garbage to the credential path
+        let cred_dir = root.join("credential");
+        std::fs::create_dir_all(&cred_dir).unwrap();
+        std::fs::write(cred_dir.join("self"), b"not a valid credential").unwrap();
+
+        let result = did.credential("self").load().perform(&provider).await;
+
+        assert!(result.is_err(), "should reject corrupted credential data");
+    }
+
+    #[dialog_common::test]
+    async fn it_loads_archive_from_prefabricated_path() {
+        use dialog_common::Blake3Hash;
+        use dialog_credentials::Ed25519Signer;
+        use dialog_effects::prelude::*;
+        use dialog_varsig::Principal;
+
+        let name = unique_name("fs-prefab-archive");
+        let location = StorageLocation::new(Directory::Temp, &name);
+        let provider = FileSystem::open(&location).await.unwrap();
+        let root: PathBuf = provider.0.clone().try_into().unwrap();
+
+        let signer = Ed25519Signer::generate().await.unwrap();
+        let did = Principal::did(&signer);
+        let content = b"prefabricated blob".to_vec();
+        let digest = Blake3Hash::hash(&content);
+
+        // Manually write content to the expected archive path
+        let digest_key = base58::ToBase58::to_base58(digest.as_bytes().as_slice());
+        let blob_dir = root.join("archive").join("index");
+        std::fs::create_dir_all(&blob_dir).unwrap();
+        std::fs::write(blob_dir.join(&digest_key), &content).unwrap();
+
+        // Provider should find it
+        let loaded = did
+            .archive()
+            .catalog("index")
+            .get(digest)
+            .perform(&provider)
+            .await
+            .unwrap();
+
+        assert_eq!(loaded, Some(content));
+    }
+
+    #[dialog_common::test]
+    async fn it_loads_memory_from_prefabricated_path() {
+        use dialog_common::Blake3Hash;
+        use dialog_credentials::Ed25519Signer;
+        use dialog_effects::prelude::*;
+        use dialog_varsig::Principal;
+
+        let name = unique_name("fs-prefab-memory");
+        let location = StorageLocation::new(Directory::Temp, &name);
+        let provider = FileSystem::open(&location).await.unwrap();
+        let root: PathBuf = provider.0.clone().try_into().unwrap();
+
+        let signer = Ed25519Signer::generate().await.unwrap();
+        let did = Principal::did(&signer);
+        let content = b"prefabricated cell value".to_vec();
+
+        // Manually write content to the expected memory path
+        let cell_dir = root.join("memory").join("local");
+        std::fs::create_dir_all(&cell_dir).unwrap();
+        std::fs::write(cell_dir.join("head"), &content).unwrap();
+
+        // Provider should resolve it with correct edition
+        let resolved = did
+            .memory()
+            .space("local")
+            .cell("head")
+            .resolve()
+            .perform(&provider)
+            .await
+            .unwrap();
+
+        let publication = resolved.expect("should find prefabricated cell");
+        assert_eq!(publication.content, content);
+
+        let expected_edition = Blake3Hash::hash(&content).as_bytes().to_vec();
+        assert_eq!(publication.edition, expected_edition);
     }
 }

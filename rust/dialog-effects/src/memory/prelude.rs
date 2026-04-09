@@ -10,21 +10,21 @@ use dialog_capability::{Capability, Did, Subject};
 use super::{Cell, Memory, Publish, Resolve, Retract, Space};
 
 /// Extension trait to start a memory capability chain.
-pub trait SubjectExt {
+pub trait MemorySubjectExt {
     /// The resulting memory chain type.
     type Memory;
     /// Begin a memory capability chain.
     fn memory(self) -> Self::Memory;
 }
 
-impl SubjectExt for Subject {
+impl MemorySubjectExt for Subject {
     type Memory = Capability<Memory>;
     fn memory(self) -> Capability<Memory> {
         self.attenuate(Memory)
     }
 }
 
-impl SubjectExt for Did {
+impl MemorySubjectExt for Did {
     type Memory = Capability<Memory>;
     fn memory(self) -> Capability<Memory> {
         Subject::from(self).attenuate(Memory)
