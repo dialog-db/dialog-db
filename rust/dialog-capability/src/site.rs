@@ -6,10 +6,34 @@
 //! No methods — all execution logic lives in [`Fork`](crate::fork::Fork)
 //! and [`Provider`](crate::Provider) impls.
 
-use crate::access::Protocol;
 use dialog_common::ConditionalSend;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+
+/// Authorization material for a [`Site`].
+///
+/// Every site's authorization type implements this trait, declaring which
+/// protocol produced it. The Operator uses this to determine the
+/// authorization path:
+///
+/// ```text
+/// S::Authorization: SiteAuthorization<Protocol: Protocol>       → capability-based
+/// S::Authorization: SiteAuthorization<Protocol: Authentication> → credential-based
+/// ```
+pub trait SiteAuthorization: ConditionalSend + 'static {
+    /// The protocol that produced this authorization.
+    type Protocol;
+}
+
+/// Credential-based authentication.
+///
+/// For sites that use ambient credentials (API keys, SigV4 signatures)
+/// rather than capability delegation chains. The Operator looks up
+/// credentials from a secret store and passes them to the site provider.
+pub trait Authentication: ConditionalSend + 'static {
+    /// The credential type (e.g., S3 access key + secret key).
+    type Credentials: ConditionalSend;
+}
 
 /// Associates an address type with its corresponding site.
 ///
@@ -25,11 +49,18 @@ pub trait SiteAddress: Serialize + DeserializeOwned + Clone + ConditionalSend + 
 /// No methods. Configuration (address) is carried by
 /// [`Fork`](crate::fork::Fork) at execution time.
 ///
-/// Credentials are the address's concern — e.g. S3 `Address` carries
-/// `Option<S3Credentials>` directly.
+/// The Operator's `Provider<Fork<S, Fx>>` impl constrains
+/// `S::Authorization` to determine the authorization path:
+/// - Capability-based: `<S::Authorization as SiteAuthorization>::Protocol: Protocol`
+/// - Credential-based: `<S::Authorization as SiteAuthorization>::Protocol: Authentication`
 pub trait Site: Clone + ConditionalSend + 'static {
-    /// The access protocol used by this site.
-    type Protocol: Protocol;
+    /// The authorization material passed to the site provider.
+    ///
+    /// For capability-based sites, this is the protocol's authorization
+    /// type (e.g., a verified UCAN proof chain with signer).
+    /// For credential-based sites, this is the credentials type
+    /// (e.g., S3 access key + secret key).
+    type Authorization: SiteAuthorization;
 
     /// The address type for this site (serializable for storage/transport).
     type Address: Serialize + DeserializeOwned + Clone + ConditionalSend + 'static;

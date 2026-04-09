@@ -4,7 +4,7 @@
 //! The Operator builds a [`ForkInvocation`] by attaching protocol-specific
 //! authorization, then the site provider executes it.
 
-use crate::access::{AuthorizeError, Protocol};
+use crate::access::AuthorizeError;
 use crate::command::Command;
 use crate::effect::Effect;
 use crate::site::Site;
@@ -23,18 +23,25 @@ pub struct Fork<S: Site, Fx: Effect> {
     _site: PhantomData<S>,
 }
 
-/// A fork with protocol-specific invocation attached.
+/// A fork with authorization attached, ready for site-level execution.
 ///
 /// Created by the Operator's `Provider<Fork<S, Fx>>` impl after building
-/// the signed invocation. The site provider receives this and
-/// executes the authorized request.
+/// protocol-specific authorization. The site provider receives this and
+/// uses the authorization to execute the request.
+///
+/// For capability-based sites (UCAN), authorization is the verified proof
+/// chain. The site provider calls `.invoke()` to produce the signed
+/// invocation for the access service.
+///
+/// For credential-based sites (S3), authorization is the credentials.
+/// The site provider uses them to sign the HTTP request.
 pub struct ForkInvocation<S: Site, Fx: Effect> {
     /// The capability being executed.
     pub capability: Capability<Fx>,
     /// The site address.
     pub address: S::Address,
-    /// Protocol-specific invocation (e.g., signed UCAN chain for UCAN sites, () for S3).
-    pub invocation: <S::Protocol as Protocol>::Invocation,
+    /// Authorization material produced by the Operator.
+    pub authorization: S::Authorization,
 }
 
 impl<S: Site, Fx: Effect> Command for Fork<S, Fx>
@@ -107,12 +114,12 @@ where
     pub fn new(
         capability: Capability<Fx>,
         address: S::Address,
-        invocation: <S::Protocol as Protocol>::Invocation,
+        authorization: S::Authorization,
     ) -> Self {
         Self {
             capability,
             address,
-            invocation,
+            authorization,
         }
     }
 
