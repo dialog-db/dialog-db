@@ -198,4 +198,34 @@ mod tests {
             assert!(result.is_err(), "should reject invalid multicodec tags");
         }
     }
+
+    #[cfg(target_arch = "wasm32")]
+    mod web {
+        use super::*;
+        use crate::credential::export::SignerCredentialExport;
+
+        wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+        #[dialog_common::test]
+        async fn it_rejects_garbage_jsvalue() {
+            let garbage = SignerCredentialExport(wasm_bindgen::JsValue::from_str("not a key"));
+            let result = SignerCredential::import(garbage).await;
+            assert!(result.is_err(), "should reject a string as credential");
+        }
+
+        #[dialog_common::test]
+        async fn it_rejects_null() {
+            let null = SignerCredentialExport(wasm_bindgen::JsValue::NULL);
+            let result = SignerCredential::import(null).await;
+            assert!(result.is_err(), "should reject null as credential");
+        }
+
+        #[dialog_common::test]
+        async fn it_rejects_random_object() {
+            let obj = js_sys::Object::new();
+            let export = SignerCredentialExport(obj.into());
+            let result = SignerCredential::import(export).await;
+            assert!(result.is_err(), "should reject random object as credential");
+        }
+    }
 }
