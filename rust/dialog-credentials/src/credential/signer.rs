@@ -143,7 +143,6 @@ impl SignerCredential {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::credential::export::{PUB_KEY_OFFSET, PUB_TAG_SIZE, SIGNER_EXPORT_SIZE};
 
     #[dialog_common::test]
     async fn it_roundtrips_export_import() {
@@ -157,40 +156,46 @@ mod tests {
         assert_eq!(imported.did(), original_did);
     }
 
-    #[dialog_common::test]
-    async fn it_rejects_mismatched_pubkey() {
-        let signer = Ed25519Signer::generate().await.unwrap();
-        let cred = SignerCredential::from(signer);
-        let export = cred.export().await.unwrap();
+    #[cfg(not(target_arch = "wasm32"))]
+    mod native {
+        use super::*;
+        use crate::credential::export::{PUB_KEY_OFFSET, PUB_TAG_SIZE, SIGNER_EXPORT_SIZE};
 
-        // Tamper with the public key bytes (flip all bits) while keeping
-        // the seed and multicodec tags intact.
-        let mut bytes = export.0;
-        assert_eq!(bytes.len(), SIGNER_EXPORT_SIZE);
-        for b in &mut bytes[PUB_KEY_OFFSET + PUB_TAG_SIZE..] {
-            *b ^= 0xff;
+        #[dialog_common::test]
+        async fn it_rejects_mismatched_pubkey() {
+            let signer = Ed25519Signer::generate().await.unwrap();
+            let cred = SignerCredential::from(signer);
+            let export = cred.export().await.unwrap();
+
+            // Tamper with the public key bytes (flip all bits) while keeping
+            // the seed and multicodec tags intact.
+            let mut bytes = export.0;
+            assert_eq!(bytes.len(), SIGNER_EXPORT_SIZE);
+            for b in &mut bytes[PUB_KEY_OFFSET + PUB_TAG_SIZE..] {
+                *b ^= 0xff;
+            }
+
+            let result = SignerCredential::import(bytes.into()).await;
+            assert!(
+                result.is_err(),
+                "should reject credential where public key doesn't match seed"
+            );
+            let err = result.unwrap_err();
+            assert!(
+                err.to_string().contains("does not match seed"),
+                "error should mention mismatch: {err}"
+            );
         }
 
-        let result = SignerCredential::import(bytes.into()).await;
-        assert!(
-            result.is_err(),
-            "should reject credential where public key doesn't match seed"
-        );
-        let err = result.unwrap_err();
-        assert!(
-            err.to_string().contains("does not match seed"),
-            "error should mention mismatch: {err}"
-        );
-    }
+        #[dialog_common::test]
+        async fn it_rejects_invalid_tags() {
+            let mut bytes = [0u8; SIGNER_EXPORT_SIZE];
+            // Wrong private key tag
+            bytes[0] = 0x00;
+            bytes[1] = 0x00;
 
-    #[dialog_common::test]
-    async fn it_rejects_invalid_tags() {
-        let mut bytes = [0u8; SIGNER_EXPORT_SIZE];
-        // Wrong private key tag
-        bytes[0] = 0x00;
-        bytes[1] = 0x00;
-
-        let result = SignerCredential::import(bytes.into()).await;
-        assert!(result.is_err(), "should reject invalid multicodec tags");
+            let result = SignerCredential::import(bytes.into()).await;
+            assert!(result.is_err(), "should reject invalid multicodec tags");
+        }
     }
 }

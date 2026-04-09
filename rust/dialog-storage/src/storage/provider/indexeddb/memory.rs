@@ -222,6 +222,8 @@ impl Provider<Retract> for IndexedDb {
 
 #[cfg(test)]
 mod tests {
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
     use super::*;
     use dialog_capability::{Did, Subject};
     use dialog_effects::memory::{Cell, Memory, Space};
