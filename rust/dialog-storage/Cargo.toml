@@ -28,6 +28,7 @@ web-integration-tests = ["dialog-common/web-integration-tests"]
 [dependencies]
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
+dialog-credentials = { workspace = true }
 dialog-effects = { workspace = true }
 dialog-varsig = { workspace = true }
 signature = { workspace = true }
@@ -60,6 +61,7 @@ bytes = { workspace = true, optional = true }
 tokio-test = { workspace = true, optional = true }
 tower = { workspace = true, optional = true }
 tower-http = { workspace = true, features = ["cors"], optional = true }
+dirs = { workspace = true }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 js-sys = { workspace = true }

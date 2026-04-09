@@ -10,6 +10,8 @@
 //!             └── Load → Effect → Result<Credential, CredentialError>
 //! ```
 
+pub mod prelude;
+
 pub use dialog_capability::{
     Attenuation, Capability, Claim, Effect, Policy, StorageError, Subject,
 };
@@ -29,21 +31,22 @@ impl Attenuation for Credential {
 
 /// Address for a credential store.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Address {
+pub struct Name {
     /// The storage address path.
-    pub address: String,
+    pub name: String,
 }
 
-impl Address {
+/// The default credential address for a space's own identity.
+pub const SELF: &str = "self";
+
+impl Name {
     /// Create a new credential address.
-    pub fn new(address: impl Into<String>) -> Self {
-        Self {
-            address: address.into(),
-        }
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
     }
 }
 
-impl Policy for Address {
+impl Policy for Name {
     type Of = Credential;
 }
 
@@ -55,7 +58,7 @@ pub struct Save {
 }
 
 impl Effect for Save {
-    type Of = Address;
+    type Of = Name;
     type Output = Result<(), CredentialError>;
 }
 
@@ -64,7 +67,7 @@ impl Effect for Save {
 pub struct Load;
 
 impl Effect for Load {
-    type Of = Address;
+    type Of = Name;
     type Output = Result<dialog_credentials::Credential, CredentialError>;
 }
 

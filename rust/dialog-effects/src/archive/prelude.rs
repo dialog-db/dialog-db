@@ -11,21 +11,21 @@ use dialog_common::Blake3Hash;
 use super::{Archive, Catalog, Get, Put};
 
 /// Extension trait to start an archive capability chain.
-pub trait SubjectExt {
+pub trait ArchiveSubjectExt {
     /// The resulting archive chain type.
     type Archive;
     /// Begin an archive capability chain.
     fn archive(self) -> Self::Archive;
 }
 
-impl SubjectExt for Subject {
+impl ArchiveSubjectExt for Subject {
     type Archive = Capability<Archive>;
     fn archive(self) -> Capability<Archive> {
         self.attenuate(Archive)
     }
 }
 
-impl SubjectExt for Did {
+impl ArchiveSubjectExt for Did {
     type Archive = Capability<Archive>;
     fn archive(self) -> Capability<Archive> {
         Subject::from(self).attenuate(Archive)
