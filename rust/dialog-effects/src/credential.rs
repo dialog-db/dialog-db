@@ -13,6 +13,8 @@
 //!             └── Load<Secret> → Result<Secret, CredentialError>
 //! ```
 
+pub mod prelude;
+
 pub use dialog_capability::{
     Attenuation, Capability, Claim, Effect, Policy, StorageError, Subject,
 };
