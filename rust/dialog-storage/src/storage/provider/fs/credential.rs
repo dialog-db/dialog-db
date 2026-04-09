@@ -1,6 +1,6 @@
 //! Credential Load/Save for filesystem storage.
 //!
-//! Layout: `{space_root}/credential/{address}`
+//! Layout: `{space_root}/credential/key/{address}`
 
 use dialog_capability::{Capability, Policy, Provider};
 use dialog_credentials::{Credential, CredentialExport};
@@ -9,22 +9,26 @@ use dialog_effects::credential::{self, CredentialError};
 use super::{FileSystem, FileSystemError, FileSystemHandle};
 
 const CREDENTIAL: &str = "credential";
+const KEY: &str = "key";
 
 impl FileSystem {
-    /// Returns the handle for a credential at the given address.
-    pub(super) fn credential(&self, address: &str) -> Result<FileSystemHandle, FileSystemError> {
-        self.resolve(CREDENTIAL)?.resolve(address)
+    /// Returns the handle for a key credential at the given address.
+    pub(super) fn credential_key(
+        &self,
+        address: &str,
+    ) -> Result<FileSystemHandle, FileSystemError> {
+        self.resolve(CREDENTIAL)?.resolve(KEY)?.resolve(address)
     }
 }
 
 #[async_trait::async_trait]
-impl Provider<credential::Load> for FileSystem {
+impl Provider<credential::Load<Credential>> for FileSystem {
     async fn execute(
         &self,
-        input: Capability<credential::Load>,
+        input: Capability<credential::Load<Credential>>,
     ) -> Result<Credential, CredentialError> {
-        let address = &credential::Name::of(&input).name;
-        let handle = self.credential(address)?;
+        let address = &credential::Key::of(&input).address;
+        let handle = self.credential_key(address)?;
         let data = handle.read().await?;
         let export = CredentialExport::try_from(data)
             .map_err(|e| CredentialError::Corrupted(e.to_string()))?;
@@ -36,11 +40,14 @@ impl Provider<credential::Load> for FileSystem {
 }
 
 #[async_trait::async_trait]
-impl Provider<credential::Save> for FileSystem {
-    async fn execute(&self, input: Capability<credential::Save>) -> Result<(), CredentialError> {
-        let name = &credential::Name::of(&input).name;
+impl Provider<credential::Save<Credential>> for FileSystem {
+    async fn execute(
+        &self,
+        input: Capability<credential::Save<Credential>>,
+    ) -> Result<(), CredentialError> {
+        let address = &credential::Key::of(&input).address;
         let cred = &credential::Save::of(&input).credential;
-        let handle = self.credential(name)?;
+        let handle = self.credential_key(address)?;
         let export = cred
             .export()
             .await
@@ -89,7 +96,7 @@ mod tests {
         let provider = FileSystem::open(&location).await?;
         let did = unique_did().await;
 
-        let result = did.credential("self").load().perform(&provider).await;
+        let result = did.credential().key("self").load().perform(&provider).await;
 
         assert!(result.is_err());
         Ok(())
@@ -105,13 +112,19 @@ mod tests {
 
         // Save
         did.clone()
-            .credential("self")
+            .credential()
+            .key("self")
             .save(cred)
             .perform(&provider)
             .await?;
 
         // Load
-        let loaded = did.credential("self").load().perform(&provider).await?;
+        let loaded = did
+            .credential()
+            .key("self")
+            .load()
+            .perform(&provider)
+            .await?;
 
         assert_eq!(loaded.did(), expected_did);
         Ok(())
@@ -129,20 +142,27 @@ mod tests {
 
         // Save first credential
         did.clone()
-            .credential("self")
+            .credential()
+            .key("self")
             .save(cred1)
             .perform(&provider)
             .await?;
 
         // Save second credential at same address
         did.clone()
-            .credential("self")
+            .credential()
+            .key("self")
             .save(cred2)
             .perform(&provider)
             .await?;
 
         // Load should return second credential
-        let loaded = did.credential("self").load().perform(&provider).await?;
+        let loaded = did
+            .credential()
+            .key("self")
+            .load()
+            .perform(&provider)
+            .await?;
 
         assert_eq!(loaded.did(), expected_did);
         Ok(())
@@ -161,13 +181,15 @@ mod tests {
 
         // Save to different addresses
         did.clone()
-            .credential("addr1")
+            .credential()
+            .key("addr1")
             .save(cred1)
             .perform(&provider)
             .await?;
 
         did.clone()
-            .credential("addr2")
+            .credential()
+            .key("addr2")
             .save(cred2)
             .perform(&provider)
             .await?;
@@ -175,12 +197,18 @@ mod tests {
         // Load from each address
         let loaded1 = did
             .clone()
-            .credential("addr1")
+            .credential()
+            .key("addr1")
             .load()
             .perform(&provider)
             .await?;
 
-        let loaded2 = did.credential("addr2").load().perform(&provider).await?;
+        let loaded2 = did
+            .credential()
+            .key("addr2")
+            .load()
+            .perform(&provider)
+            .await?;
 
         assert_eq!(loaded1.did(), expected_did1);
         assert_eq!(loaded2.did(), expected_did2);

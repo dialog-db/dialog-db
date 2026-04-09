@@ -6,7 +6,7 @@
 //! {space_root}/
 //!   archive/{catalog}/{base58(digest)}
 //!   memory/{space}/{cell}
-//!   credential/{address}
+//!   credential/key/{address}
 //! ```
 //!
 //! Compare-And-Swap (CAS) semantics are accomplished through PID-based file
@@ -371,8 +371,8 @@ mod tests {
         assert!(catalog.path().ends_with("/archive/index"));
 
         // Credential resolves under root
-        let cred = space.credential("self").unwrap();
-        assert!(cred.path().ends_with("/credential/self"));
+        let cred = space.credential_key("self").unwrap();
+        assert!(cred.path().ends_with("/credential/key/self"));
 
         // Memory resolves directly under root
         let memory = space.memory().unwrap();
@@ -463,14 +463,15 @@ mod tests {
         let did = Principal::did(&signer);
         let cred = dialog_credentials::Credential::Signer(SignerCredential::from(signer));
 
-        did.credential("self")
+        did.credential()
+            .key("self")
             .save(cred)
             .perform(&provider)
             .await
             .unwrap();
 
-        // Credential should be at {root}/credential/self
-        let expected = root.join("credential").join("self");
+        // Credential should be at {root}/credential/key/self
+        let expected = root.join("credential").join("key").join("self");
         assert!(
             expected.exists(),
             "credential file should exist at {expected:?}"
@@ -562,13 +563,14 @@ mod tests {
         let export = cred.export().await.unwrap();
 
         // Manually write the exported bytes to the expected path
-        let cred_dir = root.join("credential");
+        let cred_dir = root.join("credential").join("key");
         std::fs::create_dir_all(&cred_dir).unwrap();
         std::fs::write(cred_dir.join("self"), export.as_bytes()).unwrap();
 
         // Provider should load it successfully
         let loaded = did
-            .credential("self")
+            .credential()
+            .key("self")
             .load()
             .perform(&provider)
             .await
@@ -592,11 +594,11 @@ mod tests {
         let did = Principal::did(&signer);
 
         // Write garbage to the credential path
-        let cred_dir = root.join("credential");
+        let cred_dir = root.join("credential").join("key");
         std::fs::create_dir_all(&cred_dir).unwrap();
         std::fs::write(cred_dir.join("self"), b"not a valid credential").unwrap();
 
-        let result = did.credential("self").load().perform(&provider).await;
+        let result = did.credential().key("self").load().perform(&provider).await;
 
         assert!(result.is_err(), "should reject corrupted credential data");
     }

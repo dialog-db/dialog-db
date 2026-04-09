@@ -11,15 +11,16 @@ use wasm_bindgen::JsValue;
 const CREDENTIAL: &str = "credential";
 
 #[async_trait(?Send)]
-impl Provider<credential::Load> for IndexedDb {
+impl Provider<credential::Load<Credential>> for IndexedDb {
     async fn execute(
         &self,
-        input: Capability<credential::Load>,
+        input: Capability<credential::Load<Credential>>,
     ) -> Result<Credential, CredentialError> {
-        let address = credential::Name::of(&input).name.clone();
+        let address = credential::Key::of(&input).address.clone();
+        let idb_key = format!("key/{address}");
 
         let store = self.store(CREDENTIAL).await?;
-        let key = JsValue::from_str(&address);
+        let key = JsValue::from_str(&idb_key);
 
         let value = store
             .query(|object_store| async move {
@@ -37,15 +38,19 @@ impl Provider<credential::Load> for IndexedDb {
                     .await
                     .map_err(|e| CredentialError::Corrupted(e.to_string()))
             }
-            None => Err(CredentialError::NotFound(address)),
+            None => Err(CredentialError::NotFound(idb_key)),
         }
     }
 }
 
 #[async_trait(?Send)]
-impl Provider<credential::Save> for IndexedDb {
-    async fn execute(&self, input: Capability<credential::Save>) -> Result<(), CredentialError> {
-        let address = credential::Name::of(&input).name.clone();
+impl Provider<credential::Save<Credential>> for IndexedDb {
+    async fn execute(
+        &self,
+        input: Capability<credential::Save<Credential>>,
+    ) -> Result<(), CredentialError> {
+        let address = credential::Key::of(&input).address.clone();
+        let idb_key = format!("key/{address}");
         let credential = &credential::Save::of(&input).credential;
 
         let export = credential
@@ -55,7 +60,7 @@ impl Provider<credential::Save> for IndexedDb {
         let js_val: JsValue = export.into();
 
         let store = self.store(CREDENTIAL).await?;
-        let key = JsValue::from_str(&address);
+        let key = JsValue::from_str(&idb_key);
 
         store
             .transact(|object_store| async move {
@@ -97,7 +102,7 @@ mod tests {
         let provider = IndexedDb::connect(unique_name("cred-missing")).await?;
         let did = unique_did().await;
 
-        let result = did.credential("self").load().perform(&provider).await;
+        let result = did.credential().key("self").load().perform(&provider).await;
 
         assert!(result.is_err());
         Ok(())
@@ -111,12 +116,18 @@ mod tests {
         let expected_did = cred.did();
 
         did.clone()
-            .credential("self")
+            .credential()
+            .key("self")
             .save(cred)
             .perform(&provider)
             .await?;
 
-        let loaded = did.credential("self").load().perform(&provider).await?;
+        let loaded = did
+            .credential()
+            .key("self")
+            .load()
+            .perform(&provider)
+            .await?;
 
         assert_eq!(loaded.did(), expected_did);
         Ok(())
@@ -131,7 +142,7 @@ mod tests {
         let store = provider.store(CREDENTIAL).await?;
         store
             .transact(|object_store| async move {
-                let key = JsValue::from_str("self");
+                let key = JsValue::from_str("key/self");
                 let garbage = JsValue::from_str("not a credential");
                 object_store
                     .put(&garbage, Some(&key))
@@ -142,7 +153,7 @@ mod tests {
             .await?;
         drop(store);
 
-        let result = did.credential("self").load().perform(&provider).await;
+        let result = did.credential().key("self").load().perform(&provider).await;
 
         assert!(result.is_err(), "should reject garbage credential data");
         Ok(())
