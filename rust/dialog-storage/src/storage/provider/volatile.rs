@@ -34,6 +34,7 @@
 //! ```
 
 mod archive;
+mod certificate;
 mod credential;
 mod memory;
 
@@ -49,6 +50,9 @@ type ArchiveKey = (String, String);
 /// Memory key: (space, cell)
 type MemoryKey = (String, String);
 
+/// Certificate key: "{audience}/{subject_or_wildcard}/{issuer}.{hash}"
+type CertificateKey = String;
+
 /// A session holds the in-memory storage for a single subject.
 #[derive(Default, Debug)]
 struct Session {
@@ -58,6 +62,8 @@ struct Session {
     memory: HashMap<MemoryKey, Vec<u8>>,
     /// Credential storage keyed by address.
     credentials: HashMap<String, CredentialExport>,
+    /// Certificate storage keyed by "{audience}/{subject}/{issuer}.{hash}".
+    certificates: HashMap<CertificateKey, Vec<u8>>,
 }
 
 /// Volatile in-memory storage provider.

@@ -5,6 +5,7 @@
 //! [`profile.access().claim().delegate()`](dialog_operator::profile::access).
 
 mod access;
+mod certificate_store;
 mod invocation;
 pub mod parameters;
 pub mod scope;
