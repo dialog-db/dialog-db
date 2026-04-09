@@ -1,12 +1,13 @@
 //! Credential capability providers for IndexedDb.
 
-use super::{IndexedDb, IndexedDbError};
+use super::{IndexedDb, IndexedDbError, to_uint8array};
 use async_trait::async_trait;
 use dialog_capability::{Capability, Policy, Provider};
 use dialog_credentials::Credential;
 use dialog_credentials::credential::CredentialExport;
-use dialog_effects::credential::{self, CredentialError};
-use wasm_bindgen::JsValue;
+use dialog_effects::credential::{self, CredentialError, Secret};
+use js_sys::Uint8Array;
+use wasm_bindgen::{JsCast, JsValue};
 
 const CREDENTIAL: &str = "credential";
 
@@ -51,13 +52,74 @@ impl Provider<credential::Save<Credential>> for IndexedDb {
     ) -> Result<(), CredentialError> {
         let address = credential::Key::of(&input).address.clone();
         let idb_key = format!("key/{address}");
-        let credential = &credential::Save::of(&input).credential;
+        let credential = &credential::Save::<Credential>::of(&input).credential;
 
         let export = credential
             .export()
             .await
             .map_err(|e| CredentialError::Storage(e.to_string()))?;
         let js_val: JsValue = export.into();
+
+        let store = self.store(CREDENTIAL).await?;
+        let key = JsValue::from_str(&idb_key);
+
+        store
+            .transact(|object_store| async move {
+                object_store
+                    .put(&js_val, Some(&key))
+                    .await
+                    .map_err(|e| CredentialError::Storage(e.to_string()))?;
+                Ok(())
+            })
+            .await
+    }
+}
+
+#[async_trait(?Send)]
+impl Provider<credential::Load<Secret>> for IndexedDb {
+    async fn execute(
+        &self,
+        input: Capability<credential::Load<Secret>>,
+    ) -> Result<Secret, CredentialError> {
+        let address = credential::Site::of(&input).address.clone();
+        let idb_key = format!("site/{address}");
+
+        let store = self.store(CREDENTIAL).await?;
+        let key = JsValue::from_str(&idb_key);
+
+        let value = store
+            .query(|object_store| async move {
+                object_store
+                    .get(key)
+                    .await
+                    .map_err(|e| CredentialError::Storage(e.to_string()))
+            })
+            .await?;
+
+        match value {
+            Some(js_val) => {
+                let bytes = js_val
+                    .dyn_into::<Uint8Array>()
+                    .map_err(|_| CredentialError::Corrupted("Value is not Uint8Array".into()))?
+                    .to_vec();
+                Ok(Secret(bytes))
+            }
+            None => Err(CredentialError::NotFound(idb_key)),
+        }
+    }
+}
+
+#[async_trait(?Send)]
+impl Provider<credential::Save<Secret>> for IndexedDb {
+    async fn execute(
+        &self,
+        input: Capability<credential::Save<Secret>>,
+    ) -> Result<(), CredentialError> {
+        let address = credential::Site::of(&input).address.clone();
+        let idb_key = format!("site/{address}");
+        let secret = &credential::Save::<Secret>::of(&input).credential;
+
+        let js_val: JsValue = to_uint8array(&secret.0).into();
 
         let store = self.store(CREDENTIAL).await?;
         let key = JsValue::from_str(&idb_key);

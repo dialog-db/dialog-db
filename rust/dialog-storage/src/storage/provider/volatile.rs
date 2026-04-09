@@ -64,6 +64,8 @@ struct Session {
     credentials: HashMap<String, CredentialExport>,
     /// Certificate storage keyed by "{audience}/{subject}/{issuer}.{hash}".
     certificates: HashMap<CertificateKey, Vec<u8>>,
+    /// Secret storage keyed by site address.
+    secrets: HashMap<String, Vec<u8>>,
 }
 
 /// Volatile in-memory storage provider.
