@@ -51,6 +51,7 @@
 //! ```
 
 mod archive;
+mod certificate;
 mod credential;
 mod memory;
 
@@ -306,11 +307,18 @@ pub enum IndexedDbError {
     Conversion(String),
 }
 
+use dialog_capability::access::AuthorizeError;
 use dialog_effects::credential::CredentialError;
 
 impl From<IndexedDbError> for CredentialError {
     fn from(e: IndexedDbError) -> Self {
         Self::Storage(e.to_string())
+    }
+}
+
+impl From<IndexedDbError> for AuthorizeError {
+    fn from(e: IndexedDbError) -> Self {
+        Self::Configuration(e.to_string())
     }
 }
 

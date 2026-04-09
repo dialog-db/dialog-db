@@ -7,6 +7,7 @@
 //!   archive/{catalog}/{base58(digest)}
 //!   memory/{space}/{cell}
 //!   credential/{address}
+//!   certificate/{audience}/{subject}/{issuer}.{hash}
 //! ```
 //!
 //! Compare-And-Swap (CAS) semantics are accomplished through PID-based file
@@ -14,6 +15,7 @@
 //! enforcing ensuring invariantns.
 
 mod archive;
+mod certificate;
 mod credential;
 mod error;
 mod memory;
