@@ -224,7 +224,7 @@ impl crate::Attenuation for Access {
     type Of = crate::Subject;
 }
 
-/// Access protocol — defines how authorization is produced.
+/// Access protocol — defines how capability-based authorization is produced.
 ///
 /// Different protocols use different access representations, proof
 /// formats, and authorization/invocation materials.
@@ -241,7 +241,7 @@ pub trait Protocol: Sized + ConditionalSend + 'static {
     /// A delegation bundle — what [`Authorization::delegate`] produces.
     type Delegation: Delegation<Certificate = Self::Certificate>;
 
-    /// An invocation chain — what [`Authorization::invoke`] produces.
+    /// An invocation — what [`Authorization::invoke`] produces.
     type Invocation: ConditionalSend;
 
     /// Verified proof (no signer). Returned by [`Prove`].
