@@ -38,3 +38,5 @@ pub mod volatile;
 pub use volatile::*;
 
 pub mod space;
+pub mod storage;
+pub use storage::Storage;
