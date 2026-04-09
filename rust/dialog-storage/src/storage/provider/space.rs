@@ -19,8 +19,8 @@ pub trait SpaceProvider:
     + Provider<memory::Resolve>
     + Provider<memory::Publish>
     + Provider<memory::Retract>
-    + Provider<credential::Load>
-    + Provider<credential::Save>
+    + Provider<credential::Load<dialog_credentials::Credential>>
+    + Provider<credential::Save<dialog_credentials::Credential>>
     + ConditionalSend
     + ConditionalSync
     + Clone
@@ -34,8 +34,8 @@ impl<T> SpaceProvider for T where
         + Provider<memory::Resolve>
         + Provider<memory::Publish>
         + Provider<memory::Retract>
-        + Provider<credential::Load>
-        + Provider<credential::Save>
+        + Provider<credential::Load<dialog_credentials::Credential>>
+        + Provider<credential::Save<dialog_credentials::Credential>>
         + ConditionalSend
         + ConditionalSync
         + Clone
@@ -55,7 +55,7 @@ pub struct Space<Archive, Memory, Credential, Certificate> {
     pub memory: Memory,
 
     /// Credential provider.
-    #[provide(credential::Load, credential::Save)]
+    #[provide(credential::Load<dialog_credentials::Credential>, credential::Save<dialog_credentials::Credential>)]
     pub credential: Credential,
 
     /// Certificate provider manual implementation are used because of the

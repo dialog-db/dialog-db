@@ -11,25 +11,38 @@ use super::{Credential, Key, Load, Save};
 
 /// Extension trait to start a credential capability chain.
 pub trait CredentialSubjectExt {
-    /// The resulting address chain type.
-    type Address;
-    /// Begin a credential capability chain scoped to the given address.
-    fn credential(self, address: impl Into<String>) -> Self::Address;
+    /// The resulting credential chain type.
+    type Credential;
+    /// Begin a credential capability chain.
+    fn credential(self) -> Self::Credential;
 }
 
 impl CredentialSubjectExt for Subject {
-    type Address = Capability<Key>;
-    fn credential(self, address: impl Into<String>) -> Capability<Key> {
-        self.attenuate(Credential).attenuate(Key::new(address))
+    type Credential = Capability<Credential>;
+    fn credential(self) -> Capability<Credential> {
+        self.attenuate(Credential)
     }
 }
 
 impl CredentialSubjectExt for Did {
-    type Address = Capability<Key>;
-    fn credential(self, address: impl Into<String>) -> Capability<Key> {
-        Subject::from(self)
-            .attenuate(Credential)
-            .attenuate(Key::new(address))
+    type Credential = Capability<Credential>;
+    fn credential(self) -> Capability<Credential> {
+        Subject::from(self).attenuate(Credential)
+    }
+}
+
+/// Extension trait for attenuating a credential capability with an address.
+pub trait CredentialCapabilityExt {
+    /// The resulting key chain type.
+    type Key;
+    /// Attenuate this credential capability with a key address.
+    fn key(self, address: impl Into<String>) -> Self::Key;
+}
+
+impl CredentialCapabilityExt for Capability<Credential> {
+    type Key = Capability<Key>;
+    fn key(self, address: impl Into<String>) -> Capability<Key> {
+        self.attenuate(Key::new(address))
     }
 }
 

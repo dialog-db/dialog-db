@@ -488,7 +488,7 @@ mod tests {
         let signer = Ed25519Signer::generate().await.unwrap();
         let cred = dialog_credentials::Credential::Signer(SignerCredential::from(signer.clone()));
         let did = Principal::did(&signer);
-        did.credential("self").save(cred).perform(&db).await?;
+        did.credential().key("self").save(cred).perform(&db).await?;
 
         // Verify the store names match our expectations
         let conn = db.connection.borrow();
@@ -527,17 +527,24 @@ mod tests {
         let cred = dialog_credentials::Credential::Signer(SignerCredential::from(signer));
 
         did.clone()
-            .credential("self")
+            .credential()
+            .key("self")
             .save(cred)
             .perform(&db1)
             .await?;
 
         // db1 should have it
-        let loaded = did.clone().credential("self").load().perform(&db1).await;
+        let loaded = did
+            .clone()
+            .credential()
+            .key("self")
+            .load()
+            .perform(&db1)
+            .await;
         assert!(loaded.is_ok(), "db1 should have the credential");
 
         // db2 should NOT have it
-        let missing = did.credential("self").load().perform(&db2).await;
+        let missing = did.credential().key("self").load().perform(&db2).await;
         assert!(missing.is_err(), "db2 should not see db1's credential");
 
         Ok(())

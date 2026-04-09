@@ -10,16 +10,16 @@ use super::Volatile;
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<credential::Load> for Volatile
+impl Provider<credential::Load<Credential>> for Volatile
 where
     Self: ConditionalSend + ConditionalSync,
 {
     async fn execute(
         &self,
-        input: Capability<credential::Load>,
+        input: Capability<credential::Load<Credential>>,
     ) -> Result<Credential, CredentialError> {
-        let name = &credential::Name::of(&input).name;
-        let key = self.scoped_key(name);
+        let address = &credential::Key::of(&input).address;
+        let key = self.scoped_key(address);
 
         // Clone the export and drop the lock before awaiting import.
         let export = {
@@ -40,14 +40,17 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<credential::Save> for Volatile
+impl Provider<credential::Save<Credential>> for Volatile
 where
     Self: ConditionalSend + ConditionalSync,
 {
-    async fn execute(&self, input: Capability<credential::Save>) -> Result<(), CredentialError> {
-        let name = &credential::Name::of(&input).name;
+    async fn execute(
+        &self,
+        input: Capability<credential::Save<Credential>>,
+    ) -> Result<(), CredentialError> {
+        let address = &credential::Key::of(&input).address;
         let credential = &credential::Save::of(&input).credential;
-        let key = self.scoped_key(name);
+        let key = self.scoped_key(address);
 
         let export = credential
             .export()
