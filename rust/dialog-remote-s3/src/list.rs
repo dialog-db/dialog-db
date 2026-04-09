@@ -7,7 +7,7 @@
 
 use serde::Deserialize;
 
-use crate::s3::S3StorageError;
+use crate::S3StorageError;
 
 /// Response from S3 ListObjectsV2 API.
 #[derive(Debug)]
