@@ -1,7 +1,7 @@
 //! S3 site type, credential types, and Provider implementations.
 //!
-//! This module provides [`S3`] and [`Bucket`], S3-compatible storage types
-//! that execute pre-authorized HTTP requests via presigned URLs.
+//! This module provides [`S3`], an S3-compatible storage type
+//! that executes pre-authorized HTTP requests via presigned URLs.
 //!
 //! Submodules:
 //! - [`credentials`] — S3 credential types for direct AWS SigV4 signing
@@ -212,66 +212,6 @@ mod protocol {
 impl dialog_varsig::Principal for S3 {
     fn did(&self) -> Did {
         "did:web:s3".parse().expect("valid DID")
-    }
-}
-
-/// A scoped S3 storage bucket with subject and namespace path.
-///
-/// This is a wrapper around [`S3`] that adds the subject DID and namespace path.
-///
-/// # Example
-///
-/// ```no_run
-/// use dialog_remote_s3::s3::{S3, Bucket};
-///
-/// let subject: dialog_capability::Did = "did:key:zMySubject".parse().unwrap();
-/// let bucket = Bucket::new(S3, subject, "my-store");
-/// ```
-#[derive(Debug, Clone)]
-pub struct Bucket {
-    bucket: S3,
-    /// The subject DID (whose data we're accessing)
-    subject: Did,
-    /// The namespace path (store for StorageBackend, space for TransactionalMemoryBackend)
-    path: String,
-}
-
-impl Bucket {
-    /// Create a new scoped S3 bucket.
-    ///
-    /// - `bucket`: The underlying S3
-    /// - `subject`: The subject DID (whose data we're accessing)
-    /// - `path`: The namespace path (store for storage, space for memory)
-    pub fn new(bucket: S3, subject: impl Into<Did>, path: impl Into<String>) -> Self {
-        Self {
-            bucket,
-            subject: subject.into(),
-            path: path.into(),
-        }
-    }
-
-    /// Get the subject DID.
-    pub fn subject(&self) -> &Did {
-        &self.subject
-    }
-
-    /// Get the namespace path.
-    pub fn path(&self) -> &str {
-        &self.path
-    }
-
-    /// Create a new scoped bucket with a different path (nested namespace).
-    pub fn at(&self, path: impl Into<String>) -> Self {
-        Self {
-            bucket: self.bucket,
-            subject: self.subject.clone(),
-            path: format!("{}/{}", self.path, path.into()),
-        }
-    }
-
-    /// Get a reference to the underlying S3.
-    pub fn s3(&self) -> &S3 {
-        &self.bucket
     }
 }
 
