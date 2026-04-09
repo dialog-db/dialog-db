@@ -1,0 +1,397 @@
+//! Storage: composes Router (DID routing) and Loader (space load/create).
+
+mod loader;
+#[cfg(not(target_arch = "wasm32"))]
+mod native;
+mod router;
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+mod web;
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use dialog_capability::access::{AuthorizeError, Protocol, Prove, Retain};
+use dialog_capability::{Capability, Did, Provider};
+use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_effects::{archive, credential, memory, storage};
+
+use loader::Loader;
+use router::Router;
+
+use super::Volatile;
+use super::space::Space;
+use crate::resource::Pool;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::NativeSpace;
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub use web::WebSpace;
+
+/// Storage: the runtime context for capability dispatch.
+#[derive(Provider)]
+pub struct Storage<S: Clone> {
+    #[provide(storage::Load, storage::Create)]
+    loader: Loader<S>,
+
+    #[provide(
+        archive::Get,
+        archive::Put,
+        memory::Resolve,
+        memory::Publish,
+        memory::Retract,
+        credential::Load,
+        credential::Save
+    )]
+    router: Router<S>,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S, P> Provider<Prove<P>> for Storage<S>
+where
+    S: Clone + ConditionalSync,
+    P: Protocol,
+    P::Access: Clone + ConditionalSend + ConditionalSync,
+    P::Certificate: Clone + ConditionalSend + ConditionalSync,
+    P::Proof: ConditionalSend,
+    Router<S>: Provider<Prove<P>>,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(&self, input: Capability<Prove<P>>) -> Result<P::Proof, AuthorizeError> {
+        input.perform(&self.router).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S, P> Provider<Retain<P>> for Storage<S>
+where
+    S: Clone + ConditionalSync,
+    P: Protocol,
+    P::Delegation: ConditionalSend + ConditionalSync,
+    Router<S>: Provider<Retain<P>>,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(&self, input: Capability<Retain<P>>) -> Result<(), AuthorizeError> {
+        input.perform(&self.router).await
+    }
+}
+
+impl<S: Clone> Storage<S> {
+    /// Create a new empty environment.
+    pub fn new() -> Self {
+        let spaces = Arc::new(Pool::new());
+        Self {
+            loader: Loader::new(Arc::clone(&spaces)),
+            router: Router::new(spaces),
+        }
+    }
+
+    /// Check if a DID is mounted.
+    pub fn contains(&self, did: &Did) -> bool {
+        self.router.spaces.contains(did)
+    }
+}
+
+/// Space backed by Volatile providers.
+pub type VolatileSpace = Space<Volatile, Volatile, Volatile, Volatile>;
+
+impl Storage<VolatileSpace> {
+    /// Create a volatile (in-memory) environment for testing.
+    pub fn volatile() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::*;
+    use dialog_capability::did;
+    use dialog_common::Blake3Hash;
+    use dialog_credentials::{Ed25519Signer, SignerCredential};
+    use dialog_effects::prelude::*;
+    use dialog_effects::storage::{LocationExt, Storage as StorageFx};
+    use dialog_varsig::Principal;
+
+    /// Helper: create a credential and return (credential, expected_did).
+    async fn test_credential() -> (dialog_credentials::Credential, Did) {
+        let signer = Ed25519Signer::generate().await.unwrap();
+        let did = Principal::did(&signer);
+        let credential = dialog_credentials::Credential::Signer(SignerCredential::from(signer));
+        (credential, did)
+    }
+
+    #[dialog_common::test]
+    async fn it_creates_profile_with_sugar() {
+        let env = Storage::volatile();
+        let (credential, expected_did) = test_credential().await;
+
+        let cred = StorageFx::profile("alice")
+            .create(credential)
+            .perform(&env)
+            .await
+            .unwrap();
+
+        assert_eq!(cred.did(), expected_did);
+        assert!(env.contains(&cred.did()));
+    }
+
+    #[dialog_common::test]
+    async fn it_archives_after_create() {
+        let env = Storage::volatile();
+        let (credential, _) = test_credential().await;
+
+        let cred = StorageFx::profile("bob")
+            .create(credential)
+            .perform(&env)
+            .await
+            .unwrap();
+        let did = cred.did();
+
+        let content = b"hello world".to_vec();
+        let digest = Blake3Hash::hash(&content);
+
+        did.clone()
+            .archive()
+            .catalog("index")
+            .put(digest.clone(), content.clone())
+            .perform(&env)
+            .await
+            .unwrap();
+
+        let result = did
+            .archive()
+            .catalog("index")
+            .get(digest)
+            .perform(&env)
+            .await;
+
+        assert_eq!(result.unwrap(), Some(content));
+    }
+
+    #[dialog_common::test]
+    async fn it_publishes_memory_after_create() {
+        let env = Storage::volatile();
+        let (credential, _) = test_credential().await;
+
+        let did = StorageFx::profile("charlie")
+            .create(credential)
+            .perform(&env)
+            .await
+            .unwrap()
+            .did();
+
+        let content = b"cell value".to_vec();
+
+        let etag = did
+            .clone()
+            .memory()
+            .space("data")
+            .cell("head")
+            .publish(content.clone(), None)
+            .perform(&env)
+            .await
+            .unwrap();
+
+        assert!(!etag.is_empty());
+
+        let resolved = did
+            .memory()
+            .space("data")
+            .cell("head")
+            .resolve()
+            .perform(&env)
+            .await
+            .unwrap();
+
+        assert!(resolved.is_some());
+        assert_eq!(resolved.unwrap().content, content);
+    }
+
+    #[dialog_common::test]
+    async fn it_errors_for_unmounted_did() {
+        let env = Storage::volatile();
+
+        let result = did!("key:zUnknown")
+            .archive()
+            .catalog("index")
+            .get([0u8; 32])
+            .perform(&env)
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[dialog_common::test]
+    async fn it_isolates_spaces() {
+        let env = Storage::volatile();
+
+        let (cred1, _) = test_credential().await;
+        let did1 = StorageFx::profile("dave")
+            .create(cred1)
+            .perform(&env)
+            .await
+            .unwrap()
+            .did();
+
+        let (cred2, _) = test_credential().await;
+        let did2 = StorageFx::profile("eve")
+            .create(cred2)
+            .perform(&env)
+            .await
+            .unwrap()
+            .did();
+
+        let content = b"dave only".to_vec();
+        let digest = Blake3Hash::hash(&content);
+
+        did1.archive()
+            .catalog("index")
+            .put(digest.clone(), content)
+            .perform(&env)
+            .await
+            .unwrap();
+
+        let result = did2
+            .archive()
+            .catalog("index")
+            .get(digest)
+            .perform(&env)
+            .await;
+
+        assert_eq!(result.unwrap(), None, "eve should not see dave's data");
+    }
+
+    #[dialog_common::test]
+    async fn it_rejects_duplicate_create() {
+        let env = Storage::volatile();
+        let (credential, _) = test_credential().await;
+
+        StorageFx::profile("frank")
+            .create(credential.clone())
+            .perform(&env)
+            .await
+            .unwrap();
+
+        let result = StorageFx::profile("frank")
+            .create(credential)
+            .perform(&env)
+            .await;
+
+        assert!(result.is_err(), "duplicate create should fail");
+    }
+
+    #[dialog_common::test]
+    async fn it_creates_then_loads() {
+        let env = Storage::volatile();
+        let (credential, expected_did) = test_credential().await;
+
+        StorageFx::profile("grace")
+            .create(credential)
+            .perform(&env)
+            .await
+            .unwrap();
+
+        let loaded = StorageFx::profile("grace")
+            .load()
+            .perform(&env)
+            .await
+            .unwrap();
+
+        assert_eq!(loaded.did(), expected_did);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    mod native_tests {
+        use super::*;
+        use dialog_common::time;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        fn unique_name(prefix: &str) -> String {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let ts = time::now()
+                .duration_since(time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+            format!("{prefix}-{ts}-{seq}")
+        }
+
+        type NativeStorage = Storage<NativeSpace>;
+
+        #[dialog_common::test]
+        async fn it_creates_and_loads_on_filesystem() {
+            let env = NativeStorage::default();
+            let name = unique_name("fs-create-load");
+
+            let (credential, expected_did) = super::test_credential().await;
+
+            let cred = StorageFx::temp(&name)
+                .create(credential)
+                .perform(&env)
+                .await
+                .unwrap();
+            assert_eq!(cred.did(), expected_did);
+
+            let loaded = StorageFx::temp(&name).load().perform(&env).await.unwrap();
+            assert_eq!(loaded.did(), expected_did);
+        }
+
+        #[dialog_common::test]
+        async fn it_persists_archive_on_filesystem() {
+            let env = NativeStorage::default();
+            let name = unique_name("fs-archive");
+
+            let (credential, _) = super::test_credential().await;
+
+            let did = StorageFx::temp(&name)
+                .create(credential)
+                .perform(&env)
+                .await
+                .unwrap()
+                .did();
+
+            let content = b"persistent data".to_vec();
+            let digest = Blake3Hash::hash(&content);
+
+            did.clone()
+                .archive()
+                .catalog("index")
+                .put(digest.clone(), content.clone())
+                .perform(&env)
+                .await
+                .unwrap();
+
+            let result = did
+                .archive()
+                .catalog("index")
+                .get(digest)
+                .perform(&env)
+                .await;
+
+            assert_eq!(result.unwrap(), Some(content));
+        }
+
+        #[dialog_common::test]
+        async fn it_rejects_duplicate_create_on_filesystem() {
+            let env = NativeStorage::default();
+            let name = unique_name("fs-dup");
+
+            let (credential, _) = super::test_credential().await;
+
+            StorageFx::temp(&name)
+                .create(credential.clone())
+                .perform(&env)
+                .await
+                .unwrap();
+
+            let result = StorageFx::temp(&name)
+                .create(credential)
+                .perform(&env)
+                .await;
+            assert!(result.is_err(), "duplicate create should fail");
+        }
+    }
+}
