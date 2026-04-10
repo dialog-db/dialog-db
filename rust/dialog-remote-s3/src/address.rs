@@ -5,10 +5,10 @@
 use crate::Permit;
 use crate::S3Error;
 use crate::capability::{Access, Precondition};
-use crate::s3::{S3, build_url, extract_host, is_path_style_default};
+use crate::s3::S3;
 use dialog_capability::site::SiteAddress;
 use serde::{Deserialize, Serialize};
-use url::Url;
+use url::{Host, Url};
 
 /// Address for S3-compatible storage.
 ///
@@ -90,7 +90,7 @@ impl Address {
     ) -> Self {
         let endpoint = endpoint.into();
         let path_style = Url::parse(&endpoint)
-            .map(|url| is_path_style_default(&url))
+            .map(|url| Self::requires_path_style(&url))
             .unwrap_or(false);
 
         Self {
@@ -128,11 +128,46 @@ impl Address {
         self.path_style
     }
 
+    /// Extract the host header value from a URL, including port if non-standard.
+    pub(crate) fn authority(url: &Url) -> Result<String, S3Error> {
+        let hostname = url
+            .host_str()
+            .ok_or_else(|| S3Error::Configuration("URL missing host".into()))?;
+
+        Ok(match url.port() {
+            Some(port) => format!("{}:{}", hostname, port),
+            None => hostname.to_string(),
+        })
+    }
+
     /// Build a URL for the given key path.
     pub fn build_url(&self, path: &str) -> Result<Url, S3Error> {
         let endpoint =
             Url::parse(&self.endpoint).map_err(|e| S3Error::Configuration(e.to_string()))?;
-        build_url(&endpoint, &self.bucket, path, self.path_style)
+
+        if self.path_style {
+            let mut url = endpoint;
+            let new_path = if path.is_empty() {
+                format!("{}/", self.bucket)
+            } else {
+                format!("{}/{}", self.bucket, path)
+            };
+            url.set_path(&new_path);
+            Ok(url)
+        } else {
+            let host = endpoint
+                .host_str()
+                .ok_or_else(|| S3Error::Configuration("Invalid endpoint: no host".into()))?;
+            let new_host = format!("{}.{}", self.bucket, host);
+
+            let mut url = endpoint;
+            url.set_host(Some(&new_host))
+                .map_err(|e| S3Error::Configuration(format!("Invalid host: {}", e)))?;
+
+            let new_path = if path.is_empty() { "/" } else { path };
+            url.set_path(new_path);
+            Ok(url)
+        }
     }
 
     /// Build an unsigned request for public access.
@@ -143,7 +178,6 @@ impl Address {
         let path = request.path();
         let mut url = self.build_url(&path)?;
 
-        // Add query parameters if specified
         if let Some(params) = request.params() {
             let mut query = url.query_pairs_mut();
             for (key, value) in params {
@@ -151,7 +185,7 @@ impl Address {
             }
         }
 
-        let host = extract_host(&url)?;
+        let host = Self::authority(&url)?;
 
         let mut headers = vec![("host".to_string(), host)];
         if let Some(checksum) = request.checksum() {
@@ -173,6 +207,18 @@ impl Address {
             method: request.method().to_string(),
             headers,
         })
+    }
+
+    /// Whether this endpoint requires path-style URLs.
+    ///
+    /// IP addresses and localhost can't use virtual-hosted style because
+    /// `{bucket}.{ip}` isn't valid DNS.
+    fn requires_path_style(endpoint: &Url) -> bool {
+        match endpoint.host() {
+            Some(Host::Ipv4(_)) | Some(Host::Ipv6(_)) => true,
+            Some(Host::Domain(domain)) => domain == "localhost",
+            None => false,
+        }
     }
 }
 

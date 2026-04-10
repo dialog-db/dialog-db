@@ -18,14 +18,13 @@ pub use credentials::S3Credentials;
 pub use invocation::S3Invocation;
 pub use permit::Permit;
 
-use super::{Address, S3Error};
+use super::Address;
 use dialog_capability::site::{Authentication, Site};
-use url::{Host, Url};
 
 /// S3 direct-access site.
 ///
 /// Uses credential-based [`Authentication`] rather than capability delegation.
-/// Authorization is handled via SigV4 presigned URLs on the [`Address`](crate::Address).
+/// Authorization is handled via SigV4 presigned URLs on the [`Address`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct S3;
 
@@ -36,66 +35,6 @@ impl Authentication for S3 {
 impl Site for S3 {
     type Authorization = S3Authorization;
     type Address = Address;
-}
-
-/// Determine if path-style URLs should be used by default for this endpoint.
-///
-/// Returns true for IP addresses and localhost, since virtual-hosted style
-/// URLs require DNS resolution of `{bucket}.{host}`.
-pub fn is_path_style_default(endpoint: &Url) -> bool {
-    match endpoint.host() {
-        Some(Host::Ipv4(_)) | Some(Host::Ipv6(_)) => true,
-        Some(Host::Domain(domain)) => domain == "localhost",
-        None => false,
-    }
-}
-
-/// Build an S3 URL for the given path.
-///
-/// Handles both path-style and virtual-hosted style URLs.
-pub(crate) fn build_url(
-    endpoint: &Url,
-    bucket: &str,
-    path: &str,
-    path_style: bool,
-) -> Result<Url, S3Error> {
-    if path_style {
-        // Path-style: https://endpoint/bucket/path
-        let mut url = endpoint.clone();
-        let new_path = if path.is_empty() {
-            format!("{}/", bucket)
-        } else {
-            format!("{}/{}", bucket, path)
-        };
-        url.set_path(&new_path);
-        Ok(url)
-    } else {
-        // Virtual-hosted style: https://bucket.endpoint/path
-        let host = endpoint
-            .host_str()
-            .ok_or_else(|| S3Error::Configuration("Invalid endpoint: no host".into()))?;
-        let new_host = format!("{}.{}", bucket, host);
-
-        let mut url = endpoint.clone();
-        url.set_host(Some(&new_host))
-            .map_err(|e| S3Error::Configuration(format!("Invalid host: {}", e)))?;
-
-        let new_path = if path.is_empty() { "/" } else { path };
-        url.set_path(new_path);
-        Ok(url)
-    }
-}
-
-/// Extract host string from URL, including port for non-standard ports.
-pub(crate) fn extract_host(url: &Url) -> Result<String, S3Error> {
-    let hostname = url
-        .host_str()
-        .ok_or_else(|| S3Error::Configuration("URL missing host".into()))?;
-
-    Ok(match url.port() {
-        Some(port) => format!("{}:{}", hostname, port),
-        None => hostname.to_string(),
-    })
 }
 
 #[cfg(test)]
