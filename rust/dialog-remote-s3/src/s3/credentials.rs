@@ -8,7 +8,7 @@
 
 use crate::capability::{Access, Precondition, current_time};
 use crate::permit::Permit;
-use crate::{AccessError, Address};
+use crate::{Address, S3Error};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -71,7 +71,7 @@ impl S3Credentials {
         &self,
         request: &R,
         address: &Address,
-    ) -> Result<Permit, AccessError> {
+    ) -> Result<Permit, S3Error> {
         let time = current_time();
         let timestamp = time.format("%Y%m%dT%H%M%SZ").to_string();
         let date = &timestamp[0..8];
@@ -91,7 +91,7 @@ impl S3Credentials {
         // host and include it if present
         let hostname = url
             .host_str()
-            .ok_or_else(|| AccessError::Configuration("URL missing host".into()))?;
+            .ok_or_else(|| S3Error::Configuration("URL missing host".into()))?;
         let host = if let Some(port) = url.port() {
             format!("{}:{}", hostname, port)
         } else {

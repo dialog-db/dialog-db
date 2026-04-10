@@ -5,7 +5,7 @@ use dialog_capability::site::SiteAuthorization;
 use super::S3;
 use super::credentials::S3Credentials;
 use crate::capability::Access;
-use crate::{AccessError, Address, Permit};
+use crate::{Address, Permit, S3Error};
 
 /// S3 authorization material.
 ///
@@ -23,7 +23,7 @@ impl S3Authorization {
         &self,
         request: &R,
         address: &Address,
-    ) -> Result<Permit, AccessError> {
+    ) -> Result<Permit, S3Error> {
         match &self.0 {
             Some(creds) => creds.authorize(request, address).await,
             None => address.build_unsigned_request(request).await,

@@ -6,7 +6,7 @@ use dialog_capability::Did;
 use dialog_capability::Subject;
 use dialog_effects::memory::prelude::{CellExt, MemoryExt, MemorySubjectExt, SpaceExt};
 use dialog_effects::memory::{MemoryError, Publication};
-use dialog_remote_s3::{Address, S3, S3Credentials, S3StorageError, helpers::Session};
+use dialog_remote_s3::{Address, S3, S3Credentials, S3Error, helpers::Session};
 
 /// Adds timestamp to the given string to make it unique
 pub fn unique(base: &str) -> String {
@@ -37,11 +37,7 @@ impl TestBucket {
         }
     }
 
-    pub async fn resolve(
-        &self,
-        space: &str,
-        cell: &str,
-    ) -> Result<Option<Publication>, S3StorageError> {
+    pub async fn resolve(&self, space: &str, cell: &str) -> Result<Option<Publication>, S3Error> {
         let result: Result<Option<Publication>, MemoryError> = Subject::from(self.subject.clone())
             .memory()
             .space(space)
@@ -50,9 +46,9 @@ impl TestBucket {
             .fork(&self.address)
             .perform(&self.session)
             .await
-            .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?;
+            .map_err(|e| S3Error::Authorization(e.to_string()))?;
 
-        result.map_err(|e| S3StorageError::ServiceError(e.to_string()))
+        result.map_err(|e| S3Error::Service(e.to_string()))
     }
 
     pub async fn publish(
@@ -61,7 +57,7 @@ impl TestBucket {
         cell: &str,
         content: Vec<u8>,
         when: Option<Vec<u8>>,
-    ) -> Result<Vec<u8>, S3StorageError> {
+    ) -> Result<Vec<u8>, S3Error> {
         let result: Result<Vec<u8>, MemoryError> = Subject::from(self.subject.clone())
             .memory()
             .space(space)
@@ -70,18 +66,13 @@ impl TestBucket {
             .fork(&self.address)
             .perform(&self.session)
             .await
-            .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?;
+            .map_err(|e| S3Error::Authorization(e.to_string()))?;
 
-        result.map_err(|e| S3StorageError::ServiceError(e.to_string()))
+        result.map_err(|e| S3Error::Service(e.to_string()))
     }
 
     #[allow(dead_code)]
-    pub async fn retract(
-        &self,
-        space: &str,
-        cell: &str,
-        when: Vec<u8>,
-    ) -> Result<(), S3StorageError> {
+    pub async fn retract(&self, space: &str, cell: &str, when: Vec<u8>) -> Result<(), S3Error> {
         let result: Result<(), MemoryError> = Subject::from(self.subject.clone())
             .memory()
             .space(space)
@@ -90,9 +81,9 @@ impl TestBucket {
             .fork(&self.address)
             .perform(&self.session)
             .await
-            .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?;
+            .map_err(|e| S3Error::Authorization(e.to_string()))?;
 
-        result.map_err(|e| S3StorageError::ServiceError(e.to_string()))
+        result.map_err(|e| S3Error::Service(e.to_string()))
     }
 }
 

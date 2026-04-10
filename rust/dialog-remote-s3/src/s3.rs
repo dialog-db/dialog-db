@@ -16,7 +16,7 @@ pub use authorization::S3Authorization;
 pub use credentials::S3Credentials;
 pub use invocation::S3Invocation;
 
-use super::{AccessError, Address};
+use super::{Address, S3Error};
 use dialog_capability::site::{Authentication, Site};
 use url::{Host, Url};
 
@@ -56,7 +56,7 @@ pub(crate) fn build_url(
     bucket: &str,
     path: &str,
     path_style: bool,
-) -> Result<Url, AccessError> {
+) -> Result<Url, S3Error> {
     if path_style {
         // Path-style: https://endpoint/bucket/path
         let mut url = endpoint.clone();
@@ -71,12 +71,12 @@ pub(crate) fn build_url(
         // Virtual-hosted style: https://bucket.endpoint/path
         let host = endpoint
             .host_str()
-            .ok_or_else(|| AccessError::Configuration("Invalid endpoint: no host".into()))?;
+            .ok_or_else(|| S3Error::Configuration("Invalid endpoint: no host".into()))?;
         let new_host = format!("{}.{}", bucket, host);
 
         let mut url = endpoint.clone();
         url.set_host(Some(&new_host))
-            .map_err(|e| AccessError::Configuration(format!("Invalid host: {}", e)))?;
+            .map_err(|e| S3Error::Configuration(format!("Invalid host: {}", e)))?;
 
         let new_path = if path.is_empty() { "/" } else { path };
         url.set_path(new_path);
@@ -85,10 +85,10 @@ pub(crate) fn build_url(
 }
 
 /// Extract host string from URL, including port for non-standard ports.
-pub(crate) fn extract_host(url: &Url) -> Result<String, AccessError> {
+pub(crate) fn extract_host(url: &Url) -> Result<String, S3Error> {
     let hostname = url
         .host_str()
-        .ok_or_else(|| AccessError::Configuration("URL missing host".into()))?;
+        .ok_or_else(|| S3Error::Configuration("URL missing host".into()))?;
 
     Ok(match url.port() {
         Some(port) => format!("{}:{}", hostname, port),

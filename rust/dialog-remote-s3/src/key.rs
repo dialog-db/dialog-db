@@ -8,7 +8,7 @@
 
 use base58::{FromBase58, ToBase58};
 
-use crate::S3StorageError;
+use crate::S3Error;
 
 /// S3-safe key encoding that preserves path structure.
 ///
@@ -54,14 +54,14 @@ pub fn encode(bytes: &[u8]) -> String {
 ///
 /// Path components starting with `!` are base58-decoded.
 /// Other components are used as-is.
-pub fn decode(encoded: &str) -> Result<Vec<u8>, S3StorageError> {
+pub fn decode(encoded: &str) -> Result<Vec<u8>, S3Error> {
     // Decode each path component: `!`-prefixed ones are base58, others are plain text
     let components = encoded
         .split('/')
         .map(|component| {
             if let Some(encoded_part) = component.strip_prefix('!') {
                 encoded_part.from_base58().map_err(|e| {
-                    S3StorageError::SerializationError(format!(
+                    S3Error::Serialization(format!(
                         "Invalid base58 encoding in component '{}': {:?}",
                         component, e
                     ))
@@ -70,7 +70,7 @@ pub fn decode(encoded: &str) -> Result<Vec<u8>, S3StorageError> {
                 Ok(component.as_bytes().to_vec())
             }
         })
-        .collect::<Result<Vec<Vec<u8>>, S3StorageError>>()?;
+        .collect::<Result<Vec<Vec<u8>>, S3Error>>()?;
 
     // Join decoded components with `/` separator
     Ok(components.join(&b'/'))

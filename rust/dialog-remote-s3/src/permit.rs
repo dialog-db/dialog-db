@@ -37,16 +37,19 @@ impl Permit {
     }
 
     /// Send this permit as an HTTP request.
-    pub async fn send(self) -> Result<reqwest::Response, reqwest::Error> {
-        reqwest::RequestBuilder::from(self).send().await
+    pub async fn send(self) -> Result<reqwest::Response, crate::S3Error> {
+        Ok(reqwest::RequestBuilder::from(self).send().await?)
     }
 
     /// Send this permit with a request body.
     pub async fn upload(
         self,
         body: impl Into<reqwest::Body>,
-    ) -> Result<reqwest::Response, reqwest::Error> {
-        reqwest::RequestBuilder::from(self).body(body).send().await
+    ) -> Result<reqwest::Response, crate::S3Error> {
+        Ok(reqwest::RequestBuilder::from(self)
+            .body(body)
+            .send()
+            .await?)
     }
 }
 
