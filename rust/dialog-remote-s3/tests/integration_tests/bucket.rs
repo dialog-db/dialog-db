@@ -6,7 +6,7 @@ use dialog_capability::Did;
 use dialog_capability::Subject;
 use dialog_effects::memory::prelude::{CellExt, MemoryExt, MemorySubjectExt, SpaceExt};
 use dialog_effects::memory::{MemoryError, Publication};
-use dialog_remote_s3::{Address, S3, S3Credential, S3Error, helpers::Session};
+use dialog_remote_s3::{Address, S3, S3Credential, S3Error, helpers::S3Network};
 
 /// Adds timestamp to the given string to make it unique
 pub fn unique(base: &str) -> String {
@@ -17,12 +17,12 @@ pub fn unique(base: &str) -> String {
     format!("{}-{}", base, millis)
 }
 
-/// Test context with S3 backend, credentials, subject, and session for integration tests.
+/// Test context with S3 backend, credentials, subject, and operator for integration tests.
 pub struct TestBucket {
     pub s3: S3,
     pub address: Address,
     pub subject: Did,
-    pub session: Session,
+    pub operator: S3Network,
     pub store: String,
 }
 
@@ -32,7 +32,7 @@ impl TestBucket {
             s3: self.s3,
             address: self.address.clone(),
             subject: self.subject.clone(),
-            session: self.session.clone(),
+            operator: self.operator.clone(),
             store: format!("{}/{}", self.store, path),
         }
     }
@@ -44,7 +44,7 @@ impl TestBucket {
             .cell(cell)
             .resolve()
             .fork(&self.address)
-            .perform(&self.session)
+            .perform(&self.operator)
             .await
             .map_err(|e| S3Error::Authorization(e.to_string()))?;
 
@@ -64,7 +64,7 @@ impl TestBucket {
             .cell(cell)
             .publish(content, when)
             .fork(&self.address)
-            .perform(&self.session)
+            .perform(&self.operator)
             .await
             .map_err(|e| S3Error::Authorization(e.to_string()))?;
 
@@ -79,7 +79,7 @@ impl TestBucket {
             .cell(cell)
             .retract(when)
             .fork(&self.address)
-            .perform(&self.session)
+            .perform(&self.operator)
             .await
             .map_err(|e| S3Error::Authorization(e.to_string()))?;
 
@@ -107,13 +107,13 @@ pub fn open() -> TestBucket {
     );
 
     let s3 = S3;
-    let session = Session::new(subject.clone()).with_credentials(credentials);
+    let operator = S3Network::from(credentials);
 
     TestBucket {
         s3,
         address,
         subject,
-        session,
+        operator,
         store: "integration-tests".to_string(),
     }
 }
