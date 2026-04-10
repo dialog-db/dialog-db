@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::AccessError;
-use crate::capability::Access;
+use crate::capability::{Access, Precondition};
 use crate::permit::Permit;
 
 /// Address for S3-compatible storage.
@@ -139,8 +139,6 @@ impl Address {
         &self,
         request: &R,
     ) -> Result<Permit, AccessError> {
-        use crate::capability::Precondition;
-
         let path = request.path();
         let mut url = self.build_url(&path)?;
 
