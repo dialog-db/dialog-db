@@ -66,7 +66,7 @@ where
             && let Some(store) = self.spaces.get(&did)
         {
             return did!("local:storage")
-                .credential(credential::SELF)
+                .credential().key(credential::SELF)
                 .load()
                 .perform(&store)
                 .await
@@ -78,7 +78,7 @@ where
             .map_err(|e| StorageError::Storage(e.to_string()))?;
 
         let cred: Credential = did!("local:storage")
-            .credential(credential::SELF)
+            .credential().key(credential::SELF)
             .load()
             .perform(&store)
             .await
@@ -122,7 +122,7 @@ where
             .map_err(|e| StorageError::Storage(e.to_string()))?;
 
         did!("local:storage")
-            .credential(credential::SELF)
+            .credential().key(credential::SELF)
             .save(cred.clone())
             .perform(&store)
             .await

@@ -13,6 +13,8 @@ use async_trait::async_trait;
 use dialog_capability::access::{AuthorizeError, Protocol, Prove, Retain};
 use dialog_capability::{Capability, Did, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_credentials::Credential;
+use dialog_effects::credential::Secret;
 use dialog_effects::{archive, credential, memory, storage};
 
 use loader::Loader;
@@ -39,8 +41,10 @@ pub struct Storage<S: Clone> {
         memory::Resolve,
         memory::Publish,
         memory::Retract,
-        credential::Load,
-        credential::Save
+        credential::Load<Credential>,
+        credential::Save<Credential>,
+        credential::Load<Secret>,
+        credential::Save<Secret>
     )]
     router: Router<S>,
 }
