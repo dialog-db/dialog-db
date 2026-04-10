@@ -16,7 +16,7 @@ impl Provider<ForkInvocation<S3, Resolve>> for S3 {
     ) -> Result<Option<Publication>, MemoryError> {
         invocation
             .authorization
-            .permit(&invocation.capability, &invocation.address)
+            .redeem(&invocation.capability, &invocation.address)
             .await?
             .invoke(invocation.capability)
             .perform(self)
@@ -67,7 +67,7 @@ impl Provider<ForkInvocation<S3, Publish>> for S3 {
     ) -> Result<Vec<u8>, MemoryError> {
         invocation
             .authorization
-            .permit(&invocation.capability, &invocation.address)
+            .redeem(&invocation.capability, &invocation.address)
             .await?
             .invoke(invocation.capability)
             .perform(self)
@@ -117,7 +117,7 @@ impl Provider<ForkInvocation<S3, Retract>> for S3 {
     async fn execute(&self, invocation: ForkInvocation<S3, Retract>) -> Result<(), MemoryError> {
         invocation
             .authorization
-            .permit(&invocation.capability, &invocation.address)
+            .redeem(&invocation.capability, &invocation.address)
             .await?
             .invoke(invocation.capability)
             .perform(self)
