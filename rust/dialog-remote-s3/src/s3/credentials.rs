@@ -306,7 +306,7 @@ mod tests {
             .attenuate(archive::Archive)
             .attenuate(archive::Catalog::new("blobs"))
             .invoke(archive::Get::new([0x42; 32]));
-        let descriptor = auth.grant(&get, &address).await.unwrap();
+        let descriptor = auth.permit(&get, &address).await.unwrap();
 
         assert_eq!(descriptor.method, "GET");
         assert!(descriptor.url.as_str().contains("my-bucket"));
@@ -322,7 +322,7 @@ mod tests {
             .attenuate(archive::Archive)
             .attenuate(archive::Catalog::new("blobs"))
             .invoke(archive::Get::new([0x42; 32]));
-        let descriptor = auth.grant(&get, &address).await.unwrap();
+        let descriptor = auth.permit(&get, &address).await.unwrap();
 
         assert_eq!(descriptor.method, "GET");
         assert!(descriptor.url.as_str().contains("X-Amz-Signature="));
@@ -342,7 +342,7 @@ mod tests {
                 digest: [0x99; 32].into(),
                 checksum,
             });
-        let descriptor = auth.grant(&put, &address).await.unwrap();
+        let descriptor = auth.permit(&put, &address).await.unwrap();
 
         assert!(
             descriptor
@@ -361,7 +361,7 @@ mod tests {
             .attenuate(archive::Archive)
             .attenuate(archive::Catalog::new("blobs"))
             .invoke(archive::Get::new([0x42; 32]));
-        let descriptor = auth.grant(&get, &address).await.unwrap();
+        let descriptor = auth.permit(&get, &address).await.unwrap();
 
         assert_eq!(descriptor.url.host_str().unwrap(), "localhost");
         assert!(descriptor.url.path().starts_with("/test-bucket/"));

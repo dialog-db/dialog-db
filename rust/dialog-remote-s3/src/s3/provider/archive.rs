@@ -1,29 +1,24 @@
-//! Archive capability providers for S3.
-//!
-//! Each effect is paired: `Provider<ForkInvocation<S3, Fx>>` authorizes via SigV4,
-//! then delegates to `Provider<S3Invocation<Fx>>` for HTTP execution.
-
-use async_trait::async_trait;
-use dialog_capability::fork::ForkInvocation;
-use dialog_capability::{Policy, Provider};
-use dialog_effects::archive::*;
+//! Archive providers for S3.
 
 use crate::s3::{S3, S3Invocation};
+use async_trait::async_trait;
+use dialog_capability::Provider;
+use dialog_capability::fork::ForkInvocation;
+use dialog_effects::archive::*;
+use reqwest::StatusCode;
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<ForkInvocation<S3, Get>> for S3 {
     async fn execute(
         &self,
-        invocation: ForkInvocation<S3, Get>,
+        input: ForkInvocation<S3, Get>,
     ) -> Result<Option<Vec<u8>>, ArchiveError> {
-        let permit = invocation
+        input
             .authorization
-            .grant(&invocation.capability, &invocation.address)
-            .await
-            .map_err(|e| ArchiveError::Io(e.to_string()))?;
-
-        S3Invocation::new(permit, invocation.capability)
+            .permit(&input.capability, &input.address)
+            .await?
+            .invoke(input.capability)
             .perform(self)
             .await
     }
@@ -45,7 +40,7 @@ impl Provider<S3Invocation<Get>> for S3 {
                 .await
                 .map_err(|e| ArchiveError::Io(e.to_string()))?;
             Ok(Some(bytes.to_vec()))
-        } else if response.status() == reqwest::StatusCode::NOT_FOUND {
+        } else if response.status() == StatusCode::NOT_FOUND {
             Ok(None)
         } else {
             Err(ArchiveError::Storage(format!(
@@ -59,14 +54,12 @@ impl Provider<S3Invocation<Get>> for S3 {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<ForkInvocation<S3, Put>> for S3 {
-    async fn execute(&self, invocation: ForkInvocation<S3, Put>) -> Result<(), ArchiveError> {
-        let permit = invocation
+    async fn execute(&self, input: ForkInvocation<S3, Put>) -> Result<(), ArchiveError> {
+        input
             .authorization
-            .grant(&invocation.capability, &invocation.address)
-            .await
-            .map_err(|e| ArchiveError::Io(e.to_string()))?;
-
-        S3Invocation::new(permit, invocation.capability)
+            .permit(&input.capability, &input.address)
+            .await?
+            .invoke(input.capability)
             .perform(self)
             .await
     }
@@ -76,11 +69,11 @@ impl Provider<ForkInvocation<S3, Put>> for S3 {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<S3Invocation<Put>> for S3 {
     async fn execute(&self, input: S3Invocation<Put>) -> Result<(), ArchiveError> {
-        let content = Put::of(&input.capability).content.clone();
+        let put = input.capability.into_effect();
 
-        let response = reqwest::RequestBuilder::from(input.permit)
-            .body(content)
-            .send()
+        let response = input
+            .permit
+            .upload(put.content)
             .await
             .map_err(|e| ArchiveError::Io(e.to_string()))?;
 

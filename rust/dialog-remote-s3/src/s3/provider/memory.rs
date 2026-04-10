@@ -1,12 +1,10 @@
-//! Memory capability providers for S3.
-//!
-//! Each effect is paired: `Provider<ForkInvocation<S3, Fx>>` authorizes via SigV4,
-//! then delegates to `Provider<S3Invocation<Fx>>` for HTTP execution.
+//! Memory providers for S3.
 
 use async_trait::async_trait;
+use dialog_capability::Provider;
 use dialog_capability::fork::ForkInvocation;
-use dialog_capability::{Policy, Provider};
 use dialog_effects::memory::*;
+use reqwest::StatusCode;
 
 use crate::s3::{S3, S3Invocation};
 
@@ -17,13 +15,11 @@ impl Provider<ForkInvocation<S3, Resolve>> for S3 {
         &self,
         invocation: ForkInvocation<S3, Resolve>,
     ) -> Result<Option<Publication>, MemoryError> {
-        let permit = invocation
+        invocation
             .authorization
-            .grant(&invocation.capability, &invocation.address)
-            .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
-
-        S3Invocation::new(permit, invocation.capability)
+            .permit(&invocation.capability, &invocation.address)
+            .await?
+            .invoke(invocation.capability)
             .perform(self)
             .await
     }
@@ -59,7 +55,7 @@ impl Provider<S3Invocation<Resolve>> for S3 {
                 content: bytes.to_vec(),
                 edition: edition.into_bytes(),
             }))
-        } else if response.status() == reqwest::StatusCode::NOT_FOUND {
+        } else if response.status() == StatusCode::NOT_FOUND {
             Ok(None)
         } else {
             Err(MemoryError::Storage(format!(
@@ -77,13 +73,11 @@ impl Provider<ForkInvocation<S3, Publish>> for S3 {
         &self,
         invocation: ForkInvocation<S3, Publish>,
     ) -> Result<Vec<u8>, MemoryError> {
-        let permit = invocation
+        invocation
             .authorization
-            .grant(&invocation.capability, &invocation.address)
-            .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
-
-        S3Invocation::new(permit, invocation.capability)
+            .permit(&invocation.capability, &invocation.address)
+            .await?
+            .invoke(invocation.capability)
             .perform(self)
             .await
     }
@@ -93,15 +87,15 @@ impl Provider<ForkInvocation<S3, Publish>> for S3 {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<S3Invocation<Publish>> for S3 {
     async fn execute(&self, input: S3Invocation<Publish>) -> Result<Vec<u8>, MemoryError> {
-        let content = Publish::of(&input.capability).content.clone();
-        let when = Publish::of(&input.capability)
+        let publish = input.capability.into_effect();
+        let when = publish
             .when
             .as_ref()
             .map(|b| String::from_utf8_lossy(b).to_string());
 
-        let response = reqwest::RequestBuilder::from(input.permit)
-            .body(content)
-            .send()
+        let response = input
+            .permit
+            .upload(publish.content)
             .await
             .map_err(|e| MemoryError::Storage(e.to_string()))?;
 
@@ -117,7 +111,7 @@ impl Provider<S3Invocation<Publish>> for S3 {
                     })?;
                 Ok(new_edition.into_bytes())
             }
-            reqwest::StatusCode::PRECONDITION_FAILED => Err(MemoryError::EditionMismatch {
+            StatusCode::PRECONDITION_FAILED => Err(MemoryError::EditionMismatch {
                 expected: when,
                 actual: None,
             }),
@@ -133,13 +127,11 @@ impl Provider<S3Invocation<Publish>> for S3 {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<ForkInvocation<S3, Retract>> for S3 {
     async fn execute(&self, invocation: ForkInvocation<S3, Retract>) -> Result<(), MemoryError> {
-        let permit = invocation
+        invocation
             .authorization
-            .grant(&invocation.capability, &invocation.address)
-            .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
-
-        S3Invocation::new(permit, invocation.capability)
+            .permit(&invocation.capability, &invocation.address)
+            .await?
+            .invoke(invocation.capability)
             .perform(self)
             .await
     }
@@ -149,7 +141,8 @@ impl Provider<ForkInvocation<S3, Retract>> for S3 {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<S3Invocation<Retract>> for S3 {
     async fn execute(&self, input: S3Invocation<Retract>) -> Result<(), MemoryError> {
-        let when = String::from_utf8_lossy(&Retract::of(&input.capability).when).to_string();
+        let retract = input.capability.into_effect();
+        let when = String::from_utf8_lossy(&retract.when).to_string();
 
         let response = input
             .permit
@@ -159,7 +152,7 @@ impl Provider<S3Invocation<Retract>> for S3 {
 
         match response.status() {
             status if status.is_success() => Ok(()),
-            reqwest::StatusCode::PRECONDITION_FAILED => Err(MemoryError::EditionMismatch {
+            StatusCode::PRECONDITION_FAILED => Err(MemoryError::EditionMismatch {
                 expected: Some(when),
                 actual: None,
             }),

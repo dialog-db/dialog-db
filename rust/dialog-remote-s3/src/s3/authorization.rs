@@ -19,7 +19,7 @@ impl S3Authorization {
     /// Authorize a request, producing a presigned URL permit.
     ///
     /// With credentials, signs via SigV4. Without, builds an unsigned request.
-    pub async fn grant<R: Access>(
+    pub async fn permit<R: Access>(
         &self,
         request: &R,
         address: &Address,

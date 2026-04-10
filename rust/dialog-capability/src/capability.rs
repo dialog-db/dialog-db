@@ -113,6 +113,14 @@ impl<T: Policy + Constraint> Capability<T> {
 
 /// Perform — only for effect capabilities.
 impl<Fx: Effect> Capability<Fx> {
+    /// Consume the capability and return the owned effect.
+    pub fn into_effect(self) -> Fx
+    where
+        Fx::Of: Constraint,
+    {
+        self.into_inner().constraint
+    }
+
     /// Perform the invocation directly against a provider.
     pub async fn perform<Env>(self, env: &Env) -> Fx::Output
     where

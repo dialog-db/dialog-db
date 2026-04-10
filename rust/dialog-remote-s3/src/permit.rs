@@ -4,16 +4,19 @@
 //! or a UCAN access service response. It carries everything needed to make the
 //! actual HTTP request: presigned URL, method, and headers.
 
+use dialog_capability::{Capability, Constraint, Effect};
 use serde::{Deserialize, Serialize};
 use url::Url;
+
+use crate::s3::S3Invocation;
 
 /// A pre-authorized HTTP request — presigned URL + method + headers.
 ///
 /// Produced by SigV4 signing (direct S3) or by a UCAN access service.
-/// Fed into [`S3Invocation<Fx>`](crate::S3Invocation) for typed execution.
+/// Fed into [`S3Invocation<Fx>`] for typed execution.
 ///
 /// Converts to [`reqwest::RequestBuilder`] via `From`, or use
-/// [`send`](Permit::send) to execute the request directly.
+/// [`send`](Permit::send) / [`upload`](Permit::upload) to execute directly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Permit {
     /// The presigned URL to use.
@@ -25,9 +28,25 @@ pub struct Permit {
 }
 
 impl Permit {
+    /// Pair this permit with a capability to create an [`S3Invocation`].
+    pub fn invoke<Fx: Effect>(self, capability: Capability<Fx>) -> S3Invocation<Fx>
+    where
+        Fx::Of: Constraint,
+    {
+        S3Invocation::new(self, capability)
+    }
+
     /// Send this permit as an HTTP request.
     pub async fn send(self) -> Result<reqwest::Response, reqwest::Error> {
         reqwest::RequestBuilder::from(self).send().await
+    }
+
+    /// Send this permit with a request body.
+    pub async fn upload(
+        self,
+        body: impl Into<reqwest::Body>,
+    ) -> Result<reqwest::Response, reqwest::Error> {
+        reqwest::RequestBuilder::from(self).body(body).send().await
     }
 }
 
