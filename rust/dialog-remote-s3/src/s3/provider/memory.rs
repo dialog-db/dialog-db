@@ -1,12 +1,11 @@
 //! Memory providers for S3.
 
+use crate::{S3, S3Error, S3Invocation};
 use async_trait::async_trait;
 use dialog_capability::Provider;
 use dialog_capability::fork::ForkInvocation;
 use dialog_effects::memory::*;
 use reqwest::StatusCode;
-
-use crate::s3::{S3, S3Invocation};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -32,11 +31,7 @@ impl Provider<S3Invocation<Resolve>> for S3 {
         &self,
         input: S3Invocation<Resolve>,
     ) -> Result<Option<Publication>, MemoryError> {
-        let response = input
-            .permit
-            .send()
-            .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+        let response = input.permit.send().await?;
 
         if response.status().is_success() {
             let edition = response
@@ -46,10 +41,7 @@ impl Provider<S3Invocation<Resolve>> for S3 {
                 .map(|s| s.trim_matches('"').to_string())
                 .ok_or_else(|| MemoryError::Storage("Response missing ETag header".to_string()))?;
 
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            let bytes = response.bytes().await.map_err(S3Error::from)?;
 
             Ok(Some(Publication {
                 content: bytes.to_vec(),
@@ -93,11 +85,7 @@ impl Provider<S3Invocation<Publish>> for S3 {
             .as_ref()
             .map(|b| String::from_utf8_lossy(b).to_string());
 
-        let response = input
-            .permit
-            .upload(publish.content)
-            .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+        let response = input.permit.upload(publish.content).await?;
 
         match response.status() {
             status if status.is_success() => {
@@ -144,11 +132,7 @@ impl Provider<S3Invocation<Retract>> for S3 {
         let retract = input.capability.into_effect();
         let when = String::from_utf8_lossy(&retract.when).to_string();
 
-        let response = input
-            .permit
-            .send()
-            .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+        let response = input.permit.send().await?;
 
         match response.status() {
             status if status.is_success() => Ok(()),

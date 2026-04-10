@@ -2,7 +2,7 @@
 //!
 //! This module provides the [`Address`] type for specifying S3-compatible storage locations.
 
-use crate::AccessError;
+use crate::S3Error;
 use crate::capability::{Access, Precondition};
 use crate::permit::Permit;
 use crate::s3::{S3, build_url, extract_host, is_path_style_default};
@@ -129,9 +129,9 @@ impl Address {
     }
 
     /// Build a URL for the given key path.
-    pub fn build_url(&self, path: &str) -> Result<Url, AccessError> {
+    pub fn build_url(&self, path: &str) -> Result<Url, S3Error> {
         let endpoint =
-            Url::parse(&self.endpoint).map_err(|e| AccessError::Configuration(e.to_string()))?;
+            Url::parse(&self.endpoint).map_err(|e| S3Error::Configuration(e.to_string()))?;
         build_url(&endpoint, &self.bucket, path, self.path_style)
     }
 
@@ -139,7 +139,7 @@ impl Address {
     pub(crate) async fn build_unsigned_request<R: Access>(
         &self,
         request: &R,
-    ) -> Result<Permit, AccessError> {
+    ) -> Result<Permit, S3Error> {
         let path = request.path();
         let mut url = self.build_url(&path)?;
 
