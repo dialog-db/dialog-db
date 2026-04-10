@@ -14,5 +14,5 @@
 //! cargo test -p dialog-remote-s3 --features s3-integration-tests --test integration_tests
 //! ```
 
-mod bucket;
-mod transactional_memory;
+mod environment;
+mod memory;
