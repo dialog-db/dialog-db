@@ -37,7 +37,7 @@ async fn it_resolves_non_existent_cell() -> anyhow::Result<()> {
         .resolve()
         .fork(&env.address)
         .perform(&env.network)
-        .await??;
+        .await?;
 
     assert!(result.is_none());
     Ok(())
@@ -60,13 +60,13 @@ async fn it_publishes_and_resolves_value() -> anyhow::Result<()> {
         .publish(encode(&data), None)
         .fork(&env.address)
         .perform(&env.network)
-        .await??;
+        .await?;
 
     let publication = cell
         .resolve()
         .fork(&env.address)
         .perform(&env.network)
-        .await??;
+        .await?;
 
     assert!(publication.is_some());
     let publication = publication.unwrap();
@@ -93,7 +93,7 @@ async fn it_updates_existing_value() -> anyhow::Result<()> {
         .publish(encode(&initial), None)
         .fork(&env.address)
         .perform(&env.network)
-        .await??;
+        .await?;
 
     let updated = TestData {
         name: "updated".to_string(),
@@ -105,13 +105,13 @@ async fn it_updates_existing_value() -> anyhow::Result<()> {
         .publish(encode(&updated), Some(edition1))
         .fork(&env.address)
         .perform(&env.network)
-        .await??;
+        .await?;
 
     let publication = cell
         .resolve()
         .fork(&env.address)
         .perform(&env.network)
-        .await??;
+        .await?;
 
     assert!(publication.is_some());
     let publication = publication.unwrap();
@@ -138,7 +138,7 @@ async fn it_detects_cas_conflict() -> anyhow::Result<()> {
         .publish(encode(&initial), None)
         .fork(&env.address)
         .perform(&env.network)
-        .await??;
+        .await?;
 
     let by_cell1 = TestData {
         name: "updated_by_cell1".to_string(),
@@ -149,7 +149,7 @@ async fn it_detects_cas_conflict() -> anyhow::Result<()> {
         .publish(encode(&by_cell1), Some(edition1.clone()))
         .fork(&env.address)
         .perform(&env.network)
-        .await??;
+        .await?;
 
     // Try to update with stale edition
     let by_cell2 = TestData {
@@ -164,17 +164,14 @@ async fn it_detects_cas_conflict() -> anyhow::Result<()> {
         .perform(&env.network)
         .await;
 
-    assert!(
-        result.is_err() || result.unwrap().is_err(),
-        "CAS should fail due to edition mismatch"
-    );
+    assert!(result.is_err(), "CAS should fail due to edition mismatch");
 
     // Verify the value is still what cell1 set
     let publication = cell
         .resolve()
         .fork(&env.address)
         .perform(&env.network)
-        .await??;
+        .await?;
 
     assert!(publication.is_some());
     assert_eq!(decode(&publication.unwrap().content), by_cell1);

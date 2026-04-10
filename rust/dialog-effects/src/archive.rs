@@ -17,6 +17,7 @@ use std::error::Error;
 pub use dialog_capability::{
     Attenuate, Attenuation, Capability, DialogCapabilityAuthorizationError,
     DialogCapabilityPerformError, Effect, Policy, StorageError, Subject,
+    access::AuthorizeError,
 };
 pub use dialog_common::Blake3Hash;
 use dialog_common::Checksum;
@@ -147,6 +148,12 @@ impl From<StorageError> for ArchiveError {
 
 impl From<DialogCapabilityAuthorizationError> for ArchiveError {
     fn from(value: DialogCapabilityAuthorizationError) -> Self {
+        ArchiveError::AuthorizationError(value.to_string())
+    }
+}
+
+impl From<AuthorizeError> for ArchiveError {
+    fn from(value: AuthorizeError) -> Self {
         ArchiveError::AuthorizationError(value.to_string())
     }
 }

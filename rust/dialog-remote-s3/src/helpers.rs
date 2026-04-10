@@ -5,7 +5,6 @@
 //! configuration into tests.
 
 use async_trait::async_trait;
-use dialog_capability::access::AuthorizeError;
 use dialog_capability::fork::{Fork, ForkInvocation};
 use dialog_capability::{Constraint, Effect, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -82,14 +81,14 @@ where
     S3: Provider<ForkInvocation<S3, Fx>> + ConditionalSync,
     Self: ConditionalSend + ConditionalSync,
 {
-    async fn execute(&self, fork: Fork<S3, Fx>) -> Result<Fx::Output, AuthorizeError> {
+    async fn execute(&self, fork: Fork<S3, Fx>) -> Fx::Output {
         let (capability, address) = fork.into_parts();
         let invocation = ForkInvocation::new(
             capability,
             address,
             S3Authorization(self.credentials.clone()),
         );
-        Ok(invocation.perform(&S3).await)
+        invocation.perform(&S3).await
     }
 }
 
