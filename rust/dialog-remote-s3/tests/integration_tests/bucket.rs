@@ -6,7 +6,7 @@ use dialog_capability::Did;
 use dialog_capability::Subject;
 use dialog_effects::memory::prelude::{CellExt, MemoryExt, MemorySubjectExt, SpaceExt};
 use dialog_effects::memory::{MemoryError, Publication};
-use dialog_remote_s3::{Address, S3, S3Credentials, S3Error, helpers::Session};
+use dialog_remote_s3::{Address, S3, S3Credential, S3Error, helpers::Session};
 
 /// Adds timestamp to the given string to make it unique
 pub fn unique(base: &str) -> String {
@@ -90,18 +90,18 @@ impl TestBucket {
 /// Helper to create an S3 test context from environment variables.
 pub fn open() -> TestBucket {
     #![allow(clippy::option_env_unwrap)]
-    let address = Address::new(
-        option_env!("R2S3_ENDPOINT").expect("R2S3_ENDPOINT not set"),
-        option_env!("R2S3_REGION").expect("R2S3_REGION not set"),
-        option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set"),
-    );
+    let address = Address::builder(option_env!("R2S3_ENDPOINT").expect("R2S3_ENDPOINT not set"))
+        .region(option_env!("R2S3_REGION").expect("R2S3_REGION not set"))
+        .bucket(option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set"))
+        .build()
+        .expect("Invalid S3 address configuration");
 
     let subject: Did = option_env!("R2S3_SUBJECT")
         .unwrap_or("did:key:zTestSubject")
         .parse()
         .expect("Invalid DID in R2S3_SUBJECT");
 
-    let credentials = S3Credentials::new(
+    let credentials = S3Credential::new(
         option_env!("R2S3_ACCESS_KEY_ID").expect("R2S3_ACCESS_KEY_ID not set"),
         option_env!("R2S3_SECRET_ACCESS_KEY").expect("R2S3_SECRET_ACCESS_KEY not set"),
     );

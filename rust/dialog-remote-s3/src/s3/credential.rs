@@ -1,14 +1,15 @@
 //! S3 credentials for direct access.
 //!
-//! [`S3Credentials`] carries only auth material (access key + secret).
-//! Address info (endpoint, bucket, path_style) lives in [`Address`](crate::Address).
+//! [`S3Credential`] carries only auth material (access key + secret).
+//! Address info (endpoint, bucket, path_style) lives in [`Address`](crate::s3::Address).
 //!
-//! - `None` → public/unsigned access
-//! - `Some(S3Credentials)` → private access with SigV4 signing
+//! - `None` -> public/unsigned access
+//! - `Some(S3Credential)` -> private access with SigV4 signing
 
+use super::Address;
 use crate::Permit;
+use crate::S3Error;
 use crate::capability::{Access, Precondition, current_time};
-use crate::{Address, S3Error};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -16,38 +17,22 @@ use std::fmt::Write;
 use std::hash::{Hash, Hasher};
 
 /// S3 credentials for authenticated (SigV4 signed) access.
-///
-/// Use `Option<S3Credentials>`:
-/// - `None` for public/unsigned access
-/// - `Some(creds)` for private SigV4 signing
-///
-/// # Example
-///
-/// ```no_run
-/// use dialog_remote_s3::s3::S3Credentials;
-///
-/// // Private credentials
-/// let creds = S3Credentials::new("AKIAEXAMPLE", "secret-key");
-///
-/// // Use with Address::authorize()
-/// // address.authorize(&request, Some(&creds)).await?;
-/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct S3Credentials {
+pub struct S3Credential {
     /// AWS Access Key ID
     access_key_id: String,
     /// AWS Secret Access Key
     secret_access_key: String,
 }
 
-impl Hash for S3Credentials {
+impl Hash for S3Credential {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.access_key_id.hash(state);
         self.secret_access_key.hash(state);
     }
 }
 
-impl S3Credentials {
+impl S3Credential {
     /// Create new credentials with the given access key and secret.
     pub fn new(access_key_id: impl Into<String>, secret_access_key: impl Into<String>) -> Self {
         Self {
@@ -66,31 +51,22 @@ impl S3Credentials {
         &self.secret_access_key
     }
 
-    /// Generates a signed URL using the given address for endpoint/region/bucket info.
-    pub async fn authorize<R: Access>(
-        &self,
-        request: &R,
-        address: &Address,
-    ) -> Result<Permit, S3Error> {
-        let time = current_time();
-        let timestamp = time.format("%Y%m%dT%H%M%SZ").to_string();
-        let date = &timestamp[0..8];
-
-        let region = address.region();
-        let service = request.service();
-        let expires = request.expires();
-
-        // Derive signing key on demand
-        let key = SigningKey::derive(&self.secret_access_key, date, region, service);
-        let scope = format!("{}/{}/{}/aws4_request", date, region, service);
-
+    /// Build a permit for the given request and address.
+    ///
+    /// Resolves the URL, adds query params, and builds headers
+    /// (host, checksum, precondition).
+    pub fn permit<R: Access>(request: &R, address: &Address) -> Permit {
         let path = request.path();
-        let url = address.build_url(&path)?;
+        let mut url = address.resolve(&path);
 
-        let host = Address::authority(&url)?;
+        if let Some(params) = request.params() {
+            let mut query = url.query_pairs_mut();
+            for (key, value) in params {
+                query.append_pair(&key, &value);
+            }
+        }
 
-        // Build signed headers
-        let mut headers = vec![("host".to_string(), host.clone())];
+        let mut headers = vec![("host".to_string(), address.authority().to_string())];
         if let Some(checksum) = request.checksum() {
             let header_name = format!("x-amz-checksum-{}", checksum.name());
             headers.push((header_name, checksum.to_string()));
@@ -104,15 +80,42 @@ impl S3Credentials {
             }
             Precondition::None => {}
         }
-        headers.sort_by(|a, b| a.0.cmp(&b.0));
 
-        let signed_headers: String = headers
+        Permit {
+            url,
+            method: request.method().to_string(),
+            headers,
+        }
+    }
+
+    /// Sign a permit with SigV4, returning a new permit with presigned URL.
+    pub async fn authorize<R: Access>(
+        &self,
+        request: &R,
+        address: &Address,
+    ) -> Result<Permit, S3Error> {
+        let mut permit = Self::permit(request, address);
+
+        let time = current_time();
+        let timestamp = time.format("%Y%m%dT%H%M%SZ").to_string();
+        let date = &timestamp[0..8];
+
+        let region = address.region();
+        let service = request.service();
+        let expires = request.expires();
+
+        let key = SigningKey::derive(&self.secret_access_key, date, region, service);
+        let scope = format!("{}/{}/{}/aws4_request", date, region, service);
+
+        permit.headers.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let signed_headers: String = permit
+            .headers
             .iter()
             .map(|(k, _)| k.as_str())
             .collect::<Vec<_>>()
             .join(";");
 
-        // Build query parameters
         let mut query_params: Vec<(String, String)> = vec![
             ("X-Amz-Algorithm".into(), "AWS4-HMAC-SHA256".into()),
             ("X-Amz-Content-Sha256".into(), "UNSIGNED-PAYLOAD".into()),
@@ -122,9 +125,8 @@ impl S3Credentials {
             ),
             ("X-Amz-Date".into(), timestamp.clone()),
             ("X-Amz-Expires".into(), expires.to_string()),
+            ("X-Amz-SignedHeaders".into(), signed_headers.clone()),
         ];
-
-        query_params.push(("X-Amz-SignedHeaders".into(), signed_headers.clone()));
 
         if let Some(params) = request.params() {
             for (key, value) in params {
@@ -132,11 +134,9 @@ impl S3Credentials {
             }
         }
 
-        // Sort all query parameters alphabetically (required by SigV4)
         query_params.sort_by(|a, b| a.0.cmp(&b.0));
 
-        // Build canonical request
-        let canonical_uri = percent_encode_path(url.path());
+        let canonical_uri = percent_encode_path(permit.url.path());
 
         let canonical_query: String = query_params
             .iter()
@@ -144,7 +144,8 @@ impl S3Credentials {
             .collect::<Vec<_>>()
             .join("&");
 
-        let canonical_headers: String = headers
+        let canonical_headers: String = permit
+            .headers
             .iter()
             .map(|(k, v)| format!("{}:{}", k, v.trim()))
             .collect::<Vec<_>>()
@@ -152,14 +153,9 @@ impl S3Credentials {
 
         let canonical_request = format!(
             "{}\n{}\n{}\n{}\n\n{}\nUNSIGNED-PAYLOAD",
-            request.method(),
-            canonical_uri,
-            canonical_query,
-            canonical_headers,
-            signed_headers
+            permit.method, canonical_uri, canonical_query, canonical_headers, signed_headers
         );
 
-        // Create string to sign
         let digest = Sha256::digest(canonical_request.as_bytes());
         let payload = format!(
             "AWS4-HMAC-SHA256\n{}\n{}\n{}",
@@ -168,33 +164,24 @@ impl S3Credentials {
             hex_encode(&digest)
         );
 
-        // Compute signature
         let signature = key.sign(payload.as_bytes());
 
-        // Build final URL with all query parameters
-        let mut url = url.clone();
-        url.set_query(None);
+        permit.url.set_query(None);
         {
-            let mut query = url.query_pairs_mut();
+            let mut query = permit.url.query_pairs_mut();
             for (k, v) in &query_params {
                 query.append_pair(k, v);
             }
             query.append_pair("X-Amz-Signature", &signature.to_string());
         }
 
-        Ok(Permit {
-            url,
-            method: request.method().to_string(),
-            headers,
-        })
+        Ok(permit)
     }
 }
 
-/// AWS SigV4 signing key.
 struct SigningKey(Hmac<Sha256>);
 
 impl SigningKey {
-    /// Derive a signing key for the given date, region, and service.
     fn derive(secret_key: &str, date: &str, region: &str, service: &str) -> Self {
         let date_key = hmac_sha256(format!("AWS4{}", secret_key).as_bytes(), date.as_bytes());
         let region_key = hmac_sha256(&date_key, region.as_bytes());
@@ -204,7 +191,6 @@ impl SigningKey {
         Self(Hmac::new_from_slice(&signing_key).expect("HMAC can take key of any size"))
     }
 
-    /// Sign a message with this key.
     fn sign(&self, message: &[u8]) -> Signature {
         let mut mac = self.0.clone();
         mac.update(message);
@@ -212,7 +198,6 @@ impl SigningKey {
     }
 }
 
-/// AWS SigV4 signature.
 struct Signature(Vec<u8>);
 
 impl std::fmt::Display for Signature {
@@ -224,14 +209,12 @@ impl std::fmt::Display for Signature {
     }
 }
 
-/// Compute HMAC-SHA256.
 fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC can take key of any size");
     mac.update(data);
     mac.finalize().into_bytes().to_vec()
 }
 
-/// Hex-encode bytes.
 fn hex_encode(bytes: &[u8]) -> String {
     let mut result = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -240,7 +223,6 @@ fn hex_encode(bytes: &[u8]) -> String {
     result
 }
 
-/// Percent-encode a string for URL use.
 fn percent_encode(s: &str) -> String {
     let mut result = String::new();
     for byte in s.bytes() {
@@ -256,7 +238,6 @@ fn percent_encode(s: &str) -> String {
     result
 }
 
-/// Percent-encode a URL path (preserving slashes).
 fn percent_encode_path(path: &str) -> String {
     path.split('/')
         .map(percent_encode)
@@ -266,8 +247,8 @@ fn percent_encode_path(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::S3Authorization;
     use super::*;
-    use crate::s3::S3Authorization;
     use dialog_capability::{Subject, did};
     use dialog_common::Checksum;
     use dialog_effects::archive;
@@ -277,15 +258,19 @@ mod tests {
     }
 
     fn test_address() -> Address {
-        Address::new(
-            "https://s3.us-east-1.amazonaws.com",
-            "us-east-1",
-            "my-bucket",
-        )
+        Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("my-bucket")
+            .build()
+            .unwrap()
     }
 
     fn localhost_address() -> Address {
-        Address::new("http://localhost:9000", "us-east-1", "test-bucket")
+        Address::builder("http://localhost:9000")
+            .region("us-east-1")
+            .bucket("test-bucket")
+            .build()
+            .unwrap()
     }
 
     #[dialog_common::test]
@@ -307,7 +292,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_signs_with_private_credentials() {
         let address = test_address();
-        let auth = S3Authorization::from(S3Credentials::new("AKIATEST", "secret123"));
+        let auth = S3Authorization::from(S3Credential::new("AKIATEST", "secret123"));
 
         let get = Subject::from(test_subject())
             .attenuate(archive::Archive)

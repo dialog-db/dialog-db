@@ -5,28 +5,27 @@
 //!
 //! # Core Types
 //!
-//! - [`Address`] - S3 endpoint/bucket/region + URL building
-//! - [`S3Credentials`] - Direct S3 authentication (SigV4 signed)
+//! - [`Address`] - S3 endpoint/bucket/region + URL resolution
+//! - [`S3Credential`] - Direct S3 authentication (SigV4 signed)
 //! - [`S3`] - Site marker implementing `Provider<Fork<S3, Fx>>` for HTTP execution
 //! - [`S3Authorization`] - Authorization material wrapping optional credentials
 //!
 //! # Example
 //!
 //! ```no_run
-//! use dialog_remote_s3::{Address, S3Credentials, S3Authorization};
+//! use dialog_remote_s3::{Address, S3Credential, S3Authorization};
 //! use dialog_effects::archive::{Archive, Catalog, Get};
 //! use dialog_capability::{Subject, did};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let address = Address::new(
-//!     "https://s3.us-east-1.amazonaws.com",
-//!     "us-east-1",
-//!     "my-bucket",
-//! );
+//! let address = Address::builder("https://s3.us-east-1.amazonaws.com")
+//!     .region("us-east-1")
+//!     .bucket("my-bucket")
+//!     .build()?;
 //!
 //! let subject = did!("key:zSubject");
 //!
-//! let auth = S3Authorization::from(S3Credentials::new(
+//! let auth = S3Authorization::from(S3Credential::new(
 //!     "AKIAIOSFODNN7EXAMPLE",
 //!     "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 //! ));
@@ -42,7 +41,6 @@
 //! # }
 //! ```
 
-mod address;
 pub mod capability;
 mod error;
 pub mod s3;
@@ -50,7 +48,6 @@ pub mod s3;
 #[cfg(feature = "helpers")]
 pub mod helpers;
 
-pub use address::*;
 pub use capability::{Access, Precondition};
 pub use capability::{archive, memory};
 pub use error::S3Error;

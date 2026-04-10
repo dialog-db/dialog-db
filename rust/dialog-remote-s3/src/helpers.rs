@@ -11,7 +11,7 @@ use dialog_capability::{Capability, Did, Principal, Provider};
 use dialog_effects::authority;
 use serde::{Deserialize, Serialize};
 
-use crate::s3::{S3, S3Authorization, S3Credentials};
+use crate::s3::{S3, S3Authorization, S3Credential};
 
 /// S3 test server connection info with credentials, passed to inner tests.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,7 +51,7 @@ pub struct PublicS3Address {
 #[derive(Debug, Clone)]
 pub struct Session {
     did: Did,
-    credentials: Option<S3Credentials>,
+    credentials: Option<S3Credential>,
 }
 
 impl Session {
@@ -64,7 +64,7 @@ impl Session {
     }
 
     /// Attach S3 credentials to this session.
-    pub fn with_credentials(mut self, credentials: S3Credentials) -> Self {
+    pub fn with_credentials(mut self, credentials: S3Credential) -> Self {
         self.credentials = Some(credentials);
         self
     }
@@ -91,7 +91,7 @@ impl Provider<authority::Identify> for Session {
 
 /// Helper macro to implement Provider<Fork<S3, Fx>> for Session by delegating to S3.
 ///
-/// Session builds a `ForkInvocation` with default `S3Credentials` and
+/// Session builds a `ForkInvocation` with default `S3Credential` and
 /// delegates to the S3 `Provider<ForkInvocation<S3, Fx>>` impl.
 macro_rules! impl_fork_provider {
     ($fx:ty, $output:ty) => {
