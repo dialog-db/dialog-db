@@ -8,7 +8,7 @@ use dialog_capability::fork::ForkInvocation;
 use dialog_capability::{Policy, Provider};
 use dialog_effects::memory::*;
 
-use crate::s3::{RequestDescriptorExt, S3, S3Invocation};
+use crate::s3::{S3, S3Invocation};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -36,10 +36,8 @@ impl Provider<S3Invocation<Resolve>> for S3 {
         &self,
         input: S3Invocation<Resolve>,
     ) -> Result<Option<Publication>, MemoryError> {
-        let client = reqwest::Client::new();
         let response = input
             .permit
-            .into_request(&client)
             .send()
             .await
             .map_err(|e| MemoryError::Storage(e.to_string()))?;
@@ -101,10 +99,7 @@ impl Provider<S3Invocation<Publish>> for S3 {
             .as_ref()
             .map(|b| String::from_utf8_lossy(b).to_string());
 
-        let client = reqwest::Client::new();
-        let response = input
-            .permit
-            .into_request(&client)
+        let response = reqwest::RequestBuilder::from(input.permit)
             .body(content)
             .send()
             .await
@@ -156,10 +151,8 @@ impl Provider<S3Invocation<Retract>> for S3 {
     async fn execute(&self, input: S3Invocation<Retract>) -> Result<(), MemoryError> {
         let when = String::from_utf8_lossy(&Retract::of(&input.capability).when).to_string();
 
-        let client = reqwest::Client::new();
         let response = input
             .permit
-            .into_request(&client)
             .send()
             .await
             .map_err(|e| MemoryError::Storage(e.to_string()))?;

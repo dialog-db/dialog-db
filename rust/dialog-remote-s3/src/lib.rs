@@ -64,7 +64,7 @@ pub use permit::Permit;
 pub use s3::S3Invocation;
 
 // Re-export site types at crate root
-pub use s3::{RequestDescriptorExt, S3};
+pub use s3::S3;
 
 // Re-export S3Credentials at crate root for convenience
 pub use s3::S3Credentials;

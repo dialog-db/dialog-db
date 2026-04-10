@@ -8,7 +8,7 @@ use dialog_capability::fork::ForkInvocation;
 use dialog_capability::{Policy, Provider};
 use dialog_effects::archive::*;
 
-use crate::s3::{RequestDescriptorExt, S3, S3Invocation};
+use crate::s3::{S3, S3Invocation};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -33,10 +33,8 @@ impl Provider<ForkInvocation<S3, Get>> for S3 {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<S3Invocation<Get>> for S3 {
     async fn execute(&self, input: S3Invocation<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
-        let client = reqwest::Client::new();
         let response = input
             .permit
-            .into_request(&client)
             .send()
             .await
             .map_err(|e| ArchiveError::Io(e.to_string()))?;
@@ -80,10 +78,7 @@ impl Provider<S3Invocation<Put>> for S3 {
     async fn execute(&self, input: S3Invocation<Put>) -> Result<(), ArchiveError> {
         let content = Put::of(&input.capability).content.clone();
 
-        let client = reqwest::Client::new();
-        let response = input
-            .permit
-            .into_request(&client)
+        let response = reqwest::RequestBuilder::from(input.permit)
             .body(content)
             .send()
             .await
