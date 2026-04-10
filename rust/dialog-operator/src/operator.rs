@@ -36,8 +36,10 @@ pub struct Operator<S: Clone> {
     #[provide(
         archive::Get,
         archive::Put,
-        credential::Load,
-        credential::Save,
+        credential::Load<dialog_credentials::Credential>,
+        credential::Save<dialog_credentials::Credential>,
+        credential::Load<dialog_effects::credential::Secret>,
+        credential::Save<dialog_effects::credential::Secret>,
         memory::Resolve,
         memory::Publish,
         memory::Retract
