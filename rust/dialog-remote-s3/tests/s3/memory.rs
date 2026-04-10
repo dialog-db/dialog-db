@@ -178,3 +178,80 @@ async fn it_detects_cas_conflict() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[dialog_common::test]
+async fn it_rejects_publish_with_wrong_initial_edition() -> anyhow::Result<()> {
+    let env = Environment::open();
+    let space = &Environment::unique("wrong-initial");
+    let cell_name = &Environment::unique("test-wrong-init");
+    let cell = env.subject().memory().space(space).cell(cell_name);
+
+    // Try to publish with an edition when cell doesn't exist
+    let result = cell
+        .publish(b"data".to_vec(), Some(b"nonexistent".to_vec()))
+        .fork(&env.address)
+        .perform(&env.network)
+        .await;
+
+    assert!(
+        result.is_err(),
+        "Publish with edition on empty cell should fail"
+    );
+
+    Ok(())
+}
+
+#[dialog_common::test]
+async fn it_retracts_a_published_value() -> anyhow::Result<()> {
+    let env = Environment::open();
+    let space = &Environment::unique("retract");
+    let cell_name = &Environment::unique("test-retract");
+    let cell = env.subject().memory().space(space).cell(cell_name);
+
+    let edition = cell
+        .clone()
+        .publish(b"to-be-retracted".to_vec(), None)
+        .fork(&env.address)
+        .perform(&env.network)
+        .await?;
+
+    cell.clone()
+        .retract(edition)
+        .fork(&env.address)
+        .perform(&env.network)
+        .await?;
+
+    let result = cell
+        .resolve()
+        .fork(&env.address)
+        .perform(&env.network)
+        .await?;
+
+    assert!(result.is_none(), "Cell should be empty after retract");
+
+    Ok(())
+}
+
+#[dialog_common::test]
+async fn it_rejects_retract_with_wrong_edition() -> anyhow::Result<()> {
+    let env = Environment::open();
+    let space = &Environment::unique("retract-wrong");
+    let cell_name = &Environment::unique("test-retract-wrong");
+    let cell = env.subject().memory().space(space).cell(cell_name);
+
+    cell.clone()
+        .publish(b"data".to_vec(), None)
+        .fork(&env.address)
+        .perform(&env.network)
+        .await?;
+
+    let result = cell
+        .retract(b"wrong-edition".to_vec())
+        .fork(&env.address)
+        .perform(&env.network)
+        .await;
+
+    assert!(result.is_err(), "Retract with wrong edition should fail");
+
+    Ok(())
+}
