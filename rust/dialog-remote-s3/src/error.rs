@@ -62,3 +62,18 @@ impl From<AccessError> for S3StorageError {
         S3StorageError::AuthorizationError(error.to_string())
     }
 }
+
+use dialog_effects::archive::ArchiveError;
+use dialog_effects::memory::MemoryError;
+
+impl From<AccessError> for ArchiveError {
+    fn from(error: AccessError) -> Self {
+        ArchiveError::Io(error.to_string())
+    }
+}
+
+impl From<AccessError> for MemoryError {
+    fn from(error: AccessError) -> Self {
+        MemoryError::Storage(error.to_string())
+    }
+}
