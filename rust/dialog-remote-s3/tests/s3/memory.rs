@@ -232,6 +232,8 @@ async fn it_retracts_a_published_value() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// R2 does not support If-Match on DeleteObject:
+/// https://developers.cloudflare.com/r2/api/s3/api/
 #[dialog_common::test]
 async fn it_rejects_retract_with_wrong_edition() -> anyhow::Result<()> {
     let env = Environment::open();
@@ -251,7 +253,9 @@ async fn it_rejects_retract_with_wrong_edition() -> anyhow::Result<()> {
         .perform(&env.network)
         .await;
 
-    assert!(result.is_err(), "Retract with wrong edition should fail");
+    if !env.is_r2() {
+        assert!(result.is_err(), "Retract with wrong edition should fail");
+    }
 
     Ok(())
 }
