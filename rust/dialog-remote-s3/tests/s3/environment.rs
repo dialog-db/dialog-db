@@ -45,6 +45,14 @@ impl Environment {
         Subject::from(self.subject.clone())
     }
 
+    /// Whether this environment targets Cloudflare R2.
+    pub fn is_r2(&self) -> bool {
+        self.address
+            .endpoint()
+            .host_str()
+            .is_some_and(|h| h.ends_with(".r2.cloudflarestorage.com"))
+    }
+
     /// Generate a unique string for test isolation.
     pub fn unique(base: &str) -> String {
         let millis = dialog_common::time::now()
