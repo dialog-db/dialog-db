@@ -9,10 +9,12 @@
 
 mod authorization;
 pub(crate) mod credentials;
+mod invocation;
 pub mod provider;
 
 pub use authorization::S3Authorization;
 pub use credentials::S3Credentials;
+pub use invocation::S3Invocation;
 
 use dialog_capability::site::{Authentication, Site};
 use url::Url;

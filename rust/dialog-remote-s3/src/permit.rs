@@ -10,7 +10,7 @@ use url::Url;
 /// A pre-authorized HTTP request — presigned URL + method + headers.
 ///
 /// Produced by SigV4 signing (direct S3) or by a UCAN access service.
-/// Fed into [`Authorized<Fx>`](crate::Authorized) for typed execution.
+/// Fed into [`S3Invocation<Fx>`](crate::S3Invocation) for typed execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Permit {
     /// The presigned URL to use.

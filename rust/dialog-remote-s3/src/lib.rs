@@ -47,7 +47,6 @@
 //! ```
 
 mod address;
-mod authorized;
 pub mod capability;
 mod error;
 mod key;
@@ -58,11 +57,11 @@ pub mod s3;
 pub mod helpers;
 
 pub use address::*;
-pub use authorized::Authorized;
 pub use capability::{Access, Precondition};
 pub use capability::{archive, memory};
 pub use error::{AccessError, S3StorageError};
 pub use permit::Permit;
+pub use s3::S3Invocation;
 
 // Re-export site types at crate root
 pub use s3::{RequestDescriptorExt, S3};
