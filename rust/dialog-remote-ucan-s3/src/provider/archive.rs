@@ -16,8 +16,8 @@ impl Provider<ForkInvocation<UcanSite, Get>> for UcanSite {
         invocation: ForkInvocation<UcanSite, Get>,
     ) -> Result<Option<Vec<u8>>, ArchiveError> {
         invocation
-            .address
-            .authorize(&invocation.authorization)
+            .authorization
+            .redeem(&invocation.address)
             .await?
             .invoke(invocation.capability)
             .perform(&S3)
@@ -30,8 +30,8 @@ impl Provider<ForkInvocation<UcanSite, Get>> for UcanSite {
 impl Provider<ForkInvocation<UcanSite, Put>> for UcanSite {
     async fn execute(&self, invocation: ForkInvocation<UcanSite, Put>) -> Result<(), ArchiveError> {
         invocation
-            .address
-            .authorize(&invocation.authorization)
+            .authorization
+            .redeem(&invocation.address)
             .await?
             .invoke(invocation.capability)
             .perform(&S3)

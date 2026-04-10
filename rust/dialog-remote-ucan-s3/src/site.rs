@@ -8,10 +8,41 @@ pub use dialog_ucan::{Ucan, UcanInvocation};
 
 /// UCAN authorization material for site providers.
 ///
-/// Wraps a [`UcanInvocation`] (signed UCAN chain) that the site
-/// provider sends to the access service to obtain a presigned URL.
+/// Wraps a [`UcanInvocation`] (signed UCAN chain) that gets sent to the
+/// access service to obtain a presigned URL.
 #[derive(Debug, Clone)]
 pub struct UcanAuthorization(pub UcanInvocation);
+
+impl UcanAuthorization {
+    /// Redeem this authorization at the access service for a presigned URL permit.
+    pub async fn redeem(&self, address: &UcanAddress) -> Result<Permit, S3Error> {
+        let body = self
+            .0
+            .to_bytes()
+            .map_err(|e| S3Error::Authorization(e.to_string()))?;
+
+        let response = reqwest::Client::new()
+            .post(&address.endpoint)
+            .header("Content-Type", "application/cbor")
+            .body(body)
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(S3Error::Service(format!(
+                "Access service returned {}: {}",
+                status, body
+            )));
+        }
+
+        let body = response.bytes().await?;
+
+        serde_ipld_dagcbor::from_slice(&body)
+            .map_err(|e| S3Error::Service(format!("Failed to decode response: {}", e)))
+    }
+}
 
 impl SiteAuthorization for UcanAuthorization {
     type Protocol = Ucan;
@@ -41,36 +72,6 @@ impl UcanAddress {
     /// Get the access service endpoint URL.
     pub fn endpoint(&self) -> &str {
         &self.endpoint
-    }
-
-    /// POST a signed UCAN invocation to the access service and get back
-    /// a presigned URL for the S3 operation.
-    pub async fn authorize(&self, authorization: &UcanAuthorization) -> Result<Permit, S3Error> {
-        let body = authorization
-            .0
-            .to_bytes()
-            .map_err(|e| S3Error::Authorization(e.to_string()))?;
-
-        let response = reqwest::Client::new()
-            .post(&self.endpoint)
-            .header("Content-Type", "application/cbor")
-            .body(body)
-            .send()
-            .await?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(S3Error::Service(format!(
-                "Access service returned {}: {}",
-                status, body
-            )));
-        }
-
-        let body = response.bytes().await?;
-
-        serde_ipld_dagcbor::from_slice(&body)
-            .map_err(|e| S3Error::Service(format!("Failed to decode response: {}", e)))
     }
 }
 
