@@ -7,18 +7,19 @@
 //! - [`credentials`] — S3 credential types for direct AWS SigV4 signing
 //! - [`provider`] — `Provider<Fork<S3, Fx>>` implementations for archive, memory, storage
 
+mod address;
 mod authorization;
-pub(crate) mod credentials;
+pub(crate) mod credential;
 mod invocation;
 mod permit;
 pub mod provider;
 
+pub use address::{Address, AddressBuilder};
 pub use authorization::S3Authorization;
-pub use credentials::S3Credentials;
+pub use credential::S3Credential;
 pub use invocation::S3Invocation;
 pub use permit::Permit;
 
-use super::Address;
 use dialog_capability::site::{Authentication, Site};
 
 /// S3 direct-access site.
@@ -29,7 +30,7 @@ use dialog_capability::site::{Authentication, Site};
 pub struct S3;
 
 impl Authentication for S3 {
-    type Credentials = S3Credentials;
+    type Credentials = S3Credential;
 }
 
 impl Site for S3 {
@@ -41,20 +42,14 @@ impl Site for S3 {
 mod tests {
     use super::*;
 
-    #[allow(dead_code)]
-    fn test_address() -> Address {
-        Address::new("https://s3.amazonaws.com", "us-east-1", "bucket")
-    }
-
     #[dialog_common::test]
     fn it_creates_address() {
-        let address = Address::new(
-            "https://s3.us-east-1.amazonaws.com",
-            "us-east-1",
-            "my-bucket",
-        );
+        let address = Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("my-bucket")
+            .build()
+            .unwrap();
 
-        assert_eq!(address.endpoint(), "https://s3.us-east-1.amazonaws.com");
         assert_eq!(address.region(), "us-east-1");
         assert_eq!(address.bucket(), "my-bucket");
     }
@@ -64,26 +59,42 @@ mod tests {
 
         #[dialog_common::test]
         fn it_creates_address_for_virtual_hosted() {
-            let address = Address::new("https://s3.amazonaws.com", "us-east-1", "my-bucket");
+            let address = Address::builder("https://s3.amazonaws.com")
+                .region("us-east-1")
+                .bucket("my-bucket")
+                .build()
+                .unwrap();
             assert!(!address.path_style());
         }
 
         #[dialog_common::test]
         fn it_creates_path_style_for_localhost() {
-            let address = Address::new("http://localhost:9000", "us-east-1", "bucket");
+            let address = Address::builder("http://localhost:9000")
+                .region("us-east-1")
+                .bucket("bucket")
+                .build()
+                .unwrap();
             assert!(address.path_style());
         }
 
         #[dialog_common::test]
         fn it_allows_forcing_path_style() {
-            let address = Address::new("https://custom-s3.example.com", "us-east-1", "bucket")
-                .with_path_style();
+            let address = Address::builder("https://custom-s3.example.com")
+                .region("us-east-1")
+                .bucket("bucket")
+                .path_style(true)
+                .build()
+                .unwrap();
             assert!(address.path_style());
         }
 
         #[dialog_common::test]
         fn it_creates_r2_address() {
-            let address = Address::new("https://abc123.r2.cloudflarestorage.com", "auto", "bucket");
+            let address = Address::builder("https://abc123.r2.cloudflarestorage.com")
+                .region("auto")
+                .bucket("bucket")
+                .build()
+                .unwrap();
             assert!(!address.path_style());
         }
     }
