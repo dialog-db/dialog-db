@@ -2,9 +2,9 @@
 //!
 //! This module provides the [`Address`] type for specifying S3-compatible storage locations.
 
+use crate::Permit;
 use crate::S3Error;
 use crate::capability::{Access, Precondition};
-use crate::permit::Permit;
 use crate::s3::{S3, build_url, extract_host, is_path_style_default};
 use dialog_capability::site::SiteAddress;
 use serde::{Deserialize, Serialize};

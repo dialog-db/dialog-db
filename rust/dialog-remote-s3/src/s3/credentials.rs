@@ -6,8 +6,8 @@
 //! - `None` → public/unsigned access
 //! - `Some(S3Credentials)` → private access with SigV4 signing
 
+use crate::Permit;
 use crate::capability::{Access, Precondition, current_time};
-use crate::permit::Permit;
 use crate::{Address, S3Error};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};

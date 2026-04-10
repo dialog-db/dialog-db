@@ -8,7 +8,7 @@ use dialog_capability::{Capability, Constraint, Effect};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::s3::S3Invocation;
+use super::S3Invocation;
 
 /// A pre-authorized HTTP request — presigned URL + method + headers.
 ///
