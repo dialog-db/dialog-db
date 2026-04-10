@@ -1,14 +1,14 @@
-//! S3-compatible test server for integration testing.
+//! Test helpers for S3 integration testing.
 //!
-//! This module provides address types and a simple in-memory S3-compatible server
-//! for testing S3 storage backend functionality.
-//!
-//! The module is split into:
-//! - Address types (available on all platforms for deserialization in WASM tests)
-//! - Server implementation (native-only, in the `server` submodule)
-//! - Test operator types for capability-based testing
-use dialog_capability::{Capability, Did, Principal, Provider};
-use dialog_effects::authority;
+//! Provides [`S3Network`] for testing `Fork<S3, Fx>` capabilities
+//! without a full Operator, and address types for passing server
+//! configuration into tests.
+
+use async_trait::async_trait;
+use dialog_capability::access::AuthorizeError;
+use dialog_capability::fork::{Fork, ForkInvocation};
+use dialog_capability::{Constraint, Effect, Provider};
+use dialog_common::{ConditionalSend, ConditionalSync};
 use serde::{Deserialize, Serialize};
 
 use crate::s3::{S3, S3Authorization, S3Credential};
@@ -35,106 +35,63 @@ pub struct PublicS3Address {
     pub bucket: String,
 }
 
-/// A simple test session that implements [`Principal`] and credential effects.
+/// Test environment for S3 fork execution.
 ///
-/// This is useful for testing capability-based operations where an operator
-/// is required but actual cryptographic signing is not needed (S3 uses its
-/// own SigV4 signing).
+/// Handles `Fork<S3, Fx>` for any effect by building a `ForkInvocation`
+/// with the attached credentials and delegating to the S3 site provider.
 ///
 /// # Example
 ///
 /// ```no_run
-/// use dialog_remote_s3::helpers::Session;
+/// use dialog_remote_s3::helpers::S3Network;
+/// use dialog_remote_s3::S3Credential;
 ///
-/// let session = Session::new("did:key:zTestIssuer".parse::<dialog_capability::Did>().unwrap());
+/// let env = S3Network::new();
+/// let env = S3Network::from(S3Credential::new("AKIA...", "secret"));
 /// ```
-#[derive(Debug, Clone)]
-pub struct Session {
-    did: Did,
+#[derive(Debug, Clone, Default)]
+pub struct S3Network {
+    /// Optional S3 credentials for authenticated access.
     credentials: Option<S3Credential>,
 }
 
-impl Session {
-    /// Create a new test session with the given DID.
-    pub fn new(did: impl Into<Did>) -> Self {
+impl S3Network {
+    /// Create a new test environment without credentials (public access).
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl From<S3Credential> for S3Network {
+    fn from(credentials: S3Credential) -> Self {
         Self {
-            did: did.into(),
-            credentials: None,
+            credentials: Some(credentials),
         }
     }
+}
 
-    /// Attach S3 credentials to this session.
-    pub fn with_credentials(mut self, credentials: S3Credential) -> Self {
-        self.credentials = Some(credentials);
-        self
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Fx> Provider<Fork<S3, Fx>> for S3Network
+where
+    Fx: Effect + 'static,
+    Fx::Of: Constraint,
+    Fx::Output: ConditionalSend,
+    Fork<S3, Fx>: ConditionalSend,
+    ForkInvocation<S3, Fx>: ConditionalSend,
+    S3: Provider<ForkInvocation<S3, Fx>> + ConditionalSync,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(&self, fork: Fork<S3, Fx>) -> Result<Fx::Output, AuthorizeError> {
+        let (capability, address) = fork.into_parts();
+        let invocation = ForkInvocation::new(
+            capability,
+            address,
+            S3Authorization(self.credentials.clone()),
+        );
+        Ok(invocation.perform(&S3).await)
     }
 }
-
-impl Principal for Session {
-    fn did(&self) -> Did {
-        self.did.clone()
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<authority::Identify> for Session {
-    async fn execute(
-        &self,
-        _input: Capability<authority::Identify>,
-    ) -> Result<Capability<authority::Operator>, authority::AuthorityError> {
-        Err(authority::AuthorityError::Identity(
-            "Session does not provide identity".into(),
-        ))
-    }
-}
-
-/// Helper macro to implement Provider<Fork<S3, Fx>> for Session by delegating to S3.
-///
-/// Session builds a `ForkInvocation` with default `S3Credential` and
-/// delegates to the S3 `Provider<ForkInvocation<S3, Fx>>` impl.
-macro_rules! impl_fork_provider {
-    ($fx:ty, $output:ty) => {
-        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-        impl Provider<dialog_capability::fork::Fork<S3, $fx>> for Session {
-            async fn execute(
-                &self,
-                fork: dialog_capability::fork::Fork<S3, $fx>,
-            ) -> Result<$output, dialog_capability::access::AuthorizeError> {
-                let (capability, address) = fork.into_parts();
-                let invocation = dialog_capability::fork::ForkInvocation::new(
-                    capability,
-                    address,
-                    S3Authorization(self.credentials.clone()),
-                );
-                let s3 = S3;
-                Ok(invocation.perform(&s3).await)
-            }
-        }
-    };
-}
-
-impl_fork_provider!(
-    dialog_effects::memory::Resolve,
-    Result<Option<dialog_effects::memory::Publication>, dialog_effects::memory::MemoryError>
-);
-impl_fork_provider!(
-    dialog_effects::memory::Publish,
-    Result<Vec<u8>, dialog_effects::memory::MemoryError>
-);
-impl_fork_provider!(
-    dialog_effects::memory::Retract,
-    Result<(), dialog_effects::memory::MemoryError>
-);
-impl_fork_provider!(
-    dialog_effects::archive::Get,
-    Result<Option<Vec<u8>>, dialog_effects::archive::ArchiveError>
-);
-impl_fork_provider!(
-    dialog_effects::archive::Put,
-    Result<(), dialog_effects::archive::ArchiveError>
-);
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server;
