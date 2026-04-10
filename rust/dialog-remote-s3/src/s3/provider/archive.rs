@@ -19,8 +19,8 @@ impl Provider<ForkInvocation<S3, Get>> for S3 {
         invocation: ForkInvocation<S3, Get>,
     ) -> Result<Option<Vec<u8>>, ArchiveError> {
         let permit = invocation
-            .address
-            .authorize(&invocation.capability, invocation.authorization.0.as_ref())
+            .authorization
+            .grant(&invocation.capability, &invocation.address)
             .await
             .map_err(|e| ArchiveError::Io(e.to_string()))?;
 
@@ -64,8 +64,8 @@ impl Provider<Authorized<Get>> for S3 {
 impl Provider<ForkInvocation<S3, Put>> for S3 {
     async fn execute(&self, invocation: ForkInvocation<S3, Put>) -> Result<(), ArchiveError> {
         let permit = invocation
-            .address
-            .authorize(&invocation.capability, invocation.authorization.0.as_ref())
+            .authorization
+            .grant(&invocation.capability, &invocation.address)
             .await
             .map_err(|e| ArchiveError::Io(e.to_string()))?;
 

@@ -134,23 +134,11 @@ impl Address {
         crate::s3::build_url(&endpoint, &self.bucket, path, self.path_style)
     }
 
-    /// Authorize a request using the given credentials.
-    ///
-    /// - No credentials → public/unsigned access (no SigV4 signing)
-    /// - With credentials → private access with SigV4 signing
-    pub async fn authorize<R: Access>(
+    /// Build an unsigned request for public access.
+    pub(crate) async fn build_unsigned_request<R: Access>(
         &self,
         request: &R,
-        credentials: Option<&crate::s3::S3Credentials>,
     ) -> Result<Permit, AccessError> {
-        match credentials {
-            None => self.build_unsigned_request(request).await,
-            Some(creds) => creds.grant(request, self).await,
-        }
-    }
-
-    /// Build an unsigned request for public access.
-    async fn build_unsigned_request<R: Access>(&self, request: &R) -> Result<Permit, AccessError> {
         use crate::capability::Precondition;
 
         let path = request.path();

@@ -19,8 +19,8 @@ impl Provider<ForkInvocation<S3, Resolve>> for S3 {
         invocation: ForkInvocation<S3, Resolve>,
     ) -> Result<Option<Publication>, MemoryError> {
         let permit = invocation
-            .address
-            .authorize(&invocation.capability, invocation.authorization.0.as_ref())
+            .authorization
+            .grant(&invocation.capability, &invocation.address)
             .await
             .map_err(|e| MemoryError::Storage(e.to_string()))?;
 
@@ -81,8 +81,8 @@ impl Provider<ForkInvocation<S3, Publish>> for S3 {
         invocation: ForkInvocation<S3, Publish>,
     ) -> Result<Vec<u8>, MemoryError> {
         let permit = invocation
-            .address
-            .authorize(&invocation.capability, invocation.authorization.0.as_ref())
+            .authorization
+            .grant(&invocation.capability, &invocation.address)
             .await
             .map_err(|e| MemoryError::Storage(e.to_string()))?;
 
@@ -140,8 +140,8 @@ impl Provider<Authorized<Publish>> for S3 {
 impl Provider<ForkInvocation<S3, Retract>> for S3 {
     async fn execute(&self, invocation: ForkInvocation<S3, Retract>) -> Result<(), MemoryError> {
         let permit = invocation
-            .address
-            .authorize(&invocation.capability, invocation.authorization.0.as_ref())
+            .authorization
+            .grant(&invocation.capability, &invocation.address)
             .await
             .map_err(|e| MemoryError::Storage(e.to_string()))?;
 
