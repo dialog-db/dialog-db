@@ -13,8 +13,7 @@ pub mod provider;
 pub use crate::Address;
 pub use credentials::S3Credentials;
 
-use dialog_capability::Did;
-use dialog_capability::site::Site;
+use dialog_capability::site::{Authentication, Site, SiteAuthorization};
 use url::Url;
 
 use crate::Permit;
@@ -47,172 +46,36 @@ impl RequestDescriptorExt for Permit {
 
 /// S3 direct-access site.
 ///
-/// Combines SigV4 credential signing with HTTP execution. Fork provider impls
-/// authorize via `Address::authorize` then delegate to [`Http`] for the
-/// actual HTTP round-trip.
-///
-/// S3 is both a [`Site`] and a [`Protocol`](dialog_capability::access::Protocol).
-/// Authorization is handled via SigV4 presigned URLs, not capability-level
-/// delegation chains.
+/// Uses credential-based [`Authentication`] rather than capability delegation.
+/// Authorization is handled via SigV4 presigned URLs on the [`Address`](crate::Address).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct S3;
 
-impl Site for S3 {
+/// S3 authorization material.
+///
+/// Wraps optional credentials. In production the Operator looks up
+/// credentials from the secret store. For testing or public access,
+/// `None` is used and authorization falls back to the Address.
+#[derive(Debug, Clone, Default)]
+pub struct S3Authorization(pub Option<S3Credentials>);
+
+impl SiteAuthorization for S3Authorization {
     type Protocol = S3;
+}
+
+impl From<S3Credentials> for S3Authorization {
+    fn from(creds: S3Credentials) -> Self {
+        Self(Some(creds))
+    }
+}
+
+impl Authentication for S3 {
+    type Credentials = S3Credentials;
+}
+
+impl Site for S3 {
+    type Authorization = S3Authorization;
     type Address = crate::Address;
-}
-
-mod protocol {
-    use super::S3;
-    use dialog_capability::Did;
-    use dialog_capability::access::{self, AuthorizeError};
-
-    /// S3 access scope — just the subject DID.
-    ///
-    /// S3 authorization is handled by presigned URLs, not capability delegation,
-    /// so the scope is minimal.
-    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-    pub struct S3Access {
-        subject: Did,
-    }
-
-    impl S3Access {
-        /// Create a new S3 access scope.
-        pub fn new(subject: Did) -> Self {
-            Self { subject }
-        }
-    }
-
-    impl access::Scope for S3Access {
-        fn subject(&self) -> &Did {
-            &self.subject
-        }
-    }
-
-    /// S3 has no delegation chain — presigned URLs are self-contained.
-    #[derive(serde::Deserialize)]
-    pub struct S3Certificate;
-
-    impl access::Certificate for S3Certificate {
-        type Access = S3Access;
-        fn issuer(&self) -> &Did {
-            unreachable!("S3 has no delegation chain")
-        }
-        fn audience(&self) -> &Did {
-            unreachable!("S3 has no delegation chain")
-        }
-        fn subject(&self) -> Option<&Did> {
-            None
-        }
-        fn verify(&self, _: &S3Access) -> Result<access::TimeRange, AuthorizeError> {
-            Ok(access::TimeRange {
-                not_before: None,
-                expiration: None,
-            })
-        }
-        fn encode(&self) -> Result<Vec<u8>, AuthorizeError> {
-            Err(AuthorizeError::Denied(
-                "S3 does not use stored proofs".into(),
-            ))
-        }
-        fn decode(_bytes: &[u8]) -> Result<Self, AuthorizeError> {
-            Err(AuthorizeError::Denied(
-                "S3 does not use stored proofs".into(),
-            ))
-        }
-    }
-
-    /// S3 permit — trivially allowed (credentials are on the Address).
-    #[derive(serde::Serialize, serde::Deserialize)]
-    pub struct S3Proof(S3Access);
-
-    impl access::Proof<S3> for S3Proof {
-        fn new(access: S3Access) -> Self {
-            Self(access)
-        }
-
-        fn access(&self) -> &S3Access {
-            &self.0
-        }
-
-        fn push(&mut self, _proof: S3Certificate) {}
-
-        fn proofs(&self) -> &[S3Certificate] {
-            &[]
-        }
-
-        fn duration(&self) -> &access::TimeRange {
-            static UNBOUNDED: access::TimeRange = access::TimeRange {
-                not_before: None,
-                expiration: None,
-            };
-            &UNBOUNDED
-        }
-
-        fn set_duration(&mut self, _duration: access::TimeRange) {}
-
-        fn claim(self, _signer: S3) -> Result<S3, AuthorizeError> {
-            Ok(S3)
-        }
-    }
-
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    impl access::Authorization<S3> for S3 {
-        fn duration(&self) -> &access::TimeRange {
-            static UNBOUNDED: access::TimeRange = access::TimeRange {
-                not_before: None,
-                expiration: None,
-            };
-            &UNBOUNDED
-        }
-
-        fn not_before(self, _timestamp: u64) -> Result<Self, AuthorizeError> {
-            Ok(self)
-        }
-
-        fn expires(self, _timestamp: u64) -> Result<Self, AuthorizeError> {
-            Ok(self)
-        }
-
-        async fn delegate(&self, _audience: Did) -> Result<S3Delegation, AuthorizeError> {
-            Err(AuthorizeError::Denied(
-                "S3 does not support delegation".into(),
-            ))
-        }
-
-        async fn invoke(&self) -> Result<(), AuthorizeError> {
-            Ok(())
-        }
-    }
-
-    /// S3 does not use delegation. This is a no-op placeholder.
-    #[derive(serde::Serialize, serde::Deserialize)]
-    pub struct S3Delegation;
-
-    impl access::Delegation for S3Delegation {
-        type Certificate = S3Certificate;
-
-        fn certificates(&self) -> Vec<S3Certificate> {
-            Vec::new()
-        }
-    }
-
-    impl access::Protocol for S3 {
-        type Access = S3Access;
-        type Signer = S3;
-        type Certificate = S3Certificate;
-        type Delegation = S3Delegation;
-        type Invocation = ();
-        type Proof = S3Proof;
-        type Authorization = S3;
-    }
-}
-
-impl dialog_varsig::Principal for S3 {
-    fn did(&self) -> Did {
-        "did:web:s3".parse().expect("valid DID")
-    }
 }
 
 /// Determine if path-style URLs should be used by default for this endpoint.
