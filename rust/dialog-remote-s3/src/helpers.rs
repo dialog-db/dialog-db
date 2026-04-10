@@ -9,8 +9,9 @@
 //! - Test operator types for capability-based testing
 use dialog_capability::{Capability, Did, Principal, Provider};
 use dialog_effects::authority;
-
 use serde::{Deserialize, Serialize};
+
+use crate::s3::{S3, S3Authorization, S3Credentials};
 
 /// S3 test server connection info with credentials, passed to inner tests.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,7 +51,7 @@ pub struct PublicS3Address {
 #[derive(Debug, Clone)]
 pub struct Session {
     did: Did,
-    credentials: Option<crate::s3::S3Credentials>,
+    credentials: Option<S3Credentials>,
 }
 
 impl Session {
@@ -63,7 +64,7 @@ impl Session {
     }
 
     /// Attach S3 credentials to this session.
-    pub fn with_credentials(mut self, credentials: crate::s3::S3Credentials) -> Self {
+    pub fn with_credentials(mut self, credentials: S3Credentials) -> Self {
         self.credentials = Some(credentials);
         self
     }
@@ -96,18 +97,18 @@ macro_rules! impl_fork_provider {
     ($fx:ty, $output:ty) => {
         #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
         #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-        impl Provider<dialog_capability::fork::Fork<crate::s3::S3, $fx>> for Session {
+        impl Provider<dialog_capability::fork::Fork<S3, $fx>> for Session {
             async fn execute(
                 &self,
-                fork: dialog_capability::fork::Fork<crate::s3::S3, $fx>,
+                fork: dialog_capability::fork::Fork<S3, $fx>,
             ) -> Result<$output, dialog_capability::access::AuthorizeError> {
                 let (capability, address) = fork.into_parts();
                 let invocation = dialog_capability::fork::ForkInvocation::new(
                     capability,
                     address,
-                    crate::s3::S3Authorization(self.credentials.clone()),
+                    S3Authorization(self.credentials.clone()),
                 );
-                let s3 = crate::s3::S3;
+                let s3 = S3;
                 Ok(invocation.perform(&s3).await)
             }
         }

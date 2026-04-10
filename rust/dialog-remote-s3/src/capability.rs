@@ -38,8 +38,7 @@
 //! - [`archive`]: `Access` impls for archive capabilities
 
 use chrono::{DateTime, Utc};
-use dialog_common::Checksum;
-use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_common::{Checksum, ConditionalSend, ConditionalSync};
 
 /// Default URL expiration: 1 hour.
 pub const DEFAULT_EXPIRES: u64 = 3600;
