@@ -55,9 +55,25 @@ pub struct S3;
 ///
 /// Wraps optional credentials. In production the Operator looks up
 /// credentials from the secret store. For testing or public access,
-/// `None` is used and authorization falls back to the Address.
+/// `None` is used and produces unsigned requests.
 #[derive(Debug, Clone, Default)]
 pub struct S3Authorization(pub Option<S3Credentials>);
+
+impl S3Authorization {
+    /// Authorize a request, producing a presigned URL permit.
+    ///
+    /// With credentials, signs via SigV4. Without, builds an unsigned request.
+    pub async fn grant<R: crate::capability::Access>(
+        &self,
+        request: &R,
+        address: &crate::Address,
+    ) -> Result<Permit, crate::AccessError> {
+        match &self.0 {
+            Some(creds) => creds.authorize(request, address).await,
+            None => address.build_unsigned_request(request).await,
+        }
+    }
+}
 
 impl SiteAuthorization for S3Authorization {
     type Protocol = S3;

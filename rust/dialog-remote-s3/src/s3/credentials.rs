@@ -68,7 +68,7 @@ impl S3Credentials {
     }
 
     /// Generates a signed URL using the given address for endpoint/region/bucket info.
-    pub(crate) async fn grant<R: Access>(
+    pub async fn authorize<R: Access>(
         &self,
         request: &R,
         address: &Address,
@@ -288,6 +288,7 @@ fn current_time() -> DateTime<Utc> {
 mod tests {
     use super::*;
     use crate::Checksum;
+    use crate::s3::S3Authorization;
     use dialog_capability::{Subject, did};
     use dialog_effects::archive;
 
@@ -310,12 +311,13 @@ mod tests {
     #[dialog_common::test]
     async fn it_signs_with_public_access() {
         let address = test_address();
+        let auth = S3Authorization::default();
 
         let get = Subject::from(test_subject())
             .attenuate(archive::Archive)
             .attenuate(archive::Catalog::new("blobs"))
             .invoke(archive::Get::new([0x42; 32]));
-        let descriptor = address.authorize(&get, None).await.unwrap();
+        let descriptor = auth.grant(&get, &address).await.unwrap();
 
         assert_eq!(descriptor.method, "GET");
         assert!(descriptor.url.as_str().contains("my-bucket"));
@@ -325,13 +327,13 @@ mod tests {
     #[dialog_common::test]
     async fn it_signs_with_private_credentials() {
         let address = test_address();
-        let creds = S3Credentials::new("AKIATEST", "secret123");
+        let auth = S3Authorization::from(S3Credentials::new("AKIATEST", "secret123"));
 
         let get = Subject::from(test_subject())
             .attenuate(archive::Archive)
             .attenuate(archive::Catalog::new("blobs"))
             .invoke(archive::Get::new([0x42; 32]));
-        let descriptor = address.authorize(&get, Some(&creds)).await.unwrap();
+        let descriptor = auth.grant(&get, &address).await.unwrap();
 
         assert_eq!(descriptor.method, "GET");
         assert!(descriptor.url.as_str().contains("X-Amz-Signature="));
@@ -341,6 +343,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_includes_checksum_header() {
         let address = test_address();
+        let auth = S3Authorization::default();
 
         let checksum = Checksum::Sha256([0u8; 32]);
         let put = Subject::from(test_subject())
@@ -350,7 +353,7 @@ mod tests {
                 digest: [0x99; 32].into(),
                 checksum,
             });
-        let descriptor = address.authorize(&put, None).await.unwrap();
+        let descriptor = auth.grant(&put, &address).await.unwrap();
 
         assert!(
             descriptor
@@ -363,12 +366,13 @@ mod tests {
     #[dialog_common::test]
     async fn it_uses_path_style_for_localhost() {
         let address = localhost_address();
+        let auth = S3Authorization::default();
 
         let get = Subject::from(test_subject())
             .attenuate(archive::Archive)
             .attenuate(archive::Catalog::new("blobs"))
             .invoke(archive::Get::new([0x42; 32]));
-        let descriptor = address.authorize(&get, None).await.unwrap();
+        let descriptor = auth.grant(&get, &address).await.unwrap();
 
         assert_eq!(descriptor.url.host_str().unwrap(), "localhost");
         assert!(descriptor.url.path().starts_with("/test-bucket/"));

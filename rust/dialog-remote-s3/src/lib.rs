@@ -13,6 +13,7 @@
 //!
 //! ```no_run
 //! use dialog_remote_s3::{Address, S3Credentials};
+//! use dialog_remote_s3::s3::S3Authorization;
 //! use dialog_effects::archive::{Archive, Catalog, Get};
 //! use dialog_capability::{Subject, did};
 //!
@@ -27,19 +28,19 @@
 //! // Subject DID identifies whose data we're accessing (used as path prefix)
 //! let subject = did!("key:zSubject");
 //!
-//! // Credentials for authenticated access
-//! let credentials = S3Credentials::new(
+//! // Authorization with credentials for authenticated access
+//! let auth = S3Authorization::from(S3Credentials::new(
 //!     "AKIAIOSFODNN7EXAMPLE",
 //!     "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-//! );
+//! ));
 //!
-//! // Build a capability and authorize it using the address.
+//! // Build a capability and authorize it.
 //! let capability = Subject::from(subject)
 //!     .attenuate(Archive)
 //!     .attenuate(Catalog::new("blobs"))
 //!     .invoke(Get::new([0u8; 32]));
 //!
-//! let request = address.authorize(&capability, Some(&credentials)).await?;
+//! let request = auth.grant(&capability, &address).await?;
 //! println!("Presigned URL: {}", request.url);
 //! # Ok(())
 //! # }
