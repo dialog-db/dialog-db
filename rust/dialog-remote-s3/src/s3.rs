@@ -16,36 +16,9 @@ pub use authorization::S3Authorization;
 pub use credentials::S3Credentials;
 pub use invocation::S3Invocation;
 
+use super::{AccessError, Address};
 use dialog_capability::site::{Authentication, Site};
-use url::Url;
-
-use super::{AccessError, Address, Permit};
-
-/// Extension trait for RequestDescriptor to convert to reqwest RequestBuilder.
-pub trait RequestDescriptorExt {
-    /// Convert into a reqwest RequestBuilder with the client.
-    fn into_request(self, client: &reqwest::Client) -> reqwest::RequestBuilder;
-}
-
-impl RequestDescriptorExt for Permit {
-    fn into_request(self, client: &reqwest::Client) -> reqwest::RequestBuilder {
-        let mut builder = match self.method.as_str() {
-            "GET" => client.get(self.url),
-            "PUT" => client.put(self.url),
-            "DELETE" => client.delete(self.url),
-            _ => client.request(
-                reqwest::Method::from_bytes(self.method.as_bytes()).unwrap(),
-                self.url,
-            ),
-        };
-
-        for (key, value) in self.headers {
-            builder = builder.header(key, value);
-        }
-
-        builder
-    }
-}
+use url::{Host, Url};
 
 /// S3 direct-access site.
 ///
@@ -68,7 +41,6 @@ impl Site for S3 {
 /// Returns true for IP addresses and localhost, since virtual-hosted style
 /// URLs require DNS resolution of `{bucket}.{host}`.
 pub fn is_path_style_default(endpoint: &Url) -> bool {
-    use url::Host;
     match endpoint.host() {
         Some(Host::Ipv4(_)) | Some(Host::Ipv6(_)) => true,
         Some(Host::Domain(domain)) => domain == "localhost",
