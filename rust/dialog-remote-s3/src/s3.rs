@@ -7,16 +7,17 @@
 //! - [`credentials`] — S3 credential types for direct AWS SigV4 signing
 //! - [`provider`] — `Provider<Fork<S3, Fx>>` implementations for archive, memory, storage
 
+mod authorization;
 pub(crate) mod credentials;
 pub mod provider;
 
-pub use crate::Address;
+pub use authorization::S3Authorization;
 pub use credentials::S3Credentials;
 
-use dialog_capability::site::{Authentication, Site, SiteAuthorization};
+use dialog_capability::site::{Authentication, Site};
 use url::Url;
 
-use crate::Permit;
+use super::{AccessError, Address, Permit};
 
 /// Extension trait for RequestDescriptor to convert to reqwest RequestBuilder.
 pub trait RequestDescriptorExt {
@@ -51,47 +52,13 @@ impl RequestDescriptorExt for Permit {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct S3;
 
-/// S3 authorization material.
-///
-/// Wraps optional credentials. In production the Operator looks up
-/// credentials from the secret store. For testing or public access,
-/// `None` is used and produces unsigned requests.
-#[derive(Debug, Clone, Default)]
-pub struct S3Authorization(pub Option<S3Credentials>);
-
-impl S3Authorization {
-    /// Authorize a request, producing a presigned URL permit.
-    ///
-    /// With credentials, signs via SigV4. Without, builds an unsigned request.
-    pub async fn grant<R: crate::capability::Access>(
-        &self,
-        request: &R,
-        address: &crate::Address,
-    ) -> Result<Permit, crate::AccessError> {
-        match &self.0 {
-            Some(creds) => creds.authorize(request, address).await,
-            None => address.build_unsigned_request(request).await,
-        }
-    }
-}
-
-impl SiteAuthorization for S3Authorization {
-    type Protocol = S3;
-}
-
-impl From<S3Credentials> for S3Authorization {
-    fn from(creds: S3Credentials) -> Self {
-        Self(Some(creds))
-    }
-}
-
 impl Authentication for S3 {
     type Credentials = S3Credentials;
 }
 
 impl Site for S3 {
     type Authorization = S3Authorization;
-    type Address = crate::Address;
+    type Address = Address;
 }
 
 /// Determine if path-style URLs should be used by default for this endpoint.
@@ -115,7 +82,7 @@ pub(crate) fn build_url(
     bucket: &str,
     path: &str,
     path_style: bool,
-) -> Result<Url, crate::AccessError> {
+) -> Result<Url, AccessError> {
     if path_style {
         // Path-style: https://endpoint/bucket/path
         let mut url = endpoint.clone();
@@ -130,12 +97,12 @@ pub(crate) fn build_url(
         // Virtual-hosted style: https://bucket.endpoint/path
         let host = endpoint
             .host_str()
-            .ok_or_else(|| crate::AccessError::Configuration("Invalid endpoint: no host".into()))?;
+            .ok_or_else(|| AccessError::Configuration("Invalid endpoint: no host".into()))?;
         let new_host = format!("{}.{}", bucket, host);
 
         let mut url = endpoint.clone();
         url.set_host(Some(&new_host))
-            .map_err(|e| crate::AccessError::Configuration(format!("Invalid host: {}", e)))?;
+            .map_err(|e| AccessError::Configuration(format!("Invalid host: {}", e)))?;
 
         let new_path = if path.is_empty() { "/" } else { path };
         url.set_path(new_path);
@@ -144,10 +111,10 @@ pub(crate) fn build_url(
 }
 
 /// Extract host string from URL, including port for non-standard ports.
-pub(crate) fn extract_host(url: &Url) -> Result<String, crate::AccessError> {
+pub(crate) fn extract_host(url: &Url) -> Result<String, AccessError> {
     let hostname = url
         .host_str()
-        .ok_or_else(|| crate::AccessError::Configuration("URL missing host".into()))?;
+        .ok_or_else(|| AccessError::Configuration("URL missing host".into()))?;
 
     Ok(match url.port() {
         Some(port) => format!("{}:{}", hostname, port),

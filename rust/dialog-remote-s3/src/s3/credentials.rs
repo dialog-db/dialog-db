@@ -276,9 +276,9 @@ fn percent_encode_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Checksum;
     use crate::s3::S3Authorization;
     use dialog_capability::{Subject, did};
+    use dialog_common::Checksum;
     use dialog_effects::archive;
 
     fn test_subject() -> dialog_capability::Did {

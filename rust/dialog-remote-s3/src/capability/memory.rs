@@ -4,8 +4,8 @@
 //! capabilities, enabling them to be translated into presigned S3 URLs.
 
 use super::{Access, Precondition};
-use crate::Checksum;
 use dialog_capability::{Capability, Policy};
+use dialog_common::{Checksum, Hasher};
 use dialog_effects::memory::{self, Cell, Space};
 
 impl Access for Capability<memory::Resolve> {
@@ -35,7 +35,7 @@ impl Access for Capability<memory::Publish> {
         )
     }
     fn checksum(&self) -> Option<Checksum> {
-        Some(crate::Hasher::Sha256.checksum(&memory::Publish::of(self).content))
+        Some(Hasher::Sha256.checksum(&memory::Publish::of(self).content))
     }
     fn precondition(&self) -> Precondition {
         match &memory::Publish::of(self).when {

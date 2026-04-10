@@ -17,10 +17,10 @@ use dialog_capability::{Capability, Constraint, Effect, Provider};
 /// Combines a [`Permit`] (the presigned HTTP request) with the
 /// [`Capability<Fx>`] (carrying the typed effect parameters).
 pub struct Authorized<Fx: Effect> {
-    /// The presigned HTTP request (URL + method + headers).
-    pub permit: Permit,
     /// The capability with effect-specific parameters.
     pub capability: Capability<Fx>,
+    /// The presigned HTTP request (URL + method + headers).
+    pub permit: Permit,
 }
 
 impl<Fx: Effect> Authorized<Fx>

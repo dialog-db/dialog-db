@@ -2,12 +2,13 @@
 //!
 //! This module provides the [`Address`] type for specifying S3-compatible storage locations.
 
-use serde::{Deserialize, Serialize};
-use url::Url;
-
 use crate::AccessError;
 use crate::capability::{Access, Precondition};
 use crate::permit::Permit;
+use crate::s3::{S3, build_url, extract_host, is_path_style_default};
+use dialog_capability::site::SiteAddress;
+use serde::{Deserialize, Serialize};
+use url::Url;
 
 /// Address for S3-compatible storage.
 ///
@@ -89,7 +90,7 @@ impl Address {
     ) -> Self {
         let endpoint = endpoint.into();
         let path_style = Url::parse(&endpoint)
-            .map(|url| crate::s3::is_path_style_default(&url))
+            .map(|url| is_path_style_default(&url))
             .unwrap_or(false);
 
         Self {
@@ -131,7 +132,7 @@ impl Address {
     pub fn build_url(&self, path: &str) -> Result<Url, AccessError> {
         let endpoint =
             Url::parse(&self.endpoint).map_err(|e| AccessError::Configuration(e.to_string()))?;
-        crate::s3::build_url(&endpoint, &self.bucket, path, self.path_style)
+        build_url(&endpoint, &self.bucket, path, self.path_style)
     }
 
     /// Build an unsigned request for public access.
@@ -150,7 +151,7 @@ impl Address {
             }
         }
 
-        let host = crate::s3::extract_host(&url)?;
+        let host = extract_host(&url)?;
 
         let mut headers = vec![("host".to_string(), host)];
         if let Some(checksum) = request.checksum() {
@@ -176,8 +177,8 @@ impl Address {
 }
 
 /// `Address` is the canonical address type for the `S3` site.
-impl dialog_capability::site::SiteAddress for Address {
-    type Site = crate::s3::S3;
+impl SiteAddress for Address {
+    type Site = S3;
 }
 
 #[cfg(test)]

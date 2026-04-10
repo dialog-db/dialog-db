@@ -5,9 +5,9 @@
 //! presigned S3 URLs.
 
 use super::Access;
-use crate::Checksum;
 use base58::ToBase58;
 use dialog_capability::{Capability, Policy};
+use dialog_common::{Checksum, Hasher};
 use dialog_effects::archive::{Catalog, Get, Put, PutClaim};
 
 impl Access for Capability<Get> {
@@ -37,7 +37,7 @@ impl Access for Capability<Put> {
         )
     }
     fn checksum(&self) -> Option<Checksum> {
-        Some(crate::Hasher::Sha256.checksum(&Put::of(self).content))
+        Some(Hasher::Sha256.checksum(&Put::of(self).content))
     }
 }
 
