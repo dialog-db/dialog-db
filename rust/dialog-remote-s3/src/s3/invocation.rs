@@ -5,7 +5,7 @@
 //! after authorizing via [`S3Authorization::grant`](super::S3Authorization::grant),
 //! then executes the HTTP request.
 
-use crate::permit::Permit;
+use crate::Permit;
 use dialog_capability::command::Command;
 use dialog_capability::{Capability, Constraint, Effect, Provider};
 

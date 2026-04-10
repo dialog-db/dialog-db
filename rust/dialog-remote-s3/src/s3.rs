@@ -10,11 +10,13 @@
 mod authorization;
 pub(crate) mod credentials;
 mod invocation;
+mod permit;
 pub mod provider;
 
 pub use authorization::S3Authorization;
 pub use credentials::S3Credentials;
 pub use invocation::S3Invocation;
+pub use permit::Permit;
 
 use super::{Address, S3Error};
 use dialog_capability::site::{Authentication, Site};
