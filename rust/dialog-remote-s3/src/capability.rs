@@ -37,8 +37,8 @@
 //! - [`memory`]: `Access` impls for memory capabilities
 //! - [`archive`]: `Access` impls for archive capabilities
 
-use super::checksum::Checksum;
 use chrono::{DateTime, Utc};
+use dialog_common::Checksum;
 use dialog_common::{ConditionalSend, ConditionalSync};
 
 /// Default URL expiration: 1 hour.
@@ -97,45 +97,6 @@ pub trait Access: ConditionalSend + ConditionalSync {
     /// Precondition for conditional operations.
     fn precondition(&self) -> Precondition {
         Precondition::None
-    }
-
-    /// The ACL for this request, if any.
-    fn acl(&self) -> Option<Acl> {
-        None
-    }
-}
-
-/// S3 Access Control List (ACL) settings.
-///
-/// These are canned ACLs supported by S3 and S3-compatible services.
-/// See: https://docs.aws.amazon.com/AmazonS3/latest/userguide/acl-overview.html#canned-acl
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Acl {
-    /// Owner gets FULL_CONTROL. No one else has access rights.
-    Private,
-    /// Owner gets FULL_CONTROL. The AllUsers group gets READ access.
-    PublicRead,
-    /// Owner gets FULL_CONTROL. The AllUsers group gets READ and WRITE access.
-    PublicReadWrite,
-    /// Owner gets FULL_CONTROL. The AuthenticatedUsers group gets READ access.
-    AuthenticatedRead,
-    /// Object owner gets FULL_CONTROL. Bucket owner gets READ access.
-    BucketOwnerRead,
-    /// Both the object owner and the bucket owner get FULL_CONTROL.
-    BucketOwnerFullControl,
-}
-
-impl Acl {
-    /// Get the S3 ACL header value.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Private => "private",
-            Self::PublicRead => "public-read",
-            Self::PublicReadWrite => "public-read-write",
-            Self::AuthenticatedRead => "authenticated-read",
-            Self::BucketOwnerRead => "bucket-owner-read",
-            Self::BucketOwnerFullControl => "bucket-owner-full-control",
-        }
     }
 }
 

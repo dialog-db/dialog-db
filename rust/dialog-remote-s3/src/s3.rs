@@ -155,9 +155,6 @@ pub(crate) fn extract_host(url: &Url) -> Result<String, crate::AccessError> {
     })
 }
 
-/// Default URL expiration: 1 hour.
-pub const DEFAULT_EXPIRES: u64 = 3600;
-
 #[cfg(test)]
 mod tests {
     use super::*;

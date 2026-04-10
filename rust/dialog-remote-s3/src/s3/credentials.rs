@@ -6,10 +6,9 @@
 //! - `None` → public/unsigned access
 //! - `Some(S3Credentials)` → private access with SigV4 signing
 
-use crate::capability::{Access, Precondition};
+use crate::capability::{Access, Precondition, current_time};
 use crate::permit::Permit;
 use crate::{AccessError, Address};
-use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -133,11 +132,6 @@ impl S3Credentials {
             ("X-Amz-Date".into(), timestamp.clone()),
             ("X-Amz-Expires".into(), expires.to_string()),
         ];
-
-        // Include ACL if specified by the request
-        if let Some(acl) = request.acl() {
-            query_params.push(("x-amz-acl".into(), acl.as_str().to_string()));
-        }
 
         query_params.push(("X-Amz-SignedHeaders".into(), signed_headers.clone()));
 
@@ -277,11 +271,6 @@ fn percent_encode_path(path: &str) -> String {
         .map(percent_encode)
         .collect::<Vec<_>>()
         .join("/")
-}
-
-/// Get the current time as a UTC datetime.
-fn current_time() -> DateTime<Utc> {
-    DateTime::<Utc>::from(dialog_common::time::now())
 }
 
 #[cfg(test)]
