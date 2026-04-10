@@ -16,8 +16,8 @@ impl Provider<ForkInvocation<UcanSite, Resolve>> for UcanSite {
         invocation: ForkInvocation<UcanSite, Resolve>,
     ) -> Result<Option<Publication>, MemoryError> {
         invocation
-            .address
-            .authorize(&invocation.authorization)
+            .authorization
+            .redeem(&invocation.address)
             .await?
             .invoke(invocation.capability)
             .perform(&S3)
@@ -33,8 +33,8 @@ impl Provider<ForkInvocation<UcanSite, Publish>> for UcanSite {
         invocation: ForkInvocation<UcanSite, Publish>,
     ) -> Result<Vec<u8>, MemoryError> {
         invocation
-            .address
-            .authorize(&invocation.authorization)
+            .authorization
+            .redeem(&invocation.address)
             .await?
             .invoke(invocation.capability)
             .perform(&S3)
@@ -50,8 +50,8 @@ impl Provider<ForkInvocation<UcanSite, Retract>> for UcanSite {
         invocation: ForkInvocation<UcanSite, Retract>,
     ) -> Result<(), MemoryError> {
         invocation
-            .address
-            .authorize(&invocation.authorization)
+            .authorization
+            .redeem(&invocation.address)
             .await?
             .invoke(invocation.capability)
             .perform(&S3)

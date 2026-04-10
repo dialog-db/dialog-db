@@ -197,7 +197,7 @@ macro_rules! dispatch {
             $(
                 [$seg1, $seg2] => {
                     let capability = <$fx as FromUcanArgs>::capability_from_args($subject, $args)?;
-                    $self.authorization.permit(&capability, &$self.address).await
+                    $self.authorization.redeem(&capability, &$self.address).await
                 }
             )+
             _ => Err(S3Error::Authorization(format!("Unknown command: {:?}", $segments)))
