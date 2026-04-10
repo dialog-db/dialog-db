@@ -49,7 +49,7 @@ where
     Fx::Of: Constraint,
 {
     type Input = Self;
-    type Output = Result<Fx::Output, AuthorizeError>;
+    type Output = Fx::Output;
 }
 
 impl<S: Site, Fx: Effect> Command for ForkInvocation<S, Fx>
@@ -94,7 +94,10 @@ where
     ///
     /// The provider (typically the Operator) builds protocol-specific
     /// authorization and delegates to the site provider.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Fx::Output, AuthorizeError>
+    ///
+    /// Authorization errors are folded into the effect's error type via
+    /// `From<AuthorizeError>`, so callers get a single `Result`.
+    pub async fn perform<Env>(self, env: &Env) -> Fx::Output
     where
         Fx: ConditionalSend + 'static,
         Capability<Fx>: Ability + ConditionalSend + dialog_common::ConditionalSync,

@@ -265,6 +265,10 @@ pub enum MemoryError {
     #[error("Storage error: {0}")]
     Storage(String),
 
+    /// Authorization error.
+    #[error("Authorization error: {0}")]
+    Authorization(String),
+
     /// IO error.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
@@ -273,6 +277,12 @@ pub enum MemoryError {
 impl From<StorageError> for MemoryError {
     fn from(e: StorageError) -> Self {
         Self::Storage(e.to_string())
+    }
+}
+
+impl From<dialog_capability::access::AuthorizeError> for MemoryError {
+    fn from(e: dialog_capability::access::AuthorizeError) -> Self {
+        Self::Authorization(e.to_string())
     }
 }
 

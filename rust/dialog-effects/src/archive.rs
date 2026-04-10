@@ -200,6 +200,12 @@ impl From<DialogCapabilityAuthorizationError> for ArchiveError {
     }
 }
 
+impl From<dialog_capability::access::AuthorizeError> for ArchiveError {
+    fn from(value: dialog_capability::access::AuthorizeError) -> Self {
+        ArchiveError::AuthorizationError(value.to_string())
+    }
+}
+
 impl<E: Error> From<DialogCapabilityPerformError<E>> for ArchiveError {
     fn from(value: DialogCapabilityPerformError<E>) -> Self {
         match value {

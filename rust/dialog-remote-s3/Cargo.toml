@@ -74,9 +74,10 @@ serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
 wasm-bindgen-test = { workspace = true }
 
+
 [[test]]
-name = "integration_tests"
-path = "tests/integration_tests/main.rs"
+name = "s3"
+path = "tests/s3/main.rs"
 required-features = ["s3-integration-tests"]
 
 [lints.rust]
