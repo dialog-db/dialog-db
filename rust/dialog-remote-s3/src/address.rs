@@ -8,7 +8,6 @@ use url::Url;
 use crate::AccessError;
 use crate::capability::Access;
 use crate::permit::Permit;
-use crate::s3::S3Credentials;
 
 /// Address for S3-compatible storage.
 ///
@@ -52,10 +51,6 @@ pub struct Address {
     /// Whether to use path-style URLs (auto-detected from endpoint)
     #[serde(default)]
     path_style: bool,
-    /// Optional S3 credentials for authenticated access.
-    /// `None` means public/unsigned access.
-    #[serde(default)]
-    credentials: Option<S3Credentials>,
 }
 
 impl Address {
@@ -102,7 +97,6 @@ impl Address {
             region: region.into(),
             bucket: bucket.into(),
             path_style,
-            credentials: None,
         }
     }
 
@@ -133,17 +127,6 @@ impl Address {
         self.path_style
     }
 
-    /// Attach S3 credentials for authenticated access.
-    pub fn with_credentials(mut self, credentials: S3Credentials) -> Self {
-        self.credentials = Some(credentials);
-        self
-    }
-
-    /// Get the optional credentials.
-    pub fn credentials(&self) -> Option<&S3Credentials> {
-        self.credentials.as_ref()
-    }
-
     /// Build a URL for the given key path.
     pub fn build_url(&self, path: &str) -> Result<Url, AccessError> {
         let endpoint =
@@ -151,12 +134,16 @@ impl Address {
         crate::s3::build_url(&endpoint, &self.bucket, path, self.path_style)
     }
 
-    /// Authorize a request using the address's credentials.
+    /// Authorize a request using the given credentials.
     ///
     /// - No credentials → public/unsigned access (no SigV4 signing)
     /// - With credentials → private access with SigV4 signing
-    pub async fn authorize<R: Access>(&self, request: &R) -> Result<Permit, AccessError> {
-        match &self.credentials {
+    pub async fn authorize<R: Access>(
+        &self,
+        request: &R,
+        credentials: Option<&crate::s3::S3Credentials>,
+    ) -> Result<Permit, AccessError> {
+        match credentials {
             None => self.build_unsigned_request(request).await,
             Some(creds) => creds.grant(request, self).await,
         }

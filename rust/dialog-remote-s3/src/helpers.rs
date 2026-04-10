@@ -50,12 +50,22 @@ pub struct PublicS3Address {
 #[derive(Debug, Clone)]
 pub struct Session {
     did: Did,
+    credentials: Option<crate::s3::S3Credentials>,
 }
 
 impl Session {
     /// Create a new test session with the given DID.
     pub fn new(did: impl Into<Did>) -> Self {
-        Self { did: did.into() }
+        Self {
+            did: did.into(),
+            credentials: None,
+        }
+    }
+
+    /// Attach S3 credentials to this session.
+    pub fn with_credentials(mut self, credentials: crate::s3::S3Credentials) -> Self {
+        self.credentials = Some(credentials);
+        self
     }
 }
 
@@ -95,7 +105,7 @@ macro_rules! impl_fork_provider {
                 let invocation = dialog_capability::fork::ForkInvocation::new(
                     capability,
                     address,
-                    crate::s3::S3Authorization::default(),
+                    crate::s3::S3Authorization(self.credentials.clone()),
                 );
                 let s3 = crate::s3::S3;
                 Ok(invocation.perform(&s3).await)
