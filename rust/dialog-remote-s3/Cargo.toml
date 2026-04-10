@@ -24,9 +24,8 @@ helpers = [
   "dep:tower-http",
   "dep:tokio",
 ]
-list = ["dep:quick-xml"]
-s3-integration-tests = ["list", "helpers"]
-integration-tests = ["list", "helpers", "dialog-common/integration-tests"]
+s3-integration-tests = ["helpers"]
+integration-tests = ["helpers", "dialog-common/integration-tests"]
 web-integration-tests = ["dialog-common/web-integration-tests"]
 
 [dependencies]
@@ -48,7 +47,7 @@ thiserror = { workspace = true }
 url = { workspace = true }
 futures-util = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
-quick-xml = { workspace = true, features = ["serde", "serialize"], optional = true }
+
 rand = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

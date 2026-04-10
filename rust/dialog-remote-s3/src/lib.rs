@@ -27,11 +27,11 @@
 //! // Subject DID identifies whose data we're accessing (used as path prefix)
 //! let subject = did!("key:zSubject");
 //!
-//! // Attach credentials for authenticated access
-//! let address = address.with_credentials(S3Credentials::new(
+//! // Credentials for authenticated access
+//! let credentials = S3Credentials::new(
 //!     "AKIAIOSFODNN7EXAMPLE",
 //!     "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-//! ));
+//! );
 //!
 //! // Build a capability and authorize it using the address.
 //! let capability = Subject::from(subject)
@@ -39,7 +39,7 @@
 //!     .attenuate(Catalog::new("blobs"))
 //!     .invoke(Get::new([0u8; 32]));
 //!
-//! let request = address.authorize(&capability).await?;
+//! let request = address.authorize(&capability, Some(&credentials)).await?;
 //! println!("Presigned URL: {}", request.url);
 //! # Ok(())
 //! # }
@@ -53,10 +53,6 @@ mod error;
 mod key;
 mod permit;
 pub mod s3;
-
-#[cfg(feature = "list")]
-#[allow(dead_code)]
-mod list;
 
 #[cfg(feature = "helpers")]
 pub mod helpers;
@@ -78,5 +74,3 @@ pub use s3::S3Credentials;
 // Re-export key encoding
 pub use key::{decode as decode_s3_key, encode as encode_s3_key};
 
-#[cfg(feature = "list")]
-pub use list::ListResult;

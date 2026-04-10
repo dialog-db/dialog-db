@@ -115,10 +115,8 @@ pub fn open() -> TestBucket {
         option_env!("R2S3_SECRET_ACCESS_KEY").expect("R2S3_SECRET_ACCESS_KEY not set"),
     );
 
-    let address = address.with_credentials(credentials);
-
     let s3 = S3;
-    let session = Session::new(subject.clone());
+    let session = Session::new(subject.clone()).with_credentials(credentials);
 
     TestBucket {
         s3,
