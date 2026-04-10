@@ -33,25 +33,20 @@
 //!
 //! ```rust,no_run
 //! use dialog_remote_ucan_s3::UcanAuthorizer;
-//! use dialog_remote_s3::s3::S3Credentials;
-//! use dialog_remote_s3::Address;
+//! use dialog_remote_s3::{Address, S3Authorization, S3Credential};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! // Create address for S3 bucket
-//! let address = Address::new(
-//!     "https://s3.us-east-1.amazonaws.com",
-//!     "us-east-1",
-//!     "my-bucket",
-//! );
+//! let address = Address::builder("https://s3.us-east-1.amazonaws.com")
+//!     .region("us-east-1")
+//!     .bucket("my-bucket")
+//!     .build()?;
 //!
-//! // Create underlying credentials for S3 access
-//! let s3_credentials = S3Credentials::new(
+//! let auth = S3Authorization::from(S3Credential::new(
 //!     "access-key-id",
 //!     "secret-access-key",
-//! );
+//! ));
 //!
-//! // Wrap with UCAN authorizer
-//! let authorizer = UcanAuthorizer::new(address.with_credentials(s3_credentials));
+//! let authorizer = UcanAuthorizer::new(address, auth);
 //!
 //! // Handle incoming UCAN container
 //! let container_bytes: Vec<u8> = vec![]; // UCAN container from request
@@ -65,8 +60,7 @@ use std::collections::BTreeMap;
 use dialog_capability::{Capability, Constraint, Did, Policy};
 use dialog_credentials::Ed25519KeyResolver;
 use dialog_effects::{archive, memory};
-use dialog_remote_s3::Address;
-use dialog_remote_s3::{AccessError, Permit};
+use dialog_remote_s3::{Address, Permit, S3Authorization, S3Error};
 use dialog_ucan_core::InvocationChain;
 use dialog_ucan_core::promise::Promised;
 use ipld_core::ipld::Ipld;
@@ -81,24 +75,24 @@ type Args = BTreeMap<String, Promised>;
 /// Converts `Promised` values to IPLD, then uses `ipld_core::serde::from_ipld`
 /// to deserialize the target type. Unknown fields are ignored, so this works
 /// on the flat args map containing fields from all capability chain layers.
-fn deserialize_from_args<T: DeserializeOwned>(args: &Args) -> Result<T, AccessError> {
+fn deserialize_from_args<T: DeserializeOwned>(args: &Args) -> Result<T, S3Error> {
     let ipld_map: BTreeMap<String, Ipld> = args
         .iter()
         .map(|(k, v)| {
             Ipld::try_from(v)
                 .map(|ipld| (k.clone(), ipld))
                 .map_err(|e| {
-                    AccessError::Invocation(format!("Unresolved promise for '{}': {}", k, e))
+                    S3Error::Authorization(format!("Unresolved promise for '{}': {}", k, e))
                 })
         })
         .collect::<Result<_, _>>()?;
 
     ipld_core::serde::from_ipld(Ipld::Map(ipld_map))
-        .map_err(|e| AccessError::Invocation(format!("Failed to deserialize: {}", e)))
+        .map_err(|e| S3Error::Authorization(format!("Failed to deserialize: {}", e)))
 }
 
 /// Build a memory capability from UCAN args: `Subject -> Memory -> Space -> Cell -> Claim`.
-fn memory_claim_from_args<C>(subject: &Did, args: &Args) -> Result<Capability<C>, AccessError>
+fn memory_claim_from_args<C>(subject: &Did, args: &Args) -> Result<Capability<C>, S3Error>
 where
     C: Policy<Of = memory::Cell> + DeserializeOwned,
     <C as Constraint>::Capability: dialog_capability::Ability,
@@ -114,7 +108,7 @@ where
 }
 
 /// Build an archive capability from UCAN args: `Subject -> Archive -> Catalog -> Claim`.
-fn archive_claim_from_args<C>(subject: &Did, args: &Args) -> Result<Capability<C>, AccessError>
+fn archive_claim_from_args<C>(subject: &Did, args: &Args) -> Result<Capability<C>, S3Error>
 where
     C: Policy<Of = archive::Catalog> + DeserializeOwned,
     <C as Constraint>::Capability: dialog_capability::Ability,
@@ -137,10 +131,8 @@ trait FromUcanArgs {
     type Claim: Constraint;
 
     /// Reconstruct a capability from UCAN args.
-    fn capability_from_args(
-        subject: &Did,
-        args: &Args,
-    ) -> Result<Capability<Self::Claim>, AccessError>;
+    fn capability_from_args(subject: &Did, args: &Args)
+    -> Result<Capability<Self::Claim>, S3Error>;
 }
 
 impl FromUcanArgs for memory::Resolve {
@@ -148,7 +140,7 @@ impl FromUcanArgs for memory::Resolve {
     fn capability_from_args(
         subject: &Did,
         args: &Args,
-    ) -> Result<Capability<Self::Claim>, AccessError> {
+    ) -> Result<Capability<Self::Claim>, S3Error> {
         let space: memory::Space = deserialize_from_args(args)?;
         let cell: memory::Cell = deserialize_from_args(args)?;
         Ok(dialog_capability::Subject::from(subject.clone())
@@ -163,7 +155,7 @@ impl FromUcanArgs for memory::Publish {
     fn capability_from_args(
         subject: &Did,
         args: &Args,
-    ) -> Result<Capability<Self::Claim>, AccessError> {
+    ) -> Result<Capability<Self::Claim>, S3Error> {
         memory_claim_from_args(subject, args)
     }
 }
@@ -172,7 +164,7 @@ impl FromUcanArgs for memory::Retract {
     fn capability_from_args(
         subject: &Did,
         args: &Args,
-    ) -> Result<Capability<Self::Claim>, AccessError> {
+    ) -> Result<Capability<Self::Claim>, S3Error> {
         memory_claim_from_args(subject, args)
     }
 }
@@ -181,7 +173,7 @@ impl FromUcanArgs for archive::Get {
     fn capability_from_args(
         subject: &Did,
         args: &Args,
-    ) -> Result<Capability<Self::Claim>, AccessError> {
+    ) -> Result<Capability<Self::Claim>, S3Error> {
         archive_claim_from_args(subject, args)
     }
 }
@@ -190,7 +182,7 @@ impl FromUcanArgs for archive::Put {
     fn capability_from_args(
         subject: &Did,
         args: &Args,
-    ) -> Result<Capability<Self::Claim>, AccessError> {
+    ) -> Result<Capability<Self::Claim>, S3Error> {
         archive_claim_from_args(subject, args)
     }
 }
@@ -205,10 +197,10 @@ macro_rules! dispatch {
             $(
                 [$seg1, $seg2] => {
                     let capability = <$fx as FromUcanArgs>::capability_from_args($subject, $args)?;
-                    $self.address.authorize(&capability).await
+                    $self.authorization.permit(&capability, &$self.address).await
                 }
             )+
-            _ => Err(AccessError::Invocation(format!("Unknown command: {:?}", $segments)))
+            _ => Err(S3Error::Authorization(format!("Unknown command: {:?}", $segments)))
         }
     };
 }
@@ -219,18 +211,20 @@ macro_rules! dispatch {
 /// 1. Receives UCAN containers (invocation + delegations)
 /// 2. Verifies the delegation chain
 /// 3. Extracts commands and constructs effects
-/// 4. Delegates to wrapped credentials for presigned URLs
+/// 4. Delegates to S3 authorization for presigned URLs
 #[derive(Debug, Clone)]
 pub struct UcanAuthorizer {
     address: Address,
+    authorization: S3Authorization,
 }
 
 impl UcanAuthorizer {
-    /// Create a new UCAN authorizer wrapping the given address.
-    ///
-    /// Credentials (if any) should be set on the address via `Address::with_credentials`.
-    pub fn new(address: Address) -> Self {
-        Self { address }
+    /// Create a new UCAN authorizer with the given address and authorization.
+    pub fn new(address: Address, authorization: S3Authorization) -> Self {
+        Self {
+            address,
+            authorization,
+        }
     }
 
     /// Authorize a UCAN container.
@@ -251,14 +245,14 @@ impl UcanAuthorizer {
     /// 1. Verifies the delegation chain from subject to invocation issuer
     /// 2. Checks command prefix authorization at each delegation
     /// 3. Validates policy predicates on each delegation
-    pub async fn authorize(&self, container: &[u8]) -> Result<Permit, AccessError> {
+    pub async fn authorize(&self, container: &[u8]) -> Result<Permit, S3Error> {
         // Parse and verify the invocation chain
         let chain = InvocationChain::try_from(container)
-            .map_err(|e| AccessError::Invocation(e.to_string()))?;
+            .map_err(|e| S3Error::Authorization(e.to_string()))?;
         chain
             .verify(&Ed25519KeyResolver)
             .await
-            .map_err(|e| AccessError::Invocation(e.to_string()))?;
+            .map_err(|e| S3Error::Authorization(e.to_string()))?;
 
         // Extract command path and arguments
         let command = chain.command();
@@ -288,7 +282,7 @@ mod tests {
     use dialog_credentials::Ed25519Signer;
     use dialog_remote_s3::Address;
     use dialog_remote_s3::s3;
-    use dialog_remote_s3::s3::S3Credentials;
+    use dialog_remote_s3::s3::S3Credential;
     use dialog_ucan_core::DelegationBuilder;
     use dialog_ucan_core::InvocationBuilder;
     use dialog_ucan_core::InvocationChain;
@@ -345,14 +339,14 @@ mod tests {
     async fn it_acquires_and_performs_memory_resolve() {
         let subject_signer = test_signer().await;
 
-        let address = Address::new(
-            "https://s3.us-east-1.amazonaws.com",
-            "us-east-1",
-            "test-bucket",
-        );
-        let credentials = S3Credentials::new("access-key-id", "secret-access-key");
+        let address = Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("test-bucket")
+            .build()
+            .unwrap();
+        let credentials = S3Credential::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(address.with_credentials(credentials));
+        let authorizer = UcanAuthorizer::new(address, S3Authorization::from(credentials));
 
         let operator_signer = Ed25519Signer::import(&[1u8; 32]).await.unwrap();
 
@@ -384,14 +378,14 @@ mod tests {
     async fn it_acquires_and_performs_archive_get() {
         let subject_signer = test_signer().await;
 
-        let address = Address::new(
-            "https://s3.us-east-1.amazonaws.com",
-            "us-east-1",
-            "test-bucket",
-        );
-        let credentials = S3Credentials::new("access-key-id", "secret-access-key");
+        let address = Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("test-bucket")
+            .build()
+            .unwrap();
+        let credentials = S3Credential::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(address.with_credentials(credentials));
+        let authorizer = UcanAuthorizer::new(address, S3Authorization::from(credentials));
 
         let operator_signer = Ed25519Signer::import(&[1u8; 32]).await.unwrap();
 
@@ -417,14 +411,14 @@ mod tests {
     async fn it_acquires_and_performs_archive_put() {
         let subject_signer = test_signer().await;
 
-        let address = Address::new(
-            "https://s3.us-east-1.amazonaws.com",
-            "us-east-1",
-            "test-bucket",
-        );
-        let credentials = S3Credentials::new("access-key-id", "secret-access-key");
+        let address = Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("test-bucket")
+            .build()
+            .unwrap();
+        let credentials = S3Credential::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(address.with_credentials(credentials));
+        let authorizer = UcanAuthorizer::new(address, S3Authorization::from(credentials));
 
         let operator_signer = Ed25519Signer::import(&[1u8; 32]).await.unwrap();
 
@@ -456,14 +450,14 @@ mod tests {
     async fn it_provides_authorized_requests() -> anyhow::Result<()> {
         let operator = Ed25519Signer::import(&[0u8; 32]).await.unwrap();
 
-        let address = Address::new(
-            "https://s3.us-east-1.amazonaws.com",
-            "us-east-1",
-            "test-bucket",
-        );
-        let credentials = s3::S3Credentials::new("access-key-id", "secret-access-key");
+        let address = Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("test-bucket")
+            .build()
+            .unwrap();
+        let credentials = s3::S3Credential::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(address.with_credentials(credentials));
+        let authorizer = UcanAuthorizer::new(address, S3Authorization::from(credentials));
 
         let digest = Blake3Hash::hash(b"hello");
         let args = BTreeMap::from([
@@ -524,14 +518,14 @@ mod tests {
     async fn it_authorizes_self_invocation_for_archive_get() {
         let signer = test_signer().await;
 
-        let address = Address::new(
-            "https://s3.us-east-1.amazonaws.com",
-            "us-east-1",
-            "test-bucket",
-        );
-        let credentials = S3Credentials::new("access-key-id", "secret-access-key");
+        let address = Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("test-bucket")
+            .build()
+            .unwrap();
+        let credentials = S3Credential::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(address.with_credentials(credentials));
+        let authorizer = UcanAuthorizer::new(address, S3Authorization::from(credentials));
 
         let mut args = BTreeMap::new();
         args.insert("catalog".to_string(), Promised::String("blobs".to_string()));
@@ -563,14 +557,14 @@ mod tests {
     async fn it_authorizes_self_invocation_for_archive_put() {
         let signer = test_signer().await;
 
-        let address = Address::new(
-            "https://s3.us-east-1.amazonaws.com",
-            "us-east-1",
-            "test-bucket",
-        );
-        let credentials = S3Credentials::new("access-key-id", "secret-access-key");
+        let address = Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("test-bucket")
+            .build()
+            .unwrap();
+        let credentials = S3Credential::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(address.with_credentials(credentials));
+        let authorizer = UcanAuthorizer::new(address, S3Authorization::from(credentials));
 
         // Multihash format: [code, length, ...digest]
         // SHA-256 code is 0x12, length is 0x20 (32 bytes)
@@ -604,14 +598,14 @@ mod tests {
     async fn it_authorizes_self_invocation_for_memory_resolve() {
         let signer = test_signer().await;
 
-        let address = Address::new(
-            "https://s3.us-east-1.amazonaws.com",
-            "us-east-1",
-            "test-bucket",
-        );
-        let credentials = S3Credentials::new("access-key-id", "secret-access-key");
+        let address = Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("test-bucket")
+            .build()
+            .unwrap();
+        let credentials = S3Credential::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(address.with_credentials(credentials));
+        let authorizer = UcanAuthorizer::new(address, S3Authorization::from(credentials));
 
         let mut args = BTreeMap::new();
         args.insert(
