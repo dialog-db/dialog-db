@@ -87,16 +87,7 @@ impl S3Credentials {
         let path = request.path();
         let url = address.build_url(&path)?;
 
-        // hostname does not include port, so we check if there is port in the
-        // host and include it if present
-        let hostname = url
-            .host_str()
-            .ok_or_else(|| S3Error::Configuration("URL missing host".into()))?;
-        let host = if let Some(port) = url.port() {
-            format!("{}:{}", hostname, port)
-        } else {
-            hostname.to_string()
-        };
+        let host = Address::authority(&url)?;
 
         // Build signed headers
         let mut headers = vec![("host".to_string(), host.clone())];
