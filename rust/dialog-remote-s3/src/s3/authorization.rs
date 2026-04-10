@@ -16,10 +16,10 @@ use crate::{Permit, S3Error};
 pub struct S3Authorization(pub Option<S3Credential>);
 
 impl S3Authorization {
-    /// Authorize a request, producing a presigned URL permit.
+    /// Redeem this authorization for a presigned URL permit.
     ///
     /// With credentials, signs via SigV4. Without, builds an unsigned request.
-    pub async fn permit<R: Access>(
+    pub async fn redeem<R: Access>(
         &self,
         request: &R,
         address: &Address,

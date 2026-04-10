@@ -35,7 +35,7 @@
 //!     .attenuate(Catalog::new("blobs"))
 //!     .invoke(Get::new([0u8; 32]));
 //!
-//! let request = auth.permit(&capability, &address).await?;
+//! let request = auth.redeem(&capability, &address).await?;
 //! println!("Presigned URL: {}", request.url);
 //! # Ok(())
 //! # }
