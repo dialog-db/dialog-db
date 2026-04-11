@@ -58,23 +58,7 @@ mod tests {
     mod delegation_tests {
         use super::*;
         use dialog_capability::Subject;
-        use dialog_capability::access::{self as cap_access, Access, AuthorizeError};
         use dialog_effects::archive::prelude::{ArchiveExt, ArchiveSubjectExt};
-        use dialog_ucan::scope::Scope;
-        use dialog_ucan::{Ucan, UcanProof};
-
-        async fn claim_access(
-            operator: &super::super::super::Operator<VolatileSpace>,
-            capability: &impl dialog_capability::Ability,
-        ) -> Result<UcanProof, AuthorizeError> {
-            let scope = Scope::from(capability);
-
-            Subject::from(operator.profile_did())
-                .attenuate(Access)
-                .invoke(cap_access::Prove::<Ucan>::new(operator.did(), scope))
-                .perform(operator)
-                .await
-        }
 
         #[dialog_common::test]
         async fn self_grant_produces_delegation() {
@@ -92,8 +76,12 @@ mod tests {
                 .await
                 .unwrap();
 
-            let cap = Subject::from(operator.did()).archive().catalog("index");
-            let result = claim_access(&operator, &cap).await;
+            let result = profile
+                .access()
+                .prove(Subject::from(operator.did()).archive().catalog("index"))
+                .audience(&operator)
+                .perform(&operator)
+                .await;
 
             assert!(
                 result.is_ok(),
@@ -118,8 +106,12 @@ mod tests {
                 .await
                 .unwrap();
 
-            let cap = Subject::from(operator.did());
-            let result = claim_access(&operator, &cap).await;
+            let result = profile
+                .access()
+                .prove(Subject::from(operator.did()))
+                .audience(&operator)
+                .perform(&operator)
+                .await;
 
             assert!(
                 result.is_ok(),
@@ -145,8 +137,12 @@ mod tests {
                 .await
                 .unwrap();
 
-            let cap = Subject::from(profile.did()).archive().catalog("index");
-            let result = claim_access(&operator, &cap).await;
+            let result = profile
+                .access()
+                .prove(Subject::from(profile.did()).archive().catalog("index"))
+                .audience(&operator)
+                .perform(&operator)
+                .await;
 
             assert!(
                 result.is_ok(),
@@ -172,8 +168,12 @@ mod tests {
                 .await
                 .unwrap();
 
-            let cap = Subject::from(profile.did()).archive().catalog("secret");
-            let result = claim_access(&operator, &cap).await;
+            let result = profile
+                .access()
+                .prove(Subject::from(profile.did()).archive().catalog("secret"))
+                .audience(&operator)
+                .perform(&operator)
+                .await;
 
             assert!(result.is_err(), "should deny non-delegated archive/secret");
         }
@@ -196,8 +196,12 @@ mod tests {
                 .await
                 .unwrap();
 
-            let cap = Subject::from(profile.did()).attenuate(fx_storage::Storage);
-            let result = claim_access(&operator, &cap).await;
+            let result = profile
+                .access()
+                .prove(Subject::from(profile.did()).attenuate(fx_storage::Storage))
+                .audience(&operator)
+                .perform(&operator)
+                .await;
 
             assert!(
                 result.is_ok(),
@@ -222,8 +226,12 @@ mod tests {
                 .await
                 .unwrap();
 
-            let cap = Subject::from(profile.did()).archive().catalog("index");
-            let result = claim_access(&operator, &cap).await;
+            let result = profile
+                .access()
+                .prove(Subject::from(profile.did()).archive().catalog("index"))
+                .audience(&operator)
+                .perform(&operator)
+                .await;
 
             assert!(result.is_err(), "should fail with no delegations");
         }
@@ -245,8 +253,12 @@ mod tests {
                 .await
                 .unwrap();
 
-            let cap = Subject::from(profile.did()).archive().catalog("index");
-            let result = claim_access(&operator, &cap).await;
+            let result = profile
+                .access()
+                .prove(Subject::from(profile.did()).archive().catalog("index"))
+                .audience(&operator)
+                .perform(&operator)
+                .await;
 
             assert!(
                 result.is_ok(),
@@ -260,12 +272,8 @@ mod tests {
         use super::*;
         use crate::profile::Profile;
         use dialog_capability::Subject;
-        use dialog_capability::access::{
-            self as cap_access, Access, Authorization as _, Proof as _, TimeRange,
-        };
+        use dialog_capability::access::{Authorization as _, Proof as _};
         use dialog_effects::archive::prelude::{ArchiveExt, ArchiveSubjectExt};
-        use dialog_ucan::Ucan;
-        use dialog_ucan::scope::Scope;
         use dialog_ucan_core::time::Timestamp;
         use dialog_ucan_core::time::timestamp::{Duration, UNIX_EPOCH};
 
@@ -325,11 +333,10 @@ mod tests {
                 .unwrap();
 
             // Claim with unbounded duration (I don't care)
-            let cap = Subject::from(profile.did()).archive().catalog("index");
-            let scope = Scope::from(&cap);
-            let proof = Subject::from(profile.did())
-                .attenuate(Access)
-                .invoke(cap_access::Prove::<Ucan>::new(operator.did(), scope))
+            let proof = profile
+                .access()
+                .prove(Subject::from(profile.did()).archive().catalog("index"))
+                .audience(&operator)
                 .perform(&operator)
                 .await
                 .unwrap();
@@ -362,17 +369,11 @@ mod tests {
                 .unwrap();
 
             // Request authorization valid until 5000 - should fail
-            let cap = Subject::from(profile.did()).archive().catalog("data");
-            let scope = Scope::from(&cap);
-            let mut claim = cap_access::Prove::<Ucan>::new(operator.did(), scope);
-            claim.duration = TimeRange {
-                not_before: None,
-                expiration: Some(5000),
-            };
-
-            let result = Subject::from(profile.did())
-                .attenuate(Access)
-                .invoke(claim)
+            let result = profile
+                .access()
+                .prove(Subject::from(profile.did()).archive().catalog("data"))
+                .audience(&operator)
+                .expires(ts(5000))
                 .perform(&operator)
                 .await;
 
@@ -404,17 +405,11 @@ mod tests {
                 .unwrap();
 
             // Request authorization valid from 1000 - should fail
-            let cap = Subject::from(profile.did()).archive().catalog("data");
-            let scope = Scope::from(&cap);
-            let mut claim = cap_access::Prove::<Ucan>::new(operator.did(), scope);
-            claim.duration = TimeRange {
-                not_before: Some(1000),
-                expiration: None,
-            };
-
-            let result = Subject::from(profile.did())
-                .attenuate(Access)
-                .invoke(claim)
+            let result = profile
+                .access()
+                .prove(Subject::from(profile.did()).archive().catalog("data"))
+                .audience(&operator)
+                .not_before(ts(1000))
                 .perform(&operator)
                 .await;
 
@@ -447,17 +442,12 @@ mod tests {
                 .unwrap();
 
             // Request authorization valid from 500 to 5000 - cert covers this
-            let cap = Subject::from(profile.did()).archive().catalog("data");
-            let scope = Scope::from(&cap);
-            let mut claim = cap_access::Prove::<Ucan>::new(operator.did(), scope);
-            claim.duration = TimeRange {
-                not_before: Some(500),
-                expiration: Some(5000),
-            };
-
-            let result = Subject::from(profile.did())
-                .attenuate(Access)
-                .invoke(claim)
+            let result = profile
+                .access()
+                .prove(Subject::from(profile.did()).archive().catalog("data"))
+                .audience(&operator)
+                .not_before(ts(500))
+                .expires(ts(5000))
                 .perform(&operator)
                 .await;
 
@@ -491,24 +481,15 @@ mod tests {
                 .unwrap();
 
             // Request with no time constraints ("I don't care")
-            let cap = Subject::from(profile.did()).archive().catalog("data");
-            let scope = Scope::from(&cap);
-            let claim = cap_access::Prove::<Ucan>::new(operator.did(), scope);
-
-            let result = Subject::from(profile.did())
-                .attenuate(Access)
-                .invoke(claim)
+            let proof = profile
+                .access()
+                .prove(Subject::from(profile.did()).archive().catalog("data"))
+                .audience(&operator)
                 .perform(&operator)
-                .await;
-
-            assert!(
-                result.is_ok(),
-                "unbounded request should accept any cert: {:?}",
-                result.err()
-            );
+                .await
+                .unwrap();
 
             // But the proof should carry the cert's actual bounds
-            let proof = result.unwrap();
             assert_eq!(proof.duration().not_before, Some(100));
             assert_eq!(proof.duration().expiration, Some(200));
         }
@@ -534,17 +515,15 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Get proof
-            let cap = Subject::from(profile.did()).archive().catalog("data");
-            let scope = Scope::from(&cap);
-            let proof = Subject::from(profile.did())
-                .attenuate(Access)
-                .invoke(cap_access::Prove::<Ucan>::new(operator.did(), scope))
+            let proof = profile
+                .access()
+                .prove(Subject::from(profile.did()).archive().catalog("data"))
+                .audience(&operator)
                 .perform(&operator)
                 .await
                 .unwrap();
 
-            let signer = dialog_credentials::Ed25519Signer::from(profile.credential().clone());
+            let signer = dialog_credentials::Ed25519Signer::from(profile.signer().clone());
             let authorization = proof.claim(signer).unwrap();
 
             // Try to set expiration beyond proof bounds
@@ -576,17 +555,15 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Get proof
-            let cap = Subject::from(profile.did()).archive().catalog("data");
-            let scope = Scope::from(&cap);
-            let proof = Subject::from(profile.did())
-                .attenuate(Access)
-                .invoke(cap_access::Prove::<Ucan>::new(operator.did(), scope))
+            let proof = profile
+                .access()
+                .prove(Subject::from(profile.did()).archive().catalog("data"))
+                .audience(&operator)
                 .perform(&operator)
                 .await
                 .unwrap();
 
-            let signer = dialog_credentials::Ed25519Signer::from(profile.credential().clone());
+            let signer = dialog_credentials::Ed25519Signer::from(profile.signer().clone());
             let authorization = proof.claim(signer).unwrap();
 
             // Try to set not_before earlier than proof bounds
@@ -619,17 +596,15 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Get proof
-            let cap = Subject::from(profile.did()).archive().catalog("data");
-            let scope = Scope::from(&cap);
-            let proof = Subject::from(profile.did())
-                .attenuate(Access)
-                .invoke(cap_access::Prove::<Ucan>::new(operator.did(), scope))
+            let proof = profile
+                .access()
+                .prove(Subject::from(profile.did()).archive().catalog("data"))
+                .audience(&operator)
                 .perform(&operator)
                 .await
                 .unwrap();
 
-            let signer = dialog_credentials::Ed25519Signer::from(profile.credential().clone());
+            let signer = dialog_credentials::Ed25519Signer::from(profile.signer().clone());
             let authorization = proof.claim(signer).unwrap();
 
             // Narrow the window - should succeed
@@ -640,6 +615,169 @@ mod tests {
                 "narrowing should succeed: {:?}",
                 result.err()
             );
+        }
+    }
+
+    mod s3_credential_tests {
+        use super::*;
+        use dialog_capability::Subject;
+        use dialog_common::Blake3Hash;
+        use dialog_effects::archive::prelude::*;
+        use dialog_effects::credential::Secret;
+        use dialog_remote_s3::helpers::S3Address;
+        use dialog_remote_s3::{Address, S3Authorization, S3Credential};
+
+        fn address_from(s3: &S3Address) -> Address {
+            Address::builder(&s3.endpoint)
+                .region("us-east-1")
+                .bucket(&s3.bucket)
+                .build()
+                .unwrap()
+        }
+
+        #[dialog_common::test]
+        async fn credential_roundtrips_through_secret(s3: S3Address) {
+            let cred = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
+            let auth = S3Authorization::from(cred.clone());
+
+            let secret: Secret = auth.try_into().unwrap();
+            let restored: S3Authorization = secret.try_into().unwrap();
+
+            assert!(
+                restored.0.is_some(),
+                "should have credentials after roundtrip"
+            );
+            let restored_cred = restored.0.unwrap();
+            assert_eq!(restored_cred.access_key_id(), cred.access_key_id());
+            assert_eq!(restored_cred.secret_access_key(), cred.secret_access_key());
+        }
+
+        #[dialog_common::test]
+        async fn fork_fails_without_saved_credential(s3: S3Address) {
+            let storage = Storage::volatile();
+            let profile = Profile::open(unique_name("s3-no-cred"))
+                .perform(&storage)
+                .await
+                .unwrap();
+            let operator = profile
+                .derive(b"test")
+                .allow(Subject::any())
+                .network(Network)
+                .build(storage)
+                .await
+                .unwrap();
+
+            let address = address_from(&s3);
+
+            // Fork without saving credentials: should fail with credential not found
+            let result = Subject::from(operator.profile_did())
+                .archive()
+                .catalog("data")
+                .get(Blake3Hash::hash(b"test"))
+                .fork(&address)
+                .perform(&operator)
+                .await;
+
+            let err = result.unwrap_err();
+            assert!(
+                err.to_string().contains("not found")
+                    || err.to_string().contains("Credential not found"),
+                "should fail with credential not found, got: {err}"
+            );
+        }
+
+        #[dialog_common::test]
+        async fn fork_loads_saved_credential_for_get(s3: S3Address) {
+            let storage = Storage::volatile();
+            let profile = Profile::open(unique_name("s3-get"))
+                .perform(&storage)
+                .await
+                .unwrap();
+            let operator = profile
+                .derive(b"test")
+                .allow(Subject::any())
+                .network(Network)
+                .build(storage)
+                .await
+                .unwrap();
+
+            let address = address_from(&s3);
+            let authorization =
+                S3Authorization::from(S3Credential::new(&s3.access_key_id, &s3.secret_access_key));
+
+            profile
+                .credential()
+                .site(&address)
+                .save(authorization)
+                .perform(&operator)
+                .await
+                .unwrap();
+
+            // Fork get: credential is loaded, request reaches the S3 server,
+            // returns None because the content doesn't exist (not an auth error).
+            let result = Subject::from(operator.profile_did())
+                .archive()
+                .catalog("cred-test")
+                .get(Blake3Hash::hash(b"nonexistent"))
+                .fork(&address)
+                .perform(&operator)
+                .await;
+
+            assert!(result.is_ok(), "should succeed, got: {:?}", result.err());
+            assert!(result.unwrap().is_none(), "content should not exist");
+        }
+
+        #[dialog_common::test]
+        async fn fork_loads_saved_credential_for_put_and_get(s3: S3Address) {
+            let storage = Storage::volatile();
+            let profile = Profile::open(unique_name("s3-put-get"))
+                .perform(&storage)
+                .await
+                .unwrap();
+            let operator = profile
+                .derive(b"test")
+                .allow(Subject::any())
+                .network(Network)
+                .build(storage)
+                .await
+                .unwrap();
+
+            let address = address_from(&s3);
+            let authorization =
+                S3Authorization::from(S3Credential::new(&s3.access_key_id, &s3.secret_access_key));
+
+            profile
+                .credential()
+                .site(&address)
+                .save(authorization)
+                .perform(&operator)
+                .await
+                .unwrap();
+
+            let content = b"hello from operator".to_vec();
+            let digest = Blake3Hash::hash(&content);
+
+            // Put content via fork
+            Subject::from(operator.profile_did())
+                .archive()
+                .catalog("cred-roundtrip")
+                .put(digest.clone(), content.clone())
+                .fork(&address)
+                .perform(&operator)
+                .await
+                .unwrap();
+
+            // Get it back via fork
+            let retrieved = Subject::from(operator.profile_did())
+                .archive()
+                .catalog("cred-roundtrip")
+                .get(digest)
+                .fork(&address)
+                .perform(&operator)
+                .await
+                .unwrap();
+
+            assert_eq!(retrieved, Some(content));
         }
     }
 

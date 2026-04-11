@@ -65,6 +65,12 @@ impl From<AuthorizationFormatError> for S3Error {
     }
 }
 
+impl From<AuthorizationFormatError> for dialog_effects::credential::CredentialError {
+    fn from(error: AuthorizationFormatError) -> Self {
+        Self::Corrupted(error.to_string())
+    }
+}
+
 impl From<AuthorizationFormatError> for dialog_capability::AuthorizeError {
     fn from(error: AuthorizationFormatError) -> Self {
         Self::Configuration(error.to_string())

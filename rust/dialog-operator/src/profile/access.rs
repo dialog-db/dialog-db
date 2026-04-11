@@ -36,6 +36,20 @@ impl<'a> Access<'a> {
         }
     }
 
+    /// Prove access to a capability, returning a proof chain.
+    ///
+    /// The audience defaults to the profile DID but can be overridden
+    /// via [`.audience()`](Prove::audience) for operator-scoped proofs.
+    pub fn prove<C: Constraint>(&self, capability: impl Into<Capability<C>>) -> Prove<'a, C> {
+        Prove {
+            by: self.credential,
+            capability: capability.into(),
+            audience: None,
+            not_before: None,
+            expiration: None,
+        }
+    }
+
     /// Save a delegation chain under this profile.
     pub fn save(&self, chain: UcanDelegation) -> super::SaveDelegation {
         super::SaveDelegation {
@@ -168,5 +182,65 @@ where
             authorization = authorization.expires(exp)?;
         }
         authorization.delegate(self.audience).await
+    }
+}
+
+/// A proof request for a capability with optional audience and time bounds.
+///
+/// Created via [`Access::prove()`]. Defaults the audience to the profile DID.
+/// Override with [`.audience()`](Prove::audience) for operator-scoped proofs.
+pub struct Prove<'a, C: Constraint> {
+    by: &'a SignerCredential,
+    capability: Capability<C>,
+    audience: Option<Did>,
+    not_before: Option<Timestamp>,
+    expiration: Option<Timestamp>,
+}
+
+impl<'a, C: Constraint> Prove<'a, C> {
+    /// Set the audience (who is requesting access).
+    ///
+    /// Defaults to the profile DID if not set.
+    pub fn audience(mut self, audience: &impl Principal) -> Self {
+        self.audience = Some(audience.did());
+        self
+    }
+
+    /// Set the earliest time the proof is valid.
+    pub fn not_before(mut self, not_before: Timestamp) -> Self {
+        self.not_before = Some(not_before);
+        self
+    }
+
+    /// Set when the proof expires.
+    pub fn expires(mut self, expiration: Timestamp) -> Self {
+        self.expiration = Some(expiration);
+        self
+    }
+}
+
+impl<C: Constraint> Prove<'_, C>
+where
+    Capability<C>: Ability,
+{
+    /// Execute the proof request, returning a proof chain.
+    pub async fn perform<Env>(self, env: &Env) -> Result<UcanProof, AuthorizeError>
+    where
+        Env: Provider<access::Prove<Ucan>> + ConditionalSync,
+    {
+        let by_did = self.by.did();
+        let audience = self.audience.unwrap_or_else(|| by_did.clone());
+        let scope = Scope::from(&self.capability);
+        let duration = access::TimeRange {
+            not_before: self.not_before.map(|t| t.to_unix()),
+            expiration: self.expiration.map(|t| t.to_unix()),
+        };
+        let mut prove = access::Prove::<Ucan>::new(audience, scope);
+        prove.duration = duration;
+        Subject::from(by_did)
+            .attenuate(access::Access)
+            .invoke(prove)
+            .perform(env)
+            .await
     }
 }
