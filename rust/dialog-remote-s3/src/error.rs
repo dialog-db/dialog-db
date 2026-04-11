@@ -45,3 +45,28 @@ impl From<S3Error> for MemoryError {
         MemoryError::Storage(error.to_string())
     }
 }
+
+/// Error encoding or decoding [`S3Authorization`](crate::S3Authorization)
+/// to/from a [`Secret`](dialog_effects::credential::Secret).
+#[derive(Debug, Error)]
+pub enum AuthorizationFormatError {
+    /// Failed to serialize authorization to bytes.
+    #[error("Failed to serialize S3 authorization: {0}")]
+    Serialize(String),
+
+    /// Failed to deserialize authorization from bytes.
+    #[error("Failed to deserialize S3 authorization: {0}")]
+    Deserialize(String),
+}
+
+impl From<AuthorizationFormatError> for S3Error {
+    fn from(error: AuthorizationFormatError) -> Self {
+        S3Error::Serialization(error.to_string())
+    }
+}
+
+impl From<AuthorizationFormatError> for dialog_capability::AuthorizeError {
+    fn from(error: AuthorizationFormatError) -> Self {
+        Self::Configuration(error.to_string())
+    }
+}

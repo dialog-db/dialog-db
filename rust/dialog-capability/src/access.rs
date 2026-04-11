@@ -16,7 +16,7 @@
 //! 2. `proof.claim(signer)` binds a signer to produce an
 //!    [`Authorization`] that can `delegate()` and `invoke()`.
 
-use crate::Did;
+use crate::{Ability, Capability, Constraint, Did, Effect};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -28,6 +28,20 @@ use thiserror::Error;
 pub trait Scope {
     /// The subject (resource) this scope applies to.
     fn subject(&self) -> &Did;
+}
+
+/// Derive an access scope from an invocable capability.
+///
+/// Protocol-specific scope types implement this to extract the subject,
+/// command path, and parameters from a capability chain. The Operator
+/// uses this to build the [`Prove`] request generically across protocols.
+pub trait FromCapability: Scope {
+    /// Derive a scope from an effect capability.
+    fn from_capability<Fx>(capability: &Capability<Fx>) -> Self
+    where
+        Fx: Effect + Clone,
+        Fx::Of: Constraint,
+        Capability<Fx>: Ability;
 }
 
 /// The time range during which a delegation is valid.
@@ -230,13 +244,21 @@ impl crate::Attenuation for Access {
 /// formats, and authorization/invocation materials.
 pub trait Protocol: Sized + ConditionalSend + 'static {
     /// The type-erased form of a capability for this protocol.
-    type Access: Scope + Serialize + for<'de> Deserialize<'de>;
+    ///
+    /// Must implement [`FromCapability`] so the Operator can derive
+    /// a scope from any capability for the Prove request.
+    type Access: FromCapability
+        + Clone
+        + Serialize
+        + for<'de> Deserialize<'de>
+        + ConditionalSend
+        + ConditionalSync;
 
     /// The signer type for this protocol.
     type Signer: crate::Principal + ConditionalSend;
 
     /// An individual delegation (signed certificate) in this protocol's format.
-    type Certificate: Certificate<Access = Self::Access>;
+    type Certificate: Certificate<Access = Self::Access> + Clone + ConditionalSend + ConditionalSync;
 
     /// A delegation bundle — what [`Authorization::delegate`] produces.
     type Delegation: Delegation<Certificate = Self::Certificate>;

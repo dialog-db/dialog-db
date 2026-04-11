@@ -1,18 +1,20 @@
 //! S3 authorization material.
 
-use dialog_capability::site::SiteAuthorization;
-
 use super::credential::S3Credential;
 use super::{Address, S3};
 use crate::capability::Access;
-use crate::{Permit, S3Error};
+use crate::{AuthorizationFormatError, Permit, S3Error};
+use dialog_capability::site::Credentials;
+use dialog_capability::site::SiteAuthorization;
+use dialog_effects::credential::Secret;
+use serde::{Deserialize, Serialize};
 
 /// S3 authorization material.
 ///
 /// Wraps optional credentials. In production the Operator looks up
 /// credentials from the secret store. For testing or public access,
 /// `None` is used and produces unsigned requests.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct S3Authorization(pub Option<S3Credential>);
 
 impl S3Authorization {
@@ -32,11 +34,31 @@ impl S3Authorization {
 }
 
 impl SiteAuthorization for S3Authorization {
+    type Scheme = Credentials;
     type Protocol = S3;
 }
 
 impl From<S3Credential> for S3Authorization {
     fn from(creds: S3Credential) -> Self {
         Self(Some(creds))
+    }
+}
+
+impl TryFrom<S3Authorization> for Secret {
+    type Error = AuthorizationFormatError;
+
+    fn try_from(auth: S3Authorization) -> Result<Self, AuthorizationFormatError> {
+        serde_ipld_dagcbor::to_vec(&auth)
+            .map(Secret)
+            .map_err(|e| AuthorizationFormatError::Serialize(e.to_string()))
+    }
+}
+
+impl TryFrom<Secret> for S3Authorization {
+    type Error = AuthorizationFormatError;
+
+    fn try_from(secret: Secret) -> Result<Self, AuthorizationFormatError> {
+        serde_ipld_dagcbor::from_slice(&secret.0)
+            .map_err(|e| AuthorizationFormatError::Deserialize(e.to_string()))
     }
 }

@@ -16,7 +16,7 @@
 pub mod prelude;
 
 pub use dialog_capability::{
-    Attenuation, Capability, Claim, Effect, Policy, StorageError, Subject,
+    Attenuation, AuthorizeError, Capability, Claim, Effect, Policy, StorageError, Subject,
 };
 pub use dialog_credentials;
 use serde::{Deserialize, Serialize};
@@ -169,5 +169,11 @@ pub enum CredentialError {
 impl From<StorageError> for CredentialError {
     fn from(e: StorageError) -> Self {
         Self::Storage(e.to_string())
+    }
+}
+
+impl From<CredentialError> for AuthorizeError {
+    fn from(e: CredentialError) -> Self {
+        Self::Denied(e.to_string())
     }
 }

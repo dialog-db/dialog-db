@@ -50,5 +50,5 @@ pub mod helpers;
 
 pub use capability::{Access, Precondition};
 pub use capability::{archive, memory};
-pub use error::S3Error;
+pub use error::{AuthorizationFormatError, S3Error};
 pub use s3::*;

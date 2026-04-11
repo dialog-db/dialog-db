@@ -20,7 +20,15 @@ use serde::de::DeserializeOwned;
 /// S::Authorization: SiteAuthorization<Protocol: Protocol>       → capability-based
 /// S::Authorization: SiteAuthorization<Protocol: Authentication> → credential-based
 /// ```
+/// Marker for capability-based access (UCAN, z-caps, biscuits).
+pub enum Capabilities {}
+
+/// Marker for credential-based access (S3, API keys).
+pub enum Credentials {}
+
 pub trait SiteAuthorization: ConditionalSend + 'static {
+    /// Discriminant: [`Capabilities`] or [`Credentials`].
+    type Scheme;
     /// The protocol that produced this authorization.
     type Protocol;
 }

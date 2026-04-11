@@ -1,6 +1,6 @@
 //! UCAN site configuration -- marker trait + address type.
 
-use dialog_capability::site::{Site, SiteAddress, SiteAuthorization};
+use dialog_capability::site::{Capabilities, Site, SiteAddress, SiteAuthorization};
 use dialog_remote_s3::{Permit, S3Error};
 
 // Re-export UCAN types for convenience.
@@ -45,6 +45,7 @@ impl UcanAuthorization {
 }
 
 impl SiteAuthorization for UcanAuthorization {
+    type Scheme = Capabilities;
     type Protocol = Ucan;
 }
 

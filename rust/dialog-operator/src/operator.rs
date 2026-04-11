@@ -14,7 +14,9 @@ pub use builder::{OperatorBuilder, OperatorError};
 use crate::Authority;
 use crate::network::Network;
 use dialog_capability::Capability;
+use dialog_credentials::Credential;
 use dialog_effects::authority::{Identify, Operator as AuthOperator};
+use dialog_effects::credential::Secret;
 use dialog_effects::storage as storage_fx;
 use dialog_effects::{archive, credential, memory};
 use dialog_storage::provider::storage::Storage;
@@ -36,10 +38,10 @@ pub struct Operator<S: Clone> {
     #[provide(
         archive::Get,
         archive::Put,
-        credential::Load<dialog_credentials::Credential>,
-        credential::Save<dialog_credentials::Credential>,
-        credential::Load<dialog_effects::credential::Secret>,
-        credential::Save<dialog_effects::credential::Secret>,
+        credential::Load<Credential>,
+        credential::Save<Credential>,
+        credential::Load<Secret>,
+        credential::Save<Secret>,
         memory::Resolve,
         memory::Publish,
         memory::Retract

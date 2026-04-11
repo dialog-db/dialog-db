@@ -156,6 +156,9 @@
 // Allow `#[derive(Claim)]` to resolve `::dialog_capability::Claim` inside this crate.
 extern crate self as dialog_capability;
 
+pub mod access;
+pub use access::*;
+
 mod error;
 pub use error::*;
 
@@ -206,8 +209,6 @@ pub use dialog_macros::Provider;
 
 /// Derive macro that generates `Claim` trait impls for effect types.
 pub use dialog_macros::Claim;
-
-pub mod access;
 
 pub mod site;
 pub use site::*;
