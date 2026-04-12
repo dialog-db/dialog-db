@@ -636,8 +636,8 @@ mod tests {
         }
 
         #[dialog_common::test]
-        async fn credential_roundtrips_through_secret(s3: S3Address) {
-            let cred = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
+        fn credential_roundtrips_through_secret() {
+            let cred = S3Credential::new("test-access-key", "test-secret-key");
             let auth = S3Authorization::from(cred.clone());
 
             let secret: Secret = auth.try_into().unwrap();
@@ -653,7 +653,7 @@ mod tests {
         }
 
         #[dialog_common::test]
-        async fn fork_fails_without_saved_credential(s3: S3Address) {
+        async fn fork_fails_without_saved_credential(s3: S3Address) -> anyhow::Result<()> {
             let storage = Storage::volatile();
             let profile = Profile::open(unique_name("s3-no-cred"))
                 .perform(&storage)
@@ -684,10 +684,11 @@ mod tests {
                     || err.to_string().contains("Credential not found"),
                 "should fail with credential not found, got: {err}"
             );
+            Ok(())
         }
 
         #[dialog_common::test]
-        async fn fork_loads_saved_credential_for_get(s3: S3Address) {
+        async fn fork_loads_saved_credential_for_get(s3: S3Address) -> anyhow::Result<()> {
             let storage = Storage::volatile();
             let profile = Profile::open(unique_name("s3-get"))
                 .perform(&storage)
@@ -723,12 +724,13 @@ mod tests {
                 .perform(&operator)
                 .await;
 
-            assert!(result.is_ok(), "should succeed, got: {:?}", result.err());
-            assert!(result.unwrap().is_none(), "content should not exist");
+            let content = result?;
+            assert!(content.is_none(), "content should not exist");
+            Ok(())
         }
 
         #[dialog_common::test]
-        async fn fork_loads_saved_credential_for_put_and_get(s3: S3Address) {
+        async fn fork_loads_saved_credential_for_put_and_get(s3: S3Address) -> anyhow::Result<()> {
             let storage = Storage::volatile();
             let profile = Profile::open(unique_name("s3-put-get"))
                 .perform(&storage)
@@ -778,6 +780,7 @@ mod tests {
                 .unwrap();
 
             assert_eq!(retrieved, Some(content));
+            Ok(())
         }
     }
 
