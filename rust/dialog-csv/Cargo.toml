@@ -1,0 +1,32 @@
+[package]
+name = "dialog-csv"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+dialog-artifacts = { workspace = true }
+async-trait = { workspace = true }
+base58 = { workspace = true }
+csv-async = { workspace = true, features = ["tokio"] }
+futures-util = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["io-util"] }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+dialog-common = { workspace = true, features = ["helpers"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { workspace = true, features = ["js"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+wasm-bindgen-test = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "macros", "rt", "fs"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("web-integration-tests"))', "cfg(dialog_test_wasm_integration)"] }

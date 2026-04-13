@@ -1,6 +1,6 @@
 use super::memory::Cell;
 use crate::Revision;
-use dialog_artifacts::{Datum, Key, State};
+use dialog_artifacts::{Datum, Exporter, Importer, Key, State};
 use dialog_capability::{Capability, Did, Subject};
 use dialog_effects::archive::Archive;
 use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
@@ -14,8 +14,14 @@ pub use claims::*;
 mod commit;
 pub use commit::*;
 
+mod export;
+pub use export::*;
+
 mod fetch;
 pub use fetch::*;
+
+mod import;
+pub use import::*;
 
 mod load;
 pub use load::*;
@@ -97,6 +103,18 @@ impl Branch {
     /// Archive capability for this branch's subject.
     pub fn archive(&self) -> Capability<Archive> {
         self.subject().archive()
+    }
+
+    /// Export all artifacts from this branch to the given exporter.
+    pub fn export<E: Exporter>(&self, exporter: E) -> Export<'_, E> {
+        Export::new(self, exporter)
+    }
+
+    /// Import artifacts into this branch from the given importer.
+    ///
+    /// Each artifact read from the importer is committed as an assertion.
+    pub fn import<I: Importer>(&self, importer: I) -> Import<'_, I> {
+        Import::new(self, importer)
     }
 
     /// Query with an application. Shortcut for `branch.query().select(query)`.
