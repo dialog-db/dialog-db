@@ -168,9 +168,6 @@ where
         .await
         .map_err(|e| RepositoryError::PushFailed {
             cause: format!("Remote upload failed: {}", e),
-        })?
-        .map_err(|e| RepositoryError::PushFailed {
-            cause: format!("Remote upload failed: {}", e),
         })?;
 
     Ok(())

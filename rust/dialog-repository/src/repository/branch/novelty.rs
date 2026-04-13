@@ -26,28 +26,14 @@ where
     async_stream::try_stream! {
         let store = ContentAddressedStore::new(env, catalog);
 
-        let base: Index = Tree::from_hash(&base_hash, &store)
-            .await
-            .map_err(|e| {
-                DialogArtifactsError::Storage(format!("Failed to load base tree: {:?}", e))
-            })?;
+        let base: Index = Tree::from_hash(&base_hash, &store).await?;
 
-        let current: Index = Tree::from_hash(&current_hash, &store)
-            .await
-            .map_err(|e| {
-                DialogArtifactsError::Storage(format!("Failed to load current tree: {:?}", e))
-            })?;
+        let current: Index = Tree::from_hash(&current_hash, &store).await?;
 
-        let difference = TreeDifference::compute(&base, &current, &store, &store)
-            .await
-            .map_err(|e| {
-                DialogArtifactsError::Storage(format!("Failed to compute diff: {:?}", e))
-            })?;
+        let difference = TreeDifference::compute(&base, &current, &store, &store).await?;
 
         for await node in difference.novel_nodes() {
-            yield node.map_err(|e| {
-                DialogArtifactsError::Storage(format!("Failed to load node: {:?}", e))
-            })?;
+            yield node?;
         }
     }
 }

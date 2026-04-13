@@ -113,17 +113,14 @@ where
             .clone()
             .invoke(memory::Resolve)
             .perform(env)
-            .await
-            .map_err(|e| RepositoryError::StorageError(format!("Memory resolve failed: {}", e)))?;
+            .await?;
 
         let new_state = match publication {
             None => None,
             Some(pub_data) => {
                 let value: T = self.codec.decode(&pub_data.content).await.map_err(|e| {
-                    RepositoryError::StorageError(format!(
-                        "Failed to decode cell value: {}",
-                        Into::<DialogStorageError>::into(e)
-                    ))
+                    let storage_err: DialogStorageError = e.into();
+                    RepositoryError::from(storage_err)
                 })?;
                 Some((value, pub_data.edition))
             }
@@ -158,8 +155,7 @@ where
             .clone()
             .invoke(memory::Publish::new(content, edition))
             .perform(env)
-            .await
-            .map_err(|e| RepositoryError::StorageError(format!("Memory publish failed: {}", e)))?;
+            .await?;
 
         let mut guard = self.state.write();
         *guard = Some((value, new_edition));

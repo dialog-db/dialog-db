@@ -143,35 +143,21 @@ where
 
     let mut store = ContentAddressedStore::new(env, branch.archive().index());
 
-    let mut target: Index = Tree::from_hash(upstream_revision.tree.hash(), &store)
-        .await
-        .map_err(|e| {
-            DialogArtifactsError::Storage(format!("Failed to load upstream tree: {:?}", e))
-        })?;
+    let mut target: Index = Tree::from_hash(upstream_revision.tree.hash(), &store).await?;
 
-    let base: Index = Tree::from_hash(branch_base.hash(), &store)
-        .await
-        .map_err(|e| DialogArtifactsError::Storage(format!("Failed to load base tree: {:?}", e)))?;
+    let base: Index = Tree::from_hash(branch_base.hash(), &store).await?;
 
     let current_tree_hash = branch_revision
         .as_ref()
         .map(|rev| *rev.tree().hash())
         .unwrap_or(EMPT_TREE_HASH);
 
-    let current: Index = Tree::from_hash(&current_tree_hash, &store)
-        .await
-        .map_err(|e| {
-            DialogArtifactsError::Storage(format!("Failed to load current tree: {:?}", e))
-        })?;
+    let current: Index = Tree::from_hash(&current_tree_hash, &store).await?;
 
     let diff_store = store.clone();
     let changes = base.differentiate(&current, &diff_store, &diff_store);
 
-    Box::pin(target.integrate(changes, &mut store))
-        .await
-        .map_err(|e| {
-            DialogArtifactsError::Storage(format!("Failed to integrate changes: {:?}", e))
-        })?;
+    Box::pin(target.integrate(changes, &mut store)).await?;
 
     let hash = target.hash().cloned().unwrap_or(EMPT_TREE_HASH);
 
@@ -292,35 +278,21 @@ where
     // Use FallbackStore for three-way merge (reads fall through to remote)
     let mut store = FallbackStore::new(env, branch.archive().index(), Some(remote_repo.clone()));
 
-    let mut target: Index = Tree::from_hash(upstream_revision.tree.hash(), &store)
-        .await
-        .map_err(|e| {
-            DialogArtifactsError::Storage(format!("Failed to load upstream tree: {:?}", e))
-        })?;
+    let mut target: Index = Tree::from_hash(upstream_revision.tree.hash(), &store).await?;
 
-    let base: Index = Tree::from_hash(branch_base.hash(), &store)
-        .await
-        .map_err(|e| DialogArtifactsError::Storage(format!("Failed to load base tree: {:?}", e)))?;
+    let base: Index = Tree::from_hash(branch_base.hash(), &store).await?;
 
     let current_tree_hash = branch_revision
         .as_ref()
         .map(|rev| *rev.tree().hash())
         .unwrap_or(EMPT_TREE_HASH);
 
-    let current: Index = Tree::from_hash(&current_tree_hash, &store)
-        .await
-        .map_err(|e| {
-            DialogArtifactsError::Storage(format!("Failed to load current tree: {:?}", e))
-        })?;
+    let current: Index = Tree::from_hash(&current_tree_hash, &store).await?;
 
     let diff_store = store.clone();
     let changes = base.differentiate(&current, &diff_store, &diff_store);
 
-    Box::pin(target.integrate(changes, &mut store))
-        .await
-        .map_err(|e| {
-            DialogArtifactsError::Storage(format!("Failed to integrate changes: {:?}", e))
-        })?;
+    Box::pin(target.integrate(changes, &mut store)).await?;
 
     // Replicate all tree blocks to local storage
     {
@@ -329,9 +301,7 @@ where
         let stream = target.stream(&replicate_store);
         tokio::pin!(stream);
         while let Some(result) = stream.next().await {
-            result.map_err(|e| {
-                DialogArtifactsError::Storage(format!("Failed to replicate tree block: {:?}", e))
-            })?;
+            result?;
         }
     }
 

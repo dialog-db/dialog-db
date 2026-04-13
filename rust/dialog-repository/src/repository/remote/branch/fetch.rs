@@ -79,23 +79,12 @@ where
         .invoke(memory_fx::Resolve)
         .fork(address)
         .perform(env)
-        .await
-        .map_err(|e| RepositoryError::StorageError(format!("Remote resolve failed: {}", e)))?
-        .map_err(|e| RepositoryError::StorageError(format!("Remote resolve failed: {}", e)))?;
+        .await?;
 
     match result {
         None => Ok(None),
         Some(publication) => {
-            let revision: Revision =
-                CborEncoder
-                    .decode(&publication.content)
-                    .await
-                    .map_err(|e| {
-                        RepositoryError::StorageError(format!(
-                            "Failed to decode remote revision: {}",
-                            e
-                        ))
-                    })?;
+            let revision: Revision = CborEncoder.decode(&publication.content).await?;
             Ok(Some(revision))
         }
     }

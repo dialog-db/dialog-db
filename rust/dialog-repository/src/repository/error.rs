@@ -1,3 +1,6 @@
+use dialog_effects::archive::ArchiveError;
+use dialog_effects::memory::MemoryError;
+use dialog_effects::storage::StorageError;
 use dialog_storage::DialogStorageError;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter, Result as FmtResult};
@@ -80,6 +83,30 @@ impl RepositoryError {
     /// Create a new storage error
     pub fn storage_error(capability: OperationKind, cause: DialogStorageError) -> Self {
         RepositoryError::StorageError(format!("{}: {:?}", capability, cause))
+    }
+}
+
+impl From<StorageError> for RepositoryError {
+    fn from(e: StorageError) -> Self {
+        Self::StorageError(e.to_string())
+    }
+}
+
+impl From<ArchiveError> for RepositoryError {
+    fn from(e: ArchiveError) -> Self {
+        Self::StorageError(e.to_string())
+    }
+}
+
+impl From<MemoryError> for RepositoryError {
+    fn from(e: MemoryError) -> Self {
+        Self::StorageError(e.to_string())
+    }
+}
+
+impl From<DialogStorageError> for RepositoryError {
+    fn from(e: DialogStorageError) -> Self {
+        Self::StorageError(e.to_string())
     }
 }
 

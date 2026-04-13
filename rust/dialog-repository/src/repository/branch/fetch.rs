@@ -98,11 +98,7 @@ where
         .perform(env)
         .await?;
 
-    remote_branch
-        .fetch()
-        .perform(env)
-        .await
-        .map_err(|e| RepositoryError::StorageError(format!("Remote fetch failed: {:?}", e)))
+    remote_branch.fetch().perform(env).await
 }
 
 #[cfg(test)]

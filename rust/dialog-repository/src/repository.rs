@@ -206,11 +206,7 @@ impl OpenRepository {
                     .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
                 let cred = Credential::Signer(SignerCredential::from(signer));
 
-                self.0
-                    .create(cred)
-                    .perform(env)
-                    .await
-                    .map_err(|e| RepositoryError::StorageError(e.to_string()))?
+                self.0.create(cred).perform(env).await?
             }
         };
 
@@ -230,12 +226,7 @@ impl LoadRepository {
     where
         Env: Provider<space_fx::Load> + ConditionalSync,
     {
-        let credential = self
-            .0
-            .load()
-            .perform(env)
-            .await
-            .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
+        let credential = self.0.load().perform(env).await?;
 
         Ok(Repository::from(credential))
     }
@@ -261,12 +252,7 @@ impl CreateRepository {
             .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
         let cred = Credential::Signer(SignerCredential::from(signer));
 
-        let credential = self
-            .0
-            .create(cred)
-            .perform(env)
-            .await
-            .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
+        let credential = self.0.create(cred).perform(env).await?;
 
         Repository::try_from(credential)
     }
@@ -284,11 +270,13 @@ mod tests {
     use futures_util::stream;
 
     fn test_site_address() -> SiteAddress {
-        SiteAddress::S3(S3Address::new(
-            "https://s3.us-east-1.amazonaws.com",
-            "us-east-1",
-            "bucket",
-        ))
+        SiteAddress::S3(
+            S3Address::builder("https://s3.us-east-1.amazonaws.com")
+                .region("us-east-1")
+                .bucket("bucket")
+                .build()
+                .unwrap(),
+        )
     }
 
     #[dialog_common::test]

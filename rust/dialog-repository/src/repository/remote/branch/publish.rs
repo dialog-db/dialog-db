@@ -87,9 +87,7 @@ where
         .invoke(memory_fx::Resolve)
         .fork(address)
         .perform(env)
-        .await
-        .map_err(|e| RepositoryError::StorageError(format!("Remote resolve failed: {}", e)))?
-        .map_err(|e| RepositoryError::StorageError(format!("Remote resolve failed: {}", e)))?;
+        .await?;
 
     let edition = resolve_result.map(|pub_data| pub_data.edition);
 
@@ -101,9 +99,7 @@ where
         .invoke(memory_fx::Publish::new(content, edition))
         .fork(address)
         .perform(env)
-        .await
-        .map_err(|e| RepositoryError::StorageError(format!("Remote publish failed: {}", e)))?
-        .map_err(|e| RepositoryError::StorageError(format!("Remote publish failed: {}", e)))?;
+        .await?;
 
     Ok(())
 }

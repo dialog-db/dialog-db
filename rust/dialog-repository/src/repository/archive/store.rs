@@ -57,8 +57,7 @@ where
     {
         let effect = self.catalog.clone().invoke(Get::new(*hash));
 
-        let result: Result<Option<Vec<u8>>, _> = effect.perform(self.env).await;
-        let result = result.map_err(|e| DialogStorageError::StorageBackend(e.to_string()))?;
+        let result: Option<Vec<u8>> = effect.perform(self.env).await?;
 
         match result {
             Some(bytes) => {
@@ -81,8 +80,7 @@ where
 
         let effect = self.catalog.clone().invoke(Put::new(hash, bytes.clone()));
 
-        let result: Result<(), _> = effect.perform(self.env).await;
-        result.map_err(|e| DialogStorageError::StorageBackend(e.to_string()))?;
+        effect.perform(self.env).await?;
 
         Ok(hash)
     }

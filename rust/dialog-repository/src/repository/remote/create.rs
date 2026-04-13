@@ -60,11 +60,13 @@ mod tests {
     use crate::repository::error::RepositoryError;
 
     fn test_site_address() -> SiteAddress {
-        SiteAddress::S3(Address::new(
-            "https://s3.us-east-1.amazonaws.com",
-            "us-east-1",
-            "my-bucket",
-        ))
+        SiteAddress::S3(
+            Address::builder("https://s3.us-east-1.amazonaws.com")
+                .region("us-east-1")
+                .bucket("my-bucket")
+                .build()
+                .unwrap(),
+        )
     }
 
     async fn test_signer() -> Ed25519Signer {

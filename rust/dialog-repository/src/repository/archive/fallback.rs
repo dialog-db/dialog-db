@@ -68,9 +68,7 @@ where
         T: DeserializeOwned + ConditionalSync,
     {
         let local_get = self.local_catalog.clone().invoke(Get::new(*hash));
-        let local_result: Result<Option<Vec<u8>>, _> = local_get.perform(self.env).await;
-        let local_result =
-            local_result.map_err(|e| DialogStorageError::StorageBackend(e.to_string()))?;
+        let local_result: Option<Vec<u8>> = local_get.perform(self.env).await?;
 
         if let Some(bytes) = local_result {
             let value: T = self
@@ -126,8 +124,7 @@ where
     {
         let (hash, bytes) = self.encoder.encode(block).await?;
         let effect = self.local_catalog.clone().invoke(Put::new(hash, bytes));
-        let result: Result<(), _> = effect.perform(self.env).await;
-        result.map_err(|e| DialogStorageError::StorageBackend(e.to_string()))?;
+        effect.perform(self.env).await?;
         Ok(hash)
     }
 }
@@ -143,16 +140,12 @@ where
     A::Site: Site,
     Env: Provider<Fork<A::Site, Get>> + ConditionalSync,
 {
-    catalog
+    Ok(catalog
         .clone()
         .invoke(Get::new(hash))
         .fork(address)
         .perform(env)
-        .await
-        .map_err(|e| {
-            crate::DialogArtifactsError::Storage(format!("Remote download failed: {}", e))
-        })?
-        .map_err(|e| crate::DialogArtifactsError::Storage(format!("Remote download failed: {}", e)))
+        .await?)
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]

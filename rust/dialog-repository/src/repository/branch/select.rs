@@ -84,9 +84,7 @@ impl Select<'_> {
             + ConditionalSync
             + 's,
     {
-        let tree: Index = Tree::from_hash(&self.tree_hash(), &store)
-            .await
-            .map_err(|e| DialogArtifactsError::Storage(format!("Failed to load tree: {:?}", e)))?;
+        let tree: Index = Tree::from_hash(&self.tree_hash(), &store).await?;
 
         let selector = self.selector;
 

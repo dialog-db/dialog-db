@@ -60,9 +60,7 @@ where
             .map(|rev| *rev.tree().hash())
             .unwrap_or(dialog_prolly_tree::EMPT_TREE_HASH);
 
-        let mut tree: Index = Tree::from_hash(&base_tree_hash, &store)
-            .await
-            .map_err(|e| DialogArtifactsError::Storage(format!("Failed to load tree: {:?}", e)))?;
+        let mut tree: Index = Tree::from_hash(&base_tree_hash, &store).await?;
 
         // Apply instructions
         tokio::pin!(instructions);

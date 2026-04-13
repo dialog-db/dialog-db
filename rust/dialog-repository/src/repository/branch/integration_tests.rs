@@ -17,9 +17,11 @@ use futures_util::StreamExt;
 use futures_util::stream;
 
 fn s3_site_address(s3: &S3Address) -> S3SiteAddress {
-    S3SiteAddress::new(&s3.endpoint, "us-east-1", &s3.bucket).with_credentials(
-        dialog_remote_s3::S3Credentials::new(&s3.access_key_id, &s3.secret_access_key),
-    )
+    S3SiteAddress::builder(&s3.endpoint)
+        .region("us-east-1")
+        .bucket(&s3.bucket)
+        .build()
+        .unwrap()
 }
 
 async fn setup_repo_with_s3_remote(
