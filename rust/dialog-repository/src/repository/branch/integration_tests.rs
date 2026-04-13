@@ -10,8 +10,8 @@ use crate::repository::node_reference::NodeReference;
 use crate::repository::{Repository, RepositoryExt as _};
 use crate::{Artifact, ArtifactSelector, Instruction};
 use dialog_operator::profile::Profile;
-use dialog_remote_s3::Address as S3SiteAddress;
 use dialog_remote_s3::helpers::S3Address;
+use dialog_remote_s3::{Address as S3SiteAddress, S3Authorization, S3Credential};
 use dialog_storage::provider::storage::VolatileSpace;
 use futures_util::StreamExt;
 use futures_util::stream;
@@ -40,6 +40,17 @@ async fn setup_repo_with_s3_remote(
         .await?;
 
     let site_address = s3_site_address(s3);
+
+    // Save S3 credentials so the Operator can authorize fork requests
+    let authorization =
+        S3Authorization::from(S3Credential::new(&s3.access_key_id, &s3.secret_access_key));
+    profile
+        .credential()
+        .site(&site_address)
+        .save(authorization)
+        .perform(operator)
+        .await?;
+
     let origin = repo
         .remote("origin")
         .create(site_address)
@@ -694,10 +705,20 @@ async fn it_delegates_and_pushes_to_s3(s3: S3Address) -> anyhow::Result<()> {
         .await?;
     profile.access().save(chain).perform(&operator).await?;
 
-    // Set up S3 remote
+    // Save S3 credentials and set up remote
+    let site_address = s3_site_address(&s3);
+    let authorization =
+        S3Authorization::from(S3Credential::new(&s3.access_key_id, &s3.secret_access_key));
+    profile
+        .credential()
+        .site(&site_address)
+        .save(authorization)
+        .perform(&operator)
+        .await?;
+
     let origin = repo
         .remote("origin")
-        .create(s3_site_address(&s3))
+        .create(site_address)
         .perform(&operator)
         .await?;
 
@@ -748,10 +769,20 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> anyhow::Result<(
         .perform(&alice_operator)
         .await?;
 
-    // Alice pushes to S3
+    // Save S3 credentials for Alice and set up remote
+    let site_address = s3_site_address(&s3);
+    let authorization =
+        S3Authorization::from(S3Credential::new(&s3.access_key_id, &s3.secret_access_key));
+    alice_profile
+        .credential()
+        .site(&site_address)
+        .save(authorization)
+        .perform(&alice_operator)
+        .await?;
+
     let alice_origin = alice_repo
         .remote("origin")
-        .create(s3_site_address(&s3))
+        .create(site_address)
         .perform(&alice_operator)
         .await?;
 
@@ -791,9 +822,20 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> anyhow::Result<(
         .perform(&bob_operator)
         .await?;
 
+    // Save S3 credentials for Bob
+    let bob_site_address = s3_site_address(&s3);
+    let bob_authorization =
+        S3Authorization::from(S3Credential::new(&s3.access_key_id, &s3.secret_access_key));
+    bob_profile
+        .credential()
+        .site(&bob_site_address)
+        .save(bob_authorization)
+        .perform(&bob_operator)
+        .await?;
+
     let bob_origin = bob_repo
         .remote("origin")
-        .create(s3_site_address(&s3))
+        .create(bob_site_address)
         .subject(alice_repo.did())
         .perform(&bob_operator)
         .await?;
