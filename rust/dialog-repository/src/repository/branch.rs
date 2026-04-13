@@ -1,11 +1,10 @@
+use dialog_artifacts::{Datum, Exporter, Importer};
 use dialog_capability::{Did, Subject};
 use dialog_prolly_tree::{GeometricDistribution, Tree};
 use dialog_query::query::Application;
 use dialog_storage::Blake3Hash;
 
 use std::fmt::{Debug, Formatter, Result as FmtResult};
-
-use dialog_artifacts::Datum;
 
 use crate::repository::RemoteSelector;
 use crate::{Key, State};
@@ -15,7 +14,9 @@ pub mod state;
 
 mod commit;
 mod edit;
+mod export;
 mod fetch;
+mod import;
 mod index;
 #[cfg(all(test, feature = "integration-tests"))]
 mod integration_tests;
@@ -31,7 +32,9 @@ mod session;
 mod set_upstream;
 
 pub use commit::Commit;
+pub use export::Export;
 pub use fetch::Fetch;
+pub use import::Import;
 pub use load::LoadBranch;
 pub use open::OpenBranch;
 pub use pull::{Pull, PullLocal};
@@ -126,6 +129,18 @@ impl Branch {
             site: Site::from(space),
             subject: self.subject.clone(),
         }
+    }
+
+    /// Export all artifacts from this branch to the given exporter.
+    pub fn export<E: Exporter>(&self, exporter: E) -> Export<'_, E> {
+        Export::new(self, exporter)
+    }
+
+    /// Import artifacts into this branch from the given importer.
+    ///
+    /// Each artifact read from the importer is committed as an assertion.
+    pub fn import<I: Importer>(&self, importer: I) -> Import<'_, I> {
+        Import::new(self, importer)
     }
 
     pub(crate) fn commit<I>(&self, instructions: I) -> Commit<'_, I> {

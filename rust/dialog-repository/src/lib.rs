@@ -38,10 +38,12 @@ pub use dialog_operator::network;
 /// Capability-based repository system.
 mod repository;
 pub use repository::{
-    Branch, BranchName, BranchSelector, CreateRemote, CreateRepository, LoadBranch, LoadRemote,
-    LoadRepository, OpenBranch, OpenRepository, RemoteAddress, RemoteName, RemoteRepository,
-    Repository, RepositoryExt, SiteAddress, UpstreamState,
+    Branch, BranchName, BranchSelector, CreateRemote, CreateRepository, Export, Import, LoadBranch,
+    LoadRemote, LoadRepository, OpenBranch, OpenRepository, RemoteAddress, RemoteName,
+    RemoteRepository, Repository, RepositoryExt, SiteAddress, UpstreamState,
 };
+
+pub use dialog_artifacts::{Exporter, Importer};
 
 /// Test helpers for setting up profiles, operators, repositories, and test data.
 #[cfg(any(test, feature = "helpers"))]

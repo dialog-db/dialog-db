@@ -1018,6 +1018,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-csv"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base58",
+ "csv-async",
+ "dialog-artifacts",
+ "dialog-common",
+ "futures-util",
+ "getrandom 0.2.16",
+ "serde",
+ "tempfile",
+ "tokio",
+ "wasm-bindgen-test",
+]
+
+[[package]]
 name = "dialog-dbsp"
 version = "0.1.0"
 dependencies = [
