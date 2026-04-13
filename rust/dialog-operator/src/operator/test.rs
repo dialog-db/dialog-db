@@ -624,6 +624,7 @@ mod tests {
         use dialog_common::Blake3Hash;
         use dialog_effects::archive::prelude::*;
         use dialog_effects::credential::Secret;
+        use dialog_effects::memory::prelude::*;
         use dialog_network::NetworkAddress as SiteAddress;
         use dialog_remote_s3::helpers::S3Address;
         use dialog_remote_s3::{Address, S3Credential};
@@ -740,12 +741,12 @@ mod tests {
                 .unwrap();
 
             let address = address_from(&s3);
-            let authorization = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
+            let credential = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
 
             profile
                 .credential()
                 .site(&address)
-                .save(authorization)
+                .save(credential)
                 .perform(&operator)
                 .await
                 .unwrap();
@@ -772,6 +773,582 @@ mod tests {
                 .perform(&operator)
                 .await
                 .unwrap();
+
+            assert_eq!(retrieved, Some(content));
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn fork_memory_publish_and_resolve(s3: S3Address) -> anyhow::Result<()> {
+            let storage = Storage::volatile();
+            let profile = Profile::open(unique_name("s3-mem-pub"))
+                .perform(&storage)
+                .await?;
+            let operator = profile
+                .derive(b"test")
+                .allow(Subject::any())
+                .network(Network::default())
+                .build(storage)
+                .await?;
+
+            let address = address_from(&s3);
+            let credential = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
+            profile
+                .credential()
+                .site(&address)
+                .save(credential)
+                .perform(&operator)
+                .await?;
+
+            let subject = operator.profile_did();
+            let content = b"memory content".to_vec();
+
+            let edition = Subject::from(subject.clone())
+                .memory()
+                .space("test-space")
+                .cell("head")
+                .publish(content.clone(), None)
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+
+            let resolved = Subject::from(subject)
+                .memory()
+                .space("test-space")
+                .cell("head")
+                .resolve()
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+
+            let publication = resolved.unwrap();
+            assert_eq!(publication.content, content);
+            assert_eq!(publication.version, edition);
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn fork_memory_update_existing(s3: S3Address) -> anyhow::Result<()> {
+            let storage = Storage::volatile();
+            let profile = Profile::open(unique_name("s3-mem-upd"))
+                .perform(&storage)
+                .await?;
+            let operator = profile
+                .derive(b"test")
+                .allow(Subject::any())
+                .network(Network::default())
+                .build(storage)
+                .await?;
+
+            let address = address_from(&s3);
+            let credential = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
+            profile
+                .credential()
+                .site(&address)
+                .save(credential)
+                .perform(&operator)
+                .await?;
+
+            let subject = operator.profile_did();
+
+            let edition1 = Subject::from(subject.clone())
+                .memory()
+                .space("upd-space")
+                .cell("head")
+                .publish(b"initial".to_vec(), None)
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+
+            let edition2 = Subject::from(subject.clone())
+                .memory()
+                .space("upd-space")
+                .cell("head")
+                .publish(b"updated".to_vec(), Some(edition1))
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+
+            let resolved = Subject::from(subject)
+                .memory()
+                .space("upd-space")
+                .cell("head")
+                .resolve()
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+
+            let publication = resolved.unwrap();
+            assert_eq!(publication.content, b"updated");
+            assert_eq!(publication.version, edition2);
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn fork_memory_cas_conflict(s3: S3Address) -> anyhow::Result<()> {
+            let storage = Storage::volatile();
+            let profile = Profile::open(unique_name("s3-mem-cas"))
+                .perform(&storage)
+                .await?;
+            let operator = profile
+                .derive(b"test")
+                .allow(Subject::any())
+                .network(Network::default())
+                .build(storage)
+                .await?;
+
+            let address = address_from(&s3);
+            let credential = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
+            profile
+                .credential()
+                .site(&address)
+                .save(credential)
+                .perform(&operator)
+                .await?;
+
+            let subject = operator.profile_did();
+
+            let edition1 = Subject::from(subject.clone())
+                .memory()
+                .space("cas-space")
+                .cell("head")
+                .publish(b"initial".to_vec(), None)
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+
+            Subject::from(subject.clone())
+                .memory()
+                .space("cas-space")
+                .cell("head")
+                .publish(b"by-writer-1".to_vec(), Some(edition1.clone()))
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+
+            let result = Subject::from(subject.clone())
+                .memory()
+                .space("cas-space")
+                .cell("head")
+                .publish(b"by-writer-2".to_vec(), Some(edition1))
+                .fork(&address)
+                .perform(&operator)
+                .await;
+
+            assert!(result.is_err(), "CAS should fail due to edition mismatch");
+
+            let resolved = Subject::from(subject)
+                .memory()
+                .space("cas-space")
+                .cell("head")
+                .resolve()
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+
+            assert_eq!(resolved.unwrap().content, b"by-writer-1");
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn fork_memory_retract(s3: S3Address) -> anyhow::Result<()> {
+            let storage = Storage::volatile();
+            let profile = Profile::open(unique_name("s3-mem-ret"))
+                .perform(&storage)
+                .await?;
+            let operator = profile
+                .derive(b"test")
+                .allow(Subject::any())
+                .network(Network::default())
+                .build(storage)
+                .await?;
+
+            let address = address_from(&s3);
+            let credential = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
+            profile
+                .credential()
+                .site(&address)
+                .save(credential)
+                .perform(&operator)
+                .await?;
+
+            let subject = operator.profile_did();
+
+            let edition = Subject::from(subject.clone())
+                .memory()
+                .space("ret-space")
+                .cell("head")
+                .publish(b"to-be-retracted".to_vec(), None)
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+
+            Subject::from(subject.clone())
+                .memory()
+                .space("ret-space")
+                .cell("head")
+                .retract(edition)
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+
+            let resolved = Subject::from(subject)
+                .memory()
+                .space("ret-space")
+                .cell("head")
+                .resolve()
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+
+            assert!(resolved.is_none(), "cell should be empty after retract");
+            Ok(())
+        }
+    }
+
+    mod ucan_fork_tests {
+        use super::*;
+        use dialog_capability::Subject;
+        use dialog_common::Blake3Hash;
+        use dialog_effects::archive::prelude::*;
+        use dialog_effects::memory::prelude::*;
+        use dialog_network::NetworkAddress as SiteAddress;
+        use dialog_remote_ucan_s3::UcanAddress;
+        use dialog_remote_ucan_s3::helpers::UcanS3Address;
+
+        fn ucan_address(s3: &UcanS3Address) -> SiteAddress {
+            SiteAddress::Ucan(UcanAddress::new(&s3.access_service_url))
+        }
+
+        #[dialog_common::test]
+        async fn fork_archive_get_returns_none_for_missing(
+            s3: UcanS3Address,
+        ) -> anyhow::Result<()> {
+            let storage = Storage::volatile();
+            let profile = Profile::open(unique_name("ucan-get-miss"))
+                .perform(&storage)
+                .await?;
+            let operator = profile
+                .derive(b"test")
+                .allow(Subject::any())
+                .network(Network::default())
+                .build(storage)
+                .await?;
+
+            let address = ucan_address(&s3);
+
+            let result = Subject::from(operator.profile_did())
+                .archive()
+                .catalog("data")
+                .get(Blake3Hash::hash(b"nonexistent"))
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+
+            assert!(result.is_none(), "content should not exist");
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn fork_archive_put_and_get(s3: UcanS3Address) -> anyhow::Result<()> {
+            let storage = Storage::volatile();
+            let profile = Profile::open(unique_name("ucan-put-get"))
+                .perform(&storage)
+                .await?;
+            let operator = profile
+                .derive(b"test")
+                .allow(Subject::any())
+                .network(Network::default())
+                .build(storage)
+                .await?;
+
+            let address = ucan_address(&s3);
+            let content = b"hello from ucan".to_vec();
+            let digest = Blake3Hash::hash(&content);
+
+            Subject::from(operator.profile_did())
+                .archive()
+                .catalog("ucan-roundtrip")
+                .put(digest.clone(), content.clone())
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+
+            let retrieved = Subject::from(operator.profile_did())
+                .archive()
+                .catalog("ucan-roundtrip")
+                .get(digest)
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+
+            assert_eq!(retrieved, Some(content));
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn fork_memory_resolve_returns_none_for_missing(
+            s3: UcanS3Address,
+        ) -> anyhow::Result<()> {
+            let storage = Storage::volatile();
+            let profile = Profile::open(unique_name("ucan-mem-miss"))
+                .perform(&storage)
+                .await?;
+            let operator = profile
+                .derive(b"test")
+                .allow(Subject::any())
+                .network(Network::default())
+                .build(storage)
+                .await?;
+
+            let address = ucan_address(&s3);
+
+            let result = Subject::from(operator.profile_did())
+                .memory()
+                .space("test-space")
+                .cell("test-cell")
+                .resolve()
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+
+            assert!(result.is_none(), "cell should not exist");
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn fork_memory_publish_and_resolve(s3: UcanS3Address) -> anyhow::Result<()> {
+            let storage = Storage::volatile();
+            let profile = Profile::open(unique_name("ucan-mem-pub"))
+                .perform(&storage)
+                .await?;
+            let operator = profile
+                .derive(b"test")
+                .allow(Subject::any())
+                .network(Network::default())
+                .build(storage)
+                .await?;
+
+            let address = ucan_address(&s3);
+            let subject = operator.profile_did();
+            let content = b"memory content".to_vec();
+
+            let edition = Subject::from(subject.clone())
+                .memory()
+                .space("test-space")
+                .cell("head")
+                .publish(content.clone(), None)
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+
+            let resolved = Subject::from(subject)
+                .memory()
+                .space("test-space")
+                .cell("head")
+                .resolve()
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+
+            let publication = resolved.unwrap();
+            assert_eq!(publication.content, content);
+            assert_eq!(publication.version, edition);
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn fork_memory_update_existing(s3: UcanS3Address) -> anyhow::Result<()> {
+            let storage = Storage::volatile();
+            let profile = Profile::open(unique_name("ucan-mem-upd"))
+                .perform(&storage)
+                .await?;
+            let operator = profile
+                .derive(b"test")
+                .allow(Subject::any())
+                .network(Network::default())
+                .build(storage)
+                .await?;
+
+            let address = ucan_address(&s3);
+            let subject = operator.profile_did();
+
+            let edition1 = Subject::from(subject.clone())
+                .memory()
+                .space("upd-space")
+                .cell("head")
+                .publish(b"initial".to_vec(), None)
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+
+            let edition2 = Subject::from(subject.clone())
+                .memory()
+                .space("upd-space")
+                .cell("head")
+                .publish(b"updated".to_vec(), Some(edition1))
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+
+            let resolved = Subject::from(subject)
+                .memory()
+                .space("upd-space")
+                .cell("head")
+                .resolve()
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+
+            let publication = resolved.unwrap();
+            assert_eq!(publication.content, b"updated");
+            assert_eq!(publication.version, edition2);
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn fork_memory_cas_conflict(s3: UcanS3Address) -> anyhow::Result<()> {
+            let storage = Storage::volatile();
+            let profile = Profile::open(unique_name("ucan-mem-cas"))
+                .perform(&storage)
+                .await?;
+            let operator = profile
+                .derive(b"test")
+                .allow(Subject::any())
+                .network(Network::default())
+                .build(storage)
+                .await?;
+
+            let address = ucan_address(&s3);
+            let subject = operator.profile_did();
+
+            let edition1 = Subject::from(subject.clone())
+                .memory()
+                .space("cas-space")
+                .cell("head")
+                .publish(b"initial".to_vec(), None)
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+
+            // Update with correct edition
+            Subject::from(subject.clone())
+                .memory()
+                .space("cas-space")
+                .cell("head")
+                .publish(b"by-writer-1".to_vec(), Some(edition1.clone()))
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+
+            // Try to update with stale edition
+            let result = Subject::from(subject.clone())
+                .memory()
+                .space("cas-space")
+                .cell("head")
+                .publish(b"by-writer-2".to_vec(), Some(edition1))
+                .fork(&address)
+                .perform(&operator)
+                .await;
+
+            assert!(result.is_err(), "CAS should fail due to edition mismatch");
+
+            // Verify value is still from writer-1
+            let resolved = Subject::from(subject)
+                .memory()
+                .space("cas-space")
+                .cell("head")
+                .resolve()
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+
+            assert_eq!(resolved.unwrap().content, b"by-writer-1");
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn fork_memory_retract(s3: UcanS3Address) -> anyhow::Result<()> {
+            let storage = Storage::volatile();
+            let profile = Profile::open(unique_name("ucan-mem-ret"))
+                .perform(&storage)
+                .await?;
+            let operator = profile
+                .derive(b"test")
+                .allow(Subject::any())
+                .network(Network::default())
+                .build(storage)
+                .await?;
+
+            let address = ucan_address(&s3);
+            let subject = operator.profile_did();
+
+            let edition = Subject::from(subject.clone())
+                .memory()
+                .space("ret-space")
+                .cell("head")
+                .publish(b"to-be-retracted".to_vec(), None)
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+
+            Subject::from(subject.clone())
+                .memory()
+                .space("ret-space")
+                .cell("head")
+                .retract(edition)
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+
+            let resolved = Subject::from(subject)
+                .memory()
+                .space("ret-space")
+                .cell("head")
+                .resolve()
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+
+            assert!(resolved.is_none(), "cell should be empty after retract");
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn fork_with_scoped_delegation(s3: UcanS3Address) -> anyhow::Result<()> {
+            let storage = Storage::volatile();
+            let profile = Profile::open(unique_name("ucan-scoped"))
+                .perform(&storage)
+                .await?;
+            // Only delegate archive access, not memory
+            let operator = profile
+                .derive(b"test")
+                .allow(Subject::any().archive().catalog("allowed"))
+                .network(Network::default())
+                .build(storage)
+                .await?;
+
+            let address = ucan_address(&s3);
+            let content = b"scoped content".to_vec();
+            let digest = Blake3Hash::hash(&content);
+
+            // Put to allowed catalog should succeed
+            Subject::from(operator.profile_did())
+                .archive()
+                .catalog("allowed")
+                .put(digest.clone(), content.clone())
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+
+            // Get from allowed catalog should succeed
+            let retrieved = Subject::from(operator.profile_did())
+                .archive()
+                .catalog("allowed")
+                .get(digest)
+                .fork(&address)
+                .perform(&operator)
+                .await?;
 
             assert_eq!(retrieved, Some(content));
             Ok(())
