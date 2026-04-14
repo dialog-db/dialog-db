@@ -1,52 +1,46 @@
 use async_trait::async_trait;
 use dialog_capability::fork::Fork;
 use dialog_capability::site::{Site, SiteAddress};
-use dialog_capability::{Capability, Provider, Subject};
+use dialog_capability::{Capability, Provider};
 use dialog_common::ConditionalSync;
-use dialog_effects::archive::{self as archive_fx, Catalog, Get, Put};
+use dialog_effects::archive::prelude::{ArchiveExt, ArchiveSubjectExt, CatalogExt};
+use dialog_effects::archive::{Catalog, Get, Put};
 use dialog_remote_s3::S3;
-use dialog_storage::{
-    Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder,
-};
+use dialog_storage::{Blake3Hash, ContentAddressedStorage, DialogStorageError, Encoder};
 use serde::{Serialize, de::DeserializeOwned};
 use std::fmt::Debug;
 
+use super::store::LocalIndex;
 use crate::SiteAddress as SiteAddressEnum;
 use crate::repository::remote::RemoteRepository;
 
-/// Content-addressed store that reads locally first, falling back to a
-/// remote on cache miss. Fetched blocks are cached locally for subsequent
-/// reads.
+/// Content-addressed index with on-demand remote replication.
 ///
-/// When no remote is configured, behaves as a purely local store.
-/// Used by select, pull, and push to transparently replicate data
-/// from a remote upstream on demand.
-pub struct FallbackStore<'a, Env> {
-    env: &'a Env,
-    encoder: CborEncoder,
-    index: Capability<Catalog>,
+/// Wraps a [`LocalIndex`] and adds transparent remote fallback: reads
+/// that miss locally are fetched from the remote and cached. Writes
+/// always go to the local index only.
+///
+/// When no remote is configured, behaves identically to [`LocalIndex`].
+pub struct NetworkedIndex<'a, Env> {
+    local: LocalIndex<'a, Env>,
     remote: Option<RemoteRepository>,
 }
 
-impl<Env> Clone for FallbackStore<'_, Env> {
+impl<Env> Clone for NetworkedIndex<'_, Env> {
     fn clone(&self) -> Self {
         Self {
-            env: self.env,
-            encoder: self.encoder.clone(),
-            index: self.index.clone(),
+            local: self.local.clone(),
             remote: self.remote.clone(),
         }
     }
 }
 
-impl<'a, Env> FallbackStore<'a, Env> {
-    /// Create a fallback store. If `remote` is `Some`, reads that miss
+impl<'a, Env> NetworkedIndex<'a, Env> {
+    /// Create a networked index. If `remote` is `Some`, reads that miss
     /// locally will fall back to the remote and cache the result.
     pub fn new(env: &'a Env, index: Capability<Catalog>, remote: Option<RemoteRepository>) -> Self {
         Self {
-            env,
-            encoder: CborEncoder,
-            index,
+            local: LocalIndex::new(env, index),
             remote,
         }
     }
@@ -54,7 +48,7 @@ impl<'a, Env> FallbackStore<'a, Env> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> ContentAddressedStorage for FallbackStore<'_, Env>
+impl<Env> ContentAddressedStorage for NetworkedIndex<'_, Env>
 where
     Env: Provider<Get>
         + Provider<Put>
@@ -70,45 +64,40 @@ where
     where
         T: DeserializeOwned + ConditionalSync,
     {
-        let local_get = self.index.clone().invoke(Get::new(*hash));
-        let local_result: Option<Vec<u8>> = local_get.perform(self.env).await?;
-
-        if let Some(bytes) = local_result {
-            let value: T = self
-                .encoder
-                .decode(&bytes)
-                .await
-                .map_err(|e| DialogStorageError::DecodeFailed(e.to_string()))?;
+        // Try local first
+        if let Some(value) = self.local.read::<T>(hash).await? {
             return Ok(Some(value));
         }
 
+        // Fall back to offloaded nodes
         let remote = match &self.remote {
             Some(r) => r,
             None => return Ok(None),
         };
 
         let address = remote.address();
-        let remote_catalog = Subject::from(address.subject.clone())
-            .attenuate(archive_fx::Archive)
-            .attenuate(Catalog::new("index"));
+        let remote_catalog = address.subject.clone().archive().catalog("index");
 
         let remote_result = match address.address {
             SiteAddressEnum::S3(ref addr) => {
-                download_block(&remote_catalog, addr, *hash, self.env).await
+                download_block(&remote_catalog, addr, *hash, self.local.env()).await
             }
             #[cfg(feature = "ucan")]
             SiteAddressEnum::Ucan(ref addr) => {
-                download_block(&remote_catalog, addr, *hash, self.env).await
+                download_block(&remote_catalog, addr, *hash, self.local.env()).await
             }
         }
         .map_err(|e| DialogStorageError::StorageBackend(e.to_string()))?;
 
         match remote_result {
             Some(bytes) => {
-                let local_put = self.index.clone().invoke(Put::new(*hash, bytes.clone()));
-                let _: Result<(), _> = local_put.perform(self.env).await;
+                // Cache locally
+                let cache = self.local.catalog().clone().put(*hash, bytes.clone());
+                let _: Result<(), _> = cache.perform(self.local.env()).await;
+
                 let value: T = self
-                    .encoder
+                    .local
+                    .encoder()
                     .decode(&bytes)
                     .await
                     .map_err(|e| DialogStorageError::DecodeFailed(e.to_string()))?;
@@ -122,10 +111,7 @@ where
     where
         T: Serialize + ConditionalSync + Debug,
     {
-        let (hash, bytes) = self.encoder.encode(block).await?;
-        let effect = self.index.clone().invoke(Put::new(hash, bytes));
-        effect.perform(self.env).await?;
-        Ok(hash)
+        self.local.write(block).await
     }
 }
 
@@ -140,17 +126,12 @@ where
     A::Site: Site,
     Env: Provider<Fork<A::Site, Get>> + ConditionalSync,
 {
-    Ok(catalog
-        .clone()
-        .invoke(Get::new(hash))
-        .fork(address)
-        .perform(env)
-        .await?)
+    Ok(catalog.clone().get(hash).fork(address).perform(env).await?)
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> Encoder for FallbackStore<'_, Env>
+impl<Env> Encoder for NetworkedIndex<'_, Env>
 where
     Env: ConditionalSync + 'static,
 {
@@ -162,13 +143,13 @@ where
     where
         T: Serialize + ConditionalSync + Debug,
     {
-        self.encoder.encode(block).await
+        self.local.encoder().encode(block).await
     }
 
     async fn decode<T>(&self, bytes: &[u8]) -> Result<T, Self::Error>
     where
         T: DeserializeOwned + ConditionalSync,
     {
-        self.encoder.decode(bytes).await
+        self.local.encoder().decode(bytes).await
     }
 }

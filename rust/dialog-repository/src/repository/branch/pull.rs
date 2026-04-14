@@ -13,8 +13,8 @@ use super::Branch;
 use super::Index;
 use super::state::UpstreamState;
 use crate::DialogArtifactsError;
-use crate::repository::archive::ContentAddressedStore;
-use crate::repository::archive::fallback::FallbackStore;
+use crate::repository::archive::networked::NetworkedIndex;
+use crate::repository::archive::store::LocalIndex;
 use crate::repository::node_reference::NodeReference;
 use crate::repository::remote::RemoteName;
 use crate::repository::revision::Revision;
@@ -88,7 +88,7 @@ impl Pull<'_> {
     ///
     /// For local upstreams, loads the upstream branch revision and performs
     /// a three-way merge. For remote upstreams, resolves the remote revision
-    /// and merges using FallbackStore.
+    /// and merges using NetworkedIndex.
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, DialogArtifactsError>
     where
         Env: Provider<archive_fx::Get>
@@ -157,7 +157,7 @@ where
         return Ok(None);
     }
 
-    let mut store = ContentAddressedStore::new(env, branch.archive().index());
+    let mut store = LocalIndex::new(env, branch.archive().index());
 
     let mut target: Index = Tree::from_hash(upstream_revision.tree.hash(), &store).await?;
 
@@ -291,8 +291,8 @@ where
         return Ok(None);
     }
 
-    // Use FallbackStore for three-way merge (reads fall through to remote)
-    let mut store = FallbackStore::new(env, branch.archive().index(), Some(remote_repo.clone()));
+    // Use NetworkedIndex for three-way merge (reads fall through to remote)
+    let mut store = NetworkedIndex::new(env, branch.archive().index(), Some(remote_repo.clone()));
 
     let mut target: Index = Tree::from_hash(upstream_revision.tree.hash(), &store).await?;
 

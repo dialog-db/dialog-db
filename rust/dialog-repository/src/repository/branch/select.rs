@@ -11,7 +11,7 @@ use std::ops::Range;
 
 use super::{Branch, Index};
 use crate::repository::archive::Archive;
-use crate::repository::archive::fallback::FallbackStore;
+use crate::repository::archive::networked::NetworkedIndex;
 use crate::repository::branch::state::UpstreamState;
 use crate::{
     AttributeKey, DialogArtifactsError, EntityKey, Key, KeyViewConstruct, KeyViewMut, State,
@@ -69,7 +69,7 @@ impl Select<'_> {
             _ => None,
         };
 
-        let store = FallbackStore::new(env, self.catalog(), remote);
+        let store = NetworkedIndex::new(env, self.catalog(), remote);
         self.execute(store).await
     }
 

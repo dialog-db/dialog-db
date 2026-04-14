@@ -6,7 +6,7 @@ use dialog_storage::Blake3Hash;
 use futures_util::Stream;
 
 use super::Index;
-use crate::repository::archive::ContentAddressedStore;
+use crate::repository::archive::store::LocalIndex;
 use crate::{DialogArtifactsError, Key, State};
 use dialog_artifacts::Datum;
 
@@ -24,7 +24,7 @@ where
     Env: Provider<archive_fx::Get> + Provider<archive_fx::Put> + ConditionalSync + 'static,
 {
     async_stream::try_stream! {
-        let store = ContentAddressedStore::new(env, catalog);
+        let store = LocalIndex::new(env, catalog);
 
         let base: Index = Tree::from_hash(&base_hash, &store).await?;
 

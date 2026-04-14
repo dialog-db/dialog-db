@@ -9,7 +9,7 @@ use futures_util::{Stream, StreamExt, TryStreamExt};
 use std::collections::HashSet;
 
 use super::{Branch, Index};
-use crate::repository::archive::ContentAddressedStore;
+use crate::repository::archive::store::LocalIndex;
 use crate::repository::node_reference::NodeReference;
 use crate::repository::revision::Revision;
 use crate::{
@@ -64,7 +64,7 @@ where
         let instructions = self.instructions;
         let base_revision = branch.revision();
 
-        let mut store = ContentAddressedStore::new(env, branch.archive().index());
+        let mut store = LocalIndex::new(env, branch.archive().index());
 
         // Load tree from current revision hash (empty tree if no revision yet)
         let base_tree_hash = base_revision

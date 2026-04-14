@@ -1,20 +1,18 @@
 //! Archive capabilities and CAS adapters.
 //!
-//! - [`Archive`] — pre-attenuated `Subject → Archive` capability wrapper
-//! - [`store`] — CAS adapter bridging capabilities with prolly tree storage
-//! - [`fallback`] — fallback store that reads local, falls back to remote
+//! - [`Archive`] -- pre-attenuated `Subject -> Archive` capability wrapper
+//! - [`store`] -- local CAS adapter for prolly tree storage
+//! - [`networked`] -- CAS adapter with transparent remote replication
 
-/// Fallback store that reads from local, falls back to remote.
-pub mod fallback;
-/// CAS adapter bridging capabilities with prolly tree's ContentAddressedStorage.
+/// Networked index: local reads with remote fallback and caching.
+pub mod networked;
+/// Local CAS adapter bridging capabilities with prolly tree's ContentAddressedStorage.
 pub mod store;
-
-pub use store::ContentAddressedStore;
 
 use dialog_capability::{Capability, Subject};
 use dialog_effects::archive as fx;
 
-/// Pre-attenuated archive capability (`Subject → Archive`).
+/// Pre-attenuated archive capability (`Subject -> Archive`).
 ///
 /// Wraps `Capability<fx::Archive>` so callers can further attenuate with a
 /// `Catalog` and then invoke `Get`/`Put`.
