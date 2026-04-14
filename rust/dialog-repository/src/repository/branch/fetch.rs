@@ -21,8 +21,17 @@ pub struct Fetch<'a> {
 }
 
 impl<'a> Fetch<'a> {
-    pub(super) fn new(branch: &'a Branch) -> Self {
+    fn new(branch: &'a Branch) -> Self {
         Self { branch }
+    }
+}
+
+impl Branch {
+    /// Create a command to fetch the upstream branch's current revision.
+    ///
+    /// Does NOT modify local state -- only reads from upstream.
+    pub fn fetch(&self) -> Fetch<'_> {
+        Fetch::new(self)
     }
 }
 

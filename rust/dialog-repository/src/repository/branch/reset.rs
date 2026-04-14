@@ -12,8 +12,15 @@ pub struct Reset<'a> {
 }
 
 impl<'a> Reset<'a> {
-    pub(super) fn new(branch: &'a Branch, revision: Revision) -> Self {
+    fn new(branch: &'a Branch, revision: Revision) -> Self {
         Self { branch, revision }
+    }
+}
+
+impl Branch {
+    /// Create a command to reset the branch to a given revision.
+    pub fn reset(&self, revision: Revision) -> Reset<'_> {
+        Reset::new(self, revision)
     }
 }
 

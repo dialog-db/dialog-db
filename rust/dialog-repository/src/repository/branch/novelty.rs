@@ -1,4 +1,4 @@
-use dialog_capability::Provider;
+use dialog_capability::{Capability, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_prolly_tree::{Node, Tree, TreeDifference};
@@ -18,7 +18,7 @@ pub fn novelty<'a, Env>(
     base_hash: Blake3Hash,
     current_hash: Blake3Hash,
     env: &'a Env,
-    catalog: dialog_capability::Capability<archive_fx::Catalog>,
+    catalog: Capability<archive_fx::Catalog>,
 ) -> impl Stream<Item = Result<Node<Key, State<Datum>, Blake3Hash>, DialogArtifactsError>> + 'a
 where
     Env: Provider<archive_fx::Get> + Provider<archive_fx::Put> + ConditionalSync + 'static,

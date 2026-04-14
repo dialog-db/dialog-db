@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use dialog_capability::{Capability, Policy, Provider};
+use dialog_capability::{Capability, Did, Policy, Provider};
 use dialog_effects::memory;
 use dialog_storage::{CborEncoder, DialogStorageError, Encoder};
 use serde::{Serialize, de::DeserializeOwned};
@@ -82,7 +82,7 @@ impl<T, Codec> Cell<T, Codec> {
     }
 
     /// Returns the subject DID from the capability chain.
-    pub fn subject(&self) -> &dialog_capability::Did {
+    pub fn subject(&self) -> &Did {
         self.capability.subject()
     }
 
@@ -212,7 +212,7 @@ impl<T, Codec> CellOr<T, Codec> {
     }
 
     /// Returns the subject DID from the capability chain.
-    pub fn subject(&self) -> &dialog_capability::Did {
+    pub fn subject(&self) -> &Did {
         self.cell.subject()
     }
 }
@@ -315,7 +315,7 @@ impl<T: Clone> Retain<T> {
     }
 
     /// Returns the subject DID from the capability chain.
-    pub fn subject(&self) -> &dialog_capability::Did {
+    pub fn subject(&self) -> &Did {
         self.cell.subject()
     }
 }

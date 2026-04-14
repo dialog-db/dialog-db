@@ -12,8 +12,18 @@ pub struct SetUpstream<'a> {
 }
 
 impl<'a> SetUpstream<'a> {
-    pub(super) fn new(branch: &'a Branch, upstream: UpstreamState) -> Self {
+    fn new(branch: &'a Branch, upstream: UpstreamState) -> Self {
         Self { branch, upstream }
+    }
+}
+
+impl Branch {
+    /// Create a command to set the upstream for this branch.
+    ///
+    /// Accepts both `UpstreamState` and `RemoteBranch` directly via
+    /// `impl Into<UpstreamState>`.
+    pub fn set_upstream(&self, upstream: impl Into<UpstreamState>) -> SetUpstream<'_> {
+        SetUpstream::new(self, upstream.into())
     }
 }
 

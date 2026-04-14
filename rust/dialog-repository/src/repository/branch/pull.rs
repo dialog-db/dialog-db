@@ -6,6 +6,7 @@ use dialog_effects::authority;
 use dialog_effects::memory as memory_fx;
 use dialog_prolly_tree::{EMPT_TREE_HASH, Tree};
 use dialog_remote_s3::S3;
+use futures_util::StreamExt;
 use std::collections::HashSet;
 
 use super::Branch;
@@ -28,7 +29,7 @@ pub struct PullLocal<'a> {
 }
 
 impl<'a> PullLocal<'a> {
-    pub(super) fn new(branch: &'a Branch, upstream_revision: Revision) -> Self {
+    fn new(branch: &'a Branch, upstream_revision: Revision) -> Self {
         Self {
             branch,
             upstream_revision,
@@ -62,8 +63,23 @@ pub struct Pull<'a> {
 }
 
 impl<'a> Pull<'a> {
-    pub(super) fn new(branch: &'a Branch) -> Self {
+    fn new(branch: &'a Branch) -> Self {
         Self { branch }
+    }
+}
+
+impl Branch {
+    /// Pull from the configured upstream.
+    ///
+    /// Reads the branch's upstream and dispatches to local or remote
+    /// pull logic automatically.
+    pub fn pull(&self) -> Pull<'_> {
+        Pull::new(self)
+    }
+
+    /// Merge an explicit upstream revision into this branch.
+    pub fn merge(&self, upstream_revision: Revision) -> PullLocal<'_> {
+        PullLocal::new(self, upstream_revision)
     }
 }
 
@@ -296,7 +312,6 @@ where
 
     // Replicate all tree blocks to local storage
     {
-        use futures_util::StreamExt;
         let replicate_store = store.clone();
         let stream = target.stream(&replicate_store);
         tokio::pin!(stream);

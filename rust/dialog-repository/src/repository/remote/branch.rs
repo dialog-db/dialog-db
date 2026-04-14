@@ -2,9 +2,6 @@ mod fetch;
 mod publish;
 mod selector;
 
-#[allow(unused_imports)]
-pub use selector::RemoteBranchSelector;
-
 use crate::RemoteAddress;
 use crate::repository::branch::state::{BranchName, UpstreamState};
 use crate::repository::cell::{Cell, Retain};

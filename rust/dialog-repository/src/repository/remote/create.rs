@@ -1,6 +1,6 @@
 //! Command to create a new remote repository.
 
-use dialog_capability::Provider;
+use dialog_capability::{Did, Provider};
 use dialog_effects::memory as memory_fx;
 
 use super::repository::RemoteRepository;
@@ -22,7 +22,7 @@ impl CreateRemote {
     /// Override the subject DID for the remote repository.
     ///
     /// By default, the subject is the creating repository's own DID.
-    pub fn subject(mut self, subject: impl Into<dialog_capability::Did>) -> Self {
+    pub fn subject(mut self, subject: impl Into<Did>) -> Self {
         self.address.subject = subject.into();
         self
     }

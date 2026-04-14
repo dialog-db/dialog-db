@@ -17,6 +17,7 @@ pub struct LoadBranch {
 
 impl LoadBranch {
     pub(crate) fn new(subject: Did, memory: Memory, trace: Trace) -> Self {
+        // pub(crate): called by BranchSelector and Branch::load_branch
         Self {
             subject,
             memory,
@@ -50,6 +51,17 @@ impl LoadBranch {
             revision,
             upstream,
         })
+    }
+}
+
+use super::state::BranchName;
+
+impl Branch {
+    /// Load a sibling branch by name (internal use for pull/push/fetch).
+    pub(crate) fn load_branch(&self, name: impl Into<BranchName>) -> LoadBranch {
+        // pub(crate): used by pull, push, and fetch to resolve upstream branches
+        let trace = self.memory.trace(name.into());
+        LoadBranch::new(self.subject.clone(), self.memory.clone(), trace)
     }
 }
 

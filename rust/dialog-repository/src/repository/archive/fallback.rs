@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use dialog_capability::fork::Fork;
 use dialog_capability::site::{Site, SiteAddress};
-use dialog_capability::{Capability, Provider};
+use dialog_capability::{Capability, Provider, Subject};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{self as archive_fx, Catalog, Get, Put};
 use dialog_remote_s3::S3;
@@ -14,6 +14,13 @@ use std::fmt::Debug;
 use crate::SiteAddress as SiteAddressEnum;
 use crate::repository::remote::RemoteRepository;
 
+/// Content-addressed store that reads locally first, falling back to a
+/// remote on cache miss. Fetched blocks are cached locally for subsequent
+/// reads.
+///
+/// When no remote is configured, behaves as a purely local store.
+/// Used by select, pull, and push to transparently replicate data
+/// from a remote upstream on demand.
 pub struct FallbackStore<'a, Env> {
     env: &'a Env,
     encoder: CborEncoder,
@@ -85,7 +92,7 @@ where
         };
 
         let address = remote.address();
-        let remote_catalog = dialog_capability::Subject::from(address.subject.clone())
+        let remote_catalog = Subject::from(address.subject.clone())
             .attenuate(archive_fx::Archive)
             .attenuate(Catalog::new("index"));
 

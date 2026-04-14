@@ -21,8 +21,18 @@ pub struct Push<'a> {
 }
 
 impl<'a> Push<'a> {
-    pub(super) fn new(branch: &'a Branch) -> Self {
+    fn new(branch: &'a Branch) -> Self {
         Self { branch }
+    }
+}
+
+impl Branch {
+    /// Create a command to push local changes to the upstream branch.
+    ///
+    /// Reads the upstream configuration from branch state and dispatches
+    /// to local or remote push logic.
+    pub fn push(&self) -> Push<'_> {
+        Push::new(self)
     }
 }
 

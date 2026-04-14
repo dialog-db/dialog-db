@@ -3,7 +3,7 @@
 use dialog_capability::{Capability, Did, Policy};
 use dialog_effects::memory as fx;
 
-use super::state::RemoteName;
+use super::name::RemoteName;
 use crate::RemoteAddress;
 use crate::repository::cell::Retain;
 

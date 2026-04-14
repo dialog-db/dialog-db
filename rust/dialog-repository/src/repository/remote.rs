@@ -15,18 +15,16 @@ pub mod branch;
 mod create;
 /// Command to load an existing remote.
 mod load;
+/// Remote name newtype.
+pub mod name;
 /// Remote repository cursor.
 pub mod repository;
 /// Selectors for navigating remote sites, repositories, and branches.
 mod selector;
-/// Persisted remote configuration state.
-pub mod state;
 
 pub use address::*;
-#[allow(unused_imports)]
-pub use branch::{RemoteBranch, RemoteBranchSelector};
 pub use create::*;
 pub use load::*;
+pub use name::*;
 pub use repository::RemoteRepository;
 pub use selector::*;
-pub use state::*;

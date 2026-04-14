@@ -3,9 +3,9 @@ use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive as archive_fx;
 use dialog_effects::authority;
 use dialog_effects::memory as memory_fx;
-use dialog_prolly_tree::Tree;
+use dialog_prolly_tree::{EMPT_TREE_HASH, Tree};
 use dialog_storage::Blake3Hash;
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::{Stream, StreamExt, TryStreamExt};
 use std::collections::HashSet;
 
 use super::{Branch, Index};
@@ -25,7 +25,7 @@ pub struct Commit<'a, I> {
 }
 
 impl<'a, I> Commit<'a, I> {
-    pub(super) fn new(branch: &'a Branch, instructions: I) -> Self {
+    fn new(branch: &'a Branch, instructions: I) -> Self {
         Self {
             branch,
             instructions,
@@ -33,11 +33,23 @@ impl<'a, I> Commit<'a, I> {
     }
 }
 
+impl Branch {
+    /// Commit a stream of instructions to this branch.
+    pub(crate) fn commit<I>(&self, instructions: I) -> Commit<'_, I> {
+        Commit::new(self, instructions)
+    }
+}
+
 impl<I> Commit<'_, I>
 where
-    I: futures_util::Stream<Item = Instruction> + ConditionalSend,
+    I: Stream<Item = Instruction> + ConditionalSend,
 {
     /// Execute the commit operation, returning the tree hash.
+    ///
+    /// Loads the prolly tree from the current revision, applies all
+    /// instructions (assert inserts into three indexes, retract marks
+    /// as removed), then creates a new revision with updated logical
+    /// clock and publishes it to the branch's revision cell.
     pub async fn perform<Env>(self, env: &Env) -> Result<Blake3Hash, DialogArtifactsError>
     where
         Env: Provider<archive_fx::Get>
@@ -58,7 +70,7 @@ where
         let base_tree_hash = base_revision
             .as_ref()
             .map(|rev| *rev.tree().hash())
-            .unwrap_or(dialog_prolly_tree::EMPT_TREE_HASH);
+            .unwrap_or(EMPT_TREE_HASH);
 
         let mut tree: Index = Tree::from_hash(&base_tree_hash, &store).await?;
 
@@ -74,6 +86,8 @@ where
 
                     let datum = Datum::from(artifact);
 
+                    // When asserting with a cause, find and remove the ancestor
+                    // so the new version replaces it in all three indexes.
                     if let Some(cause) = &datum.cause {
                         let ancestor_key = {
                             let search_start = <EntityKey<Key> as KeyViewConstruct>::min()
@@ -165,7 +179,8 @@ where
         let authority_did = authority::Profile::of(&auth).profile.clone();
         let issuer_did = authority::Operator::of(&auth).operator.clone();
 
-        // Calculate new period and moment
+        // Advance the logical clock: period increments when a different
+        // issuer commits, moment increments for the same issuer.
         let (period, moment, cause) = match &base_revision {
             Some(rev) => {
                 let (p, m) = if rev.issuer() == &issuer_did {

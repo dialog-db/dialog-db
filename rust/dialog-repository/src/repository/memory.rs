@@ -1,7 +1,5 @@
 use dialog_capability::{Capability, Policy, Subject};
 use dialog_effects::memory as fx;
-#[allow(unused_imports)]
-use dialog_effects::memory::prelude::SpaceExt;
 
 use crate::RemoteAddress;
 
@@ -116,7 +114,6 @@ impl Site {
     }
 
     /// Create a [`Cell`] within this site space.
-    #[allow(dead_code)]
     pub fn cell<T>(&self, name: impl Into<String>) -> Cell<T> {
         Cell::from_capability(self.cell_capability(name))
     }

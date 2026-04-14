@@ -13,11 +13,17 @@ use crate::{RemoteName, Repository};
 /// Wraps a `Site` (memory space scoped to `remote/{name}`) and the
 /// repository's default subject DID.
 pub struct RemoteSelector {
-    pub(crate) site: Site,
-    pub(crate) subject: Did,
+    site: Site,
+    subject: Did,
 }
 
 impl RemoteSelector {
+    /// Create a new remote selector.
+    pub(crate) fn new(site: Site, subject: Did) -> Self {
+        // pub(crate): constructed by Repository::remote() and Branch::remote()
+        Self { site, subject }
+    }
+
     /// Name of this remote.
     pub fn name(&self) -> RemoteName {
         self.site.name().into()
@@ -45,9 +51,6 @@ impl<C: Principal> Repository<C> {
     pub fn remote(&self, name: impl Into<RemoteName>) -> RemoteSelector {
         let name = name.into();
         let space = self.memory().space(&format!("remote/{}", name.as_str()));
-        RemoteSelector {
-            site: Site::from(space),
-            subject: self.did(),
-        }
+        RemoteSelector::new(Site::from(space), self.did())
     }
 }
