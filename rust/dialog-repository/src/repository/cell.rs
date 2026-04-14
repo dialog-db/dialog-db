@@ -381,7 +381,7 @@ mod tests {
     }
 
     fn test_cell<T>(name: &str) -> Cell<T> {
-        test_memory().space("test").cell(name)
+        test_memory().branch("test").cell(name)
     }
 
     #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

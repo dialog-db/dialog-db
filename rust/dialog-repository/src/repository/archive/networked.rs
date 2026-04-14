@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use dialog_capability::fork::Fork;
-use dialog_capability::site::{Site, SiteAddress};
 use dialog_capability::{Capability, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::prelude::{ArchiveExt, ArchiveSubjectExt, CatalogExt};
@@ -78,13 +77,24 @@ where
         let address = remote.address();
         let remote_catalog = address.subject.clone().archive().catalog("index");
 
+        let env = self.local.env();
         let remote_result = match address.address {
             SiteAddressEnum::S3(ref addr) => {
-                download_block(&remote_catalog, addr, *hash, self.local.env()).await
+                remote_catalog
+                    .clone()
+                    .get(*hash)
+                    .fork(addr)
+                    .perform(env)
+                    .await
             }
             #[cfg(feature = "ucan")]
             SiteAddressEnum::Ucan(ref addr) => {
-                download_block(&remote_catalog, addr, *hash, self.local.env()).await
+                remote_catalog
+                    .clone()
+                    .get(*hash)
+                    .fork(addr)
+                    .perform(env)
+                    .await
             }
         }
         .map_err(|e| DialogStorageError::StorageBackend(e.to_string()))?;
@@ -113,20 +123,6 @@ where
     {
         self.local.write(block).await
     }
-}
-
-async fn download_block<A, Env>(
-    catalog: &Capability<Catalog>,
-    address: &A,
-    hash: Blake3Hash,
-    env: &Env,
-) -> Result<Option<Vec<u8>>, crate::DialogArtifactsError>
-where
-    A: SiteAddress,
-    A::Site: Site,
-    Env: Provider<Fork<A::Site, Get>> + ConditionalSync,
-{
-    Ok(catalog.clone().get(hash).fork(address).perform(env).await?)
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
