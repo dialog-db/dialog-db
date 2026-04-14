@@ -210,24 +210,44 @@ impl IndexedDb {
     /// The returned StoreSession holds a shared `Rc<Rexie>` so it can
     /// be used across .await points without holding a borrow on Connection.
     ///
-    /// During an upgrade, the old database connection remains valid for
-    /// any active StoreSession. The new connection is opened alongside it
-    /// and swapped in once ready. IndexedDB's `versionchange` mechanism
-    /// coordinates the transition.
+    /// During an upgrade the old connection is closed first so that IDB's
+    /// `versionchange` event does not fire on a stale `Rexie` whose
+    /// `onupgradeneeded` closure has already been dropped. After the
+    /// upgraded connection is opened it is swapped in atomically.
+    ///
+    /// Re-entrancy is handled by re-checking `stores` after acquiring the
+    /// upgrade: if another caller already added the store while we were
+    /// waiting, we skip the upgrade.
     async fn store(&self, name: &str) -> Result<StoreSession, IndexedDbError> {
         // Check if upgrade is needed (brief borrow, dropped before .await).
         let needs_upgrade = !self.connection.borrow().stores.contains(name);
 
         if needs_upgrade {
-            // Gather what we need from the connection (brief borrow).
+            // Gather what we need and close the old connection so IDB can
+            // proceed with the version change without firing events on a
+            // stale handle.
             let (version, mut new_stores) = {
-                let conn = self.connection.borrow();
-                (conn.version, conn.stores.clone())
+                let mut conn = self.connection.borrow_mut();
+                // Re-check under borrow — another caller may have completed
+                // the upgrade between our initial check and acquiring the
+                // borrow.
+                if conn.stores.contains(name) {
+                    let db = conn.db();
+                    return Ok(StoreSession {
+                        db,
+                        store_name: name.to_string(),
+                    });
+                }
+                let version = conn.version;
+                let stores = conn.stores.clone();
+                // Drop the old Rexie so IDB doesn't fire versionchange on it.
+                conn.db = None;
+                (version, stores)
             };
             new_stores.insert(name.to_string());
 
-            // Build the upgraded database. No RefCell borrow held here,
-            // so the old Rc<Rexie> remains valid for concurrent readers.
+            // Build the upgraded database. The old Rexie has been dropped so
+            // IDB won't deliver versionchange to a stale closure.
             let new_version = version + 1;
             let mut builder = RexieBuilder::new(&self.name).version(new_version);
             for store in &new_stores {
@@ -238,8 +258,7 @@ impl IndexedDb {
                 .await
                 .map_err(|e| IndexedDbError::Database(format!("{:?}", e)))?;
 
-            // Swap in the new connection (brief borrow). Any StoreSession
-            // holding the old Rc<Rexie> keeps it alive until they drop.
+            // Swap in the new connection.
             let mut conn = self.connection.borrow_mut();
             conn.version = db
                 .version()
