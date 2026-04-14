@@ -4,12 +4,12 @@ use dialog_varsig::Principal;
 /// A reference to a named branch within a repository.
 ///
 /// Call `.open()` to open (create if missing) or `.load()` to load (fail if missing).
-pub struct BranchSelector<'a, C: Principal> {
+pub struct BranchReference<'a, C: Principal> {
     name: BranchName,
     repository: &'a Repository<C>,
 }
 
-impl<'a, C: Principal> BranchSelector<'a, C> {
+impl<'a, C: Principal> BranchReference<'a, C> {
     /// Returns the name of this branch.
     pub fn name(&self) -> &BranchName {
         &self.name
@@ -20,7 +20,7 @@ impl<'a, C: Principal> BranchSelector<'a, C> {
         OpenBranch::new(
             self.repository.credential.did(),
             self.repository.memory.clone(),
-            self.repository.memory.trace(self.name()),
+            self.repository.memory.branch(self.name()),
         )
     }
 
@@ -29,7 +29,7 @@ impl<'a, C: Principal> BranchSelector<'a, C> {
         LoadBranch::new(
             self.repository.credential.did(),
             self.repository.memory.clone(),
-            self.repository.memory.trace(self.name()),
+            self.repository.memory.branch(self.name()),
         )
     }
 }
@@ -38,8 +38,8 @@ impl<C: Principal> Repository<C> {
     /// Get a branch reference for the given name.
     ///
     /// Call `.open()` or `.load()` on the returned reference.
-    pub fn branch(&self, name: impl Into<BranchName>) -> BranchSelector<'_, C> {
-        BranchSelector {
+    pub fn branch(&self, name: impl Into<BranchName>) -> BranchReference<'_, C> {
+        BranchReference {
             repository: self,
             name: name.into(),
         }

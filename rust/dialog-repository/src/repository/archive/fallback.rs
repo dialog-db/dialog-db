@@ -24,7 +24,7 @@ use crate::repository::remote::RemoteRepository;
 pub struct FallbackStore<'a, Env> {
     env: &'a Env,
     encoder: CborEncoder,
-    local_catalog: Capability<Catalog>,
+    index: Capability<Catalog>,
     remote: Option<RemoteRepository>,
 }
 
@@ -33,7 +33,7 @@ impl<Env> Clone for FallbackStore<'_, Env> {
         Self {
             env: self.env,
             encoder: self.encoder.clone(),
-            local_catalog: self.local_catalog.clone(),
+            index: self.index.clone(),
             remote: self.remote.clone(),
         }
     }
@@ -42,15 +42,11 @@ impl<Env> Clone for FallbackStore<'_, Env> {
 impl<'a, Env> FallbackStore<'a, Env> {
     /// Create a fallback store. If `remote` is `Some`, reads that miss
     /// locally will fall back to the remote and cache the result.
-    pub fn new(
-        env: &'a Env,
-        local_catalog: Capability<Catalog>,
-        remote: Option<RemoteRepository>,
-    ) -> Self {
+    pub fn new(env: &'a Env, index: Capability<Catalog>, remote: Option<RemoteRepository>) -> Self {
         Self {
             env,
             encoder: CborEncoder,
-            local_catalog,
+            index,
             remote,
         }
     }
@@ -74,7 +70,7 @@ where
     where
         T: DeserializeOwned + ConditionalSync,
     {
-        let local_get = self.local_catalog.clone().invoke(Get::new(*hash));
+        let local_get = self.index.clone().invoke(Get::new(*hash));
         let local_result: Option<Vec<u8>> = local_get.perform(self.env).await?;
 
         if let Some(bytes) = local_result {
@@ -109,10 +105,7 @@ where
 
         match remote_result {
             Some(bytes) => {
-                let local_put = self
-                    .local_catalog
-                    .clone()
-                    .invoke(Put::new(*hash, bytes.clone()));
+                let local_put = self.index.clone().invoke(Put::new(*hash, bytes.clone()));
                 let _: Result<(), _> = local_put.perform(self.env).await;
                 let value: T = self
                     .encoder
@@ -130,7 +123,7 @@ where
         T: Serialize + ConditionalSync + Debug,
     {
         let (hash, bytes) = self.encoder.encode(block).await?;
-        let effect = self.local_catalog.clone().invoke(Put::new(hash, bytes));
+        let effect = self.index.clone().invoke(Put::new(hash, bytes));
         effect.perform(self.env).await?;
         Ok(hash)
     }

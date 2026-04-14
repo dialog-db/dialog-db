@@ -5,28 +5,31 @@ use super::address::SiteAddress;
 use super::create::CreateRemote;
 use super::load::LoadRemote;
 use crate::RemoteAddress;
-use crate::repository::memory::Site;
+use crate::repository::memory::RemoteMemory;
 use crate::{RemoteName, Repository};
 
 /// A reference to a named remote within a repository.
 ///
-/// Wraps a `Site` (memory space scoped to `remote/{name}`) and the
+/// Wraps a [`RemoteMemory`] (scoped to `remote/{name}`) and the
 /// repository's default subject DID.
 pub struct RemoteSelector {
-    site: Site,
+    remote_memory: RemoteMemory,
     subject: Did,
 }
 
 impl RemoteSelector {
     /// Create a new remote selector.
-    pub(crate) fn new(site: Site, subject: Did) -> Self {
+    pub(crate) fn new(remote_memory: RemoteMemory, subject: Did) -> Self {
         // pub(crate): constructed by Repository::remote() and Branch::remote()
-        Self { site, subject }
+        Self {
+            remote_memory,
+            subject,
+        }
     }
 
     /// Name of this remote.
     pub fn name(&self) -> RemoteName {
-        self.site.name().into()
+        self.remote_memory.name().into()
     }
 
     /// Create a new remote with a site address.
@@ -35,12 +38,12 @@ impl RemoteSelector {
     /// on the returned builder to target a different repository.
     pub fn create(self, address: impl Into<SiteAddress>) -> CreateRemote {
         let remote = RemoteAddress::new(address.into(), self.subject);
-        CreateRemote::new(self.site, remote)
+        CreateRemote::new(self.remote_memory, remote)
     }
 
     /// Load an existing remote.
     pub fn load(self) -> LoadRemote {
-        LoadRemote::from(self.site)
+        LoadRemote::from(self.remote_memory)
     }
 }
 
@@ -51,6 +54,6 @@ impl<C: Principal> Repository<C> {
     pub fn remote(&self, name: impl Into<RemoteName>) -> RemoteSelector {
         let name = name.into();
         let space = self.memory().space(&format!("remote/{}", name.as_str()));
-        RemoteSelector::new(Site::from(space), self.did())
+        RemoteSelector::new(RemoteMemory::from(space), self.did())
     }
 }

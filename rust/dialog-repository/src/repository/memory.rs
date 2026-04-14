@@ -6,7 +6,7 @@ use crate::RemoteAddress;
 use super::branch::BranchName;
 use super::cell::Cell;
 
-/// Pre-attenuated memory capability (`Subject → Memory`).
+/// Pre-attenuated memory capability (`Subject -> Memory`).
 ///
 /// Wraps `Capability<fx::Memory>` so callers can further attenuate with
 /// structured helpers:
@@ -31,34 +31,34 @@ impl Memory {
         Space(self.0.clone().attenuate(fx::Space::new(name)))
     }
 
-    /// Access branch trace state — `trace/{branch}/local/...`
-    pub fn trace(&self, branch: impl Into<BranchName>) -> Trace {
+    /// Access branch memory scoped to `branch/{name}`.
+    pub fn branch(&self, branch: impl Into<BranchName>) -> BranchMemory {
         let name: BranchName = branch.into();
         let space = self
             .0
             .clone()
-            .attenuate(fx::Space::new(format!("trace/{}/local", name)));
-        Trace { name, space }
+            .attenuate(fx::Space::new(format!("branch/{}", name)));
+        BranchMemory { name, space }
     }
 }
 
-/// Branch trace — a `Capability<fx::Space>` scoped to a branch's local
-/// namespace (`trace/{branch}/local`).
+/// Branch-scoped memory namespace (`branch/{name}`).
 ///
-/// Carries the branch name and provides typed cell accessors.
+/// Carries the branch name and provides typed cell accessors
+/// for revision and upstream state.
 #[derive(Debug, Clone)]
-pub struct Trace {
+pub struct BranchMemory {
     name: BranchName,
     space: Capability<fx::Space>,
 }
 
-impl Trace {
-    /// The branch name this trace is scoped to.
+impl BranchMemory {
+    /// The branch name this memory is scoped to.
     pub fn name(&self) -> &BranchName {
         &self.name
     }
 
-    /// Create a typed cell within this trace space.
+    /// Create a typed cell within this branch's space.
     pub fn cell<T>(&self, cell_name: impl Into<String>) -> Cell<T> {
         Cell::from_capability(self.cell_capability(cell_name))
     }
@@ -85,17 +85,20 @@ impl Space {
     }
 }
 
+/// Remote-scoped memory namespace (`remote/{name}`).
+///
+/// Provides access to remote address configuration and branch cells.
 #[derive(Debug, Clone)]
-pub struct Site(Capability<fx::Space>);
+pub struct RemoteMemory(Capability<fx::Space>);
 
-impl From<Space> for Site {
+impl From<Space> for RemoteMemory {
     fn from(space: Space) -> Self {
         Self(space.0)
     }
 }
 
-impl Site {
-    /// Return name for this site, strips out remote/ prefix.
+impl RemoteMemory {
+    /// Remote name, derived from the space path.
     pub fn name(&self) -> &str {
         fx::Space::of(&self.0)
             .space
@@ -108,12 +111,12 @@ impl Site {
         self.0.clone()
     }
 
-    /// Cell for the site address.
+    /// Cell for the remote address configuration.
     pub fn address(&self) -> Cell<RemoteAddress> {
         Cell::from_capability(self.cell_capability("address"))
     }
 
-    /// Create a [`Cell`] within this site space.
+    /// Create a [`Cell`] within this remote's space.
     pub fn cell<T>(&self, name: impl Into<String>) -> Cell<T> {
         Cell::from_capability(self.cell_capability(name))
     }

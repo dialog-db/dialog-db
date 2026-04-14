@@ -6,16 +6,16 @@ use dialog_effects::memory as memory_fx;
 use super::repository::RemoteRepository;
 use crate::RemoteAddress;
 use crate::repository::error::RepositoryError;
-use crate::repository::memory::Site;
+use crate::repository::memory::RemoteMemory;
 
 /// Command to create a new remote repository, persisting its configuration.
 pub struct CreateRemote {
     address: RemoteAddress,
-    site: Site,
+    site: RemoteMemory,
 }
 
 impl CreateRemote {
-    pub(crate) fn new(site: Site, address: RemoteAddress) -> Self {
+    pub(crate) fn new(site: RemoteMemory, address: RemoteAddress) -> Self {
         Self { site, address }
     }
 

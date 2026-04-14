@@ -5,10 +5,10 @@ use dialog_effects::memory as memory_fx;
 
 use super::repository::RemoteRepository;
 use crate::repository::error::RepositoryError;
-use crate::repository::memory::Site;
+use crate::repository::memory::RemoteMemory;
 
 /// Command to load an existing remote repository.
-pub struct LoadRemote(Site);
+pub struct LoadRemote(RemoteMemory);
 
 impl LoadRemote {
     /// Execute the load operation.
@@ -30,9 +30,9 @@ impl LoadRemote {
     }
 }
 
-impl From<Site> for LoadRemote {
-    fn from(site: Site) -> Self {
-        Self(site)
+impl From<RemoteMemory> for LoadRemote {
+    fn from(remote_memory: RemoteMemory) -> Self {
+        Self(remote_memory)
     }
 }
 

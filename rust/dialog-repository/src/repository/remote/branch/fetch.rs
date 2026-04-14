@@ -46,7 +46,7 @@ impl<'a> Fetch<'a> {
             .unwrap_or("");
 
         let cell_cap = Memory::new(subject)
-            .trace(branch_name)
+            .branch(branch_name)
             .cell_capability("revision");
 
         let revision = match address.address {

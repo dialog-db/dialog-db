@@ -5,22 +5,23 @@ use super::Branch;
 use super::state::UpstreamState;
 use crate::repository::cell::Cell;
 use crate::repository::error::RepositoryError;
-use crate::repository::memory::{Memory, Trace};
+use crate::repository::memory::{BranchMemory, Memory};
 use crate::repository::revision::Revision;
 
 /// Command to open a branch, creating it with defaults if it doesn't exist.
 pub struct OpenBranch {
     subject: Did,
     memory: Memory,
-    trace: Trace,
+    branch_memory: BranchMemory,
 }
 
 impl OpenBranch {
-    pub(crate) fn new(subject: Did, memory: Memory, trace: Trace) -> Self {
+    pub(crate) fn new(subject: Did, memory: Memory, branch_memory: BranchMemory) -> Self {
+        // pub(crate): constructed by BranchReference
         Self {
             subject,
             memory,
-            trace,
+            branch_memory,
         }
     }
 
@@ -29,20 +30,20 @@ impl OpenBranch {
     where
         Env: Provider<memory_fx::Resolve> + Provider<memory_fx::Publish>,
     {
-        let revision: Cell<Option<Revision>> = self.trace.cell("revision");
+        let revision: Cell<Option<Revision>> = self.branch_memory.cell("revision");
         revision.resolve(env).await?;
         // Publish None to mark the branch as existing if the cell is empty.
         if revision.get().is_none() {
             revision.publish(None, env).await?;
         }
 
-        let upstream: Cell<Option<UpstreamState>> = self.trace.cell("upstream");
+        let upstream: Cell<Option<UpstreamState>> = self.branch_memory.cell("upstream");
         upstream.resolve(env).await?;
 
         Ok(Branch {
             subject: self.subject,
             memory: self.memory,
-            trace: self.trace,
+            branch_memory: self.branch_memory,
             revision,
             upstream,
         })

@@ -15,12 +15,12 @@ use crate::repository::revision::Revision;
 /// A reference to a named branch at a remote repository.
 ///
 /// Call `.open()` or `.load()` to get a command, then `.perform(&env)`.
-pub struct RemoteBranchSelector<'a> {
+pub struct RemoteBranchReference<'a> {
     repository: &'a RemoteRepository,
     cell: Cell<Revision>,
 }
 
-impl RemoteBranchSelector<'_> {
+impl RemoteBranchReference<'_> {
     /// The branch name, derived from the cell path.
     pub fn name(&self) -> BranchName {
         let cell_name = self.cell.name();
@@ -106,12 +106,12 @@ impl LoadRemoteBranch {
 
 impl RemoteRepository {
     /// Get a branch selector at this remote repository.
-    pub fn branch(&self, name: impl Into<BranchName>) -> RemoteBranchSelector<'_> {
+    pub fn branch(&self, name: impl Into<BranchName>) -> RemoteBranchReference<'_> {
         let name = name.into();
         let cell = Cell::from_capability(self.capability().attenuate(memory_fx::Cell::new(
             format!("branch/{}/revision", name.as_str()),
         )));
-        RemoteBranchSelector {
+        RemoteBranchReference {
             repository: self,
             cell,
         }

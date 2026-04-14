@@ -12,10 +12,10 @@ use crate::{Key, State};
 /// Branch state, identifiers, and upstream descriptors.
 pub mod state;
 
+mod claims;
 mod commit;
 mod edit;
 mod fetch;
-mod index;
 #[cfg(all(test, feature = "integration-tests"))]
 mod integration_tests;
 mod load;
@@ -34,7 +34,7 @@ pub use selector::*;
 
 use super::archive::Archive;
 use super::cell::Cell;
-use super::memory::{Memory, Site, Trace};
+use super::memory::{BranchMemory, Memory, RemoteMemory};
 
 pub use super::occurence::Occurence;
 use super::revision::Revision;
@@ -45,12 +45,12 @@ pub type Index = Tree<GeometricDistribution, Key, State<Datum>, Blake3Hash>;
 
 /// A branch represents a named line of development within a repository.
 ///
-/// Holds a `Trace` (scoped to `trace/{branch}/local`) plus separate cells
+/// Holds a [`BranchMemory`] (scoped to `branch/{name}`) plus separate cells
 /// for revision and upstream state.
 pub struct Branch {
     subject: Did,
     memory: Memory,
-    trace: Trace,
+    branch_memory: BranchMemory,
     revision: Cell<Option<Revision>>,
     upstream: Cell<Option<UpstreamState>>,
 }
@@ -58,7 +58,7 @@ pub struct Branch {
 impl Debug for Branch {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.debug_struct("Branch")
-            .field("name", self.trace.name())
+            .field("name", self.branch_memory.name())
             .finish_non_exhaustive()
     }
 }
@@ -66,7 +66,7 @@ impl Debug for Branch {
 impl Branch {
     /// Returns the branch name.
     pub fn name(&self) -> &BranchName {
-        self.trace.name()
+        self.branch_memory.name()
     }
 
     /// Returns the current revision of this branch, or `None` if the branch
@@ -85,9 +85,9 @@ impl Branch {
         &self.subject
     }
 
-    /// Returns the trace capability for this branch.
-    pub fn trace(&self) -> &Trace {
-        &self.trace
+    /// Returns the branch-scoped memory namespace.
+    pub fn branch_memory(&self) -> &BranchMemory {
+        &self.branch_memory
     }
 
     /// Logical time on this branch, or `None` if the branch has no commits.
@@ -104,6 +104,6 @@ impl Branch {
     pub fn remote(&self, name: impl Into<super::remote::RemoteName>) -> RemoteSelector {
         let name = name.into();
         let space = self.memory.space(&format!("remote/{}", name.as_str()));
-        RemoteSelector::new(Site::from(space), self.subject.clone())
+        RemoteSelector::new(RemoteMemory::from(space), self.subject.clone())
     }
 }

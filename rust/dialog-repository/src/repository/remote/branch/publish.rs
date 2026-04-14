@@ -48,7 +48,7 @@ impl<'a> Publish<'a> {
             .unwrap_or("");
 
         let cell_cap = Memory::new(subject)
-            .trace(branch_name)
+            .branch(branch_name)
             .cell_capability("revision");
 
         match address.address {
