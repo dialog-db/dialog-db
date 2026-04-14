@@ -14,21 +14,26 @@ pub mod archive;
 pub mod branch;
 /// Cell descriptor for typed memory cell operations.
 pub mod cell;
+/// Command to create a new repository.
+mod create;
 /// Repository error types.
 pub mod error;
-/// Memory capability wrapper (`Subject → Memory → Space → Cell`).
+/// Command to load an existing repository.
+mod load;
+/// Memory capability wrapper (`Subject -> Memory -> Space -> Cell`).
 pub mod memory;
 /// Node reference type for tree root hashes.
 pub mod node_reference;
 /// Occurence logical timestamp type.
 pub mod occurence;
+/// Command to open (load-or-create) a repository.
+mod open;
 /// Remote site / repository / branch cursor hierarchy.
 pub mod remote;
 /// Revision type and edition tracking.
 pub mod revision;
 
-use dialog_capability::{Capability, Did, Provider, Subject};
-use dialog_common::ConditionalSync;
+use dialog_capability::{Capability, Did, Subject};
 use dialog_credentials::credential::{Credential, SignerCredential};
 use dialog_effects::space as space_fx;
 use dialog_operator::profile::access::Access as ProfileAccess;
@@ -38,7 +43,10 @@ use self::archive::Archive;
 use self::memory::Memory;
 
 pub use branch::*;
+pub use create::CreateRepository;
 pub use error::*;
+pub use load::LoadRepository;
+pub use open::OpenRepository;
 pub use remote::*;
 
 /// A repository scoped to a specific subject.
@@ -85,6 +93,12 @@ impl<C: Principal> Repository<C> {
     /// Pre-attenuated archive capability (`Subject → Archive`).
     pub fn archive(&self) -> &Archive {
         &self.archive
+    }
+}
+
+impl<C: Principal> Principal for Repository<C> {
+    fn did(&self) -> Did {
+        self.credential.did()
     }
 }
 
@@ -144,29 +158,19 @@ impl From<dialog_credentials::Ed25519Signer> for Repository<SignerCredential> {
     }
 }
 
-use dialog_effects::space::SpaceExt as _;
 use dialog_operator::profile::SpaceHandle;
 
 /// Extension trait for opening repositories from a [`SpaceHandle`].
 ///
 /// Enables `profile.repository("name").open().perform(&operator)`.
 pub trait RepositoryExt {
-    /// Open or create a repository — loads existing or creates new.
-    ///
-    /// Returns `Repository<Credential>` since a loaded credential
-    /// may be verifier-only.
+    /// Open or create a repository, loading existing or creating new.
     fn open(self) -> OpenRepository;
 
-    /// Load an existing repository — fails if not found.
-    ///
-    /// Returns `Repository<Credential>` since the credential
-    /// may be verifier-only.
+    /// Load an existing repository, failing if not found.
     fn load(self) -> LoadRepository;
 
-    /// Create a new repository — fails if one already exists.
-    ///
-    /// Returns `Repository<SignerCredential>` since a freshly
-    /// generated credential always has a private key.
+    /// Create a new repository, failing if one already exists.
     fn create(self) -> CreateRepository;
 }
 
@@ -181,80 +185,6 @@ impl RepositoryExt for SpaceHandle {
 
     fn create(self) -> CreateRepository {
         CreateRepository(Subject::from(self.profile_did).attenuate(space_fx::Space::new(self.name)))
-    }
-}
-
-/// Command to open (load-or-create) or load a repository.
-///
-/// Returns `Repository<Credential>` since the loaded credential
-/// may be verifier-only.
-pub struct OpenRepository(Capability<space_fx::Space>);
-
-impl OpenRepository {
-    /// Execute against an operator.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Repository, RepositoryError>
-    where
-        Env: Provider<space_fx::Load> + Provider<space_fx::Create> + ConditionalSync,
-    {
-        let load_result = self.0.clone().load().perform(env).await;
-
-        let credential = match load_result {
-            Ok(cred) => cred,
-            Err(_) => {
-                let signer = dialog_credentials::Ed25519Signer::generate()
-                    .await
-                    .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
-                let cred = Credential::Signer(SignerCredential::from(signer));
-
-                self.0.create(cred).perform(env).await?
-            }
-        };
-
-        Ok(Repository::from(credential))
-    }
-}
-
-/// Command to load an existing repository.
-///
-/// Returns `Repository<Credential>` since the credential
-/// may be verifier-only.
-pub struct LoadRepository(Capability<space_fx::Space>);
-
-impl LoadRepository {
-    /// Execute against an operator.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Repository, RepositoryError>
-    where
-        Env: Provider<space_fx::Load> + ConditionalSync,
-    {
-        let credential = self.0.load().perform(env).await?;
-
-        Ok(Repository::from(credential))
-    }
-}
-
-/// Command to create a new repository.
-///
-/// Returns `Repository<SignerCredential>` since a freshly generated
-/// credential always has a private key.
-pub struct CreateRepository(Capability<space_fx::Space>);
-
-impl CreateRepository {
-    /// Execute against an operator.
-    pub async fn perform<Env>(
-        self,
-        env: &Env,
-    ) -> Result<Repository<SignerCredential>, RepositoryError>
-    where
-        Env: Provider<space_fx::Create> + ConditionalSync,
-    {
-        let signer = dialog_credentials::Ed25519Signer::generate()
-            .await
-            .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
-        let cred = Credential::Signer(SignerCredential::from(signer));
-
-        let credential = self.0.create(cred).perform(env).await?;
-
-        Repository::try_from(credential)
     }
 }
 

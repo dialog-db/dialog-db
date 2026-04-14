@@ -2,6 +2,7 @@
 
 use dialog_capability::{Capability, Did, Policy};
 use dialog_effects::memory as fx;
+use dialog_varsig::Principal;
 
 use super::name::RemoteName;
 use crate::RemoteAddress;
@@ -53,5 +54,11 @@ impl RemoteRepository {
     /// Clone the retained address for sharing.
     pub(crate) fn retain_address(&self) -> Retain<RemoteAddress> {
         self.address.clone()
+    }
+}
+
+impl Principal for RemoteRepository {
+    fn did(&self) -> Did {
+        self.address.get().subject.clone()
     }
 }

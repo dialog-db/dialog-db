@@ -5,9 +5,8 @@ use dialog_effects::memory as memory_fx;
 use dialog_remote_s3::S3;
 
 use super::Branch;
-use super::state::{BranchName, UpstreamState};
+use super::state::UpstreamState;
 use crate::repository::error::RepositoryError;
-use crate::repository::remote::RemoteName;
 use crate::repository::revision::Revision;
 
 /// Command struct for fetching the upstream branch's current revision.
@@ -15,7 +14,7 @@ use crate::repository::revision::Revision;
 /// Borrows `&Branch` (non-consuming). Reads the branch's upstream to
 /// dispatch to local or remote fetch logic.
 ///
-/// Does NOT modify local state — only reads from upstream.
+/// Does NOT modify local state (only reads from upstream).
 pub struct Fetch<'a> {
     branch: &'a Branch,
 }
@@ -29,7 +28,7 @@ impl<'a> Fetch<'a> {
 impl Branch {
     /// Create a command to fetch the upstream branch's current revision.
     ///
-    /// Does NOT modify local state -- only reads from upstream.
+    /// Does NOT modify local state, only reads from upstream.
     pub fn fetch(&self) -> Fetch<'_> {
         Fetch::new(self)
     }
@@ -55,59 +54,25 @@ impl Fetch<'_> {
                 })?;
 
         match &upstream {
-            UpstreamState::Local { branch: name, .. } => fetch_local(self.branch, name, env).await,
+            UpstreamState::Local { branch: name, .. } => {
+                let upstream = self.branch.load_branch(name.clone()).perform(env).await?;
+                Ok(upstream.revision())
+            }
             UpstreamState::Remote {
                 name,
                 branch: branch_name,
                 ..
-            } => fetch_remote(self.branch, name, branch_name, env).await,
+            } => {
+                let remote_repo = self.branch.remote(name.clone()).load().perform(env).await?;
+                let remote_branch = remote_repo
+                    .branch(branch_name.clone())
+                    .open()
+                    .perform(env)
+                    .await?;
+                remote_branch.fetch().perform(env).await
+            }
         }
     }
-}
-
-/// Fetch the current revision from a local upstream branch.
-///
-/// Does NOT modify local state.
-async fn fetch_local<Env>(
-    branch: &Branch,
-    upstream_name: &BranchName,
-    env: &Env,
-) -> Result<Option<Revision>, RepositoryError>
-where
-    Env: Provider<memory_fx::Resolve>,
-{
-    let upstream = branch
-        .load_branch(upstream_name.clone())
-        .perform(env)
-        .await?;
-
-    Ok(upstream.revision())
-}
-
-/// Fetch the current revision from a remote upstream branch.
-///
-/// Resolves the remote revision and updates the local cache.
-async fn fetch_remote<Env>(
-    branch: &Branch,
-    remote: &RemoteName,
-    upstream_branch_name: &BranchName,
-    env: &Env,
-) -> Result<Option<Revision>, RepositoryError>
-where
-    Env: Provider<memory_fx::Resolve>
-        + Provider<memory_fx::Publish>
-        + Provider<Fork<S3, memory_fx::Resolve>>
-        + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Resolve>>
-        + ConditionalSync,
-{
-    let remote_repo = branch.remote(remote.clone()).load().perform(env).await?;
-    let remote_branch = remote_repo
-        .branch(upstream_branch_name.clone())
-        .open()
-        .perform(env)
-        .await?;
-
-    remote_branch.fetch().perform(env).await
 }
 
 #[cfg(test)]
@@ -147,7 +112,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let fetched = super::fetch_local(&feature, &"main".into(), &operator).await?;
+        let fetched = feature.fetch().perform(&operator).await?;
 
         assert!(fetched.is_some());
         assert_eq!(fetched.unwrap().tree(), main_revision.tree());
@@ -182,7 +147,7 @@ mod tests {
 
         let feature_revision_before = feature.revision();
 
-        let _fetched = super::fetch_local(&feature, &"main".into(), &operator).await?;
+        let _fetched = feature.fetch().perform(&operator).await?;
 
         // Fetch should not modify local state
         assert_eq!(feature.revision(), feature_revision_before);
