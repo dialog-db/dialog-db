@@ -1,10 +1,11 @@
-//! Remote archive operations — upload blocks to remote storage.
+//! Remote archive operations -- upload blocks to remote storage.
 
 use dialog_capability::fork::Fork;
 use dialog_capability::site::{Site, SiteAddress};
-use dialog_capability::{Capability, Provider, Subject};
+use dialog_capability::{Capability, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
+use dialog_effects::archive::prelude::{ArchiveExt, ArchiveSubjectExt, CatalogExt};
 use dialog_prolly_tree::Node;
 use dialog_remote_s3::S3;
 use dialog_storage::Blake3Hash;
@@ -25,10 +26,7 @@ impl<'a> RemoteArchive<'a> {
     /// The index catalog for tree node storage.
     pub fn index(&self) -> RemoteArchiveIndex<'a> {
         let address = self.repository.address();
-        let subject = Subject::from(address.subject.clone());
-        let catalog = subject
-            .attenuate(archive_fx::Archive)
-            .attenuate(archive_fx::Catalog::new("index"));
+        let catalog = address.subject.clone().archive().catalog("index");
 
         RemoteArchiveIndex {
             repository: self.repository,
@@ -37,7 +35,7 @@ impl<'a> RemoteArchive<'a> {
     }
 }
 
-/// Remote archive index — the "index" catalog for tree nodes.
+/// Remote archive index for tree node uploads.
 pub struct RemoteArchiveIndex<'a> {
     repository: &'a RemoteRepository,
     catalog: Capability<archive_fx::Catalog>,
@@ -47,7 +45,6 @@ impl RemoteArchiveIndex<'_> {
     /// Upload a stream of novel nodes to the remote.
     ///
     /// `local_catalog` is used to read raw bytes from local storage.
-    /// The remote catalog (from this index) is used for the fork upload.
     pub fn upload<'a, S>(
         &'a self,
         nodes: S,
@@ -91,17 +88,19 @@ where
 
         match address.address {
             SiteAddressEnum::S3(ref addr) => {
-                upload_nodes(self.nodes, local_catalog, remote_catalog, addr, env).await
+                upload_to(self.nodes, local_catalog, remote_catalog, addr, env).await
             }
             #[cfg(feature = "ucan")]
             SiteAddressEnum::Ucan(ref addr) => {
-                upload_nodes(self.nodes, local_catalog, remote_catalog, addr, env).await
+                upload_to(self.nodes, local_catalog, remote_catalog, addr, env).await
             }
         }
     }
 }
 
-async fn upload_nodes<S, A, Env>(
+/// Upload novel nodes to a remote catalog, reading raw bytes locally
+/// and writing via fork.
+async fn upload_to<S, A, Env>(
     nodes: S,
     local_catalog: &Capability<archive_fx::Catalog>,
     remote_catalog: &Capability<archive_fx::Catalog>,
@@ -122,19 +121,25 @@ where
 
             let hash = *node.hash();
 
-            // Read from local archive
-            let get_cap = local_catalog.clone().invoke(archive_fx::Get::new(hash));
-            let bytes: Option<Vec<u8>> =
-                get_cap
+            let bytes: Option<Vec<u8>> = local_catalog
+                .clone()
+                .get(hash)
+                .perform(env)
+                .await
+                .map_err(|e| RepositoryError::PushFailed {
+                    cause: format!("Failed to read local block: {}", e),
+                })?;
+
+            if let Some(bytes) = bytes {
+                remote_catalog
+                    .clone()
+                    .put(hash, bytes)
+                    .fork(address)
                     .perform(env)
                     .await
                     .map_err(|e| RepositoryError::PushFailed {
-                        cause: format!("Failed to read local block: {}", e),
+                        cause: format!("Remote upload failed: {}", e),
                     })?;
-
-            if let Some(bytes) = bytes {
-                // Upload to remote archive
-                upload_block(remote_catalog, address, hash, bytes, env).await?;
             }
 
             Ok(())
@@ -142,35 +147,6 @@ where
         .buffer_unordered(UPLOAD_CONCURRENCY)
         .try_collect::<()>()
         .await
-}
-
-async fn upload_block<A, Env>(
-    _local_catalog: &Capability<archive_fx::Catalog>,
-    address: &A,
-    hash: Blake3Hash,
-    bytes: Vec<u8>,
-    env: &Env,
-) -> Result<(), RepositoryError>
-where
-    A: SiteAddress,
-    A::Site: Site,
-    Env: Provider<Fork<A::Site, archive_fx::Put>> + ConditionalSync,
-{
-    // Build archive Put capability using the same subject/catalog as the remote
-    // The catalog is already scoped to the right subject from RemoteArchiveIndex
-    let put_cap = _local_catalog
-        .clone()
-        .invoke(archive_fx::Put::new(hash, bytes));
-
-    put_cap
-        .fork(address)
-        .perform(env)
-        .await
-        .map_err(|e| RepositoryError::PushFailed {
-            cause: format!("Remote upload failed: {}", e),
-        })?;
-
-    Ok(())
 }
 
 impl RemoteRepository {
