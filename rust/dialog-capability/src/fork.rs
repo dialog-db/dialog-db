@@ -8,8 +8,8 @@ use crate::access::AuthorizeError;
 use crate::command::Command;
 use crate::effect::Effect;
 use crate::site::Site;
-use crate::{Ability, Capability, Constraint, Provider};
-use dialog_common::ConditionalSend;
+use crate::{Ability, Capability, Constraint, Provider, SiteAddress, SiteIssuer};
+use dialog_common::{ConditionalSend, ConditionalSync};
 use std::marker::PhantomData;
 
 /// Fork pairs a capability with a site address for remote execution.
@@ -134,6 +134,56 @@ where
     {
         env.execute(self).await
     }
+}
+
+impl<S, Fx> Fork<S, Fx>
+where
+    S: Site,
+    Fx: Effect,
+    Fx::Of: Constraint,
+{
+    /// SiteAuthorization authorization for this fork, producing a [`ForkInvocation`].
+    ///
+    /// Calls the address's authorize method to obtain site-specific
+    /// authorization material, then wraps everything into a
+    /// [`ForkInvocation`] ready for execution against the network.
+    pub async fn acquire<Env>(
+        self,
+        issuer: &SiteIssuer,
+        env: &Env,
+    ) -> Result<ForkInvocation<S, Fx>, AuthorizeError>
+    where
+        S::Address: SiteAuthorization<Env> + SiteAddress<Site = S>,
+        Fx: Clone + ConditionalSend + 'static,
+        Capability<Fx>: Ability + ConditionalSend + dialog_common::ConditionalSync,
+    {
+        let (capability, address) = self.into_parts();
+        let authorization = address.authorize(&capability, issuer, env).await?;
+        Ok(ForkInvocation::new(capability, address, authorization))
+    }
+}
+
+/// Trait for addresses that can authorize a capability for remote execution.
+///
+/// Each address type implements this with its own authorization logic:
+/// credential-based sites load secrets, capability-based sites build
+/// signed proof chains.
+///
+/// The `Site` type is inferred from the [`SiteAddress`] supertrait.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+pub trait SiteAuthorization<Env>: SiteAddress {
+    /// Obtain authorization material for executing the given capability
+    /// at this address.
+    async fn authorize<Fx: Effect + Clone + ConditionalSend + 'static>(
+        &self,
+        capability: &Capability<Fx>,
+        issuer: &SiteIssuer,
+        env: &Env,
+    ) -> Result<<<Self as SiteAddress>::Site as Site>::Authorization, AuthorizeError>
+    where
+        Fx::Of: Constraint,
+        Capability<Fx>: Ability + ConditionalSend + ConditionalSync;
 }
 
 /// Error during fork execution.

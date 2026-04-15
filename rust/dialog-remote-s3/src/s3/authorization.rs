@@ -1,11 +1,9 @@
 //! S3 authorization material.
 
+use super::Address;
 use super::credential::S3Credential;
-use super::{Address, S3};
 use crate::capability::Access;
 use crate::{AuthorizationFormatError, Permit, S3Error};
-use dialog_capability::site::Credentials;
-use dialog_capability::site::SiteAuthorization;
 use dialog_effects::credential::Secret;
 use serde::{Deserialize, Serialize};
 
@@ -31,11 +29,6 @@ impl S3Authorization {
             None => Ok(S3Credential::permit(request, address)),
         }
     }
-}
-
-impl SiteAuthorization for S3Authorization {
-    type Scheme = Credentials;
-    type Protocol = S3;
 }
 
 impl From<S3Credential> for S3Authorization {

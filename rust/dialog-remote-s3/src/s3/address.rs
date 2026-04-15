@@ -6,10 +6,10 @@
 use super::S3;
 use crate::S3Error;
 use dialog_capability::access::AuthorizeError;
+use dialog_capability::fork::SiteAuthorization;
 use dialog_capability::site::SiteAddress;
 use dialog_capability::{Capability, Provider, SiteId};
-use dialog_common::ConditionalSync;
-use dialog_effects::authority;
+use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::credential::Secret;
 use dialog_effects::credential::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -130,33 +130,6 @@ impl Address {
     }
 }
 
-impl Address {
-    /// Authorize a capability for execution at this S3 site.
-    ///
-    /// Loads credentials from the secret store using the address id as key.
-    pub async fn authorize<Env>(
-        &self,
-        operator: &Capability<authority::Operator>,
-        env: &Env,
-    ) -> Result<super::S3Authorization, AuthorizeError>
-    where
-        Env: Provider<dialog_effects::credential::Load<Secret>> + ConditionalSync,
-    {
-        use authority::OperatorExt;
-
-        let secret: Secret = operator
-            .profile()
-            .clone()
-            .credential()
-            .site(self)
-            .load()
-            .perform(env)
-            .await?;
-
-        secret.try_into().map_err(Into::into)
-    }
-}
-
 /// `Address` is the canonical address type for the `S3` site.
 impl SiteAddress for Address {
     type Site = S3;
@@ -165,6 +138,35 @@ impl SiteAddress for Address {
 impl From<Address> for SiteId {
     fn from(address: Address) -> Self {
         address.id().into()
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<Env> SiteAuthorization<Env> for Address
+where
+    Env: Provider<dialog_effects::credential::Load<Secret>> + ConditionalSync,
+{
+    async fn authorize<Fx: dialog_capability::Effect + Clone + ConditionalSend + 'static>(
+        &self,
+        _capability: &Capability<Fx>,
+        issuer: &dialog_capability::SiteIssuer,
+        env: &Env,
+    ) -> Result<super::S3Authorization, AuthorizeError>
+    where
+        Fx::Of: dialog_capability::Constraint,
+        Capability<Fx>: dialog_capability::Ability + ConditionalSend + ConditionalSync,
+    {
+        let secret: Secret = issuer
+            .profile
+            .clone()
+            .credential()
+            .site(self)
+            .load()
+            .perform(env)
+            .await?;
+
+        secret.try_into().map_err(Into::into)
     }
 }
 

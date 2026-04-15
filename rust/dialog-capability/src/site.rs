@@ -7,40 +7,20 @@
 //! and [`Provider`](crate::Provider) impls.
 
 use dialog_common::ConditionalSend;
+use dialog_varsig::Did;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-/// Authorization material for a [`Site`].
+/// The identity performing a fork operation.
 ///
-/// Every site's authorization type implements this trait, declaring which
-/// protocol produced it. The Operator uses this to determine the
-/// authorization path:
-///
-/// ```text
-/// S::Authorization: SiteAuthorization<Protocol: Protocol>       → capability-based
-/// S::Authorization: SiteAuthorization<Protocol: Authentication> → credential-based
-/// ```
-/// Marker for capability-based access (UCAN, z-caps, biscuits).
-pub enum Capabilities {}
-
-/// Marker for credential-based access (S3, API keys).
-pub enum Credentials {}
-
-pub trait SiteAuthorization: ConditionalSend + 'static {
-    /// Discriminant: [`Capabilities`] or [`Credentials`].
-    type Scheme;
-    /// The protocol that produced this authorization.
-    type Protocol;
-}
-
-/// Credential-based authentication.
-///
-/// For sites that use ambient credentials (API keys, SigV4 signatures)
-/// rather than capability delegation chains. The Operator looks up
-/// credentials from a secret store and passes them to the site provider.
-pub trait Authentication: ConditionalSend + 'static {
-    /// The credential type (e.g., S3 access key + secret key).
-    type Credentials: ConditionalSend;
+/// Contains the operator DID (ephemeral session key) and the profile
+/// DID (long-lived identity) it acts on behalf of.
+#[derive(Debug, Clone)]
+pub struct SiteIssuer {
+    /// The operator's DID (ephemeral session key).
+    pub operator: Did,
+    /// The profile's DID (long-lived identity).
+    pub profile: Did,
 }
 
 /// A stable identifier for a site address.
@@ -114,19 +94,13 @@ where
 /// No methods. Configuration (address) is carried by
 /// [`Fork`](crate::fork::Fork) at execution time.
 ///
-/// The Operator's `Provider<Fork<S, Fx>>` impl constrains
-/// `S::Authorization` to determine the authorization path:
-/// - Capability-based: `<S::Authorization as SiteAuthorization>::Protocol: Protocol`
-/// - Credential-based: `<S::Authorization as SiteAuthorization>::Protocol: Authentication`
+/// Marker trait for remote execution targets.
+///
+/// Associates an authorization type with an address type.
 pub trait Site: Clone + ConditionalSend + 'static {
-    /// The authorization material passed to the site provider.
-    ///
-    /// For capability-based sites, this is the protocol's authorization
-    /// type (e.g., a verified UCAN proof chain with signer).
-    /// For credential-based sites, this is the credentials type
-    /// (e.g., S3 access key + secret key).
-    type Authorization: SiteAuthorization;
+    /// The authorization material for this site.
+    type Authorization: ConditionalSend + 'static;
 
-    /// The address type for this site (serializable for storage/transport).
+    /// The address type for this site.
     type Address: Serialize + DeserializeOwned + Clone + ConditionalSend + 'static;
 }

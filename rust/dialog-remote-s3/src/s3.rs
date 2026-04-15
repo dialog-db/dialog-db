@@ -20,18 +20,13 @@ pub use credential::S3Credential;
 pub use invocation::S3Invocation;
 pub use permit::Permit;
 
-use dialog_capability::site::{Authentication, Site};
+use dialog_capability::site::Site;
 
 /// S3 direct-access site.
 ///
-/// Uses credential-based [`Authentication`] rather than capability delegation.
 /// Authorization is handled via SigV4 presigned URLs on the [`Address`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct S3;
-
-impl Authentication for S3 {
-    type Credentials = S3Credential;
-}
 
 impl Site for S3 {
     type Authorization = S3Authorization;
