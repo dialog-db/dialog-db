@@ -159,7 +159,8 @@ impl Push<'_> {
                 if let Some(upstream) = branch.upstream() {
                     branch
                         .upstream
-                        .publish(Some(upstream.with_tree(branch_revision.tree.clone())), env)
+                        .publish(Some(upstream.with_tree(branch_revision.tree.clone())))
+                        .perform(env)
                         .await
                         .map_err(|e| RepositoryError::PushFailed {
                             cause: format!("Failed to update upstream state: {:?}", e),

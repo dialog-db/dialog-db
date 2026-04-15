@@ -25,13 +25,13 @@ impl OpenBranch {
         Env: Provider<memory_fx::Resolve> + Provider<memory_fx::Publish>,
     {
         let revision: Cell<Option<Revision>> = self.branch.cell("revision");
-        revision.resolve(env).await?;
+        revision.resolve().perform(env).await?;
         if revision.get().is_none() {
-            revision.publish(None, env).await?;
+            revision.publish(None).perform(env).await?;
         }
 
         let upstream: Cell<Option<UpstreamState>> = self.branch.cell("upstream");
-        upstream.resolve(env).await?;
+        upstream.resolve().perform(env).await?;
 
         Ok(Branch {
             reference: self.branch,

@@ -207,7 +207,8 @@ where
         // Publish updated revision
         branch
             .revision
-            .publish(Some(new_revision), env)
+            .publish(Some(new_revision))
+            .perform(env)
             .await
             .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
 

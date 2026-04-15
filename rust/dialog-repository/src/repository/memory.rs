@@ -9,6 +9,11 @@ use super::remote::RemoteName;
 use super::remote::RemoteReference;
 
 mod cell;
+/// Publish command for writing cell values.
+pub mod publish;
+/// Resolve command for fetching cell values.
+pub mod resolve;
+
 pub use cell::*;
 
 /// Extension trait on [`Subject`] for repository memory navigation.

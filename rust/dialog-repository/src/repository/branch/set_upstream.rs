@@ -44,7 +44,8 @@ impl SetUpstream<'_> {
 
         self.branch
             .upstream
-            .publish(Some(self.upstream), env)
+            .publish(Some(self.upstream))
+            .perform(env)
             .await?;
 
         Ok(())

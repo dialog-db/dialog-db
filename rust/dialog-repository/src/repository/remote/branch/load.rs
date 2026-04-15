@@ -23,7 +23,7 @@ impl LoadRemoteBranch {
     where
         Env: Provider<memory_fx::Resolve>,
     {
-        self.0.revision.resolve(env).await?;
+        self.0.revision.resolve().perform(env).await?;
         if self.0.revision.get().is_none() {
             return Err(RepositoryError::BranchNotFound {
                 name: self.0.name(),

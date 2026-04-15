@@ -22,7 +22,7 @@ impl LoadRemote {
         Env: Provider<memory_fx::Resolve>,
     {
         let cell = self.0.address();
-        cell.resolve(env).await?;
+        cell.resolve().perform(env).await?;
         match cell.get() {
             Some(address) => Ok(RemoteRepository::new(cell.retain(address), self.0)),
             None => Err(RepositoryError::RemoteNotFound {

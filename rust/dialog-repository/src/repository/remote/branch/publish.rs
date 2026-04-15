@@ -55,7 +55,11 @@ impl<'a> Publish<'a> {
         }
 
         // Update local cache
-        self.branch.revision.publish(self.revision, env).await?;
+        self.branch
+            .revision
+            .publish(self.revision)
+            .perform(env)
+            .await?;
 
         Ok(())
     }

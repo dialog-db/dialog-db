@@ -34,14 +34,14 @@ impl CreateRemote {
         Env: Provider<memory_fx::Resolve> + Provider<memory_fx::Publish>,
     {
         let cell = self.reference.address();
-        cell.resolve(env).await?;
+        cell.resolve().perform(env).await?;
         if cell.get().is_some() {
             return Err(RepositoryError::RemoteAlreadyExists {
                 remote: self.reference.name(),
             });
         }
 
-        cell.publish(self.address.clone(), env).await?;
+        cell.publish(self.address.clone()).perform(env).await?;
 
         Ok(RemoteRepository::new(
             cell.retain(self.address),

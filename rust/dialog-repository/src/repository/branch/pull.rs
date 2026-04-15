@@ -254,17 +254,16 @@ where
 
     branch
         .revision
-        .publish(Some(new_revision.clone()), env)
+        .publish(Some(new_revision.clone()))
+        .perform(env)
         .await
         .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
 
     if let Some(upstream) = branch.upstream() {
         branch
             .upstream
-            .publish(
-                Some(upstream.with_tree(upstream_revision.tree.clone())),
-                env,
-            )
+            .publish(Some(upstream.with_tree(upstream_revision.tree.clone())))
+            .perform(env)
             .await
             .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
     }

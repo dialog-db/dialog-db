@@ -32,7 +32,8 @@ impl Reset<'_> {
     {
         self.branch
             .revision
-            .publish(Some(self.revision), env)
+            .publish(Some(self.revision))
+            .perform(env)
             .await?;
 
         Ok(())

@@ -46,7 +46,7 @@ impl BranchReference {
 
     /// Create a typed cell within this branch's space.
     pub fn cell<T>(&self, cell_name: impl Into<String>) -> Cell<T> {
-        Cell::from_capability(self.cell_capability(cell_name))
+        self.cell_capability(cell_name).into()
     }
 
     /// Return the raw cell capability without wrapping in [`Cell<T>`].

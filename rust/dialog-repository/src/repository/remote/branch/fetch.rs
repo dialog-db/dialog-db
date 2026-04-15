@@ -50,7 +50,11 @@ impl<'a> Fetch<'a> {
 
         // Update local cache
         if let Some(ref rev) = revision {
-            self.branch.revision.publish(rev.clone(), env).await?;
+            self.branch
+                .revision
+                .publish(rev.clone())
+                .perform(env)
+                .await?;
         }
 
         Ok(revision)

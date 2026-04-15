@@ -25,7 +25,7 @@ impl LoadBranch {
         Env: Provider<memory_fx::Resolve>,
     {
         let revision: Cell<Option<Revision>> = self.branch.cell("revision");
-        revision.resolve(env).await?;
+        revision.resolve().perform(env).await?;
 
         if revision.get().is_none() {
             return Err(RepositoryError::BranchNotFound {
@@ -34,7 +34,7 @@ impl LoadBranch {
         }
 
         let upstream: Cell<Option<UpstreamState>> = self.branch.cell("upstream");
-        upstream.resolve(env).await?;
+        upstream.resolve().perform(env).await?;
 
         Ok(Branch {
             reference: self.branch,

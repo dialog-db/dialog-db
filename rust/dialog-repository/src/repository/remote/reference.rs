@@ -45,12 +45,12 @@ impl RemoteReference {
 
     /// Cell for the remote address configuration.
     pub fn address(&self) -> Cell<RemoteAddress> {
-        Cell::from_capability(self.0.clone().cell("address"))
+        self.0.clone().cell("address").into()
     }
 
     /// Create a typed cell within this remote's space.
     pub fn cell<T>(&self, cell_name: impl Into<String>) -> Cell<T> {
-        Cell::from_capability(self.0.clone().cell(cell_name))
+        self.0.clone().cell(cell_name).into()
     }
 
     /// Return the raw cell capability without wrapping in [`Cell<T>`].
