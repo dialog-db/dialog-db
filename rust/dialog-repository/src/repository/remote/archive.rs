@@ -1,7 +1,6 @@
 //! Remote archive operations -- upload blocks to remote storage.
 
 use dialog_capability::fork::Fork;
-use dialog_capability::site::{Site, SiteAddress};
 use dialog_capability::{Capability, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
@@ -43,6 +42,98 @@ pub struct RemoteArchiveIndex<'a> {
 }
 
 impl RemoteArchiveIndex<'_> {
+    /// Read a block from the remote archive by hash.
+    pub fn get(&self, hash: Blake3Hash) -> RemoteGet<'_> {
+        RemoteGet { index: self, hash }
+    }
+
+    /// Write a block to the remote archive.
+    pub fn put(&self, hash: Blake3Hash, bytes: Vec<u8>) -> RemotePut<'_> {
+        RemotePut {
+            index: self,
+            hash,
+            bytes,
+        }
+    }
+}
+
+/// Command to read a block from the remote archive.
+pub struct RemoteGet<'a> {
+    index: &'a RemoteArchiveIndex<'a>,
+    hash: Blake3Hash,
+}
+
+impl RemoteGet<'_> {
+    /// Execute the get operation.
+    pub async fn perform<Env>(self, env: &Env) -> Result<Option<Vec<u8>>, RepositoryError>
+    where
+        Env: Provider<Fork<S3, archive_fx::Get>>
+            + Provider<Fork<UcanSite, archive_fx::Get>>
+            + ConditionalSync,
+    {
+        let address = self.index.repository.address();
+        match address.address {
+            SiteAddressEnum::S3(ref addr) => Ok(self
+                .index
+                .catalog
+                .clone()
+                .get(self.hash)
+                .fork(addr)
+                .perform(env)
+                .await?),
+            SiteAddressEnum::Ucan(ref addr) => Ok(self
+                .index
+                .catalog
+                .clone()
+                .get(self.hash)
+                .fork(addr)
+                .perform(env)
+                .await?),
+        }
+    }
+}
+
+/// Command to write a block to the remote archive.
+pub struct RemotePut<'a> {
+    index: &'a RemoteArchiveIndex<'a>,
+    hash: Blake3Hash,
+    bytes: Vec<u8>,
+}
+
+impl RemotePut<'_> {
+    /// Execute the put operation.
+    pub async fn perform<Env>(self, env: &Env) -> Result<(), RepositoryError>
+    where
+        Env: Provider<Fork<S3, archive_fx::Put>>
+            + Provider<Fork<UcanSite, archive_fx::Put>>
+            + ConditionalSync,
+    {
+        let address = self.index.repository.address();
+        match address.address {
+            SiteAddressEnum::S3(ref addr) => {
+                self.index
+                    .catalog
+                    .clone()
+                    .put(self.hash, self.bytes)
+                    .fork(addr)
+                    .perform(env)
+                    .await?;
+            }
+            SiteAddressEnum::Ucan(ref addr) => {
+                self.index
+                    .catalog
+                    .clone()
+                    .put(self.hash, self.bytes)
+                    .fork(addr)
+                    .perform(env)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl RemoteArchiveIndex<'_> {
     /// Upload a stream of novel nodes to the remote.
     ///
     /// `local_catalog` is used to read raw bytes from local storage.
@@ -75,7 +166,8 @@ impl<S> Upload<'_, S>
 where
     S: Stream<Item = Result<Node<Key, State<Datum>, Blake3Hash>, DialogArtifactsError>>,
 {
-    /// Execute the upload.
+    /// Execute the upload, reading blocks locally and writing to remote
+    /// with up to 16 concurrent uploads.
     pub async fn perform<Env>(self, env: &Env) -> Result<(), RepositoryError>
     where
         Env: Provider<archive_fx::Get>
@@ -83,70 +175,36 @@ where
             + Provider<Fork<UcanSite, archive_fx::Put>>
             + ConditionalSync,
     {
-        let address = self.index.repository.address();
-        let remote_catalog = &self.index.catalog;
+        let index = self.index;
         let local_catalog = &self.local_catalog;
 
-        match address.address {
-            SiteAddressEnum::S3(ref addr) => {
-                upload_to(self.nodes, local_catalog, remote_catalog, addr, env).await
-            }
-            SiteAddressEnum::Ucan(ref addr) => {
-                upload_to(self.nodes, local_catalog, remote_catalog, addr, env).await
-            }
-        }
-    }
-}
-
-/// Upload novel nodes to a remote catalog, reading raw bytes locally
-/// and writing via fork.
-async fn upload_to<S, A, Env>(
-    nodes: S,
-    local_catalog: &Capability<archive_fx::Catalog>,
-    remote_catalog: &Capability<archive_fx::Catalog>,
-    address: &A,
-    env: &Env,
-) -> Result<(), RepositoryError>
-where
-    S: Stream<Item = Result<Node<Key, State<Datum>, Blake3Hash>, DialogArtifactsError>>,
-    A: SiteAddress,
-    A::Site: Site,
-    Env: Provider<archive_fx::Get> + Provider<Fork<A::Site, archive_fx::Put>> + ConditionalSync,
-{
-    nodes
-        .map(|node_result| async move {
-            let node = node_result.map_err(|e| RepositoryError::PushFailed {
-                cause: format!("Failed to compute novelty: {}", e),
-            })?;
-
-            let hash = *node.hash();
-
-            let bytes: Option<Vec<u8>> = local_catalog
-                .clone()
-                .get(hash)
-                .perform(env)
-                .await
-                .map_err(|e| RepositoryError::PushFailed {
-                    cause: format!("Failed to read local block: {}", e),
+        self.nodes
+            .map(|node_result| async move {
+                let node = node_result.map_err(|e| RepositoryError::PushFailed {
+                    cause: format!("Failed to compute novelty: {}", e),
                 })?;
 
-            if let Some(bytes) = bytes {
-                remote_catalog
+                let hash = *node.hash();
+
+                let bytes: Option<Vec<u8>> = local_catalog
                     .clone()
-                    .put(hash, bytes)
-                    .fork(address)
+                    .get(hash)
                     .perform(env)
                     .await
                     .map_err(|e| RepositoryError::PushFailed {
-                        cause: format!("Remote upload failed: {}", e),
+                        cause: format!("Failed to read local block: {}", e),
                     })?;
-            }
 
-            Ok(())
-        })
-        .buffer_unordered(UPLOAD_CONCURRENCY)
-        .try_collect::<()>()
-        .await
+                if let Some(bytes) = bytes {
+                    index.put(hash, bytes).perform(env).await?;
+                }
+
+                Ok(())
+            })
+            .buffer_unordered(UPLOAD_CONCURRENCY)
+            .try_collect::<()>()
+            .await
+    }
 }
 
 impl RemoteRepository {
