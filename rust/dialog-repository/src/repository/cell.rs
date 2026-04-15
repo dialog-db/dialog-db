@@ -85,16 +85,6 @@ impl<T, Codec> Cell<T, Codec> {
     pub fn subject(&self) -> &Did {
         self.capability.subject()
     }
-
-    /// Wrap this cell with a default value, so [`CellOr::get`] always
-    /// returns `T` — falling back to `default` when nothing has been
-    /// resolved or published.
-    pub fn or(self, default: T) -> CellOr<T, Codec> {
-        CellOr {
-            cell: self,
-            default,
-        }
-    }
 }
 
 impl<T, Codec> Cell<T, Codec>
@@ -161,108 +151,6 @@ where
         *guard = Some((value, new_edition));
 
         Ok(())
-    }
-}
-
-/// A [`Cell`] paired with a default value for infallible access.
-///
-/// Created by [`Cell::or`]. [`get`](CellOr::get) always returns `T`,
-/// falling back to the default when the cell has not been resolved or
-/// the remote value is empty.
-#[derive(Debug)]
-pub struct CellOr<T, Codec = CborEncoder> {
-    cell: Cell<T, Codec>,
-    default: T,
-}
-
-impl<T, Codec: Clone> Clone for CellOr<T, Codec>
-where
-    T: Clone,
-{
-    fn clone(&self) -> Self {
-        Self {
-            cell: self.cell.clone(),
-            default: self.default.clone(),
-        }
-    }
-}
-
-impl<T, Codec> CellOr<T, Codec>
-where
-    T: Clone,
-{
-    /// Read the current value, falling back to the default.
-    pub fn get(&self) -> T {
-        self.cell.get().unwrap_or_else(|| self.default.clone())
-    }
-
-    /// Read the current value via callback, falling back to the default.
-    pub fn read_with<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&T) -> R,
-    {
-        self.cell.read_with(|opt| f(opt.unwrap_or(&self.default)))
-    }
-}
-
-impl<T, Codec> CellOr<T, Codec> {
-    /// Access the underlying [`Cell`].
-    pub fn inner(&self) -> &Cell<T, Codec> {
-        &self.cell
-    }
-
-    /// Returns the subject DID from the capability chain.
-    pub fn subject(&self) -> &Did {
-        self.cell.subject()
-    }
-}
-
-impl<T, Codec> CellOr<T, Codec>
-where
-    T: DeserializeOwned + Clone + dialog_common::ConditionalSync,
-    Codec: Encoder,
-{
-    /// Fetch the cell value from env, updating the shared cache.
-    /// Use [`get`](CellOr::get) to read the cached value without hitting env.
-    pub async fn resolve<Env>(&self, env: &Env) -> Result<T, RepositoryError>
-    where
-        Env: Provider<memory::Resolve>,
-    {
-        self.cell.resolve(env).await?;
-        Ok(self.get())
-    }
-}
-
-impl<T, Codec> CellOr<T, Codec>
-where
-    T: Serialize + DeserializeOwned + Clone + dialog_common::ConditionalSync,
-    Codec: Encoder,
-{
-    /// Resolve the cell, publishing the default value if the cell is empty
-    /// in env. After this call the cell is guaranteed to be synced.
-    pub async fn get_or_init<Env>(&self, env: &Env) -> Result<T, RepositoryError>
-    where
-        Env: Provider<memory::Resolve> + Provider<memory::Publish>,
-    {
-        self.cell.resolve(env).await?;
-        if self.cell.read_with(|opt| opt.is_none()) {
-            self.cell.publish(self.default.clone(), env).await?;
-        }
-        Ok(self.get())
-    }
-}
-
-impl<T, Codec> CellOr<T, Codec>
-where
-    T: Serialize,
-    Codec: Encoder,
-{
-    /// Publish a new value to this cell.
-    pub async fn publish<Env>(&self, value: T, env: &Env) -> Result<(), RepositoryError>
-    where
-        Env: Provider<memory::Publish>,
-    {
-        self.cell.publish(value, env).await
     }
 }
 
@@ -471,58 +359,6 @@ mod tests {
 
         cell.resolve(&provider).await?;
         assert_eq!(cell.get(), Some(value));
-
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    fn or_returns_default_before_resolve() -> anyhow::Result<()> {
-        let cell = test_cell::<TestValue>("or-default").or(TestValue::default());
-
-        assert_eq!(cell.get().count, 0);
-        assert_eq!(cell.get().name, "default");
-
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    async fn or_resolves_to_persisted_value() -> anyhow::Result<()> {
-        let provider = Volatile::new();
-
-        let value = TestValue {
-            count: 42,
-            name: "hello".into(),
-        };
-
-        let writer: Cell<TestValue> = test_cell("or-read");
-        writer.publish(value.clone(), &provider).await?;
-
-        let cell = test_cell::<TestValue>("or-read").or(TestValue::default());
-        cell.resolve(&provider).await?;
-
-        assert_eq!(cell.get(), value);
-
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    async fn or_get_or_init_publishes_default_when_empty() -> anyhow::Result<()> {
-        let provider = Volatile::new();
-
-        let default = TestValue {
-            count: 99,
-            name: "initial".into(),
-        };
-        let cell = test_cell::<TestValue>("or-init").or(default.clone());
-
-        cell.get_or_init(&provider).await?;
-
-        assert_eq!(cell.get(), default);
-
-        // Verify persisted by reading from a separate cell
-        let reader: Cell<TestValue> = test_cell("or-init");
-        reader.resolve(&provider).await?;
-        assert_eq!(reader.get(), Some(default));
 
         Ok(())
     }
