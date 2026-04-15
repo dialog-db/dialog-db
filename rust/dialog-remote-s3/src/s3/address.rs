@@ -5,7 +5,15 @@
 
 use super::S3;
 use crate::S3Error;
+use dialog_capability::access::AuthorizeError;
 use dialog_capability::site::SiteAddress;
+use dialog_capability::{
+    Ability, Capability, Constraint, Effect, Policy, Provider, SiteId, Subject,
+};
+use dialog_common::ConditionalSync;
+use dialog_effects::authority;
+use dialog_effects::credential::Secret;
+use dialog_effects::credential::prelude::*;
 use serde::{Deserialize, Serialize};
 use url::{Host, Url};
 
@@ -98,6 +106,18 @@ impl Address {
         &self.authority
     }
 
+    /// A stable identifier for this address as a URI.
+    pub fn id(&self) -> String {
+        let mut id = format!(
+            "{}?region={}&bucket={}",
+            self.endpoint, self.region, self.bucket,
+        );
+        if self.path_style {
+            id.push_str("&path_style");
+        }
+        id
+    }
+
     /// Resolve a key path into a full S3 URL.
     pub fn resolve(&self, path: &str) -> Url {
         let mut url = self.endpoint.clone();
@@ -112,9 +132,51 @@ impl Address {
     }
 }
 
+impl Address {
+    /// Authorize a capability for execution at this S3 site.
+    ///
+    /// Loads credentials from the secret store using the address hash as key.
+    pub async fn authorize<Fx, Env>(
+        &self,
+        capability: &Capability<Fx>,
+        env: &Env,
+    ) -> Result<super::S3Authorization, AuthorizeError>
+    where
+        Fx: Effect,
+        Fx::Of: Constraint,
+        Capability<Fx>: Ability,
+        Env: Provider<authority::Identify>
+            + Provider<dialog_effects::credential::Load<Secret>>
+            + ConditionalSync,
+    {
+        let authority = Subject::from(capability.subject().clone())
+            .invoke(authority::Identify)
+            .perform(env)
+            .await
+            .map_err(|e| AuthorizeError::Configuration(e.to_string()))?;
+
+        let profile_did = authority::Profile::of(&authority).profile.clone();
+
+        let secret: Secret = profile_did
+            .credential()
+            .site(self)
+            .load()
+            .perform(env)
+            .await?;
+
+        secret.try_into().map_err(Into::into)
+    }
+}
+
 /// `Address` is the canonical address type for the `S3` site.
 impl SiteAddress for Address {
     type Site = S3;
+}
+
+impl From<Address> for SiteId {
+    fn from(address: Address) -> Self {
+        address.id().into()
+    }
 }
 
 /// Builder for constructing an [`Address`] with validation.

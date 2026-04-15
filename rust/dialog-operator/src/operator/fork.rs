@@ -6,9 +6,10 @@
 
 use crate::Operator;
 use crate::network::Network;
-use base58::ToBase58;
 
-use dialog_capability::{Ability, Capability, Effect, Provider, SiteAuthorization, Subject};
+use dialog_capability::{
+    Ability, Capability, Effect, Provider, SiteAddress, SiteAuthorization, Subject,
+};
 use dialog_capability::{
     Access, Authorization as _, AuthorizeError, Capabilities, Credentials, Fork, ForkInvocation,
     FromCapability, Proof as _, Protocol, Prove, Retain, Site,
@@ -89,6 +90,7 @@ where
     // SpaceProvider gives access to the credential store
     A: SpaceProvider + Clone + ConditionalSend + ConditionalSync + 'static,
     At: Site,
+    At::Address: SiteAddress,
     // Site must use credential-based scheme and be deserializable from Secret
     At::Authorization: SiteAuthorization<Scheme = Credentials> + TryFrom<Secret>,
     // Deserialization errors must convert to AuthorizeError for ? to work
@@ -105,13 +107,10 @@ where
         // Look up credentials before taking ownership of the fork,
         // to avoid holding the non-Send capability across the await.
         let address = input.address().clone();
-        let address_bytes = serde_ipld_dagcbor::to_vec(&address)
-            .map_err(|e| AuthorizeError::Configuration(e.to_string()))?;
-        let site_key = blake3::hash(&address_bytes).as_bytes().to_base58();
         let credential = {
             self.profile_did()
                 .credential()
-                .site(&site_key)
+                .site(&address)
                 .load()
                 .perform(self)
                 .await?

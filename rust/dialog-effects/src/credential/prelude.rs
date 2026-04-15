@@ -5,7 +5,7 @@
 //! use dialog_effects::credential::prelude::*;
 //! ```
 
-use dialog_capability::{Capability, Did, Subject};
+use dialog_capability::{Capability, Did, SiteId, Subject};
 
 use super::{Credential, Key, Load, Save, Secret, Site};
 
@@ -40,7 +40,7 @@ pub trait CredentialCapabilityExt {
     /// Select a key credential by name.
     fn key(self, address: impl Into<String>) -> Self::Key;
     /// Select a site credential by address.
-    fn site(self, address: impl Into<String>) -> Self::Site;
+    fn site(self, address: impl Into<SiteId>) -> Self::Site;
 }
 
 impl CredentialCapabilityExt for Capability<Credential> {
@@ -51,7 +51,7 @@ impl CredentialCapabilityExt for Capability<Credential> {
         self.attenuate(Key::new(address))
     }
 
-    fn site(self, address: impl Into<String>) -> Capability<Site> {
+    fn site(self, address: impl Into<SiteId>) -> Capability<Site> {
         self.attenuate(Site::new(address))
     }
 }

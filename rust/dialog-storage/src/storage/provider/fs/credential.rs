@@ -2,11 +2,11 @@
 //!
 //! Layout: `{space_root}/credential/{address}`
 
+use super::{FileSystem, FileSystemError, FileSystemHandle};
+use base58::ToBase58;
 use dialog_capability::{Capability, Policy, Provider};
 use dialog_credentials::{Credential, CredentialExport};
 use dialog_effects::credential::{self, CredentialError, Secret};
-
-use super::{FileSystem, FileSystemError, FileSystemHandle};
 
 const CREDENTIAL: &str = "credential";
 
@@ -21,9 +21,10 @@ impl FileSystem {
     }
 
     /// Returns the handle for a site secret at the given address.
-    /// Layout: `{space_root}/credential/site/{address}`
+    /// Layout: `{space_root}/credential/site/{hash(address)}`
     fn credential_site(&self, address: &str) -> Result<FileSystemHandle, FileSystemError> {
-        self.resolve(CREDENTIAL)?.resolve("site")?.resolve(address)
+        let key = blake3::hash(address.as_bytes()).as_bytes().to_base58();
+        self.resolve(CREDENTIAL)?.resolve("site")?.resolve(&key)
     }
 }
 
@@ -70,7 +71,7 @@ impl Provider<credential::Load<Secret>> for FileSystem {
         &self,
         input: Capability<credential::Load<Secret>>,
     ) -> Result<Secret, CredentialError> {
-        let address = &credential::Site::of(&input).address;
+        let address = &credential::Site::of(&input).address.as_str();
         let handle = self.credential_site(address)?;
         let data = handle.read().await?;
         Ok(Secret(data))
@@ -83,7 +84,7 @@ impl Provider<credential::Save<Secret>> for FileSystem {
         &self,
         input: Capability<credential::Save<Secret>>,
     ) -> Result<(), CredentialError> {
-        let address = &credential::Site::of(&input).address;
+        let address = &credential::Site::of(&input).address.as_str();
         let secret = &credential::Save::<Secret>::of(&input).credential;
         let handle = self.credential_site(address)?;
         handle.write(&secret.0).await?;

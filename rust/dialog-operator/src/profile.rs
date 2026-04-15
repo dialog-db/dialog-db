@@ -12,8 +12,7 @@ pub use save::SaveDelegation;
 pub use space::SpaceHandle;
 
 use crate::operator::OperatorBuilder;
-use base58::ToBase58;
-use dialog_capability::{Capability, Provider, Subject};
+use dialog_capability::{Capability, Provider, SiteId, Subject};
 use dialog_common::ConditionalSync;
 use dialog_credentials::SignerCredential;
 use dialog_effects::credential::prelude::*;
@@ -97,14 +96,12 @@ pub struct CredentialHandle {
 }
 
 impl CredentialHandle {
-    /// Select a site credential by address.
-    ///
-    /// The address is serialized and blake3-hashed to derive the credential
-    /// store key, matching the Operator's fork authorization lookup.
-    pub fn site(self, address: &impl serde::Serialize) -> CredentialSite {
-        let bytes = serde_ipld_dagcbor::to_vec(address).expect("address must be serializable");
-        let key = blake3::hash(&bytes).as_bytes().to_base58();
-        CredentialSite { did: self.did, key }
+    /// Select a site credential by address identifier.
+    pub fn site(self, id: impl Into<SiteId>) -> CredentialSite {
+        CredentialSite {
+            did: self.did,
+            key: id.into(),
+        }
     }
 }
 
@@ -113,7 +110,7 @@ impl CredentialHandle {
 /// Created via [`CredentialHandle::site()`].
 pub struct CredentialSite {
     did: Did,
-    key: String,
+    key: SiteId,
 }
 
 impl CredentialSite {
@@ -145,7 +142,7 @@ impl CredentialSite {
 /// Saves a site credential. Created via [`CredentialSite::save()`].
 pub struct SaveSiteCredential<T> {
     did: Did,
-    key: String,
+    key: SiteId,
     credential: T,
 }
 
@@ -162,7 +159,7 @@ where
         let secret = self.credential.try_into().map_err(Into::into)?;
         self.did
             .credential()
-            .site(&self.key)
+            .site(self.key.clone())
             .save(secret)
             .perform(env)
             .await
@@ -172,7 +169,7 @@ where
 /// Loads a site credential. Created via [`CredentialSite::load()`].
 pub struct LoadSiteCredential<T> {
     did: Did,
-    key: String,
+    key: SiteId,
     _marker: PhantomData<T>,
 }
 
@@ -189,7 +186,7 @@ where
         let secret = self
             .did
             .credential()
-            .site(&self.key)
+            .site(self.key.clone())
             .load()
             .perform(env)
             .await?;

@@ -1,6 +1,14 @@
 //! UCAN site configuration -- marker trait + address type.
 
+use dialog_capability::access::{
+    Access, Authorization as _, Authorize, AuthorizeError, FromCapability, Protocol,
+};
 use dialog_capability::site::{Capabilities, Site, SiteAddress, SiteAuthorization};
+use dialog_capability::{
+    Ability, Capability, Constraint, Effect, Policy, Provider, SiteId, Subject,
+};
+use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_effects::authority;
 use dialog_remote_s3::{Permit, S3Error};
 
 // Re-export UCAN types for convenience.
@@ -76,8 +84,51 @@ impl UcanAddress {
     }
 }
 
+impl UcanAddress {
+    /// Authorize a capability for execution at this UCAN site.
+    ///
+    /// Identifies the caller via `Identify`, then uses `Authorize<Ucan>`
+    /// to build a signed proof chain and produce a UCAN invocation.
+    pub async fn authorize<Fx, Env>(
+        &self,
+        capability: &Capability<Fx>,
+        env: &Env,
+    ) -> Result<UcanAuthorization, AuthorizeError>
+    where
+        Fx: Effect + Clone,
+        Fx::Of: Constraint,
+        Capability<Fx>: Ability + ConditionalSend + ConditionalSync,
+        Env: Provider<authority::Identify> + Provider<Authorize<Ucan>> + ConditionalSync,
+    {
+        let auth = Subject::from(capability.subject().clone())
+            .invoke(authority::Identify)
+            .perform(env)
+            .await
+            .map_err(|e| AuthorizeError::Configuration(e.to_string()))?;
+
+        let profile_did = authority::Profile::of(&auth).profile.clone();
+        let operator_did = authority::Operator::of(&auth).operator.clone();
+        let scope = <Ucan as Protocol>::Access::from_capability(capability);
+
+        let authorization = Subject::from(profile_did)
+            .attenuate(Access)
+            .invoke(Authorize::<Ucan>::new(operator_did, scope))
+            .perform(env)
+            .await?;
+
+        let invocation = authorization.invoke().await?;
+        Ok(UcanAuthorization::from(invocation))
+    }
+}
+
 impl SiteAddress for UcanAddress {
     type Site = UcanSite;
+}
+
+impl From<UcanAddress> for SiteId {
+    fn from(address: UcanAddress) -> Self {
+        address.endpoint.into()
+    }
 }
 
 /// UCAN site configuration for delegated authorization.

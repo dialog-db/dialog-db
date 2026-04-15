@@ -32,6 +32,7 @@ web-integration-tests = ["dialog-common/web-integration-tests"]
 async-trait = { workspace = true }
 base58 = { workspace = true }
 base64 = { workspace = true }
+blake3 = { workspace = true }
 chrono = { workspace = true }
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }

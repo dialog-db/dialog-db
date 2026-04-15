@@ -16,7 +16,7 @@
 pub mod prelude;
 
 pub use dialog_capability::{
-    Attenuation, AuthorizeError, Capability, Claim, Effect, Policy, StorageError, Subject,
+    Attenuation, AuthorizeError, Capability, Claim, Effect, Policy, SiteId, StorageError, Subject,
 };
 pub use dialog_credentials;
 use serde::{Deserialize, Serialize};
@@ -71,22 +71,20 @@ impl Attenuation for Key {
     type Of = Credential;
 }
 
-/// Site credential address (e.g., S3 access keys).
+/// Site credential address.
 ///
-/// Keyed by URL so that the address naturally identifies the remote
-/// service the credentials are for.
+/// Keyed by [`SiteId`](dialog_capability::SiteId) which uniquely identifies
+/// the remote site the credentials are for.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Site {
-    /// The credential address (e.g., "https://s3.us-east-1.amazonaws.com/my-bucket").
-    pub address: String,
+    /// The site identifier.
+    pub address: SiteId,
 }
 
 impl Site {
     /// Create a new site credential address.
-    pub fn new(address: impl Into<String>) -> Self {
-        Self {
-            address: address.into(),
-        }
+    pub fn new(id: impl Into<SiteId>) -> Self {
+        Self { address: id.into() }
     }
 }
 

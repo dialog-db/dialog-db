@@ -43,13 +43,70 @@ pub trait Authentication: ConditionalSend + 'static {
     type Credentials: ConditionalSend;
 }
 
-/// Associates an address type with its corresponding site.
+/// A stable identifier for a site address.
 ///
-/// This trait allows inferring the site type from an address type,
-/// enabling ergonomic `.fork(address)` calls without explicit site type parameters.
-pub trait SiteAddress: Serialize + DeserializeOwned + Clone + ConditionalSend + 'static {
+/// Used as a key in credential stores. The filesystem backend hashes
+/// this internally for safe filenames; other backends may use it as-is.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, serde::Deserialize)]
+pub struct SiteId(String);
+
+impl SiteId {
+    /// The identifier string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for SiteId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for SiteId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+impl From<&SiteId> for SiteId {
+    fn from(id: &SiteId) -> Self {
+        id.clone()
+    }
+}
+
+impl AsRef<str> for SiteId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<SiteId> for String {
+    fn from(id: SiteId) -> Self {
+        id.0
+    }
+}
+
+impl std::fmt::Display for SiteId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+pub trait SiteAddress:
+    Serialize + DeserializeOwned + Clone + Into<SiteId> + ConditionalSend + 'static
+{
     /// The site type this address belongs to.
     type Site: Site<Address = Self>;
+}
+
+impl<T> From<&T> for SiteId
+where
+    T: SiteAddress,
+{
+    fn from(address: &T) -> Self {
+        address.clone().into()
+    }
 }
 
 /// Pure site marker — declares types needed for remote execution.
