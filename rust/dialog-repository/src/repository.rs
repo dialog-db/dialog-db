@@ -39,9 +39,6 @@ use dialog_effects::space as space_fx;
 use dialog_operator::profile::access::Access as ProfileAccess;
 use dialog_varsig::Principal;
 
-use self::archive::Archive;
-use self::memory::Memory;
-
 pub use branch::*;
 pub use create::CreateRepository;
 pub use error::*;
@@ -52,22 +49,15 @@ pub use remote::*;
 /// A repository scoped to a specific subject.
 ///
 /// The credential type parameter determines access level:
-/// - `Repository<SignerCredential>` — owns the keypair, can delegate
-/// - `Repository<Credential>` — either signer or verifier, determined at runtime
+/// - `Repository<SignerCredential>` -- owns the keypair, can delegate
+/// - `Repository<Credential>` -- either signer or verifier, determined at runtime
 pub struct Repository<C: Principal = Credential> {
     credential: C,
-    memory: Memory,
-    archive: Archive,
 }
 
 impl<C: Principal> Repository<C> {
     fn new(credential: C) -> Self {
-        let subject = Subject::from(credential.did());
-        Self {
-            memory: Memory::new(subject.clone()),
-            archive: Archive::new(subject),
-            credential,
-        }
+        Self { credential }
     }
 
     /// Get the credential.
@@ -80,19 +70,25 @@ impl<C: Principal> Repository<C> {
         self.credential.did()
     }
 
-    /// The subject as a `Subject`.
+    /// The subject.
     pub fn subject(&self) -> Subject {
         self.did().into()
     }
 
-    /// Pre-attenuated memory capability (`Subject → Memory`).
-    pub fn memory(&self) -> &Memory {
-        &self.memory
+    /// Get a branch reference for the given name.
+    ///
+    /// Call `.open()` or `.load()` on the returned reference.
+    pub fn branch(&self, name: impl Into<branch::BranchName>) -> branch::BranchReference {
+        use memory::MemoryExt;
+        self.subject().branch(name)
     }
 
-    /// Pre-attenuated archive capability (`Subject → Archive`).
-    pub fn archive(&self) -> &Archive {
-        &self.archive
+    /// Get a remote reference for the given name.
+    ///
+    /// Call `.create(address)` or `.load()` on the returned reference.
+    pub fn remote(&self, name: impl Into<remote::RemoteName>) -> remote::RemoteReference {
+        use memory::MemoryExt;
+        self.subject().remote(name)
     }
 }
 

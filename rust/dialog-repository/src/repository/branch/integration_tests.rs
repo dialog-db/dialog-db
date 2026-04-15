@@ -5,7 +5,7 @@
 
 use crate::SiteAddress;
 use crate::helpers::{test_operator_with_profile, unique_name};
-use crate::repository::branch::state::UpstreamState;
+use crate::repository::branch::upstream::UpstreamState;
 use crate::repository::node_reference::NodeReference;
 use crate::repository::{Repository, RepositoryExt as _};
 use crate::{Artifact, ArtifactSelector, Instruction};

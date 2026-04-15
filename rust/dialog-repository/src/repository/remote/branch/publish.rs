@@ -6,11 +6,12 @@ use dialog_capability::{Capability, Provider, Subject};
 use dialog_common::ConditionalSync;
 use dialog_effects::memory as memory_fx;
 use dialog_remote_s3::S3;
+use dialog_remote_ucan_s3::UcanSite;
 
 use super::RemoteBranch;
 use crate::SiteAddress as SiteAddressEnum;
 use crate::repository::error::RepositoryError;
-use crate::repository::memory::Memory;
+use crate::repository::memory::MemoryExt;
 use crate::repository::revision::Revision;
 
 /// Command to publish a revision to the remote.
@@ -32,8 +33,8 @@ impl<'a> Publish<'a> {
     where
         Env: Provider<Fork<S3, memory_fx::Resolve>>
             + Provider<Fork<S3, memory_fx::Publish>>
-            + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Resolve>>
-            + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Publish>>
+            + Provider<Fork<UcanSite, memory_fx::Resolve>>
+            + Provider<Fork<UcanSite, memory_fx::Publish>>
             + Provider<memory_fx::Publish>
             + ConditionalSync,
     {
@@ -47,9 +48,7 @@ impl<'a> Publish<'a> {
             .and_then(|s| s.strip_suffix("/revision"))
             .unwrap_or("");
 
-        let cell_cap = Memory::new(subject)
-            .branch(branch_name)
-            .cell_capability("revision");
+        let cell_cap = subject.branch(branch_name).cell_capability("revision");
 
         match address.address {
             SiteAddressEnum::S3(ref addr) => {

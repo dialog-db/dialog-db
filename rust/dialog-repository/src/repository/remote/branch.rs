@@ -3,7 +3,8 @@ mod publish;
 mod reference;
 
 use crate::RemoteAddress;
-use crate::repository::branch::state::{BranchName, UpstreamState};
+use crate::repository::branch::name::BranchName;
+use crate::repository::branch::upstream::UpstreamState;
 use crate::repository::cell::{Cell, Retain};
 use crate::repository::node_reference::NodeReference;
 use crate::repository::remote::RemoteName;

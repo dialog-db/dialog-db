@@ -3,14 +3,18 @@
 use dialog_capability::Provider;
 use dialog_effects::memory as memory_fx;
 
+use super::reference::RemoteReference;
 use super::repository::RemoteRepository;
 use crate::repository::error::RepositoryError;
-use crate::repository::memory::RemoteMemory;
 
 /// Command to load an existing remote repository.
-pub struct LoadRemote(RemoteMemory);
+pub struct LoadRemote(RemoteReference);
 
 impl LoadRemote {
+    pub(crate) fn new(reference: RemoteReference) -> Self {
+        Self(reference)
+    }
+
     /// Execute the load operation.
     pub async fn perform<Env>(self, env: &Env) -> Result<RemoteRepository, RepositoryError>
     where
@@ -24,15 +28,9 @@ impl LoadRemote {
                 self.0.capability(),
             )),
             None => Err(RepositoryError::RemoteNotFound {
-                remote: self.0.name().into(),
+                remote: self.0.name(),
             }),
         }
-    }
-}
-
-impl From<RemoteMemory> for LoadRemote {
-    fn from(remote_memory: RemoteMemory) -> Self {
-        Self(remote_memory)
     }
 }
 

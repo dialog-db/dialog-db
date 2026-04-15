@@ -8,6 +8,7 @@ use dialog_effects::archive as archive_fx;
 use dialog_effects::archive::prelude::{ArchiveExt, ArchiveSubjectExt, CatalogExt};
 use dialog_prolly_tree::Node;
 use dialog_remote_s3::S3;
+use dialog_remote_ucan_s3::UcanSite;
 use dialog_storage::Blake3Hash;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 
@@ -79,7 +80,7 @@ where
     where
         Env: Provider<archive_fx::Get>
             + Provider<Fork<S3, archive_fx::Put>>
-            + Provider<Fork<dialog_remote_ucan_s3::UcanSite, archive_fx::Put>>
+            + Provider<Fork<UcanSite, archive_fx::Put>>
             + ConditionalSync,
     {
         let address = self.index.repository.address();

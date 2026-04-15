@@ -2,7 +2,7 @@ use dialog_capability::Provider;
 use dialog_effects::memory as memory_fx;
 
 use super::Branch;
-use super::state::UpstreamState;
+use super::upstream::UpstreamState;
 use crate::repository::error::RepositoryError;
 
 /// Command struct for setting a branch's upstream.
@@ -35,10 +35,10 @@ impl SetUpstream<'_> {
     {
         // Validate: upstream must not be this branch itself
         if let UpstreamState::Local { ref branch, .. } = self.upstream
-            && branch == self.branch.name()
+            && *branch == self.branch.name()
         {
             return Err(RepositoryError::BranchUpstreamIsItself {
-                name: self.branch.name().clone(),
+                name: self.branch.name(),
             });
         }
 
@@ -56,7 +56,7 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use crate::repository::branch::state::UpstreamState;
+    use crate::repository::branch::upstream::UpstreamState;
     use crate::repository::error::RepositoryError;
     use crate::repository::node_reference::NodeReference;
 

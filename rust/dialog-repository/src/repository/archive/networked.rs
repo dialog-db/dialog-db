@@ -5,6 +5,7 @@ use dialog_common::ConditionalSync;
 use dialog_effects::archive::prelude::{ArchiveExt, ArchiveSubjectExt, CatalogExt};
 use dialog_effects::archive::{Catalog, Get, Put};
 use dialog_remote_s3::S3;
+use dialog_remote_ucan_s3::UcanSite;
 use dialog_storage::{Blake3Hash, ContentAddressedStorage, DialogStorageError, Encoder};
 use serde::{Serialize, de::DeserializeOwned};
 use std::fmt::Debug;
@@ -52,7 +53,7 @@ where
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Fork<S3, Get>>
-        + Provider<Fork<dialog_remote_ucan_s3::UcanSite, Get>>
+        + Provider<Fork<UcanSite, Get>>
         + ConditionalSync
         + 'static,
 {

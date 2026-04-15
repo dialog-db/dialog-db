@@ -1,10 +1,13 @@
+use crate::repository::memory::MemoryExt;
+use dialog_capability::Subject;
 use dialog_capability::fork::Fork;
-use dialog_capability::{Capability, Provider, Subject};
+use dialog_capability::{Capability, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
 use dialog_prolly_tree::{EMPT_TREE_HASH, Entry, Tree};
 use dialog_remote_s3::S3;
+use dialog_remote_ucan_s3::UcanSite;
 use dialog_storage::{Blake3Hash, ContentAddressedStorage, DialogStorageError};
 use futures_util::Stream;
 use std::ops::Range;
@@ -12,7 +15,7 @@ use std::ops::Range;
 use super::{Branch, Index};
 use crate::repository::archive::Archive;
 use crate::repository::archive::networked::NetworkedIndex;
-use crate::repository::branch::state::UpstreamState;
+use crate::repository::branch::upstream::UpstreamState;
 use crate::{
     AttributeKey, DialogArtifactsError, EntityKey, Key, KeyViewConstruct, KeyViewMut, State,
     ValueKey,
@@ -57,14 +60,19 @@ impl Select<'_> {
             + Provider<memory_fx::Resolve>
             + Provider<Fork<S3, archive_fx::Get>>
             + Provider<Fork<S3, memory_fx::Resolve>>
-            + Provider<Fork<dialog_remote_ucan_s3::UcanSite, archive_fx::Get>>
-            + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Resolve>>
+            + Provider<Fork<UcanSite, archive_fx::Get>>
+            + Provider<Fork<UcanSite, memory_fx::Resolve>>
             + ConditionalSync
             + 'static,
     {
         let remote = match self.branch.upstream() {
             Some(UpstreamState::Remote { name, .. }) => {
-                self.branch.remote(name).load().perform(env).await.ok()
+                Subject::from(self.branch.subject().clone())
+                    .remote(name)
+                    .load()
+                    .perform(env)
+                    .await
+                    .ok()
             }
             _ => None,
         };

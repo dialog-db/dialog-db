@@ -1,28 +1,21 @@
-use dialog_capability::{Did, Provider};
+use dialog_capability::Provider;
 use dialog_effects::memory as memory_fx;
 
 use super::Branch;
-use super::state::{BranchName, UpstreamState};
+use super::reference::BranchReference;
+use super::upstream::UpstreamState;
 use crate::repository::cell::Cell;
 use crate::repository::error::RepositoryError;
-use crate::repository::memory::{BranchMemory, Memory};
 use crate::repository::revision::Revision;
 
 /// Command to load an existing branch, returning an error if not found.
 pub struct LoadBranch {
-    subject: Did,
-    memory: Memory,
-    branch_memory: BranchMemory,
+    branch: BranchReference,
 }
 
 impl LoadBranch {
-    pub(crate) fn new(subject: Did, memory: Memory, branch_memory: BranchMemory) -> Self {
-        // pub(crate): constructed by BranchReference and Branch::load_branch
-        Self {
-            subject,
-            memory,
-            branch_memory,
-        }
+    pub(crate) fn new(branch: BranchReference) -> Self {
+        Self { branch }
     }
 
     /// Execute the load operation.
@@ -30,36 +23,23 @@ impl LoadBranch {
     where
         Env: Provider<memory_fx::Resolve>,
     {
-        let revision: Cell<Option<Revision>> = self.branch_memory.cell("revision");
+        let revision: Cell<Option<Revision>> = self.branch.cell("revision");
         revision.resolve(env).await?;
 
-        // The outer Option from Cell::get() tells us whether the cell exists
-        // in storage. If it's None, the branch was never opened/created.
         if revision.get().is_none() {
             return Err(RepositoryError::BranchNotFound {
-                name: self.branch_memory.name().clone(),
+                name: self.branch.name(),
             });
         }
 
-        let upstream: Cell<Option<UpstreamState>> = self.branch_memory.cell("upstream");
+        let upstream: Cell<Option<UpstreamState>> = self.branch.cell("upstream");
         upstream.resolve(env).await?;
 
         Ok(Branch {
-            subject: self.subject,
-            memory: self.memory,
-            branch_memory: self.branch_memory,
+            memory: self.branch,
             revision,
             upstream,
         })
-    }
-}
-
-impl Branch {
-    /// Load a sibling branch by name (internal use for pull/push/fetch).
-    pub(crate) fn load_branch(&self, name: impl Into<BranchName>) -> LoadBranch {
-        // pub(crate): used by pull, push, and fetch to resolve upstream branches
-        let branch_memory = self.memory.branch(name.into());
-        LoadBranch::new(self.subject.clone(), self.memory.clone(), branch_memory)
     }
 }
 

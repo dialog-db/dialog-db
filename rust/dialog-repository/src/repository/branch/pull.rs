@@ -1,17 +1,20 @@
+use crate::repository::memory::MemoryExt;
+use dialog_capability::Subject;
 use dialog_capability::fork::Fork;
-use dialog_capability::{Policy, Provider, Subject};
+use dialog_capability::{Policy, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::authority;
 use dialog_effects::memory as memory_fx;
 use dialog_prolly_tree::{EMPT_TREE_HASH, Tree};
 use dialog_remote_s3::S3;
+use dialog_remote_ucan_s3::UcanSite;
 use futures_util::StreamExt;
 use std::collections::HashSet;
 
 use super::Branch;
 use super::Index;
-use super::state::UpstreamState;
+use super::upstream::UpstreamState;
 use crate::DialogArtifactsError;
 use crate::repository::archive::local::LocalIndex;
 use crate::repository::archive::networked::NetworkedIndex;
@@ -99,8 +102,8 @@ impl Pull<'_> {
             + Provider<authority::Identify>
             + Provider<Fork<S3, archive_fx::Get>>
             + Provider<Fork<S3, memory_fx::Resolve>>
-            + Provider<Fork<dialog_remote_ucan_s3::UcanSite, archive_fx::Get>>
-            + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Resolve>>
+            + Provider<Fork<UcanSite, archive_fx::Get>>
+            + Provider<Fork<UcanSite, memory_fx::Resolve>>
             + ConditionalSync
             + 'static,
     {
@@ -111,8 +114,9 @@ impl Pull<'_> {
 
         match upstream {
             UpstreamState::Local { branch: id, .. } => {
-                let upstream_branch = branch
-                    .load_branch(id)
+                let upstream_branch = Subject::from(branch.subject().clone())
+                    .branch(id)
+                    .load()
                     .perform(env)
                     .await
                     .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
@@ -127,7 +131,7 @@ impl Pull<'_> {
                 branch: branch_name,
                 ..
             } => {
-                let remote_repo = branch
+                let remote_repo = Subject::from(branch.subject().clone())
                     .remote(name)
                     .load()
                     .perform(env)

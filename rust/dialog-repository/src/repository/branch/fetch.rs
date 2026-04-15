@@ -1,11 +1,14 @@
+use crate::repository::memory::MemoryExt;
 use dialog_capability::Provider;
+use dialog_capability::Subject;
 use dialog_capability::fork::Fork;
 use dialog_common::ConditionalSync;
 use dialog_effects::memory as memory_fx;
 use dialog_remote_s3::S3;
+use dialog_remote_ucan_s3::UcanSite;
 
 use super::Branch;
-use super::state::UpstreamState;
+use super::upstream::UpstreamState;
 use crate::repository::error::RepositoryError;
 use crate::repository::revision::Revision;
 
@@ -43,7 +46,7 @@ impl Fetch<'_> {
         Env: Provider<memory_fx::Resolve>
             + Provider<memory_fx::Publish>
             + Provider<Fork<S3, memory_fx::Resolve>>
-            + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Resolve>>
+            + Provider<Fork<UcanSite, memory_fx::Resolve>>
             + ConditionalSync,
     {
         let upstream =
@@ -55,7 +58,11 @@ impl Fetch<'_> {
 
         match &upstream {
             UpstreamState::Local { branch: name, .. } => {
-                let upstream = self.branch.load_branch(name.clone()).perform(env).await?;
+                let upstream = Subject::from(self.branch.subject().clone())
+                    .branch(name.clone())
+                    .load()
+                    .perform(env)
+                    .await?;
                 Ok(upstream.revision())
             }
             UpstreamState::Remote {
@@ -63,7 +70,11 @@ impl Fetch<'_> {
                 branch: branch_name,
                 ..
             } => {
-                let remote_repo = self.branch.remote(name.clone()).load().perform(env).await?;
+                let remote_repo = Subject::from(self.branch.subject().clone())
+                    .remote(name.clone())
+                    .load()
+                    .perform(env)
+                    .await?;
                 let remote_branch = remote_repo
                     .branch(branch_name.clone())
                     .open()
@@ -81,7 +92,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use crate::helpers::{test_operator_with_profile, test_repo};
-    use crate::repository::branch::state::UpstreamState;
+    use crate::repository::branch::upstream::UpstreamState;
     use crate::repository::node_reference::NodeReference;
     use crate::{Artifact, Instruction};
     use futures_util::stream;

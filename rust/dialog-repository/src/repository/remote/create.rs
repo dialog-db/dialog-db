@@ -3,20 +3,20 @@
 use dialog_capability::{Did, Provider};
 use dialog_effects::memory as memory_fx;
 
+use super::reference::RemoteReference;
 use super::repository::RemoteRepository;
 use crate::RemoteAddress;
 use crate::repository::error::RepositoryError;
-use crate::repository::memory::RemoteMemory;
 
 /// Command to create a new remote repository, persisting its configuration.
 pub struct CreateRemote {
     address: RemoteAddress,
-    site: RemoteMemory,
+    reference: RemoteReference,
 }
 
 impl CreateRemote {
-    pub(crate) fn new(site: RemoteMemory, address: RemoteAddress) -> Self {
-        Self { site, address }
+    pub(crate) fn new(reference: RemoteReference, address: RemoteAddress) -> Self {
+        Self { reference, address }
     }
 
     /// Override the subject DID for the remote repository.
@@ -32,11 +32,11 @@ impl CreateRemote {
     where
         Env: Provider<memory_fx::Resolve> + Provider<memory_fx::Publish>,
     {
-        let cell = self.site.address();
+        let cell = self.reference.address();
         cell.resolve(env).await?;
         if cell.get().is_some() {
             return Err(RepositoryError::RemoteAlreadyExists {
-                remote: cell.name().into(),
+                remote: self.reference.name(),
             });
         }
 
@@ -44,7 +44,7 @@ impl CreateRemote {
 
         Ok(RemoteRepository::new(
             cell.retain(self.address),
-            self.site.capability(),
+            self.reference.capability(),
         ))
     }
 }

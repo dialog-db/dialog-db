@@ -1,47 +1,56 @@
-use crate::{BranchName, LoadBranch, OpenBranch, Repository};
-use dialog_varsig::Principal;
+use dialog_capability::{Capability, Did, Policy};
+use dialog_effects::memory as fx;
+use dialog_effects::memory::prelude::SpaceExt;
 
-/// A reference to a named branch within a repository.
+use crate::repository::branch::name::BranchName;
+use crate::repository::branch::{LoadBranch, OpenBranch};
+use crate::repository::cell::Cell;
+
+/// A reference to a named branch within a repository's memory.
 ///
-/// Call `.open()` to open (create if missing) or `.load()` to load (fail if missing).
-pub struct BranchReference<'a, C: Principal> {
-    name: BranchName,
-    repository: &'a Repository<C>,
+/// Wraps `Capability<fx::Space>` scoped to `branch/{name}`.
+/// Use `.open()` or `.load()` to create a command, then `.perform(&env)`.
+#[derive(Debug, Clone)]
+pub struct BranchReference(Capability<fx::Space>);
+
+impl From<Capability<fx::Space>> for BranchReference {
+    fn from(space: Capability<fx::Space>) -> Self {
+        Self(space)
+    }
 }
 
-impl<'a, C: Principal> BranchReference<'a, C> {
-    /// Returns the name of this branch.
-    pub fn name(&self) -> &BranchName {
-        &self.name
+impl BranchReference {
+    /// The subject DID this branch belongs to.
+    pub fn subject(&self) -> &Did {
+        self.0.subject()
+    }
+
+    /// The branch name, extracted from the space path.
+    pub fn name(&self) -> BranchName {
+        fx::Space::of(&self.0)
+            .space
+            .strip_prefix("branch/")
+            .unwrap_or("")
+            .into()
     }
 
     /// Open the branch, creating it if it doesn't exist.
-    pub fn open(self) -> OpenBranch {
-        OpenBranch::new(
-            self.repository.credential.did(),
-            self.repository.memory.clone(),
-            self.repository.memory.branch(self.name()),
-        )
+    pub fn open(&self) -> OpenBranch {
+        OpenBranch::new(self.clone())
     }
 
     /// Load the branch, returning an error if it doesn't exist.
-    pub fn load(self) -> LoadBranch {
-        LoadBranch::new(
-            self.repository.credential.did(),
-            self.repository.memory.clone(),
-            self.repository.memory.branch(self.name()),
-        )
+    pub fn load(&self) -> LoadBranch {
+        LoadBranch::new(self.clone())
     }
-}
 
-impl<C: Principal> Repository<C> {
-    /// Get a branch reference for the given name.
-    ///
-    /// Call `.open()` or `.load()` on the returned reference.
-    pub fn branch(&self, name: impl Into<BranchName>) -> BranchReference<'_, C> {
-        BranchReference {
-            repository: self,
-            name: name.into(),
-        }
+    /// Create a typed cell within this branch's space.
+    pub fn cell<T>(&self, cell_name: impl Into<String>) -> Cell<T> {
+        Cell::from_capability(self.cell_capability(cell_name))
+    }
+
+    /// Return the raw cell capability without wrapping in [`Cell<T>`].
+    pub fn cell_capability(&self, cell_name: impl Into<String>) -> Capability<fx::Cell> {
+        self.0.clone().cell(cell_name)
     }
 }

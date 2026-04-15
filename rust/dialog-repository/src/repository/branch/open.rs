@@ -1,28 +1,21 @@
-use dialog_capability::{Did, Provider};
+use dialog_capability::Provider;
 use dialog_effects::memory as memory_fx;
 
 use super::Branch;
-use super::state::UpstreamState;
+use super::reference::BranchReference;
+use super::upstream::UpstreamState;
 use crate::repository::cell::Cell;
 use crate::repository::error::RepositoryError;
-use crate::repository::memory::{BranchMemory, Memory};
 use crate::repository::revision::Revision;
 
 /// Command to open a branch, creating it with defaults if it doesn't exist.
 pub struct OpenBranch {
-    subject: Did,
-    memory: Memory,
-    branch_memory: BranchMemory,
+    branch: BranchReference,
 }
 
 impl OpenBranch {
-    pub(crate) fn new(subject: Did, memory: Memory, branch_memory: BranchMemory) -> Self {
-        // pub(crate): constructed by BranchReference
-        Self {
-            subject,
-            memory,
-            branch_memory,
-        }
+    pub(crate) fn new(branch: BranchReference) -> Self {
+        Self { branch }
     }
 
     /// Execute the open operation.
@@ -30,20 +23,17 @@ impl OpenBranch {
     where
         Env: Provider<memory_fx::Resolve> + Provider<memory_fx::Publish>,
     {
-        let revision: Cell<Option<Revision>> = self.branch_memory.cell("revision");
+        let revision: Cell<Option<Revision>> = self.branch.cell("revision");
         revision.resolve(env).await?;
-        // Publish None to mark the branch as existing if the cell is empty.
         if revision.get().is_none() {
             revision.publish(None, env).await?;
         }
 
-        let upstream: Cell<Option<UpstreamState>> = self.branch_memory.cell("upstream");
+        let upstream: Cell<Option<UpstreamState>> = self.branch.cell("upstream");
         upstream.resolve(env).await?;
 
         Ok(Branch {
-            subject: self.subject,
-            memory: self.memory,
-            branch_memory: self.branch_memory,
+            memory: self.branch,
             revision,
             upstream,
         })

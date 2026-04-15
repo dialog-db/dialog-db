@@ -1,35 +1,44 @@
-use dialog_capability::Did;
-use dialog_varsig::Principal;
+use dialog_capability::{Capability, Policy};
+use dialog_effects::memory as fx;
+use dialog_effects::memory::prelude::SpaceExt;
 
 use super::address::SiteAddress;
 use super::create::CreateRemote;
 use super::load::LoadRemote;
 use crate::RemoteAddress;
-use crate::repository::memory::RemoteMemory;
-use crate::{RemoteName, Repository};
+use crate::RemoteName;
+use crate::repository::cell::Cell;
 
 /// A reference to a named remote within a repository.
 ///
-/// Wraps a [`RemoteMemory`] (scoped to `remote/{name}`) and the
-/// repository's default subject DID.
-pub struct RemoteReference {
-    remote_memory: RemoteMemory,
-    subject: Did,
+/// Wraps a `Capability<fx::Space>` scoped to `remote/{name}`.
+/// The subject DID is derived from the capability chain.
+pub struct RemoteReference(Capability<fx::Space>);
+
+impl From<Capability<fx::Space>> for RemoteReference {
+    fn from(space: Capability<fx::Space>) -> Self {
+        Self(space)
+    }
 }
 
 impl RemoteReference {
-    /// Create a new remote selector.
-    pub(crate) fn new(remote_memory: RemoteMemory, subject: Did) -> Self {
-        // pub(crate): constructed by Repository::remote() and Branch::remote()
-        Self {
-            remote_memory,
-            subject,
-        }
+    /// Name of this remote, extracted from the space path.
+    pub fn name(&self) -> RemoteName {
+        fx::Space::of(&self.0)
+            .space
+            .strip_prefix("remote/")
+            .unwrap_or("")
+            .into()
     }
 
-    /// Name of this remote.
-    pub fn name(&self) -> RemoteName {
-        self.remote_memory.name().into()
+    /// Cell for the remote address configuration.
+    pub fn address(&self) -> Cell<RemoteAddress> {
+        Cell::from_capability(self.0.clone().cell("address"))
+    }
+
+    /// The underlying space capability.
+    pub fn capability(&self) -> Capability<fx::Space> {
+        self.0.clone()
     }
 
     /// Create a new remote with a site address.
@@ -37,23 +46,13 @@ impl RemoteReference {
     /// Uses the repository's own DID as the subject. Call `.subject(did)`
     /// on the returned builder to target a different repository.
     pub fn create(self, address: impl Into<SiteAddress>) -> CreateRemote {
-        let remote = RemoteAddress::new(address.into(), self.subject);
-        CreateRemote::new(self.remote_memory, remote)
+        let subject = self.0.subject().clone();
+        let remote = RemoteAddress::new(address.into(), subject);
+        CreateRemote::new(self, remote)
     }
 
     /// Load an existing remote.
     pub fn load(self) -> LoadRemote {
-        LoadRemote::from(self.remote_memory)
-    }
-}
-
-impl<C: Principal> Repository<C> {
-    /// Get a remote reference for the given name.
-    ///
-    /// Call `.create(address)` or `.load()` on the returned reference.
-    pub fn remote(&self, name: impl Into<RemoteName>) -> RemoteReference {
-        let name = name.into();
-        let space = self.memory().space(&format!("remote/{}", name.as_str()));
-        RemoteReference::new(RemoteMemory::from(space), self.did())
+        LoadRemote::new(self)
     }
 }

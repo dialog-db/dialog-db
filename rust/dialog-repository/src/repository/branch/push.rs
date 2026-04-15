@@ -1,13 +1,16 @@
+use crate::repository::memory::MemoryExt;
 use dialog_capability::Provider;
+use dialog_capability::Subject;
 use dialog_capability::fork::Fork;
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
 use dialog_remote_s3::S3;
+use dialog_remote_ucan_s3::UcanSite;
 
 use super::Branch;
 use super::novelty::novelty;
-use super::state::UpstreamState;
+use super::upstream::UpstreamState;
 use crate::repository::error::RepositoryError;
 use crate::repository::revision::Revision;
 
@@ -46,14 +49,14 @@ impl Push<'_> {
             + Provider<archive_fx::Put>
             + Provider<memory_fx::Resolve>
             + Provider<memory_fx::Publish>
+            + Provider<Fork<S3, archive_fx::Get>>
             + Provider<Fork<S3, archive_fx::Put>>
             + Provider<Fork<S3, memory_fx::Resolve>>
-            + Provider<Fork<dialog_remote_ucan_s3::UcanSite, archive_fx::Get>>
-            + Provider<Fork<dialog_remote_ucan_s3::UcanSite, archive_fx::Get>>
-            + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Resolve>>
             + Provider<Fork<S3, memory_fx::Publish>>
-            + Provider<Fork<dialog_remote_ucan_s3::UcanSite, archive_fx::Put>>
-            + Provider<Fork<dialog_remote_ucan_s3::UcanSite, memory_fx::Publish>>
+            + Provider<Fork<UcanSite, archive_fx::Get>>
+            + Provider<Fork<UcanSite, archive_fx::Put>>
+            + Provider<Fork<UcanSite, memory_fx::Resolve>>
+            + Provider<Fork<UcanSite, memory_fx::Publish>>
             + ConditionalSync
             + 'static,
     {
@@ -70,8 +73,9 @@ impl Push<'_> {
                 ..
             } => {
                 // Fast-forward push to local upstream
-                let upstream_branch = branch
-                    .load_branch(upstream_name.clone())
+                let upstream_branch = Subject::from(branch.subject().clone())
+                    .branch(upstream_name.clone())
+                    .load()
                     .perform(env)
                     .await?;
 
@@ -116,7 +120,7 @@ impl Push<'_> {
                     .unwrap_or_default();
 
                 // Load remote repository and open remote branch
-                let remote_repo = branch
+                let remote_repo = Subject::from(branch.subject().clone())
                     .remote(remote_name.clone())
                     .load()
                     .perform(env)
@@ -177,7 +181,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use crate::helpers::{test_operator_with_profile, test_repo};
-    use crate::repository::branch::state::UpstreamState;
+    use crate::repository::branch::upstream::UpstreamState;
     use crate::repository::node_reference::NodeReference;
     use crate::{Artifact, Instruction};
     use futures_util::stream;

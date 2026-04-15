@@ -1,4 +1,5 @@
-use dialog_capability::{Policy, Provider, Subject};
+use dialog_capability::Subject;
+use dialog_capability::{Policy, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive as archive_fx;
 use dialog_effects::authority;

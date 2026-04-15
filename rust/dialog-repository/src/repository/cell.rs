@@ -371,17 +371,17 @@ impl<T> Cell<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::memory::Memory;
+    use crate::repository::memory::MemoryExt;
     use dialog_capability::{Did, Subject};
     use dialog_storage::provider::Volatile;
 
-    fn test_memory() -> Memory {
+    fn test_subject() -> Subject {
         let did: Did = "did:test:cell-tests".parse().unwrap();
-        Memory::new(Subject::from(did))
+        Subject::from(did)
     }
 
     fn test_cell<T>(name: &str) -> Cell<T> {
-        test_memory().branch("test").cell(name)
+        test_subject().branch("test").cell(name)
     }
 
     #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

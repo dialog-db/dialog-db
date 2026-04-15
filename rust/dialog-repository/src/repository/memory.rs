@@ -1,53 +1,38 @@
-//! Memory capability wrappers for structured cell access.
-//!
-//! ```text
-//! branch/{name}/revision                  Cell<Revision>
-//! branch/{name}/upstream                  Cell<Option<UpstreamState>>
-//! remote/{name}/address                   Cell<RemoteAddress>
-//! remote/{name}/branch/{branch}/revision  Cell<Revision>
-//! ```
+//! Extension trait on [`Subject`] for repository memory navigation.
 
-mod branch;
-mod remote;
+use dialog_capability::Subject;
+use dialog_effects::memory::prelude::{MemoryExt as _, MemorySubjectExt};
 
-pub use branch::BranchMemory;
-pub use remote::RemoteMemory;
+use super::branch::BranchReference;
+use super::branch::name::BranchName;
+use super::remote::RemoteName;
+use super::remote::RemoteReference;
 
-use dialog_capability::{Capability, Subject};
-use dialog_effects::memory as fx;
-
-use super::branch::BranchName;
-
-/// Pre-attenuated memory capability (`Subject -> Memory`).
+/// Extension trait on [`Subject`] for repository memory navigation.
 ///
-/// Provides structured access to branch and remote memory namespaces.
-#[derive(Debug, Clone)]
-pub struct Memory(Capability<fx::Memory>);
+/// Provides `.branch("name")` and `.remote("name")` methods that
+/// create scoped references for repository operations.
+pub trait MemoryExt {
+    /// Access branch scoped to `branch/{name}`.
+    fn branch(&self, branch: impl Into<BranchName>) -> BranchReference;
 
-impl Memory {
-    /// Create a new memory capability for the given subject.
-    pub fn new(subject: Subject) -> Self {
-        Self(subject.attenuate(fx::Memory))
-    }
-
-    /// Access branch memory scoped to `branch/{name}`.
-    pub fn branch(&self, branch: impl Into<BranchName>) -> BranchMemory {
-        let name: BranchName = branch.into();
-        let space = self
-            .0
-            .clone()
-            .attenuate(fx::Space::new(format!("branch/{}", name)));
-        BranchMemory::new(name, space)
-    }
-
-    /// Attenuate to a specific space within this memory.
-    pub(crate) fn space(&self, name: &str) -> Space {
-        Space(self.0.clone().attenuate(fx::Space::new(name)))
-    }
+    /// Access remote scoped to `remote/{name}`.
+    fn remote(&self, name: impl Into<RemoteName>) -> RemoteReference;
 }
 
-/// A memory capability attenuated to a specific space.
-///
-/// Used internally to construct [`RemoteMemory`].
-#[derive(Debug, Clone)]
-pub(crate) struct Space(pub(crate) Capability<fx::Space>);
+impl MemoryExt for Subject {
+    fn branch(&self, branch: impl Into<BranchName>) -> BranchReference {
+        let name: BranchName = branch.into();
+        let space = self.clone().memory().space(format!("branch/{}", name));
+        space.into()
+    }
+
+    fn remote(&self, name: impl Into<RemoteName>) -> RemoteReference {
+        let name: RemoteName = name.into();
+        let space = self
+            .clone()
+            .memory()
+            .space(format!("remote/{}", name.as_str()));
+        space.into()
+    }
+}

@@ -6,15 +6,15 @@ use std::fmt::{Debug, Formatter, Result as FmtResult};
 
 use dialog_artifacts::Datum;
 
-use crate::repository::RemoteReference;
 use crate::{Key, State};
 
-/// Branch state, identifiers, and upstream descriptors.
-pub mod state;
+/// Branch name newtype.
+pub mod name;
+/// Upstream tracking state.
+pub mod upstream;
 
 mod claims;
 mod commit;
-mod edit;
 mod fetch;
 #[cfg(all(test, feature = "integration-tests"))]
 mod integration_tests;
@@ -23,34 +23,33 @@ mod novelty;
 mod open;
 mod pull;
 mod push;
-mod reference;
+pub mod reference;
 mod reset;
 mod select;
 mod set_upstream;
+mod transaction;
 
 pub use load::LoadBranch;
 pub use open::OpenBranch;
-pub use reference::*;
+pub use reference::BranchReference;
 
 use super::archive::Archive;
 use super::cell::Cell;
-use super::memory::{BranchMemory, Memory, RemoteMemory};
 
 pub use super::occurence::Occurence;
 use super::revision::Revision;
-pub use state::{BranchName, UpstreamState};
+pub use name::BranchName;
+pub use upstream::UpstreamState;
 
 /// Type alias for the prolly tree index.
 pub type Index = Tree<GeometricDistribution, Key, State<Datum>, Blake3Hash>;
 
 /// A branch represents a named line of development within a repository.
 ///
-/// Holds a [`BranchMemory`] (scoped to `branch/{name}`) plus separate cells
-/// for revision and upstream state.
+/// Holds a [`BranchReference`] (scoped to `branch/{name}`) plus separate
+/// cells for revision and upstream state.
 pub struct Branch {
-    subject: Did,
-    memory: Memory,
-    branch_memory: BranchMemory,
+    memory: BranchReference,
     revision: Cell<Option<Revision>>,
     upstream: Cell<Option<UpstreamState>>,
 }
@@ -58,15 +57,15 @@ pub struct Branch {
 impl Debug for Branch {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.debug_struct("Branch")
-            .field("name", self.branch_memory.name())
+            .field("name", &self.memory.name())
             .finish_non_exhaustive()
     }
 }
 
 impl Branch {
     /// Returns the branch name.
-    pub fn name(&self) -> &BranchName {
-        self.branch_memory.name()
+    pub fn name(&self) -> BranchName {
+        self.memory.name()
     }
 
     /// Returns the current revision of this branch, or `None` if the branch
@@ -82,12 +81,7 @@ impl Branch {
 
     /// Returns the subject DID.
     pub fn subject(&self) -> &Did {
-        &self.subject
-    }
-
-    /// Returns the branch-scoped memory namespace.
-    pub fn branch_memory(&self) -> &BranchMemory {
-        &self.branch_memory
+        self.memory.subject()
     }
 
     /// Logical time on this branch, or `None` if the branch has no commits.
@@ -95,15 +89,8 @@ impl Branch {
         self.revision().map(Into::into)
     }
 
-    /// Pre-attenuated archive capability for this branch's subject.
+    /// Archive capability for this branch's subject.
     pub fn archive(&self) -> Archive {
-        Archive::new(Subject::from(self.subject.clone()))
-    }
-
-    /// Get a remote reference by name.
-    pub fn remote(&self, name: impl Into<super::remote::RemoteName>) -> RemoteReference {
-        let name = name.into();
-        let space = self.memory.space(&format!("remote/{}", name.as_str()));
-        RemoteReference::new(RemoteMemory::from(space), self.subject.clone())
+        Archive::new(Subject::from(self.subject().clone()))
     }
 }

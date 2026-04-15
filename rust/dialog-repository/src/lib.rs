@@ -37,9 +37,11 @@ pub use dialog_operator::network;
 
 /// Capability-based repository system.
 mod repository;
+pub use repository::branch::BranchReference;
+pub use repository::memory::MemoryExt;
 pub use repository::{
-    Branch, BranchName, BranchReference, CreateRemote, CreateRepository, LoadBranch, LoadRemote,
-    LoadRepository, OpenBranch, OpenRepository, RemoteAddress, RemoteName, RemoteRepository,
+    Branch, BranchName, CreateRemote, CreateRepository, LoadBranch, LoadRemote, LoadRepository,
+    OpenBranch, OpenRepository, RemoteAddress, RemoteName, RemoteReference, RemoteRepository,
     Repository, RepositoryExt, SiteAddress, UpstreamState,
 };
 
