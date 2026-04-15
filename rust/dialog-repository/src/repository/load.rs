@@ -9,7 +9,7 @@ use super::error::RepositoryError;
 ///
 /// Returns `Repository<Credential>` since the credential
 /// may be verifier-only.
-pub struct LoadRepository(pub(super) Capability<space_fx::Space>);
+pub struct LoadRepository(pub Capability<space_fx::Space>);
 
 impl LoadRepository {
     /// Execute against an operator.

@@ -11,7 +11,8 @@ use crate::repository::error::RepositoryError;
 pub struct LoadRemote(RemoteReference);
 
 impl LoadRemote {
-    pub(crate) fn new(reference: RemoteReference) -> Self {
+    /// Create from a remote reference.
+    pub fn new(reference: RemoteReference) -> Self {
         Self(reference)
     }
 
@@ -23,10 +24,7 @@ impl LoadRemote {
         let cell = self.0.address();
         cell.resolve(env).await?;
         match cell.get() {
-            Some(address) => Ok(RemoteRepository::new(
-                cell.retain(address),
-                self.0.capability(),
-            )),
+            Some(address) => Ok(RemoteRepository::new(cell.retain(address), self.0)),
             None => Err(RepositoryError::RemoteNotFound {
                 remote: self.0.name(),
             }),
@@ -69,7 +67,7 @@ mod tests {
             .await?;
 
         let loaded = repo.remote("origin").load().perform(&env).await?;
-        assert_eq!(loaded.name(), "origin");
+        assert_eq!(loaded.site().name(), "origin");
         assert_eq!(loaded.address().site(), &test_site_address());
 
         Ok(())

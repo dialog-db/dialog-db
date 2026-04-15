@@ -30,7 +30,7 @@ pub struct Select<'a> {
 }
 
 impl<'a> Select<'a> {
-    pub(super) fn new(branch: &'a Branch, selector: ArtifactSelector<Constrained>) -> Self {
+    pub fn new(branch: &'a Branch, selector: ArtifactSelector<Constrained>) -> Self {
         Self { branch, selector }
     }
 
@@ -38,11 +38,11 @@ impl<'a> Select<'a> {
         self.branch
             .revision()
             .as_ref()
-            .map(|rev| *rev.tree().hash())
+            .map(|rev| *rev.tree.hash())
             .unwrap_or(EMPT_TREE_HASH)
     }
 
-    pub(crate) fn catalog(&self) -> Capability<archive_fx::Catalog> {
+    fn catalog(&self) -> Capability<archive_fx::Catalog> {
         Archive::new(Subject::from(self.branch.subject().clone())).index()
     }
 }
@@ -81,8 +81,7 @@ impl Select<'_> {
         self.execute(store).await
     }
 
-    /// Execute with a custom content-addressed store.
-    pub(crate) async fn execute<'s, S>(
+    async fn execute<'s, S>(
         self,
         store: S,
     ) -> Result<impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's, DialogArtifactsError>

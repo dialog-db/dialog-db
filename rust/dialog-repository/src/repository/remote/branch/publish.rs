@@ -24,7 +24,8 @@ pub struct Publish<'a> {
 }
 
 impl<'a> Publish<'a> {
-    pub(super) fn new(branch: &'a RemoteBranch, revision: Revision) -> Self {
+    /// Create a new publish command.
+    pub fn new(branch: &'a RemoteBranch, revision: Revision) -> Self {
         Self { branch, revision }
     }
 
@@ -40,15 +41,9 @@ impl<'a> Publish<'a> {
     {
         let address = self.branch.address();
         let subject = Subject::from(address.subject.clone());
-        let branch_name = self
-            .branch
-            .revision
-            .name()
-            .strip_prefix("branch/")
-            .and_then(|s| s.strip_suffix("/revision"))
-            .unwrap_or("");
-
-        let cell_cap = subject.branch(branch_name).cell_capability("revision");
+        let cell_cap = subject
+            .branch(self.branch.name())
+            .cell_capability("revision");
 
         match address.address {
             SiteAddressEnum::S3(ref addr) => {

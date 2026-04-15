@@ -1,4 +1,4 @@
-use dialog_capability::{Capability, Policy};
+use dialog_capability::{Capability, Did, Policy};
 use dialog_effects::memory as fx;
 use dialog_effects::memory::prelude::SpaceExt;
 
@@ -13,6 +13,7 @@ use crate::repository::cell::Cell;
 ///
 /// Wraps a `Capability<fx::Space>` scoped to `remote/{name}`.
 /// The subject DID is derived from the capability chain.
+#[derive(Debug, Clone)]
 pub struct RemoteReference(Capability<fx::Space>);
 
 impl From<Capability<fx::Space>> for RemoteReference {
@@ -21,7 +22,18 @@ impl From<Capability<fx::Space>> for RemoteReference {
     }
 }
 
+impl From<RemoteReference> for Capability<fx::Space> {
+    fn from(reference: RemoteReference) -> Self {
+        reference.0
+    }
+}
+
 impl RemoteReference {
+    /// The subject DID this remote belongs to.
+    pub fn subject(&self) -> &Did {
+        self.0.subject()
+    }
+
     /// Name of this remote, extracted from the space path.
     pub fn name(&self) -> RemoteName {
         fx::Space::of(&self.0)
@@ -36,9 +48,14 @@ impl RemoteReference {
         Cell::from_capability(self.0.clone().cell("address"))
     }
 
-    /// The underlying space capability.
-    pub fn capability(&self) -> Capability<fx::Space> {
-        self.0.clone()
+    /// Create a typed cell within this remote's space.
+    pub fn cell<T>(&self, cell_name: impl Into<String>) -> Cell<T> {
+        Cell::from_capability(self.0.clone().cell(cell_name))
+    }
+
+    /// Return the raw cell capability without wrapping in [`Cell<T>`].
+    pub fn cell_capability(&self, cell_name: impl Into<String>) -> Capability<fx::Cell> {
+        self.0.clone().cell(cell_name)
     }
 
     /// Create a new remote with a site address.

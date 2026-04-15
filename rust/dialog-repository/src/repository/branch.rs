@@ -36,7 +36,6 @@ pub use reference::BranchReference;
 use super::archive::Archive;
 use super::cell::Cell;
 
-pub use super::occurence::Occurence;
 use super::revision::Revision;
 pub use name::BranchName;
 pub use upstream::UpstreamState;
@@ -49,7 +48,7 @@ pub type Index = Tree<GeometricDistribution, Key, State<Datum>, Blake3Hash>;
 /// Holds a [`BranchReference`] (scoped to `branch/{name}`) plus separate
 /// cells for revision and upstream state.
 pub struct Branch {
-    memory: BranchReference,
+    reference: BranchReference,
     revision: Cell<Option<Revision>>,
     upstream: Cell<Option<UpstreamState>>,
 }
@@ -57,7 +56,7 @@ pub struct Branch {
 impl Debug for Branch {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.debug_struct("Branch")
-            .field("name", &self.memory.name())
+            .field("name", &self.reference.name())
             .finish_non_exhaustive()
     }
 }
@@ -65,7 +64,7 @@ impl Debug for Branch {
 impl Branch {
     /// Returns the branch name.
     pub fn name(&self) -> BranchName {
-        self.memory.name()
+        self.reference.name()
     }
 
     /// Returns the current revision of this branch, or `None` if the branch
@@ -81,12 +80,7 @@ impl Branch {
 
     /// Returns the subject DID.
     pub fn subject(&self) -> &Did {
-        self.memory.subject()
-    }
-
-    /// Logical time on this branch, or `None` if the branch has no commits.
-    pub fn occurence(&self) -> Option<Occurence> {
-        self.revision().map(Into::into)
+        self.reference.subject()
     }
 
     /// Archive capability for this branch's subject.

@@ -1,39 +1,29 @@
-//! Remote repository — a loaded remote with address and branch navigation.
+//! Remote repository -- a loaded remote with address and branch navigation.
 
-use dialog_capability::{Capability, Did, Policy};
-use dialog_effects::memory as fx;
+use dialog_capability::Did;
 use dialog_varsig::Principal;
 
-use super::name::RemoteName;
+use super::reference::RemoteReference;
 use crate::RemoteAddress;
 use crate::repository::cell::Retain;
 
 /// A loaded remote repository.
 ///
-/// Holds the retained address and a memory space capability scoped to
+/// Holds the retained address and a remote reference scoped to
 /// `remote/{name}`, used for branch revision cells.
 #[derive(Debug, Clone)]
 pub struct RemoteRepository {
+    site: RemoteReference,
     address: Retain<RemoteAddress>,
-    capability: Capability<fx::Space>,
 }
 
 impl RemoteRepository {
-    /// Construct from a retained address cell and its site space capability.
-    pub(crate) fn new(address: Retain<RemoteAddress>, capability: Capability<fx::Space>) -> Self {
+    /// Construct from a retained address cell and its remote reference.
+    pub fn new(address: Retain<RemoteAddress>, remote: RemoteReference) -> Self {
         Self {
             address,
-            capability,
+            site: remote,
         }
-    }
-
-    /// Local name for this remote.
-    pub fn name(&self) -> RemoteName {
-        fx::Space::of(&self.capability)
-            .space
-            .strip_prefix("remote/")
-            .unwrap_or("")
-            .into()
     }
 
     /// The subject DID of the remote repository.
@@ -46,14 +36,9 @@ impl RemoteRepository {
         self.address.get().clone()
     }
 
-    /// The space capability scoped to `remote/{name}/`.
-    pub(crate) fn capability(&self) -> Capability<fx::Space> {
-        self.capability.clone()
-    }
-
-    /// Clone the retained address for sharing.
-    pub(crate) fn retain_address(&self) -> Retain<RemoteAddress> {
-        self.address.clone()
+    /// The site of the remote this repository is on.
+    pub fn site(&self) -> &RemoteReference {
+        &self.site
     }
 }
 

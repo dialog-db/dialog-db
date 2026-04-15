@@ -15,7 +15,8 @@ pub struct CreateRemote {
 }
 
 impl CreateRemote {
-    pub(crate) fn new(reference: RemoteReference, address: RemoteAddress) -> Self {
+    /// Create from a remote reference and address.
+    pub fn new(reference: RemoteReference, address: RemoteAddress) -> Self {
         Self { reference, address }
     }
 
@@ -44,7 +45,7 @@ impl CreateRemote {
 
         Ok(RemoteRepository::new(
             cell.retain(self.address),
-            self.reference.capability(),
+            self.reference,
         ))
     }
 }
@@ -84,7 +85,7 @@ mod tests {
             .perform(&env)
             .await?;
 
-        assert_eq!(remote.name(), "origin");
+        assert_eq!(remote.site().name(), "origin");
         assert_eq!(remote.address().site(), &test_site_address());
 
         Ok(())

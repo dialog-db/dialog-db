@@ -126,7 +126,7 @@ mod tests {
         let fetched = feature.fetch().perform(&operator).await?;
 
         assert!(fetched.is_some());
-        assert_eq!(fetched.unwrap().tree(), main_revision.tree());
+        assert_eq!(fetched.unwrap().tree, main_revision.tree);
 
         Ok(())
     }

@@ -10,7 +10,7 @@ use super::error::RepositoryError;
 ///
 /// Returns `Repository<SignerCredential>` since a freshly generated
 /// credential always has a private key.
-pub struct CreateRepository(pub(super) Capability<space_fx::Space>);
+pub struct CreateRepository(pub Capability<space_fx::Space>);
 
 impl CreateRepository {
     /// Execute against an operator.

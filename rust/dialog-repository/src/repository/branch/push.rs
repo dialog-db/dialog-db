@@ -90,7 +90,7 @@ impl Push<'_> {
 
                 let upstream_tree = upstream_branch
                     .revision()
-                    .map(|r| r.tree().clone())
+                    .map(|r| r.tree.clone())
                     .unwrap_or_default();
 
                 // Can only fast-forward if upstream hasn't diverged
@@ -134,7 +134,7 @@ impl Push<'_> {
                 // Compute and upload novel blocks
                 let nodes = novelty(
                     *branch_base.hash(),
-                    *branch_revision.tree().hash(),
+                    *branch_revision.tree.hash(),
                     env,
                     branch.archive().index(),
                 );
@@ -159,10 +159,7 @@ impl Push<'_> {
                 if let Some(upstream) = branch.upstream() {
                     branch
                         .upstream
-                        .publish(
-                            Some(upstream.with_tree(branch_revision.tree().clone())),
-                            env,
-                        )
+                        .publish(Some(upstream.with_tree(branch_revision.tree.clone())), env)
                         .await
                         .map_err(|e| RepositoryError::PushFailed {
                             cause: format!("Failed to update upstream state: {:?}", e),
@@ -222,7 +219,7 @@ mod tests {
         let main_rev = main_reloaded
             .revision()
             .expect("main should have a revision after push");
-        assert_eq!(main_rev.tree(), feature_revision.tree());
+        assert_eq!(main_rev.tree, feature_revision.tree);
 
         Ok(())
     }

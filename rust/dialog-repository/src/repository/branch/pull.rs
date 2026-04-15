@@ -59,7 +59,7 @@ impl PullLocal<'_> {
             .map(|u| u.tree().clone())
             .unwrap_or_default();
 
-        if branch_base == *upstream_revision.tree() {
+        if branch_base == upstream_revision.tree {
             return Ok(None);
         }
 
@@ -159,7 +159,7 @@ impl Pull<'_> {
                     .map(|u| u.tree().clone())
                     .unwrap_or_default();
 
-                if branch_base == *upstream_revision.tree() {
+                if branch_base == upstream_revision.tree {
                     return Ok(None);
                 }
 
@@ -170,7 +170,7 @@ impl Pull<'_> {
 
                 // Replicate all tree blocks to local storage
                 if let Some(rev) = branch.revision() {
-                    let target: Index = Tree::from_hash(rev.tree().hash(), &store).await?;
+                    let target: Index = Tree::from_hash(rev.tree.hash(), &store).await?;
                     let stream = target.stream(&store);
                     tokio::pin!(stream);
                     while let Some(r) = stream.next().await {
@@ -215,10 +215,11 @@ where
     let branch_revision = branch.revision();
 
     let mut target: Index = Tree::from_hash(upstream_revision.tree.hash(), &store).await?;
+
     let base: Index = Tree::from_hash(branch_base.hash(), &store).await?;
     let current_tree_hash = branch_revision
         .as_ref()
-        .map(|rev| *rev.tree().hash())
+        .map(|rev| *rev.tree.hash())
         .unwrap_or(EMPT_TREE_HASH);
     let current: Index = Tree::from_hash(&current_tree_hash, &store).await?;
 
@@ -245,7 +246,7 @@ where
             issuer: authority::Operator::of(&auth).operator.clone(),
             authority: authority::Profile::of(&auth).profile.clone(),
             tree: NodeReference::from(hash),
-            cause: HashSet::from([upstream_revision.tree().clone()]),
+            cause: HashSet::from([upstream_revision.tree.clone()]),
             period: upstream_revision.period.max(branch_period) + 1,
             moment: 0,
         }
@@ -330,7 +331,7 @@ mod tests {
         let feature_rev = feature
             .revision()
             .expect("feature should have a revision after pull");
-        assert_eq!(feature_rev.tree(), main_revision.tree());
+        assert_eq!(feature_rev.tree, main_revision.tree);
         Ok(())
     }
 
@@ -370,7 +371,7 @@ mod tests {
         let feature_rev = feature
             .revision()
             .expect("feature should have a revision after merge");
-        assert_ne!(feature_rev.tree(), main_revision.tree());
+        assert_ne!(feature_rev.tree, main_revision.tree);
         Ok(())
     }
 }

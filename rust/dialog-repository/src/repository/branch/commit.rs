@@ -36,7 +36,7 @@ impl<'a, I> Commit<'a, I> {
 
 impl Branch {
     /// Commit a stream of instructions to this branch.
-    pub(crate) fn commit<I>(&self, instructions: I) -> Commit<'_, I> {
+    pub fn commit<I>(&self, instructions: I) -> Commit<'_, I> {
         Commit::new(self, instructions)
     }
 }
@@ -70,7 +70,7 @@ where
         // Load tree from current revision hash (empty tree if no revision yet)
         let base_tree_hash = base_revision
             .as_ref()
-            .map(|rev| *rev.tree().hash())
+            .map(|rev| *rev.tree.hash())
             .unwrap_or(EMPT_TREE_HASH);
 
         let mut tree: Index = Tree::from_hash(&base_tree_hash, &store).await?;
@@ -184,12 +184,12 @@ where
         // issuer commits, moment increments for the same issuer.
         let (period, moment, cause) = match &base_revision {
             Some(rev) => {
-                let (p, m) = if rev.issuer() == &issuer_did {
-                    (*rev.period(), *rev.moment() + 1)
+                let (p, m) = if rev.issuer == issuer_did {
+                    (rev.period, rev.moment + 1)
                 } else {
-                    (*rev.period() + 1, 0)
+                    (rev.period + 1, 0)
                 };
-                (p, m, HashSet::from([rev.tree().clone()]))
+                (p, m, HashSet::from([rev.tree.clone()]))
             }
             None => (0, 0, HashSet::new()),
         };

@@ -1,56 +1,28 @@
 mod fetch;
+mod load;
+mod open;
 mod publish;
 mod reference;
 
-use crate::RemoteAddress;
-use crate::repository::branch::name::BranchName;
+use std::ops::Deref;
+
 use crate::repository::branch::upstream::UpstreamState;
-use crate::repository::cell::{Cell, Retain};
 use crate::repository::node_reference::NodeReference;
-use crate::repository::remote::RemoteName;
 use crate::repository::revision::Revision;
+
+pub use reference::RemoteBranchReference;
 
 /// A loaded remote branch.
 ///
-/// Holds a local cache of the remote revision and the connection info
-/// needed to fetch from / publish to the remote.
+/// Wraps a [`RemoteBranchReference`] that has been resolved (the revision
+/// cell has been fetched from storage).
 #[derive(Debug, Clone)]
-pub struct RemoteBranch {
-    /// Local cache of the remote branch revision.
-    /// Path: `remote/{name}/branch/{branch}/revision`
-    pub(crate) revision: Cell<Revision>,
-
-    /// Remote address (site + subject).
-    pub(crate) address: Retain<RemoteAddress>,
-
-    /// The name of the remote this branch belongs to.
-    pub(crate) remote_name: RemoteName,
-}
+pub struct RemoteBranch(RemoteBranchReference);
 
 impl RemoteBranch {
-    /// The branch name, derived from the revision cell path.
-    pub fn name(&self) -> BranchName {
-        let cell_name = self.revision.name();
-        cell_name
-            .strip_prefix("branch/")
-            .and_then(|s| s.strip_suffix("/revision"))
-            .unwrap_or(cell_name)
-            .into()
-    }
-
-    /// The name of the remote this branch belongs to.
-    pub fn remote_name(&self) -> RemoteName {
-        self.remote_name.clone()
-    }
-
-    /// The cached remote revision, if fetched.
-    pub fn revision(&self) -> Option<Revision> {
-        self.revision.get()
-    }
-
-    /// The remote address.
-    pub fn address(&self) -> RemoteAddress {
-        self.address.get().clone()
+    /// Create from a resolved reference.
+    pub fn new(reference: RemoteBranchReference) -> Self {
+        Self(reference)
     }
 
     /// Fetch the latest revision from the remote.
@@ -64,10 +36,18 @@ impl RemoteBranch {
     }
 }
 
+impl Deref for RemoteBranch {
+    type Target = RemoteBranchReference;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 impl From<&RemoteBranch> for UpstreamState {
     fn from(rb: &RemoteBranch) -> Self {
         UpstreamState::Remote {
-            name: rb.remote_name(),
+            name: rb.repository.site().name(),
             branch: rb.name(),
             tree: NodeReference::default(),
         }

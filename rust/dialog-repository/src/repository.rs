@@ -24,8 +24,6 @@ mod load;
 pub mod memory;
 /// Node reference type for tree root hashes.
 pub mod node_reference;
-/// Occurence logical timestamp type.
-pub mod occurence;
 /// Command to open (load-or-create) a repository.
 mod open;
 /// Remote site / repository / branch cursor hierarchy.
@@ -302,10 +300,10 @@ mod tests {
             .create(test_site_address())
             .perform(&operator)
             .await?;
-        assert_eq!(site.name(), "origin");
+        assert_eq!(site.site().name(), "origin");
 
         let loaded = repo.remote("origin").load().perform(&operator).await?;
-        assert_eq!(loaded.name(), "origin");
+        assert_eq!(loaded.site().name(), "origin");
         assert_eq!(loaded.address().site(), &test_site_address());
 
         Ok(())

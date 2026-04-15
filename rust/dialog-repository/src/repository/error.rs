@@ -3,7 +3,6 @@ use dialog_effects::memory::MemoryError;
 use dialog_effects::storage::StorageError;
 use dialog_storage::DialogStorageError;
 use serde::{Deserialize, Serialize};
-use std::fmt::{Display, Formatter, Result as FmtResult};
 use thiserror::Error;
 
 use super::branch::BranchName;
@@ -79,13 +78,6 @@ pub enum RepositoryError {
     },
 }
 
-impl RepositoryError {
-    /// Create a new storage error
-    pub fn storage_error(capability: OperationKind, cause: DialogStorageError) -> Self {
-        RepositoryError::StorageError(format!("{}: {:?}", capability, cause))
-    }
-}
-
 impl From<StorageError> for RepositoryError {
     fn from(e: StorageError) -> Self {
         Self::StorageError(e.to_string())
@@ -107,35 +99,5 @@ impl From<MemoryError> for RepositoryError {
 impl From<DialogStorageError> for RepositoryError {
     fn from(e: DialogStorageError) -> Self {
         Self::StorageError(e.to_string())
-    }
-}
-
-/// Identifies which operation failed when a storage error occurs.
-/// Used in [`RepositoryError::StorageError`] to provide context about where the failure happened.
-#[derive(Error, Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum OperationKind {
-    /// Failed while resolving a branch by name
-    ResolveBranch,
-    /// Failed while resolving a revision
-    ResolveRevision,
-    /// Failed while updating a revision
-    UpdateRevision,
-
-    /// Failed during archive operation
-    ArchiveError,
-
-    /// Failed during encoding operation
-    EncodeError,
-}
-
-impl Display for OperationKind {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        match self {
-            OperationKind::ResolveBranch => write!(f, "ResolveBranch"),
-            OperationKind::ResolveRevision => write!(f, "ResolveRevision"),
-            OperationKind::UpdateRevision => write!(f, "UpdateRevision"),
-            OperationKind::ArchiveError => write!(f, "ArchiveError"),
-            OperationKind::EncodeError => write!(f, "EncodeError"),
-        }
     }
 }

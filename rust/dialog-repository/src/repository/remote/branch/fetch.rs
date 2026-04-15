@@ -24,7 +24,8 @@ pub struct Fetch<'a> {
 }
 
 impl<'a> Fetch<'a> {
-    pub(super) fn new(branch: &'a RemoteBranch) -> Self {
+    /// Create a new fetch command.
+    pub fn new(branch: &'a RemoteBranch) -> Self {
         Self { branch }
     }
 
@@ -38,15 +39,9 @@ impl<'a> Fetch<'a> {
     {
         let address = self.branch.address();
         let subject = Subject::from(address.subject.clone());
-        let branch_name = self
-            .branch
-            .revision
-            .name()
-            .strip_prefix("branch/")
-            .and_then(|s| s.strip_suffix("/revision"))
-            .unwrap_or("");
-
-        let cell_cap = subject.branch(branch_name).cell_capability("revision");
+        let cell_cap = subject
+            .branch(self.branch.name())
+            .cell_capability("revision");
 
         let revision = match address.address {
             SiteAddressEnum::S3(ref addr) => resolve_remote(&cell_cap, addr, env).await?,

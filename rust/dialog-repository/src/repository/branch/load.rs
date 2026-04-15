@@ -14,7 +14,8 @@ pub struct LoadBranch {
 }
 
 impl LoadBranch {
-    pub(crate) fn new(branch: BranchReference) -> Self {
+    /// Create from a branch reference.
+    pub fn new(branch: BranchReference) -> Self {
         Self { branch }
     }
 
@@ -36,7 +37,7 @@ impl LoadBranch {
         upstream.resolve(env).await?;
 
         Ok(Branch {
-            memory: self.branch,
+            reference: self.branch,
             revision,
             upstream,
         })
