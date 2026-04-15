@@ -13,8 +13,8 @@ use super::Branch;
 use super::Index;
 use super::state::UpstreamState;
 use crate::DialogArtifactsError;
+use crate::repository::archive::local::LocalIndex;
 use crate::repository::archive::networked::NetworkedIndex;
-use crate::repository::archive::store::LocalIndex;
 use crate::repository::node_reference::NodeReference;
 use crate::repository::revision::Revision;
 

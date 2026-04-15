@@ -51,7 +51,6 @@ impl<'a> Fetch<'a> {
 
         let revision = match address.address {
             SiteAddressEnum::S3(ref addr) => resolve_remote(&cell_cap, addr, env).await?,
-            #[cfg(feature = "ucan")]
             SiteAddressEnum::Ucan(ref addr) => resolve_remote(&cell_cap, addr, env).await?,
         };
 

@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! repo.remote("origin").load().perform(&env)  → RemoteRepository
-//!   └── .branch("main")                    → RemoteBranchSelector
+//!   └── .branch("main")                    → RemoteBranchReference
 //! ```
 
 /// Serializable remote address configuration.
@@ -17,14 +17,14 @@ mod create;
 mod load;
 /// Remote name newtype.
 pub mod name;
+/// Selectors for navigating remote sites, repositories, and branches.
+mod reference;
 /// Remote repository cursor.
 pub mod repository;
-/// Selectors for navigating remote sites, repositories, and branches.
-mod selector;
 
 pub use address::*;
 pub use create::*;
 pub use load::*;
 pub use name::*;
+pub use reference::*;
 pub use repository::RemoteRepository;
-pub use selector::*;

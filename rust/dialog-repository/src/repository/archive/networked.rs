@@ -9,7 +9,7 @@ use dialog_storage::{Blake3Hash, ContentAddressedStorage, DialogStorageError, En
 use serde::{Serialize, de::DeserializeOwned};
 use std::fmt::Debug;
 
-use super::store::LocalIndex;
+use super::local::LocalIndex;
 use crate::SiteAddress as SiteAddressEnum;
 use crate::repository::remote::RemoteRepository;
 
@@ -87,7 +87,6 @@ where
                     .perform(env)
                     .await
             }
-            #[cfg(feature = "ucan")]
             SiteAddressEnum::Ucan(ref addr) => {
                 remote_catalog
                     .clone()

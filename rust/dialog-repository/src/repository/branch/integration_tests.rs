@@ -328,14 +328,11 @@ async fn it_two_party_convergence(s3: S3Address) -> anyhow::Result<()> {
 
 // UCAN integration tests
 
-#[cfg(feature = "ucan")]
 use dialog_remote_ucan_s3::UcanAddress;
-#[cfg(feature = "ucan")]
 use dialog_remote_ucan_s3::helpers::UcanS3Address;
 
 /// Alice creates a repo, delegates to Bob, Bob pulls, commits, pushes,
 /// then Alice pulls Bob's changes.
-#[cfg(feature = "ucan")]
 #[dialog_common::test]
 async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> anyhow::Result<()> {
     // Alice: create profile, operator, repo
@@ -497,7 +494,6 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> anyhow::Res
 }
 
 /// Push and pull via UCAN access service.
-#[cfg(feature = "ucan")]
 #[dialog_common::test]
 async fn it_pushes_and_pulls_via_ucan(ucan: UcanS3Address) -> anyhow::Result<()> {
     let (operator, profile) = test_operator_with_profile().await;

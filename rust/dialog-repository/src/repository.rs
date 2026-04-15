@@ -569,7 +569,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "ucan")]
     mod delegation_tests {
         use super::*;
         use crate::helpers::{test_operator_with_profile, unique_name};

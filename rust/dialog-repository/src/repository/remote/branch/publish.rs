@@ -55,7 +55,6 @@ impl<'a> Publish<'a> {
             SiteAddressEnum::S3(ref addr) => {
                 publish_remote(&cell_cap, addr, &self.revision, env).await?;
             }
-            #[cfg(feature = "ucan")]
             SiteAddressEnum::Ucan(ref addr) => {
                 publish_remote(&cell_cap, addr, &self.revision, env).await?;
             }

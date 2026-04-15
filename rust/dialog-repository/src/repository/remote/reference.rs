@@ -12,12 +12,12 @@ use crate::{RemoteName, Repository};
 ///
 /// Wraps a [`RemoteMemory`] (scoped to `remote/{name}`) and the
 /// repository's default subject DID.
-pub struct RemoteSelector {
+pub struct RemoteReference {
     remote_memory: RemoteMemory,
     subject: Did,
 }
 
-impl RemoteSelector {
+impl RemoteReference {
     /// Create a new remote selector.
     pub(crate) fn new(remote_memory: RemoteMemory, subject: Did) -> Self {
         // pub(crate): constructed by Repository::remote() and Branch::remote()
@@ -51,9 +51,9 @@ impl<C: Principal> Repository<C> {
     /// Get a remote reference for the given name.
     ///
     /// Call `.create(address)` or `.load()` on the returned reference.
-    pub fn remote(&self, name: impl Into<RemoteName>) -> RemoteSelector {
+    pub fn remote(&self, name: impl Into<RemoteName>) -> RemoteReference {
         let name = name.into();
         let space = self.memory().space(&format!("remote/{}", name.as_str()));
-        RemoteSelector::new(RemoteMemory::from(space), self.did())
+        RemoteReference::new(RemoteMemory::from(space), self.did())
     }
 }

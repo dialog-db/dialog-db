@@ -6,7 +6,7 @@ use std::fmt::{Debug, Formatter, Result as FmtResult};
 
 use dialog_artifacts::Datum;
 
-use crate::repository::RemoteSelector;
+use crate::repository::RemoteReference;
 use crate::{Key, State};
 
 /// Branch state, identifiers, and upstream descriptors.
@@ -23,14 +23,14 @@ mod novelty;
 mod open;
 mod pull;
 mod push;
+mod reference;
 mod reset;
 mod select;
-mod selector;
 mod set_upstream;
 
 pub use load::LoadBranch;
 pub use open::OpenBranch;
-pub use selector::*;
+pub use reference::*;
 
 use super::archive::Archive;
 use super::cell::Cell;
@@ -101,9 +101,9 @@ impl Branch {
     }
 
     /// Get a remote reference by name.
-    pub fn remote(&self, name: impl Into<super::remote::RemoteName>) -> RemoteSelector {
+    pub fn remote(&self, name: impl Into<super::remote::RemoteName>) -> RemoteReference {
         let name = name.into();
         let space = self.memory.space(&format!("remote/{}", name.as_str()));
-        RemoteSelector::new(RemoteMemory::from(space), self.subject.clone())
+        RemoteReference::new(RemoteMemory::from(space), self.subject.clone())
     }
 }

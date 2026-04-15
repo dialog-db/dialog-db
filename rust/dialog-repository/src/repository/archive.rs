@@ -4,10 +4,10 @@
 //! - [`store`] -- local CAS adapter for prolly tree storage
 //! - [`networked`] -- CAS adapter with transparent remote replication
 
+/// Local CAS adapter bridging capabilities with prolly tree's ContentAddressedStorage.
+pub mod local;
 /// Networked index: local reads with remote fallback and caching.
 pub mod networked;
-/// Local CAS adapter bridging capabilities with prolly tree's ContentAddressedStorage.
-pub mod store;
 
 use dialog_capability::{Capability, Subject};
 use dialog_effects::archive as fx;

@@ -9,7 +9,6 @@ use std::mem;
 
 use dialog_capability::Did;
 use dialog_remote_s3::Address;
-#[cfg(feature = "ucan")]
 use dialog_remote_ucan_s3::UcanAddress;
 
 /// Connection info for a remote site.
@@ -20,7 +19,6 @@ pub enum SiteAddress {
     /// Direct S3 access.
     S3(Address),
     /// UCAN-based authorization via external access service.
-    #[cfg(feature = "ucan")]
     Ucan(UcanAddress),
 }
 
@@ -30,7 +28,6 @@ impl From<Address> for SiteAddress {
     }
 }
 
-#[cfg(feature = "ucan")]
 impl From<UcanAddress> for SiteAddress {
     fn from(addr: UcanAddress) -> Self {
         Self::Ucan(addr)
@@ -42,7 +39,6 @@ impl Hash for SiteAddress {
         mem::discriminant(self).hash(state);
         match self {
             Self::S3(addr) => addr.hash(state),
-            #[cfg(feature = "ucan")]
             Self::Ucan(c) => c.hash(state),
         }
     }

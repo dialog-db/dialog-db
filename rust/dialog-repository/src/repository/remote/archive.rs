@@ -90,7 +90,6 @@ where
             SiteAddressEnum::S3(ref addr) => {
                 upload_to(self.nodes, local_catalog, remote_catalog, addr, env).await
             }
-            #[cfg(feature = "ucan")]
             SiteAddressEnum::Ucan(ref addr) => {
                 upload_to(self.nodes, local_catalog, remote_catalog, addr, env).await
             }

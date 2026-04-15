@@ -9,14 +9,12 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["s3", "ucan"]
+default = []
 helpers = ["dep:anyhow", "dialog-operator/helpers"]
 # Enable integration tests (tests with service provisioning)
 integration-tests = ["dialog-common/integration-tests"]
 # Enable web integration tests
 web-integration-tests = ["dialog-common/web-integration-tests"]
-s3 = ["dep:dialog-remote-s3", "dialog-operator/s3"]
-ucan = ["s3", "dep:dialog-remote-ucan-s3", "dep:dialog-ucan-core", "dep:dialog-ucan"]
 
 [dependencies]
 dialog-artifacts = { workspace = true }
@@ -25,10 +23,10 @@ dialog-common = { workspace = true }
 dialog-operator = { workspace = true }
 dialog-credentials = { workspace = true }
 dialog-effects = { workspace = true }
-dialog-ucan = { workspace = true, optional = true }
-dialog-ucan-core = { workspace = true, optional = true }
-dialog-remote-s3 = { workspace = true, optional = true }
-dialog-remote-ucan-s3 = { workspace = true, optional = true }
+dialog-ucan = { workspace = true }
+dialog-ucan-core = { workspace = true }
+dialog-remote-s3 = { workspace = true }
+dialog-remote-ucan-s3 = { workspace = true }
 dialog-storage = { workspace = true }
 dialog-prolly-tree = { workspace = true }
 dialog-varsig = { workspace = true }

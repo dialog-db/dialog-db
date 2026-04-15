@@ -1,6 +1,6 @@
 mod fetch;
 mod publish;
-mod selector;
+mod reference;
 
 use crate::RemoteAddress;
 use crate::repository::branch::state::{BranchName, UpstreamState};

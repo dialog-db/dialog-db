@@ -6,7 +6,7 @@ use dialog_storage::Blake3Hash;
 use futures_util::Stream;
 
 use super::Index;
-use crate::repository::archive::store::LocalIndex;
+use crate::repository::archive::local::LocalIndex;
 use crate::{DialogArtifactsError, Key, State};
 use dialog_artifacts::Datum;
 
