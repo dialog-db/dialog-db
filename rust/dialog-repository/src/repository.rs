@@ -12,8 +12,6 @@
 pub mod archive;
 /// Capability-based branch operations (command pattern).
 pub mod branch;
-/// Cell descriptor for typed memory cell operations.
-pub mod cell;
 /// Command to create a new repository.
 mod create;
 /// Repository error types.

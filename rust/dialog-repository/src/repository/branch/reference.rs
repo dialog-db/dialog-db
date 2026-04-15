@@ -4,7 +4,7 @@ use dialog_effects::memory::prelude::SpaceExt;
 
 use crate::repository::branch::name::BranchName;
 use crate::repository::branch::{LoadBranch, OpenBranch};
-use crate::repository::cell::Cell;
+use crate::repository::memory::Cell;
 
 /// A reference to a named branch within a repository's memory.
 ///

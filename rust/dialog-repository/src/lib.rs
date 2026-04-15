@@ -42,7 +42,7 @@ pub use repository::memory::MemoryExt;
 pub use repository::{
     Branch, BranchName, CreateRemote, CreateRepository, LoadBranch, LoadRemote, LoadRepository,
     OpenBranch, OpenRepository, RemoteAddress, RemoteName, RemoteReference, RemoteRepository,
-    Repository, RepositoryExt, SiteAddress, UpstreamState,
+    Repository, RepositoryError, RepositoryExt, SiteAddress, UpstreamState,
 };
 
 /// Test helpers for setting up profiles, operators, repositories, and test data.

@@ -4,7 +4,7 @@ use super::load::LoadRemoteBranch;
 use super::open::OpenRemoteBranch;
 use crate::RemoteAddress;
 use crate::repository::branch::BranchName;
-use crate::repository::cell::Cell;
+use crate::repository::memory::Cell;
 use crate::repository::remote::repository::RemoteRepository;
 use crate::repository::revision::Revision;
 

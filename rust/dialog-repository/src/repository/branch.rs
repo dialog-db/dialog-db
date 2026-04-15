@@ -34,7 +34,7 @@ pub use open::OpenBranch;
 pub use reference::BranchReference;
 
 use super::archive::Archive;
-use super::cell::Cell;
+use super::memory::Cell;
 
 use super::revision::Revision;
 pub use name::BranchName;

@@ -5,7 +5,7 @@ use dialog_varsig::Principal;
 
 use super::reference::RemoteReference;
 use crate::RemoteAddress;
-use crate::repository::cell::Retain;
+use crate::repository::memory::Retain;
 
 /// A loaded remote repository.
 ///

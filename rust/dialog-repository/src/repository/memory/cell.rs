@@ -7,7 +7,7 @@ use dialog_effects::memory;
 use dialog_storage::{CborEncoder, DialogStorageError, Encoder};
 use serde::{Serialize, de::DeserializeOwned};
 
-use super::RepositoryError;
+use crate::RepositoryError;
 
 /// Cached value paired with its edition, behind a shared lock.
 type SharedState<T> = Arc<RwLock<Option<(T, Vec<u8>)>>>;

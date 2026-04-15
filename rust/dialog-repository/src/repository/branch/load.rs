@@ -4,8 +4,8 @@ use dialog_effects::memory as memory_fx;
 use super::Branch;
 use super::reference::BranchReference;
 use super::upstream::UpstreamState;
-use crate::repository::cell::Cell;
 use crate::repository::error::RepositoryError;
+use crate::repository::memory::Cell;
 use crate::repository::revision::Revision;
 
 /// Command to load an existing branch, returning an error if not found.

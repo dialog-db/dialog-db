@@ -7,7 +7,7 @@ use super::create::CreateRemote;
 use super::load::LoadRemote;
 use crate::RemoteAddress;
 use crate::RemoteName;
-use crate::repository::cell::Cell;
+use crate::repository::memory::Cell;
 
 /// A reference to a named remote within a repository.
 ///

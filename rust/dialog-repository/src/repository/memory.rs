@@ -8,6 +8,9 @@ use super::branch::name::BranchName;
 use super::remote::RemoteName;
 use super::remote::RemoteReference;
 
+mod cell;
+pub use cell::*;
+
 /// Extension trait on [`Subject`] for repository memory navigation.
 ///
 /// Provides `.branch("name")` and `.remote("name")` methods that
