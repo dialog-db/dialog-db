@@ -24,7 +24,7 @@ impl OpenRemoteBranch {
     where
         Env: Provider<memory_fx::Resolve>,
     {
-        self.0.revision.resolve().perform(env).await?;
+        self.0.local.resolve().perform(env).await?;
         Ok(RemoteBranch::new(self.0))
     }
 }

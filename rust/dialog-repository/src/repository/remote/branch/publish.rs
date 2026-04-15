@@ -1,17 +1,15 @@
 //! Publish command for remote branches.
 
+use dialog_capability::Provider;
 use dialog_capability::fork::Fork;
-use dialog_capability::site::{Site, SiteAddress};
-use dialog_capability::{Capability, Provider, Subject};
 use dialog_common::ConditionalSync;
 use dialog_effects::memory as memory_fx;
 use dialog_remote_s3::S3;
 use dialog_remote_ucan_s3::UcanSite;
 
 use super::RemoteBranch;
-use crate::SiteAddress as SiteAddressEnum;
+use crate::SiteAddress;
 use crate::repository::error::RepositoryError;
-use crate::repository::memory::MemoryExt;
 use crate::repository::revision::Revision;
 
 /// Command to publish a revision to the remote.
@@ -40,63 +38,44 @@ impl<'a> Publish<'a> {
             + ConditionalSync,
     {
         let address = self.branch.address();
-        let subject = Subject::from(address.subject.clone());
-        let cell_cap = subject
-            .branch(self.branch.name())
-            .cell_capability("revision");
 
+        // First resolve remote to sync edition for CAS
         match address.address {
-            SiteAddressEnum::S3(ref addr) => {
-                publish_remote(&cell_cap, addr, &self.revision, env).await?;
+            SiteAddress::S3(ref addr) => {
+                self.branch.remote.resolve().fork(addr).perform(env).await?;
             }
-            SiteAddressEnum::Ucan(ref addr) => {
-                publish_remote(&cell_cap, addr, &self.revision, env).await?;
+            SiteAddress::Ucan(ref addr) => {
+                self.branch.remote.resolve().fork(addr).perform(env).await?;
+            }
+        }
+
+        // Publish to remote via fork
+        match address.address {
+            SiteAddress::S3(ref addr) => {
+                self.branch
+                    .remote
+                    .publish(self.revision.clone())
+                    .fork(addr)
+                    .perform(env)
+                    .await?;
+            }
+            SiteAddress::Ucan(ref addr) => {
+                self.branch
+                    .remote
+                    .publish(self.revision.clone())
+                    .fork(addr)
+                    .perform(env)
+                    .await?;
             }
         }
 
         // Update local cache
         self.branch
-            .revision
+            .local
             .publish(self.revision)
             .perform(env)
             .await?;
 
         Ok(())
     }
-}
-
-async fn publish_remote<A, Env>(
-    cell_cap: &Capability<memory_fx::Cell>,
-    address: &A,
-    revision: &Revision,
-    env: &Env,
-) -> Result<(), RepositoryError>
-where
-    A: SiteAddress,
-    A::Site: Site,
-    Env: Provider<Fork<A::Site, memory_fx::Resolve>>
-        + Provider<Fork<A::Site, memory_fx::Publish>>
-        + ConditionalSync,
-{
-    // Resolve to get current edition
-    let resolve_result: Option<memory_fx::Publication> = cell_cap
-        .clone()
-        .invoke(memory_fx::Resolve)
-        .fork(address)
-        .perform(env)
-        .await?;
-
-    let edition = resolve_result.map(|pub_data| pub_data.edition);
-
-    let content = serde_ipld_dagcbor::to_vec(revision)
-        .map_err(|e| RepositoryError::StorageError(format!("Failed to encode revision: {}", e)))?;
-
-    cell_cap
-        .clone()
-        .invoke(memory_fx::Publish::new(content, edition))
-        .fork(address)
-        .perform(env)
-        .await?;
-
-    Ok(())
 }

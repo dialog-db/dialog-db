@@ -1,18 +1,15 @@
 //! Fetch command for remote branches.
 
+use dialog_capability::Provider;
 use dialog_capability::fork::Fork;
-use dialog_capability::site::{Site, SiteAddress};
-use dialog_capability::{Capability, Provider, Subject};
 use dialog_common::ConditionalSync;
 use dialog_effects::memory as memory_fx;
 use dialog_remote_s3::S3;
 use dialog_remote_ucan_s3::UcanSite;
-use dialog_storage::{CborEncoder, Encoder};
 
 use super::RemoteBranch;
-use crate::SiteAddress as SiteAddressEnum;
+use crate::SiteAddress;
 use crate::repository::error::RepositoryError;
-use crate::repository::memory::MemoryExt;
 use crate::repository::revision::Revision;
 
 /// Command to fetch the latest revision from the remote.
@@ -38,51 +35,24 @@ impl<'a> Fetch<'a> {
             + ConditionalSync,
     {
         let address = self.branch.address();
-        let subject = Subject::from(address.subject.clone());
-        let cell_cap = subject
-            .branch(self.branch.name())
-            .cell_capability("revision");
 
-        let revision = match address.address {
-            SiteAddressEnum::S3(ref addr) => resolve_remote(&cell_cap, addr, env).await?,
-            SiteAddressEnum::Ucan(ref addr) => resolve_remote(&cell_cap, addr, env).await?,
-        };
+        // Resolve from remote via fork
+        match address.address {
+            SiteAddress::S3(ref addr) => {
+                self.branch.remote.resolve().fork(addr).perform(env).await?;
+            }
+            SiteAddress::Ucan(ref addr) => {
+                self.branch.remote.resolve().fork(addr).perform(env).await?;
+            }
+        }
+
+        let revision = self.branch.remote.get();
 
         // Update local cache
         if let Some(ref rev) = revision {
-            self.branch
-                .revision
-                .publish(rev.clone())
-                .perform(env)
-                .await?;
+            self.branch.local.publish(rev.clone()).perform(env).await?;
         }
 
         Ok(revision)
-    }
-}
-
-async fn resolve_remote<A, Env>(
-    cell_cap: &Capability<memory_fx::Cell>,
-    address: &A,
-    env: &Env,
-) -> Result<Option<Revision>, RepositoryError>
-where
-    A: SiteAddress,
-    A::Site: Site,
-    Env: Provider<Fork<A::Site, memory_fx::Resolve>> + ConditionalSync,
-{
-    let result: Option<memory_fx::Publication> = cell_cap
-        .clone()
-        .invoke(memory_fx::Resolve)
-        .fork(address)
-        .perform(env)
-        .await?;
-
-    match result {
-        None => Ok(None),
-        Some(publication) => {
-            let revision: Revision = CborEncoder.decode(&publication.content).await?;
-            Ok(Some(revision))
-        }
     }
 }
