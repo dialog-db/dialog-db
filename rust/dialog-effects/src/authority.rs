@@ -11,7 +11,7 @@
 //! [`Identify`] is an effect on `Subject` that returns the current
 //! `Capability<Operator>` chain.
 
-use dialog_capability::{Attenuation, Capability, Claim, Did, Effect, Subject};
+use dialog_capability::{Attenuation, Capability, Claim, Did, Effect, Policy, Subject};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -90,4 +90,31 @@ pub struct Identify;
 impl Effect for Identify {
     type Of = Subject;
     type Output = Result<Capability<Operator>, AuthorityError>;
+}
+
+/// Extension trait for `Capability<Operator>` providing convenient
+/// access to the authority chain fields.
+pub trait OperatorExt {
+    /// The operator DID (ephemeral session key).
+    fn did(&self) -> Did;
+
+    /// The profile DID from the authority chain.
+    fn profile(&self) -> &Did;
+
+    /// The optional account DID from the authority chain.
+    fn account(&self) -> &Option<Did>;
+}
+
+impl OperatorExt for Capability<Operator> {
+    fn did(&self) -> Did {
+        Operator::of(self).operator.clone()
+    }
+
+    fn profile(&self) -> &Did {
+        &Profile::of(self).profile
+    }
+
+    fn account(&self) -> &Option<Did> {
+        &Profile::of(self).account
+    }
 }

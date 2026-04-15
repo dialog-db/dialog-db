@@ -7,9 +7,7 @@ use super::S3;
 use crate::S3Error;
 use dialog_capability::access::AuthorizeError;
 use dialog_capability::site::SiteAddress;
-use dialog_capability::{
-    Ability, Capability, Constraint, Effect, Policy, Provider, SiteId, Subject,
-};
+use dialog_capability::{Capability, Provider, SiteId};
 use dialog_common::ConditionalSync;
 use dialog_effects::authority;
 use dialog_effects::credential::Secret;
@@ -135,29 +133,20 @@ impl Address {
 impl Address {
     /// Authorize a capability for execution at this S3 site.
     ///
-    /// Loads credentials from the secret store using the address hash as key.
-    pub async fn authorize<Fx, Env>(
+    /// Loads credentials from the secret store using the address id as key.
+    pub async fn authorize<Env>(
         &self,
-        capability: &Capability<Fx>,
+        operator: &Capability<authority::Operator>,
         env: &Env,
     ) -> Result<super::S3Authorization, AuthorizeError>
     where
-        Fx: Effect,
-        Fx::Of: Constraint,
-        Capability<Fx>: Ability,
-        Env: Provider<authority::Identify>
-            + Provider<dialog_effects::credential::Load<Secret>>
-            + ConditionalSync,
+        Env: Provider<dialog_effects::credential::Load<Secret>> + ConditionalSync,
     {
-        let authority = Subject::from(capability.subject().clone())
-            .invoke(authority::Identify)
-            .perform(env)
-            .await
-            .map_err(|e| AuthorizeError::Configuration(e.to_string()))?;
+        use authority::OperatorExt;
 
-        let profile_did = authority::Profile::of(&authority).profile.clone();
-
-        let secret: Secret = profile_did
+        let secret: Secret = operator
+            .profile()
+            .clone()
             .credential()
             .site(self)
             .load()
