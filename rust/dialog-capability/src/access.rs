@@ -345,6 +345,61 @@ where
     type Output = Result<P::Proof, AuthorizeError>;
 }
 
+/// Authorize effect — proves access and binds a signer in one step.
+///
+/// Like [`Prove`], but also binds a signer to produce a full
+/// [`Protocol::Authorization`] rather than an unsigned proof.
+/// The provider (typically the Operator) handles both the proof
+/// lookup and the signing internally.
+#[derive(Serialize, Deserialize, crate::Claim)]
+#[serde(bound(
+    serialize = "P::Access: Serialize",
+    deserialize = "P::Access: for<'a> Deserialize<'a>"
+))]
+pub struct Authorize<P: Protocol> {
+    /// The DID of the principal claiming access.
+    pub principal: Did,
+    /// The access being claimed.
+    pub access: P::Access,
+    /// Time range the authorization must cover.
+    pub duration: TimeRange,
+}
+
+impl<P: Protocol> Authorize<P> {
+    /// Create a new authorization request with unbounded duration.
+    pub fn new(by: Did, access: P::Access) -> Self {
+        Self {
+            principal: by,
+            access,
+            duration: TimeRange::unbounded(),
+        }
+    }
+
+    /// Constrain the authorization to a specific time range.
+    pub fn during(mut self, duration: TimeRange) -> Self {
+        self.duration = duration;
+        self
+    }
+}
+
+impl<P: Protocol> From<Authorize<P>> for Prove<P> {
+    fn from(authorize: Authorize<P>) -> Self {
+        Prove {
+            principal: authorize.principal,
+            access: authorize.access,
+            duration: authorize.duration,
+        }
+    }
+}
+
+impl<P: Protocol> crate::Effect for Authorize<P>
+where
+    P::Access: ConditionalSend + 'static,
+{
+    type Of = Access;
+    type Output = Result<P::Authorization, AuthorizeError>;
+}
+
 /// Retain effect — retains a delegation for future proof lookups.
 ///
 /// An [`Effect`](crate::Effect) on [`Access`]. The subject DID
