@@ -28,20 +28,11 @@ impl<'a> Publish<'a> {
     /// Execute the publish.
     pub async fn perform<Env>(self, env: &Env) -> Result<(), RepositoryError>
     where
-        Env: Provider<Fork<RemoteSite, memory_fx::Resolve>>
-            + Provider<Fork<RemoteSite, memory_fx::Publish>>
+        Env: Provider<Fork<RemoteSite, memory_fx::Publish>>
             + Provider<memory_fx::Publish>
             + ConditionalSync,
     {
         let address = &self.branch.address().address;
-
-        // Resolve remote to sync edition for CAS
-        self.branch
-            .remote
-            .resolve()
-            .fork(address)
-            .perform(env)
-            .await?;
 
         // Publish to remote via fork
         self.branch

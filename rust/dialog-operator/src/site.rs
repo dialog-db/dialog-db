@@ -16,11 +16,9 @@ use dialog_effects::credential::{Load, Secret};
 use dialog_remote_s3::{Address, S3Authorization, S3Claim};
 use dialog_remote_ucan_s3::{Ucan, UcanAddress, UcanAuthorization, UcanClaim};
 use serde::{Deserialize, Serialize};
-use std::hash::{Hash, Hasher};
-use std::mem;
 
 /// Connection info for a remote site.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SiteAddress {
     /// Direct S3 access.
     S3(Address),
@@ -37,16 +35,6 @@ impl From<Address> for SiteAddress {
 impl From<UcanAddress> for SiteAddress {
     fn from(addr: UcanAddress) -> Self {
         Self::Ucan(addr)
-    }
-}
-
-impl Hash for SiteAddress {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        mem::discriminant(self).hash(state);
-        match self {
-            Self::S3(addr) => addr.hash(state),
-            Self::Ucan(c) => c.hash(state),
-        }
     }
 }
 
