@@ -30,10 +30,12 @@ pub mod remote;
 pub mod revision;
 
 use dialog_capability::{Capability, Did, Subject};
+use dialog_credentials::Ed25519Signer;
 use dialog_credentials::credential::{Credential, SignerCredential};
 use dialog_effects::space as space_fx;
 use dialog_operator::profile::access::Access as ProfileAccess;
 use dialog_varsig::Principal;
+use memory::MemoryExt;
 
 pub use branch::*;
 pub use create::CreateRepository;
@@ -75,7 +77,6 @@ impl<C: Principal> Repository<C> {
     ///
     /// Call `.open()` or `.load()` on the returned reference.
     pub fn branch(&self, name: impl Into<branch::BranchName>) -> branch::BranchReference {
-        use memory::MemoryExt;
         self.subject().branch(name)
     }
 
@@ -83,7 +84,6 @@ impl<C: Principal> Repository<C> {
     ///
     /// Call `.create(address)` or `.load()` on the returned reference.
     pub fn remote(&self, name: impl Into<remote::RemoteName>) -> remote::RemoteReference {
-        use memory::MemoryExt;
         self.subject().remote(name)
     }
 }
@@ -144,8 +144,8 @@ impl TryFrom<Credential> for Repository<SignerCredential> {
     }
 }
 
-impl From<dialog_credentials::Ed25519Signer> for Repository<SignerCredential> {
-    fn from(signer: dialog_credentials::Ed25519Signer) -> Self {
+impl From<Ed25519Signer> for Repository<SignerCredential> {
+    fn from(signer: Ed25519Signer) -> Self {
         SignerCredential::from(signer).into()
     }
 }
@@ -187,8 +187,9 @@ mod tests {
 
     use super::*;
     use crate::helpers::{test_operator_with_profile, test_repo, unique_name};
-    use crate::{Artifact, Instruction};
+    use crate::{Artifact, ArtifactSelector, Instruction, Value};
     use dialog_remote_s3::Address as S3Address;
+    use futures_util::StreamExt;
     use futures_util::stream;
 
     fn test_site_address() -> SiteAddress {
@@ -272,7 +273,7 @@ mod tests {
         let artifact = Artifact {
             the: "user/name".parse()?,
             of: "user:123".parse()?,
-            is: crate::Value::String("Alice".to_string()),
+            is: Value::String("Alice".to_string()),
             cause: None,
         };
         let _hash = branch
@@ -373,9 +374,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_commits_and_selects_by_attribute() -> anyhow::Result<()> {
-        use crate::ArtifactSelector;
-        use futures_util::StreamExt;
-
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
 
@@ -385,19 +383,19 @@ mod tests {
             Instruction::Assert(Artifact {
                 the: "user/name".parse()?,
                 of: "user:1".parse()?,
-                is: crate::Value::String("Alice".into()),
+                is: Value::String("Alice".into()),
                 cause: None,
             }),
             Instruction::Assert(Artifact {
                 the: "user/email".parse()?,
                 of: "user:1".parse()?,
-                is: crate::Value::String("alice@example.com".into()),
+                is: Value::String("alice@example.com".into()),
                 cause: None,
             }),
             Instruction::Assert(Artifact {
                 the: "user/name".parse()?,
                 of: "user:2".parse()?,
-                is: crate::Value::String("Bob".into()),
+                is: Value::String("Bob".into()),
                 cause: None,
             }),
         ];
@@ -420,11 +418,11 @@ mod tests {
         assert_eq!(results.len(), 2, "should find 2 user/name artifacts");
         let names: Vec<_> = results.iter().map(|a| &a.is).collect();
         assert!(
-            names.contains(&&crate::Value::String("Alice".into())),
+            names.contains(&&Value::String("Alice".into())),
             "should contain Alice"
         );
         assert!(
-            names.contains(&&crate::Value::String("Bob".into())),
+            names.contains(&&Value::String("Bob".into())),
             "should contain Bob"
         );
 
@@ -433,9 +431,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_commits_and_selects_by_entity() -> anyhow::Result<()> {
-        use crate::ArtifactSelector;
-        use futures_util::StreamExt;
-
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
 
@@ -445,19 +440,19 @@ mod tests {
             Instruction::Assert(Artifact {
                 the: "user/name".parse()?,
                 of: "user:alice".parse()?,
-                is: crate::Value::String("Alice".into()),
+                is: Value::String("Alice".into()),
                 cause: None,
             }),
             Instruction::Assert(Artifact {
                 the: "user/name".parse()?,
                 of: "user:bob".parse()?,
-                is: crate::Value::String("Bob".into()),
+                is: Value::String("Bob".into()),
                 cause: None,
             }),
             Instruction::Assert(Artifact {
                 the: "user/email".parse()?,
                 of: "user:alice".parse()?,
-                is: crate::Value::String("alice@example.com".into()),
+                is: Value::String("alice@example.com".into()),
                 cause: None,
             }),
         ];
@@ -484,9 +479,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_selects_empty_branch() -> anyhow::Result<()> {
-        use crate::ArtifactSelector;
-        use futures_util::StreamExt;
-
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
 
@@ -509,9 +501,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_retracts_artifact() -> anyhow::Result<()> {
-        use crate::ArtifactSelector;
-        use futures_util::StreamExt;
-
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
 
@@ -520,7 +509,7 @@ mod tests {
         let artifact = Artifact {
             the: "user/name".parse()?,
             of: "user:1".parse()?,
-            is: crate::Value::String("Alice".into()),
+            is: Value::String("Alice".into()),
             cause: None,
         };
 

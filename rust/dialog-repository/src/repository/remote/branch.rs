@@ -9,6 +9,8 @@ use std::ops::Deref;
 use crate::repository::branch::upstream::UpstreamState;
 use crate::repository::node_reference::NodeReference;
 use crate::repository::revision::Revision;
+use fetch::Fetch;
+use publish::Publish;
 
 pub use reference::RemoteBranchReference;
 
@@ -26,13 +28,13 @@ impl RemoteBranch {
     }
 
     /// Fetch the latest revision from the remote.
-    pub fn fetch(&self) -> fetch::Fetch<'_> {
-        fetch::Fetch::new(self)
+    pub fn fetch(&self) -> Fetch<'_> {
+        Fetch::new(self)
     }
 
     /// Publish a revision to the remote.
-    pub fn publish(&self, revision: Revision) -> publish::Publish<'_> {
-        publish::Publish::new(self, revision)
+    pub fn publish(&self, revision: Revision) -> Publish<'_> {
+        Publish::new(self, revision)
     }
 }
 

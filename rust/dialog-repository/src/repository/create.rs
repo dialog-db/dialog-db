@@ -1,7 +1,9 @@
 use dialog_capability::{Capability, Provider};
 use dialog_common::ConditionalSync;
+use dialog_credentials::Ed25519Signer;
 use dialog_credentials::credential::{Credential, SignerCredential};
 use dialog_effects::space as space_fx;
+use dialog_effects::space::SpaceExt as _;
 
 use super::Repository;
 use super::error::RepositoryError;
@@ -21,9 +23,7 @@ impl CreateRepository {
     where
         Env: Provider<space_fx::Create> + ConditionalSync,
     {
-        use dialog_effects::space::SpaceExt as _;
-
-        let signer = dialog_credentials::Ed25519Signer::generate()
+        let signer = Ed25519Signer::generate()
             .await
             .map_err(|e| RepositoryError::StorageError(e.to_string()))?;
         let cred = Credential::Signer(SignerCredential::from(signer));

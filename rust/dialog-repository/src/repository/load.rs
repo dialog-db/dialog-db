@@ -1,6 +1,7 @@
 use dialog_capability::{Capability, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::space as space_fx;
+use dialog_effects::space::SpaceExt as _;
 
 use super::Repository;
 use super::error::RepositoryError;
@@ -17,8 +18,6 @@ impl LoadRepository {
     where
         Env: Provider<space_fx::Load> + ConditionalSync,
     {
-        use dialog_effects::space::SpaceExt as _;
-
         let credential = self.0.load().perform(env).await?;
         Ok(Repository::from(credential))
     }

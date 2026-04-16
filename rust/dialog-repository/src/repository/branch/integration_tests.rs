@@ -5,10 +5,12 @@
 
 use crate::SiteAddress;
 use crate::helpers::{test_operator_with_profile, unique_name};
+use crate::repository::branch::Branch;
 use crate::repository::branch::upstream::UpstreamState;
 use crate::repository::node_reference::NodeReference;
 use crate::repository::{Repository, RepositoryExt as _};
-use crate::{Artifact, ArtifactSelector, Instruction};
+use crate::{Artifact, ArtifactSelector, Instruction, Operator, Value};
+use dialog_credentials::SignerCredential;
 use dialog_operator::profile::Profile;
 use dialog_remote_s3::helpers::S3Address;
 use dialog_remote_s3::{Address as S3SiteAddress, S3Authorization, S3Credential};
@@ -25,14 +27,11 @@ fn s3_site_address(s3: &S3Address) -> S3SiteAddress {
 }
 
 async fn setup_repo_with_s3_remote(
-    operator: &crate::Operator<VolatileSpace>,
+    operator: &Operator<VolatileSpace>,
     profile: &Profile,
     s3: &S3Address,
     name: &str,
-) -> anyhow::Result<(
-    Repository<dialog_credentials::SignerCredential>,
-    super::Branch,
-)> {
+) -> anyhow::Result<(Repository<SignerCredential>, Branch)> {
     let repo = profile
         .repository(unique_name(name))
         .create()
@@ -72,7 +71,7 @@ async fn it_pushes_to_s3_remote(s3: S3Address) -> anyhow::Result<()> {
     let artifact = Artifact {
         the: "user/name".parse()?,
         of: "user:1".parse()?,
-        is: crate::Value::String("Alice".into()),
+        is: Value::String("Alice".into()),
         cause: None,
     };
     branch
@@ -94,7 +93,7 @@ async fn it_fetches_from_s3_remote(s3: S3Address) -> anyhow::Result<()> {
     let artifact = Artifact {
         the: "user/name".parse()?,
         of: "user:1".parse()?,
-        is: crate::Value::String("Alice".into()),
+        is: Value::String("Alice".into()),
         cause: None,
     };
     branch
@@ -118,7 +117,7 @@ async fn it_push_and_pull_roundtrip(s3: S3Address) -> anyhow::Result<()> {
     let artifact = Artifact {
         the: "user/name".parse()?,
         of: "user:1".parse()?,
-        is: crate::Value::String("Alice".into()),
+        is: Value::String("Alice".into()),
         cause: None,
     };
     branch
@@ -144,7 +143,7 @@ async fn it_pull_returns_none_when_no_changes(s3: S3Address) -> anyhow::Result<(
     let artifact = Artifact {
         the: "user/name".parse()?,
         of: "user:1".parse()?,
-        is: crate::Value::String("Alice".into()),
+        is: Value::String("Alice".into()),
         cause: None,
     };
     branch
@@ -175,7 +174,7 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> anyhow::Result
     let artifact = Artifact {
         the: "user/name".parse()?,
         of: "user:alice".parse()?,
-        is: crate::Value::String("Alice".into()),
+        is: Value::String("Alice".into()),
         cause: None,
     };
     alice_branch
@@ -223,7 +222,7 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> anyhow::Result
     assert_eq!(results.len(), 1, "Bob should have Alice's artifact");
     assert_eq!(
         results[0].is,
-        crate::Value::String("Alice".into()),
+        Value::String("Alice".into()),
         "artifact value should match"
     );
 
@@ -242,7 +241,7 @@ async fn it_two_party_convergence(s3: S3Address) -> anyhow::Result<()> {
         .commit(stream::iter(vec![Instruction::Assert(Artifact {
             the: "user/name".parse()?,
             of: "user:alice".parse()?,
-            is: crate::Value::String("Alice".into()),
+            is: Value::String("Alice".into()),
             cause: None,
         })]))
         .perform(&operator)
@@ -279,7 +278,7 @@ async fn it_two_party_convergence(s3: S3Address) -> anyhow::Result<()> {
         .commit(stream::iter(vec![Instruction::Assert(Artifact {
             the: "user/name".parse()?,
             of: "user:bob".parse()?,
-            is: crate::Value::String("Bob".into()),
+            is: Value::String("Bob".into()),
             cause: None,
         })]))
         .perform(&operator)
@@ -384,7 +383,7 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> anyhow::Res
         .commit(stream::iter(vec![Instruction::Assert(Artifact {
             the: "user/name".parse()?,
             of: "user:alice".parse()?,
-            is: crate::Value::String("Alice".into()),
+            is: Value::String("Alice".into()),
             cause: None,
         })]))
         .perform(&alice_operator)
@@ -460,7 +459,7 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> anyhow::Res
         .commit(stream::iter(vec![Instruction::Assert(Artifact {
             the: "user/name".parse()?,
             of: "user:bob".parse()?,
-            is: crate::Value::String("Bob".into()),
+            is: Value::String("Bob".into()),
             cause: None,
         })]))
         .perform(&bob_operator)
@@ -534,7 +533,7 @@ async fn it_pushes_and_pulls_via_ucan(ucan: UcanS3Address) -> anyhow::Result<()>
         .commit(stream::iter(vec![Instruction::Assert(Artifact {
             the: "user/name".parse()?,
             of: "user:ucan-test".parse()?,
-            is: crate::Value::String("UCAN User".into()),
+            is: Value::String("UCAN User".into()),
             cause: None,
         })]))
         .perform(&operator)
@@ -559,7 +558,7 @@ async fn it_pushes_and_pulls_via_ucan(ucan: UcanS3Address) -> anyhow::Result<()>
         .collect::<Result<Vec<_>, _>>()?;
 
     assert_eq!(results.len(), 1, "should have the pushed artifact");
-    assert_eq!(results[0].is, crate::Value::String("UCAN User".into()));
+    assert_eq!(results[0].is, Value::String("UCAN User".into()));
 
     Ok(())
 }
@@ -578,7 +577,7 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> anyhow::Re
         .commit(stream::iter(vec![Instruction::Assert(Artifact {
             the: "user/name".parse()?,
             of: "user:alice".parse()?,
-            is: crate::Value::String("Alice".into()),
+            is: Value::String("Alice".into()),
             cause: None,
         })]))
         .perform(&operator)
@@ -649,7 +648,7 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> anyhow::Re
         .collect::<Result<Vec<_>, _>>()?;
 
     assert_eq!(results.len(), 1, "should replicate and find Alice's data");
-    assert_eq!(results[0].is, crate::Value::String("Alice".into()));
+    assert_eq!(results[0].is, Value::String("Alice".into()));
 
     // Remove upstream (simulates remote going away) by pointing
     // at a non-existent local branch instead
@@ -677,7 +676,7 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> anyhow::Re
         1,
         "data should be available from local cache"
     );
-    assert_eq!(cached_results[0].is, crate::Value::String("Alice".into()));
+    assert_eq!(cached_results[0].is, Value::String("Alice".into()));
 
     Ok(())
 }
@@ -730,7 +729,7 @@ async fn it_delegates_and_pushes_to_s3(s3: S3Address) -> anyhow::Result<()> {
         .commit(stream::iter(vec![Instruction::Assert(Artifact {
             the: "user/name".parse()?,
             of: "user:delegated".parse()?,
-            is: crate::Value::String("Delegated Push".into()),
+            is: Value::String("Delegated Push".into()),
             cause: None,
         })]))
         .perform(&operator)
@@ -801,7 +800,7 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> anyhow::Result<(
         .commit(stream::iter(vec![Instruction::Assert(Artifact {
             the: "user/name".parse()?,
             of: "user:alice".parse()?,
-            is: crate::Value::String("Alice Delegated".into()),
+            is: Value::String("Alice Delegated".into()),
             cause: None,
         })]))
         .perform(&alice_operator)
@@ -865,10 +864,7 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> anyhow::Result<(
         .collect::<Result<Vec<_>, _>>()?;
 
     assert_eq!(results.len(), 1, "should have Alice's artifact");
-    assert_eq!(
-        results[0].is,
-        crate::Value::String("Alice Delegated".into())
-    );
+    assert_eq!(results[0].is, Value::String("Alice Delegated".into()));
 
     Ok(())
 }

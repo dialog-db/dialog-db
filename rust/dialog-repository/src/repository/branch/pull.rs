@@ -8,6 +8,7 @@ use dialog_effects::archive as archive_fx;
 use dialog_effects::authority;
 use dialog_effects::memory as memory_fx;
 use dialog_prolly_tree::{EMPT_TREE_HASH, Tree};
+use dialog_storage::{Blake3Hash, ContentAddressedStorage, DialogStorageError, Encoder};
 use futures_util::StreamExt;
 use std::collections::HashSet;
 
@@ -196,13 +197,9 @@ async fn three_way_merge<S>(
      ),
 ) -> Result<Option<Revision>, DialogArtifactsError>
 where
-    S: dialog_storage::ContentAddressedStorage<
-            Hash = dialog_storage::Blake3Hash,
-            Error = dialog_storage::DialogStorageError,
-        > + dialog_storage::Encoder<
-            Hash = dialog_storage::Blake3Hash,
-            Error = dialog_storage::DialogStorageError,
-        > + Clone
+    S: ContentAddressedStorage<Hash = Blake3Hash, Error = DialogStorageError>
+        + Encoder<Hash = Blake3Hash, Error = DialogStorageError>
+        + Clone
         + ConditionalSync,
 {
     let branch_base = branch
@@ -274,7 +271,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use crate::helpers::{test_operator_with_profile, test_repo};
-    use crate::{Artifact, Instruction};
+    use crate::{Artifact, Instruction, Value};
     use futures_util::stream;
 
     #[dialog_common::test]
@@ -286,7 +283,7 @@ mod tests {
         let artifact = Artifact {
             the: "user/name".parse()?,
             of: "user:seed".parse()?,
-            is: crate::Value::String("Seed".to_string()),
+            is: Value::String("Seed".to_string()),
             cause: None,
         };
         let _hash = main
@@ -311,7 +308,7 @@ mod tests {
             .commit(stream::iter(vec![Instruction::Assert(Artifact {
                 the: "user/name".parse()?,
                 of: "user:main".parse()?,
-                is: crate::Value::String("Main data".to_string()),
+                is: Value::String("Main data".to_string()),
                 cause: None,
             })]))
             .perform(&operator)
@@ -341,7 +338,7 @@ mod tests {
             .commit(stream::iter(vec![Instruction::Assert(Artifact {
                 the: "user/name".parse()?,
                 of: "user:main".parse()?,
-                is: crate::Value::String("Main data".to_string()),
+                is: Value::String("Main data".to_string()),
                 cause: None,
             })]))
             .perform(&operator)
@@ -353,7 +350,7 @@ mod tests {
             .commit(stream::iter(vec![Instruction::Assert(Artifact {
                 the: "user/email".parse()?,
                 of: "user:feature".parse()?,
-                is: crate::Value::String("feature@test.com".to_string()),
+                is: Value::String("feature@test.com".to_string()),
                 cause: None,
             })]))
             .perform(&operator)

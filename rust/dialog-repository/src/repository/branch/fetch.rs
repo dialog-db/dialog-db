@@ -92,7 +92,7 @@ mod tests {
     use crate::helpers::{test_operator_with_profile, test_repo};
     use crate::repository::branch::upstream::UpstreamState;
     use crate::repository::node_reference::NodeReference;
-    use crate::{Artifact, Instruction};
+    use crate::{Artifact, Instruction, Value};
     use futures_util::stream;
 
     #[dialog_common::test]
@@ -105,7 +105,7 @@ mod tests {
             .commit(stream::iter(vec![Instruction::Assert(Artifact {
                 the: "user/name".parse()?,
                 of: "user:main".parse()?,
-                is: crate::Value::String("Main data".to_string()),
+                is: Value::String("Main data".to_string()),
                 cause: None,
             })]))
             .perform(&operator)
@@ -139,7 +139,7 @@ mod tests {
             .commit(stream::iter(vec![Instruction::Assert(Artifact {
                 the: "user/name".parse()?,
                 of: "user:main".parse()?,
-                is: crate::Value::String("Main data".to_string()),
+                is: Value::String("Main data".to_string()),
                 cause: None,
             })]))
             .perform(&operator)

@@ -6,12 +6,13 @@ pub use dialog_operator::helpers::{
 use crate::Repository;
 use crate::repository::RepositoryExt as _;
 use dialog_credentials::Credential;
+use dialog_operator::Operator;
 use dialog_operator::profile::Profile;
 use dialog_storage::provider::storage::VolatileSpace;
 
 /// Create a test repository using the given operator and profile.
 pub async fn test_repo(
-    operator: &dialog_operator::Operator<VolatileSpace>,
+    operator: &Operator<VolatileSpace>,
     profile: &Profile,
 ) -> Repository<Credential> {
     profile

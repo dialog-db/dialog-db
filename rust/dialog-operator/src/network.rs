@@ -21,6 +21,7 @@ mod s3_dispatch {
     use async_trait::async_trait;
     use dialog_capability::fork::ForkInvocation;
     use dialog_capability::{Constraint, Effect, Provider};
+    use dialog_common::ConditionalSend;
     use dialog_remote_s3::S3;
 
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -29,7 +30,7 @@ mod s3_dispatch {
     where
         Fx: Effect + 'static,
         Fx::Of: Constraint,
-        ForkInvocation<S3, Fx>: dialog_common::ConditionalSend,
+        ForkInvocation<S3, Fx>: ConditionalSend,
         S3: Provider<ForkInvocation<S3, Fx>>,
     {
         async fn execute(&self, input: ForkInvocation<S3, Fx>) -> Fx::Output {
@@ -44,6 +45,7 @@ mod remote_dispatch {
     use async_trait::async_trait;
     use dialog_capability::fork::ForkInvocation;
     use dialog_capability::{Constraint, Effect, Provider};
+    use dialog_common::{ConditionalSend, ConditionalSync};
     use dialog_remote_s3::S3;
     use dialog_remote_ucan_s3::UcanSite;
 
@@ -51,11 +53,10 @@ mod remote_dispatch {
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     impl<Fx> Provider<ForkInvocation<RemoteSite, Fx>> for Network
     where
-        Fx: Effect + dialog_common::ConditionalSend + dialog_common::ConditionalSync + 'static,
-        Fx::Of:
-            Constraint<Capability: dialog_common::ConditionalSend + dialog_common::ConditionalSync>,
-        ForkInvocation<S3, Fx>: dialog_common::ConditionalSend,
-        ForkInvocation<UcanSite, Fx>: dialog_common::ConditionalSend,
+        Fx: Effect + ConditionalSend + ConditionalSync + 'static,
+        Fx::Of: Constraint<Capability: ConditionalSend + ConditionalSync>,
+        ForkInvocation<S3, Fx>: ConditionalSend,
+        ForkInvocation<UcanSite, Fx>: ConditionalSend,
         S3: Provider<ForkInvocation<S3, Fx>>,
         UcanSite: Provider<ForkInvocation<UcanSite, Fx>>,
     {
@@ -87,6 +88,7 @@ mod ucan_dispatch {
     use async_trait::async_trait;
     use dialog_capability::fork::ForkInvocation;
     use dialog_capability::{Constraint, Effect, Provider};
+    use dialog_common::ConditionalSend;
     use dialog_remote_ucan_s3::UcanSite;
 
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -95,7 +97,7 @@ mod ucan_dispatch {
     where
         Fx: Effect + 'static,
         Fx::Of: Constraint,
-        ForkInvocation<UcanSite, Fx>: dialog_common::ConditionalSend,
+        ForkInvocation<UcanSite, Fx>: ConditionalSend,
         UcanSite: Provider<ForkInvocation<UcanSite, Fx>>,
     {
         async fn execute(&self, input: ForkInvocation<UcanSite, Fx>) -> Fx::Output {

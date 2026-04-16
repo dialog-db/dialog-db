@@ -392,7 +392,7 @@ impl<P: Protocol> From<Authorize<P>> for Prove<P> {
     }
 }
 
-impl<P: Protocol> crate::Effect for Authorize<P>
+impl<P: Protocol> Effect for Authorize<P>
 where
     P::Access: ConditionalSend + 'static,
 {

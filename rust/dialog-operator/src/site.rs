@@ -7,19 +7,20 @@
 use dialog_capability::access::Authorize;
 use dialog_capability::access::AuthorizeError;
 use dialog_capability::fork::Acquire;
-use dialog_capability::site::{Site, SiteIssuer};
+use dialog_capability::site::{self, Site, SiteIssuer};
 use dialog_capability::{
     Ability, Capability, Constraint, Effect, ForkInvocation, Provider, SiteId,
 };
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::credential::{Load, Secret};
-use dialog_remote_s3::{Address, S3Claim};
-use dialog_remote_ucan_s3::{Ucan, UcanAddress, UcanClaim};
+use dialog_remote_s3::{Address, S3Authorization, S3Claim};
+use dialog_remote_ucan_s3::{Ucan, UcanAddress, UcanAuthorization, UcanClaim};
+use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 use std::mem;
 
 /// Connection info for a remote site.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SiteAddress {
     /// Direct S3 access.
     S3(Address),
@@ -58,7 +59,7 @@ impl From<SiteAddress> for SiteId {
     }
 }
 
-impl dialog_capability::SiteAddress for SiteAddress {
+impl site::SiteAddress for SiteAddress {
     type Site = RemoteSite;
 }
 
@@ -70,9 +71,9 @@ pub struct RemoteSite;
 #[derive(Debug, Clone)]
 pub enum RemoteAuthorization {
     /// S3 credentials.
-    S3(dialog_remote_s3::S3Authorization),
+    S3(S3Authorization),
     /// UCAN signed invocation.
-    Ucan(dialog_remote_ucan_s3::UcanAuthorization),
+    Ucan(UcanAuthorization),
 }
 
 /// Composite claim for remote authorization.

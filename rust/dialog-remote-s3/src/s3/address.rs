@@ -3,14 +3,14 @@
 //! This module provides the [`Address`] type for specifying S3-compatible storage locations.
 //! Use [`Address::builder`] to construct with validation.
 
-use super::S3;
+use super::{S3, S3Authorization, S3Claim};
 use crate::S3Error;
 use dialog_capability::access::AuthorizeError;
 use dialog_capability::site::SiteAddress;
-use dialog_capability::{Provider, SiteId};
+use dialog_capability::{Constraint, Effect, Provider, SiteId};
 use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_effects::credential::Secret;
 use dialog_effects::credential::prelude::*;
+use dialog_effects::credential::{Load, Secret};
 use serde::{Deserialize, Serialize};
 use url::{Host, Url};
 
@@ -145,19 +145,19 @@ use dialog_capability::fork::Acquire;
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Fx, Env> Acquire<Env> for super::S3Claim<Fx>
+impl<Fx, Env> Acquire<Env> for S3Claim<Fx>
 where
-    Fx: dialog_capability::Effect + ConditionalSend + ConditionalSync + 'static,
-    Fx::Of: dialog_capability::Constraint<Capability: ConditionalSend + ConditionalSync>,
-    Env: Provider<dialog_effects::credential::Load<Secret>> + ConditionalSync,
-    super::S3Claim<Fx>: ConditionalSend,
+    Fx: Effect + ConditionalSend + ConditionalSync + 'static,
+    Fx::Of: Constraint<Capability: ConditionalSend + ConditionalSync>,
+    Env: Provider<Load<Secret>> + ConditionalSync,
+    S3Claim<Fx>: ConditionalSend,
 {
-    type Site = super::S3;
+    type Site = S3;
     type Effect = Fx;
 
-    async fn perform(self, env: &Env) -> Result<ForkInvocation<super::S3, Fx>, AuthorizeError> {
+    async fn perform(self, env: &Env) -> Result<ForkInvocation<S3, Fx>, AuthorizeError> {
         // Destructure early to avoid holding non-Send Capability<Fx> across await
-        let super::S3Claim {
+        let S3Claim {
             capability,
             issuer,
             address,
@@ -171,7 +171,7 @@ where
                 .load()
                 .perform(env)
                 .await?;
-            super::S3Authorization::try_from(secret).map_err(AuthorizeError::from)?
+            S3Authorization::try_from(secret).map_err(AuthorizeError::from)?
         };
 
         Ok(ForkInvocation::new(capability, address, authorization))

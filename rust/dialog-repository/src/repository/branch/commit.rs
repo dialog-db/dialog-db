@@ -222,7 +222,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use crate::helpers::{test_operator_with_profile, test_repo};
-    use crate::{Artifact, ArtifactSelector, Instruction};
+    use crate::{Artifact, ArtifactSelector, Instruction, Value};
     use dialog_prolly_tree::EMPT_TREE_HASH;
     use futures_util::{StreamExt, stream};
 
@@ -235,7 +235,7 @@ mod tests {
         let artifact = Artifact {
             the: "user/name".parse()?,
             of: "user:123".parse()?,
-            is: crate::Value::String("Alice".to_string()),
+            is: Value::String("Alice".to_string()),
             cause: None,
         };
 

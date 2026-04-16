@@ -6,6 +6,9 @@
 //! No methods — all execution logic lives in [`Fork`](crate::fork::Fork)
 //! and [`Provider`](crate::Provider) impls.
 
+use std::fmt::{self, Display, Formatter};
+
+use crate::{Capability, Effect};
 use dialog_common::ConditionalSend;
 use dialog_varsig::Did;
 use serde::Serialize;
@@ -67,8 +70,8 @@ impl From<SiteId> for String {
     }
 }
 
-impl std::fmt::Display for SiteId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for SiteId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
     }
 }
@@ -102,5 +105,5 @@ pub trait Site: Clone + ConditionalSend + 'static {
     type Address: Serialize + DeserializeOwned + Clone + ConditionalSend + 'static;
 
     /// A claim bundles a capability + issuer + address, ready for authorization.
-    type Claim<Fx: crate::Effect>: From<(crate::Capability<Fx>, SiteIssuer, Self::Address)>;
+    type Claim<Fx: Effect>: From<(Capability<Fx>, SiteIssuer, Self::Address)>;
 }
