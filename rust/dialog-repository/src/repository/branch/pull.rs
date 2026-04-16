@@ -1,4 +1,5 @@
 use crate::repository::memory::MemoryExt;
+use crate::repository::remote::address::RemoteSite;
 use dialog_capability::Subject;
 use dialog_capability::fork::Fork;
 use dialog_capability::{Policy, Provider};
@@ -7,8 +8,6 @@ use dialog_effects::archive as archive_fx;
 use dialog_effects::authority;
 use dialog_effects::memory as memory_fx;
 use dialog_prolly_tree::{EMPT_TREE_HASH, Tree};
-use dialog_remote_s3::S3;
-use dialog_remote_ucan_s3::UcanSite;
 use futures_util::StreamExt;
 use std::collections::HashSet;
 
@@ -100,10 +99,8 @@ impl Pull<'_> {
             + Provider<memory_fx::Resolve>
             + Provider<memory_fx::Publish>
             + Provider<authority::Identify>
-            + Provider<Fork<S3, archive_fx::Get>>
-            + Provider<Fork<S3, memory_fx::Resolve>>
-            + Provider<Fork<UcanSite, archive_fx::Get>>
-            + Provider<Fork<UcanSite, memory_fx::Resolve>>
+            + Provider<Fork<RemoteSite, archive_fx::Get>>
+            + Provider<Fork<RemoteSite, memory_fx::Resolve>>
             + ConditionalSync
             + 'static,
     {

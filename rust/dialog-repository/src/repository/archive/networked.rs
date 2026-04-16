@@ -1,17 +1,15 @@
+use crate::repository::remote::address::RemoteSite;
 use async_trait::async_trait;
 use dialog_capability::fork::Fork;
 use dialog_capability::{Capability, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::prelude::{ArchiveExt, ArchiveSubjectExt, CatalogExt};
 use dialog_effects::archive::{Catalog, Get, Put};
-use dialog_remote_s3::S3;
-use dialog_remote_ucan_s3::UcanSite;
 use dialog_storage::{Blake3Hash, ContentAddressedStorage, DialogStorageError, Encoder};
 use serde::{Serialize, de::DeserializeOwned};
 use std::fmt::Debug;
 
 use super::local::LocalIndex;
-use crate::SiteAddress as SiteAddressEnum;
 use crate::repository::remote::RemoteRepository;
 
 /// Content-addressed index with on-demand remote replication.
@@ -50,12 +48,8 @@ impl<'a, Env> NetworkedIndex<'a, Env> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Env> ContentAddressedStorage for NetworkedIndex<'_, Env>
 where
-    Env: Provider<Get>
-        + Provider<Put>
-        + Provider<Fork<S3, Get>>
-        + Provider<Fork<UcanSite, Get>>
-        + ConditionalSync
-        + 'static,
+    Env:
+        Provider<Get> + Provider<Put> + Provider<Fork<RemoteSite, Get>> + ConditionalSync + 'static,
 {
     type Hash = Blake3Hash;
     type Error = DialogStorageError;
@@ -79,25 +73,13 @@ where
         let remote_catalog = address.subject.clone().archive().catalog("index");
 
         let env = self.local.env();
-        let remote_result = match address.address {
-            SiteAddressEnum::S3(ref addr) => {
-                remote_catalog
-                    .clone()
-                    .get(*hash)
-                    .fork(addr)
-                    .perform(env)
-                    .await
-            }
-            SiteAddressEnum::Ucan(ref addr) => {
-                remote_catalog
-                    .clone()
-                    .get(*hash)
-                    .fork(addr)
-                    .perform(env)
-                    .await
-            }
-        }
-        .map_err(|e| DialogStorageError::StorageBackend(e.to_string()))?;
+        let remote_result = remote_catalog
+            .clone()
+            .get(*hash)
+            .fork(&address.address)
+            .perform(env)
+            .await
+            .map_err(|e| DialogStorageError::StorageBackend(e.to_string()))?;
 
         match remote_result {
             Some(bytes) => {

@@ -1,20 +1,18 @@
 //! Remote archive operations -- upload blocks to remote storage.
 
+use super::address::RemoteSite;
 use dialog_capability::fork::Fork;
 use dialog_capability::{Capability, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::archive::prelude::{ArchiveExt, ArchiveSubjectExt, CatalogExt};
 use dialog_prolly_tree::Node;
-use dialog_remote_s3::S3;
-use dialog_remote_ucan_s3::UcanSite;
 use dialog_storage::Blake3Hash;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 
 use super::repository::RemoteRepository;
 use crate::repository::error::RepositoryError;
-use crate::{DialogArtifactsError, SiteAddress as SiteAddressEnum};
-use crate::{Key, State};
+use crate::{DialogArtifactsError, Key, State};
 use dialog_artifacts::Datum;
 
 /// Remote archive scoped to a remote repository.
@@ -67,29 +65,17 @@ impl RemoteGet<'_> {
     /// Execute the get operation.
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<Vec<u8>>, RepositoryError>
     where
-        Env: Provider<Fork<S3, archive_fx::Get>>
-            + Provider<Fork<UcanSite, archive_fx::Get>>
-            + ConditionalSync,
+        Env: Provider<Fork<RemoteSite, archive_fx::Get>> + ConditionalSync,
     {
-        let address = self.index.repository.address();
-        match address.address {
-            SiteAddressEnum::S3(ref addr) => Ok(self
-                .index
-                .catalog
-                .clone()
-                .get(self.hash)
-                .fork(addr)
-                .perform(env)
-                .await?),
-            SiteAddressEnum::Ucan(ref addr) => Ok(self
-                .index
-                .catalog
-                .clone()
-                .get(self.hash)
-                .fork(addr)
-                .perform(env)
-                .await?),
-        }
+        let address = &self.index.repository.address().address;
+        Ok(self
+            .index
+            .catalog
+            .clone()
+            .get(self.hash)
+            .fork(address)
+            .perform(env)
+            .await?)
     }
 }
 
@@ -104,31 +90,16 @@ impl RemotePut<'_> {
     /// Execute the put operation.
     pub async fn perform<Env>(self, env: &Env) -> Result<(), RepositoryError>
     where
-        Env: Provider<Fork<S3, archive_fx::Put>>
-            + Provider<Fork<UcanSite, archive_fx::Put>>
-            + ConditionalSync,
+        Env: Provider<Fork<RemoteSite, archive_fx::Put>> + ConditionalSync,
     {
-        let address = self.index.repository.address();
-        match address.address {
-            SiteAddressEnum::S3(ref addr) => {
-                self.index
-                    .catalog
-                    .clone()
-                    .put(self.hash, self.bytes)
-                    .fork(addr)
-                    .perform(env)
-                    .await?;
-            }
-            SiteAddressEnum::Ucan(ref addr) => {
-                self.index
-                    .catalog
-                    .clone()
-                    .put(self.hash, self.bytes)
-                    .fork(addr)
-                    .perform(env)
-                    .await?;
-            }
-        }
+        let address = &self.index.repository.address().address;
+        self.index
+            .catalog
+            .clone()
+            .put(self.hash, self.bytes)
+            .fork(address)
+            .perform(env)
+            .await?;
         Ok(())
     }
 }
@@ -171,8 +142,7 @@ where
     pub async fn perform<Env>(self, env: &Env) -> Result<(), RepositoryError>
     where
         Env: Provider<archive_fx::Get>
-            + Provider<Fork<S3, archive_fx::Put>>
-            + Provider<Fork<UcanSite, archive_fx::Put>>
+            + Provider<Fork<RemoteSite, archive_fx::Put>>
             + ConditionalSync,
     {
         let index = self.index;

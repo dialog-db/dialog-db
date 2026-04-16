@@ -1,11 +1,10 @@
 use crate::repository::memory::MemoryExt;
+use crate::repository::remote::address::RemoteSite;
 use dialog_capability::Provider;
 use dialog_capability::Subject;
 use dialog_capability::fork::Fork;
 use dialog_common::ConditionalSync;
 use dialog_effects::memory as memory_fx;
-use dialog_remote_s3::S3;
-use dialog_remote_ucan_s3::UcanSite;
 
 use super::Branch;
 use super::upstream::UpstreamState;
@@ -45,8 +44,7 @@ impl Fetch<'_> {
     where
         Env: Provider<memory_fx::Resolve>
             + Provider<memory_fx::Publish>
-            + Provider<Fork<S3, memory_fx::Resolve>>
-            + Provider<Fork<UcanSite, memory_fx::Resolve>>
+            + Provider<Fork<RemoteSite, memory_fx::Resolve>>
             + ConditionalSync,
     {
         let upstream =

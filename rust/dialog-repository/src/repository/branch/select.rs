@@ -1,4 +1,5 @@
 use crate::repository::memory::MemoryExt;
+use crate::repository::remote::address::RemoteSite;
 use dialog_capability::Subject;
 use dialog_capability::fork::Fork;
 use dialog_capability::{Capability, Provider};
@@ -6,8 +7,6 @@ use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
 use dialog_effects::memory as memory_fx;
 use dialog_prolly_tree::{EMPT_TREE_HASH, Entry, Tree};
-use dialog_remote_s3::S3;
-use dialog_remote_ucan_s3::UcanSite;
 use dialog_storage::{Blake3Hash, ContentAddressedStorage, DialogStorageError};
 use futures_util::Stream;
 use std::ops::Range;
@@ -58,10 +57,8 @@ impl Select<'_> {
         Env: Provider<archive_fx::Get>
             + Provider<archive_fx::Put>
             + Provider<memory_fx::Resolve>
-            + Provider<Fork<S3, archive_fx::Get>>
-            + Provider<Fork<S3, memory_fx::Resolve>>
-            + Provider<Fork<UcanSite, archive_fx::Get>>
-            + Provider<Fork<UcanSite, memory_fx::Resolve>>
+            + Provider<Fork<RemoteSite, archive_fx::Get>>
+            + Provider<Fork<RemoteSite, memory_fx::Resolve>>
             + ConditionalSync
             + 'static,
     {

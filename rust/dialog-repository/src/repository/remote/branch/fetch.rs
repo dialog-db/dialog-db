@@ -4,12 +4,10 @@ use dialog_capability::Provider;
 use dialog_capability::fork::Fork;
 use dialog_common::ConditionalSync;
 use dialog_effects::memory as memory_fx;
-use dialog_remote_s3::S3;
-use dialog_remote_ucan_s3::UcanSite;
 
 use super::RemoteBranch;
-use crate::SiteAddress;
 use crate::repository::error::RepositoryError;
+use crate::repository::remote::address::RemoteSite;
 use crate::repository::revision::Revision;
 
 /// Command to fetch the latest revision from the remote.
@@ -29,22 +27,16 @@ impl<'a> Fetch<'a> {
     /// Execute the fetch.
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, RepositoryError>
     where
-        Env: Provider<Fork<S3, memory_fx::Resolve>>
-            + Provider<Fork<UcanSite, memory_fx::Resolve>>
+        Env: Provider<Fork<RemoteSite, memory_fx::Resolve>>
             + Provider<memory_fx::Publish>
             + ConditionalSync,
     {
-        let address = self.branch.address();
-
-        // Resolve from remote via fork
-        match address.address {
-            SiteAddress::S3(ref addr) => {
-                self.branch.remote.resolve().fork(addr).perform(env).await?;
-            }
-            SiteAddress::Ucan(ref addr) => {
-                self.branch.remote.resolve().fork(addr).perform(env).await?;
-            }
-        }
+        self.branch
+            .remote
+            .resolve()
+            .fork(&self.branch.address().address)
+            .perform(env)
+            .await?;
 
         let revision = self.branch.remote.get();
 
