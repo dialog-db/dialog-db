@@ -89,18 +89,18 @@ where
     }
 }
 
-/// Pure site marker — declares types needed for remote execution.
-///
-/// No methods. Configuration (address) is carried by
-/// [`Fork`](crate::fork::Fork) at execution time.
-///
 /// Marker trait for remote execution targets.
 ///
-/// Associates an authorization type with an address type.
+/// Associates an authorization type, address type, and claim type.
+/// The claim type bundles a capability + issuer + address and knows
+/// how to authorize against an environment.
 pub trait Site: Clone + ConditionalSend + 'static {
     /// The authorization material for this site.
     type Authorization: ConditionalSend + 'static;
 
     /// The address type for this site.
     type Address: Serialize + DeserializeOwned + Clone + ConditionalSend + 'static;
+
+    /// A claim bundles a capability + issuer + address, ready for authorization.
+    type Claim<Fx: crate::Effect>: From<(crate::Capability<Fx>, SiteIssuer, Self::Address)>;
 }

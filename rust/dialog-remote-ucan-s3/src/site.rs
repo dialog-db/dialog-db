@@ -3,8 +3,11 @@
 use dialog_capability::access::{
     Access, Authorization as _, Authorize, AuthorizeError, FromCapability, Protocol,
 };
-use dialog_capability::site::{Site, SiteAddress};
-use dialog_capability::{Ability, Capability, Constraint, Effect, Provider, SiteId, Subject};
+use dialog_capability::fork::Acquire;
+use dialog_capability::site::{Site, SiteAddress, SiteIssuer};
+use dialog_capability::{
+    Ability, Capability, Constraint, Effect, ForkInvocation, Provider, SiteId, Subject,
+};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_remote_s3::{Permit, S3Error};
 
@@ -86,35 +89,56 @@ impl From<UcanAddress> for SiteId {
     }
 }
 
-use dialog_capability::SiteIssuer;
-use dialog_capability::fork::SiteAuthorization;
+/// Bundles a capability + issuer + address for UCAN authorization.
+pub struct UcanClaim<Fx: Effect> {
+    pub capability: Capability<Fx>,
+    pub issuer: SiteIssuer,
+    pub address: UcanAddress,
+}
+
+impl<Fx: Effect> From<(Capability<Fx>, SiteIssuer, UcanAddress)> for UcanClaim<Fx> {
+    fn from((capability, issuer, address): (Capability<Fx>, SiteIssuer, UcanAddress)) -> Self {
+        Self {
+            capability,
+            issuer,
+            address,
+        }
+    }
+}
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Env> SiteAuthorization<Env> for UcanAddress
+impl<Fx, Env> Acquire<Env> for UcanClaim<Fx>
 where
+    Fx: Effect + Clone + ConditionalSend + ConditionalSync + 'static,
+    Fx::Of: Constraint<Capability: ConditionalSend + ConditionalSync>,
+    Capability<Fx>: Ability + ConditionalSend + ConditionalSync,
     Env: Provider<Authorize<Ucan>> + ConditionalSync,
 {
-    async fn authorize<Fx: Effect + Clone + ConditionalSend + 'static>(
-        &self,
-        capability: &Capability<Fx>,
-        issuer: &SiteIssuer,
-        env: &Env,
-    ) -> Result<UcanAuthorization, AuthorizeError>
-    where
-        Fx::Of: Constraint,
-        Capability<Fx>: Ability + ConditionalSend + ConditionalSync,
-    {
-        let scope = <Ucan as Protocol>::Access::from_capability(capability);
+    type Site = UcanSite;
+    type Effect = Fx;
 
-        let authorization = Subject::from(issuer.profile.clone())
+    async fn perform(self, env: &Env) -> Result<ForkInvocation<UcanSite, Fx>, AuthorizeError> {
+        let UcanClaim {
+            capability,
+            issuer,
+            address,
+        } = self;
+
+        let scope = <Ucan as Protocol>::Access::from_capability(&capability);
+
+        let authorization = Subject::from(issuer.profile)
             .attenuate(Access)
-            .invoke(Authorize::<Ucan>::new(issuer.operator.clone(), scope))
+            .invoke(Authorize::<Ucan>::new(issuer.operator, scope))
             .perform(env)
             .await?;
 
         let invocation = authorization.invoke().await?;
-        Ok(UcanAuthorization::from(invocation))
+        Ok(ForkInvocation::new(
+            capability,
+            address,
+            UcanAuthorization::from(invocation),
+        ))
     }
 }
 
@@ -127,4 +151,5 @@ pub struct UcanSite;
 impl Site for UcanSite {
     type Authorization = UcanAuthorization;
     type Address = UcanAddress;
+    type Claim<Fx: Effect> = UcanClaim<Fx>;
 }

@@ -1,14 +1,14 @@
 //! Fork dispatch provider for Operator.
 //!
-//! Uses [`Fork::acquire`] with the address's [`SiteAuthorization`] implementation
-//! to obtain authorization, then performs the invocation against the network.
+//! Uses [`Fork::claim`] to bundle the issuer, then [`Acquire::perform`]
+//! to authorize and obtain a [`ForkInvocation`] for network execution.
 
 use crate::Operator;
 use crate::network::Network;
 
 use dialog_capability::access::AuthorizeError;
-use dialog_capability::fork::SiteAuthorization;
-use dialog_capability::{Effect, Provider};
+use dialog_capability::fork::Acquire;
+use dialog_capability::{Effect, Provider, SiteIssuer};
 use dialog_capability::{Fork, ForkInvocation, Site};
 use dialog_common::{ConditionalSend, ConditionalSync};
 
@@ -29,9 +29,8 @@ impl<A, At, Fx> Provider<Fork<At, Fx>> for Operator<A>
 where
     A: Clone + ConditionalSend + ConditionalSync + 'static,
     At: Site,
-    At::Address: SiteAuthorization<Self> + dialog_capability::SiteAddress<Site = At>,
-    Fx: Effect + Clone + ConditionalSend + ConditionalSync + 'static,
-    Fx::Of: dialog_capability::Constraint<Capability: ConditionalSend + ConditionalSync + 'static>,
+    At::Claim<Fx>: Acquire<Self, Site = At, Effect = Fx> + ConditionalSend,
+    Fx: Effect + 'static,
     Fx::Output: FromAuthError,
     Fork<At, Fx>: ConditionalSend,
     ForkInvocation<At, Fx>: ConditionalSend,
@@ -39,12 +38,12 @@ where
     Self: ConditionalSend + ConditionalSync,
 {
     async fn execute(&self, input: Fork<At, Fx>) -> Fx::Output {
-        let issuer = dialog_capability::SiteIssuer {
+        let issuer = SiteIssuer {
             operator: self.authority.operator_did(),
             profile: self.authority.profile_did(),
         };
 
-        match input.acquire(&issuer, self).await {
+        match input.claim(issuer).perform(self).await {
             Ok(invocation) => invocation.perform(&self.network).await,
             Err(e) => FromAuthError::from_auth_error(e),
         }

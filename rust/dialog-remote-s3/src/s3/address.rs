@@ -6,9 +6,8 @@
 use super::S3;
 use crate::S3Error;
 use dialog_capability::access::AuthorizeError;
-use dialog_capability::fork::SiteAuthorization;
 use dialog_capability::site::SiteAddress;
-use dialog_capability::{Capability, Provider, SiteId};
+use dialog_capability::{Provider, SiteId};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::credential::Secret;
 use dialog_effects::credential::prelude::*;
@@ -141,32 +140,41 @@ impl From<Address> for SiteId {
     }
 }
 
+use dialog_capability::ForkInvocation;
+use dialog_capability::fork::Acquire;
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Env> SiteAuthorization<Env> for Address
+impl<Fx, Env> Acquire<Env> for super::S3Claim<Fx>
 where
+    Fx: dialog_capability::Effect + ConditionalSend + ConditionalSync + 'static,
+    Fx::Of: dialog_capability::Constraint<Capability: ConditionalSend + ConditionalSync>,
     Env: Provider<dialog_effects::credential::Load<Secret>> + ConditionalSync,
+    super::S3Claim<Fx>: ConditionalSend,
 {
-    async fn authorize<Fx: dialog_capability::Effect + Clone + ConditionalSend + 'static>(
-        &self,
-        _capability: &Capability<Fx>,
-        issuer: &dialog_capability::SiteIssuer,
-        env: &Env,
-    ) -> Result<super::S3Authorization, AuthorizeError>
-    where
-        Fx::Of: dialog_capability::Constraint,
-        Capability<Fx>: dialog_capability::Ability + ConditionalSend + ConditionalSync,
-    {
-        let secret: Secret = issuer
-            .profile
-            .clone()
-            .credential()
-            .site(self)
-            .load()
-            .perform(env)
-            .await?;
+    type Site = super::S3;
+    type Effect = Fx;
 
-        secret.try_into().map_err(Into::into)
+    async fn perform(self, env: &Env) -> Result<ForkInvocation<super::S3, Fx>, AuthorizeError> {
+        // Destructure early to avoid holding non-Send Capability<Fx> across await
+        let super::S3Claim {
+            capability,
+            issuer,
+            address,
+        } = self;
+
+        let authorization = {
+            let secret: Secret = issuer
+                .profile
+                .credential()
+                .site(&address)
+                .load()
+                .perform(env)
+                .await?;
+            super::S3Authorization::try_from(secret).map_err(AuthorizeError::from)?
+        };
+
+        Ok(ForkInvocation::new(capability, address, authorization))
     }
 }
 

@@ -8,8 +8,8 @@ use crate::access::AuthorizeError;
 use crate::command::Command;
 use crate::effect::Effect;
 use crate::site::Site;
-use crate::{Ability, Capability, Constraint, Provider, SiteAddress, SiteIssuer};
-use dialog_common::{ConditionalSend, ConditionalSync};
+use crate::{Ability, Capability, Constraint, Provider, SiteIssuer};
+use dialog_common::ConditionalSend;
 use std::marker::PhantomData;
 
 /// Fork pairs a capability with a site address for remote execution.
@@ -142,48 +142,34 @@ where
     Fx: Effect,
     Fx::Of: Constraint,
 {
-    /// SiteAuthorization authorization for this fork, producing a [`ForkInvocation`].
+    /// Bundle this fork with an issuer, producing a claim ready for authorization.
     ///
-    /// Calls the address's authorize method to obtain site-specific
-    /// authorization material, then wraps everything into a
-    /// [`ForkInvocation`] ready for execution against the network.
-    pub async fn acquire<Env>(
-        self,
-        issuer: &SiteIssuer,
-        env: &Env,
-    ) -> Result<ForkInvocation<S, Fx>, AuthorizeError>
-    where
-        S::Address: SiteAuthorization<Env> + SiteAddress<Site = S>,
-        Fx: Clone + ConditionalSend + 'static,
-        Capability<Fx>: Ability + ConditionalSend + dialog_common::ConditionalSync,
-    {
+    /// Call `.perform(&env)` on the returned claim to authorize and get a
+    /// [`ForkInvocation`].
+    pub fn claim(self, issuer: SiteIssuer) -> S::Claim<Fx> {
         let (capability, address) = self.into_parts();
-        let authorization = address.authorize(&capability, issuer, env).await?;
-        Ok(ForkInvocation::new(capability, address, authorization))
+        (capability, issuer, address).into()
     }
 }
 
-/// Trait for addresses that can authorize a capability for remote execution.
+/// Trait for claims that can authorize against an environment.
 ///
-/// Each address type implements this with its own authorization logic:
-/// credential-based sites load secrets, capability-based sites build
-/// signed proof chains.
-///
-/// The `Site` type is inferred from the [`SiteAddress`] supertrait.
+/// Implemented by each site's claim type (e.g., `S3Claim`, `UcanClaim`).
+/// The claim bundles capability + issuer + address and knows how to
+/// obtain authorization material from the environment.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-pub trait SiteAuthorization<Env>: SiteAddress {
-    /// Obtain authorization material for executing the given capability
-    /// at this address.
-    async fn authorize<Fx: Effect + Clone + ConditionalSend + 'static>(
-        &self,
-        capability: &Capability<Fx>,
-        issuer: &SiteIssuer,
+pub trait Acquire<Env> {
+    /// The site type this claim authorizes for.
+    type Site: Site;
+    /// The effect type this claim was created for.
+    type Effect: Effect;
+
+    /// Authorize and produce a [`ForkInvocation`].
+    async fn perform(
+        self,
         env: &Env,
-    ) -> Result<<<Self as SiteAddress>::Site as Site>::Authorization, AuthorizeError>
-    where
-        Fx::Of: Constraint,
-        Capability<Fx>: Ability + ConditionalSend + ConditionalSync;
+    ) -> Result<ForkInvocation<Self::Site, Self::Effect>, AuthorizeError>;
 }
 
 /// Error during fork execution.

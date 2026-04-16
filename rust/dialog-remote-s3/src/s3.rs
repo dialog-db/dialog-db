@@ -20,7 +20,8 @@ pub use credential::S3Credential;
 pub use invocation::S3Invocation;
 pub use permit::Permit;
 
-use dialog_capability::site::Site;
+use dialog_capability::site::{Site, SiteIssuer};
+use dialog_capability::{Capability, Effect};
 
 /// S3 direct-access site.
 ///
@@ -28,9 +29,30 @@ use dialog_capability::site::Site;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct S3;
 
+/// Bundles a capability + issuer + address for S3 authorization.
+pub struct S3Claim<Fx: Effect> {
+    /// The capability being authorized.
+    pub capability: Capability<Fx>,
+    /// The issuer requesting authorization.
+    pub issuer: SiteIssuer,
+    /// The S3 address to authorize against.
+    pub address: Address,
+}
+
+impl<Fx: Effect> From<(Capability<Fx>, SiteIssuer, Address)> for S3Claim<Fx> {
+    fn from((capability, issuer, address): (Capability<Fx>, SiteIssuer, Address)) -> Self {
+        Self {
+            capability,
+            issuer,
+            address,
+        }
+    }
+}
+
 impl Site for S3 {
     type Authorization = S3Authorization;
     type Address = Address;
+    type Claim<Fx: Effect> = S3Claim<Fx>;
 }
 
 #[cfg(test)]
