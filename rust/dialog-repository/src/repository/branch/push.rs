@@ -10,6 +10,7 @@ use dialog_effects::memory as memory_fx;
 use super::Branch;
 use super::novelty::novelty;
 use super::upstream::UpstreamState;
+use crate::repository::archive::ArchiveExt as _;
 use crate::repository::error::RepositoryError;
 use crate::repository::revision::Revision;
 

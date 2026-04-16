@@ -1,4 +1,6 @@
-use dialog_capability::{Did, Subject};
+use dialog_capability::{Capability, Did, Subject};
+use dialog_effects::archive as archive_fx;
+use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_prolly_tree::{GeometricDistribution, Tree};
 use dialog_storage::Blake3Hash;
 
@@ -33,7 +35,6 @@ pub use load::LoadBranch;
 pub use open::OpenBranch;
 pub use reference::BranchReference;
 
-use super::archive::Archive;
 use super::memory::Cell;
 
 use super::revision::Revision;
@@ -84,7 +85,7 @@ impl Branch {
     }
 
     /// Archive capability for this branch's subject.
-    pub fn archive(&self) -> Archive {
-        Archive::new(Subject::from(self.subject().clone()))
+    pub fn archive(&self) -> Capability<archive_fx::Archive> {
+        Subject::from(self.subject().clone()).archive()
     }
 }

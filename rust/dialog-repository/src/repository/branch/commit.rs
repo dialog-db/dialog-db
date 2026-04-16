@@ -10,6 +10,7 @@ use futures_util::{Stream, StreamExt, TryStreamExt};
 use std::collections::HashSet;
 
 use super::{Branch, Index};
+use crate::repository::archive::ArchiveExt as _;
 use crate::repository::archive::local::LocalIndex;
 use crate::repository::node_reference::NodeReference;
 use crate::repository::revision::Revision;

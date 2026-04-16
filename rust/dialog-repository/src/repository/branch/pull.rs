@@ -16,6 +16,7 @@ use super::Branch;
 use super::Index;
 use super::upstream::UpstreamState;
 use crate::DialogArtifactsError;
+use crate::repository::archive::ArchiveExt as _;
 use crate::repository::archive::local::LocalIndex;
 use crate::repository::archive::networked::NetworkedIndex;
 use crate::repository::node_reference::NodeReference;

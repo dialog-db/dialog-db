@@ -5,6 +5,7 @@ use dialog_capability::fork::Fork;
 use dialog_capability::{Capability, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive as archive_fx;
+use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_effects::memory as memory_fx;
 use dialog_prolly_tree::{EMPT_TREE_HASH, Entry, Tree};
 use dialog_storage::{Blake3Hash, ContentAddressedStorage, DialogStorageError};
@@ -12,7 +13,7 @@ use futures_util::Stream;
 use std::ops::Range;
 
 use super::{Branch, Index};
-use crate::repository::archive::Archive;
+use crate::repository::archive::ArchiveExt as _;
 use crate::repository::archive::networked::NetworkedIndex;
 use crate::repository::branch::upstream::UpstreamState;
 use crate::{
@@ -42,7 +43,9 @@ impl<'a> Select<'a> {
     }
 
     fn catalog(&self) -> Capability<archive_fx::Catalog> {
-        Archive::new(Subject::from(self.branch.subject().clone())).index()
+        Subject::from(self.branch.subject().clone())
+            .archive()
+            .index()
     }
 }
 
