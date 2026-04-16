@@ -159,7 +159,7 @@ where
         let secret = self.credential.try_into().map_err(Into::into)?;
         self.did
             .credential()
-            .site(self.key.clone())
+            .site(&self.key)
             .save(secret)
             .perform(env)
             .await
@@ -186,7 +186,7 @@ where
         let secret = self
             .did
             .credential()
-            .site(self.key.clone())
+            .site(&self.key)
             .load()
             .perform(env)
             .await?;
