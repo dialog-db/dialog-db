@@ -13,6 +13,10 @@ use dialog_capability::{Fork, ForkInvocation, Site};
 use dialog_common::{ConditionalSend, ConditionalSync};
 
 /// Helper trait for effect outputs that can absorb authorization errors.
+///
+/// All our effects return `Result<T, E>` where `E: From<AuthorizeError>`.
+/// Enables converting authorization failures into effect-specific errors
+/// (e.g., `AuthorizeError` -> `ArchiveError::Authorization`).
 trait FromAuthError {
     fn from_auth_error(e: AuthorizeError) -> Self;
 }
@@ -27,13 +31,19 @@ impl<T, E: From<AuthorizeError>> FromAuthError for Result<T, E> {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<A, At, Fx> Provider<Fork<At, Fx>> for Operator<A>
 where
+    // Operator's storage provider type
     A: Clone + ConditionalSend + ConditionalSync + 'static,
     At: Site,
+    // Site's Claim bundles capability + issuer + address, then Acquire
+    // authorizes it into a ForkInvocation for the network layer.
     At::Claim<Fx>: Acquire<Self, Site = At, Effect = Fx> + ConditionalSend,
     Fx: Effect + 'static,
+    // Needed to flatten AuthorizeError into effect error via FromAuthError
     Fx::Output: FromAuthError,
+    // Required by async_trait for Send futures
     Fork<At, Fx>: ConditionalSend,
     ForkInvocation<At, Fx>: ConditionalSend,
+    // Network dispatches the authorized invocation to the site provider
     Network: Provider<ForkInvocation<At, Fx>> + ConditionalSync,
     Self: ConditionalSend + ConditionalSync,
 {
