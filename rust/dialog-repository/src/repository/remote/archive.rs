@@ -67,13 +67,13 @@ impl RemoteGet<'_> {
     where
         Env: Provider<Fork<RemoteSite, archive_fx::Get>> + ConditionalSync,
     {
-        let address = &self.index.repository.address().address;
+        let address = self.index.repository.address();
         Ok(self
             .index
             .catalog
             .clone()
             .get(self.hash)
-            .fork(address)
+            .fork(address.site())
             .perform(env)
             .await?)
     }
@@ -92,12 +92,12 @@ impl RemotePut<'_> {
     where
         Env: Provider<Fork<RemoteSite, archive_fx::Put>> + ConditionalSync,
     {
-        let address = &self.index.repository.address().address;
+        let address = self.index.repository.address();
         self.index
             .catalog
             .clone()
             .put(self.hash, self.bytes)
-            .fork(address)
+            .fork(address.site())
             .perform(env)
             .await?;
         Ok(())

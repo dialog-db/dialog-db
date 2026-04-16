@@ -32,13 +32,13 @@ impl<'a> Publish<'a> {
             + Provider<memory_fx::Publish>
             + ConditionalSync,
     {
-        let address = &self.branch.address().address;
+        let address = self.branch.repository.address();
 
         // Publish to remote via fork
         self.branch
             .remote
             .publish(self.revision.clone())
-            .fork(address)
+            .fork(address.site())
             .perform(env)
             .await?;
 

@@ -31,10 +31,11 @@ impl<'a> Fetch<'a> {
             + Provider<memory_fx::Publish>
             + ConditionalSync,
     {
+        let address = self.branch.repository.address();
         self.branch
             .remote
             .resolve()
-            .fork(&self.branch.address().address)
+            .fork(address.site())
             .perform(env)
             .await?;
 

@@ -4,8 +4,6 @@ use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_prolly_tree::{GeometricDistribution, Tree};
 use dialog_storage::Blake3Hash;
 
-use std::fmt::{Debug, Formatter, Result as FmtResult};
-
 use dialog_artifacts::Datum;
 
 use crate::{Key, State};
@@ -48,18 +46,11 @@ pub type Index = Tree<GeometricDistribution, Key, State<Datum>, Blake3Hash>;
 ///
 /// Holds a [`BranchReference`] (scoped to `branch/{name}`) plus separate
 /// cells for revision and upstream state.
+#[derive(Debug, Clone)]
 pub struct Branch {
     reference: BranchReference,
     revision: Cell<Option<Revision>>,
     upstream: Cell<Option<UpstreamState>>,
-}
-
-impl Debug for Branch {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        f.debug_struct("Branch")
-            .field("name", &self.reference.name())
-            .finish_non_exhaustive()
-    }
 }
 
 impl Branch {

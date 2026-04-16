@@ -4,7 +4,6 @@ use dialog_capability::Subject;
 
 use super::load::LoadRemoteBranch;
 use super::open::OpenRemoteBranch;
-use crate::RemoteAddress;
 use crate::repository::branch::BranchName;
 use crate::repository::memory::{Cell, MemoryExt};
 use crate::repository::remote::repository::RemoteRepository;
@@ -37,11 +36,6 @@ impl RemoteBranchReference {
     /// The cached local revision, if resolved.
     pub fn revision(&self) -> Option<Revision> {
         self.local.get()
-    }
-
-    /// The remote address.
-    pub fn address(&self) -> RemoteAddress {
-        self.repository.address()
     }
 
     /// Open the remote branch (resolves local cache, no error if missing).
