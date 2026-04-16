@@ -620,6 +620,7 @@ mod tests {
 
     mod s3_credential_tests {
         use super::*;
+        use crate::SiteAddress;
         use dialog_capability::Subject;
         use dialog_common::Blake3Hash;
         use dialog_effects::archive::prelude::*;
@@ -627,12 +628,14 @@ mod tests {
         use dialog_remote_s3::helpers::S3Address;
         use dialog_remote_s3::{Address, S3Authorization, S3Credential};
 
-        fn address_from(s3: &S3Address) -> Address {
-            Address::builder(&s3.endpoint)
-                .region("us-east-1")
-                .bucket(&s3.bucket)
-                .build()
-                .unwrap()
+        fn address_from(s3: &S3Address) -> SiteAddress {
+            SiteAddress::S3(
+                Address::builder(&s3.endpoint)
+                    .region("us-east-1")
+                    .bucket(&s3.bucket)
+                    .build()
+                    .unwrap(),
+            )
         }
 
         #[dialog_common::test]
