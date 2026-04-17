@@ -2,7 +2,7 @@
 
 use super::Address;
 use super::credential::S3Credential;
-use crate::capability::Request;
+use crate::request::S3Request;
 use crate::{AuthorizationFormatError, Permit, S3Error};
 use dialog_effects::credential::Secret;
 use serde::{Deserialize, Serialize};
@@ -18,12 +18,12 @@ pub struct S3Authorization {
     /// Credential for SigV4 signing, or `None` for unsigned/public access.
     credential: Option<S3Credential>,
     /// The specific request this authorization is bound to.
-    request: Request,
+    request: S3Request,
 }
 
 impl S3Authorization {
     /// Create an authorization for public (unsigned) access to a request.
-    pub fn public(request: Request) -> Self {
+    pub fn public(request: S3Request) -> Self {
         Self {
             credential: None,
             request,
@@ -42,7 +42,7 @@ impl S3Authorization {
     }
 }
 
-impl Request {
+impl S3Request {
     /// Attest this request with a credential, producing an
     /// [`S3Authorization`] that can be redeemed for a presigned URL.
     pub fn attest(self, credential: S3Credential) -> S3Authorization {

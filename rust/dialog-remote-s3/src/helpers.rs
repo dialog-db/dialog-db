@@ -10,7 +10,7 @@ use dialog_capability::{Capability, Constraint, Effect, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use serde::{Deserialize, Serialize};
 
-use crate::capability::{Access, Request};
+use crate::request::IntoRequest;
 use crate::s3::{S3, S3Authorization, S3Credential};
 
 // Helpers bind request-at-fork-time because there's no Operator in the loop
@@ -82,12 +82,12 @@ where
     Fx::Output: ConditionalSend,
     Fork<S3, Fx>: ConditionalSend,
     ForkInvocation<S3, Fx>: ConditionalSend,
-    Capability<Fx>: Access,
+    Capability<Fx>: IntoRequest,
     S3: Provider<ForkInvocation<S3, Fx>> + ConditionalSync,
     Self: ConditionalSend + ConditionalSync,
 {
     async fn execute(&self, fork: Fork<S3, Fx>) -> Fx::Output {
-        let request = Request::from(fork.capability());
+        let request = fork.capability().to_request();
         let authorization = match self.credentials.clone() {
             Some(credential) => request.attest(credential),
             None => S3Authorization::public(request),

@@ -197,7 +197,7 @@ macro_rules! dispatch {
             $(
                 [$seg1, $seg2] => {
                     let capability = <$fx as FromUcanArgs>::capability_from_args($subject, $args)?;
-                    let request = ::dialog_remote_s3::capability::Request::from(&capability);
+                    let request = ::dialog_remote_s3::request::S3Request::from(&capability);
                     let authorization = match $self.credential.clone() {
                         Some(credential) => request.attest(credential),
                         None => ::dialog_remote_s3::S3Authorization::public(request),

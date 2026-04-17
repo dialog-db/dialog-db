@@ -5,7 +5,7 @@
 
 use super::{S3, S3Credential, S3Fork};
 use crate::S3Error;
-use crate::capability::{Access, Request};
+use crate::request::IntoRequest;
 use dialog_capability::access::AuthorizeError;
 use dialog_capability::site::SiteAddress;
 use dialog_capability::{Capability, Constraint, Effect, Provider, SiteId};
@@ -151,7 +151,7 @@ impl<Fx, Env> Authorize<Env> for S3Fork<Fx>
 where
     Fx: Effect + ConditionalSend + ConditionalSync + 'static,
     Fx::Of: Constraint<Capability: ConditionalSend + ConditionalSync>,
-    Capability<Fx>: Access,
+    Capability<Fx>: IntoRequest,
     Env: Provider<Load<Secret>> + Provider<authority::Identify> + ConditionalSync,
     S3Fork<Fx>: ConditionalSend,
 {
@@ -161,7 +161,7 @@ where
     async fn authorize(self, env: &Env) -> Result<ForkInvocation<S3, Fx>, AuthorizeError> {
         // Capture the request description up front so we don't need to
         // hold the capability across awaits.
-        let request = Request::from(self.0.capability());
+        let request = self.0.capability().to_request();
 
         let profile = authority::Identify
             .perform(env)
