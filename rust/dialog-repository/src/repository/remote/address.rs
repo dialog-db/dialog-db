@@ -1,12 +1,13 @@
 //! Remote address types.
 //!
-//! Re-exports [`SiteAddress`] and [`RemoteSite`] from dialog-operator.
+//! Re-exports [`NetworkAddress`] and [`Network`] from dialog-operator.
 //! [`RemoteAddress`] pairs a site address with a subject DID to identify
 //! a specific remote repository.
 
 use dialog_capability::Did;
 
-pub use dialog_operator::site::{RemoteSite, SiteAddress};
+pub use dialog_operator::network::Network as RemoteSite;
+pub use dialog_operator::network::NetworkAddress as SiteAddress;
 
 /// A remote repository address -- connection info plus subject DID.
 ///

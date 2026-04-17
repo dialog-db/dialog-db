@@ -15,7 +15,7 @@ mod claim;
 mod compose;
 mod provider;
 mod query;
-mod router;
+mod site;
 mod test;
 
 /// A cross-platform test macro with automatic service provisioning.
@@ -369,34 +369,6 @@ pub fn derive_attribute(input: TokenStream) -> TokenStream {
     query::attribute::derive(input)
 }
 
-/// Derive macro that generates `Provider<RemoteInvocation<Fx, Address>>` impls
-/// for composite structs whose fields each route to a different address type.
-///
-/// For each field with generic type arguments, the macro extracts the first
-/// type argument as the `Address` and generates a forwarding `Provider` impl
-/// that delegates to that field.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// #[derive(Router)]
-/// pub struct Network<Issuer> {
-///     #[cfg(feature = "s3")]
-///     s3: Router<s3::Address, s3::Connection<Issuer>>,
-///     #[cfg(feature = "ucan")]
-///     ucan: Router<ucan::Address, ucan::Connection<Issuer>>,
-/// }
-/// ```
-///
-/// This generates `Provider<RemoteInvocation<Fx, s3::Address>>` and
-/// `Provider<RemoteInvocation<Fx, ucan::Address>>` implementations that
-/// forward to the respective fields. Each field's `#[cfg]` attributes
-/// are preserved on the generated impls.
-#[proc_macro_derive(Router, attributes(route))]
-pub fn router(input: TokenStream) -> TokenStream {
-    router::generate(input)
-}
-
 /// Derive macro that generates a `Claim` trait impl for effect types.
 ///
 /// For types with no `#[claim(into = ...)]` annotations, `Claim::Claim = Self`
@@ -444,4 +416,119 @@ pub fn derive_claim(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(Provider, attributes(provide))]
 pub fn derive_provider(input: TokenStream) -> TokenStream {
     compose::generate(input)
+}
+
+/// Derive macro that generates composite [`Site`](dialog_capability::Site)
+/// types from a struct of site fields.
+///
+/// Each field must be a type implementing `dialog_capability::Site`. The
+/// macro derives parallel address / authorization / claim enums from those
+/// fields' associated types and emits all dispatch boilerplate.
+///
+/// # Example
+///
+/// Given:
+///
+/// ```rust,ignore
+/// #[derive(Site)]
+/// pub struct Network {
+///     s3: S3,
+///     ucan: UcanSite,
+/// }
+/// ```
+///
+/// ...the macro expands to roughly:
+///
+/// ```rust,ignore
+/// // Address enum — one variant per field, typed by `<Field as Site>::Address`.
+/// #[derive(Debug, Clone, Hash, Serialize, Deserialize, PartialEq, Eq)]
+/// pub enum NetworkAddress {
+///     S3(<S3 as Site>::Address),
+///     Ucan(<UcanSite as Site>::Address),
+/// }
+///
+/// // Authorization enum — mirrors the address variants.
+/// #[derive(Debug, Clone)]
+/// pub enum NetworkAuthorization {
+///     S3(<S3 as Site>::Authorization),
+///     Ucan(<UcanSite as Site>::Authorization),
+/// }
+///
+/// // Claim enum — mirrors the address variants, generic over an effect.
+/// pub enum NetworkClaim<Fx: Effect> {
+///     S3(<S3 as Site>::Claim<Fx>),
+///     Ucan(<UcanSite as Site>::Claim<Fx>),
+/// }
+///
+/// // Network is itself a Site, with the generated enums as associated types.
+/// impl Site for Network {
+///     type Address = NetworkAddress;
+///     type Authorization = NetworkAuthorization;
+///     type Claim<Fx: Effect> = NetworkClaim<Fx>;
+/// }
+///
+/// // NetworkAddress points back to Network, closing the cycle.
+/// impl SiteAddress for NetworkAddress {
+///     type Site = Network;
+/// }
+///
+/// // `.into()` works for any concrete variant address. Routed through a
+/// // helper trait parameterized by the site type so that per-variant impls
+/// // have distinct headers (a direct `impl From<<S as Site>::Address>`
+/// // triggers E0119 across crate boundaries).
+/// trait __NetworkFromSiteAddress<S: Site> {
+///     fn from_site_address(address: S::Address) -> NetworkAddress;
+/// }
+/// impl __NetworkFromSiteAddress<S3> for NetworkAddress { /* S3(addr) */ }
+/// impl __NetworkFromSiteAddress<UcanSite> for NetworkAddress { /* Ucan(addr) */ }
+/// impl<A: SiteAddress> From<A> for NetworkAddress
+/// where NetworkAddress: __NetworkFromSiteAddress<A::Site>
+/// { /* dispatches via the helper */ }
+///
+/// // `From<NetworkAddress> for SiteId` via match on variants.
+/// impl From<NetworkAddress> for SiteId { /* match ... */ }
+///
+/// // Claim construction: bundles capability + issuer + variant address.
+/// impl<Fx: Effect> From<(Capability<Fx>, SiteIssuer, NetworkAddress)>
+///     for NetworkClaim<Fx> { /* match ... */ }
+///
+/// // `Acquire` dispatches to the inner claim's `perform()` and rewraps
+/// // the resulting ForkInvocation in the composite types.
+/// impl<Fx, Env> Acquire<Env> for NetworkClaim<Fx>
+/// where /* per-variant bounds on each inner claim's Acquire impl */
+/// {
+///     type Site = Network;
+///     type Effect = Fx;
+///     async fn perform(self, env: &Env) -> Result<ForkInvocation<Network, Fx>, _> {
+///         match self { /* delegate + rewrap */ }
+///     }
+/// }
+///
+/// // The dispatch impl: match on (authorization, address) and forward to
+/// // the appropriate field (`self.s3`, `self.ucan`, etc.).
+/// impl<Fx> Provider<ForkInvocation<Network, Fx>> for Network
+/// where /* per-variant Provider + ConditionalSend bounds */
+/// {
+///     async fn execute(&self, input: ForkInvocation<Network, Fx>) -> Fx::Output {
+///         match (input.authorization, input.address) {
+///             (NetworkAuthorization::S3(a), NetworkAddress::S3(addr)) =>
+///                 ForkInvocation::new(input.capability, addr, a)
+///                     .perform(&self.s3).await,
+///             (NetworkAuthorization::Ucan(a), NetworkAddress::Ucan(addr)) =>
+///                 ForkInvocation::new(input.capability, addr, a)
+///                     .perform(&self.ucan).await,
+///             _ => unreachable!(),
+///         }
+///     }
+/// }
+/// ```
+///
+/// # Limitations
+///
+/// `#[cfg]`-gated fields are rejected with a compile error. Supporting
+/// them requires routing per-variant where-clause bounds through marker
+/// traits (currently unimplemented).
+#[proc_macro_derive(Site)]
+pub fn derive_site(input: TokenStream) -> TokenStream {
+    site::generate(input)
 }

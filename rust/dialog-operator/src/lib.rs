@@ -37,10 +37,6 @@ pub use operator::Operator;
 pub mod network;
 pub use network::Network;
 
-/// Composite remote site types for multi-transport dispatch.
-pub mod site;
-pub use site::{RemoteAuthorization, RemoteSite, SiteAddress};
-
 /// Test helpers for setting up profiles, operators, and test data.
 #[cfg(any(test, feature = "helpers"))]
 pub mod helpers;

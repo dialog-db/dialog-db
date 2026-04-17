@@ -13,7 +13,7 @@ pub use builder::{OperatorBuilder, OperatorError};
 
 use crate::Authority;
 use crate::network::Network;
-use dialog_capability::Capability;
+use dialog_capability::{Capability, Provider};
 use dialog_credentials::Credential;
 use dialog_effects::authority::{Identify, Operator as AuthOperator};
 use dialog_effects::credential::Secret;
@@ -29,7 +29,7 @@ use dialog_varsig::{Did, Principal};
 /// - [`Storage`] for DID-routed effects
 /// - Base directory for resolving space names to storage locations
 /// - Remote for fork invocations
-#[derive(dialog_capability::Provider)]
+#[derive(Provider)]
 pub struct Operator<S: Clone> {
     #[provide(Identify)]
     /// Provider for authority effects (identity).

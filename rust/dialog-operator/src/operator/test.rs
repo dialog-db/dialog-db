@@ -18,7 +18,7 @@ mod tests {
 
         let operator = profile
             .derive(b"test")
-            .network(Network)
+            .network(Network::default())
             .build(storage)
             .await
             .unwrap();
@@ -35,7 +35,7 @@ mod tests {
             .unwrap();
         let op1 = profile1
             .derive(b"context-a")
-            .network(Network)
+            .network(Network::default())
             .build(storage1)
             .await
             .unwrap();
@@ -47,7 +47,7 @@ mod tests {
             .unwrap();
         let op2 = profile2
             .derive(b"context-b")
-            .network(Network)
+            .network(Network::default())
             .build(storage2)
             .await
             .unwrap();
@@ -71,7 +71,7 @@ mod tests {
 
             let operator = profile
                 .derive(b"alice")
-                .network(Network)
+                .network(Network::default())
                 .build(storage)
                 .await
                 .unwrap();
@@ -101,7 +101,7 @@ mod tests {
 
             let operator = profile
                 .derive(b"alice")
-                .network(Network)
+                .network(Network::default())
                 .build(storage)
                 .await
                 .unwrap();
@@ -132,7 +132,7 @@ mod tests {
             let operator = profile
                 .derive(b"alice")
                 .allow(Subject::any().archive().catalog("index"))
-                .network(Network)
+                .network(Network::default())
                 .build(storage)
                 .await
                 .unwrap();
@@ -163,7 +163,7 @@ mod tests {
             let operator = profile
                 .derive(b"alice")
                 .allow(Subject::any().archive().catalog("index"))
-                .network(Network)
+                .network(Network::default())
                 .build(storage)
                 .await
                 .unwrap();
@@ -191,7 +191,7 @@ mod tests {
             let operator = profile
                 .derive(b"admin")
                 .allow(Subject::any())
-                .network(Network)
+                .network(Network::default())
                 .build(storage)
                 .await
                 .unwrap();
@@ -221,7 +221,7 @@ mod tests {
 
             let operator = profile
                 .derive(b"alice")
-                .network(Network)
+                .network(Network::default())
                 .build(storage)
                 .await
                 .unwrap();
@@ -248,7 +248,7 @@ mod tests {
             let operator = profile
                 .derive(b"alice")
                 .allow(Subject::any().archive().catalog("index"))
-                .network(Network)
+                .network(Network::default())
                 .build(storage)
                 .await
                 .unwrap();
@@ -620,7 +620,7 @@ mod tests {
 
     mod s3_credential_tests {
         use super::*;
-        use crate::SiteAddress;
+        use crate::network::NetworkAddress as SiteAddress;
         use dialog_capability::Subject;
         use dialog_common::Blake3Hash;
         use dialog_effects::archive::prelude::*;
@@ -665,7 +665,7 @@ mod tests {
             let operator = profile
                 .derive(b"test")
                 .allow(Subject::any())
-                .network(Network)
+                .network(Network::default())
                 .build(storage)
                 .await
                 .unwrap();
@@ -700,7 +700,7 @@ mod tests {
             let operator = profile
                 .derive(b"test")
                 .allow(Subject::any())
-                .network(Network)
+                .network(Network::default())
                 .build(storage)
                 .await
                 .unwrap();
@@ -742,7 +742,7 @@ mod tests {
             let operator = profile
                 .derive(b"test")
                 .allow(Subject::any())
-                .network(Network)
+                .network(Network::default())
                 .build(storage)
                 .await
                 .unwrap();
@@ -803,7 +803,7 @@ mod tests {
             let operator = profile
                 .derive(b"test")
                 .allow(Subject::any())
-                .network(Network)
+                .network(Network::default())
                 .build(storage)
                 .await
                 .unwrap();
@@ -830,7 +830,7 @@ mod tests {
             let operator = profile
                 .derive(b"test")
                 .allow(Subject::any())
-                .network(Network)
+                .network(Network::default())
                 .build(storage)
                 .await
                 .unwrap();

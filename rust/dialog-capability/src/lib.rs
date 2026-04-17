@@ -210,6 +210,10 @@ pub use dialog_macros::Provider;
 /// Derive macro that generates `Claim` trait impls for effect types.
 pub use dialog_macros::Claim;
 
+/// Derive macro that generates composite site dispatch types from a struct
+/// of site fields.
+pub use dialog_macros::Site;
+
 pub mod site;
 pub use site::*;
 

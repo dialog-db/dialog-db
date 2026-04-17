@@ -1,56 +1,80 @@
-//! Network dispatch — routes `ForkInvocation<RemoteSite, Fx>` to the
-//! appropriate site provider.
+//! Network dispatch for fork invocations.
 //!
-//! The Operator builds the authorization (converting `Fork` to `ForkInvocation`)
-//! before delegating here. The [`RemoteSite`](crate::site::RemoteSite) enum
-//! dispatches to S3 or UCAN based on the address/authorization variant.
+//! [`Network`] is the composite [`Site`](dialog_capability::Site) dispatcher.
+//! Each field is a concrete site implementor; `#[derive(Site)]` generates
+//! the associated address/authorization/claim enums and all dispatch impls
+//! from the field site types.
 
-use crate::site::{RemoteAuthorization, RemoteSite, SiteAddress};
-use async_trait::async_trait;
-use dialog_capability::fork::ForkInvocation;
-use dialog_capability::{Constraint, Effect, Provider};
-use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_capability::Site;
 use dialog_remote_s3::S3;
 use dialog_remote_ucan_s3::UcanSite;
 
-/// Network dispatch — routes fork invocations to the appropriate site.
+/// Network dispatch table for fork invocations.
 ///
-/// Stateless dispatcher. The Operator routes `ForkInvocation<RemoteSite, Fx>`
-/// here after building the protocol-specific authorization. The match on
-/// `RemoteAuthorization`/`SiteAddress` variants delegates to `S3` or
-/// `UcanSite` directly.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Network;
+/// Holds one concrete site per supported transport. The `#[derive(Site)]`
+/// macro inspects the field types and generates:
+/// - [`NetworkAddress`] -- composite address enum
+/// - [`NetworkAuthorization`] -- composite authorization enum
+/// - `NetworkClaim<Fx>` -- composite claim enum
+/// - `Site for Network`, `SiteAddress for NetworkAddress`,
+///   `Acquire<Env> for NetworkClaim<Fx>`, and
+///   `Provider<ForkInvocation<Network, Fx>> for Network`.
+#[derive(Debug, Clone, Copy, Default, Site)]
+pub struct Network {
+    s3: S3,
+    ucan: UcanSite,
+}
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Fx> Provider<ForkInvocation<RemoteSite, Fx>> for Network
-where
-    Fx: Effect + ConditionalSend + ConditionalSync + 'static,
-    Fx::Of: Constraint<Capability: ConditionalSend + ConditionalSync>,
-    ForkInvocation<S3, Fx>: ConditionalSend,
-    ForkInvocation<UcanSite, Fx>: ConditionalSend,
-    S3: Provider<ForkInvocation<S3, Fx>>,
-    UcanSite: Provider<ForkInvocation<UcanSite, Fx>>,
-{
-    async fn execute(&self, input: ForkInvocation<RemoteSite, Fx>) -> Fx::Output {
-        let ForkInvocation {
-            capability,
-            address,
-            authorization,
-        } = input;
-        match (authorization, address) {
-            (RemoteAuthorization::S3(auth), SiteAddress::S3(addr)) => {
-                ForkInvocation::new(capability, addr, auth)
-                    .perform(&S3)
-                    .await
-            }
-            (RemoteAuthorization::Ucan(auth), SiteAddress::Ucan(addr)) => {
-                ForkInvocation::new(capability, addr, auth)
-                    .perform(&UcanSite)
-                    .await
-            }
-            _ => unreachable!("authorization/address type mismatch"),
-        }
+#[cfg(test)]
+mod tests {
+    //! Tests verifying that `#[derive(Site)]` produces the expected types
+    //! and trait impls.
+
+    use super::*;
+    use dialog_capability::SiteAddress;
+    use dialog_capability::site::Site;
+    use dialog_remote_s3::Address as S3Address;
+    use dialog_remote_ucan_s3::UcanAddress;
+
+    fn s3_address() -> S3Address {
+        S3Address::builder("https://s3.amazonaws.com")
+            .region("us-east-1")
+            .bucket("test")
+            .build()
+            .unwrap()
+    }
+
+    fn ucan_address() -> UcanAddress {
+        UcanAddress::new("https://access.example.com")
+    }
+
+    /// `NetworkAddress` is a public enum with one variant per field. Variant
+    /// names are field names converted to PascalCase.
+    #[test]
+    fn it_generates_address_enum_with_variant_per_field() {
+        let _: NetworkAddress = NetworkAddress::S3(s3_address());
+        let _: NetworkAddress = NetworkAddress::Ucan(ucan_address());
+    }
+
+    /// `From<VariantAddress> for NetworkAddress` is generated for each
+    /// concrete variant address type via the `FromSiteAddress` helper trait.
+    #[test]
+    fn it_generates_from_impls_via_helper_trait() {
+        let net: NetworkAddress = s3_address().into();
+        assert!(matches!(net, NetworkAddress::S3(_)));
+
+        let net: NetworkAddress = ucan_address().into();
+        assert!(matches!(net, NetworkAddress::Ucan(_)));
+    }
+
+    /// `Network` implements `Site` (with the generated enums as associated
+    /// types) and `NetworkAddress` implements `SiteAddress`, closing the
+    /// cycle back to `Network` as the Site type.
+    #[test]
+    fn network_implements_site_and_address() {
+        fn assert_site<S: Site>() {}
+        fn assert_site_address<A: SiteAddress>() {}
+        assert_site::<Network>();
+        assert_site_address::<NetworkAddress>();
     }
 }

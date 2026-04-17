@@ -9,7 +9,7 @@ use crate::command::Command;
 use crate::effect::Effect;
 use crate::site::Site;
 use crate::{Ability, Capability, Constraint, Provider, SiteIssuer};
-use dialog_common::ConditionalSend;
+use dialog_common::{ConditionalSend, ConditionalSync};
 use std::marker::PhantomData;
 
 /// Fork pairs a capability with a site address for remote execution.
@@ -100,8 +100,8 @@ where
     pub async fn perform<Env>(self, env: &Env) -> Fx::Output
     where
         Fx: ConditionalSend + 'static,
-        Capability<Fx>: Ability + ConditionalSend + dialog_common::ConditionalSync,
-        Env: Provider<Fork<S, Fx>> + dialog_common::ConditionalSync,
+        Capability<Fx>: Ability + ConditionalSend + ConditionalSync,
+        Env: Provider<Fork<S, Fx>> + ConditionalSync,
     {
         env.execute(self).await
     }

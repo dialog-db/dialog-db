@@ -36,7 +36,7 @@ impl OperatorBuilder {
             context,
             allowed: Vec::new(),
             directory: Directory::Current,
-            network: Network,
+            network: Network::default(),
         }
     }
 
