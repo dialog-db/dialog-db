@@ -9,8 +9,8 @@ use crate::repository::error::RepositoryError;
 
 /// Command to open a remote branch.
 ///
-/// Resolves the revision cell; does not error if the branch has no revision
-/// (does not exist) yet.
+/// Resolves the persisted snapshot; does not error if the branch has no
+/// revision (does not exist) yet.
 pub struct OpenRemoteBranch(RemoteBranchReference);
 
 impl OpenRemoteBranch {
@@ -24,7 +24,10 @@ impl OpenRemoteBranch {
     where
         Env: Provider<memory_fx::Resolve>,
     {
-        self.0.local.resolve().perform(env).await?;
+        self.0.cache.resolve().perform(env).await?;
+        if let Some(snapshot) = self.0.cache.get() {
+            self.0.remote.reset(snapshot.revision, snapshot.edition);
+        }
         Ok(RemoteBranch::new(self.0))
     }
 }

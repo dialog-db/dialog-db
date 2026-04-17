@@ -9,7 +9,7 @@ use crate::repository::error::RepositoryError;
 
 /// Command to load an existing remote branch.
 ///
-/// Resolves the revision cell; errors if the branch has no revision.
+/// Resolves the persisted snapshot; errors if the branch has no revision.
 pub struct LoadRemoteBranch(RemoteBranchReference);
 
 impl LoadRemoteBranch {
@@ -23,13 +23,13 @@ impl LoadRemoteBranch {
     where
         Env: Provider<memory_fx::Resolve>,
     {
-        self.0.local.resolve().perform(env).await?;
-        if self.0.local.get().is_none() {
+        self.0.cache.resolve().perform(env).await?;
+        let Some(snapshot) = self.0.cache.get() else {
             return Err(RepositoryError::BranchNotFound {
                 name: self.0.name(),
             });
-        }
-
+        };
+        self.0.remote.reset(snapshot.revision, snapshot.edition);
         Ok(RemoteBranch::new(self.0))
     }
 }

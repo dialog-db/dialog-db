@@ -6,14 +6,15 @@ use dialog_common::ConditionalSync;
 use dialog_effects::memory as memory_fx;
 
 use super::RemoteBranch;
+use super::reference::RemoteSnapshot;
 use crate::repository::error::RepositoryError;
 use crate::repository::remote::address::RemoteSite;
 use crate::repository::revision::Revision;
 
 /// Command to fetch the latest revision from the remote.
 ///
-/// Resolves the remote branch revision via Fork and updates
-/// the local cache cell.
+/// Resolves the remote branch revision via Fork and persists the resulting
+/// (revision, edition) pair to the local snapshot cache.
 pub struct Fetch<'a> {
     branch: &'a RemoteBranch,
 }
@@ -39,13 +40,16 @@ impl<'a> Fetch<'a> {
             .perform(env)
             .await?;
 
-        let revision = self.branch.remote.get();
+        // Persist the new (revision, edition) snapshot if the remote has one.
+        let Some((revision, edition)) = self.branch.remote.snapshot() else {
+            return Ok(None);
+        };
+        let snapshot = RemoteSnapshot {
+            revision: revision.clone(),
+            edition,
+        };
+        self.branch.cache.publish(snapshot).perform(env).await?;
 
-        // Update local cache
-        if let Some(ref rev) = revision {
-            self.branch.local.publish(rev.clone()).perform(env).await?;
-        }
-
-        Ok(revision)
+        Ok(Some(revision))
     }
 }

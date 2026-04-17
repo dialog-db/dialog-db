@@ -39,7 +39,12 @@ impl<T: Clone, Codec: Clone> Cache<T, Codec> {
         self.state.read().as_ref().map(|(v, _)| v.clone())
     }
 
-    /// Read the cached edition.
+    /// Read the full cached (value, edition) pair.
+    pub(super) fn snapshot(&self) -> Option<(T, Vec<u8>)> {
+        self.state.read().clone()
+    }
+
+    /// Read just the cached edition.
     pub(super) fn edition(&self) -> Option<Vec<u8>> {
         self.state.read().as_ref().map(|(_, e)| e.clone())
     }
@@ -129,6 +134,18 @@ where
     /// Returns `None` if the cell has not been resolved or published yet.
     pub fn get(&self) -> Option<T> {
         self.cache.get()
+    }
+
+    /// Read the cached (value, edition) pair without hitting env.
+    /// Returns `None` if the cell has not been resolved or published yet.
+    pub fn snapshot(&self) -> Option<(T, Vec<u8>)> {
+        self.cache.snapshot()
+    }
+
+    /// Reset the in-memory cache to a known value and edition, without
+    /// hitting the backend. Used to restore cache state across sessions.
+    pub fn reset(&self, value: T, edition: Vec<u8>) {
+        self.cache.update(value, edition);
     }
 
     /// Returns the subject DID from the capability chain.
