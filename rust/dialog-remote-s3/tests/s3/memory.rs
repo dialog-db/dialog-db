@@ -71,7 +71,7 @@ async fn it_publishes_and_resolves_value() -> anyhow::Result<()> {
     assert!(publication.is_some());
     let publication = publication.unwrap();
     assert_eq!(decode(&publication.content), data);
-    assert_eq!(publication.edition, edition);
+    assert_eq!(publication.version.as_bytes(), edition.as_bytes());
 
     Ok(())
 }
@@ -116,7 +116,7 @@ async fn it_updates_existing_value() -> anyhow::Result<()> {
     assert!(publication.is_some());
     let publication = publication.unwrap();
     assert_eq!(decode(&publication.content), updated);
-    assert_eq!(publication.edition, edition2);
+    assert_eq!(publication.version.as_bytes(), edition2.as_bytes());
 
     Ok(())
 }
@@ -188,7 +188,7 @@ async fn it_rejects_publish_with_wrong_initial_edition() -> anyhow::Result<()> {
 
     // Try to publish with an edition when cell doesn't exist
     let result = cell
-        .publish(b"data".to_vec(), Some(b"nonexistent".to_vec()))
+        .publish(b"data".to_vec(), Some(b"nonexistent".to_vec().into()))
         .fork(&env.address)
         .perform(&env.network)
         .await;

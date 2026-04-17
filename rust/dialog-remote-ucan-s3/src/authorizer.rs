@@ -160,7 +160,7 @@ impl FromUcanArgs for memory::Publish {
     }
 }
 impl FromUcanArgs for memory::Retract {
-    type Claim = memory::RetractClaim;
+    type Claim = memory::Retract;
     fn capability_from_args(
         subject: &Did,
         args: &Args,

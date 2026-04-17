@@ -10,6 +10,7 @@ dialog-capability = { workspace = true }
 dialog-credentials = { workspace = true }
 dialog-common = { workspace = true }
 async-trait = { workspace = true }
+base58 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_bytes = { workspace = true }
 thiserror = { workspace = true }

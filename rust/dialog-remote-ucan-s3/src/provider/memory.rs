@@ -14,7 +14,7 @@ impl Provider<ForkInvocation<UcanSite, Resolve>> for UcanSite {
     async fn execute(
         &self,
         invocation: ForkInvocation<UcanSite, Resolve>,
-    ) -> Result<Option<Publication>, MemoryError> {
+    ) -> Result<Option<Edition<Vec<u8>>>, MemoryError> {
         invocation
             .authorization
             .redeem(&invocation.address)
@@ -31,7 +31,7 @@ impl Provider<ForkInvocation<UcanSite, Publish>> for UcanSite {
     async fn execute(
         &self,
         invocation: ForkInvocation<UcanSite, Publish>,
-    ) -> Result<Vec<u8>, MemoryError> {
+    ) -> Result<Version, MemoryError> {
         invocation
             .authorization
             .redeem(&invocation.address)

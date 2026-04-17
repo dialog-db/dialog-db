@@ -35,13 +35,13 @@ where
         Env: Provider<memory::Publish>,
     {
         let content = self.cache.encode(&self.value).await?;
-        let edition = self.cache.edition();
+        let when = self.cache.edition().map(Into::into);
         let new_edition = self
             .capability
-            .publish(content, edition)
+            .publish(content, when)
             .perform(env)
             .await?;
-        self.cache.update(self.value, new_edition);
+        self.cache.update(self.value, new_edition.into_bytes());
         Ok(())
     }
 
@@ -79,14 +79,14 @@ where
         Env: Provider<Fork<A::Site, memory::Publish>> + ConditionalSync,
     {
         let content = self.cache.encode(&self.value).await?;
-        let edition = self.cache.edition();
+        let when = self.cache.edition().map(Into::into);
         let new_edition = self
             .capability
-            .publish(content, edition)
+            .publish(content, when)
             .fork(&self.address)
             .perform(env)
             .await?;
-        self.cache.update(self.value, new_edition);
+        self.cache.update(self.value, new_edition.into_bytes());
         Ok(())
     }
 }

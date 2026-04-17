@@ -69,17 +69,17 @@ where
 /// Decode a publication and update the cache.
 async fn apply<T, Codec>(
     cache: &Cache<T, Codec>,
-    publication: Option<memory::Publication>,
+    edition: Option<memory::Edition<Vec<u8>>>,
 ) -> Result<(), RepositoryError>
 where
     T: DeserializeOwned + Clone + ConditionalSync,
     Codec: Encoder + Clone,
 {
-    match publication {
+    match edition {
         None => cache.clear(),
         Some(pub_data) => {
             let value: T = cache.decode(&pub_data.content).await?;
-            cache.update(value, pub_data.edition);
+            cache.update(value, pub_data.version.into_bytes());
         }
     }
     Ok(())

@@ -21,8 +21,8 @@ impl FileSystem {
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
 use dialog_effects::memory::{
-    MemoryError, Publication, Publish, PublishCapability, Resolve, ResolveCapability, Retract,
-    RetractCapability,
+    Edition, MemoryError, Publish, PublishCapability, Resolve, ResolveCapability, Retract,
+    RetractCapability, Version,
 };
 use pidlock::Pidlock;
 use std::path::PathBuf;
@@ -106,8 +106,8 @@ impl Drop for PidlockGuard {
 }
 
 /// Format edition bytes for error messages.
-fn format_edition(edition: Option<&[u8]>) -> Option<String> {
-    edition.map(base58::ToBase58::to_base58)
+fn format_edition(edition: Option<&[u8]>) -> Option<Version> {
+    edition.map(Version::from)
 }
 
 /// Helper methods for cell-related paths.
@@ -144,7 +144,7 @@ impl Provider<Resolve> for FileSystem {
     async fn execute(
         &self,
         effect: Capability<Resolve>,
-    ) -> Result<Option<Publication>, MemoryError> {
+    ) -> Result<Option<Edition<Vec<u8>>>, MemoryError> {
         let space = effect.space();
         let cell = effect.cell();
 
@@ -153,9 +153,9 @@ impl Provider<Resolve> for FileSystem {
         match handle.read_optional().await? {
             Some(bytes) => {
                 let edition = Blake3Hash::hash(&bytes);
-                Ok(Some(Publication {
+                Ok(Some(Edition {
                     content: bytes,
-                    edition: edition.as_bytes().to_vec(),
+                    version: Version::from(edition.as_bytes()),
                 }))
             }
             None => Ok(None),
@@ -165,11 +165,11 @@ impl Provider<Resolve> for FileSystem {
 
 #[async_trait]
 impl Provider<Publish> for FileSystem {
-    async fn execute(&self, effect: Capability<Publish>) -> Result<Vec<u8>, MemoryError> {
+    async fn execute(&self, effect: Capability<Publish>) -> Result<Version, MemoryError> {
         let space = effect.space();
         let cell = effect.cell();
         let content = effect.content().to_vec();
-        let expected_edition = effect.when().map(|e| e.to_vec());
+        let expected_edition = effect.when().map(|e| e.as_bytes().to_vec());
 
         let cell_handle = self.memory()?.resolve(space)?.cell(cell)?;
 
@@ -187,7 +187,7 @@ impl Provider<Publish> for FileSystem {
 
         // If current value already matches desired value, succeed without writing
         if current_edition.as_ref() == Some(&new_edition) {
-            return Ok(new_edition.to_vec());
+            return Ok(Version::from(new_edition.as_slice()));
         }
 
         // Check CAS condition
@@ -225,7 +225,7 @@ impl Provider<Publish> for FileSystem {
         tmp_handle.write(&content).await?;
         tmp_handle.rename(&cell_handle).await?;
 
-        Ok(new_edition.to_vec())
+        Ok(Version::from(new_edition.as_slice()))
     }
 }
 
@@ -234,7 +234,7 @@ impl Provider<Retract> for FileSystem {
     async fn execute(&self, effect: Capability<Retract>) -> Result<(), MemoryError> {
         let space = effect.space();
         let cell = effect.cell();
-        let expected_edition = effect.when().to_vec();
+        let expected_edition = effect.when().as_bytes().to_vec();
 
         let cell_handle = self.memory()?.resolve(space)?.cell(cell)?;
 
@@ -341,7 +341,7 @@ mod tests {
 
         let publication = resolved.expect("should have content");
         assert_eq!(publication.content, content);
-        assert_eq!(publication.edition, edition);
+        assert_eq!(publication.version.as_bytes(), edition.as_bytes());
 
         Ok(())
     }
@@ -411,7 +411,7 @@ mod tests {
             .await?;
 
         // Try to update with wrong edition
-        let wrong_edition = Blake3Hash::hash(b"wrong").as_bytes().to_vec();
+        let wrong_edition = dialog_effects::memory::Version::from(Blake3Hash::hash(b"wrong").as_bytes());
         let result = did
             .memory()
             .space("local")
@@ -515,7 +515,7 @@ mod tests {
             .await?;
 
         // Try to retract with wrong edition
-        let wrong_edition = Blake3Hash::hash(b"wrong").as_bytes().to_vec();
+        let wrong_edition = dialog_effects::memory::Version::from(Blake3Hash::hash(b"wrong").as_bytes());
         let result = did
             .memory()
             .space("local")
@@ -599,7 +599,7 @@ mod tests {
             .await?;
 
         // Try to publish same content with wrong edition - should succeed
-        let wrong_edition = Blake3Hash::hash(b"wrong").as_bytes().to_vec();
+        let wrong_edition = dialog_effects::memory::Version::from(Blake3Hash::hash(b"wrong").as_bytes());
         let result = did
             .memory()
             .space("local")
@@ -611,7 +611,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             result.unwrap(),
-            Blake3Hash::hash(&content).as_bytes().to_vec()
+            dialog_effects::memory::Version::from(Blake3Hash::hash(&content).as_bytes())
         );
 
         Ok(())
@@ -662,7 +662,7 @@ mod tests {
         let did = unique_did().await;
 
         // Try to retract non-existent cell - should succeed
-        let wrong_edition = Blake3Hash::hash(b"wrong").as_bytes().to_vec();
+        let wrong_edition = dialog_effects::memory::Version::from(Blake3Hash::hash(b"wrong").as_bytes());
         let result = did
             .memory()
             .space("local")
@@ -850,7 +850,7 @@ mod tests {
             .resolve()
             .perform(&provider)
             .await?;
-        let edition = resolved.unwrap().edition;
+        let edition = resolved.unwrap().version;
 
         let edition2 = did
             .memory()

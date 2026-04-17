@@ -39,7 +39,7 @@ impl Access for Capability<memory::Publish> {
     }
     fn precondition(&self) -> Precondition {
         match &memory::Publish::of(self).when {
-            Some(edition) => Precondition::IfMatch(String::from_utf8_lossy(edition).to_string()),
+            Some(edition) => Precondition::IfMatch(edition.to_string()),
             None => Precondition::IfNoneMatch,
         }
     }
@@ -62,7 +62,7 @@ impl Access for Capability<memory::PublishClaim> {
     }
     fn precondition(&self) -> Precondition {
         match &memory::PublishClaim::of(self).when {
-            Some(edition) => Precondition::IfMatch(edition.clone()),
+            Some(edition) => Precondition::IfMatch(edition.to_string()),
             None => Precondition::IfNoneMatch,
         }
     }
@@ -81,23 +81,7 @@ impl Access for Capability<memory::Retract> {
         )
     }
     fn precondition(&self) -> Precondition {
-        Precondition::IfMatch(String::from_utf8_lossy(&memory::Retract::of(self).when).to_string())
+        Precondition::IfMatch(memory::Retract::of(self).when.to_string())
     }
 }
 
-impl Access for Capability<memory::RetractClaim> {
-    fn method(&self) -> &'static str {
-        "DELETE"
-    }
-    fn path(&self) -> String {
-        format!(
-            "{}/{}/{}",
-            self.subject(),
-            &Space::of(self).space,
-            &Cell::of(self).cell
-        )
-    }
-    fn precondition(&self) -> Precondition {
-        Precondition::IfMatch(memory::RetractClaim::of(self).when.clone())
-    }
-}
