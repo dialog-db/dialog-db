@@ -82,7 +82,7 @@ impl Provider<Publish> for Volatile {
         match (expected_edition.as_deref(), &current_edition) {
             // Creating new: require cell doesn't exist
             (None, Some(current)) => {
-                return Err(MemoryError::EditionMismatch {
+                return Err(MemoryError::VersionMismatch {
                     expected: None,
                     actual: format_edition(Some(current.as_bytes())),
                 });
@@ -90,7 +90,7 @@ impl Provider<Publish> for Volatile {
             // Updating existing: require edition matches
             (Some(expected), Some(current)) => {
                 if expected != current.as_bytes() {
-                    return Err(MemoryError::EditionMismatch {
+                    return Err(MemoryError::VersionMismatch {
                         expected: format_edition(Some(expected)),
                         actual: format_edition(Some(current.as_bytes())),
                     });
@@ -98,7 +98,7 @@ impl Provider<Publish> for Volatile {
             }
             // Updating non-existent: fail
             (Some(expected), None) => {
-                return Err(MemoryError::EditionMismatch {
+                return Err(MemoryError::VersionMismatch {
                     expected: format_edition(Some(expected)),
                     actual: None,
                 });
@@ -137,7 +137,7 @@ impl Provider<Retract> for Volatile {
 
         // Check CAS condition
         if expected_edition != current_edition.as_bytes() {
-            return Err(MemoryError::EditionMismatch {
+            return Err(MemoryError::VersionMismatch {
                 expected: format_edition(Some(&expected_edition)),
                 actual: format_edition(Some(current_edition.as_bytes())),
             });
@@ -154,7 +154,7 @@ impl Provider<Retract> for Volatile {
 mod tests {
     use super::*;
     use dialog_capability::{Did, Subject};
-    use dialog_effects::memory::{Cell, Memory, Space};
+    use dialog_effects::memory::{Cell, Memory, Space, Version};
 
     fn unique_subject(prefix: &str) -> Subject {
         let did: Did = format!(
@@ -279,7 +279,7 @@ mod tests {
             .await?;
 
         // Try to update with wrong edition
-        let wrong_edition = dialog_effects::memory::Version::from(Blake3Hash::hash(b"wrong").as_bytes());
+        let wrong_edition = Version::from(Blake3Hash::hash(b"wrong"));
         let result = subject
             .attenuate(Memory)
             .attenuate(Space::new("local"))
@@ -288,7 +288,7 @@ mod tests {
             .perform(&provider)
             .await;
 
-        assert!(matches!(result, Err(MemoryError::EditionMismatch { .. })));
+        assert!(matches!(result, Err(MemoryError::VersionMismatch { .. })));
 
         Ok(())
     }
@@ -317,7 +317,7 @@ mod tests {
             .perform(&provider)
             .await;
 
-        assert!(matches!(result, Err(MemoryError::EditionMismatch { .. })));
+        assert!(matches!(result, Err(MemoryError::VersionMismatch { .. })));
 
         Ok(())
     }
@@ -377,16 +377,16 @@ mod tests {
             .await?;
 
         // Try to retract with wrong edition
-        let wrong_edition = dialog_effects::memory::Version::from(Blake3Hash::hash(b"wrong").as_bytes());
+        let wrong_version = Version::from(Blake3Hash::hash(b"wrong"));
         let result = subject
             .attenuate(Memory)
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
-            .invoke(Retract::new(wrong_edition))
+            .invoke(Retract::new(wrong_version))
             .perform(&provider)
             .await;
 
-        assert!(matches!(result, Err(MemoryError::EditionMismatch { .. })));
+        assert!(matches!(result, Err(MemoryError::VersionMismatch { .. })));
 
         Ok(())
     }
@@ -456,20 +456,17 @@ mod tests {
             .await?;
 
         // Try to publish same content with wrong edition - should succeed
-        let wrong_edition = dialog_effects::memory::Version::from(Blake3Hash::hash(b"wrong").as_bytes());
+        let wrong_version = Version::from(Blake3Hash::hash(b"wrong"));
         let result = subject
             .attenuate(Memory)
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
-            .invoke(Publish::new(content.clone(), Some(wrong_edition)))
+            .invoke(Publish::new(content.clone(), Some(wrong_version)))
             .perform(&provider)
             .await;
 
         assert!(result.is_ok());
-        assert_eq!(
-            result.unwrap(),
-            dialog_effects::memory::Version::from(Blake3Hash::hash(&content).as_bytes())
-        );
+        assert_eq!(result.unwrap(), Version::from(Blake3Hash::hash(&content)));
 
         Ok(())
     }
@@ -511,12 +508,12 @@ mod tests {
         let subject = unique_subject("memory-retract-already-retracted");
 
         // Try to retract non-existent cell - should succeed
-        let wrong_edition = dialog_effects::memory::Version::from(Blake3Hash::hash(b"wrong").as_bytes());
+        let wrong_version = Version::from(Blake3Hash::hash(b"wrong"));
         let result = subject
             .attenuate(Memory)
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("nonexistent"))
-            .invoke(Retract::new(wrong_edition))
+            .invoke(Retract::new(wrong_version))
             .perform(&provider)
             .await;
 

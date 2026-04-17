@@ -19,9 +19,9 @@ use crate::RepositoryError;
 /// Created by [`Cell::publish`](super::Cell::publish). Execute with
 /// `.perform(&env)` for local or `.fork(&address).perform(&env)` for remote.
 pub struct Publish<T, Codec: Clone> {
-    pub(super) capability: Capability<memory::Cell>,
-    pub(super) cache: Cache<T, Codec>,
-    pub(super) value: T,
+    pub capability: Capability<memory::Cell>,
+    pub cache: Cache<T, Codec>,
+    pub content: T,
 }
 
 impl<T, Codec> Publish<T, Codec>
@@ -34,14 +34,13 @@ where
     where
         Env: Provider<memory::Publish>,
     {
-        let content = self.cache.encode(&self.value).await?;
-        let when = self.cache.edition().map(Into::into);
-        let new_edition = self
-            .capability
-            .publish(content, when)
-            .perform(env)
-            .await?;
-        self.cache.update(self.value, new_edition.into_bytes());
+        let content = self.cache.encode(&self.content).await?;
+        let when = self.cache.version();
+        let version = self.capability.publish(content, when).perform(env).await?;
+        self.cache.update(memory::Edition {
+            content: self.content,
+            version,
+        });
         Ok(())
     }
 
@@ -50,7 +49,7 @@ where
         ForkPublish {
             capability: self.capability,
             cache: self.cache,
-            value: self.value,
+            content: self.content,
             address: address.clone(),
         }
     }
@@ -60,7 +59,7 @@ where
 pub struct ForkPublish<T, A: SiteAddress, Codec: Clone> {
     capability: Capability<memory::Cell>,
     cache: Cache<T, Codec>,
-    value: T,
+    content: T,
     address: A,
 }
 
@@ -78,24 +77,27 @@ where
     where
         Env: Provider<Fork<A::Site, memory::Publish>> + ConditionalSync,
     {
-        let content = self.cache.encode(&self.value).await?;
-        let when = self.cache.edition().map(Into::into);
-        let new_edition = self
+        let content = self.cache.encode(&self.content).await?;
+        let when = self.cache.version();
+        let version = self
             .capability
             .publish(content, when)
             .fork(&self.address)
             .perform(env)
             .await?;
-        self.cache.update(self.value, new_edition.into_bytes());
+        self.cache.update(memory::Edition {
+            content: self.content,
+            version,
+        });
         Ok(())
     }
 }
 
 /// Command to publish to a retained cell.
 pub struct RetainPublish<'a, T, Codec: Clone> {
-    pub(super) inner: Publish<T, Codec>,
-    pub(super) sticky: &'a RwLock<T>,
-    pub(super) value: T,
+    pub inner: Publish<T, Codec>,
+    pub sticky: &'a RwLock<T>,
+    pub value: T,
 }
 
 impl<T, Codec> RetainPublish<'_, T, Codec>

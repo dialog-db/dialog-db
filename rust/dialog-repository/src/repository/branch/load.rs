@@ -27,7 +27,7 @@ impl LoadBranch {
         let revision: Cell<Option<Revision>> = self.branch.cell("revision");
         revision.resolve().perform(env).await?;
 
-        if revision.get().is_none() {
+        if revision.content().is_none() {
             return Err(RepositoryError::BranchNotFound {
                 name: self.branch.name(),
             });

@@ -23,7 +23,7 @@ impl LoadRemote {
     {
         let cell = self.0.address();
         cell.resolve().perform(env).await?;
-        match cell.get() {
+        match cell.content() {
             Some(address) => Ok(RemoteRepository::new(cell.retain(address), self.0)),
             None => Err(RepositoryError::RemoteNotFound {
                 remote: self.0.name(),

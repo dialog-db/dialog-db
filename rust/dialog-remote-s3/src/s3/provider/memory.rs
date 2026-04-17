@@ -96,7 +96,7 @@ impl Provider<S3Invocation<Publish>> for S3 {
                     })?;
                 Ok(Version::from(new_edition))
             }
-            StatusCode::PRECONDITION_FAILED => Err(MemoryError::EditionMismatch {
+            StatusCode::PRECONDITION_FAILED => Err(MemoryError::VersionMismatch {
                 expected: when,
                 actual: None,
             }),
@@ -133,7 +133,7 @@ impl Provider<S3Invocation<Retract>> for S3 {
 
         match response.status() {
             status if status.is_success() => Ok(()),
-            StatusCode::PRECONDITION_FAILED => Err(MemoryError::EditionMismatch {
+            StatusCode::PRECONDITION_FAILED => Err(MemoryError::VersionMismatch {
                 expected: Some(when),
                 actual: None,
             }),

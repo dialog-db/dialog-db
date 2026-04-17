@@ -1,7 +1,7 @@
 //! Reference for navigating to a remote branch.
 
 use dialog_capability::Subject;
-use serde::{Deserialize, Serialize};
+use dialog_effects::memory::Edition;
 
 use super::load::LoadRemoteBranch;
 use super::open::OpenRemoteBranch;
@@ -10,18 +10,11 @@ use crate::repository::memory::{Cell, MemoryExt};
 use crate::repository::remote::repository::RemoteRepository;
 use crate::repository::revision::Revision;
 
-/// Cached snapshot of the remote branch's last known state.
-///
-/// Pairs the remote revision with the remote's CAS edition so that fresh
+/// Cached snapshot of the remote branch's last known state: the remote
+/// revision paired with the remote's CAS version, so that fresh
 /// [`RemoteBranchReference`] instances can prime the in-memory remote cell
 /// cache without hitting the network.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RemoteSnapshot {
-    /// The remote branch's current revision, as last seen.
-    pub revision: Revision,
-    /// The remote's edition (ETag) at the time this snapshot was taken.
-    pub edition: Vec<u8>,
-}
+pub type RemoteEdition = Edition<Revision>;
 
 /// A reference to a named branch in a remote repository.
 ///
@@ -32,7 +25,7 @@ pub struct RemoteBranchReference {
     pub repository: RemoteRepository,
     /// Persistent cache of the last known remote state.
     /// Path: `remote/{name}/branch/{branch}/revision`.
-    pub cache: Cell<RemoteSnapshot>,
+    pub cache: Cell<RemoteEdition>,
     /// Remote subject's cell: `branch/{branch}/revision` at the remote subject.
     /// In-memory cache only; hydrate from `cache` on open/load.
     pub remote: Cell<Revision>,
@@ -51,7 +44,7 @@ impl RemoteBranchReference {
 
     /// The cached revision, if the snapshot has been resolved.
     pub fn revision(&self) -> Option<Revision> {
-        self.cache.get().map(|s| s.revision)
+        self.cache.content().map(|e| e.content)
     }
 
     /// Open the remote branch (resolves local cache, no error if missing).

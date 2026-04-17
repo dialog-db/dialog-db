@@ -6,7 +6,6 @@ use dialog_common::ConditionalSync;
 use dialog_effects::memory as memory_fx;
 
 use super::RemoteBranch;
-use super::reference::RemoteSnapshot;
 use crate::repository::error::RepositoryError;
 use crate::repository::remote::address::RemoteSite;
 use crate::repository::revision::Revision;
@@ -44,14 +43,12 @@ impl<'a> Publish<'a> {
             .perform(env)
             .await?;
 
-        // Persist the (revision, remote edition) pair so that a future
-        // RemoteBranchReference can hydrate its in-memory `remote` cache
-        // without a round trip.
-        let (revision, edition) = self.branch.remote.snapshot().ok_or_else(|| {
-            RepositoryError::StorageError("remote cell missing snapshot after publish".into())
+        // Persist the remote edition so that a future RemoteBranchReference
+        // can hydrate its in-memory `remote` cache without a round trip.
+        let edition = self.branch.remote.edition().ok_or_else(|| {
+            RepositoryError::StorageError("remote cell missing edition after publish".into())
         })?;
-        let snapshot = RemoteSnapshot { revision, edition };
-        self.branch.cache.publish(snapshot).perform(env).await?;
+        self.branch.cache.publish(edition).perform(env).await?;
 
         Ok(())
     }

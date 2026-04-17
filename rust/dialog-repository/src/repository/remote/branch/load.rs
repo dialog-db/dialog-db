@@ -24,12 +24,12 @@ impl LoadRemoteBranch {
         Env: Provider<memory_fx::Resolve>,
     {
         self.0.cache.resolve().perform(env).await?;
-        let Some(snapshot) = self.0.cache.get() else {
+        let Some(edition) = self.0.cache.content() else {
             return Err(RepositoryError::BranchNotFound {
                 name: self.0.name(),
             });
         };
-        self.0.remote.reset(snapshot.revision, snapshot.edition);
+        self.0.remote.reset(edition);
         Ok(RemoteBranch::new(self.0))
     }
 }

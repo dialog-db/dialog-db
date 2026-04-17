@@ -26,7 +26,7 @@ impl OpenBranch {
     {
         let revision: Cell<Option<Revision>> = self.branch.cell("revision");
         revision.resolve().perform(env).await?;
-        if revision.get().is_none() {
+        if revision.content().is_none() {
             revision.publish(None).perform(env).await?;
         }
 

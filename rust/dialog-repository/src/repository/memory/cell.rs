@@ -6,6 +6,7 @@ use dialog_capability::{Capability, Did, Policy};
 use dialog_common::ConditionalSync;
 use dialog_effects::memory;
 use dialog_effects::memory::prelude::CellExt;
+use dialog_effects::memory::{Edition, Version};
 use dialog_storage::{CborEncoder, DialogStorageError, Encoder};
 use serde::{Serialize, de::DeserializeOwned};
 use std::fmt::Debug;
@@ -14,14 +15,14 @@ use super::publish::{Publish, RetainPublish};
 use super::resolve::{Resolve, RetainResolve};
 use crate::RepositoryError;
 
-/// Cached value paired with its edition, behind a shared lock.
-pub(super) type SharedState<T> = Arc<RwLock<Option<(T, Vec<u8>)>>>;
+/// Cached [`Edition`] behind a shared lock.
+pub type SharedState<T> = Arc<RwLock<Option<Edition<T>>>>;
 
 /// Typed cache over shared state. Handles encode/decode and cache updates.
 #[derive(Debug)]
-pub(super) struct Cache<T, Codec: Clone = CborEncoder> {
-    pub(super) codec: Codec,
-    pub(super) state: SharedState<T>,
+pub struct Cache<T, Codec: Clone = CborEncoder> {
+    pub codec: Codec,
+    pub state: SharedState<T>,
 }
 
 impl<T, Codec: Clone> Clone for Cache<T, Codec> {
@@ -34,28 +35,28 @@ impl<T, Codec: Clone> Clone for Cache<T, Codec> {
 }
 
 impl<T: Clone, Codec: Clone> Cache<T, Codec> {
-    /// Read the cached value.
-    pub(super) fn get(&self) -> Option<T> {
-        self.state.read().as_ref().map(|(v, _)| v.clone())
+    /// Read the cached content.
+    pub fn content(&self) -> Option<T> {
+        self.state.read().as_ref().map(|e| e.content.clone())
     }
 
-    /// Read the full cached (value, edition) pair.
-    pub(super) fn snapshot(&self) -> Option<(T, Vec<u8>)> {
+    /// Read the full cached edition.
+    pub fn edition(&self) -> Option<Edition<T>> {
         self.state.read().clone()
     }
 
-    /// Read just the cached edition.
-    pub(super) fn edition(&self) -> Option<Vec<u8>> {
-        self.state.read().as_ref().map(|(_, e)| e.clone())
+    /// Read just the cached version.
+    pub fn version(&self) -> Option<Version> {
+        self.state.read().as_ref().map(|e| e.version.clone())
     }
 
-    /// Update the cache with a value and edition.
-    pub(super) fn update(&self, value: T, edition: Vec<u8>) {
-        *self.state.write() = Some((value, edition));
+    /// Update the cache with a new edition.
+    pub fn update(&self, edition: Edition<T>) {
+        *self.state.write() = Some(edition);
     }
 
     /// Clear the cache.
-    pub(super) fn clear(&self) {
+    pub fn clear(&self) {
         *self.state.write() = None;
     }
 }
@@ -66,7 +67,7 @@ where
     Codec: Encoder + Clone,
 {
     /// Decode bytes into a typed value.
-    pub(super) async fn decode(&self, bytes: &[u8]) -> Result<T, RepositoryError> {
+    pub async fn decode(&self, bytes: &[u8]) -> Result<T, RepositoryError> {
         self.codec.decode(bytes).await.map_err(|e| {
             let storage_err: DialogStorageError = e.into();
             RepositoryError::from(storage_err)
@@ -80,7 +81,7 @@ where
     Codec: Encoder<Bytes = Vec<u8>> + Clone,
 {
     /// Encode a value into bytes.
-    pub(super) async fn encode(&self, value: &T) -> Result<Vec<u8>, RepositoryError> {
+    pub async fn encode(&self, value: &T) -> Result<Vec<u8>, RepositoryError> {
         let (_hash, content) = self.codec.encode(value).await.map_err(|e| {
             let storage_err: DialogStorageError = e.into();
             RepositoryError::from(storage_err)
@@ -132,20 +133,20 @@ where
 {
     /// Read the cached value without hitting env.
     /// Returns `None` if the cell has not been resolved or published yet.
-    pub fn get(&self) -> Option<T> {
-        self.cache.get()
+    pub fn content(&self) -> Option<T> {
+        self.cache.content()
     }
 
-    /// Read the cached (value, edition) pair without hitting env.
+    /// Read the cached edition (content + version) without hitting env.
     /// Returns `None` if the cell has not been resolved or published yet.
-    pub fn snapshot(&self) -> Option<(T, Vec<u8>)> {
-        self.cache.snapshot()
+    pub fn edition(&self) -> Option<Edition<T>> {
+        self.cache.edition()
     }
 
-    /// Reset the in-memory cache to a known value and edition, without
-    /// hitting the backend. Used to restore cache state across sessions.
-    pub fn reset(&self, value: T, edition: Vec<u8>) {
-        self.cache.update(value, edition);
+    /// Reset the in-memory cache to a known edition, without hitting the
+    /// backend. Used to restore cache state across sessions.
+    pub fn reset(&self, edition: Edition<T>) {
+        self.cache.update(edition);
     }
 
     /// Returns the subject DID from the capability chain.
@@ -180,11 +181,11 @@ where
     ///
     /// Call `.perform(&env)` for local, or `.fork(&address).perform(&env)`
     /// for remote.
-    pub fn publish(&self, value: T) -> Publish<T, Codec> {
+    pub fn publish(&self, content: T) -> Publish<T, Codec> {
         Publish {
             capability: self.capability.clone(),
             cache: self.cache.clone(),
-            value,
+            content,
         }
     }
 }
@@ -206,7 +207,7 @@ impl<T: Clone> Retain<T> {
     /// If the cell has a newer value, the sticky cache is updated.
     /// Returns a read guard that derefs to `&T`.
     pub fn get(&self) -> parking_lot::RwLockReadGuard<'_, T> {
-        if let Some(value) = self.cell.get() {
+        if let Some(value) = self.cell.content() {
             *self.value.write() = value;
         }
         self.value.read()
@@ -303,7 +304,7 @@ mod tests {
         let cell: Cell<TestValue> = test_cell("missing");
 
         cell.resolve().perform(&provider).await?;
-        assert!(cell.get().is_none());
+        assert!(cell.content().is_none());
 
         Ok(())
     }
@@ -319,10 +320,10 @@ mod tests {
         };
 
         cell.publish(value.clone()).perform(&provider).await?;
-        assert_eq!(cell.get(), Some(value.clone()));
+        assert_eq!(cell.content(), Some(value.clone()));
 
         cell.resolve().perform(&provider).await?;
-        assert_eq!(cell.get(), Some(value));
+        assert_eq!(cell.content(), Some(value));
 
         Ok(())
     }
@@ -345,7 +346,7 @@ mod tests {
         cell.publish(v2.clone()).perform(&provider).await?;
 
         cell.resolve().perform(&provider).await?;
-        assert_eq!(cell.get(), Some(v2));
+        assert_eq!(cell.content(), Some(v2));
 
         Ok(())
     }
@@ -363,12 +364,12 @@ mod tests {
         let writer: Cell<TestValue> = test_cell("cache");
         writer.publish(value.clone()).perform(&provider).await?;
 
-        assert!(cell.get().is_none());
+        assert!(cell.content().is_none());
         cell.resolve().perform(&provider).await?;
-        assert_eq!(cell.get(), Some(value.clone()));
+        assert_eq!(cell.content(), Some(value.clone()));
 
         cell.resolve().perform(&provider).await?;
-        assert_eq!(cell.get(), Some(value));
+        assert_eq!(cell.content(), Some(value));
 
         Ok(())
     }
@@ -385,7 +386,7 @@ mod tests {
         };
 
         cell.publish(value.clone()).perform(&provider).await?;
-        assert_eq!(clone.get(), Some(value));
+        assert_eq!(clone.content(), Some(value));
 
         Ok(())
     }
@@ -402,7 +403,7 @@ mod tests {
         };
 
         clone.publish(value.clone()).perform(&provider).await?;
-        assert_eq!(original.get(), Some(value));
+        assert_eq!(original.content(), Some(value));
 
         Ok(())
     }
@@ -519,7 +520,7 @@ mod tests {
         let reader: Cell<TestValue> = test_cell("edition");
         reader.resolve().perform(&provider).await?;
         assert_eq!(
-            reader.get(),
+            reader.content(),
             Some(v2),
             "second publish should succeed with correct edition"
         );

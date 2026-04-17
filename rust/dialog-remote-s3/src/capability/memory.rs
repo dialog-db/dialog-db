@@ -84,4 +84,3 @@ impl Access for Capability<memory::Retract> {
         Precondition::IfMatch(memory::Retract::of(self).when.to_string())
     }
 }
-

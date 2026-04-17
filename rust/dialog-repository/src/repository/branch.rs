@@ -62,12 +62,12 @@ impl Branch {
     /// Returns the current revision of this branch, or `None` if the branch
     /// has no commits yet (equivalent to an orphan branch in git).
     pub fn revision(&self) -> Option<Revision> {
-        self.revision.get().flatten()
+        self.revision.content().flatten()
     }
 
     /// Returns the upstream state.
     pub fn upstream(&self) -> Option<UpstreamState> {
-        self.upstream.get().flatten()
+        self.upstream.content().flatten()
     }
 
     /// Returns the subject DID.

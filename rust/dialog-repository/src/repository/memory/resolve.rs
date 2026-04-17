@@ -17,8 +17,8 @@ use crate::RepositoryError;
 /// Created by [`Cell::resolve`](super::Cell::resolve). Execute with
 /// `.perform(&env)` for local or `.fork(&address).perform(&env)` for remote.
 pub struct Resolve<T, Codec: Clone> {
-    pub(super) effect: Capability<memory::Resolve>,
-    pub(super) cache: Cache<T, Codec>,
+    pub effect: Capability<memory::Resolve>,
+    pub cache: Cache<T, Codec>,
 }
 
 impl<T, Codec> Resolve<T, Codec>
@@ -78,8 +78,10 @@ where
     match edition {
         None => cache.clear(),
         Some(pub_data) => {
-            let value: T = cache.decode(&pub_data.content).await?;
-            cache.update(value, pub_data.version.into_bytes());
+            cache.update(memory::Edition {
+                content: cache.decode(&pub_data.content).await?,
+                version: pub_data.version,
+            });
         }
     }
     Ok(())
@@ -87,8 +89,8 @@ where
 
 /// Command to resolve a retained cell.
 pub struct RetainResolve<'a, T, Codec: Clone> {
-    pub(super) inner: Resolve<T, Codec>,
-    pub(super) value: &'a RwLock<T>,
+    pub inner: Resolve<T, Codec>,
+    pub value: &'a RwLock<T>,
 }
 
 impl<T, Codec> RetainResolve<'_, T, Codec>
@@ -103,7 +105,7 @@ where
     ) -> Result<(), RepositoryError> {
         let cache = self.inner.cache.clone();
         self.inner.perform(env).await?;
-        if let Some(value) = cache.get() {
+        if let Some(value) = cache.content() {
             *self.value.write() = value;
         }
         Ok(())

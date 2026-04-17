@@ -25,8 +25,8 @@ impl OpenRemoteBranch {
         Env: Provider<memory_fx::Resolve>,
     {
         self.0.cache.resolve().perform(env).await?;
-        if let Some(snapshot) = self.0.cache.get() {
-            self.0.remote.reset(snapshot.revision, snapshot.edition);
+        if let Some(edition) = self.0.cache.content() {
+            self.0.remote.reset(edition);
         }
         Ok(RemoteBranch::new(self.0))
     }

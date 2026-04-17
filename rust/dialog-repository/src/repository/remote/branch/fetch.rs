@@ -6,7 +6,6 @@ use dialog_common::ConditionalSync;
 use dialog_effects::memory as memory_fx;
 
 use super::RemoteBranch;
-use super::reference::RemoteSnapshot;
 use crate::repository::error::RepositoryError;
 use crate::repository::remote::address::RemoteSite;
 use crate::repository::revision::Revision;
@@ -40,15 +39,12 @@ impl<'a> Fetch<'a> {
             .perform(env)
             .await?;
 
-        // Persist the new (revision, edition) snapshot if the remote has one.
-        let Some((revision, edition)) = self.branch.remote.snapshot() else {
+        // Persist the new remote edition if the remote has one.
+        let Some(edition) = self.branch.remote.edition() else {
             return Ok(None);
         };
-        let snapshot = RemoteSnapshot {
-            revision: revision.clone(),
-            edition,
-        };
-        self.branch.cache.publish(snapshot).perform(env).await?;
+        let revision = edition.content.clone();
+        self.branch.cache.publish(edition).perform(env).await?;
 
         Ok(Some(revision))
     }

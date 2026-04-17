@@ -35,7 +35,7 @@ impl CreateRemote {
     {
         let cell = self.reference.address();
         cell.resolve().perform(env).await?;
-        if cell.get().is_some() {
+        if cell.content().is_some() {
             return Err(RepositoryError::RemoteAlreadyExists {
                 remote: self.reference.name(),
             });

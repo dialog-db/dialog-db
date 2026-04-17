@@ -106,7 +106,7 @@ impl Provider<Publish> for IndexedDb {
                 match (expected_edition.as_deref(), &current_edition) {
                     // Creating new: require cell doesn't exist
                     (None, Some(_)) => {
-                        return Err(MemoryError::EditionMismatch {
+                        return Err(MemoryError::VersionMismatch {
                             expected: None,
                             actual: format_edition(
                                 current_edition.as_ref().map(|h| h.as_bytes().as_slice()),
@@ -116,7 +116,7 @@ impl Provider<Publish> for IndexedDb {
                     // Updating existing: require edition matches
                     (Some(expected), Some(current)) => {
                         if expected != current.as_bytes() {
-                            return Err(MemoryError::EditionMismatch {
+                            return Err(MemoryError::VersionMismatch {
                                 expected: format_edition(Some(expected)),
                                 actual: format_edition(Some(current.as_bytes())),
                             });
@@ -124,7 +124,7 @@ impl Provider<Publish> for IndexedDb {
                     }
                     // Updating non-existent: fail
                     (Some(expected), None) => {
-                        return Err(MemoryError::EditionMismatch {
+                        return Err(MemoryError::VersionMismatch {
                             expected: format_edition(Some(expected)),
                             actual: None,
                         });
@@ -171,7 +171,7 @@ impl Provider<Retract> for IndexedDb {
 
                 // Check CAS condition
                 if expected_edition != current_edition.as_bytes() {
-                    return Err(MemoryError::EditionMismatch {
+                    return Err(MemoryError::VersionMismatch {
                         expected: format_edition(Some(&expected_edition)),
                         actual: format_edition(Some(current_edition.as_bytes())),
                     });
@@ -314,16 +314,16 @@ mod tests {
             .await?;
 
         // Try to update with wrong edition
-        let wrong_edition = Blake3Hash::hash(b"wrong").as_bytes().to_vec();
+        let wrong_edition = Version::from(Blake3Hash::hash(b"wrong"));
         let result = subject
             .attenuate(Memory)
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
-            .invoke(Publish::new(b"updated", Some(wrong_edition.into())))
+            .invoke(Publish::new(b"updated", Some(wrong_edition)))
             .perform(&provider)
             .await;
 
-        assert!(matches!(result, Err(MemoryError::EditionMismatch { .. })));
+        assert!(matches!(result, Err(MemoryError::VersionMismatch { .. })));
 
         Ok(())
     }
@@ -352,7 +352,7 @@ mod tests {
             .perform(&provider)
             .await;
 
-        assert!(matches!(result, Err(MemoryError::EditionMismatch { .. })));
+        assert!(matches!(result, Err(MemoryError::VersionMismatch { .. })));
 
         Ok(())
     }
@@ -412,16 +412,16 @@ mod tests {
             .await?;
 
         // Try to retract with wrong edition
-        let wrong_edition = Blake3Hash::hash(b"wrong").as_bytes().to_vec();
+        let wrong_version = Blake3Hash::hash(b"wrong");
         let result = subject
             .attenuate(Memory)
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
-            .invoke(Retract::new(wrong_edition))
+            .invoke(Retract::new(wrong_version))
             .perform(&provider)
             .await;
 
-        assert!(matches!(result, Err(MemoryError::EditionMismatch { .. })));
+        assert!(matches!(result, Err(MemoryError::VersionMismatch { .. })));
 
         Ok(())
     }
@@ -491,20 +491,17 @@ mod tests {
             .await?;
 
         // Try to publish same content with wrong edition - should succeed
-        let wrong_edition = Blake3Hash::hash(b"wrong").as_bytes().to_vec();
+        let wrong_edition = Version::from(Blake3Hash::hash(b"wrong"));
         let result = subject
             .attenuate(Memory)
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
-            .invoke(Publish::new(content.clone(), Some(wrong_edition.into())))
+            .invoke(Publish::new(content.clone(), Some(wrong_edition)))
             .perform(&provider)
             .await;
 
         assert!(result.is_ok());
-        assert_eq!(
-            result.unwrap(),
-            Version::from(Blake3Hash::hash(&content).as_bytes())
-        );
+        assert_eq!(result.unwrap(), Version::from(Blake3Hash::hash(&content)));
 
         Ok(())
     }
@@ -546,7 +543,7 @@ mod tests {
         let subject = unique_subject("memory-retract-already-retracted");
 
         // Try to retract non-existent cell - should succeed
-        let wrong_edition = Blake3Hash::hash(b"wrong").as_bytes().to_vec();
+        let wrong_edition = Blake3Hash::hash(b"wrong");
         let result = subject
             .attenuate(Memory)
             .attenuate(Space::new("local"))

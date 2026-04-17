@@ -16,10 +16,10 @@
 
 use std::fmt;
 
+use base58::ToBase58;
 pub use dialog_capability::{
     Attenuation, Capability, Claim, Effect, Policy, StorageError, Subject,
 };
-use base58::ToBase58;
 use dialog_common::Checksum;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -127,6 +127,18 @@ impl From<&str> for Version {
     }
 }
 
+impl From<dialog_common::Blake3Hash> for Version {
+    fn from(hash: dialog_common::Blake3Hash) -> Self {
+        Self(hash.as_bytes().to_vec())
+    }
+}
+
+impl From<&dialog_common::Blake3Hash> for Version {
+    fn from(hash: &dialog_common::Blake3Hash) -> Self {
+        Self(hash.as_bytes().to_vec())
+    }
+}
+
 impl AsRef<[u8]> for Version {
     fn as_ref(&self) -> &[u8] {
         &self.0
@@ -151,7 +163,6 @@ impl fmt::Debug for Version {
         write!(f, "Version({})", self)
     }
 }
-
 
 /// A cell's current state: content and its version.
 ///
@@ -198,7 +209,7 @@ impl ResolveCapability for Capability<Resolve> {
 /// - If `when` is `None`, expects cell to be empty (first publish)
 /// - If `when` is `Some(edition)`, expects current edition to match
 /// - Returns new edition on success
-/// - Returns `MemoryError::EditionMismatch` if expectation doesn't match
+/// - Returns `MemoryError::VersionMismatch` if expectation doesn't match
 #[derive(Debug, Clone, Serialize, Deserialize, Claim)]
 pub struct Publish {
     /// The content to publish.
@@ -265,7 +276,7 @@ impl PublishCapability for Capability<Publish> {
 /// Retract operation - removes cell content with CAS semantics.
 ///
 /// - Requires `when` to match current edition
-/// - Returns `MemoryError::EditionMismatch` if edition doesn't match
+/// - Returns `MemoryError::VersionMismatch` if edition doesn't match
 #[derive(Debug, Clone, Serialize, Deserialize, Claim)]
 pub struct Retract {
     /// The expected current version.
@@ -314,8 +325,8 @@ pub mod prelude;
 #[derive(Debug, Error)]
 pub enum MemoryError {
     /// CAS edition mismatch.
-    #[error("Edition mismatch: expected {expected:?}, got {actual:?}")]
-    EditionMismatch {
+    #[error("Version mismatch: expected {expected:?}, got {actual:?}")]
+    VersionMismatch {
         /// The expected version.
         expected: Option<Version>,
         /// The actual version found.

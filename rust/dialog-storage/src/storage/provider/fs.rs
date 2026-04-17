@@ -674,8 +674,7 @@ mod tests {
         let publication = resolved.expect("should find prefabricated cell");
         assert_eq!(publication.content, content);
 
-        let expected_version =
-            dialog_effects::memory::Version::from(Blake3Hash::hash(&content).as_bytes());
+        let expected_version = dialog_effects::memory::Version::from(Blake3Hash::hash(&content));
         assert_eq!(publication.version, expected_version);
     }
 }
