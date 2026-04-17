@@ -20,9 +20,9 @@ pub use credential::S3Credential;
 pub use invocation::S3Invocation;
 pub use permit::Permit;
 
+use dialog_capability::Effect;
 use dialog_capability::fork::Fork;
 use dialog_capability::site::Site;
-use dialog_capability::{Capability, Effect};
 
 /// S3 direct-access site.
 ///
@@ -32,24 +32,16 @@ pub struct S3;
 
 /// Site-owned fork wrapper for S3.
 ///
-/// Carries the `Authorize` impl for S3: fetches session identity from
-/// the env via `authority::Identify`, loads credentials for that
-/// identity, and bundles them with the capability + address into a
-/// `ForkInvocation`.
-pub struct S3Fork<Fx: Effect> {
-    /// The capability being authorized.
-    pub capability: Capability<Fx>,
-    /// The S3 address to authorize against.
-    pub address: Address,
-}
+/// Thin newtype around [`Fork<S3, Fx>`] that carries the site-specific
+/// [`Authorize`](dialog_capability::fork::Authorize) impl. Fetches
+/// session identity from the env via `authority::Identify`, loads the
+/// matching credential, and returns a [`ForkInvocation`] bound to the
+/// captured request.
+pub struct S3Fork<Fx: Effect>(Fork<S3, Fx>);
 
 impl<Fx: Effect> From<Fork<S3, Fx>> for S3Fork<Fx> {
     fn from(fork: Fork<S3, Fx>) -> Self {
-        let (capability, address) = fork.into_parts();
-        Self {
-            capability,
-            address,
-        }
+        Self(fork)
     }
 }
 

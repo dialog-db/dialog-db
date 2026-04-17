@@ -626,7 +626,7 @@ mod tests {
         use dialog_effects::archive::prelude::*;
         use dialog_effects::credential::Secret;
         use dialog_remote_s3::helpers::S3Address;
-        use dialog_remote_s3::{Address, S3Authorization, S3Credential};
+        use dialog_remote_s3::{Address, S3Credential};
 
         fn address_from(s3: &S3Address) -> SiteAddress {
             SiteAddress::S3(
@@ -641,18 +641,11 @@ mod tests {
         #[dialog_common::test]
         fn credential_roundtrips_through_secret() {
             let cred = S3Credential::new("test-access-key", "test-secret-key");
-            let auth = S3Authorization::from(cred.clone());
+            let secret: Secret = cred.clone().into();
+            let restored: S3Credential = secret.try_into().unwrap();
 
-            let secret: Secret = auth.try_into().unwrap();
-            let restored: S3Authorization = secret.try_into().unwrap();
-
-            assert!(
-                restored.0.is_some(),
-                "should have credentials after roundtrip"
-            );
-            let restored_cred = restored.0.unwrap();
-            assert_eq!(restored_cred.access_key_id(), cred.access_key_id());
-            assert_eq!(restored_cred.secret_access_key(), cred.secret_access_key());
+            assert_eq!(restored.access_key_id(), cred.access_key_id());
+            assert_eq!(restored.secret_access_key(), cred.secret_access_key());
         }
 
         #[dialog_common::test]
@@ -706,13 +699,12 @@ mod tests {
                 .unwrap();
 
             let address = address_from(&s3);
-            let authorization =
-                S3Authorization::from(S3Credential::new(&s3.access_key_id, &s3.secret_access_key));
+            let credential = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
 
             profile
                 .credential()
                 .site(&address)
-                .save(authorization)
+                .save(credential)
                 .perform(&operator)
                 .await
                 .unwrap();
@@ -748,8 +740,7 @@ mod tests {
                 .unwrap();
 
             let address = address_from(&s3);
-            let authorization =
-                S3Authorization::from(S3Credential::new(&s3.access_key_id, &s3.secret_access_key));
+            let authorization = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
 
             profile
                 .credential()

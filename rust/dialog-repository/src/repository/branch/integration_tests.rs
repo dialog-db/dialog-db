@@ -13,7 +13,7 @@ use crate::{Artifact, ArtifactSelector, Instruction, Operator, Value};
 use dialog_credentials::SignerCredential;
 use dialog_operator::profile::Profile;
 use dialog_remote_s3::helpers::S3Address;
-use dialog_remote_s3::{Address as S3SiteAddress, S3Authorization, S3Credential};
+use dialog_remote_s3::{Address as S3SiteAddress, S3Credential};
 use dialog_storage::provider::storage::VolatileSpace;
 use futures_util::StreamExt;
 use futures_util::stream;
@@ -41,8 +41,7 @@ async fn setup_repo_with_s3_remote(
     let site_address = s3_site_address(s3);
 
     // Save S3 credentials so the Operator can authorize fork requests
-    let authorization =
-        S3Authorization::from(S3Credential::new(&s3.access_key_id, &s3.secret_access_key));
+    let authorization = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
     profile
         .credential()
         .site(&site_address)
@@ -702,8 +701,7 @@ async fn it_delegates_and_pushes_to_s3(s3: S3Address) -> anyhow::Result<()> {
 
     // Save S3 credentials and set up remote
     let site_address = s3_site_address(&s3);
-    let authorization =
-        S3Authorization::from(S3Credential::new(&s3.access_key_id, &s3.secret_access_key));
+    let authorization = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
     profile
         .credential()
         .site(&site_address)
@@ -766,8 +764,7 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> anyhow::Result<(
 
     // Save S3 credentials for Alice and set up remote
     let site_address = s3_site_address(&s3);
-    let authorization =
-        S3Authorization::from(S3Credential::new(&s3.access_key_id, &s3.secret_access_key));
+    let authorization = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
     alice_profile
         .credential()
         .site(&site_address)
@@ -819,8 +816,7 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> anyhow::Result<(
 
     // Save S3 credentials for Bob
     let bob_site_address = s3_site_address(&s3);
-    let bob_authorization =
-        S3Authorization::from(S3Credential::new(&s3.access_key_id, &s3.secret_access_key));
+    let bob_authorization = S3Credential::new(&s3.access_key_id, &s3.secret_access_key);
     bob_profile
         .credential()
         .site(&bob_site_address)

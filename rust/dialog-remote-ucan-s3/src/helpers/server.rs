@@ -8,7 +8,7 @@ use super::UcanS3Address;
 use crate::UcanAuthorizer;
 use dialog_common::helpers::{Provider, Service};
 use dialog_remote_s3::helpers::LocalS3;
-use dialog_remote_s3::{Address, S3Authorization, S3Credential};
+use dialog_remote_s3::{Address, S3Credential};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::{Method, Request, Response, StatusCode};
@@ -41,9 +41,9 @@ impl UcanAccessServer {
             .path_style(true)
             .build()?;
 
-        let authorization = S3Authorization::from(S3Credential::new(access_key, secret_key));
+        let credential = S3Credential::new(access_key, secret_key);
 
-        let authorizer = Arc::new(RwLock::new(UcanAuthorizer::new(address, authorization)));
+        let authorizer = Arc::new(RwLock::new(UcanAuthorizer::new(address, Some(credential))));
 
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;

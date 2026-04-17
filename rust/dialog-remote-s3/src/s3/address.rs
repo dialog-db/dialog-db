@@ -3,11 +3,12 @@
 //! This module provides the [`Address`] type for specifying S3-compatible storage locations.
 //! Use [`Address::builder`] to construct with validation.
 
-use super::{S3, S3Authorization, S3Fork};
+use super::{S3, S3Credential, S3Fork};
 use crate::S3Error;
+use crate::capability::{Access, Request};
 use dialog_capability::access::AuthorizeError;
 use dialog_capability::site::SiteAddress;
-use dialog_capability::{Constraint, Effect, Provider, SiteId};
+use dialog_capability::{Capability, Constraint, Effect, Provider, SiteId};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::authority::{self, OperatorExt};
 use dialog_effects::credential::prelude::*;
@@ -150,6 +151,7 @@ impl<Fx, Env> Authorize<Env> for S3Fork<Fx>
 where
     Fx: Effect + ConditionalSend + ConditionalSync + 'static,
     Fx::Of: Constraint<Capability: ConditionalSend + ConditionalSync>,
+    Capability<Fx>: Access,
     Env: Provider<Load<Secret>> + Provider<authority::Identify> + ConditionalSync,
     S3Fork<Fx>: ConditionalSend,
 {
@@ -157,29 +159,27 @@ where
     type Effect = Fx;
 
     async fn authorize(self, env: &Env) -> Result<ForkInvocation<S3, Fx>, AuthorizeError> {
-        // Destructure early to avoid holding non-Send Capability<Fx> across await
-        let S3Fork {
-            capability,
-            address,
-        } = self;
+        // Capture the request description up front so we don't need to
+        // hold the capability across awaits.
+        let request = Request::from(self.0.capability());
 
-        let authorization = {
-            let profile = authority::Identify
-                .perform(env)
-                .await
-                .map_err(|e| AuthorizeError::Configuration(e.to_string()))?
-                .profile()
-                .clone();
-            let secret: Secret = profile
-                .credential()
-                .site(&address)
-                .load()
-                .perform(env)
-                .await?;
-            S3Authorization::try_from(secret).map_err(AuthorizeError::from)?
-        };
+        let profile = authority::Identify
+            .perform(env)
+            .await
+            .map_err(|e| AuthorizeError::Configuration(e.to_string()))?
+            .profile()
+            .clone();
 
-        Ok(ForkInvocation::new(capability, address, authorization))
+        let secret = profile
+            .credential()
+            .site(self.0.address())
+            .load()
+            .perform(env)
+            .await?;
+
+        let credential = S3Credential::try_from(secret).map_err(AuthorizeError::from)?;
+
+        Ok(self.0.attest(request.attest(credential)))
     }
 }
 

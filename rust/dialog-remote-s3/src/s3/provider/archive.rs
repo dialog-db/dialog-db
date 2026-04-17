@@ -17,7 +17,7 @@ impl Provider<ForkInvocation<S3, Get>> for S3 {
     ) -> Result<Option<Vec<u8>>, ArchiveError> {
         input
             .authorization
-            .redeem(&input.capability, &input.address)
+            .redeem(&input.address)
             .await?
             .invoke(input.capability)
             .perform(self)
@@ -51,7 +51,7 @@ impl Provider<ForkInvocation<S3, Put>> for S3 {
     async fn execute(&self, input: ForkInvocation<S3, Put>) -> Result<(), ArchiveError> {
         input
             .authorization
-            .redeem(&input.capability, &input.address)
+            .redeem(&input.address)
             .await?
             .invoke(input.capability)
             .perform(self)

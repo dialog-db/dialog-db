@@ -175,3 +175,9 @@ impl From<CredentialError> for AuthorizeError {
         Self::Denied(e.to_string())
     }
 }
+
+impl From<std::convert::Infallible> for CredentialError {
+    fn from(never: std::convert::Infallible) -> Self {
+        match never {}
+    }
+}

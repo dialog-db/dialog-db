@@ -21,7 +21,7 @@ pub use dialog_ucan::{Ucan, UcanInvocation};
 /// Wraps a [`UcanInvocation`] (signed UCAN chain) that gets sent to the
 /// access service to obtain a presigned URL.
 #[derive(Debug, Clone)]
-pub struct UcanAuthorization(pub UcanInvocation);
+pub struct UcanAuthorization(UcanInvocation);
 
 impl UcanAuthorization {
     /// Redeem this authorization at the access service for a presigned URL permit.
@@ -93,22 +93,16 @@ impl From<UcanAddress> for SiteId {
 
 /// Site-owned fork wrapper for UCAN.
 ///
-/// Carries the `Authorize` impl for UCAN sites: fetches session identity
-/// from the env via `authority::Identify`, constructs a UCAN `Authorize`
-/// invocation on that identity, and bundles the resulting signed
-/// delegation with the capability + address into a `ForkInvocation`.
-pub struct UcanFork<Fx: Effect> {
-    pub capability: Capability<Fx>,
-    pub address: UcanAddress,
-}
+/// Thin newtype around [`Fork<UcanSite, Fx>`] that carries the
+/// site-specific [`Authorize`](dialog_capability::fork::Authorize)
+/// impl: fetches session identity from the env, invokes UCAN's
+/// `Authorize` on that identity, and bundles the resulting signed
+/// delegation into a [`ForkInvocation`].
+pub struct UcanFork<Fx: Effect>(Fork<UcanSite, Fx>);
 
 impl<Fx: Effect> From<Fork<UcanSite, Fx>> for UcanFork<Fx> {
     fn from(fork: Fork<UcanSite, Fx>) -> Self {
-        let (capability, address) = fork.into_parts();
-        Self {
-            capability,
-            address,
-        }
+        Self(fork)
     }
 }
 
@@ -125,11 +119,6 @@ where
     type Effect = Fx;
 
     async fn authorize(self, env: &Env) -> Result<ForkInvocation<UcanSite, Fx>, AuthorizeError> {
-        let UcanFork {
-            capability,
-            address,
-        } = self;
-
         let identity = authority::Identify
             .perform(env)
             .await
@@ -137,7 +126,7 @@ where
         let profile = identity.profile().clone();
         let operator = identity.did();
 
-        let scope = <Ucan as Protocol>::Access::from_capability(&capability);
+        let scope = <Ucan as Protocol>::Access::from_capability(self.0.capability());
 
         let authorization = Subject::from(profile)
             .attenuate(Access)
@@ -146,11 +135,7 @@ where
             .await?;
 
         let invocation = authorization.invoke().await?;
-        Ok(ForkInvocation::new(
-            capability,
-            address,
-            UcanAuthorization::from(invocation),
-        ))
+        Ok(self.0.attest(UcanAuthorization::from(invocation)))
     }
 }
 

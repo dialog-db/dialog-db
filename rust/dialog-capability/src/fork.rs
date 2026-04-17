@@ -87,6 +87,13 @@ where
         (self.capability, self.address)
     }
 
+    /// Attest authorization for this fork, producing a [`ForkInvocation`]
+    /// ready for execution. The caller is vouching that the supplied
+    /// material authorizes this specific capability + address pair.
+    pub fn attest(self, authorization: S::Authorization) -> ForkInvocation<S, Fx> {
+        ForkInvocation::new(self.capability, self.address, authorization)
+    }
+
     /// Execute the fork against a provider.
     ///
     /// The provider (typically the Operator) builds protocol-specific

@@ -39,6 +39,7 @@
 
 use chrono::{DateTime, Utc};
 use dialog_common::{Checksum, ConditionalSend, ConditionalSync};
+use serde::{Deserialize, Serialize};
 
 /// Default URL expiration: 1 hour.
 pub const DEFAULT_EXPIRES: u64 = 3600;
@@ -47,7 +48,7 @@ pub mod archive;
 pub mod memory;
 
 /// Precondition for conditional S3 operations (CAS semantics).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Precondition {
     /// No precondition - unconditional operation.
     None,
@@ -57,10 +58,35 @@ pub enum Precondition {
     IfNoneMatch,
 }
 
-/// This trait can be implemented by effects that that be translated into
-/// S3 requests. Providing convenient way for creating authorizations in
-/// form of presigned URLs + headers.
+/// A concrete, captured S3 request description.
 ///
+/// Produced by `Request::from(&access)` where `access: Access`; the
+/// result is a self-contained value that no longer depends on the
+/// capability and can be signed / bound into an
+/// [`S3Authorization`](crate::S3Authorization).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Request {
+    /// The HTTP method.
+    pub method: String,
+    /// The URL path.
+    pub path: String,
+    /// Body checksum, if any.
+    pub checksum: Option<Checksum>,
+    /// Service name for SigV4 (usually `"s3"`).
+    pub service: String,
+    /// Signed-URL expiration in seconds.
+    pub expires: u64,
+    /// Signing timestamp.
+    pub time: DateTime<Utc>,
+    /// Query parameters.
+    pub params: Option<Vec<(String, String)>>,
+    /// Conditional-operation precondition.
+    pub precondition: Precondition,
+}
+
+/// This trait can be implemented by effects that can be translated into
+/// S3 requests. Any `Access` value can be converted into a concrete
+/// [`Request`] via `Request::from(&access)`.
 pub trait Access: ConditionalSend + ConditionalSync {
     /// The HTTP method for this request.
     fn method(&self) -> &'static str;
@@ -96,6 +122,21 @@ pub trait Access: ConditionalSend + ConditionalSync {
     /// Precondition for conditional operations.
     fn precondition(&self) -> Precondition {
         Precondition::None
+    }
+}
+
+impl<T: Access + ?Sized> From<&T> for Request {
+    fn from(access: &T) -> Self {
+        Self {
+            method: access.method().to_string(),
+            path: access.path(),
+            checksum: access.checksum(),
+            service: access.service().to_string(),
+            expires: access.expires(),
+            time: access.time(),
+            params: access.params(),
+            precondition: access.precondition(),
+        }
     }
 }
 
