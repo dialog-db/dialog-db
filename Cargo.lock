@@ -1083,6 +1083,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-network"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "dialog-capability",
+ "dialog-common",
+ "dialog-effects",
+ "dialog-remote-s3",
+ "dialog-remote-ucan-s3",
+ "serde",
+]
+
+[[package]]
 name = "dialog-operator"
 version = "0.1.0"
 dependencies = [
@@ -1095,6 +1108,7 @@ dependencies = [
  "dialog-common",
  "dialog-credentials",
  "dialog-effects",
+ "dialog-network",
  "dialog-remote-s3",
  "dialog-remote-ucan-s3",
  "dialog-storage",
