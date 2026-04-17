@@ -8,23 +8,11 @@
 
 use std::fmt::{self, Display, Formatter};
 
-use crate::{Capability, Effect};
+use crate::Effect;
+use crate::fork::Fork;
 use dialog_common::ConditionalSend;
-use dialog_varsig::Did;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-
-/// The identity performing a fork operation.
-///
-/// Contains the operator DID (ephemeral session key) and the profile
-/// DID (long-lived identity) it acts on behalf of.
-#[derive(Debug, Clone)]
-pub struct SiteIssuer {
-    /// The operator's DID (ephemeral session key).
-    pub operator: Did,
-    /// The profile's DID (long-lived identity).
-    pub profile: Did,
-}
 
 /// A stable identifier for a site address.
 ///
@@ -94,9 +82,10 @@ where
 
 /// Marker trait for remote execution targets.
 ///
-/// Associates an authorization type, address type, and claim type.
-/// The claim type bundles a capability + issuer + address and knows
-/// how to authorize against an environment.
+/// Associates an authorization type, an address type, and a site-owned
+/// fork wrapper. The wrapper is constructed from the generic
+/// [`Fork<Self, Fx>`] and is where site-specific behavior (authorization
+/// via [`Authorize`](crate::fork::Authorize)) is implemented.
 pub trait Site: Clone + ConditionalSend + 'static {
     /// The authorization material for this site.
     type Authorization: ConditionalSend + 'static;
@@ -104,6 +93,7 @@ pub trait Site: Clone + ConditionalSend + 'static {
     /// The address type for this site.
     type Address: Serialize + DeserializeOwned + Clone + ConditionalSend + 'static;
 
-    /// A claim bundles a capability + issuer + address, ready for authorization.
-    type Claim<Fx: Effect>: From<(Capability<Fx>, SiteIssuer, Self::Address)>;
+    /// The site-owned fork wrapper to side step orphan-rule limitations with
+    /// a generic Fork.
+    type Fork<Fx: Effect>: From<Fork<Self, Fx>>;
 }

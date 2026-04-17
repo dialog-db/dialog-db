@@ -3,7 +3,7 @@
 //! Generates composite [`Site`](dialog_capability::Site) types from a struct
 //! of site fields. Each field must be a type that implements
 //! `dialog_capability::Site`. The macro derives address, authorization, and
-//! claim enums from the associated types, plus all dispatch boilerplate.
+//! fork enums from the associated types, plus all dispatch boilerplate.
 //!
 //! # Generated types and impls
 //!
@@ -19,21 +19,21 @@
 //! The macro generates:
 //! - `NetworkAddress` enum (variants from field names, types from `<Site>::Address`)
 //! - `NetworkAuthorization` enum (from `<Site>::Authorization`)
-//! - `NetworkClaim<Fx>` enum (from `<Site>::Claim<Fx>`)
+//! - `NetworkFork<Fx>` enum (from `<Site>::Fork<Fx>`)
 //! - `impl Site for Network`
 //! - `impl SiteAddress for NetworkAddress`
 //! - `From<VariantAddr>` impls via a `FromSiteAddress` helper trait (a bare
 //!   `impl From<<S as Site>::Address> for Address` would hit cross-crate
 //!   coherence issues with associated-type projections)
 //! - `From<NetworkAddress> for SiteId`
-//! - `From<(Capability<Fx>, SiteIssuer, NetworkAddress)> for NetworkClaim<Fx>`
-//! - `Acquire<Env> for NetworkClaim<Fx>`
+//! - `From<Fork<Network, Fx>> for NetworkFork<Fx>` (dispatches on address)
+//! - `Authorize<Env> for NetworkFork<Fx>`
 //! - `Provider<ForkInvocation<Network, Fx>> for Network`
 //!
 //! # Limitations
 //!
 //! `#[cfg]`-gated fields are not currently supported because the generated
-//! `Acquire` and `Provider` impls need per-variant bounds in their `where`
+//! `Authorize` and `Provider` impls need per-variant bounds in their `where`
 //! clauses, and attributes in where clauses are still unstable on Rust
 //! (rust#115590).
 
@@ -110,7 +110,7 @@ fn generate_site(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 
     let address_enum_name = format_ident!("{}Address", struct_name);
     let auth_enum_name = format_ident!("{}Authorization", struct_name);
-    let claim_enum_name = format_ident!("{}Claim", struct_name);
+    let fork_enum_name = format_ident!("{}Fork", struct_name);
     // Helper trait used to implement `From<A> for {Struct}Address` without
     // running into coherence errors on associated type projections.
     let from_site_address_trait_name = format_ident!("__{}FromSiteAddress", struct_name);
@@ -173,13 +173,13 @@ fn generate_site(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         })
         .collect();
 
-    // Claim enum variants (uses aliases to avoid GATs in async_trait)
-    let claim_alias_names: Vec<_> = fields
+    // Fork enum variants (uses aliases to avoid GATs in async_trait)
+    let fork_alias_names: Vec<_> = fields
         .iter()
-        .map(|f| format_ident!("__{}ClaimAlias", f.variant_name))
+        .map(|f| format_ident!("__{}ForkAlias", f.variant_name))
         .collect();
 
-    let claim_alias_defs: Vec<_> = claim_alias_names
+    let fork_alias_defs: Vec<_> = fork_alias_names
         .iter()
         .zip(site_alias_names.iter())
         .zip(fields.iter())
@@ -187,12 +187,12 @@ fn generate_site(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             let cfgs = &f.cfg_attrs;
             quote! {
                 #(#cfgs)*
-                type #alias<Fx> = <#site_alias as ::dialog_capability::Site>::Claim<Fx>;
+                type #alias<Fx> = <#site_alias as ::dialog_capability::Site>::Fork<Fx>;
             }
         })
         .collect();
 
-    let claim_variants: Vec<_> = claim_alias_names
+    let fork_variants: Vec<_> = fork_alias_names
         .iter()
         .zip(fields.iter())
         .map(|(alias, f)| {
@@ -200,7 +200,7 @@ fn generate_site(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             let vname = &f.variant_name;
             quote! {
                 #(#cfgs)*
-                #[doc = concat!(stringify!(#vname), " claim.")]
+                #[doc = concat!(stringify!(#vname), " site-specific fork wrapper.")]
                 #vname(#alias<Fx>),
             }
         })
@@ -244,8 +244,8 @@ fn generate_site(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         })
         .collect();
 
-    // From<(Capability, SiteIssuer, Address)> for Claim
-    let claim_from_arms: Vec<_> = fields
+    // From<Fork<Self, Fx>> for the composite fork enum -- dispatch on address.
+    let fork_from_arms: Vec<_> = fields
         .iter()
         .map(|f| {
             let cfgs = &f.cfg_attrs;
@@ -253,41 +253,41 @@ fn generate_site(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             quote! {
                 #(#cfgs)*
                 #address_enum_name::#vname(addr) => {
-                    Self::#vname((capability, issuer, addr).into())
+                    Self::#vname(::dialog_capability::fork::Fork::new(capability, addr).into())
                 }
             }
         })
         .collect();
 
-    // Acquire where-clause bounds, one per variant.
+    // Authorize where-clause bounds, one per variant.
     //
     // Note: this does NOT currently support `#[cfg]`-gated fields because
     // attributes inside where clauses are unstable on Rust (rust#115590).
     // If you add a cfg-gated field to a `#[derive(Site)]` struct, expect a
     // build error on stable. A future refactor can route these bounds
     // through a marker trait whose impls are cfg-gated at item level.
-    let acquire_bound_trait_defs: Vec<proc_macro2::TokenStream> = Vec::new();
-    let acquire_bounds: Vec<_> = claim_alias_names
+    let authorize_bound_trait_defs: Vec<proc_macro2::TokenStream> = Vec::new();
+    let authorize_bounds: Vec<_> = fork_alias_names
         .iter()
         .zip(site_alias_names.iter())
         .map(|(alias, site_alias)| {
             quote! {
-                #alias<Fx>: ::dialog_capability::fork::Acquire<
+                #alias<Fx>: ::dialog_capability::fork::Authorize<
                     Env, Site = #site_alias, Effect = Fx,
                 > + ::dialog_common::ConditionalSend,
             }
         })
         .collect();
 
-    let acquire_arms: Vec<_> = fields
+    let authorize_arms: Vec<_> = fields
         .iter()
         .map(|f| {
             let cfgs = &f.cfg_attrs;
             let vname = &f.variant_name;
             quote! {
                 #(#cfgs)*
-                Self::#vname(claim) => {
-                    let invocation = claim.perform(env).await?;
+                Self::#vname(site_fork) => {
+                    let invocation = site_fork.authorize(env).await?;
                     Ok(::dialog_capability::ForkInvocation::new(
                         invocation.capability,
                         #address_enum_name::#vname(invocation.address),
@@ -299,7 +299,7 @@ fn generate_site(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         .collect();
 
     // Dispatch (`Provider<ForkInvocation>`) where-clause bounds.
-    // Same cfg limitation as `acquire_bounds` above.
+    // Same cfg limitation as `authorize_bounds` above.
     let dispatch_bound_trait_defs: Vec<proc_macro2::TokenStream> = Vec::new();
     let dispatch_bounds: Vec<_> = site_alias_names
         .iter()
@@ -388,25 +388,20 @@ fn generate_site(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             #(#auth_variants)*
         }
 
-        /// Composite claim for authorization.
-        #vis enum #claim_enum_name<Fx: ::dialog_capability::Effect> {
-            #(#claim_variants)*
+        /// Composite site-owned fork wrapper for dispatch.
+        #vis enum #fork_enum_name<Fx: ::dialog_capability::Effect> {
+            #(#fork_variants)*
         }
 
-        impl<Fx: ::dialog_capability::Effect> ::core::convert::From<(
-            ::dialog_capability::Capability<Fx>,
-            ::dialog_capability::SiteIssuer,
-            #address_enum_name,
-        )> for #claim_enum_name<Fx> {
+        impl<Fx: ::dialog_capability::Effect> ::core::convert::From<
+            ::dialog_capability::fork::Fork<#struct_name, Fx>,
+        > for #fork_enum_name<Fx> {
             fn from(
-                (capability, issuer, address): (
-                    ::dialog_capability::Capability<Fx>,
-                    ::dialog_capability::SiteIssuer,
-                    #address_enum_name,
-                ),
+                fork: ::dialog_capability::fork::Fork<#struct_name, Fx>,
             ) -> Self {
+                let (capability, address) = fork.into_parts();
                 match address {
-                    #(#claim_from_arms)*
+                    #(#fork_from_arms)*
                 }
             }
         }
@@ -414,17 +409,17 @@ fn generate_site(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         impl ::dialog_capability::Site for #struct_name {
             type Authorization = #auth_enum_name;
             type Address = #address_enum_name;
-            type Claim<Fx: ::dialog_capability::Effect> = #claim_enum_name<Fx>;
+            type Fork<Fx: ::dialog_capability::Effect> = #fork_enum_name<Fx>;
         }
 
         #(#site_alias_defs)*
-        #(#claim_alias_defs)*
+        #(#fork_alias_defs)*
 
-        #(#acquire_bound_trait_defs)*
+        #(#authorize_bound_trait_defs)*
 
         #[cfg_attr(not(target_arch = "wasm32"), ::async_trait::async_trait)]
         #[cfg_attr(target_arch = "wasm32", ::async_trait::async_trait(?Send))]
-        impl<Fx, Env> ::dialog_capability::fork::Acquire<Env> for #claim_enum_name<Fx>
+        impl<Fx, Env> ::dialog_capability::fork::Authorize<Env> for #fork_enum_name<Fx>
         where
             Fx: ::dialog_capability::Effect
                 + Clone
@@ -438,13 +433,13 @@ fn generate_site(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             ::dialog_capability::Capability<Fx>: ::dialog_capability::Ability
                 + ::dialog_common::ConditionalSend
                 + ::dialog_common::ConditionalSync,
-            #(#acquire_bounds)*
+            #(#authorize_bounds)*
             Env: ::dialog_common::ConditionalSync,
         {
             type Site = #struct_name;
             type Effect = Fx;
 
-            async fn perform(
+            async fn authorize(
                 self,
                 env: &Env,
             ) -> ::core::result::Result<
@@ -452,7 +447,7 @@ fn generate_site(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 ::dialog_capability::AuthorizeError,
             > {
                 match self {
-                    #(#acquire_arms)*
+                    #(#authorize_arms)*
                 }
             }
         }

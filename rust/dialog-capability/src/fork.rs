@@ -8,9 +8,8 @@ use crate::access::AuthorizeError;
 use crate::command::Command;
 use crate::effect::Effect;
 use crate::site::Site;
-use crate::{Ability, Capability, Constraint, Provider, SiteIssuer};
+use crate::{Ability, Capability, Constraint, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
-use std::marker::PhantomData;
 
 /// Fork pairs a capability with a site address for remote execution.
 ///
@@ -20,7 +19,6 @@ use std::marker::PhantomData;
 pub struct Fork<S: Site, Fx: Effect> {
     capability: Capability<Fx>,
     address: S::Address,
-    _site: PhantomData<S>,
 }
 
 /// A fork with authorization attached, ready for site-level execution.
@@ -71,7 +69,6 @@ where
         Self {
             capability,
             address,
-            _site: PhantomData,
         }
     }
 
@@ -142,31 +139,38 @@ where
     Fx: Effect,
     Fx::Of: Constraint,
 {
-    /// Bundle this fork with an issuer, producing a claim ready for authorization.
+    /// Authorize this fork against an environment, producing a
+    /// [`ForkInvocation`] ready for execution.
     ///
-    /// Call `.perform(&env)` on the returned claim to authorize and get a
-    /// [`ForkInvocation`].
-    pub fn claim(self, issuer: SiteIssuer) -> S::Claim<Fx> {
-        let (capability, address) = self.into_parts();
-        (capability, issuer, address).into()
+    /// Internally this converts the generic `Fork<S, Fx>` into the
+    /// site specific fork type (`S::Fork<Fx>`) and delegates to its
+    /// [`Authorize`] impl. The site's wrapper knows how to fetch
+    /// authorization material from the env.
+    pub async fn authorize<Env>(self, env: &Env) -> Result<ForkInvocation<S, Fx>, AuthorizeError>
+    where
+        S::Fork<Fx>: Authorize<Env, Site = S, Effect = Fx>,
+    {
+        let fork: S::Fork<Fx> = self.into();
+        fork.authorize(env).await
     }
 }
 
-/// Trait for claims that can authorize against an environment.
+/// Trait for site-specific fork wrappers that can authorize against an env.
 ///
-/// Implemented by each site's claim type (e.g., `S3Claim`, `UcanClaim`).
-/// The claim bundles capability + issuer + address and knows how to
-/// obtain authorization material from the environment.
+/// Implemented by each site's fork type (e.g., `S3Fork`, `UcanFork`).
+/// The wrapper knows how to obtain authorization material from the
+/// environment (credentials, signed delegations, etc.) and bundle it
+/// with the capability + address into a [`ForkInvocation`].
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-pub trait Acquire<Env> {
-    /// The site type this claim authorizes for.
+pub trait Authorize<Env> {
+    /// The site type this fork authorizes for.
     type Site: Site;
-    /// The effect type this claim was created for.
+    /// The effect type this fork was created for.
     type Effect: Effect;
 
     /// Authorize and produce a [`ForkInvocation`].
-    async fn perform(
+    async fn authorize(
         self,
         env: &Env,
     ) -> Result<ForkInvocation<Self::Site, Self::Effect>, AuthorizeError>;

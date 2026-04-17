@@ -3,12 +3,13 @@
 //! This module provides the [`Address`] type for specifying S3-compatible storage locations.
 //! Use [`Address::builder`] to construct with validation.
 
-use super::{S3, S3Authorization, S3Claim};
+use super::{S3, S3Authorization, S3Fork};
 use crate::S3Error;
 use dialog_capability::access::AuthorizeError;
 use dialog_capability::site::SiteAddress;
 use dialog_capability::{Constraint, Effect, Provider, SiteId};
 use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_effects::authority::{self, OperatorExt};
 use dialog_effects::credential::prelude::*;
 use dialog_effects::credential::{Load, Secret};
 use serde::{Deserialize, Serialize};
@@ -141,31 +142,35 @@ impl From<Address> for SiteId {
 }
 
 use dialog_capability::ForkInvocation;
-use dialog_capability::fork::Acquire;
+use dialog_capability::fork::Authorize;
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Fx, Env> Acquire<Env> for S3Claim<Fx>
+impl<Fx, Env> Authorize<Env> for S3Fork<Fx>
 where
     Fx: Effect + ConditionalSend + ConditionalSync + 'static,
     Fx::Of: Constraint<Capability: ConditionalSend + ConditionalSync>,
-    Env: Provider<Load<Secret>> + ConditionalSync,
-    S3Claim<Fx>: ConditionalSend,
+    Env: Provider<Load<Secret>> + Provider<authority::Identify> + ConditionalSync,
+    S3Fork<Fx>: ConditionalSend,
 {
     type Site = S3;
     type Effect = Fx;
 
-    async fn perform(self, env: &Env) -> Result<ForkInvocation<S3, Fx>, AuthorizeError> {
+    async fn authorize(self, env: &Env) -> Result<ForkInvocation<S3, Fx>, AuthorizeError> {
         // Destructure early to avoid holding non-Send Capability<Fx> across await
-        let S3Claim {
+        let S3Fork {
             capability,
-            issuer,
             address,
         } = self;
 
         let authorization = {
-            let secret: Secret = issuer
-                .profile
+            let profile = authority::Identify
+                .perform(env)
+                .await
+                .map_err(|e| AuthorizeError::Configuration(e.to_string()))?
+                .profile()
+                .clone();
+            let secret: Secret = profile
                 .credential()
                 .site(&address)
                 .load()

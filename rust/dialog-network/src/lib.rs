@@ -14,7 +14,7 @@
 //! This crate exposes [`Network`], the composite
 //! [`Site`](dialog_capability::Site) that dispatches fork invocations to
 //! the appropriate transport (S3, UCAN-over-S3, ...). The associated
-//! [`NetworkAddress`], [`NetworkAuthorization`], and `NetworkClaim` types
+//! [`NetworkAddress`], [`NetworkAuthorization`], and `NetworkFork` types
 //! are generated from the struct fields by `#[derive(Site)]` in
 //! `dialog-capability`.
 
@@ -28,9 +28,9 @@ use dialog_remote_ucan_s3::UcanSite;
 /// macro inspects the field types and generates:
 /// - [`NetworkAddress`] -- composite address enum
 /// - [`NetworkAuthorization`] -- composite authorization enum
-/// - `NetworkClaim<Fx>` -- composite claim enum
+/// - `NetworkFork<Fx>` -- composite site-owned fork wrapper
 /// - `Site for Network`, `SiteAddress for NetworkAddress`,
-///   `Acquire<Env> for NetworkClaim<Fx>`, and
+///   `Authorize<Env> for NetworkFork<Fx>`, and
 ///   `Provider<ForkInvocation<Network, Fx>> for Network`.
 #[derive(Debug, Clone, Copy, Default, Site)]
 pub struct Network {

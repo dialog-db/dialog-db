@@ -1,14 +1,16 @@
 //! UCAN site configuration -- marker trait + address type.
 
 use dialog_capability::access::{
-    Access, Authorization as _, Authorize, AuthorizeError, FromCapability, Protocol,
+    Access, Authorization as _, Authorize as AuthorizeEffect, AuthorizeError, FromCapability,
+    Protocol,
 };
-use dialog_capability::fork::Acquire;
-use dialog_capability::site::{Site, SiteAddress, SiteIssuer};
+use dialog_capability::fork::{Authorize, Fork};
+use dialog_capability::site::{Site, SiteAddress};
 use dialog_capability::{
     Ability, Capability, Constraint, Effect, ForkInvocation, Provider, SiteId, Subject,
 };
 use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_effects::authority::{self, OperatorExt};
 use dialog_remote_s3::{Permit, S3Error};
 
 // Re-export UCAN types for convenience.
@@ -89,18 +91,22 @@ impl From<UcanAddress> for SiteId {
     }
 }
 
-/// Bundles a capability + issuer + address for UCAN authorization.
-pub struct UcanClaim<Fx: Effect> {
+/// Site-owned fork wrapper for UCAN.
+///
+/// Carries the `Authorize` impl for UCAN sites: fetches session identity
+/// from the env via `authority::Identify`, constructs a UCAN `Authorize`
+/// invocation on that identity, and bundles the resulting signed
+/// delegation with the capability + address into a `ForkInvocation`.
+pub struct UcanFork<Fx: Effect> {
     pub capability: Capability<Fx>,
-    pub issuer: SiteIssuer,
     pub address: UcanAddress,
 }
 
-impl<Fx: Effect> From<(Capability<Fx>, SiteIssuer, UcanAddress)> for UcanClaim<Fx> {
-    fn from((capability, issuer, address): (Capability<Fx>, SiteIssuer, UcanAddress)) -> Self {
+impl<Fx: Effect> From<Fork<UcanSite, Fx>> for UcanFork<Fx> {
+    fn from(fork: Fork<UcanSite, Fx>) -> Self {
+        let (capability, address) = fork.into_parts();
         Self {
             capability,
-            issuer,
             address,
         }
     }
@@ -108,28 +114,34 @@ impl<Fx: Effect> From<(Capability<Fx>, SiteIssuer, UcanAddress)> for UcanClaim<F
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Fx, Env> Acquire<Env> for UcanClaim<Fx>
+impl<Fx, Env> Authorize<Env> for UcanFork<Fx>
 where
     Fx: Effect + Clone + ConditionalSend + ConditionalSync + 'static,
     Fx::Of: Constraint<Capability: ConditionalSend + ConditionalSync>,
     Capability<Fx>: Ability + ConditionalSend + ConditionalSync,
-    Env: Provider<Authorize<Ucan>> + ConditionalSync,
+    Env: Provider<AuthorizeEffect<Ucan>> + Provider<authority::Identify> + ConditionalSync,
 {
     type Site = UcanSite;
     type Effect = Fx;
 
-    async fn perform(self, env: &Env) -> Result<ForkInvocation<UcanSite, Fx>, AuthorizeError> {
-        let UcanClaim {
+    async fn authorize(self, env: &Env) -> Result<ForkInvocation<UcanSite, Fx>, AuthorizeError> {
+        let UcanFork {
             capability,
-            issuer,
             address,
         } = self;
 
+        let identity = authority::Identify
+            .perform(env)
+            .await
+            .map_err(|e| AuthorizeError::Configuration(e.to_string()))?;
+        let profile = identity.profile().clone();
+        let operator = identity.did();
+
         let scope = <Ucan as Protocol>::Access::from_capability(&capability);
 
-        let authorization = Subject::from(issuer.profile)
+        let authorization = Subject::from(profile)
             .attenuate(Access)
-            .invoke(Authorize::<Ucan>::new(issuer.operator, scope))
+            .invoke(AuthorizeEffect::<Ucan>::new(operator, scope))
             .perform(env)
             .await?;
 
@@ -151,5 +163,5 @@ pub struct UcanSite;
 impl Site for UcanSite {
     type Authorization = UcanAuthorization;
     type Address = UcanAddress;
-    type Claim<Fx: Effect> = UcanClaim<Fx>;
+    type Fork<Fx: Effect> = UcanFork<Fx>;
 }

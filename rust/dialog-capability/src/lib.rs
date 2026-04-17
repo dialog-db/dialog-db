@@ -221,4 +221,7 @@ pub mod command;
 pub use command::*;
 
 pub mod fork;
-pub use fork::*;
+// Note: `fork::Authorize` is NOT glob-exported to avoid clashing with
+// `access::Authorize` (the effect). Users reference it via `fork::Authorize`
+// until the access effect is renamed.
+pub use fork::{Fork, ForkError, ForkInvocation};

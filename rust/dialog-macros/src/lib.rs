@@ -454,17 +454,18 @@ pub fn derive_provider(input: TokenStream) -> TokenStream {
 ///     Ucan(<UcanSite as Site>::Authorization),
 /// }
 ///
-/// // Claim enum — mirrors the address variants, generic over an effect.
-/// pub enum NetworkClaim<Fx: Effect> {
-///     S3(<S3 as Site>::Claim<Fx>),
-///     Ucan(<UcanSite as Site>::Claim<Fx>),
+/// // Fork enum — mirrors the address variants, generic over an effect.
+/// // Wraps each site's own fork type (`S::Fork<Fx>`).
+/// pub enum NetworkFork<Fx: Effect> {
+///     S3(<S3 as Site>::Fork<Fx>),
+///     Ucan(<UcanSite as Site>::Fork<Fx>),
 /// }
 ///
 /// // Network is itself a Site, with the generated enums as associated types.
 /// impl Site for Network {
 ///     type Address = NetworkAddress;
 ///     type Authorization = NetworkAuthorization;
-///     type Claim<Fx: Effect> = NetworkClaim<Fx>;
+///     type Fork<Fx: Effect> = NetworkFork<Fx>;
 /// }
 ///
 /// // NetworkAddress points back to Network, closing the cycle.
@@ -488,18 +489,20 @@ pub fn derive_provider(input: TokenStream) -> TokenStream {
 /// // `From<NetworkAddress> for SiteId` via match on variants.
 /// impl From<NetworkAddress> for SiteId { /* match ... */ }
 ///
-/// // Claim construction: bundles capability + issuer + variant address.
-/// impl<Fx: Effect> From<(Capability<Fx>, SiteIssuer, NetworkAddress)>
-///     for NetworkClaim<Fx> { /* match ... */ }
+/// // Fork construction: dispatches on the variant address to the
+/// // corresponding site's Fork<Fx>.
+/// impl<Fx: Effect> From<Fork<Network, Fx>> for NetworkFork<Fx> {
+///     /* match address → wrap Fork<VariantSite, Fx> into variant */
+/// }
 ///
-/// // `Acquire` dispatches to the inner claim's `perform()` and rewraps
+/// // `Authorize` dispatches to the inner fork's `authorize()` and rewraps
 /// // the resulting ForkInvocation in the composite types.
-/// impl<Fx, Env> Acquire<Env> for NetworkClaim<Fx>
-/// where /* per-variant bounds on each inner claim's Acquire impl */
+/// impl<Fx, Env> Authorize<Env> for NetworkFork<Fx>
+/// where /* per-variant bounds on each inner fork's Authorize impl */
 /// {
 ///     type Site = Network;
 ///     type Effect = Fx;
-///     async fn perform(self, env: &Env) -> Result<ForkInvocation<Network, Fx>, _> {
+///     async fn authorize(self, env: &Env) -> Result<ForkInvocation<Network, Fx>, _> {
 ///         match self { /* delegate + rewrap */ }
 ///     }
 /// }

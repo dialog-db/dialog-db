@@ -20,7 +20,8 @@ pub use credential::S3Credential;
 pub use invocation::S3Invocation;
 pub use permit::Permit;
 
-use dialog_capability::site::{Site, SiteIssuer};
+use dialog_capability::fork::Fork;
+use dialog_capability::site::Site;
 use dialog_capability::{Capability, Effect};
 
 /// S3 direct-access site.
@@ -29,21 +30,24 @@ use dialog_capability::{Capability, Effect};
 #[derive(Debug, Clone, Copy, Default)]
 pub struct S3;
 
-/// Bundles a capability + issuer + address for S3 authorization.
-pub struct S3Claim<Fx: Effect> {
+/// Site-owned fork wrapper for S3.
+///
+/// Carries the `Authorize` impl for S3: fetches session identity from
+/// the env via `authority::Identify`, loads credentials for that
+/// identity, and bundles them with the capability + address into a
+/// `ForkInvocation`.
+pub struct S3Fork<Fx: Effect> {
     /// The capability being authorized.
     pub capability: Capability<Fx>,
-    /// The issuer requesting authorization.
-    pub issuer: SiteIssuer,
     /// The S3 address to authorize against.
     pub address: Address,
 }
 
-impl<Fx: Effect> From<(Capability<Fx>, SiteIssuer, Address)> for S3Claim<Fx> {
-    fn from((capability, issuer, address): (Capability<Fx>, SiteIssuer, Address)) -> Self {
+impl<Fx: Effect> From<Fork<S3, Fx>> for S3Fork<Fx> {
+    fn from(fork: Fork<S3, Fx>) -> Self {
+        let (capability, address) = fork.into_parts();
         Self {
             capability,
-            issuer,
             address,
         }
     }
@@ -52,7 +56,7 @@ impl<Fx: Effect> From<(Capability<Fx>, SiteIssuer, Address)> for S3Claim<Fx> {
 impl Site for S3 {
     type Authorization = S3Authorization;
     type Address = Address;
-    type Claim<Fx: Effect> = S3Claim<Fx>;
+    type Fork<Fx: Effect> = S3Fork<Fx>;
 }
 
 #[cfg(test)]

@@ -1,14 +1,15 @@
 //! Fork dispatch provider for Operator.
 //!
-//! Uses [`Fork::claim`] to bundle the issuer, then [`Acquire::perform`]
-//! to authorize and obtain a [`ForkInvocation`] for network execution.
+//! Calls [`Fork::authorize`] to produce a [`ForkInvocation`], then
+//! delegates execution to the network layer. The site's own fork
+//! wrapper fetches identity from the env via `authority::Identify`.
 
 use crate::Operator;
 use crate::network::Network;
 
 use dialog_capability::access::AuthorizeError;
-use dialog_capability::fork::Acquire;
-use dialog_capability::{Effect, Provider, SiteIssuer};
+use dialog_capability::fork::Authorize;
+use dialog_capability::{Effect, Provider};
 use dialog_capability::{Fork, ForkInvocation, Site};
 use dialog_common::{ConditionalSend, ConditionalSync};
 
@@ -34,9 +35,9 @@ where
     // Operator's storage provider type
     A: Clone + ConditionalSend + ConditionalSync + 'static,
     At: Site,
-    // Site's Claim bundles capability + issuer + address, then Acquire
-    // authorizes it into a ForkInvocation for the network layer.
-    At::Claim<Fx>: Acquire<Self, Site = At, Effect = Fx> + ConditionalSend,
+    // Site's own fork wrapper carries the Authorize impl that fetches
+    // identity from the env and produces a ForkInvocation.
+    At::Fork<Fx>: Authorize<Self, Site = At, Effect = Fx> + ConditionalSend,
     Fx: Effect + 'static,
     // Needed to flatten AuthorizeError into effect error via FromAuthError
     Fx::Output: FromAuthError,
@@ -48,12 +49,7 @@ where
     Self: ConditionalSend + ConditionalSync,
 {
     async fn execute(&self, input: Fork<At, Fx>) -> Fx::Output {
-        let issuer = SiteIssuer {
-            operator: self.authority.operator_did(),
-            profile: self.authority.profile_did(),
-        };
-
-        match input.claim(issuer).perform(self).await {
+        match input.authorize(self).await {
             Ok(invocation) => invocation.perform(&self.network).await,
             Err(e) => FromAuthError::from_auth_error(e),
         }
