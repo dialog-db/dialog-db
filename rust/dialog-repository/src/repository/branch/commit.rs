@@ -1,4 +1,3 @@
-use dialog_capability::Subject;
 use dialog_capability::{Policy, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive as archive_fx;
@@ -172,8 +171,7 @@ where
         let tree_reference = NodeReference::from(tree_hash);
 
         // Discover identity from the environment
-        let identify_cap = Subject::from(branch.subject().clone()).invoke(authority::Identify);
-        let auth = identify_cap
+        let auth = authority::Identify
             .perform(env)
             .await
             .map_err(|e| DialogArtifactsError::Storage(format!("Identify failed: {}", e)))?;

@@ -228,8 +228,7 @@ where
     let new_revision = if &hash == upstream_revision.tree.hash() {
         upstream_revision.clone()
     } else {
-        let identify_cap = Subject::from(branch.subject().clone()).invoke(authority::Identify);
-        let auth = identify_cap
+        let auth = authority::Identify
             .perform(env)
             .await
             .map_err(|e| DialogArtifactsError::Storage(format!("Identify failed: {}", e)))?;
