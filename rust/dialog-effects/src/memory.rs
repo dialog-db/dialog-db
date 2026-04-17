@@ -18,7 +18,7 @@ use std::fmt;
 
 use base58::ToBase58;
 pub use dialog_capability::{
-    Attenuation, Capability, Claim, Effect, Policy, StorageError, Subject,
+    Attenuate, Attenuation, Capability, Effect, Policy, StorageError, Subject,
 };
 use dialog_common::Checksum;
 use serde::{Deserialize, Serialize};
@@ -178,7 +178,7 @@ pub struct Edition<T> {
 /// Resolve operation - reads current cell content and version.
 ///
 /// Returns `None` if the cell has no content (empty/uninitialized).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Claim)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Attenuate)]
 pub struct Resolve;
 
 impl Effect for Resolve {
@@ -210,11 +210,11 @@ impl ResolveCapability for Capability<Resolve> {
 /// - If `when` is `Some(edition)`, expects current edition to match
 /// - Returns new edition on success
 /// - Returns `MemoryError::VersionMismatch` if expectation doesn't match
-#[derive(Debug, Clone, Serialize, Deserialize, Claim)]
+#[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
 pub struct Publish {
     /// The content to publish.
     #[serde(with = "serde_bytes")]
-    #[claim(into = Checksum, with = Checksum::sha256, rename = checksum)]
+    #[attenuate(into = Checksum, with = Checksum::sha256, rename = checksum)]
     pub content: Vec<u8>,
     /// The expected current version, or None if expecting empty cell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -236,7 +236,7 @@ impl Effect for Publish {
     type Output = Result<Version, MemoryError>;
 }
 
-impl Attenuation for PublishClaim {
+impl Attenuation for PublishAttenuation {
     type Of = Cell;
     fn attenuation() -> &'static str {
         "publish"
@@ -277,7 +277,7 @@ impl PublishCapability for Capability<Publish> {
 ///
 /// - Requires `when` to match current edition
 /// - Returns `MemoryError::VersionMismatch` if edition doesn't match
-#[derive(Debug, Clone, Serialize, Deserialize, Claim)]
+#[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
 pub struct Retract {
     /// The expected current version.
     pub when: Version,

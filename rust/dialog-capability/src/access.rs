@@ -16,7 +16,7 @@
 //! 2. `proof.claim(signer)` binds a signer to produce an
 //!    [`Authorization`] that can `delegate()` and `invoke()`.
 
-use crate::{Ability, Capability, Constraint, Did, Effect};
+use crate::{Ability, Attenuate, Capability, Constraint, Did, Effect};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -306,7 +306,7 @@ pub trait Authorization<P: Protocol>: Sized {
 ///
 /// An [`Effect`](crate::Effect) on [`Access`]. The subject DID
 /// in the capability chain determines which store handles the request.
-#[derive(Serialize, Deserialize, crate::Claim)]
+#[derive(Serialize, Deserialize, Attenuate)]
 #[serde(bound(
     serialize = "P::Access: Serialize",
     deserialize = "P::Access: for<'a> Deserialize<'a>"
@@ -351,7 +351,7 @@ where
 /// [`Protocol::Authorization`] rather than an unsigned proof.
 /// The provider (typically the Operator) handles both the proof
 /// lookup and the signing internally.
-#[derive(Serialize, Deserialize, crate::Claim)]
+#[derive(Serialize, Deserialize, Attenuate)]
 #[serde(bound(
     serialize = "P::Access: Serialize",
     deserialize = "P::Access: for<'a> Deserialize<'a>"
@@ -404,7 +404,7 @@ where
 ///
 /// An [`Effect`](crate::Effect) on [`Access`]. The subject DID
 /// in the capability chain determines where proofs are stored.
-#[derive(Serialize, Deserialize, crate::Claim)]
+#[derive(Serialize, Deserialize, Attenuate)]
 #[serde(bound(
     serialize = "P::Delegation: Serialize",
     deserialize = "P::Delegation: for<'a> Deserialize<'a>"

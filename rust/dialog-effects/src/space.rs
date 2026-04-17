@@ -14,7 +14,7 @@
 //!
 //! `Create` resolves the name and delegates to `storage::Create`.
 
-use dialog_capability::{Attenuation, Capability, Claim, Effect, Subject};
+use dialog_capability::{Attenuate, Attenuation, Capability, Effect, Subject};
 use dialog_credentials::Credential;
 use serde::{Deserialize, Serialize};
 
@@ -64,7 +64,7 @@ impl SpaceExt for Capability<Space> {
 ///
 /// The operator resolves the name against its base directory,
 /// loads the credential, mounts the space, and returns the credential.
-#[derive(Debug, Clone, Serialize, Deserialize, Claim)]
+#[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
 pub struct Load;
 
 impl Effect for Load {
@@ -76,7 +76,7 @@ impl Effect for Load {
 ///
 /// The operator resolves the name against its base directory,
 /// stores the credential, mounts the space, and returns the credential.
-#[derive(Debug, Clone, Serialize, Deserialize, Claim)]
+#[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
 pub struct Create {
     /// The credential to store at the new space.
     pub credential: Credential,

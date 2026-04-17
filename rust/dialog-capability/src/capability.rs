@@ -192,7 +192,7 @@ mod tests {
     }
 
     /// An effect that operates on Catalog
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, crate::Claim)]
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Attenuate)]
     struct Get {
         digest: Vec<u8>,
     }
@@ -221,7 +221,7 @@ mod tests {
     }
 
     /// An effect under Store
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, crate::Claim)]
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Attenuate)]
     struct Lookup {
         key: Vec<u8>,
     }

@@ -16,7 +16,8 @@
 pub mod prelude;
 
 pub use dialog_capability::{
-    Attenuation, AuthorizeError, Capability, Claim, Effect, Policy, SiteId, StorageError, Subject,
+    Attenuate, Attenuation, AuthorizeError, Capability, Effect, Policy, SiteId, StorageError,
+    Subject,
 };
 pub use dialog_credentials;
 use serde::{Deserialize, Serialize};
@@ -93,7 +94,7 @@ impl Attenuation for Site {
 }
 
 /// Save a credential or secret to storage.
-#[derive(Debug, Clone, Serialize, Deserialize, Claim)]
+#[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
 pub struct Save<T> {
     /// The value to save.
     pub credential: T,
@@ -117,7 +118,7 @@ impl Effect for Save<Secret> {
 }
 
 /// Load a credential or secret from storage.
-#[derive(Debug, Clone, Serialize, Deserialize, Claim)]
+#[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
 pub struct Load<T> {
     #[serde(skip)]
     _marker: std::marker::PhantomData<T>,

@@ -309,7 +309,7 @@ mod tests {
         let put = Subject::from(test_subject())
             .attenuate(archive::Archive)
             .attenuate(archive::Catalog::new("index"))
-            .attenuate(archive::PutClaim {
+            .attenuate(archive::PutAttenuation {
                 digest: [0x99; 32].into(),
                 checksum,
             });

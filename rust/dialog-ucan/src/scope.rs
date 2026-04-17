@@ -171,10 +171,10 @@ impl Scope {
         }
     }
 
-    /// Build a scope from an effect capability, projecting through Claim.
+    /// Build a scope from an effect capability, projecting through Attenuate.
     ///
     /// Unlike `Scope::from`, this projects effect fields through their
-    /// [`Claim`](dialog_capability::Claim) type, so payload fields like
+    /// [`Attenuate`](dialog_capability::Attenuate) type, so payload fields like
     /// `content` become `checksum` in the scope parameters.
     pub fn invoke<Fx>(capability: &Capability<Fx>) -> Self
     where
@@ -194,9 +194,9 @@ impl Scope {
         let chain: &<Fx as Constraint>::Capability = capability.as_ref();
         let mut params = parameters(&chain.capability);
 
-        // Add claim-projected parameters for the effect
-        let claim = Policy::of(capability).clone().claim();
-        if let Ok(Ipld::Map(map)) = ipld_core::serde::to_ipld(&claim) {
+        // Add attenuation-projected parameters for the effect
+        let attenuation = Policy::of(capability).clone().attenuate();
+        if let Ok(Ipld::Map(map)) = ipld_core::serde::to_ipld(&attenuation) {
             params.extend(map);
         }
 

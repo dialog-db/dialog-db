@@ -33,7 +33,7 @@
 //!
 //! ```rust,no_run
 //! use dialog_remote_ucan_s3::UcanAuthorizer;
-//! use dialog_remote_s3::{Address, S3Authorization, S3Credential};
+//! use dialog_remote_s3::{Address, S3Credential};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let address = Address::builder("https://s3.us-east-1.amazonaws.com")
@@ -41,12 +41,9 @@
 //!     .bucket("my-bucket")
 //!     .build()?;
 //!
-//! let auth = S3Authorization::from(S3Credential::new(
-//!     "access-key-id",
-//!     "secret-access-key",
-//! ));
+//! let credential = S3Credential::new("access-key-id", "secret-access-key");
 //!
-//! let authorizer = UcanAuthorizer::new(address, auth);
+//! let authorizer = UcanAuthorizer::new(address, Some(credential));
 //!
 //! // Handle incoming UCAN container
 //! let container_bytes: Vec<u8> = vec![]; // UCAN container from request
@@ -91,7 +88,7 @@ fn deserialize_from_args<T: DeserializeOwned>(args: &Args) -> Result<T, S3Error>
         .map_err(|e| S3Error::Authorization(format!("Failed to deserialize: {}", e)))
 }
 
-/// Build a memory capability from UCAN args: `Subject -> Memory -> Space -> Cell -> Claim`.
+/// Build a memory capability from UCAN args: `Subject -> Memory -> Space -> Cell -> Attenuation`.
 fn memory_claim_from_args<C>(subject: &Did, args: &Args) -> Result<Capability<C>, S3Error>
 where
     C: Policy<Of = memory::Cell> + DeserializeOwned,
@@ -107,7 +104,7 @@ where
         .attenuate(claim))
 }
 
-/// Build an archive capability from UCAN args: `Subject -> Archive -> Catalog -> Claim`.
+/// Build an archive capability from UCAN args: `Subject -> Archive -> Catalog -> Attenuation`.
 fn archive_claim_from_args<C>(subject: &Did, args: &Args) -> Result<Capability<C>, S3Error>
 where
     C: Policy<Of = archive::Catalog> + DeserializeOwned,
@@ -121,26 +118,29 @@ where
         .attenuate(claim))
 }
 
-/// Maps an execution effect type to its claim type that can be
+/// Maps an execution effect type to its attenuation type that can be
 /// reconstructed from UCAN args.
 ///
-/// The `Claim` associated type is the authorization-safe representation
-/// whose `Capability<Claim>` implements `Access`.
+/// The `Attenuation` associated type is the delegation-safe representation
+/// whose `Capability<Attenuation>` produces an `S3Request`.
 trait FromUcanArgs {
-    /// The claim type for this effect (either Self or a generated {Name}Claim).
-    type Claim: Constraint;
+    /// The attenuation type for this effect (either Self or a generated
+    /// `{Name}Attenuation`).
+    type Attenuation: Constraint;
 
     /// Reconstruct a capability from UCAN args.
-    fn capability_from_args(subject: &Did, args: &Args)
-    -> Result<Capability<Self::Claim>, S3Error>;
-}
-
-impl FromUcanArgs for memory::Resolve {
-    type Claim = memory::Resolve;
     fn capability_from_args(
         subject: &Did,
         args: &Args,
-    ) -> Result<Capability<Self::Claim>, S3Error> {
+    ) -> Result<Capability<Self::Attenuation>, S3Error>;
+}
+
+impl FromUcanArgs for memory::Resolve {
+    type Attenuation = memory::Resolve;
+    fn capability_from_args(
+        subject: &Did,
+        args: &Args,
+    ) -> Result<Capability<Self::Attenuation>, S3Error> {
         let space: memory::Space = deserialize_from_args(args)?;
         let cell: memory::Cell = deserialize_from_args(args)?;
         Ok(dialog_capability::Subject::from(subject.clone())
@@ -151,38 +151,38 @@ impl FromUcanArgs for memory::Resolve {
     }
 }
 impl FromUcanArgs for memory::Publish {
-    type Claim = memory::PublishClaim;
+    type Attenuation = memory::PublishAttenuation;
     fn capability_from_args(
         subject: &Did,
         args: &Args,
-    ) -> Result<Capability<Self::Claim>, S3Error> {
+    ) -> Result<Capability<Self::Attenuation>, S3Error> {
         memory_claim_from_args(subject, args)
     }
 }
 impl FromUcanArgs for memory::Retract {
-    type Claim = memory::Retract;
+    type Attenuation = memory::Retract;
     fn capability_from_args(
         subject: &Did,
         args: &Args,
-    ) -> Result<Capability<Self::Claim>, S3Error> {
+    ) -> Result<Capability<Self::Attenuation>, S3Error> {
         memory_claim_from_args(subject, args)
     }
 }
 impl FromUcanArgs for archive::Get {
-    type Claim = archive::Get;
+    type Attenuation = archive::Get;
     fn capability_from_args(
         subject: &Did,
         args: &Args,
-    ) -> Result<Capability<Self::Claim>, S3Error> {
+    ) -> Result<Capability<Self::Attenuation>, S3Error> {
         archive_claim_from_args(subject, args)
     }
 }
 impl FromUcanArgs for archive::Put {
-    type Claim = archive::PutClaim;
+    type Attenuation = archive::PutAttenuation;
     fn capability_from_args(
         subject: &Did,
         args: &Args,
-    ) -> Result<Capability<Self::Claim>, S3Error> {
+    ) -> Result<Capability<Self::Attenuation>, S3Error> {
         archive_claim_from_args(subject, args)
     }
 }

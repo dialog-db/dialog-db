@@ -1,4 +1,4 @@
-use crate::{Caveat, Claim, Constraint};
+use crate::{Attenuate, Caveat, Constraint};
 use dialog_common::ConditionalSend;
 
 /// Trait for effect types that can be performed.
@@ -7,10 +7,10 @@ use dialog_common::ConditionalSend;
 /// output type. Implementing `Effect` automatically makes the type an
 /// [`Attenuation`] (and thus a [`Policy`]) via blanket impls.
 ///
-/// Effects must also implement [`Claim`] to support authorization. The
-/// `Claim` trait defines how the effect is represented during authorization —
-/// payload fields (like content bytes) become checksums.
-pub trait Effect: Sized + Caveat + Claim {
+/// Effects must also implement [`Attenuate`] so their payload fields can
+/// be projected into attenuation-safe shapes (e.g. content bytes become
+/// checksums) when carried in delegations and invocations.
+pub trait Effect: Sized + Caveat + Attenuate {
     /// The capability this effect requires (the parent in the chain).
     type Of: Constraint;
     /// The output type produced by the invocation of this effect when performed.

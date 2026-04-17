@@ -15,7 +15,7 @@
 use std::error::Error;
 
 pub use dialog_capability::{
-    Attenuation, Capability, Claim, DialogCapabilityAuthorizationError,
+    Attenuate, Attenuation, Capability, DialogCapabilityAuthorizationError,
     DialogCapabilityPerformError, Effect, Policy, StorageError, Subject,
 };
 pub use dialog_common::Blake3Hash;
@@ -58,7 +58,7 @@ impl Policy for Catalog {
 /// Get operation - retrieves content by digest.
 ///
 /// Requires `Capability<Catalog>` access level.
-#[derive(Debug, Clone, Serialize, Deserialize, Claim)]
+#[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
 pub struct Get {
     /// The blake3 digest of the content to retrieve.
     #[serde(with = "dialog_common::as_bytes")]
@@ -100,14 +100,14 @@ impl GetCapability for Capability<Get> {
 /// Put operation - stores content by digest.
 ///
 /// Requires `Capability<Catalog>` access level.
-#[derive(Debug, Clone, Serialize, Deserialize, Claim)]
+#[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
 pub struct Put {
     /// The blake3 digest of the content (must match hash of content).
     #[serde(with = "dialog_common::as_bytes")]
     pub digest: Blake3Hash,
     /// The content to store.
     #[serde(with = "serde_bytes")]
-    #[claim(into = Checksum, with = Checksum::sha256, rename = checksum)]
+    #[attenuate(into = Checksum, with = Checksum::sha256, rename = checksum)]
     pub content: Vec<u8>,
 }
 
@@ -126,7 +126,7 @@ impl Effect for Put {
     type Output = Result<(), ArchiveError>;
 }
 
-impl Attenuation for PutClaim {
+impl Attenuation for PutAttenuation {
     type Of = Catalog;
     fn attenuation() -> &'static str {
         "put"

@@ -8,7 +8,7 @@ use super::S3Request;
 use base58::ToBase58;
 use dialog_capability::{Capability, Policy};
 use dialog_common::Hasher;
-use dialog_effects::archive::{Catalog, Get, GetCapability, Put, PutCapability, PutClaim};
+use dialog_effects::archive::{Catalog, Get, GetCapability, Put, PutAttenuation, PutCapability};
 
 impl From<&Capability<Get>> for S3Request {
     fn from(capability: &Capability<Get>) -> Self {
@@ -41,9 +41,9 @@ impl From<&Capability<Put>> for S3Request {
     }
 }
 
-impl From<&Capability<PutClaim>> for S3Request {
-    fn from(capability: &Capability<PutClaim>) -> Self {
-        let put = PutClaim::of(capability);
+impl From<&Capability<PutAttenuation>> for S3Request {
+    fn from(capability: &Capability<PutAttenuation>) -> Self {
+        let put = PutAttenuation::of(capability);
         S3Request {
             method: "PUT".to_string(),
             path: format!(

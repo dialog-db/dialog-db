@@ -8,7 +8,7 @@ use super::{Precondition, S3Request};
 use dialog_capability::{Capability, Policy};
 use dialog_common::Hasher;
 use dialog_effects::memory::{
-    Cell, Publish, PublishCapability, PublishClaim, Resolve, ResolveCapability, Retract,
+    Cell, Publish, PublishAttenuation, PublishCapability, Resolve, ResolveCapability, Retract,
     RetractCapability, Space, Version,
 };
 
@@ -59,9 +59,9 @@ impl From<&Capability<Publish>> for S3Request {
     }
 }
 
-impl From<&Capability<PublishClaim>> for S3Request {
-    fn from(capability: &Capability<PublishClaim>) -> Self {
-        let publish = PublishClaim::of(capability);
+impl From<&Capability<PublishAttenuation>> for S3Request {
+    fn from(capability: &Capability<PublishAttenuation>) -> Self {
+        let publish = PublishAttenuation::of(capability);
         S3Request {
             method: "PUT".to_string(),
             path: format!(
