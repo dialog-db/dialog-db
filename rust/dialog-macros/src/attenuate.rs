@@ -149,7 +149,7 @@ fn generate_for_unit(
         #wc
         {
             type Attenuation = Self;
-            fn attenuate(self) -> Self { self }
+            fn into_attenuation(self) -> Self { self }
         }
     })
 }
@@ -211,7 +211,7 @@ fn generate_for_named_struct(
             #wc
             {
                 type Attenuation = Self;
-                fn attenuate(self) -> Self { self }
+                fn into_attenuation(self) -> Self { self }
             }
         });
     }
@@ -256,7 +256,7 @@ fn generate_for_named_struct(
 
         impl ::dialog_capability::Attenuate for #attenuation_name {
             type Attenuation = Self;
-            fn attenuate(self) -> Self { self }
+            fn into_attenuation(self) -> Self { self }
         }
 
         // The generated projection struct mirrors the source's position in
@@ -274,7 +274,7 @@ fn generate_for_named_struct(
         #where_clause
         {
             type Attenuation = #attenuation_name;
-            fn attenuate(self) -> #attenuation_name {
+            fn into_attenuation(self) -> #attenuation_name {
                 #attenuation_name {
                     #(#attenuation_conversions,)*
                 }

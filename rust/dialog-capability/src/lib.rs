@@ -154,6 +154,8 @@
 //! | [`Delegation<C, A>`] | Grants capability to another principal |
 //! | [`Access`] | Looks up authorization proofs |
 
+extern crate self as dialog_capability;
+
 mod error;
 pub use error::*;
 
@@ -180,6 +182,9 @@ pub use policy::*;
 
 mod attenuation;
 pub use attenuation::*;
+
+mod attenuate;
+pub use attenuate::*;
 
 mod effect;
 pub use effect::*;
