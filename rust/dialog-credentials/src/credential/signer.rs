@@ -6,12 +6,12 @@ use dialog_capability::Issuer;
 use dialog_varsig::eddsa::Ed25519Signature;
 use dialog_varsig::{Did, Principal, Signer};
 
-use super::export::{CredentialExportError, SignerCredentialExport};
 #[cfg(not(target_arch = "wasm32"))]
-use super::export::{
+use super::constants::{
     ED25519_PRIV_TAG, ED25519_PUB_TAG, KEY_SIZE, PRIV_TAG_SIZE, PUB_KEY_OFFSET, PUB_TAG_SIZE,
     SIGNER_EXPORT_SIZE,
 };
+use super::export::{CredentialExportError, SignerCredentialExport};
 
 /// A signer credential — wraps an `Ed25519Signer` (full keypair).
 #[derive(Debug, Clone)]

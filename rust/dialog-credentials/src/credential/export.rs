@@ -3,14 +3,20 @@
 //! These are plain data containers for serialized credential material.
 //! Import/export logic lives on the credential types themselves.
 
+use thiserror::Error;
+
+#[cfg(not(target_arch = "wasm32"))]
+use super::constants::{
+    ED25519_PRIV_TAG, ED25519_PUB_TAG, PUB_KEY_OFFSET, SIGNER_EXPORT_SIZE, VERIFIER_EXPORT_SIZE,
+};
+
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use js_sys::Uint8Array;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use wasm_bindgen::{JsCast, JsValue};
 
-
 /// Error type for credential export/import operations.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Error)]
 pub enum CredentialExportError {
     /// Key export/import operation failed.
     #[error("key operation failed: {0}")]
@@ -51,17 +57,6 @@ pub enum CredentialExport {
     Signer(SignerCredentialExport),
     Verifier(VerifierCredentialExport),
 }
-
-/// Multicodec varint for ed25519 private key (0x1300).
-pub(crate) const ED25519_PRIV_TAG: &[u8] = &[0x80, 0x26];
-/// Multicodec varint for ed25519 public key (0xed).
-pub(crate) const ED25519_PUB_TAG: &[u8] = &[0xed, 0x01];
-pub(crate) const KEY_SIZE: usize = 32;
-pub(crate) const PRIV_TAG_SIZE: usize = ED25519_PRIV_TAG.len();
-pub(crate) const PUB_TAG_SIZE: usize = ED25519_PUB_TAG.len();
-pub(crate) const SIGNER_EXPORT_SIZE: usize = PRIV_TAG_SIZE + KEY_SIZE + PUB_TAG_SIZE + KEY_SIZE;
-pub(crate) const VERIFIER_EXPORT_SIZE: usize = PUB_TAG_SIZE + KEY_SIZE;
-pub(crate) const PUB_KEY_OFFSET: usize = PRIV_TAG_SIZE + KEY_SIZE;
 
 /// Raw byte type for a serialized signer credential.
 #[cfg(not(target_arch = "wasm32"))]

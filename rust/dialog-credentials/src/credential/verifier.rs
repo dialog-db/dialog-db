@@ -4,9 +4,10 @@ use crate::Ed25519Verifier;
 use crate::ed25519::Ed25519VerifyingKey;
 use dialog_varsig::{Did, Principal};
 
-use super::export::{CredentialExportError, KEY_SIZE, VerifierCredentialExport};
+use super::constants::KEY_SIZE;
 #[cfg(not(target_arch = "wasm32"))]
-use super::export::{ED25519_PUB_TAG, PUB_TAG_SIZE, VERIFIER_EXPORT_SIZE};
+use super::constants::{ED25519_PUB_TAG, PUB_TAG_SIZE, VERIFIER_EXPORT_SIZE};
+use super::export::{CredentialExportError, VerifierCredentialExport};
 
 /// A verifier credential — wraps an `Ed25519Verifier` (public key only).
 #[derive(Debug, Clone)]

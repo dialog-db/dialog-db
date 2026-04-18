@@ -3,6 +3,7 @@
 //! A [`Credential`] represents either a full signing keypair ([`SignerCredential`])
 //! or a public-key-only verifier ([`VerifierCredential`]).
 
+pub(crate) mod constants;
 pub mod export;
 pub mod signer;
 pub mod verifier;
