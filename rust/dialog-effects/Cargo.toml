@@ -13,6 +13,7 @@ async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_bytes = { workspace = true }
 thiserror = { workspace = true }
+base58.workspace = true
 
 [lints.rust]
 missing_docs = "warn"
