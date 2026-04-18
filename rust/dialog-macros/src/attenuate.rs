@@ -259,6 +259,17 @@ fn generate_for_named_struct(
             fn attenuate(self) -> Self { self }
         }
 
+        // The generated projection struct mirrors the source's position in
+        // the capability chain: same `Of` and same ability-path segment.
+        // The source must be an `Attenuation` — which `Effect` implies via
+        // blanket impl.
+        impl ::dialog_capability::Attenuation for #attenuation_name {
+            type Of = <#name as ::dialog_capability::Attenuation>::Of;
+            fn attenuation() -> &'static str {
+                <#name as ::dialog_capability::Attenuation>::attenuation()
+            }
+        }
+
         impl #impl_generics ::dialog_capability::Attenuate for #name #ty_generics
         #where_clause
         {
