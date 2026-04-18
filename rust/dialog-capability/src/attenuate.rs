@@ -84,7 +84,7 @@ mod tests {
     #[derive(Debug, Clone, Copy, Serialize, Deserialize, Attenuate)]
     struct Ping;
 
-    #[test]
+    #[dialog_common::test]
     fn it_derives_attenuation_for_unit_struct() {
         let ping = Ping;
         let attenuation = ping.into_attenuation();
@@ -98,7 +98,7 @@ mod tests {
         key: Vec<u8>,
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_derives_identity_attenuation_for_plain_struct() {
         let get = Get {
             key: b"hello".to_vec(),
@@ -120,7 +120,7 @@ mod tests {
         type Output = ();
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_projects_content_to_checksum() {
         let put = Put {
             digest: vec![1, 2, 3],
@@ -144,7 +144,7 @@ mod tests {
         type Output = ();
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_renames_projected_field() {
         let publish = Publish {
             when: Some(42),
@@ -155,7 +155,7 @@ mod tests {
         assert_eq!(attenuation.checksum, Checksum(3));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_generates_attenuation_struct_with_renamed_field() {
         let publish = Publish {
             when: None,
@@ -167,7 +167,7 @@ mod tests {
         assert_eq!(attenuation.when, None);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_preserves_ability_path_on_attenuation_struct() {
         // The generated *Attenuation struct must occupy the same position
         // in the capability chain as its source: same `Of` and same
@@ -205,7 +205,7 @@ mod tests {
         type Output = ();
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_uses_custom_with_function() {
         let upload = Upload {
             key: "test".to_string(),
@@ -221,7 +221,7 @@ mod tests {
     #[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
     struct GenericEffect<T>(PhantomData<T>);
 
-    #[test]
+    #[dialog_common::test]
     fn it_derives_attenuation_for_generic_struct() {
         let effect = GenericEffect::<String>(PhantomData);
         let _attenuation = effect.into_attenuation();

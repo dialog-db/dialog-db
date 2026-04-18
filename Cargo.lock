@@ -956,6 +956,7 @@ dependencies = [
  "serde",
  "signature",
  "thiserror 2.0.18",
+ "wasm-bindgen-test",
 ]
 
 [[package]]
