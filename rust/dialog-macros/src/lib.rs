@@ -11,6 +11,7 @@
 //! here rather than in the crates that use them.
 
 use proc_macro::TokenStream;
+mod attenuate;
 mod provider;
 mod query;
 mod router;
@@ -393,4 +394,33 @@ pub fn derive_attribute(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(Router, attributes(route))]
 pub fn router(input: TokenStream) -> TokenStream {
     router::generate(input)
+}
+
+/// Derive macro that generates an `Attenuate` trait impl for effect types.
+///
+/// For types with no `#[attenuate(into = ...)]` annotations,
+/// `Attenuate::Attenuation = Self` (the attenuation shape is identical to
+/// the execution shape).
+///
+/// For types with annotated fields, a parallel `{Name}Attenuation` struct
+/// is generated where annotated fields use the target type via `From`
+/// conversion, and the generated struct implements the existing
+/// `Attenuation` trait so it can serve as an attenuation layer in
+/// capability chains.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// #[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
+/// pub struct Put {
+///     pub digest: Blake3Hash,
+///     #[attenuate(into = Checksum)]
+///     pub content: Vec<u8>,
+/// }
+/// // Generates PutAttenuation { digest: Blake3Hash, content: Checksum }
+/// // and impl Attenuate for Put { type Attenuation = PutAttenuation; ... }
+/// ```
+#[proc_macro_derive(Attenuate, attributes(attenuate))]
+pub fn derive_attenuate(input: TokenStream) -> TokenStream {
+    attenuate::derive(input)
 }
