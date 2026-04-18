@@ -9,8 +9,7 @@ use crate::command::Command;
 use crate::effect::Effect;
 use crate::site::Site;
 use crate::{Ability, Capability, Constraint, Provider};
-use dialog_common::ConditionalSend;
-use std::marker::PhantomData;
+use dialog_common::{ConditionalSend, ConditionalSync};
 
 /// Fork pairs a capability with a site address for remote execution.
 ///
@@ -20,7 +19,6 @@ use std::marker::PhantomData;
 pub struct Fork<S: Site, Fx: Effect> {
     capability: Capability<Fx>,
     address: S::Address,
-    _site: PhantomData<S>,
 }
 
 /// A fork with authorization attached, ready for site-level execution.
@@ -49,7 +47,7 @@ where
     Fx::Of: Constraint,
 {
     type Input = Self;
-    type Output = Result<Fx::Output, AuthorizeError>;
+    type Output = Fx::Output;
 }
 
 impl<S: Site, Fx: Effect> Command for ForkInvocation<S, Fx>
@@ -71,7 +69,6 @@ where
         Self {
             capability,
             address,
-            _site: PhantomData,
         }
     }
 
@@ -90,15 +87,25 @@ where
         (self.capability, self.address)
     }
 
+    /// Attest authorization for this fork, producing a [`ForkInvocation`]
+    /// ready for execution. The caller is vouching that the supplied
+    /// material authorizes this specific capability + address pair.
+    pub fn attest(self, authorization: S::Authorization) -> ForkInvocation<S, Fx> {
+        ForkInvocation::new(self.capability, self.address, authorization)
+    }
+
     /// Execute the fork against a provider.
     ///
     /// The provider (typically the Operator) builds protocol-specific
     /// authorization and delegates to the site provider.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Fx::Output, AuthorizeError>
+    ///
+    /// Authorization errors are folded into the effect's error type via
+    /// `From<AuthorizeError>`, so callers get a single `Result`.
+    pub async fn perform<Env>(self, env: &Env) -> Fx::Output
     where
         Fx: ConditionalSend + 'static,
-        Capability<Fx>: Ability + ConditionalSend + dialog_common::ConditionalSync,
-        Env: Provider<Fork<S, Fx>> + dialog_common::ConditionalSync,
+        Capability<Fx>: Ability + ConditionalSend + ConditionalSync,
+        Env: Provider<Fork<S, Fx>> + ConditionalSync,
     {
         env.execute(self).await
     }
@@ -131,6 +138,49 @@ where
     {
         env.execute(self).await
     }
+}
+
+impl<S, Fx> Fork<S, Fx>
+where
+    S: Site,
+    Fx: Effect,
+    Fx::Of: Constraint,
+{
+    /// Authorize this fork against an environment, producing a
+    /// [`ForkInvocation`] ready for execution.
+    ///
+    /// Internally this converts the generic `Fork<S, Fx>` into the
+    /// site specific fork type (`S::Fork<Fx>`) and delegates to its
+    /// [`Authorize`] impl. The site's wrapper knows how to fetch
+    /// authorization material from the env.
+    pub async fn authorize<Env>(self, env: &Env) -> Result<ForkInvocation<S, Fx>, AuthorizeError>
+    where
+        S::Fork<Fx>: Authorize<Env, Site = S, Effect = Fx>,
+    {
+        let fork: S::Fork<Fx> = self.into();
+        fork.authorize(env).await
+    }
+}
+
+/// Trait for site-specific fork wrappers that can authorize against an env.
+///
+/// Implemented by each site's fork type (e.g., `S3Fork`, `UcanFork`).
+/// The wrapper knows how to obtain authorization material from the
+/// environment (credentials, signed delegations, etc.) and bundle it
+/// with the capability + address into a [`ForkInvocation`].
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+pub trait Authorize<Env> {
+    /// The site type this fork authorizes for.
+    type Site: Site;
+    /// The effect type this fork was created for.
+    type Effect: Effect;
+
+    /// Authorize and produce a [`ForkInvocation`].
+    async fn authorize(
+        self,
+        env: &Env,
+    ) -> Result<ForkInvocation<Self::Site, Self::Effect>, AuthorizeError>;
 }
 
 /// Error during fork execution.

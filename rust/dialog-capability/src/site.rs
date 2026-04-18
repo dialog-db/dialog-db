@@ -6,62 +6,94 @@
 //! No methods — all execution logic lives in [`Fork`](crate::fork::Fork)
 //! and [`Provider`](crate::Provider) impls.
 
+use std::fmt::{self, Display, Formatter};
+
+use crate::Effect;
+use crate::fork::Fork;
 use dialog_common::ConditionalSend;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-/// Authorization material for a [`Site`].
+/// A stable identifier for a site address.
 ///
-/// Every site's authorization type implements this trait, declaring which
-/// protocol produced it. The Operator uses this to determine the
-/// authorization path:
-///
-/// ```text
-/// S::Authorization: SiteAuthorization<Protocol: Protocol>       → capability-based
-/// S::Authorization: SiteAuthorization<Protocol: Authentication> → credential-based
-/// ```
-pub trait SiteAuthorization: ConditionalSend + 'static {
-    /// The protocol that produced this authorization.
-    type Protocol;
+/// Used as a key in credential stores. The filesystem backend hashes
+/// this internally for safe filenames; other backends may use it as-is.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, serde::Deserialize)]
+pub struct SiteId(String);
+
+impl SiteId {
+    /// The identifier string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
-/// Credential-based authentication.
-///
-/// For sites that use ambient credentials (API keys, SigV4 signatures)
-/// rather than capability delegation chains. The Operator looks up
-/// credentials from a secret store and passes them to the site provider.
-pub trait Authentication: ConditionalSend + 'static {
-    /// The credential type (e.g., S3 access key + secret key).
-    type Credentials: ConditionalSend;
+impl From<String> for SiteId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
 }
 
-/// Associates an address type with its corresponding site.
-///
-/// This trait allows inferring the site type from an address type,
-/// enabling ergonomic `.fork(address)` calls without explicit site type parameters.
-pub trait SiteAddress: Serialize + DeserializeOwned + Clone + ConditionalSend + 'static {
+impl From<&str> for SiteId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+impl From<&SiteId> for SiteId {
+    fn from(id: &SiteId) -> Self {
+        id.clone()
+    }
+}
+
+impl AsRef<str> for SiteId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<SiteId> for String {
+    fn from(id: SiteId) -> Self {
+        id.0
+    }
+}
+
+impl Display for SiteId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+pub trait SiteAddress:
+    Serialize + DeserializeOwned + Clone + Into<SiteId> + ConditionalSend + 'static
+{
     /// The site type this address belongs to.
     type Site: Site<Address = Self>;
 }
 
-/// Pure site marker — declares types needed for remote execution.
-///
-/// No methods. Configuration (address) is carried by
-/// [`Fork`](crate::fork::Fork) at execution time.
-///
-/// The Operator's `Provider<Fork<S, Fx>>` impl constrains
-/// `S::Authorization` to determine the authorization path:
-/// - Capability-based: `<S::Authorization as SiteAuthorization>::Protocol: Protocol`
-/// - Credential-based: `<S::Authorization as SiteAuthorization>::Protocol: Authentication`
-pub trait Site: Clone + ConditionalSend + 'static {
-    /// The authorization material passed to the site provider.
-    ///
-    /// For capability-based sites, this is the protocol's authorization
-    /// type (e.g., a verified UCAN proof chain with signer).
-    /// For credential-based sites, this is the credentials type
-    /// (e.g., S3 access key + secret key).
-    type Authorization: SiteAuthorization;
+impl<T> From<&T> for SiteId
+where
+    T: SiteAddress,
+{
+    fn from(address: &T) -> Self {
+        address.clone().into()
+    }
+}
 
-    /// The address type for this site (serializable for storage/transport).
+/// Marker trait for remote execution targets.
+///
+/// Associates an authorization type, an address type, and a site-owned
+/// fork wrapper. The wrapper is constructed from the generic
+/// [`Fork<Self, Fx>`] and is where site-specific behavior (authorization
+/// via [`Authorize`](crate::fork::Authorize)) is implemented.
+pub trait Site: Clone + ConditionalSend + 'static {
+    /// The authorization material for this site.
+    type Authorization: ConditionalSend + 'static;
+
+    /// The address type for this site.
     type Address: Serialize + DeserializeOwned + Clone + ConditionalSend + 'static;
+
+    /// The site-owned fork wrapper to side step orphan-rule limitations with
+    /// a generic Fork.
+    type Fork<Fx: Effect>: From<Fork<Self, Fx>>;
 }
