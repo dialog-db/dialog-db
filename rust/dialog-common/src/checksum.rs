@@ -115,8 +115,8 @@ impl TryFrom<Vec<u8>> for Checksum {
 impl Checksum {
     /// Compute the SHA-256 checksum of the given data.
     ///
-    /// This is the primary constructor for use with `#[derive(Claim)]`:
-    /// `#[claim(with = Checksum::sha256, rename = checksum)]`
+    /// This is the primary constructor for use with `#[derive(Attenuate)]`:
+    /// `#[attenuate(with = Checksum::sha256, rename = checksum)]`
     pub fn sha256(data: impl AsRef<[u8]>) -> Self {
         Hasher::Sha256.checksum(data.as_ref())
     }
