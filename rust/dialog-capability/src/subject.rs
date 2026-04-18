@@ -2,12 +2,14 @@ pub use dialog_varsig::Did;
 pub use dialog_varsig::did;
 
 use crate::{Capability, Constrained, Effect, Policy};
+use serde::{Deserialize, Serialize};
+use std::fmt::{self, Display, Formatter};
 
 /// The subject (resource) - anchors the capability chain.
 ///
 /// A `Subject` wraps a DID that identifies the resource owner. It is the
 /// root of all capability chains - every chain starts with a Subject.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Subject(Did);
 
@@ -18,8 +20,8 @@ impl Subject {
     }
 }
 
-impl std::fmt::Display for Subject {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for Subject {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
     }
 }

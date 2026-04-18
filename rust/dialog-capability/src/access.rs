@@ -16,7 +16,7 @@
 //! 2. `proof.claim(signer)` binds a signer to produce an
 //!    [`Authorization`] that can `delegate()` and `invoke()`.
 
-use crate::Did;
+use crate::{Attenuate, Attenuation, Did, Effect, Principal, StorageError, Subject};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -220,8 +220,8 @@ pub trait Proof<P: Protocol>:
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Access;
 
-impl crate::Attenuation for Access {
-    type Of = crate::Subject;
+impl Attenuation for Access {
+    type Of = Subject;
 }
 
 /// Access protocol — defines how capability-based authorization is produced.
@@ -233,7 +233,7 @@ pub trait Protocol: Sized + ConditionalSend + 'static {
     type Access: Scope + Serialize + for<'de> Deserialize<'de>;
 
     /// The signer type for this protocol.
-    type Signer: crate::Principal + ConditionalSend;
+    type Signer: Principal + ConditionalSend;
 
     /// An individual delegation (signed certificate) in this protocol's format.
     type Certificate: Certificate<Access = Self::Access>;
@@ -284,7 +284,7 @@ pub trait Authorization<P: Protocol>: Sized {
 ///
 /// An [`Effect`](crate::Effect) on [`Access`]. The subject DID
 /// in the capability chain determines which store handles the request.
-#[derive(Serialize, Deserialize, crate::Attenuate)]
+#[derive(Serialize, Deserialize, Attenuate)]
 #[serde(bound(
     serialize = "P::Access: Serialize",
     deserialize = "P::Access: for<'a> Deserialize<'a>"
@@ -315,7 +315,7 @@ impl<P: Protocol> Prove<P> {
     }
 }
 
-impl<P: Protocol> crate::Effect for Prove<P>
+impl<P: Protocol> Effect for Prove<P>
 where
     P::Access: ConditionalSend + 'static,
 {
@@ -327,7 +327,7 @@ where
 ///
 /// An [`Effect`](crate::Effect) on [`Access`]. The subject DID
 /// in the capability chain determines where proofs are stored.
-#[derive(Serialize, Deserialize, crate::Attenuate)]
+#[derive(Serialize, Deserialize, Attenuate)]
 #[serde(bound(
     serialize = "P::Delegation: Serialize",
     deserialize = "P::Delegation: for<'a> Deserialize<'a>"
@@ -344,7 +344,7 @@ impl<P: Protocol> Retain<P> {
     }
 }
 
-impl<P: Protocol> crate::Effect for Retain<P>
+impl<P: Protocol> Effect for Retain<P>
 where
     P::Delegation: ConditionalSend + 'static,
 {
@@ -391,7 +391,7 @@ pub trait CertificateStore<P: Protocol> {
         let duration = &input.duration;
         let subject = access.subject().clone();
 
-        if *authority == subject || crate::Subject::from(subject.clone()).is_any() {
+        if *authority == subject || Subject::from(subject.clone()).is_any() {
             return Ok(P::Proof::new(access.clone()));
         }
 
@@ -461,8 +461,8 @@ pub enum AuthorizeError {
     Configuration(String),
 }
 
-impl From<crate::StorageError> for AuthorizeError {
-    fn from(e: crate::StorageError) -> Self {
+impl From<StorageError> for AuthorizeError {
+    fn from(e: StorageError) -> Self {
         AuthorizeError::Configuration(e.to_string())
     }
 }

@@ -3,6 +3,7 @@ use crate::site::SiteAddress;
 use crate::{
     Ability, Capability, Constraint, Did, Effect, Here, Policy, Provider, Selector, There,
 };
+use serde::{Deserialize, Serialize};
 
 /// A capability chain element - constraint applied to a parent capability.
 ///
@@ -24,7 +25,7 @@ use crate::{
 /// let cap: Capability<Storage> = Subject::from(did!("key:zSpace"))
 ///     .attenuate(Storage);
 /// ```
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(bound(deserialize = ""))]
 pub struct Constrained<P: Policy, Of: Ability> {
     /// The policy/ability being added.

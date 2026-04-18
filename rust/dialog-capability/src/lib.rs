@@ -153,6 +153,17 @@
 //! | [`access::Authorize`] | Command for requesting authorization via a protocol |
 //! | [`site::Site`] | Trait for site configuration types |
 
+#![warn(missing_docs)]
+#![warn(clippy::absolute_paths)]
+#![warn(clippy::default_trait_access)]
+#![warn(clippy::fallible_impl_from)]
+#![warn(clippy::panicking_unwrap)]
+#![warn(clippy::unused_async)]
+#![deny(clippy::partial_pub_fields)]
+#![deny(clippy::unnecessary_self_imports)]
+#![cfg_attr(not(test), warn(clippy::large_futures))]
+#![cfg_attr(not(test), deny(clippy::panic))]
+
 // Allow derive macros to resolve `::dialog_capability::*` inside this crate.
 extern crate self as dialog_capability;
 
@@ -204,18 +215,15 @@ pub use provider::*;
 mod issuer;
 pub use issuer::*;
 
+mod site;
+pub use site::*;
+
+mod command;
+pub use command::*;
+
+mod fork;
+pub use fork::*;
+
 /// Derive macro that generates `Provider<Fx>` impls for composite structs.
 pub use dialog_macros::Provider;
 
-
-pub mod site;
-pub use site::*;
-
-pub mod command;
-pub use command::*;
-
-pub mod fork;
-// Note: `fork::Authorize` is NOT glob-exported to avoid clashing with
-// `access::Authorize` (the effect). Users reference it via `fork::Authorize`
-// until the access effect is renamed.
-pub use fork::{Fork, ForkError, ForkInvocation};

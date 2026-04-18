@@ -11,14 +11,11 @@ use std::fmt::{self, Display, Formatter};
 use crate::Effect;
 use crate::fork::Fork;
 use dialog_common::ConditionalSend;
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
-/// A stable identifier for a site address.
-///
-/// Used as a key in credential stores. The filesystem backend hashes
-/// this internally for safe filenames; other backends may use it as-is.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, serde::Deserialize)]
+/// A stable identifier for a site address. Used as a key in credential stores.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SiteId(String);
 
 impl SiteId {
@@ -64,8 +61,21 @@ impl Display for SiteId {
     }
 }
 
+/// A typed address for a specific [`Site`].
+///
+/// Each site has its own address shape (e.g. S3 has an endpoint +
+/// region + bucket; UCAN has an access-service endpoint). This trait
+/// connects the address type back to its site via the `Site` associated
+/// type, so code that holds an address can resolve the site it belongs
+/// to without having to pass the site generically.
+///
+/// The `Into<SiteId>` bound gives every address a stable, hashable
+/// identifier suitable for use as a credential-store key. Implementors
+/// choose how to serialize themselves into a `SiteId`; the identifier
+/// must be stable across runs for the credential store to find the
+/// saved credential again.
 pub trait SiteAddress:
-    Serialize + DeserializeOwned + Clone + Into<SiteId> + ConditionalSend + 'static
+    Into<SiteId> + Serialize + DeserializeOwned + Clone + ConditionalSend + 'static
 {
     /// The site type this address belongs to.
     type Site: Site<Address = Self>;
@@ -85,7 +95,7 @@ where
 /// Associates an authorization type, an address type, and a site-owned
 /// fork wrapper. The wrapper is constructed from the generic
 /// [`Fork<Self, Fx>`] and is where site-specific behavior (authorization
-/// via [`Authorize`](crate::fork::Authorize)) is implemented.
+/// via [`SiteFork`](crate::fork::SiteFork)) is implemented.
 pub trait Site: Clone + ConditionalSend + 'static {
     /// The authorization material for this site.
     type Authorization: ConditionalSend + 'static;

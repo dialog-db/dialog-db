@@ -3,19 +3,26 @@ use crate::site::SiteAddress;
 use crate::{
     Ability, Constrained, Constraint, Did, Effect, Policy, PolicyBuilder, Provider, Selector,
 };
-use std::fmt::{Debug, Formatter};
+use serde::{Deserialize, Serialize};
+use std::fmt::{self, Debug, Formatter};
+use std::ops::Deref;
 
 /// Capability chain — wraps a fully-typed constraint chain.
 ///
 /// `Capability<T>` carries the chain from `Subject` through attenuations,
 /// policies, and effects down to `T`. Use `.perform(&env)` to execute
 /// effect capabilities locally.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(bound(deserialize = ""))]
 pub struct Capability<T: Constraint> {
     can: T::Capability,
 }
 
+// Manual impls (rather than #[derive]) so the bound is on `T::Capability`
+// (the actual field type) rather than on `T` itself. The derive would add
+// `where T: Clone` / `where T: Debug`, but many `Constraint` impls are
+// marker types that aren't `Clone`/`Debug` — their projected capability
+// chain always is. The manual impl captures the right (weaker) bound.
 impl<T: Constraint> Clone for Capability<T>
 where
     T::Capability: Clone,
@@ -31,7 +38,7 @@ impl<T: Constraint> Debug for Capability<T>
 where
     T::Capability: Debug,
 {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("Capability")
             .field("can", &self.can)
             .finish()
@@ -142,7 +149,7 @@ impl<T: Constraint> Ability for Capability<T> {
     }
 }
 
-impl<T: Constraint> std::ops::Deref for Capability<T> {
+impl<T: Constraint> Deref for Capability<T> {
     type Target = T::Capability;
 
     fn deref(&self) -> &Self::Target {
@@ -184,7 +191,7 @@ mod tests {
     }
 
     /// An effect that operates on Catalog
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, crate::Attenuate)]
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Attenuate)]
     struct Get {
         digest: Vec<u8>,
     }
@@ -213,7 +220,7 @@ mod tests {
     }
 
     /// An effect under Store
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, crate::Attenuate)]
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Attenuate)]
     struct Lookup {
         key: Vec<u8>,
     }

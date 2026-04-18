@@ -150,12 +150,12 @@ where
     /// [`ForkInvocation`] ready for execution.
     ///
     /// Internally this converts the generic `Fork<S, Fx>` into the
-    /// site specific fork type (`S::Fork<Fx>`) and delegates to its
-    /// [`Authorize`] impl. The site's wrapper knows how to fetch
+    /// site-specific fork type (`S::Fork<Fx>`) and delegates to its
+    /// [`SiteFork`] impl. The site's wrapper knows how to fetch
     /// authorization material from the env.
     pub async fn authorize<Env>(self, env: &Env) -> Result<ForkInvocation<S, Fx>, AuthorizeError>
     where
-        S::Fork<Fx>: Authorize<Env, Site = S, Effect = Fx>,
+        S::Fork<Fx>: SiteFork<Env, Site = S, Effect = Fx>,
     {
         let fork: S::Fork<Fx> = self.into();
         fork.authorize(env).await
@@ -170,7 +170,7 @@ where
 /// with the capability + address into a [`ForkInvocation`].
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-pub trait Authorize<Env> {
+pub trait SiteFork<Env> {
     /// The site type this fork authorizes for.
     type Site: Site;
     /// The effect type this fork was created for.
@@ -181,12 +181,4 @@ pub trait Authorize<Env> {
         self,
         env: &Env,
     ) -> Result<ForkInvocation<Self::Site, Self::Effect>, AuthorizeError>;
-}
-
-/// Error during fork execution.
-#[derive(Debug, thiserror::Error)]
-pub enum ForkError {
-    /// Authorization was denied.
-    #[error(transparent)]
-    Authorization(#[from] AuthorizeError),
 }
