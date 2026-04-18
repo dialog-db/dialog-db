@@ -19,6 +19,7 @@ pub use dialog_capability::{
 };
 use dialog_common::Checksum;
 use serde::{Deserialize, Serialize};
+use std::io;
 use thiserror::Error;
 
 /// Root attenuation for memory operations.
@@ -253,7 +254,7 @@ pub enum MemoryError {
 
     /// IO error.
     #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[from] io::Error),
 }
 
 impl From<StorageError> for MemoryError {

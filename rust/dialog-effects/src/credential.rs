@@ -21,6 +21,8 @@ pub use dialog_capability::{
 };
 pub use dialog_credentials;
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
+use std::marker::PhantomData;
 use thiserror::Error;
 
 /// Opaque secret bytes for site credentials.
@@ -121,14 +123,14 @@ impl Effect for Save<Secret> {
 #[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
 pub struct Load<T> {
     #[serde(skip)]
-    _marker: std::marker::PhantomData<T>,
+    _marker: PhantomData<T>,
 }
 
 impl<T> Load<T> {
     /// Create a new load effect.
     pub fn new() -> Self {
         Self {
-            _marker: std::marker::PhantomData,
+            _marker: PhantomData,
         }
     }
 }
@@ -177,8 +179,8 @@ impl From<CredentialError> for AuthorizeError {
     }
 }
 
-impl From<std::convert::Infallible> for CredentialError {
-    fn from(never: std::convert::Infallible) -> Self {
+impl From<Infallible> for CredentialError {
+    fn from(never: Infallible) -> Self {
         match never {}
     }
 }
