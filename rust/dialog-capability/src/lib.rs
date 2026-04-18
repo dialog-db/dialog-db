@@ -10,7 +10,7 @@
 //!
 //! ```rust
 //! # mod example {
-//! use dialog_capability::{did, Subject, Did, Ability, Attenuation, Policy, Effect, Attenuate};
+//! use dialog_capability::{did, Subject, Did, Ability, Attenuate, Attenuation, Policy, Effect};
 //! use serde::{Serialize, Deserialize};
 //!
 //! // Attenuation: narrows ability (adds "/storage" to path) and adds parameters
@@ -156,6 +156,9 @@
 // Allow derive macros to resolve `::dialog_capability::*` inside this crate.
 extern crate self as dialog_capability;
 
+pub mod access;
+pub use access::*;
+
 mod error;
 pub use error::*;
 
@@ -204,7 +207,6 @@ pub use issuer::*;
 /// Derive macro that generates `Provider<Fx>` impls for composite structs.
 pub use dialog_macros::Provider;
 
-pub mod access;
 
 pub mod site;
 pub use site::*;
@@ -213,4 +215,7 @@ pub mod command;
 pub use command::*;
 
 pub mod fork;
-pub use fork::*;
+// Note: `fork::Authorize` is NOT glob-exported to avoid clashing with
+// `access::Authorize` (the effect). Users reference it via `fork::Authorize`
+// until the access effect is renamed.
+pub use fork::{Fork, ForkError, ForkInvocation};
