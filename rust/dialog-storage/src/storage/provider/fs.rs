@@ -46,9 +46,14 @@ const STORAGE_NAMESPACE: &str = "dialog";
 pub struct FileSystem(FileSystemHandle);
 
 impl FileSystem {
+    /// The handle for this provider's root location.
+    pub fn handle(&self) -> &FileSystemHandle {
+        &self.0
+    }
+
     /// Resolve a path segment under this space's root.
     pub fn resolve(&self, segment: &str) -> Result<FileSystemHandle, FileSystemError> {
-        self.0.resolve(segment)
+        self.handle().resolve(segment)
     }
 }
 
@@ -225,7 +230,7 @@ impl FileSystemHandle {
 
     /// Returns the URL path component of this location.
     pub fn path(&self) -> &str {
-        self.0.path()
+        self.url().path()
     }
 
     /// Resolves a path segment relative to this location, validating containment.
@@ -237,11 +242,11 @@ impl FileSystemHandle {
         // Normalize base to ensure it ends with '/' for correct directory semantics.
         // Without trailing slash, joining "baz" to "file:///foo/bar" gives "file:///foo/baz"
         // (a sibling), not "file:///foo/bar/baz" (a child).
-        let normalized_base = if self.0.path().ends_with('/') {
-            self.0.clone()
+        let normalized_base = if self.path().ends_with('/') {
+            self.url().clone()
         } else {
-            let mut url = self.0.clone();
-            url.set_path(&format!("{}/", self.0.path()));
+            let mut url = self.url().clone();
+            url.set_path(&format!("{}/", self.path()));
             url
         };
 
