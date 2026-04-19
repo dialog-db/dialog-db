@@ -5,6 +5,8 @@
 use dialog_capability::access::{AuthorizeError, Protocol, Prove, Retain as AccessRetain};
 use dialog_capability::{Capability, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_credentials::Credential;
+use dialog_effects::credential::Secret;
 use dialog_effects::storage::{Location, StorageError};
 use dialog_effects::{archive, credential, memory};
 
@@ -19,8 +21,10 @@ pub trait SpaceProvider:
     + Provider<memory::Resolve>
     + Provider<memory::Publish>
     + Provider<memory::Retract>
-    + Provider<credential::Load<dialog_credentials::Credential>>
-    + Provider<credential::Save<dialog_credentials::Credential>>
+    + Provider<credential::Load<Credential>>
+    + Provider<credential::Save<Credential>>
+    + Provider<credential::Load<Secret>>
+    + Provider<credential::Save<Secret>>
     + ConditionalSend
     + ConditionalSync
     + Clone
@@ -34,8 +38,10 @@ impl<T> SpaceProvider for T where
         + Provider<memory::Resolve>
         + Provider<memory::Publish>
         + Provider<memory::Retract>
-        + Provider<credential::Load<dialog_credentials::Credential>>
-        + Provider<credential::Save<dialog_credentials::Credential>>
+        + Provider<credential::Load<Credential>>
+        + Provider<credential::Save<Credential>>
+        + Provider<credential::Load<Secret>>
+        + Provider<credential::Save<Secret>>
         + ConditionalSend
         + ConditionalSync
         + Clone
@@ -45,22 +51,27 @@ impl<T> SpaceProvider for T where
 
 /// A composed set of providers for a single mounted space.
 #[derive(Clone, dialog_capability::Provider)]
-pub struct Space<Archive, Memory, Credential, Certificate> {
+pub struct Space<A, M, C, D> {
     /// Archive provider.
     #[provide(archive::Get, archive::Put)]
-    pub archive: Archive,
+    pub archive: A,
 
     /// Memory provider.
     #[provide(memory::Resolve, memory::Publish, memory::Retract)]
-    pub memory: Memory,
+    pub memory: M,
 
     /// Credential provider.
-    #[provide(credential::Load<dialog_credentials::Credential>, credential::Save<dialog_credentials::Credential>)]
-    pub credential: Credential,
+    #[provide(
+        credential::Load<Credential>,
+        credential::Save<Credential>,
+        credential::Load<Secret>,
+        credential::Save<Secret>
+    )]
+    pub credential: C,
 
     /// Certificate provider manual implementation are used because of the
     /// complex generics
-    pub certificate: Certificate,
+    pub certificate: D,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]

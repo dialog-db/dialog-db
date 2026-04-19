@@ -7,7 +7,7 @@
 
 use dialog_capability::{Capability, Did, Subject};
 
-use super::{Cell, Memory, Publish, Resolve, Retract, Space};
+use super::{Cell, Memory, Publish, Resolve, Retract, Space, Version};
 
 /// Extension trait to start a memory capability chain.
 pub trait MemorySubjectExt {
@@ -69,12 +69,14 @@ pub trait CellExt {
     type Publish;
     /// The resulting retract chain type.
     type Retract;
-    /// Resolve the current cell content and edition.
+    /// Resolve the current cell content and version.
     fn resolve(self) -> Self::Resolve;
-    /// Publish content to the cell with CAS semantics.
-    fn publish(self, content: impl Into<Vec<u8>>, when: Option<Vec<u8>>) -> Self::Publish;
+    /// Publish content to the cell. Pass `Some(version)` as `when` to
+    /// require the current version to match (CAS), `None` to publish
+    /// unconditionally.
+    fn publish(self, content: impl Into<Vec<u8>>, when: Option<Version>) -> Self::Publish;
     /// Retract (delete) cell content with CAS semantics.
-    fn retract(self, when: impl Into<Vec<u8>>) -> Self::Retract;
+    fn retract(self, when: impl Into<Version>) -> Self::Retract;
 }
 
 impl CellExt for Capability<Cell> {
@@ -86,11 +88,11 @@ impl CellExt for Capability<Cell> {
         self.invoke(Resolve)
     }
 
-    fn publish(self, content: impl Into<Vec<u8>>, when: Option<Vec<u8>>) -> Capability<Publish> {
+    fn publish(self, content: impl Into<Vec<u8>>, when: Option<Version>) -> Capability<Publish> {
         self.invoke(Publish::new(content, when))
     }
 
-    fn retract(self, when: impl Into<Vec<u8>>) -> Capability<Retract> {
+    fn retract(self, when: impl Into<Version>) -> Capability<Retract> {
         self.invoke(Retract::new(when))
     }
 }

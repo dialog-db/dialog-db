@@ -1,23 +1,30 @@
 //! Credential Load/Save for filesystem storage.
 //!
-//! Layout: `{space_root}/credential/key/{address}`
-
-use dialog_capability::{Capability, Policy, Provider};
-use dialog_credentials::{Credential, CredentialExport};
-use dialog_effects::credential::{self, CredentialError};
+//! Layout: `{space_root}/credential/{address}`
 
 use super::{FileSystem, FileSystemError, FileSystemHandle};
+use base58::ToBase58;
+use dialog_capability::{Capability, Policy, Provider};
+use dialog_credentials::{Credential, CredentialExport};
+use dialog_effects::credential::{self, CredentialError, Secret};
 
 const CREDENTIAL: &str = "credential";
-const KEY: &str = "key";
 
 impl FileSystem {
     /// Returns the handle for a key credential at the given address.
+    /// Layout: `{space_root}/credential/key/{address}`
     pub(super) fn credential_key(
         &self,
         address: &str,
     ) -> Result<FileSystemHandle, FileSystemError> {
-        self.resolve(CREDENTIAL)?.resolve(KEY)?.resolve(address)
+        self.resolve(CREDENTIAL)?.resolve("key")?.resolve(address)
+    }
+
+    /// Returns the handle for a site secret at the given address.
+    /// Layout: `{space_root}/credential/site/{hash(address)}`
+    fn credential_site(&self, address: &str) -> Result<FileSystemHandle, FileSystemError> {
+        let key = blake3::hash(address.as_bytes()).as_bytes().to_base58();
+        self.resolve(CREDENTIAL)?.resolve("site")?.resolve(&key)
     }
 }
 
@@ -46,7 +53,7 @@ impl Provider<credential::Save<Credential>> for FileSystem {
         input: Capability<credential::Save<Credential>>,
     ) -> Result<(), CredentialError> {
         let address = &credential::Key::of(&input).address;
-        let cred = &credential::Save::of(&input).credential;
+        let cred = &credential::Save::<Credential>::of(&input).credential;
         let handle = self.credential_key(address)?;
         let export = cred
             .export()
@@ -54,6 +61,33 @@ impl Provider<credential::Save<Credential>> for FileSystem {
             .map_err(|e| CredentialError::Storage(e.to_string()))?;
 
         handle.write(export.as_bytes()).await?;
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider<credential::Load<Secret>> for FileSystem {
+    async fn execute(
+        &self,
+        input: Capability<credential::Load<Secret>>,
+    ) -> Result<Secret, CredentialError> {
+        let address = &credential::Site::of(&input).address.as_str();
+        let handle = self.credential_site(address)?;
+        let data = handle.read().await?;
+        Ok(Secret(data))
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider<credential::Save<Secret>> for FileSystem {
+    async fn execute(
+        &self,
+        input: Capability<credential::Save<Secret>>,
+    ) -> Result<(), CredentialError> {
+        let address = &credential::Site::of(&input).address.as_str();
+        let secret = &credential::Save::<Secret>::of(&input).credential;
+        let handle = self.credential_site(address)?;
+        handle.write(&secret.0).await?;
         Ok(())
     }
 }

@@ -9,17 +9,22 @@
 //!   └── Memory (ability: /memory)
 //!         └── Space { space: String }
 //!               └── Cell { cell: String }
-//!                     ├── Resolve → Effect → Result<Option<Publication>, MemoryError>
+//!                     ├── Resolve → Effect → Result<Option<Edition<Vec<u8>>>, MemoryError>
 //!                     ├── Publish { content, when } → Effect → Result<Bytes, MemoryError>
 //!                     └── Retract { when } → Effect → Result<(), MemoryError>
 //! ```
 
+use std::fmt;
+use std::io;
+use std::str;
+
+use base58::ToBase58;
+use dialog_capability::access::AuthorizeError;
 pub use dialog_capability::{
     Attenuate, Attenuation, Capability, Effect, Policy, StorageError, Subject,
 };
 use dialog_common::Checksum;
 use serde::{Deserialize, Serialize};
-use std::io;
 use thiserror::Error;
 
 /// Root attenuation for memory operations.
@@ -68,33 +73,112 @@ impl Policy for Cell {
     type Of = Space;
 }
 
-/// Edition identifier for CAS operations.
-pub type Edition = String;
+/// Opaque version identifier for CAS operations.
+///
+/// Backends produce version tokens in whatever form suits them -- S3 hands
+/// back ASCII ETags, content-addressed stores hand back raw hashes. This
+/// newtype keeps the underlying bytes intact (no lossy UTF-8 conversion)
+/// while providing readable [`Debug`] / [`Display`] output.
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Version(#[serde(with = "serde_bytes")] Vec<u8>);
 
-/// Convert raw bytes to an edition string (used by `#[derive(Claim)]`).
-fn edition(bytes: Vec<u8>) -> Edition {
-    String::from_utf8_lossy(&bytes).into_owned()
+impl Version {
+    /// View the raw version bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Consume the wrapper and return the raw bytes.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.0
+    }
+
+    /// Whether this version is empty (zero-length). Empty versions are
+    /// sometimes used as sentinels for "no prior version".
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
-/// Convert optional raw bytes to an optional edition string (used by `#[derive(Claim)]`).
-fn optional_edition(bytes: Option<serde_bytes::ByteBuf>) -> Option<Edition> {
-    bytes.map(|b| String::from_utf8_lossy(&b).into_owned())
+impl From<Vec<u8>> for Version {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
 }
 
-/// A cell's current state: content and its edition.
+impl From<&[u8]> for Version {
+    fn from(bytes: &[u8]) -> Self {
+        Self(bytes.to_vec())
+    }
+}
+
+impl<const N: usize> From<&[u8; N]> for Version {
+    fn from(bytes: &[u8; N]) -> Self {
+        Self(bytes.to_vec())
+    }
+}
+
+impl From<String> for Version {
+    fn from(s: String) -> Self {
+        Self(s.into_bytes())
+    }
+}
+
+impl From<&str> for Version {
+    fn from(s: &str) -> Self {
+        Self(s.as_bytes().to_vec())
+    }
+}
+
+impl From<dialog_common::Blake3Hash> for Version {
+    fn from(hash: dialog_common::Blake3Hash) -> Self {
+        Self(hash.as_bytes().to_vec())
+    }
+}
+
+impl From<&dialog_common::Blake3Hash> for Version {
+    fn from(hash: &dialog_common::Blake3Hash) -> Self {
+        Self(hash.as_bytes().to_vec())
+    }
+}
+
+impl AsRef<[u8]> for Version {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// Render bytes as a UTF-8 string when all bytes are printable ASCII,
+/// otherwise fall back to base58.
+impl fmt::Display for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.iter().all(|b| b.is_ascii_graphic() || *b == b' ') {
+            // Safety: all bytes are ASCII graphic/space, hence valid UTF-8.
+            f.write_str(str::from_utf8(&self.0).expect("ascii is valid utf8"))
+        } else {
+            f.write_str(&self.0.to_base58())
+        }
+    }
+}
+
+impl fmt::Debug for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Version({})", self)
+    }
+}
+
+/// A cell's current state: content and its version.
 ///
 /// Returned by [`Resolve`] when the cell has content.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Publication {
+pub struct Edition<T> {
     /// The cell's current content.
-    #[serde(with = "serde_bytes")]
-    pub content: Vec<u8>,
-    /// The edition identifier for this content.
-    #[serde(with = "serde_bytes")]
-    pub edition: Vec<u8>,
+    pub content: T,
+    /// The version identifier for this content.
+    pub version: Version,
 }
 
-/// Resolve operation - reads current cell content and edition.
+/// Resolve operation - reads current cell content and version.
 ///
 /// Returns `None` if the cell has no content (empty/uninitialized).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Attenuate)]
@@ -102,7 +186,7 @@ pub struct Resolve;
 
 impl Effect for Resolve {
     type Of = Cell;
-    type Output = Result<Option<Publication>, MemoryError>;
+    type Output = Result<Option<Edition<Vec<u8>>>, MemoryError>;
 }
 
 /// Extension trait for `Capability<Resolve>` to access its fields.
@@ -128,32 +212,31 @@ impl ResolveCapability for Capability<Resolve> {
 /// - If `when` is `None`, expects cell to be empty (first publish)
 /// - If `when` is `Some(edition)`, expects current edition to match
 /// - Returns new edition on success
-/// - Returns `MemoryError::EditionMismatch` if expectation doesn't match
+/// - Returns `MemoryError::VersionMismatch` if expectation doesn't match
 #[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
 pub struct Publish {
     /// The content to publish.
     #[serde(with = "serde_bytes")]
     #[attenuate(into = Checksum, with = Checksum::sha256, rename = checksum)]
     pub content: Vec<u8>,
-    /// The expected current edition, or None if expecting empty cell.
+    /// The expected current version, or None if expecting empty cell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[attenuate(into = Option<Edition>, with = optional_edition)]
-    pub when: Option<serde_bytes::ByteBuf>,
+    pub when: Option<Version>,
 }
 
 impl Publish {
     /// Create a new Publish effect.
-    pub fn new(content: impl Into<Vec<u8>>, when: Option<Vec<u8>>) -> Self {
+    pub fn new(content: impl Into<Vec<u8>>, when: Option<Version>) -> Self {
         Self {
             content: content.into(),
-            when: when.map(serde_bytes::ByteBuf::from),
+            when,
         }
     }
 }
 
 impl Effect for Publish {
     type Of = Cell;
-    type Output = Result<Vec<u8>, MemoryError>;
+    type Output = Result<Version, MemoryError>;
 }
 
 /// Extension trait for `Capability<Publish>` to access its fields.
@@ -164,8 +247,8 @@ pub trait PublishCapability {
     fn cell(&self) -> &str;
     /// Get the content to publish.
     fn content(&self) -> &[u8];
-    /// Get the expected edition (when condition).
-    fn when(&self) -> Option<&[u8]>;
+    /// Get the expected version (when condition).
+    fn when(&self) -> Option<&Version>;
 }
 
 impl PublishCapability for Capability<Publish> {
@@ -181,26 +264,24 @@ impl PublishCapability for Capability<Publish> {
         &Publish::of(self).content
     }
 
-    fn when(&self) -> Option<&[u8]> {
-        Publish::of(self).when.as_ref().map(|b| b.as_ref())
+    fn when(&self) -> Option<&Version> {
+        Publish::of(self).when.as_ref()
     }
 }
 
 /// Retract operation - removes cell content with CAS semantics.
 ///
 /// - Requires `when` to match current edition
-/// - Returns `MemoryError::EditionMismatch` if edition doesn't match
+/// - Returns `MemoryError::VersionMismatch` if edition doesn't match
 #[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
 pub struct Retract {
-    /// The expected current edition.
-    #[serde(with = "serde_bytes")]
-    #[attenuate(into = Edition, with = edition)]
-    pub when: Vec<u8>,
+    /// The expected current version.
+    pub when: Version,
 }
 
 impl Retract {
     /// Create a new Retract effect.
-    pub fn new(when: impl Into<Vec<u8>>) -> Self {
+    pub fn new(when: impl Into<Version>) -> Self {
         Self { when: when.into() }
     }
 }
@@ -216,8 +297,8 @@ pub trait RetractCapability {
     fn space(&self) -> &str;
     /// Get the cell name from the capability chain.
     fn cell(&self) -> &str;
-    /// Get the expected edition (when condition).
-    fn when(&self) -> &[u8];
+    /// Get the expected version (when condition).
+    fn when(&self) -> &Version;
 }
 
 impl RetractCapability for Capability<Retract> {
@@ -229,7 +310,7 @@ impl RetractCapability for Capability<Retract> {
         &Cell::of(self).cell
     }
 
-    fn when(&self) -> &[u8] {
+    fn when(&self) -> &Version {
         &Retract::of(self).when
     }
 }
@@ -240,17 +321,21 @@ pub mod prelude;
 #[derive(Debug, Error)]
 pub enum MemoryError {
     /// CAS edition mismatch.
-    #[error("Edition mismatch: expected {expected:?}, got {actual:?}")]
-    EditionMismatch {
-        /// The expected edition.
-        expected: Option<String>,
-        /// The actual edition found.
-        actual: Option<String>,
+    #[error("Version mismatch: expected {expected:?}, got {actual:?}")]
+    VersionMismatch {
+        /// The expected version.
+        expected: Option<Version>,
+        /// The actual version found.
+        actual: Option<Version>,
     },
 
     /// Storage backend error.
     #[error("Storage error: {0}")]
     Storage(String),
+
+    /// Authorization error.
+    #[error("Authorization error: {0}")]
+    Authorization(String),
 
     /// IO error.
     #[error("IO error: {0}")]
@@ -260,6 +345,12 @@ pub enum MemoryError {
 impl From<StorageError> for MemoryError {
     fn from(e: StorageError) -> Self {
         Self::Storage(e.to_string())
+    }
+}
+
+impl From<AuthorizeError> for MemoryError {
+    fn from(e: AuthorizeError) -> Self {
+        Self::Authorization(e.to_string())
     }
 }
 

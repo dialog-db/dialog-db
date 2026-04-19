@@ -7,6 +7,7 @@
 //!   archive/{catalog}/{base58(digest)}
 //!   memory/{space}/{cell}
 //!   credential/key/{address}
+//!   certificate/{audience}/{subject}/{issuer}.{hash}
 //! ```
 //!
 //! Compare-And-Swap (CAS) semantics are accomplished through PID-based file
@@ -20,7 +21,10 @@ mod memory;
 
 pub use error::FileSystemError;
 
+use std::env;
+use std::io;
 use std::path::PathBuf;
+use tokio::fs;
 use url::Url;
 
 /// Filesystem-based storage provider.
@@ -73,9 +77,9 @@ impl TryFrom<&Location> for FileSystemHandle {
                 data_dir.join("dialog")
             }
             Directory::Current => {
-                std::env::current_dir().map_err(|e| FileSystemError::Io(e.to_string()))?
+                env::current_dir().map_err(|e| FileSystemError::Io(e.to_string()))?
             }
-            Directory::Temp => std::env::temp_dir(),
+            Directory::Temp => env::temp_dir(),
             Directory::At(path) => PathBuf::from(path),
         };
 
@@ -96,7 +100,7 @@ impl TryFrom<&Location> for FileSystemHandle {
     type Error = FileSystemError;
 
     fn try_from(location: &Location) -> Result<Self, FileSystemError> {
-        let base = std::env::temp_dir().join("dialog");
+        let base = env::temp_dir().join("dialog");
         let suffix = match &location.directory {
             Directory::Profile => ".profile",
             Directory::Current => ".space",
@@ -167,7 +171,7 @@ impl TryFrom<PathBuf> for FileSystemHandle {
         let absolute = if path.is_absolute() {
             path
         } else {
-            std::env::current_dir()
+            env::current_dir()
                 .map_err(|e| FileSystemError::Io(e.to_string()))?
                 .join(path)
         };
@@ -259,7 +263,7 @@ impl FileSystemHandle {
     /// Ensures this location exists as a directory.
     pub async fn ensure_dir(&self) -> Result<(), FileSystemError> {
         let path: PathBuf = self.clone().try_into()?;
-        tokio::fs::create_dir_all(&path)
+        fs::create_dir_all(&path)
             .await
             .map_err(|e| FileSystemError::Io(e.to_string()))
     }
@@ -267,7 +271,7 @@ impl FileSystemHandle {
     /// Read the contents of the file at this location.
     pub async fn read(&self) -> Result<Vec<u8>, FileSystemError> {
         let path: PathBuf = self.clone().try_into()?;
-        tokio::fs::read(&path)
+        fs::read(&path)
             .await
             .map_err(|e| FileSystemError::Io(e.to_string()))
     }
@@ -276,9 +280,9 @@ impl FileSystemHandle {
     /// the file does not exist.
     pub async fn read_optional(&self) -> Result<Option<Vec<u8>>, FileSystemError> {
         let path: PathBuf = self.clone().try_into()?;
-        match tokio::fs::read(&path).await {
+        match fs::read(&path).await {
             Ok(bytes) => Ok(Some(bytes)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(FileSystemError::Io(e.to_string())),
         }
     }
@@ -287,11 +291,11 @@ impl FileSystemHandle {
     pub async fn write(&self, contents: &[u8]) -> Result<(), FileSystemError> {
         let path: PathBuf = self.clone().try_into()?;
         if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
+            fs::create_dir_all(parent)
                 .await
                 .map_err(|e| FileSystemError::Io(e.to_string()))?;
         }
-        tokio::fs::write(&path, contents)
+        fs::write(&path, contents)
             .await
             .map_err(|e| FileSystemError::Io(e.to_string()))
     }
@@ -300,7 +304,7 @@ impl FileSystemHandle {
     pub async fn rename(&self, to: &FileSystemHandle) -> Result<(), FileSystemError> {
         let from_path: PathBuf = self.clone().try_into()?;
         let to_path: PathBuf = to.clone().try_into()?;
-        tokio::fs::rename(&from_path, &to_path)
+        fs::rename(&from_path, &to_path)
             .await
             .map_err(|e| FileSystemError::Io(e.to_string()))
     }
@@ -308,9 +312,9 @@ impl FileSystemHandle {
     /// Remove the file at this location, returning Ok if already absent.
     pub async fn remove(&self) -> Result<(), FileSystemError> {
         let path: PathBuf = self.clone().try_into()?;
-        match tokio::fs::remove_file(&path).await {
+        match fs::remove_file(&path).await {
             Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(FileSystemError::Io(e.to_string())),
         }
     }
@@ -319,9 +323,9 @@ impl FileSystemHandle {
     /// directory does not exist.
     pub async fn list(&self) -> Result<Vec<String>, FileSystemError> {
         let path: PathBuf = self.clone().try_into()?;
-        let mut entries = match tokio::fs::read_dir(&path).await {
+        let mut entries = match fs::read_dir(&path).await {
             Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(FileSystemError::Io(e.to_string())),
         };
 
@@ -672,7 +676,7 @@ mod tests {
         let publication = resolved.expect("should find prefabricated cell");
         assert_eq!(publication.content, content);
 
-        let expected_edition = Blake3Hash::hash(&content).as_bytes().to_vec();
-        assert_eq!(publication.edition, expected_edition);
+        let expected_version = dialog_effects::memory::Version::from(Blake3Hash::hash(&content));
+        assert_eq!(publication.version, expected_version);
     }
 }

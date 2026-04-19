@@ -58,6 +58,8 @@ struct Session {
     memory: HashMap<MemoryKey, Vec<u8>>,
     /// Credential storage keyed by address.
     credentials: HashMap<String, CredentialExport>,
+    /// Secret storage keyed by site address.
+    secrets: HashMap<String, Vec<u8>>,
 }
 
 /// Volatile in-memory storage provider.

@@ -1,10 +1,8 @@
 //! Signer credential — wraps a full Ed25519 keypair.
 
 use crate::Ed25519Signer;
-use crate::key::KeyExport;
 use dialog_capability::Issuer;
-use dialog_varsig::eddsa::Ed25519Signature;
-use dialog_varsig::{Did, Principal, Signer};
+use dialog_varsig::{Did, Principal};
 
 #[cfg(not(target_arch = "wasm32"))]
 use super::constants::{
@@ -53,21 +51,24 @@ impl From<SignerCredential> for Ed25519Signer {
     }
 }
 
-impl Signer<Ed25519Signature> for SignerCredential {
-    async fn sign(&self, msg: &[u8]) -> Result<Ed25519Signature, signature::Error> {
-        Signer::sign(&self.0, msg).await
+impl dialog_varsig::Signer<dialog_varsig::eddsa::Ed25519Signature> for SignerCredential {
+    async fn sign(
+        &self,
+        msg: &[u8],
+    ) -> Result<dialog_varsig::eddsa::Ed25519Signature, signature::Error> {
+        dialog_varsig::Signer::sign(&self.0, msg).await
     }
 }
 
 impl Issuer for SignerCredential {
-    type Signature = Ed25519Signature;
+    type Signature = dialog_varsig::eddsa::Ed25519Signature;
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl SignerCredential {
     /// Export to multicodec-tagged bytes for native storage.
     pub async fn export(&self) -> Result<SignerCredentialExport, CredentialExportError> {
-        let KeyExport::Extractable(ref seed) = self
+        let crate::key::KeyExport::Extractable(ref seed) = self
             .0
             .export()
             .await
@@ -130,7 +131,7 @@ impl SignerCredential {
 
     /// Import from a JsValue (CryptoKeyPair).
     pub async fn import(export: SignerCredentialExport) -> Result<Self, CredentialExportError> {
-        let key_export = KeyExport::try_from(export.0)
+        let key_export = crate::key::KeyExport::try_from(export.0)
             .map_err(|e| CredentialExportError::InvalidFormat(e.to_string()))?;
         let signer = Ed25519Signer::import(key_export)
             .await
@@ -202,26 +203,28 @@ mod tests {
     mod web {
         use super::*;
         use crate::credential::export::SignerCredentialExport;
+        use js_sys::Object;
+        use wasm_bindgen::JsValue;
 
         wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
         #[dialog_common::test]
         async fn it_rejects_garbage_jsvalue() {
-            let garbage = SignerCredentialExport(wasm_bindgen::JsValue::from_str("not a key"));
+            let garbage = SignerCredentialExport(JsValue::from_str("not a key"));
             let result = SignerCredential::import(garbage).await;
             assert!(result.is_err(), "should reject a string as credential");
         }
 
         #[dialog_common::test]
         async fn it_rejects_null() {
-            let null = SignerCredentialExport(wasm_bindgen::JsValue::NULL);
+            let null = SignerCredentialExport(JsValue::NULL);
             let result = SignerCredential::import(null).await;
             assert!(result.is_err(), "should reject null as credential");
         }
 
         #[dialog_common::test]
         async fn it_rejects_random_object() {
-            let obj = js_sys::Object::new();
+            let obj = Object::new();
             let export = SignerCredentialExport(obj.into());
             let result = SignerCredential::import(export).await;
             assert!(result.is_err(), "should reject random object as credential");

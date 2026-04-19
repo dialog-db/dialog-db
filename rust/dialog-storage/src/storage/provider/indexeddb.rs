@@ -306,6 +306,7 @@ pub enum IndexedDbError {
     Conversion(String),
 }
 
+use dialog_capability::access::AuthorizeError;
 use dialog_effects::credential::CredentialError;
 
 impl From<IndexedDbError> for CredentialError {
@@ -314,15 +315,22 @@ impl From<IndexedDbError> for CredentialError {
     }
 }
 
+impl From<IndexedDbError> for AuthorizeError {
+    fn from(e: IndexedDbError) -> Self {
+        Self::Configuration(e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
+    use js_sys::Date;
     use wasm_bindgen::JsValue;
 
     fn unique_name(prefix: &str) -> String {
-        format!("test-{}-{}", prefix, js_sys::Date::now() as u64)
+        format!("test-{}-{}", prefix, Date::now() as u64)
     }
 
     #[dialog_common::test]
@@ -517,7 +525,7 @@ mod tests {
         use dialog_effects::prelude::*;
         use dialog_varsig::Principal;
 
-        let ts = js_sys::Date::now() as u64;
+        let ts = Date::now() as u64;
         let db1 = IndexedDb::connect(format!("space1-{ts}")).await?;
         let db2 = IndexedDb::connect(format!("space2-{ts}")).await?;
 
