@@ -16,7 +16,8 @@ impl FileSystem {
     }
 }
 use dialog_common::Blake3Hash;
-use dialog_effects::archive::{ArchiveError, Get, GetCapability, Put, PutCapability};
+use dialog_effects::archive::prelude::{GetExt, PutExt};
+use dialog_effects::archive::{ArchiveError, Get, Put};
 
 impl From<FileSystemError> for ArchiveError {
     fn from(e: FileSystemError) -> Self {

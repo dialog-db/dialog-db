@@ -5,7 +5,8 @@ use async_trait::async_trait;
 use base58::ToBase58;
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
-use dialog_effects::archive::{ArchiveError, Get, GetCapability, Put, PutCapability};
+use dialog_effects::archive::prelude::{GetExt, PutExt};
+use dialog_effects::archive::{ArchiveError, Get, Put};
 
 impl From<VolatileError> for ArchiveError {
     fn from(e: VolatileError) -> Self {

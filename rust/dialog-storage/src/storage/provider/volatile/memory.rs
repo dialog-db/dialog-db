@@ -7,10 +7,8 @@ use super::{MemoryKey, Volatile, VolatileError};
 use async_trait::async_trait;
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
-use dialog_effects::memory::{
-    Edition, MemoryError, Publish, PublishCapability, Resolve, ResolveCapability, Retract,
-    RetractCapability, Version,
-};
+use dialog_effects::memory::prelude::{PublishExt, ResolveExt, RetractExt};
+use dialog_effects::memory::{Edition, MemoryError, Publish, Resolve, Retract, Version};
 
 impl From<VolatileError> for MemoryError {
     fn from(e: VolatileError) -> Self {

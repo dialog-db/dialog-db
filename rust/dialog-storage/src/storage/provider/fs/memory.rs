@@ -20,10 +20,8 @@ impl FileSystem {
 }
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
-use dialog_effects::memory::{
-    Edition, MemoryError, Publish, PublishCapability, Resolve, ResolveCapability, Retract,
-    RetractCapability, Version,
-};
+use dialog_effects::memory::prelude::{PublishExt, ResolveExt, RetractExt};
+use dialog_effects::memory::{Edition, MemoryError, Publish, Resolve, Retract, Version};
 use pidlock::Pidlock;
 use std::path::PathBuf;
 

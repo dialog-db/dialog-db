@@ -5,7 +5,7 @@
 //! use dialog_effects::archive::prelude::*;
 //! ```
 
-use dialog_capability::{Capability, Did, Subject};
+use dialog_capability::{Capability, Did, Policy, Subject};
 use dialog_common::Blake3Hash;
 
 use super::{Archive, Catalog, Get, Put};
@@ -69,5 +69,47 @@ impl CatalogExt for Capability<Catalog> {
 
     fn put(self, digest: impl Into<Blake3Hash>, content: impl Into<Vec<u8>>) -> Capability<Put> {
         self.invoke(Put::new(digest, content))
+    }
+}
+
+/// Field accessors on `Capability<Get>`.
+pub trait GetExt {
+    /// Get the catalog name from the capability chain.
+    fn catalog(&self) -> &str;
+    /// Get the digest from the capability chain.
+    fn digest(&self) -> &Blake3Hash;
+}
+
+impl GetExt for Capability<Get> {
+    fn catalog(&self) -> &str {
+        &Catalog::of(self).catalog
+    }
+
+    fn digest(&self) -> &Blake3Hash {
+        &Get::of(self).digest
+    }
+}
+
+/// Field accessors on `Capability<Put>`.
+pub trait PutExt {
+    /// Get the catalog name from the capability chain.
+    fn catalog(&self) -> &str;
+    /// Get the digest from the capability chain.
+    fn digest(&self) -> &Blake3Hash;
+    /// Get the content from the capability chain.
+    fn content(&self) -> &[u8];
+}
+
+impl PutExt for Capability<Put> {
+    fn catalog(&self) -> &str {
+        &Catalog::of(self).catalog
+    }
+
+    fn digest(&self) -> &Blake3Hash {
+        &Put::of(self).digest
+    }
+
+    fn content(&self) -> &[u8] {
+        &Put::of(self).content
     }
 }

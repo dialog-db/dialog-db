@@ -5,7 +5,7 @@
 //! use dialog_effects::memory::prelude::*;
 //! ```
 
-use dialog_capability::{Capability, Did, Subject};
+use dialog_capability::{Capability, Did, Policy, Subject};
 
 use super::{Cell, Memory, Publish, Resolve, Retract, Space, Version};
 
@@ -94,5 +94,77 @@ impl CellExt for Capability<Cell> {
 
     fn retract(self, when: impl Into<Version>) -> Capability<Retract> {
         self.invoke(Retract::new(when))
+    }
+}
+
+/// Field accessors on `Capability<Resolve>`.
+pub trait ResolveExt {
+    /// Get the space name from the capability chain.
+    fn space(&self) -> &str;
+    /// Get the cell name from the capability chain.
+    fn cell(&self) -> &str;
+}
+
+impl ResolveExt for Capability<Resolve> {
+    fn space(&self) -> &str {
+        &Space::of(self).space
+    }
+
+    fn cell(&self) -> &str {
+        &Cell::of(self).cell
+    }
+}
+
+/// Field accessors on `Capability<Publish>`.
+pub trait PublishExt {
+    /// Get the space name from the capability chain.
+    fn space(&self) -> &str;
+    /// Get the cell name from the capability chain.
+    fn cell(&self) -> &str;
+    /// Get the content to publish.
+    fn content(&self) -> &[u8];
+    /// Get the expected version (when condition).
+    fn when(&self) -> Option<&Version>;
+}
+
+impl PublishExt for Capability<Publish> {
+    fn space(&self) -> &str {
+        &Space::of(self).space
+    }
+
+    fn cell(&self) -> &str {
+        &Cell::of(self).cell
+    }
+
+    fn content(&self) -> &[u8] {
+        &Publish::of(self).content
+    }
+
+    fn when(&self) -> Option<&Version> {
+        Publish::of(self).when.as_ref()
+    }
+}
+
+/// Field accessors on `Capability<Retract>`.
+pub trait RetractExt {
+    /// Get the space name from the capability chain.
+    fn space(&self) -> &str;
+    /// Get the cell name from the capability chain.
+    fn cell(&self) -> &str;
+    /// Get the expected version (when condition).
+    fn when(&self) -> &Version;
+}
+
+impl RetractExt for Capability<Retract> {
+    fn space(&self) -> &str {
+        &Space::of(self).space
+    }
+
+    fn cell(&self) -> &str {
+        &Cell::of(self).cell
+    }
+
+    fn when(&self) -> &Version {
+        &Retract::of(self).when
     }
 }

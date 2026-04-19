@@ -79,24 +79,6 @@ impl Effect for Get {
     type Output = Result<Option<Vec<u8>>, ArchiveError>;
 }
 
-/// Extension trait for `Capability<Get>` to access its fields.
-pub trait GetCapability {
-    /// Get the catalog name from the capability chain.
-    fn catalog(&self) -> &str;
-    /// Get the digest from the capability chain.
-    fn digest(&self) -> &Blake3Hash;
-}
-
-impl GetCapability for Capability<Get> {
-    fn catalog(&self) -> &str {
-        &Catalog::of(self).catalog
-    }
-
-    fn digest(&self) -> &Blake3Hash {
-        &Get::of(self).digest
-    }
-}
-
 /// Put operation - stores content by digest.
 ///
 /// Requires `Capability<Catalog>` access level.
@@ -124,30 +106,6 @@ impl Put {
 impl Effect for Put {
     type Of = Catalog;
     type Output = Result<(), ArchiveError>;
-}
-
-/// Extension trait for `Capability<Put>` to access its fields.
-pub trait PutCapability {
-    /// Get the catalog name from the capability chain.
-    fn catalog(&self) -> &str;
-    /// Get the digest from the capability chain.
-    fn digest(&self) -> &Blake3Hash;
-    /// Get the content from the capability chain.
-    fn content(&self) -> &[u8];
-}
-
-impl PutCapability for Capability<Put> {
-    fn catalog(&self) -> &str {
-        &Catalog::of(self).catalog
-    }
-
-    fn digest(&self) -> &Blake3Hash {
-        &Put::of(self).digest
-    }
-
-    fn content(&self) -> &[u8] {
-        &Put::of(self).content
-    }
 }
 
 pub mod prelude;

@@ -189,24 +189,6 @@ impl Effect for Resolve {
     type Output = Result<Option<Edition<Vec<u8>>>, MemoryError>;
 }
 
-/// Extension trait for `Capability<Resolve>` to access its fields.
-pub trait ResolveCapability {
-    /// Get the space name from the capability chain.
-    fn space(&self) -> &str;
-    /// Get the cell name from the capability chain.
-    fn cell(&self) -> &str;
-}
-
-impl ResolveCapability for Capability<Resolve> {
-    fn space(&self) -> &str {
-        &Space::of(self).space
-    }
-
-    fn cell(&self) -> &str {
-        &Cell::of(self).cell
-    }
-}
-
 /// Publish operation - sets cell content with CAS semantics.
 ///
 /// - If `when` is `None`, expects cell to be empty (first publish)
@@ -239,36 +221,6 @@ impl Effect for Publish {
     type Output = Result<Version, MemoryError>;
 }
 
-/// Extension trait for `Capability<Publish>` to access its fields.
-pub trait PublishCapability {
-    /// Get the space name from the capability chain.
-    fn space(&self) -> &str;
-    /// Get the cell name from the capability chain.
-    fn cell(&self) -> &str;
-    /// Get the content to publish.
-    fn content(&self) -> &[u8];
-    /// Get the expected version (when condition).
-    fn when(&self) -> Option<&Version>;
-}
-
-impl PublishCapability for Capability<Publish> {
-    fn space(&self) -> &str {
-        &Space::of(self).space
-    }
-
-    fn cell(&self) -> &str {
-        &Cell::of(self).cell
-    }
-
-    fn content(&self) -> &[u8] {
-        &Publish::of(self).content
-    }
-
-    fn when(&self) -> Option<&Version> {
-        Publish::of(self).when.as_ref()
-    }
-}
-
 /// Retract operation - removes cell content with CAS semantics.
 ///
 /// - Requires `when` to match current edition
@@ -289,30 +241,6 @@ impl Retract {
 impl Effect for Retract {
     type Of = Cell;
     type Output = Result<(), MemoryError>;
-}
-
-/// Extension trait for `Capability<Retract>` to access its fields.
-pub trait RetractCapability {
-    /// Get the space name from the capability chain.
-    fn space(&self) -> &str;
-    /// Get the cell name from the capability chain.
-    fn cell(&self) -> &str;
-    /// Get the expected version (when condition).
-    fn when(&self) -> &Version;
-}
-
-impl RetractCapability for Capability<Retract> {
-    fn space(&self) -> &str {
-        &Space::of(self).space
-    }
-
-    fn cell(&self) -> &str {
-        &Cell::of(self).cell
-    }
-
-    fn when(&self) -> &Version {
-        &Retract::of(self).when
-    }
 }
 
 pub mod prelude;
