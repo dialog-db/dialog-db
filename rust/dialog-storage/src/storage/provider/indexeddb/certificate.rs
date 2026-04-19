@@ -5,6 +5,7 @@
 //! for powerlines). Uses IDBKeyRange for efficient prefix queries.
 
 use async_trait::async_trait;
+use base58::ToBase58;
 use dialog_capability::access::{
     AuthorizeError, Certificate, CertificateStore, Delegation, Protocol, Prove, Retain,
 };
@@ -70,7 +71,7 @@ impl<P: Protocol> CertificateStore<P> for IndexedDb {
 
         for cert in &certs {
             let bytes = cert.encode()?;
-            let id = base58::ToBase58::to_base58(blake3::hash(&bytes).as_bytes().as_slice());
+            let id = blake3::hash(&bytes).as_bytes().to_base58();
 
             let audience = cert.audience().to_string();
             let subject_segment = match cert.subject() {

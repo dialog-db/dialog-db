@@ -4,6 +4,7 @@
 //! `{audience}/{subject}/{issuer}.{hash}` (or `{audience}/_/{issuer}.{hash}`
 //! for [powerlines](https://github.com/ucan-wg/delegation?tab=readme-ov-file#powerline)).
 
+use base58::ToBase58;
 use dialog_capability::access::{
     AuthorizeError, Certificate, CertificateStore, Delegation, Protocol, Prove, Retain,
 };
@@ -59,7 +60,7 @@ where
 
         for cert in delegation.certificates() {
             let bytes = cert.encode()?;
-            let id = base58::ToBase58::to_base58(blake3::hash(&bytes).as_bytes().as_slice());
+            let id = blake3::hash(&bytes).as_bytes().to_base58();
 
             let audience = cert.audience().to_string();
             let subject_segment = match cert.subject() {
