@@ -9,22 +9,21 @@ use dialog_credentials::{Credential, CredentialExport};
 use dialog_effects::credential::{CredentialError, Key, Load, Save, Secret, Site};
 
 const CREDENTIAL: &str = "credential";
+const KEY: &str = "key";
+const SITE: &str = "site";
 
 impl FileSystem {
     /// Returns the handle for a key credential at the given address.
     /// Layout: `{space_root}/credential/key/{address}`
-    pub(super) fn credential_key(
-        &self,
-        address: &str,
-    ) -> Result<FileSystemHandle, FileSystemError> {
-        self.resolve(CREDENTIAL)?.resolve("key")?.resolve(address)
+    pub fn credential_key(&self, address: &str) -> Result<FileSystemHandle, FileSystemError> {
+        self.resolve(CREDENTIAL)?.resolve(KEY)?.resolve(address)
     }
 
     /// Returns the handle for a site secret at the given address.
     /// Layout: `{space_root}/credential/site/{hash(address)}`
-    fn credential_site(&self, address: &str) -> Result<FileSystemHandle, FileSystemError> {
+    pub fn credential_site(&self, address: &str) -> Result<FileSystemHandle, FileSystemError> {
         let key = blake3::hash(address.as_bytes()).as_bytes().to_base58();
-        self.resolve(CREDENTIAL)?.resolve("site")?.resolve(&key)
+        self.resolve(CREDENTIAL)?.resolve(SITE)?.resolve(&key)
     }
 }
 

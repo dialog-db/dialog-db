@@ -74,7 +74,7 @@ struct Connection {
     stores: HashSet<String>,
     /// Shared via Rc so StoreSession can hold a clone across .await
     /// points without borrowing the Connection.
-    db: Option<Rc<Rexie>>,
+    db: Rc<Rexie>,
 }
 
 impl Connection {
@@ -93,13 +93,13 @@ impl Connection {
             name: name.to_string(),
             version,
             stores,
-            db: Some(Rc::new(db)),
+            db: Rc::new(db),
         })
     }
 
     /// Returns a clone of the database handle.
     fn db(&self) -> Rc<Rexie> {
-        self.db.as_ref().expect("connection not open").clone()
+        self.db.clone()
     }
 }
 
@@ -244,7 +244,7 @@ impl IndexedDb {
                 .version()
                 .map_err(|e| IndexedDbError::Database(e.to_string()))?;
             conn.stores = db.store_names().into_iter().collect();
-            conn.db = Some(Rc::new(db));
+            conn.db = Rc::new(db);
         }
 
         let db = self.connection.borrow().db();
