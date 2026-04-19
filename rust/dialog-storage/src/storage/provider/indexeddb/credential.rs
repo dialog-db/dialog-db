@@ -2,10 +2,13 @@
 
 use super::{IndexedDb, IndexedDbError, to_uint8array};
 use async_trait::async_trait;
-use dialog_capability::{Capability, Policy, Provider};
+use dialog_capability::{Capability, Provider};
 use dialog_credentials::Credential;
 use dialog_credentials::credential::CredentialExport;
-use dialog_effects::credential::{CredentialError, Key, Load, Save, Secret, Site};
+use dialog_effects::credential::prelude::{
+    LoadCredentialExt, LoadSecretExt, SaveCredentialExt, SaveSecretExt,
+};
+use dialog_effects::credential::{CredentialError, Load, Save, Secret};
 use js_sys::Uint8Array;
 use wasm_bindgen::{JsCast, JsValue};
 
@@ -17,8 +20,7 @@ impl Provider<Load<Credential>> for IndexedDb {
         &self,
         input: Capability<Load<Credential>>,
     ) -> Result<Credential, CredentialError> {
-        let address = Key::of(&input).address.clone();
-        let idb_key = format!("key/{address}");
+        let idb_key = format!("key/{}", input.address());
 
         let store = self.store(CREDENTIAL).await?;
         let key = JsValue::from_str(&idb_key);
@@ -47,11 +49,9 @@ impl Provider<Load<Credential>> for IndexedDb {
 #[async_trait(?Send)]
 impl Provider<Save<Credential>> for IndexedDb {
     async fn execute(&self, input: Capability<Save<Credential>>) -> Result<(), CredentialError> {
-        let address = Key::of(&input).address.clone();
-        let idb_key = format!("key/{address}");
-        let credential = &Save::<Credential>::of(&input).credential;
-
-        let export = credential
+        let idb_key = format!("key/{}", input.address());
+        let export = input
+            .credential()
             .export()
             .await
             .map_err(|e| CredentialError::Storage(e.to_string()))?;
@@ -75,8 +75,7 @@ impl Provider<Save<Credential>> for IndexedDb {
 #[async_trait(?Send)]
 impl Provider<Load<Secret>> for IndexedDb {
     async fn execute(&self, input: Capability<Load<Secret>>) -> Result<Secret, CredentialError> {
-        let address = Site::of(&input).address.clone();
-        let idb_key = format!("site/{address}");
+        let idb_key = format!("site/{}", input.address());
 
         let store = self.store(CREDENTIAL).await?;
         let key = JsValue::from_str(&idb_key);
@@ -106,11 +105,8 @@ impl Provider<Load<Secret>> for IndexedDb {
 #[async_trait(?Send)]
 impl Provider<Save<Secret>> for IndexedDb {
     async fn execute(&self, input: Capability<Save<Secret>>) -> Result<(), CredentialError> {
-        let address = Site::of(&input).address.clone();
-        let idb_key = format!("site/{address}");
-        let secret = &Save::<Secret>::of(&input).credential;
-
-        let js_val: JsValue = to_uint8array(secret.as_bytes()).into();
+        let idb_key = format!("site/{}", input.address());
+        let js_val: JsValue = to_uint8array(input.secret().as_bytes()).into();
 
         let store = self.store(CREDENTIAL).await?;
         let key = JsValue::from_str(&idb_key);

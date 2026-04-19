@@ -1,9 +1,12 @@
 //! Credential Load/Save for volatile (in-memory) storage.
 
-use dialog_capability::{Capability, Policy, Provider};
+use dialog_capability::{Capability, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::Credential;
-use dialog_effects::credential::{CredentialError, Key, Load, Save, Secret, Site};
+use dialog_effects::credential::prelude::{
+    LoadCredentialExt, LoadSecretExt, SaveCredentialExt, SaveSecretExt,
+};
+use dialog_effects::credential::{CredentialError, Load, Save, Secret};
 use dialog_varsig::Principal;
 
 use super::Volatile;
@@ -18,8 +21,7 @@ where
         &self,
         input: Capability<Load<Credential>>,
     ) -> Result<Credential, CredentialError> {
-        let address = &Key::of(&input).address;
-        let key = self.scoped_key(&format!("key/{address}"));
+        let key = self.scoped_key(&format!("key/{}", input.address()));
 
         // Clone the export and drop the lock before awaiting import.
         let export = {
@@ -45,9 +47,8 @@ where
     Self: ConditionalSend + ConditionalSync,
 {
     async fn execute(&self, input: Capability<Save<Credential>>) -> Result<(), CredentialError> {
-        let address = &Key::of(&input).address;
-        let credential = &Save::<Credential>::of(&input).credential;
-        let key = self.scoped_key(&format!("key/{address}"));
+        let key = self.scoped_key(&format!("key/{}", input.address()));
+        let credential = input.credential();
 
         let export = credential
             .export()
@@ -69,8 +70,7 @@ where
     Self: ConditionalSend + ConditionalSync,
 {
     async fn execute(&self, input: Capability<Load<Secret>>) -> Result<Secret, CredentialError> {
-        let address = &Site::of(&input).address;
-        let key = self.scoped_key(&format!("site/{address}"));
+        let key = self.scoped_key(&format!("site/{}", input.address()));
 
         let sessions = self.sessions.read();
         sessions
@@ -88,14 +88,13 @@ where
     Self: ConditionalSend + ConditionalSync,
 {
     async fn execute(&self, input: Capability<Save<Secret>>) -> Result<(), CredentialError> {
-        let address = &Site::of(&input).address;
-        let secret = &Save::<Secret>::of(&input).credential;
-        let key = self.scoped_key(&format!("site/{address}"));
+        let key = self.scoped_key(&format!("site/{}", input.address()));
+        let secret = input.secret().as_bytes().to_vec();
 
         let subject = input.subject().clone();
         let mut sessions = self.sessions.write();
         let session = sessions.entry(subject).or_default();
-        session.secrets.insert(key, secret.as_bytes().to_vec());
+        session.secrets.insert(key, secret);
         Ok(())
     }
 }
