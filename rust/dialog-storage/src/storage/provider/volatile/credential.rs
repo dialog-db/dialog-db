@@ -76,7 +76,7 @@ where
         sessions
             .values()
             .find_map(|session| session.secrets.get(&key).cloned())
-            .map(Secret)
+            .map(Secret::from)
             .ok_or(CredentialError::NotFound(key))
     }
 }
@@ -95,7 +95,7 @@ where
         let subject = input.subject().clone();
         let mut sessions = self.sessions.write();
         let session = sessions.entry(subject).or_default();
-        session.secrets.insert(key, secret.0.clone());
+        session.secrets.insert(key, secret.as_bytes().to_vec());
         Ok(())
     }
 }

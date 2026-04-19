@@ -27,7 +27,19 @@ use thiserror::Error;
 
 /// Opaque secret bytes for site credentials.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Secret(pub Vec<u8>);
+pub struct Secret(Vec<u8>);
+
+impl Secret {
+    /// View the secret bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Consume the secret and return the raw bytes.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.0
+    }
+}
 
 impl From<Vec<u8>> for Secret {
     fn from(bytes: Vec<u8>) -> Self {
@@ -37,7 +49,7 @@ impl From<Vec<u8>> for Secret {
 
 impl From<Secret> for Vec<u8> {
     fn from(secret: Secret) -> Self {
-        secret.0
+        secret.into_bytes()
     }
 }
 

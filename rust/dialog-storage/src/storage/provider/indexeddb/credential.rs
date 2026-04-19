@@ -96,7 +96,7 @@ impl Provider<Load<Secret>> for IndexedDb {
                     .dyn_into::<Uint8Array>()
                     .map_err(|_| CredentialError::Corrupted("Value is not Uint8Array".into()))?
                     .to_vec();
-                Ok(Secret(bytes))
+                Ok(Secret::from(bytes))
             }
             None => Err(CredentialError::NotFound(idb_key)),
         }
@@ -110,7 +110,7 @@ impl Provider<Save<Secret>> for IndexedDb {
         let idb_key = format!("site/{address}");
         let secret = &Save::<Secret>::of(&input).credential;
 
-        let js_val: JsValue = to_uint8array(&secret.0).into();
+        let js_val: JsValue = to_uint8array(secret.as_bytes()).into();
 
         let store = self.store(CREDENTIAL).await?;
         let key = JsValue::from_str(&idb_key);

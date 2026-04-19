@@ -474,7 +474,7 @@ mod tests {
         let name = unique_name("fs-layout-credential");
         let location = StorageLocation::new(Directory::Temp, &name);
         let provider = FileSystem::open(&location).await.unwrap();
-        let root: PathBuf = provider.0.clone().try_into().unwrap();
+        let root: PathBuf = provider.handle().clone().try_into().unwrap();
 
         let signer = Ed25519Signer::generate().await.unwrap();
         let did = Principal::did(&signer);
@@ -509,7 +509,7 @@ mod tests {
         let name = unique_name("fs-layout-archive");
         let location = StorageLocation::new(Directory::Temp, &name);
         let provider = FileSystem::open(&location).await.unwrap();
-        let root: PathBuf = provider.0.clone().try_into().unwrap();
+        let root: PathBuf = provider.handle().clone().try_into().unwrap();
 
         let signer = Ed25519Signer::generate().await.unwrap();
         let did = Principal::did(&signer);
@@ -541,7 +541,7 @@ mod tests {
         let name = unique_name("fs-layout-memory");
         let location = StorageLocation::new(Directory::Temp, &name);
         let provider = FileSystem::open(&location).await.unwrap();
-        let root: PathBuf = provider.0.clone().try_into().unwrap();
+        let root: PathBuf = provider.handle().clone().try_into().unwrap();
 
         let signer = Ed25519Signer::generate().await.unwrap();
         let did = Principal::did(&signer);
@@ -571,7 +571,7 @@ mod tests {
         let name = unique_name("fs-prefab-credential");
         let location = StorageLocation::new(Directory::Temp, &name);
         let provider = FileSystem::open(&location).await.unwrap();
-        let root: PathBuf = provider.0.clone().try_into().unwrap();
+        let root: PathBuf = provider.handle().clone().try_into().unwrap();
 
         // Generate a credential and export it
         let signer = Ed25519Signer::generate().await.unwrap();
@@ -605,7 +605,7 @@ mod tests {
         let name = unique_name("fs-corrupt-credential");
         let location = StorageLocation::new(Directory::Temp, &name);
         let provider = FileSystem::open(&location).await.unwrap();
-        let root: PathBuf = provider.0.clone().try_into().unwrap();
+        let root: PathBuf = provider.handle().clone().try_into().unwrap();
 
         let signer = Ed25519Signer::generate().await.unwrap();
         let did = Principal::did(&signer);
@@ -630,7 +630,7 @@ mod tests {
         let name = unique_name("fs-prefab-archive");
         let location = StorageLocation::new(Directory::Temp, &name);
         let provider = FileSystem::open(&location).await.unwrap();
-        let root: PathBuf = provider.0.clone().try_into().unwrap();
+        let root: PathBuf = provider.handle().clone().try_into().unwrap();
 
         let signer = Ed25519Signer::generate().await.unwrap();
         let did = Principal::did(&signer);
@@ -665,7 +665,7 @@ mod tests {
         let name = unique_name("fs-prefab-memory");
         let location = StorageLocation::new(Directory::Temp, &name);
         let provider = FileSystem::open(&location).await.unwrap();
-        let root: PathBuf = provider.0.clone().try_into().unwrap();
+        let root: PathBuf = provider.handle().clone().try_into().unwrap();
 
         let signer = Ed25519Signer::generate().await.unwrap();
         let did = Principal::did(&signer);

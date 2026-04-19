@@ -68,7 +68,7 @@ impl Provider<Load<Secret>> for FileSystem {
         let address = &Site::of(&input).address.as_str();
         let handle = self.credential_site(address)?;
         let data = handle.read().await?;
-        Ok(Secret(data))
+        Ok(Secret::from(data))
     }
 }
 
@@ -78,7 +78,7 @@ impl Provider<Save<Secret>> for FileSystem {
         let address = &Site::of(&input).address.as_str();
         let secret = &Save::<Secret>::of(&input).credential;
         let handle = self.credential_site(address)?;
-        handle.write(&secret.0).await?;
+        handle.write(secret.as_bytes()).await?;
         Ok(())
     }
 }
