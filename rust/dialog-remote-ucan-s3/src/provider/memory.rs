@@ -1,8 +1,8 @@
 //! Memory providers for UCAN-authorized S3.
 
 use async_trait::async_trait;
+use dialog_capability::ForkInvocation;
 use dialog_capability::Provider;
-use dialog_capability::fork::ForkInvocation;
 use dialog_effects::memory::*;
 use dialog_remote_s3::S3;
 
@@ -14,7 +14,7 @@ impl Provider<ForkInvocation<UcanSite, Resolve>> for UcanSite {
     async fn execute(
         &self,
         invocation: ForkInvocation<UcanSite, Resolve>,
-    ) -> Result<Option<Publication>, MemoryError> {
+    ) -> Result<Option<Edition<Vec<u8>>>, MemoryError> {
         invocation
             .authorization
             .redeem(&invocation.address)
@@ -31,7 +31,7 @@ impl Provider<ForkInvocation<UcanSite, Publish>> for UcanSite {
     async fn execute(
         &self,
         invocation: ForkInvocation<UcanSite, Publish>,
-    ) -> Result<Vec<u8>, MemoryError> {
+    ) -> Result<Version, MemoryError> {
         invocation
             .authorization
             .redeem(&invocation.address)

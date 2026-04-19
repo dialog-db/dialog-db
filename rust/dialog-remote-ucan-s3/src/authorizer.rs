@@ -33,7 +33,7 @@
 //!
 //! ```rust,no_run
 //! use dialog_remote_ucan_s3::UcanAuthorizer;
-//! use dialog_remote_s3::{Address, S3Authorization, S3Credential};
+//! use dialog_remote_s3::{Address, S3Credential};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let address = Address::builder("https://s3.us-east-1.amazonaws.com")
@@ -41,12 +41,9 @@
 //!     .bucket("my-bucket")
 //!     .build()?;
 //!
-//! let auth = S3Authorization::from(S3Credential::new(
-//!     "access-key-id",
-//!     "secret-access-key",
-//! ));
+//! let credential = S3Credential::new("access-key-id", "secret-access-key");
 //!
-//! let authorizer = UcanAuthorizer::new(address, auth);
+//! let authorizer = UcanAuthorizer::new(address, Some(credential));
 //!
 //! // Handle incoming UCAN container
 //! let container_bytes: Vec<u8> = vec![]; // UCAN container from request
@@ -60,7 +57,7 @@ use std::collections::BTreeMap;
 use dialog_capability::{Capability, Constraint, Did, Policy};
 use dialog_credentials::Ed25519KeyResolver;
 use dialog_effects::{archive, memory};
-use dialog_remote_s3::{Address, Permit, S3Authorization, S3Error};
+use dialog_remote_s3::{Address, Permit, S3Credential, S3Error};
 use dialog_ucan_core::InvocationChain;
 use dialog_ucan_core::promise::Promised;
 use ipld_core::ipld::Ipld;
@@ -91,7 +88,7 @@ fn deserialize_from_args<T: DeserializeOwned>(args: &Args) -> Result<T, S3Error>
         .map_err(|e| S3Error::Authorization(format!("Failed to deserialize: {}", e)))
 }
 
-/// Build a memory capability from UCAN args: `Subject -> Memory -> Space -> Cell -> Claim`.
+/// Build a memory capability from UCAN args: `Subject -> Memory -> Space -> Cell -> Attenuation`.
 fn memory_claim_from_args<C>(subject: &Did, args: &Args) -> Result<Capability<C>, S3Error>
 where
     C: Policy<Of = memory::Cell> + DeserializeOwned,
@@ -107,7 +104,7 @@ where
         .attenuate(claim))
 }
 
-/// Build an archive capability from UCAN args: `Subject -> Archive -> Catalog -> Claim`.
+/// Build an archive capability from UCAN args: `Subject -> Archive -> Catalog -> Attenuation`.
 fn archive_claim_from_args<C>(subject: &Did, args: &Args) -> Result<Capability<C>, S3Error>
 where
     C: Policy<Of = archive::Catalog> + DeserializeOwned,
@@ -121,26 +118,29 @@ where
         .attenuate(claim))
 }
 
-/// Maps an execution effect type to its claim type that can be
+/// Maps an execution effect type to its attenuation type that can be
 /// reconstructed from UCAN args.
 ///
-/// The `Claim` associated type is the authorization-safe representation
-/// whose `Capability<Claim>` implements `Access`.
+/// The `Attenuation` associated type is the delegation-safe representation
+/// whose `Capability<Attenuation>` produces an `S3Request`.
 trait FromUcanArgs {
-    /// The claim type for this effect (either Self or a generated {Name}Claim).
-    type Claim: Constraint;
+    /// The attenuation type for this effect (either Self or a generated
+    /// `{Name}Attenuation`).
+    type Attenuation: Constraint;
 
     /// Reconstruct a capability from UCAN args.
-    fn capability_from_args(subject: &Did, args: &Args)
-    -> Result<Capability<Self::Claim>, S3Error>;
-}
-
-impl FromUcanArgs for memory::Resolve {
-    type Claim = memory::Resolve;
     fn capability_from_args(
         subject: &Did,
         args: &Args,
-    ) -> Result<Capability<Self::Claim>, S3Error> {
+    ) -> Result<Capability<Self::Attenuation>, S3Error>;
+}
+
+impl FromUcanArgs for memory::Resolve {
+    type Attenuation = memory::Resolve;
+    fn capability_from_args(
+        subject: &Did,
+        args: &Args,
+    ) -> Result<Capability<Self::Attenuation>, S3Error> {
         let space: memory::Space = deserialize_from_args(args)?;
         let cell: memory::Cell = deserialize_from_args(args)?;
         Ok(dialog_capability::Subject::from(subject.clone())
@@ -151,38 +151,38 @@ impl FromUcanArgs for memory::Resolve {
     }
 }
 impl FromUcanArgs for memory::Publish {
-    type Claim = memory::PublishClaim;
+    type Attenuation = memory::PublishAttenuation;
     fn capability_from_args(
         subject: &Did,
         args: &Args,
-    ) -> Result<Capability<Self::Claim>, S3Error> {
+    ) -> Result<Capability<Self::Attenuation>, S3Error> {
         memory_claim_from_args(subject, args)
     }
 }
 impl FromUcanArgs for memory::Retract {
-    type Claim = memory::RetractClaim;
+    type Attenuation = memory::Retract;
     fn capability_from_args(
         subject: &Did,
         args: &Args,
-    ) -> Result<Capability<Self::Claim>, S3Error> {
+    ) -> Result<Capability<Self::Attenuation>, S3Error> {
         memory_claim_from_args(subject, args)
     }
 }
 impl FromUcanArgs for archive::Get {
-    type Claim = archive::Get;
+    type Attenuation = archive::Get;
     fn capability_from_args(
         subject: &Did,
         args: &Args,
-    ) -> Result<Capability<Self::Claim>, S3Error> {
+    ) -> Result<Capability<Self::Attenuation>, S3Error> {
         archive_claim_from_args(subject, args)
     }
 }
 impl FromUcanArgs for archive::Put {
-    type Claim = archive::PutClaim;
+    type Attenuation = archive::PutAttenuation;
     fn capability_from_args(
         subject: &Did,
         args: &Args,
-    ) -> Result<Capability<Self::Claim>, S3Error> {
+    ) -> Result<Capability<Self::Attenuation>, S3Error> {
         archive_claim_from_args(subject, args)
     }
 }
@@ -197,7 +197,12 @@ macro_rules! dispatch {
             $(
                 [$seg1, $seg2] => {
                     let capability = <$fx as FromUcanArgs>::capability_from_args($subject, $args)?;
-                    $self.authorization.redeem(&capability, &$self.address).await
+                    let request = ::dialog_remote_s3::request::S3Request::from(&capability);
+                    let authorization = match $self.credential.clone() {
+                        Some(credential) => request.attest(credential),
+                        None => ::dialog_remote_s3::S3Authorization::public(request),
+                    };
+                    authorization.redeem(&$self.address).await
                 }
             )+
             _ => Err(S3Error::Authorization(format!("Unknown command: {:?}", $segments)))
@@ -215,15 +220,17 @@ macro_rules! dispatch {
 #[derive(Debug, Clone)]
 pub struct UcanAuthorizer {
     address: Address,
-    authorization: S3Authorization,
+    credential: Option<S3Credential>,
 }
 
 impl UcanAuthorizer {
-    /// Create a new UCAN authorizer with the given address and authorization.
-    pub fn new(address: Address, authorization: S3Authorization) -> Self {
+    /// Create a new UCAN authorizer with the given address and credential.
+    ///
+    /// `credential` is `None` for public/unsigned S3 endpoints.
+    pub fn new(address: Address, credential: Option<S3Credential>) -> Self {
         Self {
             address,
-            authorization,
+            credential,
         }
     }
 
@@ -346,7 +353,7 @@ mod tests {
             .unwrap();
         let credentials = S3Credential::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(address, S3Authorization::from(credentials));
+        let authorizer = UcanAuthorizer::new(address, Some(credentials));
 
         let operator_signer = Ed25519Signer::import(&[1u8; 32]).await.unwrap();
 
@@ -385,7 +392,7 @@ mod tests {
             .unwrap();
         let credentials = S3Credential::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(address, S3Authorization::from(credentials));
+        let authorizer = UcanAuthorizer::new(address, Some(credentials));
 
         let operator_signer = Ed25519Signer::import(&[1u8; 32]).await.unwrap();
 
@@ -418,7 +425,7 @@ mod tests {
             .unwrap();
         let credentials = S3Credential::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(address, S3Authorization::from(credentials));
+        let authorizer = UcanAuthorizer::new(address, Some(credentials));
 
         let operator_signer = Ed25519Signer::import(&[1u8; 32]).await.unwrap();
 
@@ -457,7 +464,7 @@ mod tests {
             .unwrap();
         let credentials = s3::S3Credential::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(address, S3Authorization::from(credentials));
+        let authorizer = UcanAuthorizer::new(address, Some(credentials));
 
         let digest = Blake3Hash::hash(b"hello");
         let args = BTreeMap::from([
@@ -525,7 +532,7 @@ mod tests {
             .unwrap();
         let credentials = S3Credential::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(address, S3Authorization::from(credentials));
+        let authorizer = UcanAuthorizer::new(address, Some(credentials));
 
         let mut args = BTreeMap::new();
         args.insert("catalog".to_string(), Promised::String("blobs".to_string()));
@@ -564,7 +571,7 @@ mod tests {
             .unwrap();
         let credentials = S3Credential::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(address, S3Authorization::from(credentials));
+        let authorizer = UcanAuthorizer::new(address, Some(credentials));
 
         // Multihash format: [code, length, ...digest]
         // SHA-256 code is 0x12, length is 0x20 (32 bytes)
@@ -605,7 +612,7 @@ mod tests {
             .unwrap();
         let credentials = S3Credential::new("access-key-id", "secret-access-key");
 
-        let authorizer = UcanAuthorizer::new(address, S3Authorization::from(credentials));
+        let authorizer = UcanAuthorizer::new(address, Some(credentials));
 
         let mut args = BTreeMap::new();
         args.insert(

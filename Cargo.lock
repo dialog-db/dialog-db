@@ -1179,6 +1179,7 @@ dependencies = [
  "async-signature",
  "async-trait",
  "base58",
+ "blake3",
  "bytes",
  "dialog-capability",
  "dialog-common",

@@ -1,8 +1,8 @@
 //! Archive providers for UCAN-authorized S3.
 
 use async_trait::async_trait;
+use dialog_capability::ForkInvocation;
 use dialog_capability::Provider;
-use dialog_capability::fork::ForkInvocation;
 use dialog_effects::archive::*;
 use dialog_remote_s3::S3;
 
