@@ -204,7 +204,11 @@ impl TryFrom<FileSystemHandle> for PathBuf {
 
         // Strip trailing slash added by FileSystemHandle for URL semantics.
         // Filesystem operations (read, write, rename) need clean file paths.
-        let s = path.to_string_lossy();
+        // Use `to_str` (not `to_string_lossy`) so non-UTF-8 paths don't
+        // collide via lossy substitutions; require UTF-8 for the trim.
+        let s = path.to_str().ok_or_else(|| {
+            FileSystemError::Io("Path is not valid UTF-8 and cannot be normalized".to_string())
+        })?;
         if s.ends_with('/') && s.len() > 1 {
             Ok(PathBuf::from(s.trim_end_matches('/')))
         } else {
