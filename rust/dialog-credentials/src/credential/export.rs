@@ -7,7 +7,7 @@ use thiserror::Error;
 
 #[cfg(not(target_arch = "wasm32"))]
 use super::constants::{
-    ED25519_PRIV_TAG, ED25519_PUB_TAG, PUB_KEY_OFFSET, SIGNER_EXPORT_SIZE, VERIFIER_EXPORT_SIZE,
+    PRIVATE_TAG, PUBLIC_KEY_OFFSET, PUBLIC_TAG, SIGNER_EXPORT_SIZE, VERIFIER_EXPORT_SIZE,
 };
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -138,14 +138,14 @@ impl TryFrom<Vec<u8>> for CredentialExport {
 
     fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
         if bytes.len() == SIGNER_EXPORT_SIZE
-            && bytes.starts_with(ED25519_PRIV_TAG)
-            && bytes[PUB_KEY_OFFSET..].starts_with(ED25519_PUB_TAG)
+            && bytes.starts_with(PRIVATE_TAG)
+            && bytes[PUBLIC_KEY_OFFSET..].starts_with(PUBLIC_TAG)
         {
             let arr: SignerExport = bytes.try_into().map_err(|_| {
                 CredentialExportError::InvalidFormat("invalid signer length".into())
             })?;
             Ok(Self::Signer(arr.into()))
-        } else if bytes.len() == VERIFIER_EXPORT_SIZE && bytes.starts_with(ED25519_PUB_TAG) {
+        } else if bytes.len() == VERIFIER_EXPORT_SIZE && bytes.starts_with(PUBLIC_TAG) {
             let arr: VerifierExport = bytes.try_into().map_err(|_| {
                 CredentialExportError::InvalidFormat("invalid verifier length".into())
             })?;

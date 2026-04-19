@@ -6,7 +6,7 @@ use dialog_varsig::{Did, Principal};
 
 #[cfg(not(target_arch = "wasm32"))]
 use super::constants::{
-    ED25519_PRIV_TAG, ED25519_PUB_TAG, KEY_SIZE, PRIV_TAG_SIZE, PUB_KEY_OFFSET, PUB_TAG_SIZE,
+    KEY_SIZE, PRIVATE_TAG, PRIVATE_TAG_SIZE, PUBLIC_KEY_OFFSET, PUBLIC_TAG, PUBLIC_TAG_SIZE,
     SIGNER_EXPORT_SIZE,
 };
 use super::export::{CredentialExportError, SignerCredentialExport};
@@ -75,29 +75,27 @@ impl SignerCredential {
             .map_err(|e| CredentialExportError::Key(e.to_string()))?;
 
         let public_key = self.0.ed25519_did().0.to_bytes();
-        let mut buf = [0u8; SIGNER_EXPORT_SIZE];
-        buf[..PRIV_TAG_SIZE].copy_from_slice(ED25519_PRIV_TAG);
-        buf[PRIV_TAG_SIZE..PUB_KEY_OFFSET].copy_from_slice(seed);
-        buf[PUB_KEY_OFFSET..PUB_KEY_OFFSET + PUB_TAG_SIZE].copy_from_slice(ED25519_PUB_TAG);
-        buf[PUB_KEY_OFFSET + PUB_TAG_SIZE..].copy_from_slice(&public_key);
-        Ok(SignerCredentialExport(buf))
+        let mut buffer = [0u8; SIGNER_EXPORT_SIZE];
+        buffer[..PRIVATE_TAG_SIZE].copy_from_slice(PRIVATE_TAG);
+        buffer[PRIVATE_TAG_SIZE..PUBLIC_KEY_OFFSET].copy_from_slice(seed);
+        buffer[PUBLIC_KEY_OFFSET..PUBLIC_KEY_OFFSET + PUBLIC_TAG_SIZE].copy_from_slice(PUBLIC_TAG);
+        buffer[PUBLIC_KEY_OFFSET + PUBLIC_TAG_SIZE..].copy_from_slice(&public_key);
+        Ok(SignerCredentialExport(buffer))
     }
 
     /// Import from multicodec-tagged bytes.
     pub async fn import(export: SignerCredentialExport) -> Result<Self, CredentialExportError> {
         let data = &export.0;
-        if !data.starts_with(ED25519_PRIV_TAG)
-            || !data[PUB_KEY_OFFSET..].starts_with(ED25519_PUB_TAG)
-        {
+        if !data.starts_with(PRIVATE_TAG) || !data[PUBLIC_KEY_OFFSET..].starts_with(PUBLIC_TAG) {
             return Err(CredentialExportError::InvalidFormat(
                 "invalid multicodec tags".into(),
             ));
         }
 
-        let seed: &[u8; KEY_SIZE] = data[PRIV_TAG_SIZE..PUB_KEY_OFFSET]
+        let seed: &[u8; KEY_SIZE] = data[PRIVATE_TAG_SIZE..PUBLIC_KEY_OFFSET]
             .try_into()
             .map_err(|_| CredentialExportError::InvalidFormat("invalid seed".into()))?;
-        let stored_pubkey: &[u8; KEY_SIZE] = data[PUB_KEY_OFFSET + PUB_TAG_SIZE..]
+        let stored_pubkey: &[u8; KEY_SIZE] = data[PUBLIC_KEY_OFFSET + PUBLIC_TAG_SIZE..]
             .try_into()
             .map_err(|_| CredentialExportError::InvalidFormat("invalid public key".into()))?;
         let signer = Ed25519Signer::import(seed)
@@ -159,7 +157,9 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     mod native {
         use super::*;
-        use crate::credential::constants::{PUB_KEY_OFFSET, PUB_TAG_SIZE, SIGNER_EXPORT_SIZE};
+        use crate::credential::constants::{
+            PUBLIC_KEY_OFFSET, PUBLIC_TAG_SIZE, SIGNER_EXPORT_SIZE,
+        };
 
         #[dialog_common::test]
         async fn it_rejects_mismatched_pubkey() {
@@ -171,7 +171,7 @@ mod tests {
             // the seed and multicodec tags intact.
             let mut bytes = export.0;
             assert_eq!(bytes.len(), SIGNER_EXPORT_SIZE);
-            for b in &mut bytes[PUB_KEY_OFFSET + PUB_TAG_SIZE..] {
+            for b in &mut bytes[PUBLIC_KEY_OFFSET + PUBLIC_TAG_SIZE..] {
                 *b ^= 0xff;
             }
 
