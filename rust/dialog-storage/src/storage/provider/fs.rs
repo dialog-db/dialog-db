@@ -27,6 +27,10 @@ use std::path::PathBuf;
 use tokio::fs;
 use url::Url;
 
+/// Subdirectory name used to namespace dialog storage inside the
+/// platform's data and temp directories.
+const STORAGE_NAMESPACE: &str = "dialog";
+
 /// Filesystem-based storage provider.
 ///
 /// A transparent wrapper over a [`Location`] that manages storage directories
@@ -74,7 +78,7 @@ impl TryFrom<&Location> for FileSystemHandle {
                 let data_dir = dirs::data_dir().ok_or_else(|| {
                     FileSystemError::Io("could not determine platform data directory".into())
                 })?;
-                data_dir.join("dialog")
+                data_dir.join(STORAGE_NAMESPACE)
             }
             Directory::Current => {
                 env::current_dir().map_err(|e| FileSystemError::Io(e.to_string()))?
@@ -100,7 +104,7 @@ impl TryFrom<&Location> for FileSystemHandle {
     type Error = FileSystemError;
 
     fn try_from(location: &Location) -> Result<Self, FileSystemError> {
-        let base = env::temp_dir().join("dialog");
+        let base = env::temp_dir().join(STORAGE_NAMESPACE);
         let suffix = match &location.directory {
             Directory::Profile => ".profile",
             Directory::Current => ".space",
