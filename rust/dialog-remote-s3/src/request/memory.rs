@@ -8,9 +8,7 @@ use super::{Precondition, S3Request};
 use dialog_capability::{Capability, Policy};
 use dialog_common::Hasher;
 use dialog_effects::memory::prelude::{PublishExt, ResolveExt, RetractExt};
-use dialog_effects::memory::{
-    Cell, Publish, PublishAttenuation, Resolve, Retract, Space, Version,
-};
+use dialog_effects::memory::{Cell, Publish, PublishAttenuation, Resolve, Retract, Space, Version};
 
 impl From<Option<&Version>> for Precondition {
     fn from(version: Option<&Version>) -> Self {

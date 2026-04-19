@@ -1,8 +1,8 @@
 //! Archive providers for S3.
 
 use async_trait::async_trait;
-use dialog_capability::Provider;
 use dialog_capability::ForkInvocation;
+use dialog_capability::Provider;
 use dialog_effects::archive::*;
 use reqwest::StatusCode;
 

@@ -2,8 +2,8 @@
 
 use crate::{S3, S3Error, S3Invocation};
 use async_trait::async_trait;
-use dialog_capability::Provider;
 use dialog_capability::ForkInvocation;
+use dialog_capability::Provider;
 use dialog_effects::memory::*;
 use reqwest::StatusCode;
 

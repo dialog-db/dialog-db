@@ -7,8 +7,9 @@ use super::{S3, S3Credential, S3Fork};
 use crate::S3Error;
 use crate::request::IntoRequest;
 use dialog_capability::access::AuthorizeError;
-use dialog_capability::SiteAddress;
-use dialog_capability::{Capability, Constraint, Effect, Provider, SiteId};
+use dialog_capability::{
+    Capability, Constraint, Effect, ForkInvocation, Provider, SiteAddress, SiteFork, SiteId,
+};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::authority::{self, OperatorExt};
 use dialog_effects::credential::prelude::*;
@@ -141,9 +142,6 @@ impl From<Address> for SiteId {
         address.id().into()
     }
 }
-
-use dialog_capability::ForkInvocation;
-use dialog_capability::SiteFork;
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]

@@ -5,8 +5,8 @@
 //! configuration into tests.
 
 use async_trait::async_trait;
-use dialog_capability::{Fork, ForkInvocation};
 use dialog_capability::{Capability, Constraint, Effect, Provider};
+use dialog_capability::{Fork, ForkInvocation};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use serde::{Deserialize, Serialize};
 
