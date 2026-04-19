@@ -9,7 +9,7 @@
 use super::Address;
 use crate::Permit;
 use crate::S3Error;
-use crate::capability::{Access, Precondition, current_time};
+use crate::request::{Precondition, S3Request};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -51,27 +51,26 @@ impl S3Credential {
         &self.secret_access_key
     }
 
-    /// Build a permit for the given request and address.
+    /// Build an unsigned permit for the given captured request and address.
     ///
     /// Resolves the URL, adds query params, and builds headers
     /// (host, checksum, precondition).
-    pub fn permit<R: Access>(request: &R, address: &Address) -> Permit {
-        let path = request.path();
-        let mut url = address.resolve(&path);
+    pub fn permit(request: &S3Request, address: &Address) -> Permit {
+        let mut url = address.resolve(&request.path);
 
-        if let Some(params) = request.params() {
+        if let Some(params) = &request.params {
             let mut query = url.query_pairs_mut();
             for (key, value) in params {
-                query.append_pair(&key, &value);
+                query.append_pair(key, value);
             }
         }
 
         let mut headers = vec![("host".to_string(), address.authority().to_string())];
-        if let Some(checksum) = request.checksum() {
+        if let Some(checksum) = &request.checksum {
             let header_name = format!("x-amz-checksum-{}", checksum.name());
             headers.push((header_name, checksum.to_string()));
         }
-        match request.precondition() {
+        match &request.precondition {
             Precondition::IfMatch(etag) => {
                 headers.push(("if-match".to_string(), format!("\"{}\"", etag)));
             }
@@ -83,26 +82,25 @@ impl S3Credential {
 
         Permit {
             url,
-            method: request.method().to_string(),
+            method: request.method.to_string(),
             headers,
         }
     }
 
     /// Sign a permit with SigV4, returning a new permit with presigned URL.
-    pub async fn authorize<R: Access>(
+    pub async fn authorize(
         &self,
-        request: &R,
+        request: &S3Request,
         address: &Address,
     ) -> Result<Permit, S3Error> {
         let mut permit = Self::permit(request, address);
 
-        let time = current_time();
-        let timestamp = time.format("%Y%m%dT%H%M%SZ").to_string();
+        let timestamp = request.time.format("%Y%m%dT%H%M%SZ").to_string();
         let date = &timestamp[0..8];
 
         let region = address.region();
-        let service = request.service();
-        let expires = request.expires();
+        let service = request.service.as_str();
+        let expires = request.expires;
 
         let key = SigningKey::derive(&self.secret_access_key, date, region, service);
         let scope = format!("{}/{}/{}/aws4_request", date, region, service);
@@ -128,9 +126,9 @@ impl S3Credential {
             ("X-Amz-SignedHeaders".into(), signed_headers.clone()),
         ];
 
-        if let Some(params) = request.params() {
+        if let Some(params) = &request.params {
             for (key, value) in params {
-                query_params.push((key, value));
+                query_params.push((key.clone(), value.clone()));
             }
         }
 
@@ -249,6 +247,7 @@ fn percent_encode_path(path: &str) -> String {
 mod tests {
     use super::super::S3Authorization;
     use super::*;
+    use crate::request::S3Request;
     use dialog_capability::{Subject, did};
     use dialog_common::Checksum;
     use dialog_effects::archive;
@@ -276,13 +275,12 @@ mod tests {
     #[dialog_common::test]
     async fn it_signs_with_public_access() {
         let address = test_address();
-        let auth = S3Authorization::default();
-
         let get = Subject::from(test_subject())
             .attenuate(archive::Archive)
             .attenuate(archive::Catalog::new("blobs"))
             .invoke(archive::Get::new([0x42; 32]));
-        let descriptor = auth.redeem(&get, &address).await.unwrap();
+        let auth = S3Authorization::public(S3Request::from(&get));
+        let descriptor = auth.redeem(&address).await.unwrap();
 
         assert_eq!(descriptor.method, "GET");
         assert!(descriptor.url.as_str().contains("my-bucket"));
@@ -292,13 +290,12 @@ mod tests {
     #[dialog_common::test]
     async fn it_signs_with_private_credentials() {
         let address = test_address();
-        let auth = S3Authorization::from(S3Credential::new("AKIATEST", "secret123"));
-
         let get = Subject::from(test_subject())
             .attenuate(archive::Archive)
             .attenuate(archive::Catalog::new("blobs"))
             .invoke(archive::Get::new([0x42; 32]));
-        let descriptor = auth.redeem(&get, &address).await.unwrap();
+        let auth = S3Request::from(&get).attest(S3Credential::new("AKIATEST", "secret123"));
+        let descriptor = auth.redeem(&address).await.unwrap();
 
         assert_eq!(descriptor.method, "GET");
         assert!(descriptor.url.as_str().contains("X-Amz-Signature="));
@@ -308,17 +305,16 @@ mod tests {
     #[dialog_common::test]
     async fn it_includes_checksum_header() {
         let address = test_address();
-        let auth = S3Authorization::default();
-
         let checksum = Checksum::Sha256([0u8; 32]);
         let put = Subject::from(test_subject())
             .attenuate(archive::Archive)
             .attenuate(archive::Catalog::new("index"))
-            .attenuate(archive::PutClaim {
+            .attenuate(archive::PutAttenuation {
                 digest: [0x99; 32].into(),
                 checksum,
             });
-        let descriptor = auth.redeem(&put, &address).await.unwrap();
+        let auth = S3Authorization::public(S3Request::from(&put));
+        let descriptor = auth.redeem(&address).await.unwrap();
 
         assert!(
             descriptor
@@ -331,13 +327,12 @@ mod tests {
     #[dialog_common::test]
     async fn it_uses_path_style_for_localhost() {
         let address = localhost_address();
-        let auth = S3Authorization::default();
-
         let get = Subject::from(test_subject())
             .attenuate(archive::Archive)
             .attenuate(archive::Catalog::new("blobs"))
             .invoke(archive::Get::new([0x42; 32]));
-        let descriptor = auth.redeem(&get, &address).await.unwrap();
+        let auth = S3Authorization::public(S3Request::from(&get));
+        let descriptor = auth.redeem(&address).await.unwrap();
 
         assert_eq!(descriptor.url.host_str().unwrap(), "localhost");
         assert!(descriptor.url.path().starts_with("/test-bucket/"));

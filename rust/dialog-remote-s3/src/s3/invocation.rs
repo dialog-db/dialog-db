@@ -6,7 +6,7 @@
 //! then executes the HTTP request.
 
 use crate::Permit;
-use dialog_capability::command::Command;
+use dialog_capability::Command;
 use dialog_capability::{Capability, Constraint, Effect, Provider};
 
 /// A pre-authorized S3 operation ready for HTTP execution.

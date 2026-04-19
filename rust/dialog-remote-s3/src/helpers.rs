@@ -5,12 +5,16 @@
 //! configuration into tests.
 
 use async_trait::async_trait;
-use dialog_capability::fork::{Fork, ForkInvocation};
-use dialog_capability::{Constraint, Effect, Provider};
+use dialog_capability::{Fork, ForkInvocation};
+use dialog_capability::{Capability, Constraint, Effect, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use serde::{Deserialize, Serialize};
 
+use crate::request::IntoRequest;
 use crate::s3::{S3, S3Authorization, S3Credential};
+
+// Helpers bind request-at-fork-time because there's no Operator in the loop
+// to call Identify/Load<Secret>; the credentials are carried on S3Network.
 
 /// S3 test server connection info with credentials, passed to inner tests.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,17 +82,17 @@ where
     Fx::Output: ConditionalSend,
     Fork<S3, Fx>: ConditionalSend,
     ForkInvocation<S3, Fx>: ConditionalSend,
+    Capability<Fx>: IntoRequest,
     S3: Provider<ForkInvocation<S3, Fx>> + ConditionalSync,
     Self: ConditionalSend + ConditionalSync,
 {
     async fn execute(&self, fork: Fork<S3, Fx>) -> Fx::Output {
-        let (capability, address) = fork.into_parts();
-        let invocation = ForkInvocation::new(
-            capability,
-            address,
-            S3Authorization(self.credentials.clone()),
-        );
-        invocation.perform(&S3).await
+        let request = fork.capability().to_request();
+        let authorization = match self.credentials.clone() {
+            Some(credential) => request.attest(credential),
+            None => S3Authorization::public(request),
+        };
+        fork.attest(authorization).perform(&S3).await
     }
 }
 

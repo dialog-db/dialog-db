@@ -3,7 +3,7 @@
 use crate::{S3, S3Error, S3Invocation};
 use async_trait::async_trait;
 use dialog_capability::Provider;
-use dialog_capability::fork::ForkInvocation;
+use dialog_capability::ForkInvocation;
 use dialog_effects::memory::*;
 use reqwest::StatusCode;
 
@@ -13,10 +13,10 @@ impl Provider<ForkInvocation<S3, Resolve>> for S3 {
     async fn execute(
         &self,
         invocation: ForkInvocation<S3, Resolve>,
-    ) -> Result<Option<Publication>, MemoryError> {
+    ) -> Result<Option<Edition<Vec<u8>>>, MemoryError> {
         invocation
             .authorization
-            .redeem(&invocation.capability, &invocation.address)
+            .redeem(&invocation.address)
             .await?
             .invoke(invocation.capability)
             .perform(self)
@@ -30,7 +30,7 @@ impl Provider<S3Invocation<Resolve>> for S3 {
     async fn execute(
         &self,
         input: S3Invocation<Resolve>,
-    ) -> Result<Option<Publication>, MemoryError> {
+    ) -> Result<Option<Edition<Vec<u8>>>, MemoryError> {
         let response = input.permit.send().await?;
 
         if response.status().is_success() {
@@ -43,9 +43,9 @@ impl Provider<S3Invocation<Resolve>> for S3 {
 
             let bytes = response.bytes().await.map_err(S3Error::from)?;
 
-            Ok(Some(Publication {
+            Ok(Some(Edition {
                 content: bytes.to_vec(),
-                edition: edition.into_bytes(),
+                version: Version::from(edition),
             }))
         } else if response.status() == StatusCode::NOT_FOUND {
             Ok(None)
@@ -64,10 +64,10 @@ impl Provider<ForkInvocation<S3, Publish>> for S3 {
     async fn execute(
         &self,
         invocation: ForkInvocation<S3, Publish>,
-    ) -> Result<Vec<u8>, MemoryError> {
+    ) -> Result<Version, MemoryError> {
         invocation
             .authorization
-            .redeem(&invocation.capability, &invocation.address)
+            .redeem(&invocation.address)
             .await?
             .invoke(invocation.capability)
             .perform(self)
@@ -78,12 +78,9 @@ impl Provider<ForkInvocation<S3, Publish>> for S3 {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<S3Invocation<Publish>> for S3 {
-    async fn execute(&self, input: S3Invocation<Publish>) -> Result<Vec<u8>, MemoryError> {
+    async fn execute(&self, input: S3Invocation<Publish>) -> Result<Version, MemoryError> {
         let publish = input.capability.into_effect();
-        let when = publish
-            .when
-            .as_ref()
-            .map(|b| String::from_utf8_lossy(b).to_string());
+        let when = publish.when.clone();
 
         let response = input.permit.upload(publish.content).await?;
 
@@ -97,9 +94,9 @@ impl Provider<S3Invocation<Publish>> for S3 {
                     .ok_or_else(|| {
                         MemoryError::Storage("Response missing ETag header".to_string())
                     })?;
-                Ok(new_edition.into_bytes())
+                Ok(Version::from(new_edition))
             }
-            StatusCode::PRECONDITION_FAILED => Err(MemoryError::EditionMismatch {
+            StatusCode::PRECONDITION_FAILED => Err(MemoryError::VersionMismatch {
                 expected: when,
                 actual: None,
             }),
@@ -117,7 +114,7 @@ impl Provider<ForkInvocation<S3, Retract>> for S3 {
     async fn execute(&self, invocation: ForkInvocation<S3, Retract>) -> Result<(), MemoryError> {
         invocation
             .authorization
-            .redeem(&invocation.capability, &invocation.address)
+            .redeem(&invocation.address)
             .await?
             .invoke(invocation.capability)
             .perform(self)
@@ -130,13 +127,13 @@ impl Provider<ForkInvocation<S3, Retract>> for S3 {
 impl Provider<S3Invocation<Retract>> for S3 {
     async fn execute(&self, input: S3Invocation<Retract>) -> Result<(), MemoryError> {
         let retract = input.capability.into_effect();
-        let when = String::from_utf8_lossy(&retract.when).to_string();
+        let when = retract.when.clone();
 
         let response = input.permit.send().await?;
 
         match response.status() {
             status if status.is_success() => Ok(()),
-            StatusCode::PRECONDITION_FAILED => Err(MemoryError::EditionMismatch {
+            StatusCode::PRECONDITION_FAILED => Err(MemoryError::VersionMismatch {
                 expected: Some(when),
                 actual: None,
             }),

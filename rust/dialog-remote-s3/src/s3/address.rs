@@ -3,9 +3,16 @@
 //! This module provides the [`Address`] type for specifying S3-compatible storage locations.
 //! Use [`Address::builder`] to construct with validation.
 
-use super::S3;
+use super::{S3, S3Credential, S3Fork};
 use crate::S3Error;
-use dialog_capability::site::SiteAddress;
+use crate::request::IntoRequest;
+use dialog_capability::access::AuthorizeError;
+use dialog_capability::SiteAddress;
+use dialog_capability::{Capability, Constraint, Effect, Provider, SiteId};
+use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_effects::authority::{self, OperatorExt};
+use dialog_effects::credential::prelude::*;
+use dialog_effects::credential::{Load, Secret};
 use serde::{Deserialize, Serialize};
 use url::{Host, Url};
 
@@ -98,6 +105,18 @@ impl Address {
         &self.authority
     }
 
+    /// A stable identifier for this address as a URI.
+    pub fn id(&self) -> String {
+        let mut id = format!(
+            "{}?region={}&bucket={}",
+            self.endpoint, self.region, self.bucket,
+        );
+        if self.path_style {
+            id.push_str("&path_style");
+        }
+        id
+    }
+
     /// Resolve a key path into a full S3 URL.
     pub fn resolve(&self, path: &str) -> Url {
         let mut url = self.endpoint.clone();
@@ -115,6 +134,53 @@ impl Address {
 /// `Address` is the canonical address type for the `S3` site.
 impl SiteAddress for Address {
     type Site = S3;
+}
+
+impl From<Address> for SiteId {
+    fn from(address: Address) -> Self {
+        address.id().into()
+    }
+}
+
+use dialog_capability::ForkInvocation;
+use dialog_capability::SiteFork;
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<Fx, Env> SiteFork<Env> for S3Fork<Fx>
+where
+    Fx: Effect + ConditionalSend + ConditionalSync + 'static,
+    Fx::Of: Constraint<Capability: ConditionalSend + ConditionalSync>,
+    Capability<Fx>: IntoRequest,
+    Env: Provider<Load<Secret>> + Provider<authority::Identify> + ConditionalSync,
+    S3Fork<Fx>: ConditionalSend,
+{
+    type Site = S3;
+    type Effect = Fx;
+
+    async fn authorize(self, env: &Env) -> Result<ForkInvocation<S3, Fx>, AuthorizeError> {
+        // Capture the request description up front so we don't need to
+        // hold the capability across awaits.
+        let request = self.0.capability().to_request();
+
+        let profile = authority::Identify
+            .perform(env)
+            .await
+            .map_err(|e| AuthorizeError::Configuration(e.to_string()))?
+            .profile()
+            .clone();
+
+        let secret = profile
+            .credential()
+            .site(self.0.address())
+            .load()
+            .perform(env)
+            .await?;
+
+        let credential = S3Credential::try_from(secret).map_err(AuthorizeError::from)?;
+
+        Ok(self.0.attest(request.attest(credential)))
+    }
 }
 
 /// Builder for constructing an [`Address`] with validation.
