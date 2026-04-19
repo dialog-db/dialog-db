@@ -226,4 +226,3 @@ pub use fork::*;
 
 /// Derive macro that generates `Provider<Fx>` impls for composite structs.
 pub use dialog_macros::Provider;
-
