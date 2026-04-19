@@ -9,6 +9,12 @@
 use super::{FileSystem, FileSystemError, FileSystemHandle};
 use async_trait::async_trait;
 use base58::ToBase58;
+use dialog_capability::{Capability, Provider};
+use dialog_common::Blake3Hash;
+use dialog_effects::memory::prelude::{PublishExt, ResolveExt, RetractExt};
+use dialog_effects::memory::{Edition, MemoryError, Publish, Resolve, Retract, Version};
+use pidlock::Pidlock;
+use std::path::PathBuf;
 
 const MEMORY: &str = "memory";
 
@@ -18,12 +24,6 @@ impl FileSystem {
         self.resolve(MEMORY)
     }
 }
-use dialog_capability::{Capability, Provider};
-use dialog_common::Blake3Hash;
-use dialog_effects::memory::prelude::{PublishExt, ResolveExt, RetractExt};
-use dialog_effects::memory::{Edition, MemoryError, Publish, Resolve, Retract, Version};
-use pidlock::Pidlock;
-use std::path::PathBuf;
 
 /// A 32-byte content hash used as the edition for CAS operations.
 type ContentHash = [u8; 32];
@@ -848,10 +848,8 @@ mod tests {
         // Verifies that when our own process holds the lock, acquire returns
         // an error immediately (not a spin). This matters because all tests
         // run in the same process and share a PID.
-        let dir = std::env::temp_dir().join(unique_name("fs-same-pid-lock"));
-        std::fs::create_dir_all(&dir)?;
-
-        let lock_path = dir.join("cell.lock");
+        let dir = tempfile::tempdir()?;
+        let lock_path = dir.path().join("cell.lock");
         let _guard = PidlockGuard::acquire(lock_path.clone())?;
 
         // Second acquire from same process should fail immediately
@@ -864,9 +862,6 @@ mod tests {
             matches!(err, FileSystemError::Lock(_)),
             "expected Lock error, got: {err:?}"
         );
-
-        drop(_guard);
-        std::fs::remove_dir_all(&dir)?;
         Ok(())
     }
 
@@ -877,10 +872,8 @@ mod tests {
         // never create (create_new fails on trailing-slash paths) and
         // get_owner returns None (no file exists), causing an infinite
         // busy loop in the old unbounded retry code.
-        let dir = std::env::temp_dir().join(unique_name("fs-trailing-slash-lock"));
-        std::fs::create_dir_all(&dir)?;
-
-        let bad_path = dir.join("cell.lock/"); // trailing slash
+        let dir = tempfile::tempdir()?;
+        let bad_path = dir.path().join("cell.lock/"); // trailing slash
         let result = PidlockGuard::acquire(bad_path);
 
         // Should fail with a bounded retry error, not spin forever
@@ -892,8 +885,6 @@ mod tests {
             matches!(err, FileSystemError::Lock(_)),
             "expected Lock error, got: {err:?}"
         );
-
-        std::fs::remove_dir_all(&dir)?;
         Ok(())
     }
 
@@ -901,10 +892,8 @@ mod tests {
     async fn it_fails_lock_when_directory_exists_at_lock_path() -> anyhow::Result<()> {
         // If a directory exists where the lock file should be (e.g. from
         // a previous buggy run), acquire should fail, not spin or panic.
-        let dir = std::env::temp_dir().join(unique_name("fs-lock-dir-exists"));
-        std::fs::create_dir_all(&dir)?;
-
-        let lock_path = dir.join("cell.lock");
+        let dir = tempfile::tempdir()?;
+        let lock_path = dir.path().join("cell.lock");
         std::fs::create_dir_all(&lock_path)?;
         assert!(lock_path.is_dir());
 
@@ -916,8 +905,6 @@ mod tests {
             matches!(err, FileSystemError::Lock(_)),
             "expected Lock error, got: {err:?}"
         );
-
-        std::fs::remove_dir_all(&dir)?;
         Ok(())
     }
 }

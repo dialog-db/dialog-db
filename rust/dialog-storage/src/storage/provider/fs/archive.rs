@@ -6,6 +6,9 @@ use super::{FileSystem, FileSystemError, FileSystemHandle};
 use async_trait::async_trait;
 use base58::ToBase58;
 use dialog_capability::{Capability, Provider};
+use dialog_common::Blake3Hash;
+use dialog_effects::archive::prelude::{GetExt, PutExt};
+use dialog_effects::archive::{ArchiveError, Get, Put};
 
 const ARCHIVE: &str = "archive";
 
@@ -15,9 +18,6 @@ impl FileSystem {
         self.resolve(ARCHIVE)
     }
 }
-use dialog_common::Blake3Hash;
-use dialog_effects::archive::prelude::{GetExt, PutExt};
-use dialog_effects::archive::{ArchiveError, Get, Put};
 
 impl From<FileSystemError> for ArchiveError {
     fn from(e: FileSystemError) -> Self {
