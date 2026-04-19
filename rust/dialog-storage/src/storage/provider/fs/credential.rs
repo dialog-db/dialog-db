@@ -85,34 +85,11 @@ impl Provider<Save<Secret>> for FileSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::helpers::{test_credential, unique_did, unique_name};
     use crate::resource::Resource;
-    use dialog_capability::Did;
-    use dialog_credentials::{Ed25519Signer, SignerCredential};
     use dialog_effects::prelude::*;
     use dialog_effects::storage::{Directory, Location as StorageLocation};
     use dialog_varsig::Principal;
-
-    fn unique_name(prefix: &str) -> String {
-        use dialog_common::time;
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let ts = time::now()
-            .duration_since(time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        format!("{prefix}-{ts}-{seq}")
-    }
-
-    async fn unique_did() -> Did {
-        let signer = Ed25519Signer::generate().await.unwrap();
-        Principal::did(&signer)
-    }
-
-    async fn test_credential() -> dialog_credentials::Credential {
-        let signer = Ed25519Signer::generate().await.unwrap();
-        dialog_credentials::Credential::Signer(SignerCredential::from(signer))
-    }
 
     #[dialog_common::test]
     async fn it_returns_not_found_for_missing_credential() -> anyhow::Result<()> {

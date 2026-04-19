@@ -367,6 +367,7 @@ impl FileSystemHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::helpers::unique_name;
     use crate::resource::Resource;
     use dialog_effects::storage::{Directory, Location as StorageLocation};
 
@@ -451,18 +452,6 @@ mod tests {
             path.contains("dialog") && path.contains("test-alice") && path.ends_with("/archive"),
             "profile location should resolve under temp/dialog with .profile suffix: {path}"
         );
-    }
-
-    fn unique_name(prefix: &str) -> String {
-        use dialog_common::time;
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let ts = time::now()
-            .duration_since(time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        format!("{prefix}-{ts}-{seq}")
     }
 
     #[dialog_common::test]

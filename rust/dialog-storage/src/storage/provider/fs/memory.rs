@@ -271,28 +271,11 @@ impl Provider<Retract> for FileSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::helpers::{unique_did, unique_name};
     use crate::resource::Resource;
-    use dialog_capability::Did;
     use dialog_effects::memory::Version;
     use dialog_effects::prelude::*;
     use dialog_effects::storage::{Directory, Location as StorageLocation};
-
-    fn unique_name(prefix: &str) -> String {
-        use dialog_common::time;
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let ts = time::now()
-            .duration_since(time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        format!("{prefix}-{ts}-{seq}")
-    }
-
-    async fn unique_did() -> Did {
-        let signer = dialog_credentials::Ed25519Signer::generate().await.unwrap();
-        dialog_varsig::Principal::did(&signer)
-    }
 
     #[dialog_common::test]
     async fn it_resolves_non_existent_cell() -> anyhow::Result<()> {

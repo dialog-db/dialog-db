@@ -130,25 +130,11 @@ impl Provider<Save<Secret>> for IndexedDb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dialog_credentials::{Ed25519Signer, SignerCredential};
+    use crate::helpers::{test_credential, unique_did, unique_name};
     use dialog_effects::prelude::*;
     use dialog_varsig::Principal;
 
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
-
-    fn unique_name(prefix: &str) -> String {
-        format!("test-{}-{}", prefix, js_sys::Date::now() as u64)
-    }
-
-    async fn unique_did() -> dialog_capability::Did {
-        let signer = Ed25519Signer::generate().await.unwrap();
-        Principal::did(&signer)
-    }
-
-    async fn test_credential() -> Credential {
-        let signer = Ed25519Signer::generate().await.unwrap();
-        Credential::Signer(SignerCredential::from(signer))
-    }
 
     #[dialog_common::test]
     async fn it_returns_not_found_for_missing_credential() -> anyhow::Result<()> {

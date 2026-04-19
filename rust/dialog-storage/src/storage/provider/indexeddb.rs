@@ -326,12 +326,8 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use js_sys::Date;
+    use crate::helpers::unique_name;
     use wasm_bindgen::JsValue;
-
-    fn unique_name(prefix: &str) -> String {
-        format!("test-{}-{}", prefix, Date::now() as u64)
-    }
 
     #[dialog_common::test]
     async fn it_opens_new_database_with_no_stores() -> anyhow::Result<()> {
@@ -525,9 +521,8 @@ mod tests {
         use dialog_effects::prelude::*;
         use dialog_varsig::Principal;
 
-        let ts = Date::now() as u64;
-        let db1 = IndexedDb::connect(format!("space1-{ts}")).await?;
-        let db2 = IndexedDb::connect(format!("space2-{ts}")).await?;
+        let db1 = IndexedDb::connect(unique_name("space1")).await?;
+        let db2 = IndexedDb::connect(unique_name("space2")).await?;
 
         // Save credential in db1
         let signer = Ed25519Signer::generate().await.unwrap();

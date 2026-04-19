@@ -191,19 +191,8 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use dialog_capability::{Did, Subject};
+    use crate::helpers::{unique_name, unique_subject};
     use dialog_effects::memory::{Cell, Memory, Space};
-
-    fn unique_name(prefix: &str) -> String {
-        format!("test-{}-{}", prefix, js_sys::Date::now() as u64)
-    }
-
-    fn unique_subject(prefix: &str) -> Subject {
-        let did: Did = format!("did:test:{}-{}", prefix, js_sys::Date::now() as u64)
-            .parse()
-            .unwrap();
-        Subject::from(did)
-    }
 
     #[dialog_common::test]
     async fn it_resolves_non_existent_cell() -> anyhow::Result<()> {

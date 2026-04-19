@@ -153,22 +153,8 @@ impl Provider<Retract> for Volatile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dialog_capability::{Did, Subject};
+    use crate::helpers::unique_subject;
     use dialog_effects::memory::{Cell, Memory, Space, Version};
-
-    fn unique_subject(prefix: &str) -> Subject {
-        let did: Did = format!(
-            "did:test:{}-{}",
-            prefix,
-            dialog_common::time::now()
-                .duration_since(dialog_common::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        )
-        .parse()
-        .unwrap();
-        Subject::from(did)
-    }
 
     #[dialog_common::test]
     async fn it_resolves_non_existent_cell() -> anyhow::Result<()> {
