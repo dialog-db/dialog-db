@@ -15,6 +15,7 @@
 //! enforcing ensuring invariantns.
 
 mod archive;
+mod certificate;
 mod credential;
 mod error;
 mod memory;
