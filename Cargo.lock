@@ -1085,6 +1085,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-network"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "dialog-capability",
+ "dialog-common",
+ "dialog-effects",
+ "dialog-remote-s3",
+ "dialog-remote-ucan-s3",
+ "serde",
+]
+
+[[package]]
 name = "dialog-prolly-tree"
 version = "0.1.0"
 dependencies = [
