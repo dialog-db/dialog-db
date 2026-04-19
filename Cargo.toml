@@ -33,6 +33,7 @@ members = [
     "rust/dialog-ucan",
     "rust/dialog-remote-s3",
     "rust/dialog-remote-ucan-s3",
+    "rust/dialog-network",
     "rust/dialog-varsig",
     "rust/dialog-blobs",
 ]
@@ -144,6 +145,7 @@ tower-http = "0.6"
 tracing = "0.1"
 dialog-ucan-core = { path = "./rust/dialog-ucan-core" }
 dialog-ucan = { path = "./rust/dialog-ucan" }
+dialog-network = { path = "./rust/dialog-network" }
 dialog-varsig = { path = "./rust/dialog-varsig" }
 ucan = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "main", package = "ucan" }
 varsig = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "main", package = "varsig" }
@@ -197,3 +199,6 @@ path = "./rust/dialog-blobs"
 
 [workspace.dependencies.dialog-remote-s3]
 path = "./rust/dialog-remote-s3"
+
+[workspace.dependencies.dialog-remote-ucan-s3]
+path = "./rust/dialog-remote-ucan-s3"

@@ -15,7 +15,7 @@ mod attenuate;
 mod compose;
 mod provider;
 mod query;
-mod router;
+mod site;
 mod test;
 
 /// A cross-platform test macro with automatic service provisioning.
@@ -369,34 +369,6 @@ pub fn derive_attribute(input: TokenStream) -> TokenStream {
     query::attribute::derive(input)
 }
 
-/// Derive macro that generates `Provider<RemoteInvocation<Fx, Address>>` impls
-/// for composite structs whose fields each route to a different address type.
-///
-/// For each field with generic type arguments, the macro extracts the first
-/// type argument as the `Address` and generates a forwarding `Provider` impl
-/// that delegates to that field.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// #[derive(Router)]
-/// pub struct Network<Issuer> {
-///     #[cfg(feature = "s3")]
-///     s3: Router<s3::Address, s3::Connection<Issuer>>,
-///     #[cfg(feature = "ucan")]
-///     ucan: Router<ucan::Address, ucan::Connection<Issuer>>,
-/// }
-/// ```
-///
-/// This generates `Provider<RemoteInvocation<Fx, s3::Address>>` and
-/// `Provider<RemoteInvocation<Fx, ucan::Address>>` implementations that
-/// forward to the respective fields. Each field's `#[cfg]` attributes
-/// are preserved on the generated impls.
-#[proc_macro_derive(Router, attributes(route))]
-pub fn router(input: TokenStream) -> TokenStream {
-    router::generate(input)
-}
-
 /// Derive macro that generates an `Attenuate` trait impl for effect types.
 ///
 /// For types with no `#[attenuate(into = ...)]` annotations,
@@ -448,4 +420,20 @@ pub fn derive_attenuate(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(Provider, attributes(provide))]
 pub fn derive_provider(input: TokenStream) -> TokenStream {
     compose::generate(input)
+}
+
+/// Derive macro that generates composite [`Site`](dialog_capability::Site)
+/// types from a struct of site fields.
+///
+/// Each field must be a type implementing `dialog_capability::Site`. The
+/// macro generates an `Address` enum, an `Authorization` enum, a `Fork`
+/// enum, the `Site` impl, the `SiteAddress` back-pointer, the
+/// `From<S::Address>` adapters for each field, and the `Provider<ForkInvocation>`
+/// dispatch impl.
+///
+/// `#[cfg]`-gated fields are rejected: per-variant where-clause bounds
+/// would have to be routed through marker traits.
+#[proc_macro_derive(Site)]
+pub fn derive_site(input: TokenStream) -> TokenStream {
+    site::generate(input)
 }
