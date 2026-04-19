@@ -16,7 +16,7 @@
 //! 2. `proof.claim(signer)` binds a signer to produce an
 //!    [`Authorization`] that can `delegate()` and `invoke()`.
 
-use crate::{Attenuate, Attenuation, Did, Effect, Principal, StorageError, Subject};
+use crate::{Ability, Attenuate, Capability, Constraint, Did, Effect};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -28,6 +28,20 @@ use thiserror::Error;
 pub trait Scope {
     /// The subject (resource) this scope applies to.
     fn subject(&self) -> &Did;
+}
+
+/// Derive an access scope from an invocable capability.
+///
+/// Protocol-specific scope types implement this to extract the subject,
+/// command path, and parameters from a capability chain. The Operator
+/// uses this to build the [`Prove`] request generically across protocols.
+pub trait FromCapability: Scope {
+    /// Derive a scope from an effect capability.
+    fn from_capability<Fx>(capability: &Capability<Fx>) -> Self
+    where
+        Fx: Effect + Clone,
+        Fx::Of: Constraint,
+        Capability<Fx>: Ability;
 }
 
 /// The time range during which a delegation is valid.
@@ -220,8 +234,8 @@ pub trait Proof<P: Protocol>:
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Access;
 
-impl Attenuation for Access {
-    type Of = Subject;
+impl crate::Attenuation for Access {
+    type Of = crate::Subject;
 }
 
 /// Access protocol — defines how capability-based authorization is produced.
@@ -230,13 +244,21 @@ impl Attenuation for Access {
 /// formats, and authorization/invocation materials.
 pub trait Protocol: Sized + ConditionalSend + 'static {
     /// The type-erased form of a capability for this protocol.
-    type Access: Scope + Serialize + for<'de> Deserialize<'de>;
+    ///
+    /// Must implement [`FromCapability`] so the Operator can derive
+    /// a scope from any capability for the Prove request.
+    type Access: FromCapability
+        + Clone
+        + Serialize
+        + for<'de> Deserialize<'de>
+        + ConditionalSend
+        + ConditionalSync;
 
     /// The signer type for this protocol.
-    type Signer: Principal + ConditionalSend;
+    type Signer: crate::Principal + ConditionalSend;
 
     /// An individual delegation (signed certificate) in this protocol's format.
-    type Certificate: Certificate<Access = Self::Access>;
+    type Certificate: Certificate<Access = Self::Access> + Clone + ConditionalSend + ConditionalSync;
 
     /// A delegation bundle — what [`Authorization::delegate`] produces.
     type Delegation: Delegation<Certificate = Self::Certificate>;
@@ -315,12 +337,67 @@ impl<P: Protocol> Prove<P> {
     }
 }
 
-impl<P: Protocol> Effect for Prove<P>
+impl<P: Protocol> crate::Effect for Prove<P>
 where
     P::Access: ConditionalSend + 'static,
 {
     type Of = Access;
     type Output = Result<P::Proof, AuthorizeError>;
+}
+
+/// Authorize effect — proves access and binds a signer in one step.
+///
+/// Like [`Prove`], but also binds a signer to produce a full
+/// [`Protocol::Authorization`] rather than an unsigned proof.
+/// The provider (typically the Operator) handles both the proof
+/// lookup and the signing internally.
+#[derive(Serialize, Deserialize, Attenuate)]
+#[serde(bound(
+    serialize = "P::Access: Serialize",
+    deserialize = "P::Access: for<'a> Deserialize<'a>"
+))]
+pub struct Authorize<P: Protocol> {
+    /// The DID of the principal claiming access.
+    pub principal: Did,
+    /// The access being claimed.
+    pub access: P::Access,
+    /// Time range the authorization must cover.
+    pub duration: TimeRange,
+}
+
+impl<P: Protocol> Authorize<P> {
+    /// Create a new authorization request with unbounded duration.
+    pub fn new(by: Did, access: P::Access) -> Self {
+        Self {
+            principal: by,
+            access,
+            duration: TimeRange::unbounded(),
+        }
+    }
+
+    /// Constrain the authorization to a specific time range.
+    pub fn during(mut self, duration: TimeRange) -> Self {
+        self.duration = duration;
+        self
+    }
+}
+
+impl<P: Protocol> From<Authorize<P>> for Prove<P> {
+    fn from(authorize: Authorize<P>) -> Self {
+        Prove {
+            principal: authorize.principal,
+            access: authorize.access,
+            duration: authorize.duration,
+        }
+    }
+}
+
+impl<P: Protocol> Effect for Authorize<P>
+where
+    P::Access: ConditionalSend + 'static,
+{
+    type Of = Access;
+    type Output = Result<P::Authorization, AuthorizeError>;
 }
 
 /// Retain effect — retains a delegation for future proof lookups.
@@ -344,7 +421,7 @@ impl<P: Protocol> Retain<P> {
     }
 }
 
-impl<P: Protocol> Effect for Retain<P>
+impl<P: Protocol> crate::Effect for Retain<P>
 where
     P::Delegation: ConditionalSend + 'static,
 {
@@ -391,7 +468,7 @@ pub trait CertificateStore<P: Protocol> {
         let duration = &input.duration;
         let subject = access.subject().clone();
 
-        if *authority == subject || Subject::from(subject.clone()).is_any() {
+        if *authority == subject || crate::Subject::from(subject.clone()).is_any() {
             return Ok(P::Proof::new(access.clone()));
         }
 
@@ -461,8 +538,8 @@ pub enum AuthorizeError {
     Configuration(String),
 }
 
-impl From<StorageError> for AuthorizeError {
-    fn from(e: StorageError) -> Self {
+impl From<crate::StorageError> for AuthorizeError {
+    fn from(e: crate::StorageError) -> Self {
         AuthorizeError::Configuration(e.to_string())
     }
 }
