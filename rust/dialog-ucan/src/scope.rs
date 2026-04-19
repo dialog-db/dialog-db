@@ -76,8 +76,11 @@ impl dialog_capability::access::Scope for Scope {
             UcanSubject::Specific(did) => did,
             UcanSubject::Any => {
                 static ANY: std::sync::LazyLock<dialog_varsig::Did> =
-                    std::sync::LazyLock::new(|| {
-                        dialog_capability::ANY_SUBJECT.parse().expect("valid DID")
+                    std::sync::LazyLock::new(|| match dialog_capability::ANY_SUBJECT.parse() {
+                        Ok(did) => did,
+                        Err(_) => unreachable!(
+                            "ANY_SUBJECT is a fixed compile-time constant DID and must parse"
+                        ),
                     });
                 &ANY
             }
@@ -168,10 +171,10 @@ impl Scope {
         }
     }
 
-    /// Build a scope from an effect capability, projecting through Claim.
+    /// Build a scope from an effect capability, projecting through Attenuate.
     ///
     /// Unlike `Scope::from`, this projects effect fields through their
-    /// [`Claim`](dialog_capability::Claim) type, so payload fields like
+    /// [`Attenuate`](dialog_capability::Attenuate) type, so payload fields like
     /// `content` become `checksum` in the scope parameters.
     pub fn invoke<Fx>(capability: &Capability<Fx>) -> Self
     where
@@ -191,9 +194,9 @@ impl Scope {
         let chain: &<Fx as Constraint>::Capability = capability.as_ref();
         let mut params = parameters(&chain.capability);
 
-        // Add claim-projected parameters for the effect
-        let claim = Policy::of(capability).clone().claim();
-        if let Ok(Ipld::Map(map)) = ipld_core::serde::to_ipld(&claim) {
+        // Add attenuation-projected parameters for the effect
+        let attenuation = Policy::of(capability).clone().into_attenuation();
+        if let Ok(Ipld::Map(map)) = ipld_core::serde::to_ipld(&attenuation) {
             params.extend(map);
         }
 
@@ -215,8 +218,8 @@ mod tests {
     use dialog_common::Blake3Hash;
     use dialog_effects::archive::{Archive, Catalog, Get};
 
-    #[test]
-    fn scope_from_subject() {
+    #[dialog_common::test]
+    fn it_builds_scope_from_subject() {
         let cap = Subject::from(did!("key:z6MkTest"));
         let scope = Scope::from(&cap);
 
@@ -227,15 +230,15 @@ mod tests {
         assert!(scope.args().is_empty());
     }
 
-    #[test]
-    fn scope_from_any_subject() {
+    #[dialog_common::test]
+    fn it_builds_scope_from_any_subject() {
         let cap = Subject::any();
         let scope = Scope::from(&cap);
         assert!(matches!(scope.subject, UcanSubject::Any));
     }
 
-    #[test]
-    fn scope_from_archive_catalog() {
+    #[dialog_common::test]
+    fn it_builds_scope_from_archive_catalog() {
         let cap = Subject::from(did!("key:z6MkTest"))
             .attenuate(Archive)
             .attenuate(Catalog::new("index"));
@@ -257,8 +260,8 @@ mod tests {
         assert_eq!(args.get("catalog"), Some(&Promised::String("index".into())));
     }
 
-    #[test]
-    fn scope_from_archive_get() {
+    #[dialog_common::test]
+    fn it_builds_scope_from_archive_get() {
         let digest = Blake3Hash::hash(b"hello");
         let cap = Subject::from(did!("key:z6MkTest"))
             .attenuate(Archive)
@@ -290,8 +293,8 @@ mod tests {
         assert!(args.contains_key("digest"), "args should contain digest");
     }
 
-    #[test]
-    fn parameters_to_policy() {
+    #[dialog_common::test]
+    fn it_converts_parameters_to_policy() {
         let mut map = BTreeMap::new();
         map.insert("catalog".into(), Ipld::String("index".into()));
         let params = Parameters(map);
@@ -307,8 +310,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parameters_to_args() {
+    #[dialog_common::test]
+    fn it_converts_parameters_to_args() {
         let mut map = BTreeMap::new();
         map.insert("name".into(), Ipld::String("test".into()));
         map.insert("count".into(), Ipld::Integer(42));

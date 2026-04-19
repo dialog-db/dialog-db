@@ -6,8 +6,8 @@
 
 mod access;
 mod invocation;
-pub mod parameters;
-pub mod scope;
+mod parameters;
+mod scope;
 
 pub use access::{
     UcanAuthorization, UcanCertificate, UcanDelegation, UcanProof, UcanProof as UcanProofChain,

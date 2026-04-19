@@ -4,22 +4,29 @@
 //! defining the UCAN-specific proof, permit, and authorization types.
 
 use dialog_capability::Did;
-use dialog_capability::access::{self, AuthorizeError};
+use dialog_capability::access::{
+    Authorization, AuthorizeError, Certificate, Delegation as AccessDelegation, Proof, Protocol,
+    TimeRange,
+};
 use dialog_credentials::Ed25519Signer;
-use dialog_ucan_core::DelegationChain;
+use dialog_ucan_core::delegation::builder::DelegationBuilder;
+use dialog_ucan_core::subject::Subject as UcanSubject;
+use dialog_ucan_core::time::Timestamp;
+use dialog_ucan_core::time::timestamp::{Duration, UNIX_EPOCH};
+use dialog_ucan_core::{Delegation, DelegationChain, InvocationBuilder, InvocationChain};
 use dialog_varsig::eddsa::Ed25519Signature;
 
-use super::Ucan;
 use super::scope::Scope;
+use super::{Ucan, UcanInvocation};
 
 /// A single UCAN delegation — one proof link in a chain.
 ///
-/// Implements [`Delegation`](access::Delegation) for generic chain verification.
+/// Implements [`Certificate`] for generic chain verification.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
-pub struct UcanCertificate(pub dialog_ucan_core::Delegation<Ed25519Signature>);
+pub struct UcanCertificate(pub Delegation<Ed25519Signature>);
 
-impl access::Certificate for UcanCertificate {
+impl Certificate for UcanCertificate {
     type Access = Scope;
 
     fn issuer(&self) -> &Did {
@@ -31,14 +38,13 @@ impl access::Certificate for UcanCertificate {
     }
 
     fn subject(&self) -> Option<&Did> {
-        use dialog_ucan_core::subject::Subject as UcanSubject;
         match self.0.subject() {
             UcanSubject::Specific(did) => Some(did),
             UcanSubject::Any => None,
         }
     }
 
-    fn verify(&self, access: &Scope) -> Result<access::TimeRange, AuthorizeError> {
+    fn verify(&self, access: &Scope) -> Result<TimeRange, AuthorizeError> {
         // Command attenuation: delegation command must be a prefix of requested command
         if !access.command.starts_with(self.0.command()) {
             return Err(AuthorizeError::Denied(format!(
@@ -62,7 +68,7 @@ impl access::Certificate for UcanCertificate {
             ));
         }
 
-        Ok(access::TimeRange {
+        Ok(TimeRange {
             not_before: self.0.not_before().map(|t| t.to_unix()),
             expiration: self.0.expiration().map(|t| t.to_unix()),
         })
@@ -90,7 +96,7 @@ pub struct UcanProof {
     /// The scope of access being authorized.
     pub scope: Scope,
     /// The time range this proof covers.
-    pub duration: access::TimeRange,
+    pub duration: TimeRange,
 }
 
 impl UcanProof {
@@ -103,7 +109,7 @@ impl UcanProof {
             .values()
             .map(|d| UcanCertificate(d.as_ref().clone()))
             .collect();
-        let duration = access::TimeRange {
+        let duration = TimeRange {
             not_before: chain.not_before().map(|t| t.to_unix()),
             expiration: chain.expiration().map(|t| t.to_unix()),
         };
@@ -115,12 +121,12 @@ impl UcanProof {
     }
 }
 
-impl access::Proof<Ucan> for UcanProof {
+impl Proof<Ucan> for UcanProof {
     fn new(access: Scope) -> Self {
         Self {
             proofs: Vec::new(),
             scope: access,
-            duration: access::TimeRange::unbounded(),
+            duration: TimeRange::unbounded(),
         }
     }
 
@@ -136,27 +142,27 @@ impl access::Proof<Ucan> for UcanProof {
         &self.proofs
     }
 
-    fn duration(&self) -> &access::TimeRange {
+    fn duration(&self) -> &TimeRange {
         &self.duration
     }
 
-    fn set_duration(&mut self, duration: access::TimeRange) {
+    fn set_duration(&mut self, duration: TimeRange) {
         self.duration = duration;
     }
 
     fn claim(self, signer: Ed25519Signer) -> Result<UcanAuthorization, AuthorizeError> {
-        let chain = if self.proofs.is_empty() {
-            None
-        } else {
-            let mut iter = self.proofs.into_iter();
-            let first = iter.next().expect("non-empty proofs").0;
-            let mut chain = DelegationChain::new(first);
-            for proof in iter {
-                chain = chain
-                    .push(proof.0)
-                    .map_err(|e| AuthorizeError::Configuration(e.to_string()))?;
+        let mut iter = self.proofs.into_iter();
+        let chain = match iter.next() {
+            None => None,
+            Some(first) => {
+                let mut chain = DelegationChain::new(first.0);
+                for proof in iter {
+                    chain = chain
+                        .push(proof.0)
+                        .map_err(|e| AuthorizeError::Configuration(e.to_string()))?;
+                }
+                Some(chain)
             }
-            Some(chain)
         };
 
         Ok(UcanAuthorization {
@@ -180,13 +186,13 @@ pub struct UcanAuthorization {
     /// The scope of the capability being authorized.
     pub scope: Scope,
     /// The time range this authorization is valid for.
-    pub duration: access::TimeRange,
+    pub duration: TimeRange,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl access::Authorization<Ucan> for UcanAuthorization {
-    fn duration(&self) -> &access::TimeRange {
+impl Authorization<Ucan> for UcanAuthorization {
+    fn duration(&self) -> &TimeRange {
         &self.duration
     }
 
@@ -215,10 +221,6 @@ impl access::Authorization<Ucan> for UcanAuthorization {
     }
 
     async fn delegate(&self, audience: Did) -> Result<UcanDelegation, AuthorizeError> {
-        use dialog_ucan_core::delegation::builder::DelegationBuilder;
-        use dialog_ucan_core::time::Timestamp;
-        use dialog_ucan_core::time::timestamp::{Duration, UNIX_EPOCH};
-
         let mut builder = DelegationBuilder::new()
             .issuer(self.signer.clone())
             .audience(&audience)
@@ -252,14 +254,15 @@ impl access::Authorization<Ucan> for UcanAuthorization {
         Ok(UcanDelegation::from(chain))
     }
 
-    async fn invoke(&self) -> Result<super::UcanInvocation, AuthorizeError> {
-        use dialog_capability::ANY_SUBJECT;
-        use dialog_ucan_core::InvocationBuilder;
-        use dialog_ucan_core::subject::Subject as UcanSubject;
-
+    async fn invoke(&self) -> Result<UcanInvocation, AuthorizeError> {
         let subject_did = match &self.scope.subject {
             UcanSubject::Specific(did) => did.clone(),
-            UcanSubject::Any => ANY_SUBJECT.parse().expect("valid DID"),
+            UcanSubject::Any => match dialog_capability::ANY_SUBJECT.parse() {
+                Ok(did) => did,
+                Err(_) => {
+                    unreachable!("ANY_SUBJECT is a fixed compile-time constant DID and must parse")
+                }
+            },
         };
 
         let command: Vec<String> = self.scope.command.segments().clone();
@@ -287,9 +290,9 @@ impl access::Authorization<Ucan> for UcanAuthorization {
             .await
             .map_err(|e| AuthorizeError::Denied(format!("{e:?}")))?;
 
-        let chain = dialog_ucan_core::InvocationChain::new(invocation, delegations_map);
+        let chain = InvocationChain::new(invocation, delegations_map);
 
-        Ok(super::UcanInvocation {
+        Ok(UcanInvocation {
             chain: Box::new(chain),
             subject: subject_did,
             ability,
@@ -297,7 +300,8 @@ impl access::Authorization<Ucan> for UcanAuthorization {
     }
 }
 
-/// A UCAN delegation bundle — wraps [`DelegationChain`] to implement [`Delegation`](access::Delegation).
+/// A UCAN delegation bundle — wraps [`DelegationChain`] to implement
+/// [`Delegation`](dialog_capability::access::Delegation).
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct UcanDelegation(pub DelegationChain);
@@ -325,7 +329,7 @@ impl From<DelegationChain> for UcanDelegation {
     }
 }
 
-impl access::Delegation for UcanDelegation {
+impl AccessDelegation for UcanDelegation {
     type Certificate = UcanCertificate;
 
     fn certificates(&self) -> Vec<UcanCertificate> {
@@ -337,12 +341,12 @@ impl access::Delegation for UcanDelegation {
     }
 }
 
-impl access::Protocol for Ucan {
+impl Protocol for Ucan {
     type Access = Scope;
     type Signer = Ed25519Signer;
     type Certificate = UcanCertificate;
     type Delegation = UcanDelegation;
-    type Invocation = super::UcanInvocation;
+    type Invocation = UcanInvocation;
     type Proof = UcanProof;
     type Authorization = UcanAuthorization;
 }

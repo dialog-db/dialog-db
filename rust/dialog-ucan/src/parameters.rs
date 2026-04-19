@@ -85,15 +85,15 @@ mod tests {
     use dialog_common::Blake3Hash;
     use dialog_effects::archive::{Archive, Catalog, Get, Put};
 
-    #[test]
-    fn parameters_from_empty_subject() {
+    #[dialog_common::test]
+    fn it_returns_no_parameters_for_bare_subject() {
         let cap = Subject::from(did!("key:z6MkTest"));
         let params = parameters(&cap);
         assert!(params.is_empty());
     }
 
-    #[test]
-    fn parameters_from_archive_catalog() {
+    #[dialog_common::test]
+    fn it_collects_parameters_from_archive_catalog_chain() {
         let cap = Subject::from(did!("key:z6MkTest"))
             .attenuate(Archive)
             .attenuate(Catalog::new("index"));
@@ -101,8 +101,8 @@ mod tests {
         assert_eq!(params.get("catalog"), Some(&Ipld::String("index".into())));
     }
 
-    #[test]
-    fn parameters_from_archive_get() {
+    #[dialog_common::test]
+    fn it_collects_parameters_from_archive_get_invocation() {
         let digest = Blake3Hash::hash(b"my-content");
         let cap = Subject::from(did!("key:z6MkTest"))
             .attenuate(Archive)
@@ -116,14 +116,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parameters_to_policy_empty() {
+    #[dialog_common::test]
+    fn it_returns_empty_policy_for_empty_parameters() {
         let policy = parameters_to_policy(Parameters::new());
         assert!(policy.is_empty());
     }
 
-    #[test]
-    fn parameters_to_policy_produces_equality_constraints() {
+    #[dialog_common::test]
+    fn it_produces_equality_constraints_for_each_parameter() {
         let cap = Subject::from(did!("key:z6MkTest"))
             .attenuate(Archive)
             .attenuate(Catalog::new("data"));
@@ -139,8 +139,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parameters_to_policy_multiple_constraints() {
+    #[dialog_common::test]
+    fn it_produces_multiple_constraints_for_chain_with_payload() {
         let content = b"hello world";
         let digest = Blake3Hash::hash(content);
         let cap = Subject::from(did!("key:z6MkTest"))
@@ -176,8 +176,8 @@ mod tests {
         assert!(has_digest, "should have digest equality constraint");
     }
 
-    #[test]
-    fn parameters_to_args_roundtrip() {
+    #[dialog_common::test]
+    fn it_converts_parameters_to_args() {
         let mut params = Parameters::new();
         params.insert("name".into(), Ipld::String("test".into()));
         params.insert("count".into(), Ipld::Integer(42));
