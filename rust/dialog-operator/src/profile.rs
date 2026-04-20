@@ -12,10 +12,14 @@ pub use save::SaveDelegation;
 pub use space::SpaceHandle;
 
 use crate::operator::OperatorBuilder;
-use dialog_capability::{Capability, Subject};
+use dialog_capability::{Capability, Provider, SiteId, Subject};
+use dialog_common::ConditionalSync;
 use dialog_credentials::SignerCredential;
+use dialog_effects::credential::prelude::*;
+use dialog_effects::credential::{self, CredentialError, Secret};
 use dialog_ucan::UcanDelegation;
 use dialog_varsig::{Did, Principal};
+use std::marker::PhantomData;
 
 /// An opened profile — holds a signing credential.
 #[derive(Debug, Clone)]
@@ -45,8 +49,13 @@ impl Profile {
     }
 
     /// The signing credential.
-    pub fn credential(&self) -> &SignerCredential {
+    pub fn signer(&self) -> &SignerCredential {
         &self.credential
+    }
+
+    /// Get a credential handle for saving/loading site secrets.
+    pub fn credential(&self) -> CredentialHandle {
+        CredentialHandle { did: self.did() }
     }
 
     /// Store a delegation chain under this profile's DID.
@@ -76,6 +85,112 @@ impl Profile {
             profile_did: self.did(),
             name: name.into(),
         }
+    }
+}
+
+/// Handle for credential operations scoped to a profile's DID.
+///
+/// Created via [`Profile::credential()`].
+pub struct CredentialHandle {
+    did: Did,
+}
+
+impl CredentialHandle {
+    /// Select a site credential by address identifier.
+    pub fn site(self, id: impl Into<SiteId>) -> CredentialSite {
+        CredentialSite {
+            did: self.did,
+            key: id.into(),
+        }
+    }
+}
+
+/// A site credential handle ready for save/load operations.
+///
+/// Created via [`CredentialHandle::site()`].
+pub struct CredentialSite {
+    did: Did,
+    key: SiteId,
+}
+
+impl CredentialSite {
+    /// Save a site credential to the credential store.
+    ///
+    /// The credential is converted to [`Secret`] via [`TryInto`] during
+    /// [`perform()`](SaveSiteCredential::perform).
+    pub fn save<T: TryInto<Secret>>(self, credential: T) -> SaveSiteCredential<T> {
+        SaveSiteCredential {
+            did: self.did,
+            key: self.key,
+            credential,
+        }
+    }
+
+    /// Load a site credential from the credential store.
+    ///
+    /// The loaded [`Secret`] is converted to `T` via [`TryFrom`] during
+    /// [`perform()`](LoadSiteCredential::perform).
+    pub fn load<T: TryFrom<Secret>>(self) -> LoadSiteCredential<T> {
+        LoadSiteCredential {
+            did: self.did,
+            key: self.key,
+            _marker: PhantomData,
+        }
+    }
+}
+
+/// Saves a site credential. Created via [`CredentialSite::save()`].
+pub struct SaveSiteCredential<T> {
+    did: Did,
+    key: SiteId,
+    credential: T,
+}
+
+impl<T> SaveSiteCredential<T>
+where
+    T: TryInto<Secret>,
+    T::Error: Into<CredentialError>,
+{
+    /// Serialize the credential and save it to the store.
+    pub async fn perform<Env>(self, env: &Env) -> Result<(), CredentialError>
+    where
+        Env: Provider<credential::Save<Secret>> + ConditionalSync,
+    {
+        let secret = self.credential.try_into().map_err(Into::into)?;
+        self.did
+            .credential()
+            .site(&self.key)
+            .save(secret)
+            .perform(env)
+            .await
+    }
+}
+
+/// Loads a site credential. Created via [`CredentialSite::load()`].
+pub struct LoadSiteCredential<T> {
+    did: Did,
+    key: SiteId,
+    _marker: PhantomData<T>,
+}
+
+impl<T> LoadSiteCredential<T>
+where
+    T: TryFrom<Secret>,
+    T::Error: Into<CredentialError>,
+{
+    /// Load the credential from the store and deserialize it.
+    pub async fn perform<Env>(self, env: &Env) -> Result<T, CredentialError>
+    where
+        Env: Provider<credential::Load<Secret>> + ConditionalSync,
+    {
+        let secret = self
+            .did
+            .credential()
+            .site(&self.key)
+            .load()
+            .perform(env)
+            .await?;
+        secret.try_into().map_err(Into::into)
     }
 }
 

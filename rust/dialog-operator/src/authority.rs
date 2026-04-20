@@ -8,6 +8,10 @@ use dialog_credentials::Ed25519Signer;
 use dialog_effects::authority::{self, AuthorityError, Operator as AuthOperator};
 use dialog_varsig::{Did, Principal};
 
+// Authority always answers for the current session, regardless of which
+// repository we're operating on. We use the profile DID as the subject
+// of the returned chain since that's the identity the chain describes.
+
 /// An opened profile with profile and operator signers.
 ///
 /// Implements `Provider<Identify>` and `Principal` so the capability
@@ -92,10 +96,9 @@ impl Principal for Authority {
 impl Provider<authority::Identify> for Authority {
     async fn execute(
         &self,
-        input: Capability<authority::Identify>,
+        _input: authority::Identify,
     ) -> Result<Capability<AuthOperator>, AuthorityError> {
-        let subject_did = input.subject().clone();
-        Ok(self.build_authority(subject_did))
+        Ok(self.build_authority(self.profile_did()))
     }
 }
 

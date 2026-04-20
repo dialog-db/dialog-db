@@ -1110,6 +1110,7 @@ dependencies = [
  "dialog-common",
  "dialog-credentials",
  "dialog-effects",
+ "dialog-network",
  "dialog-remote-s3",
  "dialog-remote-ucan-s3",
  "dialog-storage",

@@ -32,11 +32,11 @@ pub struct OperatorBuilder {
 impl OperatorBuilder {
     pub(crate) fn new(profile: &Profile, context: Vec<u8>) -> Self {
         Self {
-            credential: profile.credential().clone(),
+            credential: profile.signer().clone(),
             context,
             allowed: Vec::new(),
             directory: Directory::Current,
-            network: Network,
+            network: Network::default(),
         }
     }
 

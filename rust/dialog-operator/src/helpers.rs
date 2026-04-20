@@ -34,7 +34,7 @@ pub async fn test_operator() -> Operator<VolatileSpace> {
     profile
         .derive(b"test")
         .allow(Subject::any())
-        .network(Network)
+        .network(Network::default())
         .build(storage)
         .await
         .unwrap()
@@ -50,7 +50,7 @@ pub async fn test_operator_with_profile() -> (Operator<VolatileSpace>, Profile) 
     let operator = profile
         .derive(b"test")
         .allow(Subject::any())
-        .network(Network)
+        .network(Network::default())
         .build(storage)
         .await
         .unwrap();
