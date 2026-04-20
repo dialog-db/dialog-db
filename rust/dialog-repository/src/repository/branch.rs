@@ -11,7 +11,6 @@ mod fetch;
 #[cfg(all(test, feature = "integration-tests"))]
 mod integration_tests;
 mod load;
-mod novelty;
 mod open;
 mod pull;
 mod push;
@@ -26,7 +25,6 @@ pub use claims::*;
 pub use commit::*;
 pub use fetch::*;
 pub use load::*;
-pub use novelty::*;
 pub use open::*;
 pub use pull::*;
 pub use push::*;

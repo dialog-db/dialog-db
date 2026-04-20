@@ -2,9 +2,12 @@ use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::memory::{Publish, Resolve};
+use dialog_prolly_tree::{Tree, TreeDifference};
+use futures_util::TryStreamExt;
 
-use super::{Branch, UpstreamState, novelty};
+use super::{Branch, Index, UpstreamState};
 use crate::repository::archive::RepositoryArchiveExt as _;
+use crate::repository::archive::local::LocalIndex;
 use crate::repository::error::RepositoryError;
 use crate::repository::memory::RepositoryMemoryExt;
 use crate::repository::remote::RemoteSite;
@@ -67,95 +70,88 @@ impl Push<'_> {
                 // Fast-forward push to local upstream. Use `.open()` so
                 // pushing into an upstream branch with no prior commits
                 // still works — the upstream just starts at our tree.
-                let upstream_branch = branch
+                let upstream = branch
                     .subject()
                     .branch(upstream_name.clone())
                     .open()
                     .perform(env)
                     .await?;
 
-                let branch_revision = match branch.revision() {
-                    Some(rev) => rev,
+                let revision = match branch.revision() {
+                    Some(revision) => revision,
                     None => return Ok(None),
                 };
-                let branch_base = branch
+                let base = branch
                     .upstream()
                     .map(|u| u.tree().clone())
                     .unwrap_or_default();
 
-                let upstream_tree = upstream_branch
+                let current = upstream
                     .revision()
                     .map(|r| r.tree.clone())
                     .unwrap_or_default();
 
                 // Can only fast-forward if upstream hasn't diverged
-                if upstream_tree != branch_base {
+                if current != base {
                     return Ok(None);
                 }
 
-                upstream_branch
-                    .reset(branch_revision.clone())
-                    .perform(env)
-                    .await?;
+                upstream.reset(revision.clone()).perform(env).await?;
 
-                Ok(Some(branch_revision))
+                Ok(Some(revision))
             }
             UpstreamState::Remote {
                 name: remote_name,
                 branch: upstream_branch_name,
                 ..
             } => {
-                let branch_revision = match branch.revision() {
+                let revision = match branch.revision() {
                     Some(rev) => rev,
                     None => return Ok(None),
                 };
-                let branch_base = branch
+                let base = branch
                     .upstream()
                     .map(|u| u.tree().clone())
                     .unwrap_or_default();
 
                 // Load remote repository and open remote branch
-                let remote_repo = branch
+                let remote = branch
                     .subject()
                     .remote(remote_name.clone())
                     .load()
                     .perform(env)
                     .await?;
-                let remote_branch = remote_repo
+
+                let upstream = remote
                     .branch(upstream_branch_name.clone())
                     .open()
                     .perform(env)
                     .await?;
 
-                // Compute and upload novel blocks
-                let nodes = novelty(
-                    *branch_base.hash(),
-                    *branch_revision.tree.hash(),
-                    env,
-                    branch.archive().index(),
-                );
-
-                let local_catalog = branch.archive().index();
-                Box::pin(
-                    remote_repo
-                        .archive()
-                        .index()
-                        .upload(nodes, local_catalog)
-                        .perform(env),
-                )
-                .await?;
+                // Compute and upload novel blocks: tree nodes that exist
+                // in the current tree but not in the base tree.
+                let index = branch.archive().index();
+                let store = LocalIndex::new(env, index.clone());
+                let base: Index = Tree::from_hash(base.hash(), &store).await?;
+                let current: Index = Tree::from_hash(revision.tree.hash(), &store).await?;
+                let difference = TreeDifference::compute(&base, &current, &store, &store).await?;
+                let novelty = difference.novel_nodes().map_err(Into::into);
+                // Boxed because the upload future carries the full
+                // stream type and would otherwise trip the
+                // `clippy::large_futures` lint when embedded in the
+                // surrounding `perform` future.
+                let target = remote.archive().index();
+                let upload = target.upload(novelty, index).perform(env);
+                Box::pin(upload).await?;
 
                 // Publish revision to remote
-                remote_branch
-                    .publish(branch_revision.clone())
-                    .perform(env)
-                    .await?;
+                upstream.publish(revision.clone()).perform(env).await?;
 
                 // Update local upstream state
                 if let Some(upstream) = branch.upstream() {
                     branch
                         .upstream
-                        .publish(upstream.with_tree(branch_revision.tree.clone()))
+                        .publish(upstream.with_tree(revision.tree.clone()))
                         .perform(env)
                         .await
                         .map_err(|e| RepositoryError::PushFailed {
@@ -163,7 +159,7 @@ impl Push<'_> {
                         })?;
                 }
 
-                Ok(Some(branch_revision))
+                Ok(Some(revision))
             }
         }
     }
