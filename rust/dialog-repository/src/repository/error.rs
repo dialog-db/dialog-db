@@ -16,6 +16,34 @@ pub enum RepositoryError {
         name: String,
     },
 
+    /// Branch has no configured upstream
+    #[error("Branch {name} has no upstream")]
+    BranchHasNoUpstream {
+        /// The name of the branch that has no upstream
+        name: String,
+    },
+
+    /// Remote repository not found
+    #[error("Remote {remote} not found")]
+    RemoteNotFound {
+        /// Remote site name
+        remote: String,
+    },
+
+    /// Remote repository already exists
+    #[error("Remote {remote} already exists")]
+    RemoteAlreadyExists {
+        /// Remote site name
+        remote: String,
+    },
+
+    /// Pushing a revision failed
+    #[error("Pushing revision failed: {cause}")]
+    PushFailed {
+        /// The underlying error message
+        cause: String,
+    },
+
     /// A storage operation failed
     #[error("Storage error {0}")]
     StorageError(String),

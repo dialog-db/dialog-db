@@ -5,19 +5,25 @@ use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_prolly_tree::{GeometricDistribution, Tree};
 use dialog_storage::Blake3Hash;
 
+mod claims;
 mod commit;
+mod fetch;
 mod load;
 mod open;
 mod reference;
 mod reset;
+mod select;
 mod transaction;
 mod upstream;
 
+pub use claims::*;
 pub use commit::*;
+pub use fetch::*;
 pub use load::*;
 pub use open::*;
 pub use reference::*;
 pub use reset::*;
+pub use select::*;
 pub use transaction::*;
 pub use upstream::*;
 

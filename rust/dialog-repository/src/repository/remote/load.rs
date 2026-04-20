@@ -1,0 +1,88 @@
+//! Command to load an existing remote repository.
+
+use dialog_capability::Provider;
+use dialog_effects::memory::Resolve;
+
+use super::{RemoteReference, RemoteRepository};
+use crate::repository::error::RepositoryError;
+
+/// Command to load an existing remote repository.
+pub struct LoadRemote(RemoteReference);
+
+impl LoadRemote {
+    /// Create from a remote reference.
+    pub fn new(reference: RemoteReference) -> Self {
+        Self(reference)
+    }
+
+    /// Execute the load operation.
+    pub async fn perform<Env>(self, env: &Env) -> Result<RemoteRepository, RepositoryError>
+    where
+        Env: Provider<Resolve>,
+    {
+        let cell = self.0.address();
+        cell.resolve().perform(env).await?;
+        match cell.content() {
+            Some(address) => Ok(RemoteRepository::new(cell.retain(address), self.0)),
+            None => Err(RepositoryError::RemoteNotFound {
+                remote: self.0.name().to_string(),
+            }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dialog_credentials::Ed25519Signer;
+    use dialog_remote_s3::Address;
+    use dialog_storage::provider::Volatile;
+
+    use crate::repository::Repository;
+    use crate::repository::error::RepositoryError;
+    use crate::repository::remote::SiteAddress;
+
+    fn test_site_address() -> SiteAddress {
+        SiteAddress::S3(
+            Address::builder("https://s3.us-east-1.amazonaws.com")
+                .region("us-east-1")
+                .bucket("my-bucket")
+                .build()
+                .unwrap(),
+        )
+    }
+
+    async fn test_signer() -> Ed25519Signer {
+        Ed25519Signer::import(&[44; 32]).await.unwrap()
+    }
+
+    #[dialog_common::test]
+    async fn it_loads_existing_remote() -> anyhow::Result<()> {
+        let env = Volatile::new();
+        let repo = Repository::from(test_signer().await);
+
+        repo.remote("origin")
+            .create(test_site_address())
+            .perform(&env)
+            .await?;
+
+        let loaded = repo.remote("origin").load().perform(&env).await?;
+        assert_eq!(loaded.site().name(), "origin");
+        assert_eq!(loaded.address().site(), &test_site_address());
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_errors_loading_missing_remote() -> anyhow::Result<()> {
+        let env = Volatile::new();
+        let repo = Repository::from(test_signer().await);
+
+        let result = repo.remote("nonexistent").load().perform(&env).await;
+        assert!(matches!(
+            result,
+            Err(RepositoryError::RemoteNotFound { .. })
+        ));
+
+        Ok(())
+    }
+}
