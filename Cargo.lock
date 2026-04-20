@@ -1188,6 +1188,7 @@ dependencies = [
  "dialog-common",
  "dialog-credentials",
  "dialog-effects",
+ "dialog-storage",
  "dialog-ucan-core",
  "dialog-varsig",
  "ipld-core",

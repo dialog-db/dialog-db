@@ -51,6 +51,7 @@
 //! ```
 
 mod archive;
+mod certificate;
 mod credential;
 mod memory;
 
