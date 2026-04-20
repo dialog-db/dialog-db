@@ -1,6 +1,8 @@
 //! Capability-derived scope for UCAN delegation and invocation.
 
-use dialog_capability::{Ability, Capability, Constraint, Effect, Policy, Subject};
+use dialog_capability::{
+    Ability, Capability, Constraint, Effect, Policy, Subject, access::FromCapability,
+};
 use dialog_ucan_core::command::Command;
 use dialog_ucan_core::delegation::policy::predicate::Predicate;
 use dialog_ucan_core::delegation::policy::selector::filter::Filter;
@@ -205,6 +207,17 @@ impl Scope {
             command: ability_to_command(&ability),
             parameters: Parameters(params),
         }
+    }
+}
+
+impl FromCapability for Scope {
+    fn from_capability<Fx>(capability: &Capability<Fx>) -> Self
+    where
+        Fx: Effect + Clone,
+        Fx::Of: Constraint,
+        Capability<Fx>: Ability,
+    {
+        Self::invoke(capability)
     }
 }
 

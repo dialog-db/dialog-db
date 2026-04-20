@@ -32,6 +32,7 @@ members = [
     "rust/dialog-ucan-core",
     "rust/dialog-ucan",
     "rust/dialog-remote-s3",
+    "rust/dialog-remote-ucan-s3",
     "rust/dialog-varsig",
     "rust/dialog-blobs",
 ]
