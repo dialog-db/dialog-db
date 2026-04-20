@@ -29,27 +29,28 @@ impl<'a> PublishRemoteBranch<'a> {
     where
         Env: Provider<Fork<RemoteSite, Publish>> + Provider<Publish> + ConditionalSync,
     {
-        let address = self.branch.repository.address();
+        let address = self.branch.address();
 
-        // Publish to remote via fork. The in-memory `remote` cell picks up
-        // the new CAS edition internally; we then snapshot it below.
+        // Publish to the upstream via fork. The in-memory upstream cell
+        // picks up the new CAS edition internally; we then snapshot it
+        // below.
         self.branch
-            .remote
+            .upstream()
             .publish(self.revision)
             .fork(address.site())
             .perform(env)
             .await?;
 
-        // Persist the remote edition so that a future RemoteBranchReference
-        // can hydrate its in-memory `remote` cache without a round trip.
+        // Persist the upstream edition so that a future open/load can
+        // hydrate its in-memory upstream cache without a round trip.
         let edition =
             self.branch
-                .remote
+                .upstream()
                 .edition()
                 .ok_or_else(|| RepositoryError::InvalidState {
-                    message: "remote cell missing edition after publish".into(),
+                    message: "upstream cell missing edition after publish".into(),
                 })?;
-        self.branch.cache.publish(edition).perform(env).await?;
+        self.branch.cache().publish(edition).perform(env).await?;
 
         Ok(())
     }

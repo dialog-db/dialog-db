@@ -28,20 +28,20 @@ impl<'a> FetchRemoteBranch<'a> {
     where
         Env: Provider<Fork<RemoteSite, Resolve>> + Provider<Publish> + ConditionalSync,
     {
-        let address = self.branch.repository.address();
+        let address = self.branch.address();
         self.branch
-            .remote
+            .upstream()
             .resolve()
             .fork(address.site())
             .perform(env)
             .await?;
 
         // Persist the new remote edition if the remote has one.
-        let Some(edition) = self.branch.remote.edition() else {
+        let Some(edition) = self.branch.upstream().edition() else {
             return Ok(None);
         };
         let revision = edition.content.clone();
-        self.branch.cache.publish(edition).perform(env).await?;
+        self.branch.cache().publish(edition).perform(env).await?;
 
         Ok(Some(revision))
     }

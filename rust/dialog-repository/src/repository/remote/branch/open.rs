@@ -3,30 +3,63 @@
 use dialog_capability::Provider;
 use dialog_effects::memory::Resolve;
 
-use super::{RemoteBranch, RemoteBranchReference};
+use super::{LoadedRemoteBranchReference, RemoteBranch, RemoteBranchReference};
 use crate::repository::error::RepositoryError;
 
 /// Command to open a remote branch.
 ///
-/// Resolves the persisted snapshot; does not error if the branch has no
-/// revision (does not exist) yet.
-pub struct OpenRemoteBranch(RemoteBranchReference);
+/// Resolves the persisted snapshot cache and primes the in-memory
+/// upstream cell from the cache if present. When the source reference
+/// doesn't already carry a loaded address, it is resolved first. Does
+/// not error when the cache is empty (branch not yet fetched).
+pub struct OpenRemoteBranch {
+    branch: Reference,
+}
+
+enum Reference {
+    Unloaded(RemoteBranchReference),
+    Loaded(LoadedRemoteBranchReference),
+}
+
+impl From<LoadedRemoteBranchReference> for OpenRemoteBranch {
+    fn from(reference: LoadedRemoteBranchReference) -> Self {
+        Self {
+            branch: Reference::Loaded(reference),
+        }
+    }
+}
+
+impl From<RemoteBranchReference> for OpenRemoteBranch {
+    fn from(reference: RemoteBranchReference) -> Self {
+        Self {
+            branch: Reference::Unloaded(reference),
+        }
+    }
+}
 
 impl OpenRemoteBranch {
-    /// Create from a remote branch reference.
-    pub fn new(reference: RemoteBranchReference) -> Self {
-        Self(reference)
-    }
-
     /// Execute the open operation.
     pub async fn perform<Env>(self, env: &Env) -> Result<RemoteBranch, RepositoryError>
     where
         Env: Provider<Resolve>,
     {
-        self.0.cache.resolve().perform(env).await?;
-        if let Some(edition) = self.0.cache.content() {
-            self.0.remote.reset(edition);
+        let loaded = match self.branch {
+            Reference::Loaded(loaded) => loaded,
+            Reference::Unloaded(reference) => {
+                let name = reference.name().to_string();
+                reference.remote.load().perform(env).await?.branch(name)
+            }
+        };
+
+        let cache = loaded.cache();
+        cache.resolve().perform(env).await?;
+
+        let upstream = loaded.revision();
+        if let Some(edition) = cache.content() {
+            upstream.reset(edition);
         }
-        Ok(RemoteBranch::new(self.0))
+
+        let LoadedRemoteBranchReference { repository, branch } = loaded;
+        Ok(RemoteBranch::new(repository, branch, cache, upstream))
     }
 }
