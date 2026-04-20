@@ -33,7 +33,7 @@ use dialog_capability::{Capability, Did, Subject};
 use dialog_credentials::Ed25519Signer;
 use dialog_credentials::credential::{Credential, SignerCredential};
 use dialog_effects::space as space_fx;
-use dialog_operator::profile::access::Access as ProfileAccess;
+use dialog_operator::access::Access as ProfileAccess;
 use dialog_varsig::Principal;
 use memory::MemoryExt;
 
@@ -150,7 +150,7 @@ impl From<Ed25519Signer> for Repository<SignerCredential> {
     }
 }
 
-use dialog_operator::profile::SpaceHandle;
+use dialog_operator::SpaceHandle;
 
 /// Extension trait for opening repositories from a [`SpaceHandle`].
 ///
@@ -187,7 +187,7 @@ mod tests {
 
     use super::*;
     use crate::helpers::{test_operator_with_profile, test_repo, unique_name};
-    use crate::{Artifact, ArtifactSelector, Instruction, Value};
+    use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
     use dialog_remote_s3::Address as S3Address;
     use futures_util::StreamExt;
     use futures_util::stream;

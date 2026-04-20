@@ -6,8 +6,8 @@
 
 use dialog_capability::Did;
 
-pub use dialog_operator::network::Network as RemoteSite;
-pub use dialog_operator::network::NetworkAddress as SiteAddress;
+pub use dialog_network::Network as RemoteSite;
+pub use dialog_network::NetworkAddress as SiteAddress;
 
 /// A remote repository address -- connection info plus subject DID.
 ///

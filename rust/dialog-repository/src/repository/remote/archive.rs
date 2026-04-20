@@ -12,8 +12,9 @@ use futures_util::{Stream, StreamExt, TryStreamExt};
 
 use super::repository::RemoteRepository;
 use crate::repository::error::RepositoryError;
-use crate::{DialogArtifactsError, Key, State};
+
 use dialog_artifacts::Datum;
+use dialog_artifacts::{DialogArtifactsError, Key, State};
 
 /// Remote archive scoped to a remote repository.
 pub struct RemoteArchive<'a> {

@@ -16,12 +16,13 @@ use super::{Branch, Index};
 use crate::repository::archive::ArchiveExt as _;
 use crate::repository::archive::networked::NetworkedIndex;
 use crate::repository::branch::upstream::UpstreamState;
-use crate::{
+
+use dialog_artifacts::selector::Constrained;
+use dialog_artifacts::{Artifact, ArtifactSelector, Datum, MatchCandidate};
+use dialog_artifacts::{
     AttributeKey, DialogArtifactsError, EntityKey, Key, KeyViewConstruct, KeyViewMut, State,
     ValueKey,
 };
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{Artifact, ArtifactSelector, Datum, MatchCandidate};
 
 /// Command struct for selecting artifacts from a branch.
 pub struct Select<'a> {

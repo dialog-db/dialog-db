@@ -6,7 +6,7 @@ use dialog_storage::Blake3Hash;
 
 use dialog_artifacts::Datum;
 
-use crate::{Key, State};
+use dialog_artifacts::{Key, State};
 
 /// Branch name newtype.
 pub mod name;

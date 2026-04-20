@@ -7,8 +7,9 @@ use futures_util::Stream;
 
 use super::Index;
 use crate::repository::archive::local::LocalIndex;
-use crate::{DialogArtifactsError, Key, State};
+
 use dialog_artifacts::Datum;
+use dialog_artifacts::{DialogArtifactsError, Key, State};
 
 /// Create a stream of novel nodes representing local changes since the last sync.
 ///

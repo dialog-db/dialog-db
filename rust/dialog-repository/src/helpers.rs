@@ -7,7 +7,7 @@ use crate::Repository;
 use crate::repository::RepositoryExt as _;
 use dialog_credentials::Credential;
 use dialog_operator::Operator;
-use dialog_operator::profile::Profile;
+use dialog_operator::Profile;
 use dialog_storage::provider::storage::VolatileSpace;
 
 /// Create a test repository using the given operator and profile.

@@ -9,9 +9,12 @@ use crate::repository::branch::Branch;
 use crate::repository::branch::upstream::UpstreamState;
 use crate::repository::node_reference::NodeReference;
 use crate::repository::{Repository, RepositoryExt as _};
-use crate::{Artifact, ArtifactSelector, Instruction, Operator, Value};
+
+use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
+
 use dialog_credentials::SignerCredential;
-use dialog_operator::profile::Profile;
+use dialog_operator::Operator;
+use dialog_operator::Profile;
 use dialog_remote_s3::helpers::S3Address;
 use dialog_remote_s3::{Address as S3SiteAddress, S3Credential};
 use dialog_storage::provider::storage::VolatileSpace;

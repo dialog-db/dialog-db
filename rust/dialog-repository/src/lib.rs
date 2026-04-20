@@ -15,27 +15,6 @@
 //! of the operator layer (`dialog-operator`). It re-exports operator types
 //! and adds the repository abstraction with branches, remotes, and archives.
 
-// Re-export everything from dialog-operator for backwards compatibility.
-pub use dialog_operator::{
-    Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMut, Artifacts, Attribute,
-    AttributeKey, Authority, Cause, Datum, DialogArtifactsError, Entity, EntityKey, FromKey,
-    Instruction, Key, KeyView, KeyViewConstruct, KeyViewMut, Network, Operator, State, Value,
-    ValueKey,
-};
-
-/// Authority — opened profile with signers and authority chain.
-pub use dialog_operator::authority;
-
-/// Profile — named identity with signing credential.
-pub use dialog_operator::profile;
-
-/// Operator — operating environment built from a profile.
-pub use dialog_operator::operator;
-
-/// Network dispatch for fork invocations.
-pub use dialog_operator::network;
-
-/// Capability-based repository system.
 mod repository;
 pub use repository::branch::BranchReference;
 pub use repository::memory::MemoryExt;
@@ -48,3 +27,5 @@ pub use repository::{
 /// Test helpers for setting up profiles, operators, repositories, and test data.
 #[cfg(any(test, feature = "helpers"))]
 pub mod helpers;
+#[cfg(any(test, feature = "helpers"))]
+pub use helpers::*;

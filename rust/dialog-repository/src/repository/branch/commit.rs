@@ -13,11 +13,12 @@ use crate::repository::archive::ArchiveExt as _;
 use crate::repository::archive::local::LocalIndex;
 use crate::repository::node_reference::NodeReference;
 use crate::repository::revision::Revision;
-use crate::{
+
+use dialog_artifacts::{Artifact, Cause, Datum, Instruction};
+use dialog_artifacts::{
     AttributeKey, DialogArtifactsError, EntityKey, FromKey, Key, KeyView, KeyViewConstruct,
     KeyViewMut, State, ValueKey,
 };
-use dialog_artifacts::{Artifact, Cause, Datum, Instruction};
 
 /// Command struct for committing instructions to a branch.
 pub struct Commit<'a, I> {
@@ -221,7 +222,8 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use crate::helpers::{test_operator_with_profile, test_repo};
-    use crate::{Artifact, ArtifactSelector, Instruction, Value};
+
+    use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
     use dialog_prolly_tree::EMPT_TREE_HASH;
     use futures_util::{StreamExt, stream};
 

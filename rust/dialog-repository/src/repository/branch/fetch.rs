@@ -92,7 +92,8 @@ mod tests {
     use crate::helpers::{test_operator_with_profile, test_repo};
     use crate::repository::branch::upstream::UpstreamState;
     use crate::repository::node_reference::NodeReference;
-    use crate::{Artifact, Instruction, Value};
+
+    use dialog_artifacts::{Artifact, Instruction, Value};
     use futures_util::stream;
 
     #[dialog_common::test]

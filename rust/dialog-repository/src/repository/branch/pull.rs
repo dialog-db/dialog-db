@@ -15,12 +15,12 @@ use std::collections::HashSet;
 use super::Branch;
 use super::Index;
 use super::upstream::UpstreamState;
-use crate::DialogArtifactsError;
 use crate::repository::archive::ArchiveExt as _;
 use crate::repository::archive::local::LocalIndex;
 use crate::repository::archive::networked::NetworkedIndex;
 use crate::repository::node_reference::NodeReference;
 use crate::repository::revision::Revision;
+use dialog_artifacts::DialogArtifactsError;
 
 /// Command struct for merging an explicit upstream revision.
 ///
@@ -271,7 +271,8 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use crate::helpers::{test_operator_with_profile, test_repo};
-    use crate::{Artifact, Instruction, Value};
+
+    use dialog_artifacts::{Artifact, Instruction, Value};
     use futures_util::stream;
 
     #[dialog_common::test]
