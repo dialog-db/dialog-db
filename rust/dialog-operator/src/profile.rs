@@ -14,7 +14,7 @@ pub use space::SpaceHandle;
 use crate::operator::OperatorBuilder;
 use dialog_capability::{Capability, Provider, SiteId, Subject};
 use dialog_common::ConditionalSync;
-use dialog_credentials::SignerCredential;
+use dialog_credentials::{Credential, SignerCredential};
 use dialog_effects::credential::prelude::*;
 use dialog_effects::credential::{self, CredentialError, Secret};
 use dialog_ucan::UcanDelegation;
@@ -206,13 +206,13 @@ impl Principal for Profile {
     }
 }
 
-impl TryFrom<dialog_credentials::Credential> for Profile {
+impl TryFrom<Credential> for Profile {
     type Error = ProfileError;
 
-    fn try_from(credential: dialog_credentials::Credential) -> Result<Self, ProfileError> {
+    fn try_from(credential: Credential) -> Result<Self, ProfileError> {
         match credential {
-            dialog_credentials::Credential::Signer(s) => Ok(Profile { credential: s }),
-            dialog_credentials::Credential::Verifier(_) => Err(ProfileError::Key(
+            Credential::Signer(s) => Ok(Profile { credential: s }),
+            Credential::Verifier(_) => Err(ProfileError::Key(
                 "profile credential is verifier-only".into(),
             )),
         }

@@ -1,6 +1,6 @@
-use dialog_capability::Provider;
+use dialog_capability::{Capability, Provider, Subject, did};
 use dialog_common::ConditionalSync;
-use dialog_credentials::{Ed25519Signer, SignerCredential};
+use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
 use dialog_effects::storage::{self as storage_fx, Directory, Location, LocationExt};
 
 use super::{Profile, ProfileError};
@@ -52,8 +52,8 @@ impl OpenProfile {
         self
     }
 
-    fn location(&self) -> dialog_capability::Capability<Location> {
-        dialog_capability::Subject::from(dialog_capability::did!("local:storage"))
+    fn location(&self) -> Capability<Location> {
+        Subject::from(did!("local:storage"))
             .attenuate(storage_fx::Storage)
             .attenuate(Location::new(self.directory.clone(), &self.name))
     }
@@ -74,8 +74,7 @@ impl OpenProfile {
                 let signer = Ed25519Signer::generate()
                     .await
                     .map_err(|e| ProfileError::Key(e.to_string()))?;
-                let credential =
-                    dialog_credentials::Credential::Signer(SignerCredential::from(signer));
+                let credential = Credential::Signer(SignerCredential::from(signer));
 
                 self.location()
                     .create(credential)

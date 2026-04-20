@@ -5,13 +5,10 @@
 //! wrapper fetches identity from the env via `authority::Identify`.
 
 use crate::Operator;
-use crate::network::Network;
-
-use dialog_capability::SiteFork;
 use dialog_capability::access::AuthorizeError;
-use dialog_capability::{Effect, Provider};
-use dialog_capability::{Fork, ForkInvocation, Site};
+use dialog_capability::{Effect, Fork, ForkInvocation, Provider, Site, SiteFork};
 use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_network::Network;
 
 /// Helper trait for effect outputs that can absorb authorization errors.
 ///

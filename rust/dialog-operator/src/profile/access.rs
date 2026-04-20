@@ -2,6 +2,7 @@
 //!
 //! Provides a fluent builder chain for claiming authority and delegating.
 
+use super::SaveDelegation;
 use dialog_capability::access::{self, Authorization as _, AuthorizeError, Proof as _};
 use dialog_capability::{Ability, Capability, Constraint, Provider, Subject};
 use dialog_common::ConditionalSync;
@@ -51,8 +52,8 @@ impl<'a> Access<'a> {
     }
 
     /// Save a delegation chain under this profile.
-    pub fn save(&self, chain: UcanDelegation) -> super::SaveDelegation {
-        super::SaveDelegation {
+    pub fn save(&self, chain: UcanDelegation) -> SaveDelegation {
+        SaveDelegation {
             did: self.credential.did(),
             chain,
         }

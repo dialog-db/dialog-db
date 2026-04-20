@@ -1,8 +1,9 @@
 //! Space capability providers for Operator.
 
 use super::Operator;
-use dialog_capability::{Capability, Policy, Provider, Subject};
+use dialog_capability::{Capability, Policy, Provider, Subject, did};
 use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_credentials::Credential;
 use dialog_effects::space as space_fx;
 use dialog_effects::storage::{self as storage_fx, LocationExt as _};
 use dialog_storage::provider::storage::Storage;
@@ -18,7 +19,7 @@ where
     async fn execute(
         &self,
         input: Capability<space_fx::Load>,
-    ) -> Result<dialog_credentials::Credential, storage_fx::StorageError> {
+    ) -> Result<Credential, storage_fx::StorageError> {
         let subject = input.subject();
         if *subject != self.profile_did() {
             return Err(storage_fx::StorageError::Storage(format!(
@@ -29,7 +30,7 @@ where
 
         let name = &space_fx::Space::of(&input).name;
         let location = storage_fx::Location::new(self.directory.clone(), name);
-        Subject::from(dialog_capability::did!("local:storage"))
+        Subject::from(did!("local:storage"))
             .attenuate(storage_fx::Storage)
             .attenuate(location)
             .load()
@@ -49,7 +50,7 @@ where
     async fn execute(
         &self,
         input: Capability<space_fx::Create>,
-    ) -> Result<dialog_credentials::Credential, storage_fx::StorageError> {
+    ) -> Result<Credential, storage_fx::StorageError> {
         let subject = input.subject();
         if *subject != self.profile_did() {
             return Err(storage_fx::StorageError::Storage(format!(
@@ -61,7 +62,7 @@ where
         let name = &space_fx::Space::of(&input).name;
         let credential = space_fx::Create::of(&input).credential.clone();
         let location = storage_fx::Location::new(self.directory.clone(), name);
-        Subject::from(dialog_capability::did!("local:storage"))
+        Subject::from(did!("local:storage"))
             .attenuate(storage_fx::Storage)
             .attenuate(location)
             .create(credential)

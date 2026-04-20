@@ -12,13 +12,13 @@ mod test;
 pub use builder::{OperatorBuilder, OperatorError};
 
 use crate::Authority;
-use crate::network::Network;
 use dialog_capability::{Capability, Provider};
 use dialog_credentials::Credential;
 use dialog_effects::authority::{Identify, Operator as AuthOperator};
 use dialog_effects::credential::Secret;
 use dialog_effects::storage as storage_fx;
 use dialog_effects::{archive, credential, memory};
+use dialog_network::Network;
 use dialog_storage::provider::storage::Storage;
 use dialog_varsig::{Did, Principal};
 

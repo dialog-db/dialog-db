@@ -1,22 +1,21 @@
 //! Builder for constructing an Operator from a Profile.
 
+use super::Operator;
 use crate::Authority;
-use crate::network::Network;
 use crate::profile::Profile;
 use crate::profile::access::Access as ProfileAccess;
 use dialog_capability::access::{Access, Authorization as _, Proof as _, Prove, Retain};
-use dialog_capability::{Ability, Provider, Subject};
+use dialog_capability::{Ability, Capability, Constraint, Provider, Subject};
 use dialog_credentials::key::KeyExport;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
 use dialog_effects::storage::Directory;
+use dialog_network::Network;
 use dialog_storage::provider::space::SpaceProvider;
 use dialog_storage::provider::storage::Storage;
 use dialog_ucan::{Scope, Ucan};
 use dialog_varsig::Principal;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use dialog_varsig::Signer;
-
-use super::Operator;
 
 const OPERATOR_DERIVATION_CONTEXT: &str = "dialog-db operator derivation";
 
@@ -51,9 +50,9 @@ impl OperatorBuilder {
     /// Allow a capability: creates a delegation from profile to operator.
     pub fn allow<T, C>(mut self, capability: C) -> Self
     where
-        T: dialog_capability::Constraint,
-        C: Into<dialog_capability::Capability<T>>,
-        dialog_capability::Capability<T>: Ability,
+        T: Constraint,
+        C: Into<Capability<T>>,
+        Capability<T>: Ability,
     {
         let cap = capability.into();
         self.allowed.push(Scope::from(&cap));

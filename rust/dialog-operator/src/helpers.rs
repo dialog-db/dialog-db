@@ -1,12 +1,11 @@
 use std::str::FromStr;
 
-use crate::network::Network;
-use crate::operator::Operator;
-use crate::profile::Profile;
-use crate::{Artifact, Attribute, Entity, Value};
+use crate::{Operator, Profile};
 use anyhow::Result;
 use base58::ToBase58;
+use dialog_artifacts::{Artifact, Attribute, Entity, Value};
 use dialog_capability::Subject;
+use dialog_network::Network;
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;

@@ -1,6 +1,6 @@
 use crate::helpers::unique_name;
-use crate::network::Network;
 use crate::profile::Profile;
+use dialog_network::Network;
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
 
 #[cfg(test)]
@@ -270,9 +270,11 @@ mod tests {
 
     mod time_bound_tests {
         use super::*;
+        use crate::Operator;
         use crate::profile::Profile;
         use dialog_capability::Subject;
         use dialog_capability::access::{Authorization as _, Proof as _};
+        use dialog_credentials::Ed25519Signer;
         use dialog_effects::archive::prelude::{ArchiveExt, ArchiveSubjectExt};
         use dialog_ucan_core::time::Timestamp;
         use dialog_ucan_core::time::timestamp::{Duration, UNIX_EPOCH};
@@ -281,8 +283,7 @@ mod tests {
             Timestamp::new(UNIX_EPOCH + Duration::from_secs(secs)).unwrap()
         }
 
-        async fn build_operator_with_profile()
-        -> (super::super::super::Operator<VolatileSpace>, Profile) {
+        async fn build_operator_with_profile() -> (Operator<VolatileSpace>, Profile) {
             let storage = Storage::volatile();
             let profile = Profile::open(unique_name("time"))
                 .perform(&storage)
@@ -299,8 +300,7 @@ mod tests {
 
         /// Build an operator WITHOUT a powerline delegation.
         /// Only explicitly delegated capabilities will be available.
-        async fn build_restricted_operator_with_profile()
-        -> (super::super::super::Operator<VolatileSpace>, Profile) {
+        async fn build_restricted_operator_with_profile() -> (Operator<VolatileSpace>, Profile) {
             let storage = Storage::volatile();
             let profile = Profile::open(unique_name("time-restricted"))
                 .perform(&storage)
@@ -523,7 +523,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let signer = dialog_credentials::Ed25519Signer::from(profile.signer().clone());
+            let signer = Ed25519Signer::from(profile.signer().clone());
             let authorization = proof.claim(signer).unwrap();
 
             // Try to set expiration beyond proof bounds
@@ -563,7 +563,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let signer = dialog_credentials::Ed25519Signer::from(profile.signer().clone());
+            let signer = Ed25519Signer::from(profile.signer().clone());
             let authorization = proof.claim(signer).unwrap();
 
             // Try to set not_before earlier than proof bounds
@@ -604,7 +604,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let signer = dialog_credentials::Ed25519Signer::from(profile.signer().clone());
+            let signer = Ed25519Signer::from(profile.signer().clone());
             let authorization = proof.claim(signer).unwrap();
 
             // Narrow the window - should succeed
@@ -620,11 +620,11 @@ mod tests {
 
     mod s3_credential_tests {
         use super::*;
-        use crate::network::NetworkAddress as SiteAddress;
         use dialog_capability::Subject;
         use dialog_common::Blake3Hash;
         use dialog_effects::archive::prelude::*;
         use dialog_effects::credential::Secret;
+        use dialog_network::NetworkAddress as SiteAddress;
         use dialog_remote_s3::helpers::S3Address;
         use dialog_remote_s3::{Address, S3Credential};
 
@@ -780,7 +780,7 @@ mod tests {
 
     mod space_tests {
         use super::*;
-        use dialog_capability::Subject;
+        use dialog_capability::{Subject, did};
         use dialog_effects::space::{self as space_fx, SpaceExt as _};
 
         #[dialog_common::test]
@@ -800,7 +800,7 @@ mod tests {
                 .unwrap();
 
             // Use a wrong DID as subject
-            let wrong_did = dialog_capability::did!("key:z6MkWrongDid");
+            let wrong_did = did!("key:z6MkWrongDid");
             let result: Result<_, _> = Subject::from(wrong_did)
                 .attenuate(space_fx::Space::new("repo"))
                 .load()

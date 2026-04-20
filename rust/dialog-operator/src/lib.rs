@@ -15,27 +15,14 @@
 //! credentials, profiles, operator builders, and network dispatch that
 //! together form the operational layer above the core artifact store.
 
-// Re-export core artifact types for convenience.
-pub use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMut, Artifacts, Attribute,
-    AttributeKey, Cause, Datum, DialogArtifactsError, Entity, EntityKey, FromKey, Instruction, Key,
-    KeyView, KeyViewConstruct, KeyViewMut, State, Value, ValueKey,
-};
+mod authority;
+pub use authority::*;
 
-/// Authority — opened profile with signers and authority chain.
-pub mod authority;
-pub use authority::Authority;
+mod profile;
+pub use profile::*;
 
-/// Profile — named identity with signing credential.
-pub mod profile;
-
-/// Operator — operating environment built from a profile.
-pub mod operator;
-pub use operator::Operator;
-
-/// Network dispatch for fork invocations.
-pub mod network;
-pub use network::Network;
+mod operator;
+pub use operator::*;
 
 /// Test helpers for setting up profiles, operators, and test data.
 #[cfg(any(test, feature = "helpers"))]
