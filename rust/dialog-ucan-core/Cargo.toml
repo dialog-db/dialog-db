@@ -27,6 +27,7 @@ web-time = { workspace = true }
 
 # Optional deps
 arbitrary = { workspace = true, optional = true }
+dialog-credentials = { workspace = true, optional = true }
 
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
 proptest = { workspace = true, optional = true }
@@ -40,6 +41,7 @@ wasm-bindgen = { workspace = true }
 [dev-dependencies]
 arbitrary = { workspace = true }
 base64 = { workspace = true }
+dialog-common = { workspace = true, features = ["helpers"] }
 dialog-credentials = { workspace = true }
 ipld-core = { workspace = true, features = ["arb"] }
 pretty_assertions = { workspace = true }
@@ -60,3 +62,11 @@ default = []
 test_utils = ["arb", "property_test"]
 arb = ["dep:arbitrary", "ipld-core/arb"]
 property_test = ["dep:proptest", "dep:proptest-arbitrary-interop"]
+# Test helpers exposed for use by other crates (signer/delegation builders)
+helpers = ["dep:dialog-credentials"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+  "cfg(feature, values(\"web-integration-tests\"))",
+  "cfg(dialog_test_wasm_integration)",
+] }

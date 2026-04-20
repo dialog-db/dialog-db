@@ -7,6 +7,7 @@ pub mod cid;
 pub mod codec;
 pub mod collection;
 pub mod command;
+pub mod container;
 pub mod crypto;
 pub mod delegation;
 pub mod envelope;
@@ -22,10 +23,16 @@ pub mod task;
 pub mod time;
 pub mod unset;
 
+#[cfg(any(test, feature = "helpers"))]
+pub mod helpers;
+
 // Internal modules
 mod ipld;
 mod sealed;
 
+pub use container::delegation::DelegationChain;
+pub use container::invocation::InvocationChain;
+pub use container::{Container, ContainerError};
 pub use delegation::{
     Delegation,
     builder::{BuildError as DelegationBuildError, DelegationBuilder},
