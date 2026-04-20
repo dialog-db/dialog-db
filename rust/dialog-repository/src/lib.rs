@@ -34,3 +34,9 @@
 
 mod repository;
 pub use repository::*;
+
+/// Test helpers for setting up profiles, operators, repositories, and test data.
+#[cfg(any(test, feature = "helpers"))]
+pub mod helpers;
+#[cfg(any(test, feature = "helpers"))]
+pub use helpers::*;

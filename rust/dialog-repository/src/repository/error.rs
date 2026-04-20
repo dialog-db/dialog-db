@@ -56,6 +56,13 @@ pub enum RepositoryError {
     #[error("Repository '{0}' already exists")]
     AlreadyExists(String),
 
+    /// Branch upstream is set to itself
+    #[error("Upsteam of local {name} is set to itself")]
+    BranchUpstreamIsItself {
+        /// Branch name
+        name: String,
+    },
+
     /// Invalid internal state (should never happen in normal operation)
     #[error("Invalid state: {message}")]
     InvalidState {

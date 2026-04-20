@@ -8,11 +8,17 @@ use dialog_storage::Blake3Hash;
 mod claims;
 mod commit;
 mod fetch;
+#[cfg(all(test, feature = "integration-tests"))]
+mod integration_tests;
 mod load;
+mod novelty;
 mod open;
+mod pull;
+mod push;
 mod reference;
 mod reset;
 mod select;
+mod set_upstream;
 mod transaction;
 mod upstream;
 
@@ -20,10 +26,14 @@ pub use claims::*;
 pub use commit::*;
 pub use fetch::*;
 pub use load::*;
+pub use novelty::*;
 pub use open::*;
+pub use pull::*;
+pub use push::*;
 pub use reference::*;
 pub use reset::*;
 pub use select::*;
+pub use set_upstream::*;
 pub use transaction::*;
 pub use upstream::*;
 

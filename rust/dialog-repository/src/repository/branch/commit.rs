@@ -219,3 +219,46 @@ where
         Ok(tree_hash)
     }
 }
+#[cfg(test)]
+mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use crate::helpers::{test_operator_with_profile, test_repo};
+
+    use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
+    use dialog_prolly_tree::EMPT_TREE_HASH;
+    use futures_util::{StreamExt, stream};
+
+    #[dialog_common::test]
+    async fn it_commits_and_selects() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let artifact = Artifact {
+            the: "user/name".parse()?,
+            of: "user:123".parse()?,
+            is: Value::String("Alice".to_string()),
+            cause: None,
+        };
+
+        let instructions = stream::iter(vec![Instruction::Assert(artifact.clone())]);
+
+        let hash = branch.commit(instructions).perform(&operator).await?;
+        assert_ne!(hash, EMPT_TREE_HASH);
+
+        // Select should find the artifact
+        let selector = ArtifactSelector::new().the("user/name".parse()?);
+        let stream = branch.claims().select(selector).perform(&operator).await?;
+        tokio::pin!(stream);
+
+        let results: Vec<_> = stream.filter_map(|r| async { r.ok() }).collect().await;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].the, artifact.the);
+        assert_eq!(results[0].is, artifact.is);
+
+        Ok(())
+    }
+}
