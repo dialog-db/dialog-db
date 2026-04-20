@@ -10,7 +10,7 @@
 //!
 //! ```rust
 //! # mod example {
-//! use dialog_capability::{did, Subject, Did, Ability, Attenuation, Policy, Effect};
+//! use dialog_capability::{did, Subject, Did, Ability, Attenuate, Attenuation, Policy, Effect};
 //! use serde::{Serialize, Deserialize};
 //!
 //! // Attenuation: narrows ability (adds "/storage" to path) and adds parameters
@@ -28,7 +28,7 @@
 //! }
 //!
 //! // Effect: narrows ability (adds "/get"), and is invocable
-//! #[derive(Debug, Clone, Serialize, Deserialize)]
+//! #[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
 //! struct Get { key: Vec<u8> }
 //! impl Effect for Get {
 //!     type Of = Store;
@@ -149,12 +149,26 @@
 //! | Type | Role |
 //! |------|------|
 //! | [`Ability`] | Trait providing `subject()` and `ability()` |
-//! | [`Provider<I>`] | Executes capabilities |
-//! | [`Authorization`] | Proof of delegated authority |
-//! | [`Delegation<C, A>`] | Grants capability to another principal |
-//! | [`Access`] | Looks up authorization proofs |
+//! | [`Provider<C>`] | Executes commands |
+//! | [`access::Authorize`] | Command for requesting authorization via a protocol |
+//! | [`site::Site`] | Trait for site configuration types |
 
+#![warn(missing_docs)]
+#![warn(clippy::absolute_paths)]
+#![warn(clippy::default_trait_access)]
+#![warn(clippy::fallible_impl_from)]
+#![warn(clippy::panicking_unwrap)]
+#![warn(clippy::unused_async)]
+#![deny(clippy::partial_pub_fields)]
+#![deny(clippy::unnecessary_self_imports)]
+#![cfg_attr(not(test), warn(clippy::large_futures))]
+#![cfg_attr(not(test), deny(clippy::panic))]
+
+// Allow derive macros to resolve `::dialog_capability::*` inside this crate.
 extern crate self as dialog_capability;
+
+pub mod access;
+pub use access::*;
 
 mod error;
 pub use error::*;
@@ -167,9 +181,6 @@ pub use selector::*;
 
 mod settings;
 pub use settings::*;
-
-#[cfg(feature = "ucan")]
-pub mod ucan;
 
 mod ability;
 pub use ability::*;
@@ -201,35 +212,17 @@ pub use capability::*;
 mod provider;
 pub use provider::*;
 
-mod router;
-pub use router::*;
-
-mod authority;
-pub use authority::*;
-
-mod authorization;
-pub use authorization::*;
-
 mod issuer;
 pub use issuer::*;
 
-/// Derive macro that generates `Provider<Fx>` impls for composite structs.
-pub use dialog_macros::Provider;
+mod site;
+pub use site::*;
 
-pub mod command;
+mod command;
 pub use command::*;
 
-mod access;
-pub use access::*;
+mod fork;
+pub use fork::*;
 
-mod claim;
-pub use claim::*;
-
-mod authorized;
-pub use authorized::*;
-
-mod invocation;
-pub use invocation::*;
-
-mod delegation;
-pub use delegation::*;
+/// Derive macro that generates `Provider<Fx>` impls for composite structs.
+pub use dialog_macros::Provider;

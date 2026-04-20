@@ -15,7 +15,6 @@ ed25519 = [
     "dialog-varsig/edwards25519",
     "dialog-varsig/sha2_512",
 ]
-ucan = ["dep:dialog-ucan", "dialog-capability/ucan"]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -31,8 +30,6 @@ ed25519-dalek = { workspace = true, optional = true }
 getrandom = { workspace = true, optional = true }
 base58 = { workspace = true, optional = true }
 
-# ucan feature deps
-dialog-ucan = { workspace = true, optional = true }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 js-sys = { workspace = true }

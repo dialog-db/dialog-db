@@ -12,23 +12,22 @@ unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(dialog_test_wasm_integration)',
 ] }
 
-[features]
-default = []
-# UCAN support (IPLD serialization for capabilities)
-ucan = ["dep:ipld-core", "dep:dialog-ucan"]
-
 [dependencies]
 convert_case = { workspace = true }
 dialog-common = { workspace = true }
 dialog-macros = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+serde_bytes = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 signature = { workspace = true }
 dialog-varsig = { workspace = true }
-ipld-core = { workspace = true, optional = true }
-dialog-ucan = { workspace = true, optional = true }
+url = { workspace = true }
+
 
 [dev-dependencies]
 dialog-common = { workspace = true, features = ["helpers"] }
+dialog-credentials = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
 wasm-bindgen-test = { workspace = true }
