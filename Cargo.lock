@@ -1176,6 +1176,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-ucan"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base58",
+ "blake3",
+ "dialog-capability",
+ "dialog-common",
+ "dialog-credentials",
+ "dialog-effects",
+ "dialog-ucan-core",
+ "dialog-varsig",
+ "ipld-core",
+ "serde",
+ "serde_bytes",
+ "serde_ipld_dagcbor",
+ "signature",
+ "thiserror 2.0.18",
+ "tokio",
+ "wasm-bindgen-test",
+]
+
+[[package]]
 name = "dialog-ucan-core"
 version = "0.1.0"
 dependencies = [
