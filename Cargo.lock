@@ -1265,8 +1265,10 @@ name = "dialog-repository"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-stream",
  "async-trait",
  "base58",
+ "dialog-artifacts",
  "dialog-capability",
  "dialog-common",
  "dialog-credentials",
@@ -1275,6 +1277,7 @@ dependencies = [
  "dialog-prolly-tree",
  "dialog-storage",
  "dialog-varsig",
+ "futures-util",
  "getrandom 0.2.16",
  "parking_lot",
  "reqwest",

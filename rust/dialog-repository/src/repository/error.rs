@@ -9,6 +9,13 @@ use thiserror::Error;
 /// The common error type used by repository operations.
 #[derive(Error, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepositoryError {
+    /// Branch with the given name was not found
+    #[error("Branch {name} not found")]
+    BranchNotFound {
+        /// The name of the branch that was not found
+        name: String,
+    },
+
     /// A storage operation failed
     #[error("Storage error {0}")]
     StorageError(String),

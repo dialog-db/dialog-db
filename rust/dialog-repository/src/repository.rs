@@ -8,6 +8,7 @@
 //! - [`revision`] — Revision tracking and logical timestamps
 
 mod archive;
+mod branch;
 mod create;
 mod error;
 mod load;
@@ -17,6 +18,7 @@ mod revision;
 mod tree;
 
 pub use archive::*;
+pub use branch::*;
 pub use create::*;
 pub use error::*;
 pub use load::*;
@@ -60,6 +62,13 @@ impl<C: Principal> Repository<C> {
     /// The subject.
     pub fn subject(&self) -> Subject {
         self.did().into()
+    }
+
+    /// Get a branch reference for the given name.
+    ///
+    /// Call `.open()` or `.load()` on the returned reference.
+    pub fn branch(&self, name: impl Into<String>) -> BranchReference {
+        self.subject().branch(name)
     }
 }
 
