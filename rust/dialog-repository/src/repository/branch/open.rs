@@ -41,6 +41,7 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    use anyhow::Result;
     use dialog_capability::Subject;
     use dialog_storage::provider::Volatile;
     use dialog_varsig::did;
@@ -48,7 +49,7 @@ mod tests {
     use crate::repository::memory::RepositoryMemoryExt;
 
     #[dialog_common::test]
-    async fn it_opens_branch_with_no_revision() -> anyhow::Result<()> {
+    async fn it_opens_branch_with_no_revision() -> Result<()> {
         let provider = Volatile::new();
         let branch = Subject::from(did!("key:zBranchOpenTest"))
             .branch("main")
@@ -62,7 +63,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_reopens_same_branch() -> anyhow::Result<()> {
+    async fn it_reopens_same_branch() -> Result<()> {
         let provider = Volatile::new();
         let subject = Subject::from(did!("key:zBranchReopenTest"));
 

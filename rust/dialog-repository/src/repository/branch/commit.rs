@@ -1,20 +1,19 @@
 use dialog_artifacts::{
-    Artifact, AttributeKey, Cause, Datum, DialogArtifactsError, EntityKey, FromKey, Instruction,
-    Key, KeyView, KeyViewConstruct, KeyViewMut, State, ValueKey,
+    Artifact, AttributeKey, Cause, Datum, EntityKey, FromKey, Instruction, Key, KeyView,
+    KeyViewConstruct, KeyViewMut, State, ValueKey,
 };
-use dialog_capability::{Policy, Provider};
+use dialog_capability::Provider;
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive::{Get, Put};
-use dialog_effects::authority::{Identify, Operator, Profile};
+use dialog_effects::authority::{Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_prolly_tree::{EMPT_TREE_HASH, Tree};
-use dialog_storage::Blake3Hash;
 use futures_util::{Stream, StreamExt, TryStreamExt};
-use std::collections::HashSet;
 
 use super::{Branch, Index};
 use crate::repository::archive::RepositoryArchiveExt as _;
 use crate::repository::archive::local::LocalIndex;
+use crate::repository::error::RepositoryError;
 use crate::repository::revision::Revision;
 use crate::repository::tree::TreeReference;
 
@@ -43,13 +42,13 @@ impl<Changes> Commit<'_, Changes>
 where
     Changes: Stream<Item = Instruction> + ConditionalSend,
 {
-    /// Execute the commit, returning the new tree hash.
+    /// Execute the commit, returning the newly-published [`Revision`].
     ///
     /// Load the branch's current prolly tree, apply every change in the
     /// stream to the three (entity / attribute / value) indexes, then
     /// publish a new [`Revision`] to the branch's revision cell with the
     /// updated logical clock.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Blake3Hash, DialogArtifactsError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<Revision, RepositoryError>
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -169,69 +168,46 @@ where
             }
         }
 
-        let tree_hash = *tree
-            .hash()
-            .ok_or_else(|| DialogArtifactsError::Storage("Failed to get tree hash".to_string()))?;
-
-        let tree_reference = TreeReference::from(tree_hash);
+        // `tree.hash()` returns `None` only when the tree is empty, which
+        // we represent as the canonical empty-tree hash.
+        let tree = TreeReference::from(tree.hash().copied().unwrap_or(EMPT_TREE_HASH));
 
         // Discover who we are so the revision can be attributed to the
-        // correct subject / profile / operator.
-        let authority = Identify
-            .perform(env)
-            .await
-            .map_err(|e| DialogArtifactsError::Storage(format!("Identify failed: {}", e)))?;
-        let subject_did = authority.subject().clone();
-        let profile_did = Profile::of(&authority).profile.clone();
-        let operator_did = Operator::of(&authority).operator.clone();
+        // correct profile / operator. The subject comes from the branch
+        // itself, not the identity chain.
+        let authority = Identify.perform(env).await?;
+        let issuer = authority.did();
+        let profile = authority.profile().clone();
 
-        // Advance the logical clock: period increments when a different
-        // issuer commits, moment increments for the same issuer.
-        let (period, moment, cause) = match &base_revision {
-            Some(rev) => {
-                let (period, moment) = if rev.issuer == operator_did {
-                    (rev.period, rev.moment + 1)
-                } else {
-                    (rev.period + 1, 0)
-                };
-                (period, moment, HashSet::from([rev.tree.clone()]))
-            }
-            None => (0, 0, HashSet::new()),
-        };
-
-        let new_revision = Revision {
-            subject: subject_did,
-            issuer: operator_did,
-            authority: profile_did,
-            tree: tree_reference,
-            cause,
-            period,
-            moment,
+        let revision = match base_revision {
+            Some(base) => base.advance(tree, issuer, profile),
+            None => Revision::new(tree, branch.of().clone(), issuer, profile),
         };
 
         branch
             .revision
-            .publish(new_revision)
+            .publish(revision.clone())
             .perform(env)
-            .await
-            .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
+            .await?;
 
-        Ok(tree_hash)
+        Ok(revision)
     }
 }
+
 #[cfg(test)]
 mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use crate::helpers::{test_operator_with_profile, test_repo};
+    use crate::repository::tree::TreeReference;
+    use anyhow::Result;
 
     use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
-    use dialog_prolly_tree::EMPT_TREE_HASH;
     use futures_util::{StreamExt, stream};
 
     #[dialog_common::test]
-    async fn it_commits_and_selects() -> anyhow::Result<()> {
+    async fn it_commits_and_selects() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -245,8 +221,8 @@ mod tests {
 
         let instructions = stream::iter(vec![Instruction::Assert(artifact.clone())]);
 
-        let hash = branch.commit(instructions).perform(&operator).await?;
-        assert_ne!(hash, EMPT_TREE_HASH);
+        let revision = branch.commit(instructions).perform(&operator).await?;
+        assert_ne!(revision.tree, TreeReference::default());
 
         // Select should find the artifact
         let selector = ArtifactSelector::new().the("user/name".parse()?);

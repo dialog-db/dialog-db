@@ -1,6 +1,6 @@
-use dialog_capability::{Capability, Did, Policy};
+use dialog_capability::{Capability, Did, Policy, Subject};
+use dialog_effects::memory::Space;
 use dialog_effects::memory::prelude::SpaceExt;
-use dialog_effects::memory::{Cell as CellCapability, Space};
 
 use crate::repository::branch::{LoadBranch, OpenBranch, UpstreamState};
 use crate::repository::memory::Cell;
@@ -20,9 +20,14 @@ impl From<Capability<Space>> for BranchReference {
 }
 
 impl BranchReference {
-    /// The subject DID this branch belongs to.
-    pub fn subject(&self) -> &Did {
+    /// The DID of the repository this branch belongs to.
+    pub fn of(&self) -> &Did {
         self.0.subject()
+    }
+
+    /// The subject (repository) this branch belongs to.
+    pub fn subject(&self) -> Subject {
+        Subject::from(self.of().clone())
     }
 
     /// The branch name, extracted from the space path.
@@ -55,11 +60,6 @@ impl BranchReference {
 
     /// Create a typed cell within this branch's space.
     pub fn cell<T>(&self, cell_name: impl Into<String>) -> Cell<T> {
-        self.cell_capability(cell_name).into()
-    }
-
-    /// Return the raw cell capability without wrapping in [`Cell<T>`].
-    pub fn cell_capability(&self, cell_name: impl Into<String>) -> Capability<CellCapability> {
-        self.0.clone().cell(cell_name)
+        self.0.clone().cell(cell_name).into()
     }
 }

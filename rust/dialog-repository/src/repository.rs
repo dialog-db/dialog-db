@@ -130,9 +130,7 @@ impl TryFrom<Credential> for Repository<SignerCredential> {
     fn try_from(credential: Credential) -> Result<Self, RepositoryError> {
         match credential {
             Credential::Signer(s) => Ok(Self::new(s)),
-            Credential::Verifier(_) => Err(RepositoryError::StorageError(
-                "repository credential is verifier-only".into(),
-            )),
+            Credential::Verifier(_) => Err(RepositoryError::SignerRequired),
         }
     }
 }
@@ -177,6 +175,7 @@ mod tests {
 
     use super::*;
     use crate::helpers::{test_operator_with_profile, test_repo, unique_name};
+    use anyhow::Result;
     use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
     use dialog_remote_s3::Address as S3Address;
     use futures_util::StreamExt;
@@ -227,7 +226,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_opens_branch_via_repository() -> anyhow::Result<()> {
+    async fn it_opens_branch_via_repository() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
 
@@ -243,7 +242,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_loads_branch_via_repository() -> anyhow::Result<()> {
+    async fn it_loads_branch_via_repository() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
 
@@ -266,7 +265,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_commits_via_repository() -> anyhow::Result<()> {
+    async fn it_commits_via_repository() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
 
@@ -291,7 +290,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_adds_and_loads_remote_via_repository() -> anyhow::Result<()> {
+    async fn it_adds_and_loads_remote_via_repository() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
 
@@ -310,7 +309,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_opens_repository_by_name() -> anyhow::Result<()> {
+    async fn it_opens_repository_by_name() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
 
         let repo = profile
@@ -327,7 +326,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_reopens_same_repository() -> anyhow::Result<()> {
+    async fn it_reopens_same_repository() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let name = unique_name("home");
 
@@ -350,7 +349,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_isolates_repositories_by_name() -> anyhow::Result<()> {
+    async fn it_isolates_repositories_by_name() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
 
         let repo1 = profile
@@ -374,7 +373,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_commits_and_selects_by_attribute() -> anyhow::Result<()> {
+    async fn it_commits_and_selects_by_attribute() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
 
@@ -431,7 +430,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_commits_and_selects_by_entity() -> anyhow::Result<()> {
+    async fn it_commits_and_selects_by_entity() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
 
@@ -479,7 +478,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_selects_empty_branch() -> anyhow::Result<()> {
+    async fn it_selects_empty_branch() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
 
@@ -501,7 +500,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_retracts_artifact() -> anyhow::Result<()> {
+    async fn it_retracts_artifact() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
 
@@ -557,7 +556,7 @@ mod tests {
         use dialog_effects::memory as fx_memory;
 
         #[dialog_common::test]
-        async fn it_delegates_repo_to_profile_and_claims() -> anyhow::Result<()> {
+        async fn it_delegates_repo_to_profile_and_claims() -> Result<()> {
             let (operator, profile) = test_operator_with_profile().await;
             let repo = profile
                 .repository(unique_name("home"))
@@ -591,7 +590,7 @@ mod tests {
         }
 
         #[dialog_common::test]
-        async fn it_enforces_scoped_delegation_policy() -> anyhow::Result<()> {
+        async fn it_enforces_scoped_delegation_policy() -> Result<()> {
             let (operator, profile) = test_operator_with_profile().await;
             let repo = profile
                 .repository(unique_name("home"))
@@ -639,7 +638,7 @@ mod tests {
         }
 
         #[dialog_common::test]
-        async fn it_validates_delegation_against_policy() -> anyhow::Result<()> {
+        async fn it_validates_delegation_against_policy() -> Result<()> {
             let (operator, profile) = test_operator_with_profile().await;
             let repo = profile
                 .repository(unique_name("home"))

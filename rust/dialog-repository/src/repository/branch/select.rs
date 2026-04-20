@@ -3,7 +3,7 @@ use dialog_artifacts::{
     Artifact, ArtifactSelector, AttributeKey, Datum, DialogArtifactsError, EntityKey, Key,
     KeyViewConstruct, KeyViewMut, MatchCandidate, State, ValueKey,
 };
-use dialog_capability::{Capability, Fork, Provider, Subject};
+use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_effects::archive::{Catalog, Get, Put};
@@ -16,6 +16,7 @@ use std::ops::Range;
 use super::{Branch, Index, UpstreamState};
 use crate::repository::archive::RepositoryArchiveExt as _;
 use crate::repository::archive::networked::NetworkedIndex;
+use crate::repository::error::RepositoryError;
 use crate::repository::memory::RepositoryMemoryExt;
 use crate::repository::remote::RemoteSite;
 
@@ -40,19 +41,21 @@ impl<'a> Select<'a> {
     }
 
     fn catalog(&self) -> Capability<Catalog> {
-        Subject::from(self.branch.subject().clone())
-            .archive()
-            .index()
+        self.branch.subject().archive().index()
     }
 }
 
 impl Select<'_> {
     /// Execute the select, using fallback to remote if the branch has
     /// a remote upstream.
+    ///
+    /// The per-item error type remains [`DialogArtifactsError`] because
+    /// stream items surface artifact-decoding errors that the caller may
+    /// want to inspect directly.
     pub async fn perform<Env>(
         self,
         env: &Env,
-    ) -> Result<impl Stream<Item = Result<Artifact, DialogArtifactsError>>, DialogArtifactsError>
+    ) -> Result<impl Stream<Item = Result<Artifact, DialogArtifactsError>>, RepositoryError>
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -63,14 +66,14 @@ impl Select<'_> {
             + 'static,
     {
         let remote = match self.branch.upstream() {
-            Some(UpstreamState::Remote { name, .. }) => {
-                Subject::from(self.branch.subject().clone())
-                    .remote(name)
-                    .load()
-                    .perform(env)
-                    .await
-                    .ok()
-            }
+            Some(UpstreamState::Remote { name, .. }) => self
+                .branch
+                .subject()
+                .remote(name)
+                .load()
+                .perform(env)
+                .await
+                .ok(),
             _ => None,
         };
 
@@ -81,7 +84,7 @@ impl Select<'_> {
     async fn execute<'s, S>(
         self,
         store: S,
-    ) -> Result<impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's, DialogArtifactsError>
+    ) -> Result<impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's, RepositoryError>
     where
         S: ContentAddressedStorage<Hash = Blake3Hash, Error = DialogStorageError>
             + Clone

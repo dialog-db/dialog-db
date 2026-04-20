@@ -1,18 +1,17 @@
-use dialog_artifacts::DialogArtifactsError;
-use dialog_capability::{Fork, Policy, Provider, Subject};
+use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
-use dialog_effects::authority::{Identify, Operator, Profile};
+use dialog_effects::authority::{Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_prolly_tree::{EMPT_TREE_HASH, Tree};
 use dialog_storage::{Blake3Hash, ContentAddressedStorage, DialogStorageError, Encoder};
 use futures_util::StreamExt;
-use std::collections::HashSet;
 
 use super::{Branch, Index, UpstreamState};
 use crate::repository::archive::RepositoryArchiveExt as _;
 use crate::repository::archive::local::LocalIndex;
 use crate::repository::archive::networked::NetworkedIndex;
+use crate::repository::error::RepositoryError;
 use crate::repository::memory::RepositoryMemoryExt;
 use crate::repository::remote::RemoteSite;
 use crate::repository::revision::Revision;
@@ -38,7 +37,7 @@ impl<'a> PullLocal<'a> {
 
 impl PullLocal<'_> {
     /// Execute the merge, returning the new revision (or None if no changes).
-    pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, DialogArtifactsError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, RepositoryError>
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -90,7 +89,7 @@ impl Branch {
 
 impl Pull<'_> {
     /// Execute the pull operation.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, DialogArtifactsError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, RepositoryError>
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -103,18 +102,15 @@ impl Pull<'_> {
             + 'static,
     {
         let branch = self.branch;
-        let upstream = branch.upstream().ok_or_else(|| {
-            DialogArtifactsError::Storage(format!("Branch {} has no upstream", branch.name()))
-        })?;
+        let upstream = branch
+            .upstream()
+            .ok_or_else(|| RepositoryError::BranchHasNoUpstream {
+                name: branch.name().to_string(),
+            })?;
 
         match upstream {
             UpstreamState::Local { branch: id, .. } => {
-                let upstream_branch = Subject::from(branch.subject().clone())
-                    .branch(id)
-                    .load()
-                    .perform(env)
-                    .await
-                    .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
+                let upstream_branch = branch.subject().branch(id).load().perform(env).await?;
 
                 match upstream_branch.revision() {
                     Some(rev) => branch.merge(rev).perform(env).await,
@@ -126,25 +122,11 @@ impl Pull<'_> {
                 branch: branch_name,
                 ..
             } => {
-                let remote_repo = Subject::from(branch.subject().clone())
-                    .remote(name)
-                    .load()
-                    .perform(env)
-                    .await
-                    .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
+                let remote_repo = branch.subject().remote(name).load().perform(env).await?;
 
-                let remote_branch = remote_repo
-                    .branch(branch_name)
-                    .open()
-                    .perform(env)
-                    .await
-                    .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
+                let remote_branch = remote_repo.branch(branch_name).open().perform(env).await?;
 
-                let upstream_revision = remote_branch.fetch().perform(env).await.map_err(|e| {
-                    DialogArtifactsError::Storage(format!("Failed to fetch remote: {:?}", e))
-                })?;
-
-                let upstream_revision = match upstream_revision {
+                let upstream_revision = match remote_branch.fetch().perform(env).await? {
                     Some(rev) => rev,
                     None => return Ok(None),
                 };
@@ -163,7 +145,7 @@ impl Pull<'_> {
 
                 let result = three_way_merge(branch, upstream_revision, store.clone(), env).await?;
 
-                // Replicate all tree blocks to local storage
+                // Replicate all tree blocks to local storage.
                 if let Some(rev) = branch.revision() {
                     let target: Index = Tree::from_hash(rev.tree.hash(), &store).await?;
                     let stream = target.stream(&store);
@@ -187,7 +169,7 @@ async fn three_way_merge<S>(
     upstream_revision: Revision,
     store: S,
     env: &(impl Provider<Resolve> + Provider<Publish> + Provider<Identify> + ConditionalSync),
-) -> Result<Option<Revision>, DialogArtifactsError>
+) -> Result<Option<Revision>, RepositoryError>
 where
     S: ContentAddressedStorage<Hash = Blake3Hash, Error = DialogStorageError>
         + Encoder<Hash = Blake3Hash, Error = DialogStorageError>
@@ -214,26 +196,25 @@ where
     let mut write_store = store;
     Box::pin(target.integrate(changes, &mut write_store)).await?;
 
-    let hash = target.hash().cloned().unwrap_or(EMPT_TREE_HASH);
+    let tree = TreeReference::from(target.hash().copied().unwrap_or(EMPT_TREE_HASH));
 
-    let new_revision = if &hash == upstream_revision.tree.hash() {
-        upstream_revision.clone()
-    } else {
-        let auth = Identify
-            .perform(env)
-            .await
-            .map_err(|e| DialogArtifactsError::Storage(format!("Identify failed: {}", e)))?;
-
-        let branch_period = branch_revision.as_ref().map(|r| r.period).unwrap_or(0);
-
-        Revision {
-            subject: auth.subject().clone(),
-            issuer: Operator::of(&auth).operator.clone(),
-            authority: Profile::of(&auth).profile.clone(),
-            tree: TreeReference::from(hash),
-            cause: HashSet::from([upstream_revision.tree.clone()]),
-            period: upstream_revision.period.max(branch_period) + 1,
-            moment: 0,
+    let new_revision = match branch_revision {
+        // Merging produced the upstream tree verbatim (fast-forward): just
+        // adopt the upstream revision — there's nothing novel to attribute.
+        _ if tree == upstream_revision.tree => upstream_revision.clone(),
+        // Branch has no prior revision to merge against; adopt the upstream
+        // revision directly (its identity still applies).
+        None => upstream_revision.clone(),
+        // Real three-way merge: mint a revision attributed to the current
+        // authority combining both sides.
+        Some(base) => {
+            let authority = Identify.perform(env).await?;
+            base.merge(
+                &upstream_revision,
+                tree,
+                authority.did(),
+                authority.profile().clone(),
+            )
         }
     };
 
@@ -241,16 +222,14 @@ where
         .revision
         .publish(new_revision.clone())
         .perform(env)
-        .await
-        .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
+        .await?;
 
     if let Some(upstream) = branch.upstream() {
         branch
             .upstream
             .publish(upstream.with_tree(upstream_revision.tree.clone()))
             .perform(env)
-            .await
-            .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
+            .await?;
     }
 
     Ok(Some(new_revision))
@@ -262,12 +241,13 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use crate::helpers::{test_operator_with_profile, test_repo};
+    use anyhow::Result;
 
     use dialog_artifacts::{Artifact, Instruction, Value};
     use futures_util::stream;
 
     #[dialog_common::test]
-    async fn it_pulls_from_local_upstream_no_changes() -> anyhow::Result<()> {
+    async fn it_pulls_from_local_upstream_no_changes() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
 
@@ -291,7 +271,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_pulls_upstream_changes_without_local_changes() -> anyhow::Result<()> {
+    async fn it_pulls_upstream_changes_without_local_changes() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
 
@@ -321,7 +301,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_pulls_and_merges_with_both_sides_changed() -> anyhow::Result<()> {
+    async fn it_pulls_and_merges_with_both_sides_changed() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
 

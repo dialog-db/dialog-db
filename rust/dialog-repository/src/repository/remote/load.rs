@@ -33,6 +33,10 @@ impl LoadRemote {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use anyhow::Result;
     use dialog_credentials::Ed25519Signer;
     use dialog_remote_s3::Address;
     use dialog_storage::provider::Volatile;
@@ -56,7 +60,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_loads_existing_remote() -> anyhow::Result<()> {
+    async fn it_loads_existing_remote() -> Result<()> {
         let env = Volatile::new();
         let repo = Repository::from(test_signer().await);
 
@@ -73,7 +77,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_errors_loading_missing_remote() -> anyhow::Result<()> {
+    async fn it_errors_loading_missing_remote() -> Result<()> {
         let env = Volatile::new();
         let repo = Repository::from(test_signer().await);
 

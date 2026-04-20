@@ -44,6 +44,7 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    use anyhow::Result;
     use std::collections::HashSet;
 
     use dialog_capability::Subject;
@@ -56,7 +57,7 @@ mod tests {
     use crate::repository::tree::TreeReference;
 
     #[dialog_common::test]
-    async fn it_sets_revision() -> anyhow::Result<()> {
+    async fn it_sets_revision() -> Result<()> {
         let provider = Volatile::new();
         let subject = Subject::from(did!("key:zBranchResetTest"));
 

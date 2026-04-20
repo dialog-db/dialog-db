@@ -71,13 +71,18 @@ impl Branch {
         self.upstream.content()
     }
 
-    /// Returns the subject DID.
-    pub fn subject(&self) -> &Did {
+    /// Returns the DID of the host repository.
+    pub fn of(&self) -> &Did {
+        self.reference.of()
+    }
+
+    /// The subject (repository) this branch lives in.
+    pub fn subject(&self) -> Subject {
         self.reference.subject()
     }
 
     /// Archive capability for this branch's subject.
     pub fn archive(&self) -> Capability<Archive> {
-        Subject::from(self.subject().clone()).archive()
+        self.subject().archive()
     }
 }

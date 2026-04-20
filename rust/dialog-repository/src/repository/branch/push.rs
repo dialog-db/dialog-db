@@ -1,4 +1,4 @@
-use dialog_capability::{Fork, Provider, Subject};
+use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::memory::{Publish, Resolve};
@@ -67,7 +67,8 @@ impl Push<'_> {
                 // Fast-forward push to local upstream. Use `.open()` so
                 // pushing into an upstream branch with no prior commits
                 // still works — the upstream just starts at our tree.
-                let upstream_branch = Subject::from(branch.subject().clone())
+                let upstream_branch = branch
+                    .subject()
                     .branch(upstream_name.clone())
                     .open()
                     .perform(env)
@@ -114,7 +115,8 @@ impl Push<'_> {
                     .unwrap_or_default();
 
                 // Load remote repository and open remote branch
-                let remote_repo = Subject::from(branch.subject().clone())
+                let remote_repo = branch
+                    .subject()
                     .remote(remote_name.clone())
                     .load()
                     .perform(env)
@@ -175,12 +177,13 @@ mod tests {
     use crate::helpers::{test_operator_with_profile, test_repo};
     use crate::repository::branch::UpstreamState;
     use crate::repository::tree::TreeReference;
+    use anyhow::Result;
 
     use dialog_artifacts::{Artifact, Instruction, Value};
     use futures_util::stream;
 
     #[dialog_common::test]
-    async fn it_pushes_to_local_upstream() -> anyhow::Result<()> {
+    async fn it_pushes_to_local_upstream() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
 
@@ -221,7 +224,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_returns_none_when_local_upstream_diverged() -> anyhow::Result<()> {
+    async fn it_returns_none_when_local_upstream_diverged() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
 
@@ -262,7 +265,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_has_no_upstream_by_default() -> anyhow::Result<()> {
+    async fn it_has_no_upstream_by_default() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("feature").open().perform(&operator).await?;

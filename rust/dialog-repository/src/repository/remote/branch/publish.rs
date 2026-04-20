@@ -42,9 +42,13 @@ impl<'a> PublishRemoteBranch<'a> {
 
         // Persist the remote edition so that a future RemoteBranchReference
         // can hydrate its in-memory `remote` cache without a round trip.
-        let edition = self.branch.remote.edition().ok_or_else(|| {
-            RepositoryError::StorageError("remote cell missing edition after publish".into())
-        })?;
+        let edition =
+            self.branch
+                .remote
+                .edition()
+                .ok_or_else(|| RepositoryError::InvalidState {
+                    message: "remote cell missing edition after publish".into(),
+                })?;
         self.branch.cache.publish(edition).perform(env).await?;
 
         Ok(())

@@ -3,6 +3,11 @@
 //! These tests require `--features integration-tests` and spin up real
 //! local S3 (and UCAN access) servers via `#[dialog_common::test]`.
 
+#[cfg(target_arch = "wasm32")]
+wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+use anyhow::Result;
+
 use crate::SiteAddress;
 use crate::helpers::{test_operator_with_profile, unique_name};
 use crate::repository::branch::Branch;
@@ -34,7 +39,7 @@ async fn setup_repo_with_s3_remote(
     profile: &Profile,
     s3: &S3Address,
     name: &str,
-) -> anyhow::Result<(Repository<SignerCredential>, Branch)> {
+) -> Result<(Repository<SignerCredential>, Branch)> {
     let repo = profile
         .repository(unique_name(name))
         .create()
@@ -66,7 +71,7 @@ async fn setup_repo_with_s3_remote(
 }
 
 #[dialog_common::test]
-async fn it_pushes_to_s3_remote(s3: S3Address) -> anyhow::Result<()> {
+async fn it_pushes_to_s3_remote(s3: S3Address) -> Result<()> {
     let (operator, profile) = test_operator_with_profile().await;
     let (_repo, branch) = setup_repo_with_s3_remote(&operator, &profile, &s3, "push").await?;
 
@@ -88,7 +93,7 @@ async fn it_pushes_to_s3_remote(s3: S3Address) -> anyhow::Result<()> {
 }
 
 #[dialog_common::test]
-async fn it_fetches_from_s3_remote(s3: S3Address) -> anyhow::Result<()> {
+async fn it_fetches_from_s3_remote(s3: S3Address) -> Result<()> {
     let (operator, profile) = test_operator_with_profile().await;
     let (_repo, branch) = setup_repo_with_s3_remote(&operator, &profile, &s3, "fetch").await?;
 
@@ -112,7 +117,7 @@ async fn it_fetches_from_s3_remote(s3: S3Address) -> anyhow::Result<()> {
 }
 
 #[dialog_common::test]
-async fn it_push_and_pull_roundtrip(s3: S3Address) -> anyhow::Result<()> {
+async fn it_push_and_pull_roundtrip(s3: S3Address) -> Result<()> {
     let (operator, profile) = test_operator_with_profile().await;
     let (_repo, branch) = setup_repo_with_s3_remote(&operator, &profile, &s3, "roundtrip").await?;
 
@@ -138,7 +143,7 @@ async fn it_push_and_pull_roundtrip(s3: S3Address) -> anyhow::Result<()> {
 }
 
 #[dialog_common::test]
-async fn it_pull_returns_none_when_no_changes(s3: S3Address) -> anyhow::Result<()> {
+async fn it_pull_returns_none_when_no_changes(s3: S3Address) -> Result<()> {
     let (operator, profile) = test_operator_with_profile().await;
     let (_repo, branch) = setup_repo_with_s3_remote(&operator, &profile, &s3, "no-change").await?;
 
@@ -166,7 +171,7 @@ async fn it_pull_returns_none_when_no_changes(s3: S3Address) -> anyhow::Result<(
 }
 
 #[dialog_common::test]
-async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> anyhow::Result<()> {
+async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> Result<()> {
     let (operator, profile) = test_operator_with_profile().await;
 
     // Alice creates repo, commits, and pushes
@@ -232,7 +237,7 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> anyhow::Result
 }
 
 #[dialog_common::test]
-async fn it_two_party_convergence(s3: S3Address) -> anyhow::Result<()> {
+async fn it_two_party_convergence(s3: S3Address) -> Result<()> {
     let (operator, profile) = test_operator_with_profile().await;
 
     // Alice commits and pushes
@@ -335,7 +340,7 @@ use dialog_remote_ucan_s3::helpers::UcanS3Address;
 /// Alice creates a repo, delegates to Bob, Bob pulls, commits, pushes,
 /// then Alice pulls Bob's changes.
 #[dialog_common::test]
-async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> anyhow::Result<()> {
+async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> Result<()> {
     // Alice: create profile, operator, repo
     let (alice_operator, alice_profile) = test_operator_with_profile().await;
     let alice_repo = alice_profile
@@ -496,7 +501,7 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> anyhow::Res
 
 /// Push and pull via UCAN access service.
 #[dialog_common::test]
-async fn it_pushes_and_pulls_via_ucan(ucan: UcanS3Address) -> anyhow::Result<()> {
+async fn it_pushes_and_pulls_via_ucan(ucan: UcanS3Address) -> Result<()> {
     let (operator, profile) = test_operator_with_profile().await;
 
     // Create repo and delegate ownership to the profile
@@ -568,7 +573,7 @@ async fn it_pushes_and_pulls_via_ucan(ucan: UcanS3Address) -> anyhow::Result<()>
 /// Query an empty local replica. Data replicates on demand from the
 /// remote. After removing the upstream, data is still available locally.
 #[dialog_common::test]
-async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> anyhow::Result<()> {
+async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> Result<()> {
     let (operator, profile) = test_operator_with_profile().await;
 
     // Alice: create repo, commit data, push to remote
@@ -685,7 +690,7 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> anyhow::Re
 
 /// Delegate repo to profile, push data to S3, pull from a new operator.
 #[dialog_common::test]
-async fn it_delegates_and_pushes_to_s3(s3: S3Address) -> anyhow::Result<()> {
+async fn it_delegates_and_pushes_to_s3(s3: S3Address) -> Result<()> {
     let (operator, profile) = test_operator_with_profile().await;
     let repo = profile
         .repository(unique_name("deleg-push"))
@@ -744,7 +749,7 @@ async fn it_delegates_and_pushes_to_s3(s3: S3Address) -> anyhow::Result<()> {
 
 /// Alice delegates, pushes to S3; Bob pulls and verifies data arrived.
 #[dialog_common::test]
-async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> anyhow::Result<()> {
+async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> Result<()> {
     let (alice_operator, alice_profile) = test_operator_with_profile().await;
     let alice_repo = alice_profile
         .repository(unique_name("deleg-pull-a"))

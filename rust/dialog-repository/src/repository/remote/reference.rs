@@ -1,6 +1,6 @@
 use dialog_capability::{Capability, Did, Policy};
+use dialog_effects::memory::Space;
 use dialog_effects::memory::prelude::SpaceExt;
-use dialog_effects::memory::{Cell as CellCapability, Space};
 
 use super::{CreateRemote, LoadRemote, RemoteAddress, SiteAddress};
 use crate::repository::memory::Cell;
@@ -46,11 +46,6 @@ impl RemoteReference {
     /// Create a typed cell within this remote's space.
     pub fn cell<T>(&self, cell_name: impl Into<String>) -> Cell<T> {
         self.0.clone().cell(cell_name).into()
-    }
-
-    /// Return the raw cell capability without wrapping in [`Cell<T>`].
-    pub fn cell_capability(&self, cell_name: impl Into<String>) -> Capability<CellCapability> {
-        self.0.clone().cell(cell_name)
     }
 
     /// Create a new remote with a site address.

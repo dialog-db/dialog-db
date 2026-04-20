@@ -59,11 +59,12 @@ mod tests {
     use crate::repository::branch::UpstreamState;
     use crate::repository::error::RepositoryError;
     use crate::repository::tree::TreeReference;
+    use anyhow::Result;
 
     use crate::helpers::{test_operator_with_profile, test_repo};
 
     #[dialog_common::test]
-    async fn it_sets_local_upstream() -> anyhow::Result<()> {
+    async fn it_sets_local_upstream() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
 
@@ -93,7 +94,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_sets_remote_upstream() -> anyhow::Result<()> {
+    async fn it_sets_remote_upstream() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -120,7 +121,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_errors_setting_upstream_to_self() -> anyhow::Result<()> {
+    async fn it_errors_setting_upstream_to_self() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;

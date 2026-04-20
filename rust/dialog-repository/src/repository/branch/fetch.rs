@@ -1,4 +1,4 @@
-use dialog_capability::{Fork, Provider, Subject};
+use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::memory::{Publish, Resolve};
 
@@ -53,7 +53,9 @@ impl Fetch<'_> {
 
         match &upstream {
             UpstreamState::Local { branch: name, .. } => {
-                let upstream = Subject::from(self.branch.subject().clone())
+                let upstream = self
+                    .branch
+                    .subject()
                     .branch(name.clone())
                     .load()
                     .perform(env)
@@ -65,7 +67,9 @@ impl Fetch<'_> {
                 branch: branch_name,
                 ..
             } => {
-                let remote_repo = Subject::from(self.branch.subject().clone())
+                let remote_repo = self
+                    .branch
+                    .subject()
                     .remote(name.clone())
                     .load()
                     .perform(env)
@@ -88,12 +92,13 @@ mod tests {
     use crate::helpers::{test_operator_with_profile, test_repo};
     use crate::repository::branch::UpstreamState;
     use crate::repository::tree::TreeReference;
+    use anyhow::Result;
 
     use dialog_artifacts::{Artifact, Instruction, Value};
     use futures_util::stream;
 
     #[dialog_common::test]
-    async fn it_fetches_local_upstream_revision() -> anyhow::Result<()> {
+    async fn it_fetches_local_upstream_revision() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
 
@@ -127,7 +132,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_does_not_modify_local_state_on_fetch() -> anyhow::Result<()> {
+    async fn it_does_not_modify_local_state_on_fetch() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
 
