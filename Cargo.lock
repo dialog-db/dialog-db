@@ -1015,8 +1015,10 @@ name = "dialog-effects"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base58",
  "dialog-capability",
  "dialog-common",
+ "dialog-credentials",
  "serde",
  "serde_bytes",
  "thiserror 2.0.18",

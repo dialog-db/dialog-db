@@ -16,9 +16,10 @@ use std::error::Error;
 
 pub use dialog_capability::{
     Attenuate, Attenuation, Capability, DialogCapabilityAuthorizationError,
-    DialogCapabilityPerformError, Effect, Policy, Subject,
+    DialogCapabilityPerformError, Effect, Policy, StorageError, Subject,
 };
 pub use dialog_common::Blake3Hash;
+use dialog_common::Checksum;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -106,6 +107,7 @@ pub struct Put {
     pub digest: Blake3Hash,
     /// The content to store.
     #[serde(with = "serde_bytes")]
+    #[attenuate(into = Checksum, with = Checksum::sha256, rename = checksum)]
     pub content: Vec<u8>,
 }
 
@@ -148,6 +150,8 @@ impl PutCapability for Capability<Put> {
     }
 }
 
+pub mod prelude;
+
 /// Errors that can occur during archive operations.
 #[derive(Debug, Error)]
 pub enum ArchiveError {
@@ -175,6 +179,12 @@ pub enum ArchiveError {
     /// IO error.
     #[error("IO error: {0}")]
     Io(String),
+}
+
+impl From<StorageError> for ArchiveError {
+    fn from(e: StorageError) -> Self {
+        Self::Storage(e.to_string())
+    }
 }
 
 impl From<DialogCapabilityAuthorizationError> for ArchiveError {
