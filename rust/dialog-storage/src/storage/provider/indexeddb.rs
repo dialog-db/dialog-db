@@ -1,52 +1,64 @@
 //! IndexedDB-based storage provider for WASM environments.
 //!
-//! This provider implements the capability-based storage API using IndexedDB
-//! as the underlying storage mechanism. Each subject DID maps to a separate
-//! IndexedDB database, with object stores that are created dynamically as needed.
+//! Each space maps to a single IndexedDB database whose name is derived from
+//! the [`Location`](dialog_effects::storage::Location):
 //!
-//! # Database Structure
+//! - `Directory::Profile` with name "alice" -> database `"alice.profile"`
+//! - `Directory::Current` with name "contacts" -> database `"contacts"`
+//! - `Directory::Temp` with name "scratch" -> database `"temp.scratch"`
 //!
-//! For each subject DID, a database is created with object stores:
+//! Within each database, object stores are created dynamically:
 //!
-//! - `archive/{catalog}` - Content-addressed blob storage (one store per catalog)
-//! - `memory` - Transactional memory storage (memory space is encoded in the key)
+//! - `archive/{catalog}` - Content-addressed blob storage
+//! - `memory` - Transactional memory (space/cell encoded in key)
+//! - `credential` - Credential storage (address as key)
 //!
-//! # Dynamic Store Creation
+//! # Connection Sharing
 //!
-//! Stores are created on-demand. When an operation requires a store that doesn't
-//! exist, the database is closed, reopened with an incremented version, and the
-//! new store is created during the upgrade.
+//! Multiple `IndexedDb` instances for the same database share a single
+//! connection via a thread-local pool. This is necessary because
+//! [`Space`](crate::provider::space::Space) may hold the same backend
+//! type in multiple fields (archive, memory, credential, certificate),
+//! and having independent connections to the same database causes
+//! upgrade conflicts: when one connection upgrades the schema to add a
+//! new object store, the browser blocks until all other connections to
+//! that database are closed.
+//!
+//! The pool entry is removed automatically when the last clone drops.
 //!
 //! # Example
 //!
 //! ```no_run
 //! use dialog_storage::provider::IndexedDb;
-//! use dialog_capability::{did, Subject};
-//! use dialog_effects::archive::{Archive, Catalog, Get};
+//! use dialog_storage::resource::Resource;
+//! use dialog_effects::storage::{Directory, Location};
+//! use dialog_effects::prelude::*;
 //! use dialog_common::Blake3Hash;
 //!
 //! # async fn example() -> anyhow::Result<()> {
-//! let provider = IndexedDb::new();
+//! let location = Location::new(Directory::Profile, "alice");
+//! let provider = IndexedDb::open(&location).await?;
 //! let digest = Blake3Hash::hash(b"hello");
 //!
-//! let effect = Subject::from(did!("key:z6Mk..."))
-//!     .attenuate(Archive)
-//!     .attenuate(Catalog::new("index"))
-//!     .invoke(Get::new(digest));
-//!
-//! let result = effect.perform(&provider).await?;
+//! let result = dialog_capability::did!("key:z6Mk...")
+//!     .archive()
+//!     .catalog("index")
+//!     .get(digest)
+//!     .perform(&provider)
+//!     .await?;
 //! # Ok(())
 //! # }
 //! ```
 
 mod archive;
+mod credential;
 mod memory;
 
-use dialog_capability::Did;
 use js_sys::Uint8Array;
 use rexie::{ObjectStore, Rexie, RexieBuilder, TransactionMode};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 /// Convert bytes to a JS Uint8Array.
 fn to_uint8array(bytes: &[u8]) -> Uint8Array {
@@ -55,26 +67,17 @@ fn to_uint8array(bytes: &[u8]) -> Uint8Array {
     array
 }
 
-/// A session represents an open connection to a subject's IndexedDB database.
-///
-/// Stores are populated from whatever exists in the database on open,
-/// and new stores are created via upgrade when needed.
-struct Session {
-    /// Database name (subject DID).
+/// Shared database state.
+struct Connection {
     name: String,
-    /// Current database version.
     version: u32,
-    /// Set of object stores in this database.
     stores: HashSet<String>,
-    /// Open database connection. Option used to allow taking ownership for close().
-    db: Option<Rexie>,
+    /// Shared via Rc so StoreSession can hold a clone across .await
+    /// points without borrowing the Connection.
+    db: Rc<Rexie>,
 }
 
-impl Session {
-    /// Opens the database without specifying a version.
-    ///
-    /// This opens whatever version currently exists, or creates a new
-    /// database at version 1 if it doesn't exist.
+impl Connection {
     async fn open(name: &str) -> Result<Self, IndexedDbError> {
         let db = RexieBuilder::new(name)
             .build()
@@ -90,66 +93,24 @@ impl Session {
             name: name.to_string(),
             version,
             stores,
-            db: Some(db),
+            db: Rc::new(db),
         })
     }
 
-    /// Closes the database connection.
-    fn close(&mut self) {
-        if let Some(db) = self.db.take() {
-            db.close();
-        }
-    }
-
-    /// Upgrades the database to add new stores.
-    ///
-    /// Closes the current connection, increments the version, and reopens
-    /// with the new stores added.
-    async fn upgrade(&mut self, stores: HashSet<String>) -> Result<(), IndexedDbError> {
-        self.close();
-
-        let new_version = self.version + 1;
-        let mut builder = RexieBuilder::new(&self.name).version(new_version);
-        for store in &stores {
-            builder = builder.add_object_store(ObjectStore::new(store).auto_increment(false));
-        }
-
-        let db = builder
-            .build()
-            .await
-            .map_err(|e| IndexedDbError::Database(format!("{:?}", e)))?;
-
-        self.version = db
-            .version()
-            .map_err(|e| IndexedDbError::Database(e.to_string()))?;
-        self.stores = db.store_names().into_iter().collect();
-        self.db = Some(db);
-        Ok(())
-    }
-
-    /// Gets a store handle, upgrading the database if needed.
-    async fn store(&mut self, store_path: &str) -> Result<Store<'_>, IndexedDbError> {
-        if !self.stores.contains(store_path) {
-            let mut stores = self.stores.clone();
-            stores.insert(store_path.to_string());
-            self.upgrade(stores).await?;
-        }
-
-        Ok(Store {
-            db: self.db.as_ref().unwrap(),
-            name: self.stores.get(store_path).unwrap(),
-        })
+    /// Returns a clone of the database handle.
+    fn db(&self) -> Rc<Rexie> {
+        self.db.clone()
     }
 }
 
-/// A temporary handle to a specific object store for performing operations.
-struct Store<'a> {
-    db: &'a Rexie,
-    name: &'a String,
+/// A handle to a named object store. Holds a shared `Rc<Rexie>` so it
+/// can be used freely across .await points.
+struct StoreSession {
+    db: Rc<Rexie>,
+    store_name: String,
 }
 
-impl<'a> Store<'a> {
-    /// Executes a read-only query on this store.
+impl StoreSession {
     async fn query<F, Fut, Output, E>(&self, select: F) -> Result<Output, E>
     where
         F: FnOnce(rexie::Store) -> Fut,
@@ -158,11 +119,11 @@ impl<'a> Store<'a> {
     {
         let tx = self
             .db
-            .transaction(&[self.name], TransactionMode::ReadOnly)
+            .transaction(&[&self.store_name], TransactionMode::ReadOnly)
             .map_err(|e| IndexedDbError::Transaction(e.to_string()))?;
 
         let object_store = tx
-            .store(self.name)
+            .store(&self.store_name)
             .map_err(|e| IndexedDbError::Store(e.to_string()))?;
 
         let result = select(object_store).await?;
@@ -174,7 +135,6 @@ impl<'a> Store<'a> {
         Ok(result)
     }
 
-    /// Executes a read-write transaction on this store.
     async fn transact<F, Fut, Output, E>(&self, mutate: F) -> Result<Output, E>
     where
         F: FnOnce(rexie::Store) -> Fut,
@@ -183,11 +143,11 @@ impl<'a> Store<'a> {
     {
         let tx = self
             .db
-            .transaction(&[self.name], TransactionMode::ReadWrite)
+            .transaction(&[&self.store_name], TransactionMode::ReadWrite)
             .map_err(|e| IndexedDbError::Transaction(e.to_string()))?;
 
         let object_store = tx
-            .store(self.name)
+            .store(&self.store_name)
             .map_err(|e| IndexedDbError::Store(e.to_string()))?;
 
         let result = mutate(object_store).await?;
@@ -200,65 +160,129 @@ impl<'a> Store<'a> {
     }
 }
 
+// Thread-local connection pool. When Space holds multiple IndexedDb fields
+// for the same database, they all share one Connection via this pool.
+// The entry is removed when the last IndexedDb clone for that database drops.
+thread_local! {
+    static CONNECTIONS: RefCell<HashMap<String, Rc<RefCell<Connection>>>> =
+        RefCell::new(HashMap::new());
+}
+
 /// IndexedDB-based storage provider.
 ///
-/// Manages IndexedDB databases keyed by subject DID. Each subject gets its own
-/// database with object stores for archive and memory operations.
-///
-/// Databases are opened lazily on first access and stores are created dynamically
-/// as needed.
-///
-/// Uses `RefCell` for interior mutability since this provider only targets
-/// wasm32 (single-threaded). This avoids the overhead and poisoning concerns
-/// of `RwLock`.
+/// Each instance is bound to a database name derived from a
+/// [`Location`](dialog_effects::storage::Location). Clones share
+/// the same database connection via an internal `Rc`.
+#[derive(Clone)]
 pub struct IndexedDb {
-    /// Cached database sessions keyed by subject DID.
-    sessions: RefCell<HashMap<Did, Session>>,
+    name: String,
+    connection: Rc<RefCell<Connection>>,
 }
 
 impl IndexedDb {
-    /// Creates a new IndexedDB provider.
-    pub fn new() -> Self {
-        Self {
-            sessions: RefCell::new(HashMap::new()),
-        }
-    }
-
-    /// Opens or returns an existing session for the given subject.
+    /// Opens or retrieves a shared connection for the given database name.
     ///
-    /// Checks for an existing session via a short borrow, drops it before
-    /// any async work, then borrows mutably to insert a new session if needed.
-    async fn open(&self, subject: &Did) -> Result<(), IndexedDbError> {
-        let exists = self.sessions.borrow().contains_key(subject);
-        if !exists {
-            let session = Session::open(subject.as_ref()).await?;
-            self.sessions.borrow_mut().insert(subject.clone(), session);
-        }
-        Ok(())
+    /// If a connection already exists in the thread-local pool, returns a
+    /// clone sharing that connection. Otherwise opens a new database and
+    /// registers it in the pool.
+    async fn connect(name: String) -> Result<Self, IndexedDbError> {
+        let existing = CONNECTIONS.with(|pool| pool.borrow().get(&name).cloned());
+
+        let connection = match existing {
+            Some(rc) => rc,
+            None => {
+                let conn = Connection::open(&name).await?;
+                let rc = Rc::new(RefCell::new(conn));
+                CONNECTIONS.with(|pool| {
+                    pool.borrow_mut().insert(name.clone(), rc.clone());
+                });
+                rc
+            }
+        };
+
+        Ok(Self { name, connection })
     }
 
-    /// Temporarily removes a session from the cache for async operations.
+    /// Gets a handle to the named object store. Upgrades the database
+    /// schema if the store doesn't exist yet.
     ///
-    /// IndexedDB operations require `&mut Session` and are async, so we
-    /// cannot hold a `RefCell` borrow across `.await` points. Instead we
-    /// remove the session, perform the work, then re-insert it via
-    /// [`IndexedDb::return_session`].
-    fn take_session(&self, subject: &Did) -> Result<Session, IndexedDbError> {
-        self.sessions
-            .borrow_mut()
-            .remove(subject)
-            .ok_or_else(|| IndexedDbError::Database(format!("No session for {}", subject)))
-    }
+    /// The returned StoreSession holds a shared `Rc<Rexie>` so it can
+    /// be used across .await points without holding a borrow on Connection.
+    ///
+    /// During an upgrade, the old database connection remains valid for
+    /// any active StoreSession. The new connection is opened alongside it
+    /// and swapped in once ready. IndexedDB's `versionchange` mechanism
+    /// coordinates the transition.
+    async fn store(&self, name: &str) -> Result<StoreSession, IndexedDbError> {
+        // Check if upgrade is needed (brief borrow, dropped before .await).
+        let needs_upgrade = !self.connection.borrow().stores.contains(name);
 
-    /// Returns a session to the cache after async operations complete.
-    fn return_session(&self, subject: Did, session: Session) {
-        self.sessions.borrow_mut().insert(subject, session);
+        if needs_upgrade {
+            // Gather what we need from the connection (brief borrow).
+            let (version, mut new_stores) = {
+                let conn = self.connection.borrow();
+                (conn.version, conn.stores.clone())
+            };
+            new_stores.insert(name.to_string());
+
+            // Build the upgraded database. No RefCell borrow held here,
+            // so the old Rc<Rexie> remains valid for concurrent readers.
+            let new_version = version + 1;
+            let mut builder = RexieBuilder::new(&self.name).version(new_version);
+            for store in &new_stores {
+                builder = builder.add_object_store(ObjectStore::new(store).auto_increment(false));
+            }
+            let db = builder
+                .build()
+                .await
+                .map_err(|e| IndexedDbError::Database(format!("{:?}", e)))?;
+
+            // Swap in the new connection (brief borrow). Any StoreSession
+            // holding the old Rc<Rexie> keeps it alive until they drop.
+            let mut conn = self.connection.borrow_mut();
+            conn.version = db
+                .version()
+                .map_err(|e| IndexedDbError::Database(e.to_string()))?;
+            conn.stores = db.store_names().into_iter().collect();
+            conn.db = Rc::new(db);
+        }
+
+        let db = self.connection.borrow().db();
+        Ok(StoreSession {
+            db,
+            store_name: name.to_string(),
+        })
     }
 }
 
-impl Default for IndexedDb {
-    fn default() -> Self {
-        Self::new()
+impl Drop for IndexedDb {
+    fn drop(&mut self) {
+        // When we're the last clone (strong_count == 2: us + pool entry),
+        // remove the pool entry so the connection is closed.
+        if Rc::strong_count(&self.connection) == 2 {
+            let _ = CONNECTIONS.try_with(|pool| {
+                pool.borrow_mut().remove(&self.name);
+            });
+        }
+    }
+}
+
+use crate::resource::Resource;
+use dialog_effects::storage::{Directory, Location};
+
+#[async_trait::async_trait(?Send)]
+impl Resource<Location> for IndexedDb {
+    type Error = IndexedDbError;
+
+    async fn open(location: &Location) -> Result<Self, Self::Error> {
+        let name = match &location.directory {
+            Directory::Profile => format!("{}.profile", location.name),
+            Directory::Current => location.name.clone(),
+            Directory::Temp => format!("temp.{}", location.name),
+            Directory::At(path) => format!("{}/{}", path, location.name),
+        };
+
+        Self::connect(name).await
     }
 }
 
@@ -282,113 +306,102 @@ pub enum IndexedDbError {
     Conversion(String),
 }
 
+use dialog_capability::access::AuthorizeError;
+use dialog_effects::credential::CredentialError;
+
+impl From<IndexedDbError> for CredentialError {
+    fn from(e: IndexedDbError) -> Self {
+        Self::Storage(e.to_string())
+    }
+}
+
+impl From<IndexedDbError> for AuthorizeError {
+    fn from(e: IndexedDbError) -> Self {
+        Self::Configuration(e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use wasm_bindgen::JsValue;
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    fn unique_db_name(prefix: &str) -> String {
-        format!("did:test:{}-{}", prefix, js_sys::Date::now() as u64)
-    }
+    use super::*;
+    use crate::helpers::unique_name;
+    use wasm_bindgen::JsValue;
 
     #[dialog_common::test]
     async fn it_opens_new_database_with_no_stores() -> anyhow::Result<()> {
-        let db_name = unique_db_name("new-db");
-        let session = Session::open(&db_name).await?;
+        let db = IndexedDb::connect(unique_name("new-db")).await?;
+        assert!(db.connection.borrow().stores.is_empty());
+        Ok(())
+    }
 
-        assert!(session.stores.is_empty());
-        // New databases start at version 1
-        assert_eq!(session.version, 1);
+    #[dialog_common::test]
+    async fn it_derives_database_name_from_location() -> anyhow::Result<()> {
+        let profile = IndexedDb::open(&Location::new(Directory::Profile, "alice")).await?;
+        assert_eq!(profile.name, "alice.profile");
+
+        let current = IndexedDb::open(&Location::new(Directory::Current, "contacts")).await?;
+        assert_eq!(current.name, "contacts");
+
+        let temp = IndexedDb::open(&Location::new(Directory::Temp, "scratch")).await?;
+        assert_eq!(temp.name, "temp.scratch");
 
         Ok(())
     }
 
     #[dialog_common::test]
-    async fn it_reopens_existing_database() -> anyhow::Result<()> {
-        let db_name = unique_db_name("reopen");
+    async fn it_shares_connection_across_clones() -> anyhow::Result<()> {
+        let name = unique_name("shared");
+        let a = IndexedDb::connect(name.clone()).await?;
+        let b = IndexedDb::connect(name).await?;
 
-        // First session creates database and adds a store
+        assert!(Rc::ptr_eq(&a.connection, &b.connection));
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_isolates_different_databases() -> anyhow::Result<()> {
+        let a = IndexedDb::connect(unique_name("iso-a")).await?;
+        let b = IndexedDb::connect(unique_name("iso-b")).await?;
+
+        assert!(!Rc::ptr_eq(&a.connection, &b.connection));
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_creates_store_via_upgrade() -> anyhow::Result<()> {
+        let db = IndexedDb::connect(unique_name("upgrade")).await?;
+        let initial_version = db.connection.borrow().version;
+
+        let _store = db.store("new-store").await?;
+
+        let conn = db.connection.borrow();
+        assert!(conn.stores.contains("new-store"));
+        assert_eq!(conn.version, initial_version + 1);
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_cleans_up_pool_on_drop() -> anyhow::Result<()> {
+        let name = unique_name("cleanup");
+
         {
-            let mut session = Session::open(&db_name).await?;
-            let _store = session.store("my-store").await?;
-            assert!(session.stores.contains("my-store"));
-            session.close();
+            let _db = IndexedDb::connect(name.clone()).await?;
+            let has_entry = CONNECTIONS.with(|pool| pool.borrow().contains_key(&name));
+            assert!(has_entry, "pool should have entry while alive");
         }
 
-        // Second session should see the store
-        let session2 = Session::open(&db_name).await?;
-        assert!(session2.stores.contains("my-store"));
-
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    async fn it_adds_store_via_upgrade() -> anyhow::Result<()> {
-        let db_name = unique_db_name("add-store");
-
-        let mut session = Session::open(&db_name).await?;
-        let initial_version = session.version;
-        assert!(!session.stores.contains("new-store"));
-
-        // Request a store that doesn't exist - should trigger upgrade
-        let _store = session.store("new-store").await?;
-
-        assert!(session.stores.contains("new-store"));
-        assert_eq!(session.version, initial_version + 1);
-
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    async fn it_handles_multiple_store_additions() -> anyhow::Result<()> {
-        let db_name = unique_db_name("multi-store");
-
-        let mut session = Session::open(&db_name).await?;
-
-        // Add first store
-        let _store1 = session.store("store-a").await?;
-        assert!(session.stores.contains("store-a"));
-        let version_after_a = session.version;
-
-        // Add second store
-        let _store2 = session.store("store-b").await?;
-        assert!(session.stores.contains("store-b"));
-        assert_eq!(session.version, version_after_a + 1);
-
-        // Request existing store - should not upgrade
-        let _store3 = session.store("store-a").await?;
-        assert_eq!(session.version, version_after_a + 1);
-
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    async fn it_persists_stores_across_sessions() -> anyhow::Result<()> {
-        let db_name = unique_db_name("persist-stores");
-
-        // Create database and add a custom store
-        let final_version = {
-            let mut session = Session::open(&db_name).await?;
-            let _store = session.store("persistent-store").await?;
-            let version = session.version;
-            session.close();
-            version
-        };
-
-        // Reopen - should see the same version and stores
-        let session = Session::open(&db_name).await?;
-        assert_eq!(session.version, final_version);
-        assert!(session.stores.contains("persistent-store"));
-
+        let has_entry = CONNECTIONS.with(|pool| pool.borrow().contains_key(&name));
+        assert!(!has_entry, "pool should be cleaned up after drop");
         Ok(())
     }
 
     #[dialog_common::test]
     async fn it_performs_query_on_store() -> anyhow::Result<()> {
-        let db_name = unique_db_name("query-store");
-
-        let mut session = Session::open(&db_name).await?;
-        let store = session.store("memory").await?;
+        let db = IndexedDb::connect(unique_name("query")).await?;
+        let store = db.store("memory").await?;
 
         let result: Result<Option<JsValue>, IndexedDbError> = store
             .query(|object_store| async move {
@@ -400,18 +413,14 @@ mod tests {
             .await;
 
         assert!(result?.is_none());
-
         Ok(())
     }
 
     #[dialog_common::test]
     async fn it_performs_transaction_on_store() -> anyhow::Result<()> {
-        let db_name = unique_db_name("transact-store");
+        let db = IndexedDb::connect(unique_name("transact")).await?;
+        let store = db.store("memory").await?;
 
-        let mut session = Session::open(&db_name).await?;
-        let store = session.store("memory").await?;
-
-        // Write a value
         let key = JsValue::from_str("test-key");
         let value = JsValue::from_str("test-value");
         store
@@ -427,7 +436,6 @@ mod tests {
             })
             .await?;
 
-        // Read it back
         let result: Option<JsValue> = store
             .query(|object_store| async move {
                 object_store
@@ -439,22 +447,108 @@ mod tests {
 
         assert!(result.is_some());
         assert_eq!(result.unwrap().as_string(), Some("test-value".to_string()));
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_creates_expected_object_stores() -> anyhow::Result<()> {
+        use dialog_capability::{Did, Subject};
+        use dialog_common::Blake3Hash;
+        use dialog_credentials::{Ed25519Signer, SignerCredential};
+        use dialog_effects::archive::{Archive, Catalog, Put};
+        use dialog_effects::memory::{Cell, Memory, Publish, Space};
+        use dialog_effects::prelude::*;
+        use dialog_varsig::Principal;
+
+        let db = IndexedDb::connect(unique_name("stores-layout")).await?;
+
+        // Archive creates "archive/{catalog}" stores
+        let subject = {
+            let signer = Ed25519Signer::generate().await.unwrap();
+            Subject::from(Principal::did(&signer))
+        };
+        let content = b"test".to_vec();
+        let digest = Blake3Hash::hash(&content);
+
+        subject
+            .clone()
+            .attenuate(Archive)
+            .attenuate(Catalog::new("index"))
+            .invoke(Put::new(digest, content))
+            .perform(&db)
+            .await?;
+
+        // Memory creates "memory" store
+        subject
+            .clone()
+            .attenuate(Memory)
+            .attenuate(Space::new("local"))
+            .attenuate(Cell::new("head"))
+            .invoke(Publish::new(b"value", None))
+            .perform(&db)
+            .await?;
+
+        // Credential creates "credential" store
+        let signer = Ed25519Signer::generate().await.unwrap();
+        let cred = dialog_credentials::Credential::Signer(SignerCredential::from(signer.clone()));
+        let did = Principal::did(&signer);
+        did.credential().key("self").save(cred).perform(&db).await?;
+
+        // Verify the store names match our expectations
+        let conn = db.connection.borrow();
+        assert!(
+            conn.stores.contains("archive/index"),
+            "expected archive/index store, got: {:?}",
+            conn.stores
+        );
+        assert!(
+            conn.stores.contains("memory"),
+            "expected memory store, got: {:?}",
+            conn.stores
+        );
+        assert!(
+            conn.stores.contains("credential"),
+            "expected credential store, got: {:?}",
+            conn.stores
+        );
 
         Ok(())
     }
 
     #[dialog_common::test]
-    async fn it_upgrades_for_new_store() -> anyhow::Result<()> {
-        let db_name = unique_db_name("upgrade");
+    async fn it_isolates_data_across_locations() -> anyhow::Result<()> {
+        use dialog_credentials::{Ed25519Signer, SignerCredential};
+        use dialog_effects::prelude::*;
+        use dialog_varsig::Principal;
 
-        let mut session = Session::open(&db_name).await?;
-        let initial_version = session.version;
+        let db1 = IndexedDb::connect(unique_name("space1")).await?;
+        let db2 = IndexedDb::connect(unique_name("space2")).await?;
 
-        // Request new store - should upgrade
-        let _store = session.store("upgraded-store").await?;
+        // Save credential in db1
+        let signer = Ed25519Signer::generate().await.unwrap();
+        let did = Principal::did(&signer);
+        let cred = dialog_credentials::Credential::Signer(SignerCredential::from(signer));
 
-        assert_eq!(session.version, initial_version + 1);
-        assert!(session.stores.contains("upgraded-store"));
+        did.clone()
+            .credential()
+            .key("self")
+            .save(cred)
+            .perform(&db1)
+            .await?;
+
+        // db1 should have it
+        let loaded = did
+            .clone()
+            .credential()
+            .key("self")
+            .load()
+            .perform(&db1)
+            .await;
+        assert!(loaded.is_ok(), "db1 should have the credential");
+
+        // db2 should NOT have it
+        let missing = did.credential().key("self").load().perform(&db2).await;
+        assert!(missing.is_err(), "db2 should not see db1's credential");
 
         Ok(())
     }

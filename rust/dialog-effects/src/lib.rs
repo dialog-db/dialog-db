@@ -44,5 +44,16 @@ pub mod memory;
 pub mod space;
 pub mod storage;
 
+/// Unified prelude re-exporting all effect prelude traits.
+///
+/// ```
+/// use dialog_effects::prelude::*;
+/// ```
+pub mod prelude {
+    pub use crate::archive::prelude::*;
+    pub use crate::credential::prelude::*;
+    pub use crate::memory::prelude::*;
+}
+
 // Re-export capability primitives for convenience
 pub use dialog_capability::{Attenuation, Capability, Effect, Policy, Subject};

@@ -6,7 +6,7 @@ use dialog_varsig::{Did, Principal};
 
 use super::constants::KEY_SIZE;
 #[cfg(not(target_arch = "wasm32"))]
-use super::constants::{ED25519_PUB_TAG, PUB_TAG_SIZE, VERIFIER_EXPORT_SIZE};
+use super::constants::{PUBLIC_TAG, PUBLIC_TAG_SIZE, VERIFIER_EXPORT_SIZE};
 use super::export::{CredentialExportError, VerifierCredentialExport};
 
 /// A verifier credential — wraps an `Ed25519Verifier` (public key only).
@@ -35,22 +35,22 @@ impl From<VerifierCredential> for Did {
 impl VerifierCredential {
     /// Export to multicodec-tagged bytes for native storage.
     pub fn export(&self) -> VerifierCredentialExport {
-        let mut buf = [0u8; VERIFIER_EXPORT_SIZE];
-        buf[..PUB_TAG_SIZE].copy_from_slice(ED25519_PUB_TAG);
-        buf[PUB_TAG_SIZE..].copy_from_slice(&self.0.0.to_bytes());
-        VerifierCredentialExport(buf)
+        let mut buffer = [0u8; VERIFIER_EXPORT_SIZE];
+        buffer[..PUBLIC_TAG_SIZE].copy_from_slice(PUBLIC_TAG);
+        buffer[PUBLIC_TAG_SIZE..].copy_from_slice(&self.0.0.to_bytes());
+        VerifierCredentialExport(buffer)
     }
 
     /// Import from multicodec-tagged bytes.
     pub fn import(export: VerifierCredentialExport) -> Result<Self, CredentialExportError> {
         let data = &export.0;
-        if !data.starts_with(ED25519_PUB_TAG) {
+        if !data.starts_with(PUBLIC_TAG) {
             return Err(CredentialExportError::InvalidFormat(
                 "invalid ed25519-pub multicodec tag".into(),
             ));
         }
 
-        let key_arr: &[u8; KEY_SIZE] = data[PUB_TAG_SIZE..]
+        let key_arr: &[u8; KEY_SIZE] = data[PUBLIC_TAG_SIZE..]
             .try_into()
             .map_err(|_| CredentialExportError::InvalidFormat("invalid public key".into()))?;
         let vk = ed25519_dalek::VerifyingKey::from_bytes(key_arr)

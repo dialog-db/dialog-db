@@ -1,20 +1,29 @@
 //! Memory capability provider for filesystem.
 //!
+//! Layout: `{space_root}/memory/{space}/{cell}`
+//!
 //! Implements transactional cell storage with CAS (Compare-And-Swap) semantics.
 //! Uses PID-based file locking for cross-process coordination and BLAKE3
 //! content hashing for edition tracking.
 
-use super::{FileSystem, FileSystemError, Location};
+use super::{FileSystem, FileSystemError, FileSystemHandle};
 use async_trait::async_trait;
 use base58::ToBase58;
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
-use dialog_effects::memory::{
-    MemoryError, Publication, Publish, PublishCapability, Resolve, ResolveCapability, Retract,
-    RetractCapability,
-};
+use dialog_effects::memory::prelude::{PublishExt, ResolveExt, RetractExt};
+use dialog_effects::memory::{Edition, MemoryError, Publish, Resolve, Retract, Version};
 use pidlock::Pidlock;
 use std::path::PathBuf;
+
+const MEMORY: &str = "memory";
+
+impl FileSystem {
+    /// Returns the handle for this space's memory directory.
+    pub fn memory(&self) -> Result<FileSystemHandle, FileSystemError> {
+        self.resolve(MEMORY)
+    }
+}
 
 /// A 32-byte content hash used as the edition for CAS operations.
 type ContentHash = [u8; 32];
@@ -36,7 +45,7 @@ impl From<FileSystemError> for MemoryError {
 struct PidlockGuard(Pidlock);
 
 impl PidlockGuard {
-    /// Acquire a PID lock at the given path.
+    /// Acquire a PID lock at the given handle.
     ///
     /// If a stale lock exists (from a dead process), it will be automatically
     /// cleaned up and the lock acquired.
@@ -45,40 +54,45 @@ impl PidlockGuard {
     /// rather than waiting. This is intentional - the STM layer will retry
     /// the entire transaction, which is the correct behavior since the locked
     /// value will likely change anyway.
-    fn new(path: PathBuf) -> Result<Self, FileSystemError> {
+    fn acquire(path: PathBuf) -> Result<Self, FileSystemError> {
         let path_str = path
             .to_str()
             .ok_or_else(|| FileSystemError::Lock("Lock path is not valid UTF-8".to_string()))?;
 
+        // If something other than a regular file exists at the lock path
+        // (e.g. a directory from a previous bug), fail early. Pidlock
+        // panics if it tries to remove_file on a directory.
+        if path.exists() && !path.is_file() {
+            return Err(FileSystemError::Lock(format!(
+                "Lock path is not a regular file: {}",
+                path_str
+            )));
+        }
+
         let mut lock = Pidlock::new(path_str);
 
-        // Acquire lock, handling stale locks
-        loop {
-            match lock.acquire() {
-                Ok(()) => return Ok(Self(lock)),
-                Err(pidlock::PidlockError::LockExists) => {
-                    // get_owner() checks if the PID is valid and clears stale locks
-                    match lock.get_owner() {
-                        Some(pid) => {
-                            // Fail immediately rather than wait - the value is being
-                            // modified so the edition will change anyway. Let STM
-                            // retry the transaction with the new edition.
-                            return Err(FileSystemError::Lock(format!(
-                                "Concurrent write in progress (lock held by pid {})",
-                                pid
-                            )));
-                        }
-                        None => {
-                            // Lock was stale and cleared by get_owner(), retry
-                        }
+        match lock.acquire() {
+            Ok(()) => Ok(Self(lock)),
+            Err(pidlock::PidlockError::LockExists) => {
+                // get_owner() checks if the PID in the lock file is still
+                // alive. If not, it removes the stale file so a retry can
+                // succeed. If the process is alive, we fail immediately
+                // and let the STM layer retry the whole transaction.
+                match lock.get_owner() {
+                    Some(pid) => Err(FileSystemError::Lock(format!(
+                        "Concurrent write in progress (lock held by pid {pid})",
+                    ))),
+                    None => {
+                        // Stale lock was removed by get_owner(). Retry once.
+                        lock.acquire().map(|()| Self(lock)).map_err(|e| {
+                            FileSystemError::Lock(format!("Failed to acquire lock: {e:?}"))
+                        })
                     }
                 }
-                Err(e) => {
-                    return Err(FileSystemError::Lock(format!(
-                        "Failed to acquire lock: {e:?}"
-                    )));
-                }
             }
+            Err(e) => Err(FileSystemError::Lock(format!(
+                "Failed to acquire lock: {e:?}"
+            ))),
         }
     }
 }
@@ -90,22 +104,36 @@ impl Drop for PidlockGuard {
 }
 
 /// Format edition bytes for error messages.
-fn format_edition(edition: Option<&[u8]>) -> Option<String> {
-    edition.map(base58::ToBase58::to_base58)
+fn format_edition(edition: Option<&[u8]>) -> Option<Version> {
+    edition.map(Version::from)
 }
 
 /// Helper methods for cell-related paths.
-impl Location {
+impl FileSystemHandle {
     fn cell(&self, name: &str) -> Result<Self, FileSystemError> {
         self.resolve(name)
     }
 
-    fn lock(&self, cell: &str) -> Result<Self, FileSystemError> {
-        self.resolve(&format!("{}.lock", cell))
+    /// Acquire a PID lock for this handle by appending `.lock` to its path.
+    fn lock(&self) -> Result<PidlockGuard, FileSystemError> {
+        let path: PathBuf = self.clone().try_into()?;
+        let lock_path = path.with_extension("lock");
+        // Ensure parent directory exists for the lock file
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| FileSystemError::Io(e.to_string()))?;
+        }
+        PidlockGuard::acquire(lock_path)
     }
 
-    fn temp(&self, cell: &str, hash: &[u8; 32]) -> Result<Self, FileSystemError> {
-        self.resolve(&format!("{}.{}.tmp", cell, hash.to_base58()))
+    fn temp(&self, hash: &[u8; 32]) -> Result<Self, FileSystemError> {
+        let path: PathBuf = self.clone().try_into()?;
+        let tmp_name = format!(
+            "{}.{}.tmp",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or("cell"),
+            hash.to_base58()
+        );
+        let tmp_path = path.with_file_name(tmp_name);
+        tmp_path.try_into()
     }
 }
 
@@ -114,80 +142,57 @@ impl Provider<Resolve> for FileSystem {
     async fn execute(
         &self,
         effect: Capability<Resolve>,
-    ) -> Result<Option<Publication>, MemoryError> {
-        let subject = effect.subject().into();
+    ) -> Result<Option<Edition<Vec<u8>>>, MemoryError> {
         let space = effect.space();
         let cell = effect.cell();
 
-        let path: PathBuf = self
-            .memory(&subject)?
-            .resolve(space)?
-            .cell(cell)?
-            .try_into()?;
+        let handle = self.memory()?.resolve(space)?.cell(cell)?;
 
-        match tokio::fs::read(&path).await {
-            Ok(bytes) => {
+        match handle.read_optional().await? {
+            Some(bytes) => {
                 let edition = Blake3Hash::hash(&bytes);
-                Ok(Some(Publication {
+                Ok(Some(Edition {
                     content: bytes,
-                    edition: edition.as_bytes().to_vec(),
+                    version: Version::from(edition.as_bytes()),
                 }))
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(MemoryError::Storage(e.to_string())),
+            None => Ok(None),
         }
     }
 }
 
 #[async_trait]
 impl Provider<Publish> for FileSystem {
-    async fn execute(&self, effect: Capability<Publish>) -> Result<Vec<u8>, MemoryError> {
-        let subject = effect.subject().into();
+    async fn execute(&self, effect: Capability<Publish>) -> Result<Version, MemoryError> {
         let space = effect.space();
         let cell = effect.cell();
         let content = effect.content().to_vec();
-        let expected_edition = effect.when().map(|e| e.to_vec());
+        let expected_edition = effect.when().map(|e| e.as_bytes().to_vec());
 
-        let space_location = self.memory(&subject)?.resolve(space)?;
-
-        // Ensure space directory exists
-        space_location.ensure_dir().await?;
-
-        let path: PathBuf = space_location.cell(cell)?.try_into()?;
-        let lock_path: PathBuf = space_location.lock(cell)?.try_into()?;
-
-        // Ensure parent directory exists for nested cell paths (e.g. "subdir/cell").
-        // space_location.ensure_dir() only creates the space directory, not
-        // subdirectories within it that the cell path may require.
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| MemoryError::Storage(e.to_string()))?;
-        }
+        let cell_handle = self.memory()?.resolve(space)?.cell(cell)?;
 
         // Acquire lock for exclusive access
-        let _guard = PidlockGuard::new(lock_path)?;
+        let _guard = cell_handle.lock()?;
 
         // Read current value to check CAS condition
-        let current_edition: Option<[u8; 32]> = match tokio::fs::read(&path).await {
-            Ok(bytes) => Some(content_hash(&bytes)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(MemoryError::Storage(e.to_string())),
-        };
+        let current_edition: Option<[u8; 32]> = cell_handle
+            .read_optional()
+            .await?
+            .map(|bytes| content_hash(&bytes));
 
         // Compute new edition
         let new_edition = content_hash(&content);
 
         // If current value already matches desired value, succeed without writing
         if current_edition.as_ref() == Some(&new_edition) {
-            return Ok(new_edition.to_vec());
+            return Ok(Version::from(new_edition.as_slice()));
         }
 
         // Check CAS condition
         match (expected_edition.as_deref(), &current_edition) {
             // Creating new: require cell doesn't exist
             (None, Some(current)) => {
-                return Err(MemoryError::EditionMismatch {
+                return Err(MemoryError::VersionMismatch {
                     expected: None,
                     actual: format_edition(Some(current.as_slice())),
                 });
@@ -195,7 +200,7 @@ impl Provider<Publish> for FileSystem {
             // Updating existing: require edition matches
             (Some(expected), Some(current)) => {
                 if expected != current.as_slice() {
-                    return Err(MemoryError::EditionMismatch {
+                    return Err(MemoryError::VersionMismatch {
                         expected: format_edition(Some(expected)),
                         actual: format_edition(Some(current.as_slice())),
                     });
@@ -203,7 +208,7 @@ impl Provider<Publish> for FileSystem {
             }
             // Updating non-existent: fail
             (Some(expected), None) => {
-                return Err(MemoryError::EditionMismatch {
+                return Err(MemoryError::VersionMismatch {
                     expected: format_edition(Some(expected)),
                     actual: None,
                 });
@@ -212,103 +217,74 @@ impl Provider<Publish> for FileSystem {
             (None, None) => {}
         }
 
-        // Write to temp file (hash in name prevents conflicts if cleanup fails)
-        let tmp_path: PathBuf = space_location.temp(cell, &new_edition)?.try_into()?;
-        tokio::fs::write(&tmp_path, &content)
-            .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+        // Write to temp file (hash in name prevents conflicts if cleanup fails),
+        // then atomic rename to final location. write() creates parent dirs.
+        let tmp_handle = cell_handle.temp(&new_edition)?;
+        tmp_handle.write(&content).await?;
+        tmp_handle.rename(&cell_handle).await?;
 
-        // Atomic rename
-        tokio::fs::rename(&tmp_path, &path)
-            .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
-
-        Ok(new_edition.to_vec())
+        Ok(Version::from(new_edition.as_slice()))
     }
 }
 
 #[async_trait]
 impl Provider<Retract> for FileSystem {
     async fn execute(&self, effect: Capability<Retract>) -> Result<(), MemoryError> {
-        let subject = effect.subject().into();
         let space = effect.space();
         let cell = effect.cell();
-        let expected_edition = effect.when().to_vec();
+        let expected_edition = effect.when().as_bytes().to_vec();
 
-        let space_location = self.memory(&subject)?.resolve(space)?;
-        let space_path: PathBuf = space_location.clone().try_into()?;
+        let cell_handle = self.memory()?.resolve(space)?.cell(cell)?;
 
         // If space directory doesn't exist, the cell doesn't exist either
-        if !space_path.exists() {
+        if !cell_handle.exists().await {
             return Ok(());
         }
 
-        let path: PathBuf = space_location.cell(cell)?.try_into()?;
-        let lock_path: PathBuf = space_location.lock(cell)?.try_into()?;
-
         // Acquire lock for exclusive access
-        let _guard = PidlockGuard::new(lock_path)?;
+        let _guard = cell_handle.lock()?;
 
         // Read current value to check CAS condition
-        let current_bytes = match tokio::fs::read(&path).await {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // Already deleted, succeed
-                return Ok(());
-            }
-            Err(e) => return Err(MemoryError::Storage(e.to_string())),
+        let current_bytes = match cell_handle.read_optional().await? {
+            Some(bytes) => bytes,
+            None => return Ok(()),
         };
 
         let current_edition = content_hash(&current_bytes);
 
         // Check CAS condition
         if expected_edition != current_edition.as_slice() {
-            return Err(MemoryError::EditionMismatch {
+            return Err(MemoryError::VersionMismatch {
                 expected: format_edition(Some(&expected_edition)),
                 actual: format_edition(Some(current_edition.as_slice())),
             });
         }
 
         // Delete the file
-        match tokio::fs::remove_file(&path).await {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(MemoryError::Storage(e.to_string())),
-        }
+        cell_handle.remove().await?;
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dialog_capability::{Did, Subject};
-    use dialog_effects::memory::{Cell, Memory, Space};
-
-    fn unique_subject(prefix: &str) -> Subject {
-        let did: Did = format!(
-            "did:test:{}-{}",
-            prefix,
-            dialog_common::time::now()
-                .duration_since(dialog_common::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        )
-        .parse()
-        .unwrap();
-        Subject::from(did)
-    }
+    use crate::helpers::{unique_did, unique_name};
+    use crate::resource::Resource;
+    use dialog_effects::memory::Version;
+    use dialog_effects::prelude::*;
+    use dialog_effects::storage::{Directory, Location as StorageLocation};
 
     #[dialog_common::test]
     async fn it_resolves_non_existent_cell() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
-        let subject = unique_subject("memory-resolve-none");
+        let location = StorageLocation::new(
+            Directory::Temp,
+            unique_name("fs-it_resolves_non_existent_cell"),
+        );
+        let provider = FileSystem::open(&location).await?;
+        let did = unique_did().await;
 
-        let effect = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("missing"))
-            .invoke(Resolve);
+        let effect = did.memory().space("local").cell("missing").resolve();
 
         let result = effect.perform(&provider).await?;
         assert!(result.is_none());
@@ -318,77 +294,81 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_publishes_new_content() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
-        let subject = unique_subject("memory-publish-new");
+        let location =
+            StorageLocation::new(Directory::Temp, unique_name("fs-it_publishes_new_content"));
+        let provider = FileSystem::open(&location).await?;
+        let did = unique_did().await;
         let content = b"hello world".to_vec();
 
         // Publish new content (when = None means expect empty)
-        let edition = subject
+        let version = did
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(content.clone(), None))
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(content.clone(), None)
             .perform(&provider)
             .await?;
 
-        assert!(!edition.is_empty());
+        assert!(!version.is_empty());
 
         // Resolve to verify
-        let resolved = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Resolve)
+        let resolved = did
+            .memory()
+            .space("local")
+            .cell("test")
+            .resolve()
             .perform(&provider)
             .await?;
 
-        let publication = resolved.expect("should have content");
-        assert_eq!(publication.content, content);
-        assert_eq!(publication.edition, edition);
+        let edition = resolved.expect("should have content");
+        assert_eq!(edition.content, content);
+        assert_eq!(edition.version.as_bytes(), version.as_bytes());
 
         Ok(())
     }
 
     #[dialog_common::test]
     async fn it_updates_existing_content() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
-        let subject = unique_subject("memory-publish-update");
+        let location = StorageLocation::new(
+            Directory::Temp,
+            unique_name("fs-it_updates_existing_content"),
+        );
+        let provider = FileSystem::open(&location).await?;
+        let did = unique_did().await;
 
         // Create initial content
-        let edition1 = subject
+        let v1 = did
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(b"initial", None))
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(b"initial", None)
             .perform(&provider)
             .await?;
 
         // Update with correct edition
-        let edition2 = subject
+        let v2 = did
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(b"updated", Some(edition1.clone())))
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(b"updated", Some(v1.clone()))
             .perform(&provider)
             .await?;
 
-        assert_ne!(edition1, edition2);
+        assert_ne!(v1, v2);
 
         // Verify update
-        let resolved = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Resolve)
+        let edition = did
+            .memory()
+            .space("local")
+            .cell("test")
+            .resolve()
             .perform(&provider)
             .await?;
 
-        let publication = resolved.expect("should have content");
+        let publication = edition.expect("should have content");
         assert_eq!(publication.content, b"updated".to_vec());
 
         Ok(())
@@ -396,178 +376,184 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_fails_on_edition_mismatch() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
-        let subject = unique_subject("memory-mismatch");
+        let location = StorageLocation::new(
+            Directory::Temp,
+            unique_name("fs-it_fails_on_edition_mismatch"),
+        );
+        let provider = FileSystem::open(&location).await?;
+        let did = unique_did().await;
 
         // Create initial content
-        subject
-            .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(b"initial", None))
+        did.clone()
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(b"initial", None)
             .perform(&provider)
             .await?;
 
         // Try to update with wrong edition
-        let wrong_edition = Blake3Hash::hash(b"wrong").as_bytes().to_vec();
-        let result = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(b"updated", Some(wrong_edition)))
+        let wrong_edition = Version::from(Blake3Hash::hash(b"wrong"));
+        let result = did
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(b"updated", Some(wrong_edition))
             .perform(&provider)
             .await;
 
-        assert!(matches!(result, Err(MemoryError::EditionMismatch { .. })));
+        assert!(matches!(result, Err(MemoryError::VersionMismatch { .. })));
 
         Ok(())
     }
 
     #[dialog_common::test]
     async fn it_fails_creating_when_exists() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
-        let subject = unique_subject("memory-create-exists");
+        let location = StorageLocation::new(
+            Directory::Temp,
+            unique_name("fs-it_fails_creating_when_exists"),
+        );
+        let provider = FileSystem::open(&location).await?;
+        let did = unique_did().await;
 
         // Create initial content
-        subject
-            .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(b"initial", None))
+        did.clone()
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(b"initial", None)
             .perform(&provider)
             .await?;
 
         // Try to create again (when = None means expect empty)
-        let result = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(b"new", None))
+        let result = did
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(b"new", None)
             .perform(&provider)
             .await;
 
-        assert!(matches!(result, Err(MemoryError::EditionMismatch { .. })));
+        assert!(matches!(result, Err(MemoryError::VersionMismatch { .. })));
 
         Ok(())
     }
 
     #[dialog_common::test]
     async fn it_retracts_content() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
-        let subject = unique_subject("memory-retract");
+        let location = StorageLocation::new(Directory::Temp, unique_name("fs-it_retracts_content"));
+        let provider = FileSystem::open(&location).await?;
+        let did = unique_did().await;
 
         // Create content
-        let edition = subject
+        let version = did
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(b"to be deleted", None))
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(b"to be deleted", None)
             .perform(&provider)
             .await?;
 
         // Retract with correct edition
-        subject
-            .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Retract::new(edition))
+        did.clone()
+            .memory()
+            .space("local")
+            .cell("test")
+            .retract(version)
             .perform(&provider)
             .await?;
 
         // Verify deleted
-        let resolved = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Resolve)
+        let edition = did
+            .memory()
+            .space("local")
+            .cell("test")
+            .resolve()
             .perform(&provider)
             .await?;
 
-        assert!(resolved.is_none());
+        assert!(edition.is_none());
 
         Ok(())
     }
 
     #[dialog_common::test]
     async fn it_fails_retract_on_edition_mismatch() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
-        let subject = unique_subject("memory-retract-mismatch");
+        let location = StorageLocation::new(
+            Directory::Temp,
+            unique_name("fs-it_fails_retract_on_edition_mismatch"),
+        );
+        let provider = FileSystem::open(&location).await?;
+        let did = unique_did().await;
 
         // Create content
-        subject
-            .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(b"content", None))
+        did.clone()
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(b"content", None)
             .perform(&provider)
             .await?;
 
         // Try to retract with wrong edition
-        let wrong_edition = Blake3Hash::hash(b"wrong").as_bytes().to_vec();
-        let result = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Retract::new(wrong_edition))
+        let wrong_version = Version::from(Blake3Hash::hash(b"wrong"));
+        let result = did
+            .memory()
+            .space("local")
+            .cell("test")
+            .retract(wrong_version)
             .perform(&provider)
             .await;
 
-        assert!(matches!(result, Err(MemoryError::EditionMismatch { .. })));
+        assert!(matches!(result, Err(MemoryError::VersionMismatch { .. })));
 
         Ok(())
     }
 
     #[dialog_common::test]
     async fn it_handles_different_spaces() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
-        let subject = unique_subject("memory-spaces");
+        let location = StorageLocation::new(
+            Directory::Temp,
+            unique_name("fs-it_handles_different_spaces"),
+        );
+        let provider = FileSystem::open(&location).await?;
+        let did = unique_did().await;
 
         // Publish to different spaces
-        subject
-            .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("space1"))
-            .attenuate(Cell::new("cell"))
-            .invoke(Publish::new(b"content1", None))
+        did.clone()
+            .memory()
+            .space("space1")
+            .cell("cell")
+            .publish(b"content1", None)
             .perform(&provider)
             .await?;
 
-        subject
-            .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("space2"))
-            .attenuate(Cell::new("cell"))
-            .invoke(Publish::new(b"content2", None))
+        did.clone()
+            .memory()
+            .space("space2")
+            .cell("cell")
+            .publish(b"content2", None)
             .perform(&provider)
             .await?;
 
         // Resolve from space1
-        let result1 = subject
+        let result1 = did
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("space1"))
-            .attenuate(Cell::new("cell"))
-            .invoke(Resolve)
+            .memory()
+            .space("space1")
+            .cell("cell")
+            .resolve()
             .perform(&provider)
             .await?;
         assert_eq!(result1.unwrap().content, b"content1".to_vec());
 
         // Resolve from space2
-        let result2 = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("space2"))
-            .attenuate(Cell::new("cell"))
-            .invoke(Resolve)
+        let result2 = did
+            .memory()
+            .space("space2")
+            .cell("cell")
+            .resolve()
             .perform(&provider)
             .await?;
         assert_eq!(result2.unwrap().content, b"content2".to_vec());
@@ -577,63 +563,65 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_succeeds_with_stale_edition_when_value_matches() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
-        let subject = unique_subject("memory-stale-ok");
+        let location = StorageLocation::new(
+            Directory::Temp,
+            "fs-it_succeeds_with_stale_edition_when_value_matches",
+        );
+        let provider = FileSystem::open(&location).await?;
+        let did = unique_did().await;
         let content = b"desired value".to_vec();
 
         // Create initial content
-        subject
-            .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(content.clone(), None))
+        did.clone()
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(content.clone(), None)
             .perform(&provider)
             .await?;
 
         // Try to publish same content with wrong edition - should succeed
-        let wrong_edition = Blake3Hash::hash(b"wrong").as_bytes().to_vec();
-        let result = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("test"))
-            .invoke(Publish::new(content.clone(), Some(wrong_edition)))
+        let wrong_version = Version::from(Blake3Hash::hash(b"wrong"));
+        let result = did
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(content.clone(), Some(wrong_version))
             .perform(&provider)
             .await;
 
         assert!(result.is_ok());
-        assert_eq!(
-            result.unwrap(),
-            Blake3Hash::hash(&content).as_bytes().to_vec()
-        );
+        assert_eq!(result.unwrap(), Version::from(Blake3Hash::hash(&content)));
 
         Ok(())
     }
 
     #[dialog_common::test]
     async fn it_produces_deterministic_content_hash() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
-        let subject = unique_subject("memory-deterministic-hash");
+        let location = StorageLocation::new(
+            Directory::Temp,
+            unique_name("fs-it_produces_deterministic_content_hash"),
+        );
+        let provider = FileSystem::open(&location).await?;
+        let did = unique_did().await;
         let content = b"same content".to_vec();
 
         // Create value at cell1
-        let edition1 = subject
+        let edition1 = did
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("cell1"))
-            .invoke(Publish::new(content.clone(), None))
+            .memory()
+            .space("local")
+            .cell("cell1")
+            .publish(content.clone(), None)
             .perform(&provider)
             .await?;
 
         // Create same value at cell2
-        let edition2 = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("cell2"))
-            .invoke(Publish::new(content, None))
+        let edition2 = did
+            .memory()
+            .space("local")
+            .cell("cell2")
+            .publish(content, None)
             .perform(&provider)
             .await?;
 
@@ -645,17 +633,20 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_succeeds_retracting_already_retracted() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
-        let subject = unique_subject("memory-retract-already-retracted");
+        let location = StorageLocation::new(
+            Directory::Temp,
+            "fs-it_succeeds_retracting_already_retracted",
+        );
+        let provider = FileSystem::open(&location).await?;
+        let did = unique_did().await;
 
         // Try to retract non-existent cell - should succeed
-        let wrong_edition = Blake3Hash::hash(b"wrong").as_bytes().to_vec();
-        let result = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("nonexistent"))
-            .invoke(Retract::new(wrong_edition))
+        let wrong_version = Version::from(Blake3Hash::hash(b"wrong"));
+        let result = did
+            .memory()
+            .space("local")
+            .cell("nonexistent")
+            .retract(wrong_version)
             .perform(&provider)
             .await;
 
@@ -666,29 +657,30 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_handles_nested_spaces() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
-        let subject = unique_subject("memory-nested-spaces");
+        let location =
+            StorageLocation::new(Directory::Temp, unique_name("fs-it_handles_nested_spaces"));
+        let provider = FileSystem::open(&location).await?;
+        let did = unique_did().await;
         let content = b"nested content".to_vec();
 
         // Publish to nested space path
-        let edition = subject
+        let edition = did
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("parent/child/grandchild"))
-            .attenuate(Cell::new("cell"))
-            .invoke(Publish::new(content.clone(), None))
+            .memory()
+            .space("parent/child/grandchild")
+            .cell("cell")
+            .publish(content.clone(), None)
             .perform(&provider)
             .await?;
 
         assert!(!edition.is_empty());
 
         // Resolve to verify
-        let resolved = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("parent/child/grandchild"))
-            .attenuate(Cell::new("cell"))
-            .invoke(Resolve)
+        let resolved = did
+            .memory()
+            .space("parent/child/grandchild")
+            .cell("cell")
+            .resolve()
             .perform(&provider)
             .await?;
 
@@ -700,29 +692,32 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_publishes_to_nested_cell() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
-        let subject = unique_subject("memory-nested-cell");
+        let location = StorageLocation::new(
+            Directory::Temp,
+            unique_name("fs-it_publishes_to_nested_cell"),
+        );
+        let provider = FileSystem::open(&location).await?;
+        let did = unique_did().await;
         let content = b"nested cell content".to_vec();
 
         // Publish to a cell with a path separator, without pre-creating dirs.
         // This mirrors how Branch::mount uses "local/main" as an address.
-        let edition = subject
+        let version = did
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("subdir/cell"))
-            .invoke(Publish::new(content.clone(), None))
+            .memory()
+            .space("local")
+            .cell("subdir/cell")
+            .publish(content.clone(), None)
             .perform(&provider)
             .await?;
 
-        assert!(!edition.is_empty());
+        assert!(!version.is_empty());
 
-        let resolved = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("subdir/cell"))
-            .invoke(Resolve)
+        let resolved = did
+            .memory()
+            .space("local")
+            .cell("subdir/cell")
+            .resolve()
             .perform(&provider)
             .await?;
 
@@ -734,31 +729,32 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_handles_empty_content() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
-        let subject = unique_subject("memory-empty");
+        let location =
+            StorageLocation::new(Directory::Temp, unique_name("fs-it_handles_empty_content"));
+        let provider = FileSystem::open(&location).await?;
+        let did = unique_did().await;
         let content = vec![];
 
-        let edition = subject
+        let version = did
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("empty"))
-            .invoke(Publish::new(content.clone(), None))
+            .memory()
+            .space("local")
+            .cell("empty")
+            .publish(content.clone(), None)
             .perform(&provider)
             .await?;
 
-        assert!(!edition.is_empty());
+        assert!(!version.is_empty());
 
-        let resolved = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("empty"))
-            .invoke(Resolve)
+        let edition = did
+            .memory()
+            .space("local")
+            .cell("empty")
+            .resolve()
             .perform(&provider)
             .await?;
 
-        let publication = resolved.expect("should have content");
+        let publication = edition.expect("should have content");
         assert_eq!(publication.content, content);
 
         Ok(())
@@ -766,34 +762,149 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_handles_large_content() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let provider = FileSystem::mount(tempdir.path().to_path_buf())?;
-        let subject = unique_subject("memory-large");
+        let location =
+            StorageLocation::new(Directory::Temp, unique_name("fs-it_handles_large_content"));
+        let provider = FileSystem::open(&location).await?;
+        let did = unique_did().await;
         // 1MB content
         let content: Vec<u8> = (0..1024 * 1024).map(|i| (i % 256) as u8).collect();
 
-        let edition = subject
+        let version = did
             .clone()
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("large"))
-            .invoke(Publish::new(content.clone(), None))
+            .memory()
+            .space("local")
+            .cell("large")
+            .publish(content.clone(), None)
             .perform(&provider)
             .await?;
 
-        assert!(!edition.is_empty());
+        assert!(!version.is_empty());
 
-        let resolved = subject
-            .attenuate(Memory)
-            .attenuate(Space::new("local"))
-            .attenuate(Cell::new("large"))
-            .invoke(Resolve)
+        let resolved = did
+            .memory()
+            .space("local")
+            .cell("large")
+            .resolve()
             .perform(&provider)
             .await?;
 
-        let publication = resolved.expect("should have content");
-        assert_eq!(publication.content, content);
+        let edition = resolved.expect("should have content");
+        assert_eq!(edition.content, content);
 
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_publishes_despite_stale_lock_file() -> anyhow::Result<()> {
+        let location = StorageLocation::new(
+            Directory::Temp,
+            unique_name("fs-it_publishes_despite_stale_lock"),
+        );
+        let provider = FileSystem::open(&location).await?;
+        let did = unique_did().await;
+
+        // First publish to create the directory structure
+        did.clone()
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(b"initial", None)
+            .perform(&provider)
+            .await?;
+
+        // Manually create a stale lock file (as if a process crashed)
+        let cell_handle = provider.memory()?.resolve("local")?.cell("test")?;
+        let cell_path: std::path::PathBuf = cell_handle.try_into()?;
+        let lock_path = cell_path.with_extension("lock");
+        // Write a fake PID that does not correspond to a running process
+        std::fs::write(&lock_path, b"999999999")?;
+        assert!(lock_path.exists(), "stale lock file should exist");
+
+        // Publish should succeed by clearing the stale lock
+        let edition = did
+            .clone()
+            .memory()
+            .space("local")
+            .cell("test")
+            .resolve()
+            .perform(&provider)
+            .await?;
+        let edition = edition.unwrap().version;
+
+        let v2 = did
+            .memory()
+            .space("local")
+            .cell("test")
+            .publish(b"after stale lock", Some(edition))
+            .perform(&provider)
+            .await?;
+
+        assert!(!v2.is_empty());
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_fails_lock_when_held_by_same_process() -> anyhow::Result<()> {
+        // Verifies that when our own process holds the lock, acquire returns
+        // an error immediately (not a spin). This matters because all tests
+        // run in the same process and share a PID.
+        let dir = tempfile::tempdir()?;
+        let lock_path = dir.path().join("cell.lock");
+        let _guard = PidlockGuard::acquire(lock_path.clone())?;
+
+        // Second acquire from same process should fail immediately
+        let result = PidlockGuard::acquire(lock_path);
+        let err = match result {
+            Ok(_) => panic!("expected lock to fail when held by same process"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, FileSystemError::Lock(_)),
+            "expected Lock error, got: {err:?}"
+        );
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_fails_lock_with_trailing_slash_path() -> anyhow::Result<()> {
+        // Reproduces the bug where FileSystemHandle's trailing-slash URLs
+        // produced PathBufs like "/tmp/.../test.lock/" which pidlock can
+        // never create (create_new fails on trailing-slash paths) and
+        // get_owner returns None (no file exists), causing an infinite
+        // busy loop in the old unbounded retry code.
+        let dir = tempfile::tempdir()?;
+        let bad_path = dir.path().join("cell.lock/"); // trailing slash
+        let result = PidlockGuard::acquire(bad_path);
+
+        // Should fail with a bounded retry error, not spin forever
+        let err = match result {
+            Ok(_) => panic!("expected lock to fail with trailing-slash path"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, FileSystemError::Lock(_)),
+            "expected Lock error, got: {err:?}"
+        );
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_fails_lock_when_directory_exists_at_lock_path() -> anyhow::Result<()> {
+        // If a directory exists where the lock file should be (e.g. from
+        // a previous buggy run), acquire should fail, not spin or panic.
+        let dir = tempfile::tempdir()?;
+        let lock_path = dir.path().join("cell.lock");
+        std::fs::create_dir_all(&lock_path)?;
+        assert!(lock_path.is_dir());
+
+        let err = match PidlockGuard::acquire(lock_path) {
+            Ok(_) => panic!("expected lock to fail when a directory exists at the lock path"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, FileSystemError::Lock(_)),
+            "expected Lock error, got: {err:?}"
+        );
         Ok(())
     }
 }

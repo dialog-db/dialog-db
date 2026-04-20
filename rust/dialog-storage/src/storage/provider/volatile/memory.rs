@@ -7,10 +7,8 @@ use super::{MemoryKey, Volatile, VolatileError};
 use async_trait::async_trait;
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
-use dialog_effects::memory::{
-    MemoryError, Publication, Publish, PublishCapability, Resolve, ResolveCapability, Retract,
-    RetractCapability,
-};
+use dialog_effects::memory::prelude::{PublishExt, ResolveExt, RetractExt};
+use dialog_effects::memory::{Edition, MemoryError, Publish, Resolve, Retract, Version};
 
 impl From<VolatileError> for MemoryError {
     fn from(e: VolatileError) -> Self {
@@ -19,8 +17,8 @@ impl From<VolatileError> for MemoryError {
 }
 
 /// Format edition bytes for error messages.
-fn format_edition(edition: Option<&[u8]>) -> Option<String> {
-    edition.map(base58::ToBase58::to_base58)
+fn format_edition(edition: Option<&[u8]>) -> Option<Version> {
+    edition.map(Version::from)
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -29,7 +27,7 @@ impl Provider<Resolve> for Volatile {
     async fn execute(
         &self,
         effect: Capability<Resolve>,
-    ) -> Result<Option<Publication>, MemoryError> {
+    ) -> Result<Option<Edition<Vec<u8>>>, MemoryError> {
         let subject = effect.subject().into();
         let space = effect.space();
         let cell = effect.cell();
@@ -42,9 +40,9 @@ impl Provider<Resolve> for Volatile {
             .and_then(|session| session.memory.get(&key))
             .map(|content| {
                 let edition = Blake3Hash::hash(content);
-                Publication {
+                Edition {
                     content: content.clone(),
-                    edition: edition.as_bytes().to_vec(),
+                    version: Version::from(edition.as_bytes()),
                 }
             }))
     }
@@ -53,12 +51,12 @@ impl Provider<Resolve> for Volatile {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<Publish> for Volatile {
-    async fn execute(&self, effect: Capability<Publish>) -> Result<Vec<u8>, MemoryError> {
+    async fn execute(&self, effect: Capability<Publish>) -> Result<Version, MemoryError> {
         let subject = effect.subject().into();
         let space = effect.space();
         let cell = effect.cell();
         let content = effect.content().to_vec();
-        let expected_edition = effect.when().map(|e| e.to_vec());
+        let expected_edition = effect.when().map(|e| e.as_bytes().to_vec());
 
         let key: MemoryKey = (space.to_string(), cell.to_string());
         let mut sessions = self.sessions.write();
@@ -75,14 +73,14 @@ impl Provider<Publish> for Volatile {
 
         // If current value already matches desired value, succeed without writing
         if current_edition.as_ref().map(|h| h.as_bytes()) == Some(new_edition.as_bytes()) {
-            return Ok(new_edition.as_bytes().to_vec());
+            return Ok(Version::from(new_edition.as_bytes()));
         }
 
         // Check CAS condition
         match (expected_edition.as_deref(), &current_edition) {
             // Creating new: require cell doesn't exist
             (None, Some(current)) => {
-                return Err(MemoryError::EditionMismatch {
+                return Err(MemoryError::VersionMismatch {
                     expected: None,
                     actual: format_edition(Some(current.as_bytes())),
                 });
@@ -90,7 +88,7 @@ impl Provider<Publish> for Volatile {
             // Updating existing: require edition matches
             (Some(expected), Some(current)) => {
                 if expected != current.as_bytes() {
-                    return Err(MemoryError::EditionMismatch {
+                    return Err(MemoryError::VersionMismatch {
                         expected: format_edition(Some(expected)),
                         actual: format_edition(Some(current.as_bytes())),
                     });
@@ -98,7 +96,7 @@ impl Provider<Publish> for Volatile {
             }
             // Updating non-existent: fail
             (Some(expected), None) => {
-                return Err(MemoryError::EditionMismatch {
+                return Err(MemoryError::VersionMismatch {
                     expected: format_edition(Some(expected)),
                     actual: None,
                 });
@@ -110,7 +108,7 @@ impl Provider<Publish> for Volatile {
         // Write the new value
         session.memory.insert(key, content);
 
-        Ok(new_edition.as_bytes().to_vec())
+        Ok(Version::from(new_edition.as_bytes()))
     }
 }
 
@@ -121,7 +119,7 @@ impl Provider<Retract> for Volatile {
         let subject = effect.subject().into();
         let space = effect.space();
         let cell = effect.cell();
-        let expected_edition = effect.when().to_vec();
+        let expected_edition = effect.when().as_bytes().to_vec();
 
         let key: MemoryKey = (space.to_string(), cell.to_string());
         let mut sessions = self.sessions.write();
@@ -137,7 +135,7 @@ impl Provider<Retract> for Volatile {
 
         // Check CAS condition
         if expected_edition != current_edition.as_bytes() {
-            return Err(MemoryError::EditionMismatch {
+            return Err(MemoryError::VersionMismatch {
                 expected: format_edition(Some(&expected_edition)),
                 actual: format_edition(Some(current_edition.as_bytes())),
             });
@@ -153,22 +151,8 @@ impl Provider<Retract> for Volatile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dialog_capability::{Did, Subject};
-    use dialog_effects::memory::{Cell, Memory, Space};
-
-    fn unique_subject(prefix: &str) -> Subject {
-        let did: Did = format!(
-            "did:test:{}-{}",
-            prefix,
-            dialog_common::time::now()
-                .duration_since(dialog_common::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        )
-        .parse()
-        .unwrap();
-        Subject::from(did)
-    }
+    use crate::helpers::unique_subject;
+    use dialog_effects::memory::{Cell, Memory, Space, Version};
 
     #[dialog_common::test]
     async fn it_resolves_non_existent_cell() -> anyhow::Result<()> {
@@ -216,7 +200,7 @@ mod tests {
 
         let publication = resolved.expect("should have content");
         assert_eq!(publication.content, content);
-        assert_eq!(publication.edition, edition);
+        assert_eq!(publication.version.as_bytes(), edition.as_bytes());
 
         Ok(())
     }
@@ -279,7 +263,7 @@ mod tests {
             .await?;
 
         // Try to update with wrong edition
-        let wrong_edition = Blake3Hash::hash(b"wrong").as_bytes().to_vec();
+        let wrong_edition = Version::from(Blake3Hash::hash(b"wrong"));
         let result = subject
             .attenuate(Memory)
             .attenuate(Space::new("local"))
@@ -288,7 +272,7 @@ mod tests {
             .perform(&provider)
             .await;
 
-        assert!(matches!(result, Err(MemoryError::EditionMismatch { .. })));
+        assert!(matches!(result, Err(MemoryError::VersionMismatch { .. })));
 
         Ok(())
     }
@@ -317,7 +301,7 @@ mod tests {
             .perform(&provider)
             .await;
 
-        assert!(matches!(result, Err(MemoryError::EditionMismatch { .. })));
+        assert!(matches!(result, Err(MemoryError::VersionMismatch { .. })));
 
         Ok(())
     }
@@ -377,16 +361,16 @@ mod tests {
             .await?;
 
         // Try to retract with wrong edition
-        let wrong_edition = Blake3Hash::hash(b"wrong").as_bytes().to_vec();
+        let wrong_version = Version::from(Blake3Hash::hash(b"wrong"));
         let result = subject
             .attenuate(Memory)
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
-            .invoke(Retract::new(wrong_edition))
+            .invoke(Retract::new(wrong_version))
             .perform(&provider)
             .await;
 
-        assert!(matches!(result, Err(MemoryError::EditionMismatch { .. })));
+        assert!(matches!(result, Err(MemoryError::VersionMismatch { .. })));
 
         Ok(())
     }
@@ -456,20 +440,17 @@ mod tests {
             .await?;
 
         // Try to publish same content with wrong edition - should succeed
-        let wrong_edition = Blake3Hash::hash(b"wrong").as_bytes().to_vec();
+        let wrong_version = Version::from(Blake3Hash::hash(b"wrong"));
         let result = subject
             .attenuate(Memory)
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("test"))
-            .invoke(Publish::new(content.clone(), Some(wrong_edition)))
+            .invoke(Publish::new(content.clone(), Some(wrong_version)))
             .perform(&provider)
             .await;
 
         assert!(result.is_ok());
-        assert_eq!(
-            result.unwrap(),
-            Blake3Hash::hash(&content).as_bytes().to_vec()
-        );
+        assert_eq!(result.unwrap(), Version::from(Blake3Hash::hash(&content)));
 
         Ok(())
     }
@@ -511,12 +492,12 @@ mod tests {
         let subject = unique_subject("memory-retract-already-retracted");
 
         // Try to retract non-existent cell - should succeed
-        let wrong_edition = Blake3Hash::hash(b"wrong").as_bytes().to_vec();
+        let wrong_version = Version::from(Blake3Hash::hash(b"wrong"));
         let result = subject
             .attenuate(Memory)
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("nonexistent"))
-            .invoke(Retract::new(wrong_edition))
+            .invoke(Retract::new(wrong_version))
             .perform(&provider)
             .await;
 

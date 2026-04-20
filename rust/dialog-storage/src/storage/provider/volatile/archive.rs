@@ -5,7 +5,8 @@ use async_trait::async_trait;
 use base58::ToBase58;
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
-use dialog_effects::archive::{ArchiveError, Get, GetCapability, Put, PutCapability};
+use dialog_effects::archive::prelude::{GetExt, PutExt};
+use dialog_effects::archive::{ArchiveError, Get, Put};
 
 impl From<VolatileError> for ArchiveError {
     fn from(e: VolatileError) -> Self {
@@ -65,22 +66,8 @@ impl Provider<Put> for Volatile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dialog_capability::{Did, Subject};
+    use crate::helpers::unique_subject;
     use dialog_effects::archive::{Archive, Catalog};
-
-    fn unique_subject(prefix: &str) -> Subject {
-        let did: Did = format!(
-            "did:test:{}-{}",
-            prefix,
-            dialog_common::time::now()
-                .duration_since(dialog_common::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        )
-        .parse()
-        .unwrap();
-        Subject::from(did)
-    }
 
     #[dialog_common::test]
     async fn it_returns_none_for_missing_content() -> anyhow::Result<()> {
