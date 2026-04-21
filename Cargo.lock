@@ -1261,6 +1261,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-repository"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base58",
+ "dialog-capability",
+ "dialog-common",
+ "dialog-credentials",
+ "dialog-effects",
+ "dialog-operator",
+ "dialog-prolly-tree",
+ "dialog-storage",
+ "dialog-varsig",
+ "getrandom 0.2.16",
+ "parking_lot",
+ "reqwest",
+ "serde",
+ "serde_ipld_dagcbor",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
+]
+
+[[package]]
 name = "dialog-search-tree"
 version = "0.1.0"
 dependencies = [

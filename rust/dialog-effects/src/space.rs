@@ -14,7 +14,7 @@
 //!
 //! `Create` resolves the name and delegates to `storage::Create`.
 
-use dialog_capability::{Attenuate, Attenuation, Capability, Effect, Subject};
+use dialog_capability::{Attenuate, Attenuation, Capability, Did, Effect, Subject};
 use dialog_credentials::Credential;
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +39,29 @@ impl Space {
 
 impl Attenuation for Space {
     type Of = Subject;
+}
+
+/// Extension trait to start a space capability chain from a [`Subject`] or
+/// [`Did`]. Attaches a [`Space`] attenuation for the named space.
+pub trait SpaceSubjectExt {
+    /// The resulting space chain type.
+    type Space;
+    /// Scope to a named space under this subject.
+    fn space(self, name: impl Into<String>) -> Self::Space;
+}
+
+impl SpaceSubjectExt for Subject {
+    type Space = Capability<Space>;
+    fn space(self, name: impl Into<String>) -> Capability<Space> {
+        self.attenuate(Space::new(name))
+    }
+}
+
+impl SpaceSubjectExt for Did {
+    type Space = Capability<Space>;
+    fn space(self, name: impl Into<String>) -> Capability<Space> {
+        Subject::from(self).attenuate(Space::new(name))
+    }
 }
 
 /// Extension trait adding `.load()` and `.create()` sugar on Space capabilities.
