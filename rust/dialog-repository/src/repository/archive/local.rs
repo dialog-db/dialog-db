@@ -11,7 +11,7 @@ use std::fmt::Debug;
 
 /// Local content-addressed index backed by archive capabilities.
 ///
-/// Bridges the capability system (`Get`/`Put` effects) with the prolly
+/// Bridges the capability system (`Get`/`Put` effects) with the search
 /// tree's `ContentAddressedStorage` trait. All reads and writes go to
 /// the local archive only.
 pub struct LocalIndex<'a, Env> {
@@ -122,6 +122,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
+    use anyhow::Result;
     use dialog_capability::Subject;
     use dialog_storage::provider::Volatile;
     use dialog_varsig::did;
@@ -139,7 +140,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_writes_and_reads_block() -> anyhow::Result<()> {
+    async fn it_writes_and_reads_block() -> Result<()> {
         let env = Volatile::new();
         let mut archive = LocalIndex::new(&env, test_catalog("index"));
 
@@ -156,7 +157,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_returns_none_for_missing_hash() -> anyhow::Result<()> {
+    async fn it_returns_none_for_missing_hash() -> Result<()> {
         let env = Volatile::new();
         let archive = LocalIndex::new(&env, test_catalog("index"));
 
@@ -168,7 +169,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_isolates_catalogs() -> anyhow::Result<()> {
+    async fn it_isolates_catalogs() -> Result<()> {
         let env = Volatile::new();
 
         let block = TestBlock {

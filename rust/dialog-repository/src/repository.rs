@@ -107,14 +107,12 @@ impl From<SignerCredential> for Repository<SignerCredential> {
 }
 
 impl TryFrom<Credential> for Repository<SignerCredential> {
-    type Error = RepositoryError;
+    type Error = SignerRequiredError;
 
-    fn try_from(credential: Credential) -> Result<Self, RepositoryError> {
+    fn try_from(credential: Credential) -> Result<Self, SignerRequiredError> {
         match credential {
             Credential::Signer(s) => Ok(Self::new(s)),
-            Credential::Verifier(_) => Err(RepositoryError::StorageError(
-                "repository credential is verifier-only".into(),
-            )),
+            Credential::Verifier(_) => Err(SignerRequiredError),
         }
     }
 }

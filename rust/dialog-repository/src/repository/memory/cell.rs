@@ -1,19 +1,13 @@
-use std::sync::Arc;
-
-use parking_lot::RwLock;
-
+use crate::{Publish, PublishError, Resolve, ResolveError, RetainPublish, RetainResolve};
 use dialog_capability::{Capability, Did, Policy};
 use dialog_common::ConditionalSync;
-use dialog_effects::memory;
 use dialog_effects::memory::prelude::CellExt;
-use dialog_effects::memory::{Edition, Version};
-use dialog_storage::{CborEncoder, Encoder};
+use dialog_effects::memory::{self, Edition, Version};
+use dialog_storage::{CborEncoder, DialogStorageError, Encoder};
+use parking_lot::RwLock;
 use serde::{Serialize, de::DeserializeOwned};
 use std::fmt::Debug;
-
-use super::publish::{Publish, RetainPublish};
-use super::resolve::{Resolve, RetainResolve};
-use crate::RepositoryError;
+use std::sync::Arc;
 
 /// Cached [`Edition`] behind a shared lock.
 pub type SharedState<T> = Arc<RwLock<Option<Edition<T>>>>;
@@ -69,8 +63,11 @@ where
     Codec: Encoder + Clone,
 {
     /// Decode bytes into a typed value.
-    pub async fn decode(&self, bytes: &[u8]) -> Result<T, RepositoryError> {
-        Ok(self.codec.decode(bytes).await.map_err(Into::into)?)
+    pub async fn decode(&self, bytes: &[u8]) -> Result<T, ResolveError> {
+        self.codec.decode(bytes).await.map_err(|error| {
+            let error: DialogStorageError = error.into();
+            ResolveError::Decode(error.to_string())
+        })
     }
 }
 
@@ -84,7 +81,7 @@ where
     pub async fn apply(
         &self,
         edition: Option<memory::Edition<Vec<u8>>>,
-    ) -> Result<(), RepositoryError> {
+    ) -> Result<(), ResolveError> {
         match edition {
             None => self.clear(),
             Some(raw) => {
@@ -104,8 +101,11 @@ where
     Codec: Encoder<Bytes = Vec<u8>> + Clone,
 {
     /// Encode a value into bytes.
-    pub async fn encode(&self, value: &T) -> Result<Vec<u8>, RepositoryError> {
-        let (_hash, content) = self.codec.encode(value).await.map_err(Into::into)?;
+    pub async fn encode(&self, value: &T) -> Result<Vec<u8>, PublishError> {
+        let (_hash, content) = self.codec.encode(value).await.map_err(|error| {
+            let error: DialogStorageError = error.into();
+            PublishError::Encode(error.to_string())
+        })?;
         Ok(content)
     }
 }
@@ -293,17 +293,14 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
+    use anyhow::Result;
     use dialog_capability::Subject;
     use dialog_effects::memory::prelude::*;
     use dialog_storage::provider::Volatile;
     use dialog_varsig::did;
 
-    fn test_subject() -> Subject {
-        Subject::from(did!("key:zCellTests"))
-    }
-
     fn test_cell<T>(name: &str) -> Cell<T> {
-        test_subject()
+        Subject::from(did!("key:zCellTests"))
             .memory()
             .space("branch/test")
             .cell(name)
@@ -326,7 +323,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_resolves_empty_cell() -> anyhow::Result<()> {
+    async fn it_resolves_empty_cell() -> Result<()> {
         let provider = Volatile::new();
         let cell: Cell<TestValue> = test_cell("missing");
 
@@ -337,7 +334,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_publishes_then_resolves() -> anyhow::Result<()> {
+    async fn it_publishes_then_resolves() -> Result<()> {
         let provider = Volatile::new();
         let cell: Cell<TestValue> = test_cell("test");
 
@@ -356,7 +353,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_updates_with_automatic_edition() -> anyhow::Result<()> {
+    async fn it_updates_with_automatic_edition() -> Result<()> {
         let provider = Volatile::new();
         let cell: Cell<TestValue> = test_cell("update");
 
@@ -379,7 +376,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_caches_on_resolve() -> anyhow::Result<()> {
+    async fn it_caches_on_resolve() -> Result<()> {
         let provider = Volatile::new();
         let cell: Cell<TestValue> = test_cell("cache");
 
@@ -402,7 +399,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn clones_share_published_state() -> anyhow::Result<()> {
+    async fn clones_share_published_state() -> Result<()> {
         let provider = Volatile::new();
         let cell: Cell<TestValue> = test_cell("shared");
         let clone = cell.clone();
@@ -419,7 +416,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn publish_on_clone_visible_from_original() -> anyhow::Result<()> {
+    async fn publish_on_clone_visible_from_original() -> Result<()> {
         let provider = Volatile::new();
         let original: Cell<TestValue> = test_cell("shared-reverse");
         let clone = original.clone();
@@ -436,7 +433,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn equipped_publishes_and_reads() -> anyhow::Result<()> {
+    async fn equipped_publishes_and_reads() -> Result<()> {
         let provider = Volatile::new();
         let equipped = test_cell::<TestValue>("equipped-pub").retain(TestValue::default());
 
@@ -460,7 +457,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn equipped_updates_on_resolve() -> anyhow::Result<()> {
+    async fn equipped_updates_on_resolve() -> Result<()> {
         let provider = Volatile::new();
 
         let cell: Cell<TestValue> = test_cell("equipped-update");
@@ -487,7 +484,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn equipped_retains_value_when_remote_empty() -> anyhow::Result<()> {
+    async fn equipped_retains_value_when_remote_empty() -> Result<()> {
         let provider = Volatile::new();
 
         let cell: Cell<TestValue> = test_cell("equipped-retain");
@@ -519,14 +516,14 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn equipped_returns_none_before_any_value() -> anyhow::Result<()> {
+    fn equipped_returns_none_before_any_value() -> Result<()> {
         let equipped = test_cell::<TestValue>("equipped-empty").retain(TestValue::default());
         assert_eq!(*equipped.get(), TestValue::default());
         Ok(())
     }
 
     #[dialog_common::test]
-    async fn publish_preserves_edition_for_subsequent_publish() -> anyhow::Result<()> {
+    async fn publish_preserves_edition_for_subsequent_publish() -> Result<()> {
         let provider = Volatile::new();
         let cell: Cell<TestValue> = test_cell("edition");
 
@@ -556,7 +553,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn edition_mismatch_fails_publish() -> anyhow::Result<()> {
+    async fn edition_mismatch_fails_publish() -> Result<()> {
         let provider = Volatile::new();
         let cell_a: Cell<TestValue> = test_cell("conflict");
         let cell_b: Cell<TestValue> = test_cell("conflict");

@@ -4,7 +4,7 @@ use dialog_storage::Blake3Hash;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 
-/// Reference to a prolly tree by its root hash.
+/// Reference to a search tree by its root hash.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TreeReference(Blake3Hash);
 

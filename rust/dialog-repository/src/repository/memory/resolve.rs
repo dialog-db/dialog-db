@@ -1,14 +1,13 @@
 //! Resolve command for fetching a cell value.
 
+use super::cell::Cache;
+use crate::ResolveError;
 use dialog_capability::{Capability, Fork, Provider, Site, SiteAddress};
 use dialog_common::ConditionalSync;
 use dialog_effects::memory;
 use dialog_storage::Encoder;
 use parking_lot::RwLock;
 use serde::de::DeserializeOwned;
-
-use super::cell::Cache;
-use crate::RepositoryError;
 
 /// Command to resolve (fetch) a cell value.
 ///
@@ -28,7 +27,7 @@ where
     Codec: Encoder + Clone,
 {
     /// Perform the resolve against the local environment.
-    pub async fn perform<Env>(self, env: &Env) -> Result<(), RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<(), ResolveError>
     where
         Env: Provider<memory::Resolve>,
     {
@@ -62,7 +61,7 @@ where
     Codec: Encoder + Clone,
 {
     /// Perform the resolve against the remote site.
-    pub async fn perform<Env>(self, env: &Env) -> Result<(), RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<(), ResolveError>
     where
         Env: Provider<Fork<S, memory::Resolve>> + ConditionalSync,
     {
@@ -90,7 +89,7 @@ where
     pub async fn perform(
         self,
         env: &(impl Provider<memory::Resolve> + ConditionalSync),
-    ) -> Result<(), RepositoryError> {
+    ) -> Result<(), ResolveError> {
         let cache = self.inner.cache.clone();
         self.inner.perform(env).await?;
         if let Some(value) = cache.content() {

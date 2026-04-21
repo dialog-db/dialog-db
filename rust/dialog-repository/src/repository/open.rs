@@ -1,12 +1,9 @@
+use crate::{OpenRepositoryError, Repository};
 use dialog_capability::{Capability, Provider};
 use dialog_common::ConditionalSync;
 use dialog_credentials::Ed25519Signer;
 use dialog_credentials::credential::{Credential, SignerCredential};
-use dialog_effects::space;
-use dialog_effects::space::SpaceExt;
-
-use super::Repository;
-use super::error::RepositoryError;
+use dialog_effects::space::{self, SpaceExt};
 
 /// Command to open (load-or-create) a repository.
 ///
@@ -16,7 +13,7 @@ pub struct OpenRepository(pub Capability<space::Space>);
 
 impl OpenRepository {
     /// Execute against an operator.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Repository, RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<Repository, OpenRepositoryError>
     where
         Env: Provider<space::Load> + Provider<space::Create> + ConditionalSync,
     {
