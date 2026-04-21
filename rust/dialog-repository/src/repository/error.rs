@@ -12,101 +12,97 @@ use thiserror::Error;
 
 use super::tree::TreeReference;
 
-/// The common error type used by repository operations.
+/// The umbrella error type for the repository API.
+///
+/// Each variant wraps a command-specific error type. Callers doing
+/// multiple operations (e.g. `push` then `pull`) can `?` both into a
+/// single `Result<_, RepositoryError>` without juggling per-command
+/// error types. Pattern match on variants or use `downcast` via
+/// [`source()`](std::error::Error::source) when specific handling is
+/// needed.
 #[derive(Error, Debug)]
 pub enum RepositoryError {
-    /// Branch with the given name was not found.
-    #[error("Branch {name} not found")]
-    BranchNotFound {
-        /// The name of the branch that was not found.
-        name: String,
-    },
-
-    /// Branch has no configured upstream.
-    #[error("Branch {name} has no upstream")]
-    BranchHasNoUpstream {
-        /// The name of the branch that has no upstream.
-        name: String,
-    },
-
-    /// Branch upstream is set to itself.
-    #[error("Upstream of local {name} is set to itself")]
-    BranchUpstreamIsItself {
-        /// Branch name.
-        name: String,
-    },
-
-    /// Remote repository not found.
-    #[error("Remote {remote} not found")]
-    RemoteNotFound {
-        /// Remote site name.
-        remote: String,
-    },
-
-    /// Remote repository already exists.
-    #[error("Remote {remote} already exists")]
-    RemoteAlreadyExists {
-        /// Remote site name.
-        remote: String,
-    },
-
-    /// Pushing a revision failed.
-    #[error("Pushing revision failed: {cause}")]
-    PushFailed {
-        /// The underlying error message.
-        cause: String,
-    },
-
-    /// Identifying the current authority failed.
-    #[error("Identify failed: {0}")]
-    Identify(#[from] AuthorityError),
-
-    /// A memory effect (publish/resolve) failed.
+    /// Open-repository command failed.
     #[error(transparent)]
-    Memory(#[from] MemoryError),
+    OpenRepository(#[from] OpenRepositoryError),
 
-    /// An archive effect (get/put) failed.
+    /// Load-repository command failed.
     #[error(transparent)]
-    Archive(#[from] ArchiveError),
+    LoadRepository(#[from] LoadRepositoryError),
 
-    /// A storage-backed operation failed.
+    /// Create-repository command failed.
     #[error(transparent)]
-    Storage(#[from] DialogStorageError),
+    CreateRepository(#[from] CreateRepositoryError),
 
-    /// An operator-space storage effect failed.
+    /// Load-branch command failed.
     #[error(transparent)]
-    OperatorStorage(#[from] StorageError),
+    LoadBranch(#[from] LoadBranchError),
 
-    /// Key generation or signing failed.
+    /// Commit command failed.
     #[error(transparent)]
-    Signer(#[from] Ed25519SignerError),
+    Commit(#[from] CommitError),
 
-    /// An artifact operation (tree manipulation, keyview, etc.) failed.
+    /// Set-upstream command failed.
     #[error(transparent)]
-    Artifact(#[from] DialogArtifactsError),
+    SetUpstream(#[from] SetUpstreamError),
 
-    /// A prolly tree operation failed.
+    /// Fetch command failed.
     #[error(transparent)]
-    Tree(#[from] DialogProllyTreeError),
+    Fetch(#[from] FetchError),
 
-    /// Repository not found.
-    #[error("Repository '{0}' not found")]
-    NotFound(String),
+    /// Push command failed.
+    #[error(transparent)]
+    Push(#[from] PushError),
 
-    /// Repository already exists.
-    #[error("Repository '{0}' already exists")]
-    AlreadyExists(String),
+    /// Pull command failed.
+    #[error(transparent)]
+    Pull(#[from] PullError),
 
-    /// Attempted to use a verifier-only credential where a signer is required.
-    #[error("Expected signer credential, got verifier-only")]
-    SignerRequired,
+    /// Load-remote command failed.
+    #[error(transparent)]
+    LoadRemote(#[from] LoadRemoteError),
 
-    /// Invalid internal state (should never happen in normal operation).
-    #[error("Invalid state: {message}")]
-    InvalidState {
-        /// Description of the invalid state.
-        message: String,
-    },
+    /// Create-remote command failed.
+    #[error(transparent)]
+    CreateRemote(#[from] CreateRemoteError),
+
+    /// Open-remote-branch command failed.
+    #[error(transparent)]
+    OpenRemoteBranch(#[from] OpenRemoteBranchError),
+
+    /// Load-remote-branch command failed.
+    #[error(transparent)]
+    LoadRemoteBranch(#[from] LoadRemoteBranchError),
+
+    /// Fetch-remote-branch command failed.
+    #[error(transparent)]
+    FetchRemoteBranch(#[from] FetchRemoteBranchError),
+
+    /// Publish-remote-branch command failed.
+    #[error(transparent)]
+    PublishRemoteBranch(#[from] PublishRemoteBranchError),
+
+    /// Upload command (novel blocks to remote archive) failed.
+    #[error(transparent)]
+    Upload(#[from] UploadError),
+
+    /// Cell publish failed (outside a command context).
+    #[error(transparent)]
+    Publish(#[from] PublishError),
+
+    /// Cell resolve failed (outside a command context).
+    #[error(transparent)]
+    Resolve(#[from] ResolveError),
+
+    /// Select command failed to load its tree (the stream itself yields
+    /// `DialogArtifactsError` per-item, which is surfaced through the
+    /// stream).
+    #[error(transparent)]
+    Select(#[from] DialogProllyTreeError),
+
+    /// A verifier-only credential was used where a signer was required.
+    #[error(transparent)]
+    SignerRequired(#[from] SignerRequiredError),
 }
 
 /// Errors returned by the open remote branch command.
