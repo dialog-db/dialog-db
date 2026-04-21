@@ -159,11 +159,11 @@ pub enum RepositoryError {
 #[derive(Error, Debug)]
 pub enum OpenRemoteBranchError {
     /// Loading the remote (to resolve its address) failed.
-    #[error(transparent)]
+    #[error("Failed to load remote during open: {0}")]
     LoadRemote(#[from] LoadRemoteError),
 
     /// Resolving the local snapshot cache failed.
-    #[error(transparent)]
+    #[error("Failed to resolve snapshot cache during open: {0}")]
     Resolve(#[from] ResolveError),
 }
 
@@ -171,11 +171,11 @@ pub enum OpenRemoteBranchError {
 #[derive(Error, Debug)]
 pub enum FetchRemoteBranchError {
     /// Resolving the upstream revision from the remote failed.
-    #[error(transparent)]
+    #[error("Failed to resolve upstream revision from remote: {0}")]
     Resolve(#[from] ResolveError),
 
     /// Persisting the fetched revision to the local cache failed.
-    #[error(transparent)]
+    #[error("Failed to persist fetched revision to local cache: {0}")]
     Publish(#[from] PublishError),
 }
 
@@ -183,7 +183,7 @@ pub enum FetchRemoteBranchError {
 #[derive(Error, Debug)]
 pub enum PublishRemoteBranchError {
     /// Publishing the revision to the upstream failed.
-    #[error(transparent)]
+    #[error("Failed to publish revision to upstream: {0}")]
     Publish(#[from] PublishError),
 
     /// The upstream cell has no edition after publish — this should
@@ -197,14 +197,14 @@ pub enum PublishRemoteBranchError {
 pub enum LoadRemoteBranchError {
     /// The remote branch has no cached revision locally (never
     /// fetched).
-    #[error("Remote branch {name} not found")]
+    #[error("Remote branch {name} not found in local cache")]
     NotFound {
         /// The branch name.
         name: String,
     },
 
     /// Opening the remote branch (to resolve address + cache) failed.
-    #[error(transparent)]
+    #[error("Failed to open remote branch during load: {0}")]
     Open(#[from] OpenRemoteBranchError),
 }
 
@@ -219,7 +219,7 @@ pub enum LoadRemoteError {
     },
 
     /// Failed to resolve the remote's address cell.
-    #[error(transparent)]
+    #[error("Failed to resolve remote address cell: {0}")]
     Resolve(#[from] ResolveError),
 }
 
@@ -234,8 +234,55 @@ pub enum LoadBranchError {
     },
 
     /// Failed to resolve the branch's cells.
-    #[error(transparent)]
+    #[error("Failed to resolve branch cells: {0}")]
     Resolve(#[from] ResolveError),
+}
+
+/// Errors specific to a pull operation.
+#[derive(Error, Debug)]
+pub enum PullError {
+    /// Branch has no configured upstream to pull from.
+    #[error("Branch {branch} has no upstream to pull from")]
+    BranchHasNoUpstream {
+        /// The local branch with no configured upstream.
+        branch: String,
+    },
+
+    /// Loading the local upstream branch failed.
+    #[error("Failed to load upstream branch: {0}")]
+    LoadBranch(#[from] LoadBranchError),
+
+    /// Loading the configured remote failed.
+    #[error("Failed to load remote: {0}")]
+    LoadRemote(#[from] LoadRemoteError),
+
+    /// Opening the remote branch failed.
+    #[error("Failed to open remote branch: {0}")]
+    OpenRemoteBranch(#[from] OpenRemoteBranchError),
+
+    /// Fetching the upstream revision from the remote failed.
+    #[error("Failed to fetch from remote: {0}")]
+    FetchRemoteBranch(#[from] FetchRemoteBranchError),
+
+    /// A cell publish during pull failed.
+    #[error("Failed to publish merged revision: {0}")]
+    Publish(#[from] PublishError),
+
+    /// Identifying the current authority for the merge revision failed.
+    #[error("Failed to identify authority for merge: {0}")]
+    Authority(#[from] AuthorityError),
+
+    /// A prolly-tree operation during pull failed.
+    #[error("Tree operation failed during pull: {0}")]
+    Tree(#[from] DialogProllyTreeError),
+
+    /// Streaming a block during replication failed.
+    #[error("Block streaming failed during pull: {0}")]
+    Storage(#[from] DialogStorageError),
+
+    /// An artifact decode during pull failed.
+    #[error("Artifact decode failed during pull: {0}")]
+    Artifact(#[from] DialogArtifactsError),
 }
 
 /// Errors specific to a push operation.
@@ -265,35 +312,35 @@ pub enum PushError {
     },
 
     /// A cell publish during push failed.
-    #[error(transparent)]
+    #[error("Failed to publish during push: {0}")]
     Publish(#[from] PublishError),
 
     /// A cell resolve during push failed.
-    #[error(transparent)]
+    #[error("Failed to resolve during push: {0}")]
     Resolve(#[from] ResolveError),
 
     /// Loading the configured remote failed.
-    #[error(transparent)]
+    #[error("Failed to load remote during push: {0}")]
     LoadRemote(#[from] LoadRemoteError),
 
     /// Opening the remote branch failed.
-    #[error(transparent)]
+    #[error("Failed to open remote branch during push: {0}")]
     OpenRemoteBranch(#[from] OpenRemoteBranchError),
 
     /// Fetching the upstream revision from the remote failed.
-    #[error(transparent)]
+    #[error("Failed to fetch upstream during push: {0}")]
     FetchRemoteBranch(#[from] FetchRemoteBranchError),
 
     /// Publishing the revision to the remote upstream failed.
-    #[error(transparent)]
+    #[error("Failed to publish to remote upstream: {0}")]
     PublishRemoteBranch(#[from] PublishRemoteBranchError),
 
     /// Uploading novel blocks to the remote archive failed.
-    #[error(transparent)]
+    #[error("Failed to upload novel blocks: {0}")]
     Upload(#[from] UploadError),
 
     /// A prolly-tree operation during push failed.
-    #[error(transparent)]
+    #[error("Tree operation failed during push: {0}")]
     Tree(#[from] DialogProllyTreeError),
 }
 

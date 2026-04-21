@@ -8,10 +8,10 @@ use dialog_storage::{Blake3Hash, ContentAddressedStorage, DialogStorageError, En
 use futures_util::StreamExt;
 
 use super::{Branch, Index, UpstreamState};
+use crate::PullError;
 use crate::repository::archive::RepositoryArchiveExt as _;
 use crate::repository::archive::local::LocalIndex;
 use crate::repository::archive::networked::NetworkedIndex;
-use crate::repository::error::RepositoryError;
 use crate::repository::memory::RepositoryMemoryExt;
 use crate::repository::remote::RemoteSite;
 use crate::repository::revision::Revision;
@@ -37,7 +37,7 @@ impl<'a> PullLocal<'a> {
 
 impl PullLocal<'_> {
     /// Execute the merge, returning the new revision (or None if no changes).
-    pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, PullError>
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -89,7 +89,7 @@ impl Branch {
 
 impl Pull<'_> {
     /// Execute the pull operation.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, PullError>
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -104,8 +104,8 @@ impl Pull<'_> {
         let branch = self.branch;
         let upstream = branch
             .upstream()
-            .ok_or_else(|| RepositoryError::BranchHasNoUpstream {
-                name: branch.name().to_string(),
+            .ok_or_else(|| PullError::BranchHasNoUpstream {
+                branch: branch.name().to_string(),
             })?;
 
         match upstream {
@@ -169,7 +169,7 @@ async fn three_way_merge<S>(
     upstream_revision: Revision,
     store: S,
     env: &(impl Provider<Resolve> + Provider<Publish> + Provider<Identify> + ConditionalSync),
-) -> Result<Option<Revision>, RepositoryError>
+) -> Result<Option<Revision>, PullError>
 where
     S: ContentAddressedStorage<Hash = Blake3Hash, Error = DialogStorageError>
         + Encoder<Hash = Blake3Hash, Error = DialogStorageError>
