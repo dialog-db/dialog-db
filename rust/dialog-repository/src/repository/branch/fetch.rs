@@ -3,7 +3,7 @@ use dialog_common::ConditionalSync;
 use dialog_effects::memory::{Publish, Resolve};
 
 use super::{Branch, UpstreamState};
-use crate::repository::error::RepositoryError;
+use crate::FetchError;
 use crate::repository::memory::RepositoryMemoryExt;
 use crate::repository::remote::RemoteSite;
 use crate::repository::revision::Revision;
@@ -37,19 +37,19 @@ impl Fetch<'_> {
     /// Execute the fetch operation, returning the upstream revision.
     ///
     /// Returns `None` if the upstream has no revision yet.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, FetchError>
     where
         Env: Provider<Resolve>
             + Provider<Publish>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync,
     {
-        let upstream =
-            self.branch
-                .upstream()
-                .ok_or_else(|| RepositoryError::BranchHasNoUpstream {
-                    name: self.branch.name().to_string(),
-                })?;
+        let upstream = self
+            .branch
+            .upstream()
+            .ok_or_else(|| FetchError::BranchHasNoUpstream {
+                branch: self.branch.name().to_string(),
+            })?;
 
         match &upstream {
             UpstreamState::Local { branch: name, .. } => {

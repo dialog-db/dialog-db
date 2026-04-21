@@ -2,7 +2,7 @@ use dialog_capability::Provider;
 use dialog_effects::memory::Publish;
 
 use super::{Branch, UpstreamState};
-use crate::repository::error::RepositoryError;
+use crate::SetUpstreamError;
 
 /// Command struct for setting a branch's upstream.
 pub struct SetUpstream<'a> {
@@ -28,7 +28,7 @@ impl Branch {
 
 impl SetUpstream<'_> {
     /// Execute the set_upstream operation.
-    pub async fn perform<Env>(self, env: &Env) -> Result<(), RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<(), SetUpstreamError>
     where
         Env: Provider<Publish>,
     {
@@ -36,8 +36,8 @@ impl SetUpstream<'_> {
         if let UpstreamState::Local { ref branch, .. } = self.upstream
             && *branch == self.branch.name()
         {
-            return Err(RepositoryError::BranchUpstreamIsItself {
-                name: self.branch.name().to_string(),
+            return Err(SetUpstreamError::UpstreamIsItself {
+                branch: self.branch.name().to_string(),
             });
         }
 
@@ -56,8 +56,8 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    use crate::SetUpstreamError;
     use crate::repository::branch::UpstreamState;
-    use crate::repository::error::RepositoryError;
     use crate::repository::tree::TreeReference;
     use anyhow::Result;
 
@@ -136,7 +136,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(RepositoryError::BranchUpstreamIsItself { .. })
+            Err(SetUpstreamError::UpstreamIsItself { .. })
         ));
 
         Ok(())

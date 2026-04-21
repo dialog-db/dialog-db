@@ -4,7 +4,7 @@ use dialog_effects::space;
 use dialog_effects::space::SpaceExt;
 
 use super::Repository;
-use super::error::RepositoryError;
+use crate::LoadRepositoryError;
 
 /// Command to load an existing repository.
 ///
@@ -14,7 +14,7 @@ pub struct LoadRepository(pub Capability<space::Space>);
 
 impl LoadRepository {
     /// Execute against an operator.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Repository, RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<Repository, LoadRepositoryError>
     where
         Env: Provider<space::Load> + ConditionalSync,
     {

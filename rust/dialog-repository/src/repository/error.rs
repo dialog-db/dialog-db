@@ -65,52 +65,6 @@ pub enum RepositoryError {
     #[error(transparent)]
     Memory(#[from] MemoryError),
 
-    /// Scaffolding: commands that haven't yet been converted to their
-    /// own typed error still produce `RepositoryError`, and any
-    /// [`PublishError`] they bubble up lands here. Remove this variant
-    /// once every `cell.publish(...).perform(env)` call site lives in
-    /// a command with its own typed error.
-    #[error(transparent)]
-    TempPublish(#[from] PublishError),
-
-    /// Scaffolding: same as `TempPublish` but for resolve. Remove once
-    /// every `cell.resolve(...).perform(env)` call site lives in a
-    /// command with its own typed error.
-    #[error(transparent)]
-    TempResolve(#[from] ResolveError),
-
-    /// Scaffolding: bubbles `LoadBranchError` through commands that
-    /// still return `RepositoryError`. Remove once every `.load()`
-    /// caller has its own typed error.
-    #[error(transparent)]
-    TempLoadBranch(#[from] LoadBranchError),
-
-    /// Scaffolding: bubbles `LoadRemoteError` through commands that
-    /// still return `RepositoryError`. Remove once every remote load
-    /// caller has its own typed error.
-    #[error(transparent)]
-    TempLoadRemote(#[from] LoadRemoteError),
-
-    /// Scaffolding: bubbles `OpenRemoteBranchError` through commands
-    /// that still return `RepositoryError`.
-    #[error(transparent)]
-    TempOpenRemoteBranch(#[from] OpenRemoteBranchError),
-
-    /// Scaffolding: bubbles `LoadRemoteBranchError` through commands
-    /// that still return `RepositoryError`.
-    #[error(transparent)]
-    TempLoadRemoteBranch(#[from] LoadRemoteBranchError),
-
-    /// Scaffolding: bubbles `FetchRemoteBranchError` through commands
-    /// that still return `RepositoryError`.
-    #[error(transparent)]
-    TempFetchRemoteBranch(#[from] FetchRemoteBranchError),
-
-    /// Scaffolding: bubbles `PublishRemoteBranchError` through commands
-    /// that still return `RepositoryError`.
-    #[error(transparent)]
-    TempPublishRemoteBranch(#[from] PublishRemoteBranchError),
-
     /// An archive effect (get/put) failed.
     #[error(transparent)]
     Archive(#[from] ArchiveError),
@@ -208,6 +162,69 @@ pub enum LoadRemoteBranchError {
     Open(#[from] OpenRemoteBranchError),
 }
 
+/// Attempted to use a verifier-only credential where a signer was
+/// required.
+#[derive(Error, Debug)]
+#[error("Expected signer credential, got verifier-only")]
+pub struct SignerRequiredError;
+
+/// Errors returned by the open repository command.
+#[derive(Error, Debug)]
+pub enum OpenRepositoryError {
+    /// Generating a new signer for the fresh repository failed.
+    #[error("Failed to generate signer for new repository: {0}")]
+    Signer(#[from] Ed25519SignerError),
+
+    /// Backend storage failed during load-or-create.
+    #[error("Storage failed during open: {0}")]
+    Storage(#[from] StorageError),
+}
+
+/// Errors returned by the load repository command.
+#[derive(Error, Debug)]
+pub enum LoadRepositoryError {
+    /// Backend storage failed during load.
+    #[error("Storage failed during load: {0}")]
+    Storage(#[from] StorageError),
+}
+
+/// Errors returned by the create repository command.
+#[derive(Error, Debug)]
+pub enum CreateRepositoryError {
+    /// Generating a new signer for the repository failed.
+    #[error("Failed to generate signer for new repository: {0}")]
+    Signer(#[from] Ed25519SignerError),
+
+    /// Backend storage failed during create.
+    #[error("Storage failed during create: {0}")]
+    Storage(#[from] StorageError),
+
+    /// The created repository couldn't be used as a signer (should
+    /// not happen — freshly generated credentials always have a key).
+    #[error("Expected signer credential after create, got verifier-only")]
+    SignerRequired,
+}
+
+/// Errors returned by the create remote command.
+#[derive(Error, Debug)]
+pub enum CreateRemoteError {
+    /// A remote with this name already exists.
+    #[error("Remote {name} already exists")]
+    AlreadyExists {
+        /// The remote name.
+        name: String,
+    },
+
+    /// Failed to resolve the remote's address cell to check for
+    /// existing record.
+    #[error("Failed to resolve remote address cell: {0}")]
+    Resolve(#[from] ResolveError),
+
+    /// Failed to publish the new remote's address.
+    #[error("Failed to publish remote address: {0}")]
+    Publish(#[from] PublishError),
+}
+
 /// Errors returned by the load remote command.
 #[derive(Error, Debug)]
 pub enum LoadRemoteError {
@@ -236,6 +253,69 @@ pub enum LoadBranchError {
     /// Failed to resolve the branch's cells.
     #[error("Failed to resolve branch cells: {0}")]
     Resolve(#[from] ResolveError),
+}
+
+/// Errors specific to setting a branch's upstream.
+#[derive(Error, Debug)]
+pub enum SetUpstreamError {
+    /// Upstream was set to the same branch it would advance, which
+    /// would create a cycle.
+    #[error("Upstream of local branch {branch} cannot be itself")]
+    UpstreamIsItself {
+        /// The branch name.
+        branch: String,
+    },
+
+    /// Publishing the new upstream state failed.
+    #[error("Failed to publish upstream state: {0}")]
+    Publish(#[from] PublishError),
+}
+
+/// Errors specific to a branch fetch operation.
+#[derive(Error, Debug)]
+pub enum FetchError {
+    /// Branch has no configured upstream to fetch from.
+    #[error("Branch {branch} has no upstream to fetch from")]
+    BranchHasNoUpstream {
+        /// The local branch with no configured upstream.
+        branch: String,
+    },
+
+    /// Loading the local upstream branch failed.
+    #[error("Failed to load upstream branch: {0}")]
+    LoadBranch(#[from] LoadBranchError),
+
+    /// Loading the configured remote failed.
+    #[error("Failed to load remote: {0}")]
+    LoadRemote(#[from] LoadRemoteError),
+
+    /// Opening the remote branch failed.
+    #[error("Failed to open remote branch: {0}")]
+    OpenRemoteBranch(#[from] OpenRemoteBranchError),
+
+    /// Fetching from the remote failed.
+    #[error("Failed to fetch from remote: {0}")]
+    FetchRemoteBranch(#[from] FetchRemoteBranchError),
+}
+
+/// Errors specific to a commit operation.
+#[derive(Error, Debug)]
+pub enum CommitError {
+    /// A prolly-tree operation during commit failed.
+    #[error("Tree operation failed during commit: {0}")]
+    Tree(#[from] DialogProllyTreeError),
+
+    /// An artifact decode during commit failed.
+    #[error("Artifact decode failed during commit: {0}")]
+    Artifact(#[from] DialogArtifactsError),
+
+    /// Identifying the current authority for the new revision failed.
+    #[error("Failed to identify authority for commit: {0}")]
+    Authority(#[from] AuthorityError),
+
+    /// Publishing the new revision failed.
+    #[error("Failed to publish new revision: {0}")]
+    Publish(#[from] PublishError),
 }
 
 /// Errors specific to a pull operation.

@@ -13,10 +13,11 @@ use dialog_storage::{Blake3Hash, ContentAddressedStorage, DialogStorageError};
 use futures_util::Stream;
 use std::ops::Range;
 
+use dialog_prolly_tree::DialogProllyTreeError;
+
 use super::{Branch, Index, UpstreamState};
 use crate::repository::archive::RepositoryArchiveExt as _;
 use crate::repository::archive::networked::NetworkedIndex;
-use crate::repository::error::RepositoryError;
 use crate::repository::memory::RepositoryMemoryExt;
 use crate::repository::remote::RemoteSite;
 
@@ -55,7 +56,7 @@ impl Select<'_> {
     pub async fn perform<Env>(
         self,
         env: &Env,
-    ) -> Result<impl Stream<Item = Result<Artifact, DialogArtifactsError>>, RepositoryError>
+    ) -> Result<impl Stream<Item = Result<Artifact, DialogArtifactsError>>, DialogProllyTreeError>
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -84,7 +85,7 @@ impl Select<'_> {
     async fn execute<'s, S>(
         self,
         store: S,
-    ) -> Result<impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's, RepositoryError>
+    ) -> Result<impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's, DialogProllyTreeError>
     where
         S: ContentAddressedStorage<Hash = Blake3Hash, Error = DialogStorageError>
             + Clone

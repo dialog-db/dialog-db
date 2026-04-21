@@ -11,9 +11,9 @@ use dialog_prolly_tree::{EMPT_TREE_HASH, Tree};
 use futures_util::{Stream, StreamExt, TryStreamExt};
 
 use super::{Branch, Index};
+use crate::CommitError;
 use crate::repository::archive::RepositoryArchiveExt as _;
 use crate::repository::archive::local::LocalIndex;
-use crate::repository::error::RepositoryError;
 use crate::repository::revision::Revision;
 use crate::repository::tree::TreeReference;
 
@@ -48,7 +48,7 @@ where
     /// stream to the three (entity / attribute / value) indexes, then
     /// publish a new [`Revision`] to the branch's revision cell with the
     /// updated logical clock.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Revision, RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<Revision, CommitError>
     where
         Env: Provider<Get>
             + Provider<Put>

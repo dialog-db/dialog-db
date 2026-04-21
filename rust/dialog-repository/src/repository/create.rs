@@ -6,7 +6,7 @@ use dialog_effects::space;
 use dialog_effects::space::SpaceExt;
 
 use super::Repository;
-use super::error::RepositoryError;
+use crate::CreateRepositoryError;
 
 /// Command to create a new repository.
 ///
@@ -19,12 +19,14 @@ impl CreateRepository {
     pub async fn perform<Env>(
         self,
         env: &Env,
-    ) -> Result<Repository<SignerCredential>, RepositoryError>
+    ) -> Result<Repository<SignerCredential>, CreateRepositoryError>
     where
         Env: Provider<space::Create> + ConditionalSync,
     {
         let signer = Ed25519Signer::generate().await?;
         let credential = Credential::Signer(SignerCredential::from(signer));
-        self.0.create(credential).perform(env).await?.try_into()
+        let repository: Repository = Repository::from(self.0.create(credential).perform(env).await?);
+        Repository::<SignerCredential>::try_from(repository.credential().clone())
+            .map_err(|_| CreateRepositoryError::SignerRequired)
     }
 }

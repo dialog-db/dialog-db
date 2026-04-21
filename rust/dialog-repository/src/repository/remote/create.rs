@@ -4,7 +4,7 @@ use dialog_capability::{Did, Provider};
 use dialog_effects::memory::{Publish, Resolve};
 
 use super::{RemoteAddress, RemoteReference, RemoteRepository};
-use crate::repository::error::RepositoryError;
+use crate::CreateRemoteError;
 
 /// Command to create a new remote repository, persisting its configuration.
 pub struct CreateRemote {
@@ -27,15 +27,15 @@ impl CreateRemote {
     }
 
     /// Execute the create operation.
-    pub async fn perform<Env>(self, env: &Env) -> Result<RemoteRepository, RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<RemoteRepository, CreateRemoteError>
     where
         Env: Provider<Resolve> + Provider<Publish>,
     {
         let cell = self.reference.address();
         cell.resolve().perform(env).await?;
         if cell.content().is_some() {
-            return Err(RepositoryError::RemoteAlreadyExists {
-                remote: self.reference.name().to_string(),
+            return Err(CreateRemoteError::AlreadyExists {
+                name: self.reference.name().to_string(),
             });
         }
 
@@ -58,8 +58,8 @@ mod tests {
     use dialog_remote_s3::Address;
     use dialog_storage::provider::Volatile;
 
+    use crate::CreateRemoteError;
     use crate::repository::Repository;
-    use crate::repository::error::RepositoryError;
     use crate::repository::remote::SiteAddress;
 
     fn test_site_address() -> SiteAddress {
@@ -109,10 +109,7 @@ mod tests {
             .perform(&env)
             .await;
 
-        assert!(matches!(
-            result,
-            Err(RepositoryError::RemoteAlreadyExists { .. })
-        ));
+        assert!(matches!(result, Err(CreateRemoteError::AlreadyExists { .. })));
 
         Ok(())
     }
