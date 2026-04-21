@@ -1,10 +1,8 @@
 //! Remote repository -- a loaded remote with address and branch navigation.
 
+use crate::{RemoteAddress, RemoteReference, Retain};
 use dialog_capability::Did;
 use dialog_varsig::Principal;
-
-use super::{RemoteAddress, RemoteReference};
-use crate::repository::memory::Retain;
 
 /// A loaded remote repository.
 ///

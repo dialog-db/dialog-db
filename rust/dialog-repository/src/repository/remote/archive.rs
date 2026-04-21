@@ -1,5 +1,6 @@
 //! Remote archive operations -- upload blocks to remote storage.
 
+use crate::{RemoteRepository, RemoteSite, UploadError};
 use dialog_artifacts::{Datum, Key, State};
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::ConditionalSync;
@@ -8,9 +9,6 @@ use dialog_effects::archive::{ArchiveError, Catalog, Get, Put};
 use dialog_prolly_tree::{DialogProllyTreeError, Node};
 use dialog_storage::Blake3Hash;
 use futures_util::{Stream, StreamExt, TryStreamExt};
-
-use super::{RemoteRepository, RemoteSite};
-use crate::repository::error::UploadError;
 
 /// Remote archive scoped to a remote repository.
 pub struct RemoteArchive<'a> {

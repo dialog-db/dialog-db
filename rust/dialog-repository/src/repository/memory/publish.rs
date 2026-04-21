@@ -1,16 +1,14 @@
 //! Publish command for writing a cell value.
 
+use super::cell::Cache;
+use crate::PublishError;
 use dialog_capability::{Capability, Fork, Provider, SiteAddress};
 use dialog_common::ConditionalSync;
-use dialog_effects::memory;
-use dialog_effects::memory::prelude::CellExt;
+use dialog_effects::memory::{self, prelude::CellExt};
 use dialog_storage::Encoder;
 use parking_lot::RwLock;
 use serde::Serialize;
 use std::fmt::Debug;
-
-use super::cell::Cache;
-use crate::PublishError;
 
 /// Command to publish a cell value.
 ///

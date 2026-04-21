@@ -1,4 +1,4 @@
-use crate::repository::remote::RemoteSite;
+use crate::RemoteSite;
 use async_trait::async_trait;
 use dialog_capability::Fork;
 use dialog_capability::{Capability, Provider};
@@ -10,7 +10,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use std::fmt::Debug;
 
 use super::local::LocalIndex;
-use crate::repository::remote::RemoteRepository;
+use crate::RemoteRepository;
 
 /// Content-addressed index with on-demand remote replication.
 ///

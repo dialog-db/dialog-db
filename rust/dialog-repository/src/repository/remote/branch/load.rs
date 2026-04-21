@@ -1,10 +1,10 @@
 //! Command to load an existing remote branch.
 
+use crate::{
+    BranchReference, LoadRemoteBranchError, OpenRemoteBranch, RemoteBranch, RemoteRepository,
+};
 use dialog_capability::Provider;
 use dialog_effects::memory::Resolve;
-
-use super::{OpenRemoteBranch, RemoteBranch};
-use crate::LoadRemoteBranchError;
 
 /// Command to load an existing remote branch.
 ///
@@ -15,16 +15,14 @@ pub struct LoadRemoteBranch {
     open: OpenRemoteBranch,
 }
 
-impl<T> From<T> for LoadRemoteBranch
-where
-    T: Into<OpenRemoteBranch>,
-{
-    fn from(value: T) -> Self {
-        Self { open: value.into() }
-    }
-}
-
 impl LoadRemoteBranch {
+    /// Construct from an owned remote repository and a branch reference.
+    pub(super) fn new(repository: RemoteRepository, branch: BranchReference) -> Self {
+        Self {
+            open: OpenRemoteBranch::new(repository, branch),
+        }
+    }
+
     /// Execute the load operation.
     pub async fn perform<Env>(self, env: &Env) -> Result<RemoteBranch, LoadRemoteBranchError>
     where

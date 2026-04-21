@@ -1,7 +1,5 @@
+use crate::{Branch, Commit};
 use dialog_artifacts::{ChangeStream, Changes, Statement};
-
-use super::Branch;
-use super::commit::Commit;
 
 /// A transaction on a branch.
 ///

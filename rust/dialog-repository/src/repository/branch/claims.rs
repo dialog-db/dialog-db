@@ -1,8 +1,5 @@
-use dialog_artifacts::ArtifactSelector;
-use dialog_artifacts::selector::Constrained;
-
-use super::Branch;
-use super::select::Select;
+use crate::{Branch, Select};
+use dialog_artifacts::{ArtifactSelector, selector::Constrained};
 
 /// The branch's artifact index with remote fallback.
 ///

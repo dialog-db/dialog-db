@@ -5,13 +5,10 @@ use dialog_effects::memory::{Publish, Resolve};
 use dialog_prolly_tree::{Tree, TreeDifference};
 use futures_util::TryStreamExt;
 
-use super::{Branch, Index, UpstreamState};
-use crate::repository::archive::RepositoryArchiveExt as _;
-use crate::repository::archive::local::LocalIndex;
-use crate::repository::error::PushError;
-use crate::repository::memory::RepositoryMemoryExt;
-use crate::repository::remote::RemoteSite;
-use crate::repository::revision::Revision;
+use crate::{
+    Branch, Index, LocalIndex, PushError, RemoteSite, RepositoryArchiveExt as _,
+    RepositoryMemoryExt, Revision, Upstream,
+};
 
 /// Command struct for pushing local changes to an upstream branch.
 ///
@@ -76,7 +73,7 @@ impl Push<'_> {
         let base = upstream_state.tree().clone();
 
         match &upstream_state {
-            UpstreamState::Local {
+            Upstream::Local {
                 branch: upstream_name,
                 ..
             } => {
@@ -98,8 +95,8 @@ impl Push<'_> {
 
                 target.reset(revision.clone()).perform(env).await?;
             }
-            UpstreamState::Remote {
-                name: remote_name,
+            Upstream::Remote {
+                remote: remote_name,
                 branch: upstream_branch_name,
                 ..
             } => {
@@ -136,8 +133,7 @@ impl Push<'_> {
                 let index = branch.archive().index();
                 let store = LocalIndex::new(env, index.clone());
                 let base_tree: Index = Tree::from_hash(base.hash(), &store).await?;
-                let current_tree: Index =
-                    Tree::from_hash(revision.tree.hash(), &store).await?;
+                let current_tree: Index = Tree::from_hash(revision.tree.hash(), &store).await?;
                 let difference =
                     TreeDifference::compute(&base_tree, &current_tree, &store, &store).await?;
                 let novelty = difference.novel_nodes().map_err(Into::into);
@@ -170,10 +166,8 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    use crate::PushError;
     use crate::helpers::{test_operator_with_profile, test_repo};
-    use crate::repository::branch::UpstreamState;
-    use crate::repository::error::PushError;
-    use crate::repository::tree::TreeReference;
     use anyhow::Result;
 
     use dialog_artifacts::{Artifact, Instruction, Value};
@@ -184,16 +178,10 @@ mod tests {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
 
-        let _main = repo.branch("main").open().perform(&operator).await?;
+        let main = repo.branch("main").open().perform(&operator).await?;
 
         let feature = repo.branch("feature").open().perform(&operator).await?;
-        feature
-            .set_upstream(UpstreamState::Local {
-                branch: "main".into(),
-                tree: TreeReference::default(),
-            })
-            .perform(&operator)
-            .await?;
+        feature.set_upstream(&main).perform(&operator).await?;
 
         let artifact = Artifact {
             the: "user/name".parse()?,
@@ -237,13 +225,7 @@ mod tests {
             .await?;
 
         let feature = repo.branch("feature").open().perform(&operator).await?;
-        feature
-            .set_upstream(UpstreamState::Local {
-                branch: "main".into(),
-                tree: TreeReference::default(),
-            })
-            .perform(&operator)
-            .await?;
+        feature.set_upstream(&main).perform(&operator).await?;
 
         let _hash = feature
             .commit(stream::iter(vec![Instruction::Assert(Artifact {

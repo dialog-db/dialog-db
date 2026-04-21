@@ -1,12 +1,9 @@
+use crate::{CreateRepositoryError, Repository};
 use dialog_capability::{Capability, Provider};
 use dialog_common::ConditionalSync;
 use dialog_credentials::Ed25519Signer;
 use dialog_credentials::credential::{Credential, SignerCredential};
-use dialog_effects::space;
-use dialog_effects::space::SpaceExt;
-
-use super::Repository;
-use crate::CreateRepositoryError;
+use dialog_effects::space::{self, SpaceExt};
 
 /// Command to create a new repository.
 ///

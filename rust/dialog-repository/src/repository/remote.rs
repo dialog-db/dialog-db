@@ -6,17 +6,22 @@
 //! ```
 
 mod address;
-mod archive;
-mod branch;
-mod create;
-mod load;
-mod reference;
-mod repository;
-
 pub use address::*;
+
+mod archive;
 pub use archive::*;
+
+mod branch;
 pub use branch::*;
+
+mod create;
 pub use create::*;
+
+mod load;
 pub use load::*;
+
+mod reference;
 pub use reference::*;
+
+mod repository;
 pub use repository::*;

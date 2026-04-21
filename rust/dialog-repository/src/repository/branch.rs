@@ -1,3 +1,5 @@
+use super::memory::Cell;
+use crate::Revision;
 use dialog_artifacts::{Datum, Key, State};
 use dialog_capability::{Capability, Did, Subject};
 use dialog_effects::archive::Archive;
@@ -6,37 +8,46 @@ use dialog_prolly_tree::{GeometricDistribution, Tree};
 use dialog_storage::Blake3Hash;
 
 mod claims;
-mod commit;
-mod fetch;
-#[cfg(all(test, feature = "integration-tests"))]
-mod integration_tests;
-mod load;
-mod open;
-mod pull;
-mod push;
-mod reference;
-mod reset;
-mod select;
-mod set_upstream;
-mod transaction;
-mod upstream;
-
 pub use claims::*;
+
+mod commit;
 pub use commit::*;
+
+mod fetch;
 pub use fetch::*;
+
+mod load;
 pub use load::*;
+
+mod open;
 pub use open::*;
+
+mod pull;
 pub use pull::*;
+
+mod push;
 pub use push::*;
+
+mod reference;
 pub use reference::*;
+
+mod reset;
 pub use reset::*;
+
+mod select;
 pub use select::*;
+
+mod set_upstream;
 pub use set_upstream::*;
+
+mod transaction;
 pub use transaction::*;
+
+mod upstream;
 pub use upstream::*;
 
-use super::memory::Cell;
-use super::revision::Revision;
+#[cfg(all(test, feature = "integration-tests"))]
+mod integration_tests;
 
 /// Type alias for the prolly tree index.
 pub type Index = Tree<GeometricDistribution, Key, State<Datum>, Blake3Hash>;
@@ -49,7 +60,7 @@ pub type Index = Tree<GeometricDistribution, Key, State<Datum>, Blake3Hash>;
 pub struct Branch {
     reference: BranchReference,
     revision: Cell<Revision>,
-    upstream: Cell<UpstreamState>,
+    upstream: Cell<Upstream>,
 }
 
 impl Branch {
@@ -65,7 +76,7 @@ impl Branch {
     }
 
     /// Returns the upstream state, or `None` if no upstream is configured.
-    pub fn upstream(&self) -> Option<UpstreamState> {
+    pub fn upstream(&self) -> Option<Upstream> {
         self.upstream.content()
     }
 

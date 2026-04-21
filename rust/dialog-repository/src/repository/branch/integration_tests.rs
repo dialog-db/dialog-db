@@ -6,25 +6,16 @@
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-use anyhow::Result;
-
-use crate::SiteAddress;
 use crate::helpers::{test_operator_with_profile, unique_name};
-use crate::repository::branch::Branch;
-use crate::repository::branch::UpstreamState;
-use crate::repository::tree::TreeReference;
-use crate::repository::{Repository, RepositoryExt as _};
-
+use crate::{Branch, Repository, RepositoryExt as _, SiteAddress};
+use anyhow::Result;
 use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
-
 use dialog_credentials::SignerCredential;
-use dialog_operator::Operator;
-use dialog_operator::Profile;
+use dialog_operator::{Operator, Profile};
 use dialog_remote_s3::helpers::S3Address;
 use dialog_remote_s3::{Address as S3SiteAddress, S3Credential};
 use dialog_storage::provider::storage::VolatileSpace;
-use futures_util::StreamExt;
-use futures_util::stream;
+use futures_util::{StreamExt, stream};
 
 fn s3_site_address(s3: &S3Address) -> S3SiteAddress {
     S3SiteAddress::builder(&s3.endpoint)
@@ -618,13 +609,8 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> Result<()>
 
     // First, remove upstream so select has no remote to fall back to.
     // This should fail because tree blocks aren't local.
-    bob_branch
-        .set_upstream(UpstreamState::Local {
-            branch: "nowhere".into(),
-            tree: TreeReference::default(),
-        })
-        .perform(&operator)
-        .await?;
+    let nowhere = bob_repo.branch("nowhere").open().perform(&operator).await?;
+    bob_branch.set_upstream(&nowhere).perform(&operator).await?;
 
     let no_remote_result = bob_branch
         .claims()
@@ -659,13 +645,8 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> Result<()>
 
     // Remove upstream (simulates remote going away) by pointing
     // at a non-existent local branch instead
-    bob_branch
-        .set_upstream(UpstreamState::Local {
-            branch: "nowhere".into(),
-            tree: TreeReference::default(),
-        })
-        .perform(&operator)
-        .await?;
+    let nowhere = bob_repo.branch("nowhere").open().perform(&operator).await?;
+    bob_branch.set_upstream(&nowhere).perform(&operator).await?;
 
     // Query again with no remote. Data should be cached locally.
     let cached_results: Vec<_> = bob_branch

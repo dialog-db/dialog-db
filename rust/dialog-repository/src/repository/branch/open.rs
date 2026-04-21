@@ -1,8 +1,6 @@
+use crate::{Branch, BranchReference, ResolveError};
 use dialog_capability::Provider;
 use dialog_effects::memory::Resolve;
-
-use super::{Branch, BranchReference};
-use crate::ResolveError;
 
 /// Command to open a branch. Resolves the branch's revision and upstream
 /// cells without ever erroring on a missing revision — a freshly-opened
@@ -46,7 +44,7 @@ mod tests {
     use dialog_storage::provider::Volatile;
     use dialog_varsig::did;
 
-    use crate::repository::memory::RepositoryMemoryExt;
+    use crate::RepositoryMemoryExt;
 
     #[dialog_common::test]
     async fn it_opens_branch_with_no_revision() -> Result<()> {

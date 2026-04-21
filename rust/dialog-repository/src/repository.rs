@@ -6,36 +6,42 @@
 //! - [`archive`] — CAS adapter bridging capabilities with prolly tree storage
 //! - [`memory`] — Transactional memory cells with edition tracking
 //! - [`revision`] — Revision tracking and logical timestamps
-
-mod archive;
-mod branch;
-mod create;
-mod error;
-mod load;
-mod memory;
-mod open;
-mod remote;
-mod revision;
-mod tree;
-
-pub use archive::*;
-pub use branch::*;
-pub use create::*;
-pub use error::*;
-pub use load::*;
-pub use memory::*;
-pub use open::*;
-pub use remote::*;
-pub use revision::*;
-pub use tree::*;
-
 use dialog_capability::{Capability, Did, Subject};
-use dialog_credentials::Ed25519Signer;
-use dialog_credentials::credential::{Credential, SignerCredential};
+use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
 use dialog_effects::space::SpaceSubjectExt;
 use dialog_operator::SpaceHandle;
 use dialog_operator::access::Access as ProfileAccess;
 use dialog_varsig::Principal;
+
+mod archive;
+pub use archive::*;
+
+mod branch;
+pub use branch::*;
+
+mod create;
+pub use create::*;
+
+mod error;
+pub use error::*;
+
+mod load;
+pub use load::*;
+
+mod memory;
+pub use memory::*;
+
+mod open;
+pub use open::*;
+
+mod remote;
+pub use remote::*;
+
+mod revision;
+pub use revision::*;
+
+mod tree;
+pub use tree::*;
 
 /// A repository scoped to a specific subject.
 ///

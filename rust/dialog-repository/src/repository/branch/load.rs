@@ -1,8 +1,6 @@
+use crate::{Branch, BranchReference, LoadBranchError};
 use dialog_capability::Provider;
 use dialog_effects::memory::Resolve;
-
-use super::{Branch, BranchReference};
-use crate::LoadBranchError;
 
 /// Command to load an existing branch, erroring if it has no revision yet.
 pub struct LoadBranch {
@@ -49,8 +47,7 @@ mod tests {
     use dialog_storage::provider::Volatile;
     use dialog_varsig::did;
 
-    use crate::LoadBranchError;
-    use crate::repository::memory::RepositoryMemoryExt;
+    use crate::{LoadBranchError, RepositoryMemoryExt};
 
     #[dialog_common::test]
     async fn it_fails_loading_missing_branch() -> Result<()> {

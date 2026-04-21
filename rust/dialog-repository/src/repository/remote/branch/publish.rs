@@ -1,13 +1,9 @@
 //! Publish command for remote branches.
 
+use crate::{PublishRemoteBranchError, RemoteBranch, RemoteSite, Revision};
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::memory::Publish;
-
-use super::RemoteBranch;
-use crate::PublishRemoteBranchError;
-use crate::repository::remote::RemoteSite;
-use crate::repository::revision::Revision;
 
 /// Command to publish a revision to the remote.
 ///

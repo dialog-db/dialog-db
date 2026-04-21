@@ -1,8 +1,7 @@
+use crate::TreeReference;
 use dialog_capability::Did;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-
-use super::tree::TreeReference;
 
 /// A revision represents a concrete state of the repository at a point in time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

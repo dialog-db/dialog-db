@@ -1,10 +1,7 @@
+use crate::{LoadRepositoryError, Repository};
 use dialog_capability::{Capability, Provider};
 use dialog_common::ConditionalSync;
-use dialog_effects::space;
-use dialog_effects::space::SpaceExt;
-
-use super::Repository;
-use crate::LoadRepositoryError;
+use dialog_effects::space::{self, SpaceExt};
 
 /// Command to load an existing repository.
 ///

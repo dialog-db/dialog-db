@@ -1,19 +1,13 @@
-use std::sync::Arc;
-
-use parking_lot::RwLock;
-
+use crate::{Publish, PublishError, Resolve, ResolveError, RetainPublish, RetainResolve};
 use dialog_capability::{Capability, Did, Policy};
 use dialog_common::ConditionalSync;
-use dialog_effects::memory;
 use dialog_effects::memory::prelude::CellExt;
-use dialog_effects::memory::{Edition, Version};
+use dialog_effects::memory::{self, Edition, Version};
 use dialog_storage::{CborEncoder, DialogStorageError, Encoder};
+use parking_lot::RwLock;
 use serde::{Serialize, de::DeserializeOwned};
 use std::fmt::Debug;
-
-use super::publish::{Publish, RetainPublish};
-use super::resolve::{Resolve, RetainResolve};
-use crate::{PublishError, ResolveError};
+use std::sync::Arc;
 
 /// Cached [`Edition`] behind a shared lock.
 pub type SharedState<T> = Arc<RwLock<Option<Edition<T>>>>;

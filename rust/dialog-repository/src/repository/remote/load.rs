@@ -1,10 +1,8 @@
 //! Command to load an existing remote repository.
 
+use crate::{LoadRemoteError, RemoteReference, RemoteRepository};
 use dialog_capability::Provider;
 use dialog_effects::memory::Resolve;
-
-use super::{RemoteReference, RemoteRepository};
-use crate::LoadRemoteError;
 
 /// Command to load an existing remote repository.
 pub struct LoadRemote(RemoteReference);
@@ -41,9 +39,7 @@ mod tests {
     use dialog_remote_s3::Address;
     use dialog_storage::provider::Volatile;
 
-    use crate::LoadRemoteError;
-    use crate::repository::Repository;
-    use crate::repository::remote::SiteAddress;
+    use crate::{LoadRemoteError, Repository, SiteAddress};
 
     fn test_site_address() -> SiteAddress {
         SiteAddress::S3(

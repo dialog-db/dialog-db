@@ -1,3 +1,6 @@
+use crate::{
+    Branch, CommitError, Index, LocalIndex, RepositoryArchiveExt as _, Revision, TreeReference,
+};
 use dialog_artifacts::{
     Artifact, AttributeKey, Cause, Datum, EntityKey, FromKey, Instruction, Key, KeyView,
     KeyViewConstruct, KeyViewMut, State, ValueKey,
@@ -9,13 +12,6 @@ use dialog_effects::authority::{Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_prolly_tree::{EMPT_TREE_HASH, Tree};
 use futures_util::{Stream, StreamExt, TryStreamExt};
-
-use super::{Branch, Index};
-use crate::CommitError;
-use crate::repository::archive::RepositoryArchiveExt as _;
-use crate::repository::archive::local::LocalIndex;
-use crate::repository::revision::Revision;
-use crate::repository::tree::TreeReference;
 
 /// Command that commits a stream of changes (assert/retract) to a branch.
 ///
@@ -199,8 +195,8 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    use crate::TreeReference;
     use crate::helpers::{test_operator_with_profile, test_repo};
-    use crate::repository::tree::TreeReference;
     use anyhow::Result;
 
     use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};

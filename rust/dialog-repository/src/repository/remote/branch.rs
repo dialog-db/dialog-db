@@ -1,20 +1,19 @@
+use crate::{BranchReference, Cell, RemoteAddress, RemoteRepository, Revision};
+
 mod fetch;
-mod load;
-mod open;
-mod publish;
-mod reference;
-
 pub use fetch::*;
-pub use load::*;
-pub use open::*;
-pub use publish::*;
-pub use reference::*;
 
-use crate::repository::branch::{BranchReference, UpstreamState};
-use crate::repository::memory::Cell;
-use crate::repository::remote::{RemoteAddress, RemoteRepository};
-use crate::repository::revision::Revision;
-use crate::repository::tree::TreeReference;
+mod load;
+pub use load::*;
+
+mod open;
+pub use open::*;
+
+mod publish;
+pub use publish::*;
+
+mod reference;
+pub use reference::*;
 
 /// A loaded remote branch.
 ///
@@ -28,8 +27,8 @@ pub struct RemoteBranch {
     /// The loaded remote repository this branch lives at (site +
     /// retained address).
     repository: RemoteRepository,
-    /// Names the branch at the remote repository's subject. Capability
-    /// chain: `{remote_did}/memory/branch/{branch_name}`.
+    /// Names the branch at the remote repository's subject. Rooted at
+    /// the remote repo's subject; path `memory/branch/{branch_name}`.
     branch: BranchReference,
     /// Local snapshot of the last-known remote edition. Lives under
     /// the enclosing repo's subject at
@@ -104,33 +103,5 @@ impl RemoteBranch {
     /// Publish a revision to the remote.
     pub fn publish(&self, revision: Revision) -> PublishRemoteBranch<'_> {
         PublishRemoteBranch::new(self, revision)
-    }
-}
-
-impl From<&RemoteBranch> for RemoteBranchReference {
-    fn from(branch: &RemoteBranch) -> Self {
-        RemoteBranchReference::new(branch.repository.site().clone(), branch.branch.clone())
-    }
-}
-
-impl From<&LoadedRemoteBranchReference> for RemoteBranchReference {
-    fn from(loaded: &LoadedRemoteBranchReference) -> Self {
-        RemoteBranchReference::new(loaded.repository.site().clone(), loaded.branch.clone())
-    }
-}
-
-impl From<&RemoteBranch> for UpstreamState {
-    fn from(branch: &RemoteBranch) -> Self {
-        UpstreamState::Remote {
-            name: branch.repository.site().name().to_string(),
-            branch: branch.name().to_string(),
-            tree: TreeReference::default(),
-        }
-    }
-}
-
-impl From<RemoteBranch> for UpstreamState {
-    fn from(branch: RemoteBranch) -> Self {
-        UpstreamState::from(&branch)
     }
 }

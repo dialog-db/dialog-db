@@ -1,9 +1,7 @@
 use dialog_capability::Provider;
 use dialog_effects::memory::Publish;
 
-use super::Branch;
-use crate::PublishError;
-use crate::repository::revision::Revision;
+use crate::{Branch, PublishError, Revision};
 
 /// Command that resets a branch to a given revision.
 pub struct Reset<'a> {
@@ -51,9 +49,7 @@ mod tests {
     use dialog_storage::provider::Volatile;
     use dialog_varsig::did;
 
-    use crate::repository::memory::RepositoryMemoryExt;
-    use crate::repository::revision::Revision;
-    use crate::repository::tree::TreeReference;
+    use crate::{RepositoryMemoryExt, Revision, TreeReference};
 
     #[dialog_common::test]
     async fn it_sets_revision() -> Result<()> {

@@ -7,15 +7,10 @@ use dialog_prolly_tree::{EMPT_TREE_HASH, Tree};
 use dialog_storage::{Blake3Hash, ContentAddressedStorage, DialogStorageError, Encoder};
 use futures_util::StreamExt;
 
-use super::{Branch, Index, UpstreamState};
-use crate::PullError;
-use crate::repository::archive::RepositoryArchiveExt as _;
-use crate::repository::archive::local::LocalIndex;
-use crate::repository::archive::networked::NetworkedIndex;
-use crate::repository::memory::RepositoryMemoryExt;
-use crate::repository::remote::RemoteSite;
-use crate::repository::revision::Revision;
-use crate::repository::tree::TreeReference;
+use crate::{
+    Branch, Index, LocalIndex, NetworkedIndex, PullError, RemoteSite, RepositoryArchiveExt as _,
+    RepositoryMemoryExt, Revision, TreeReference, Upstream,
+};
 
 /// Command struct for merging an explicit upstream revision.
 ///
@@ -109,7 +104,7 @@ impl Pull<'_> {
             })?;
 
         match upstream {
-            UpstreamState::Local { branch: id, .. } => {
+            Upstream::Local { branch: id, .. } => {
                 let upstream_branch = branch.subject().branch(id).load().perform(env).await?;
 
                 match upstream_branch.revision() {
@@ -117,8 +112,8 @@ impl Pull<'_> {
                     None => Ok(None),
                 }
             }
-            UpstreamState::Remote {
-                name,
+            Upstream::Remote {
+                remote: name,
                 branch: branch_name,
                 ..
             } => {

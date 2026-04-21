@@ -15,11 +15,10 @@ use std::ops::Range;
 
 use dialog_prolly_tree::DialogProllyTreeError;
 
-use super::{Branch, Index, UpstreamState};
-use crate::repository::archive::RepositoryArchiveExt as _;
-use crate::repository::archive::networked::NetworkedIndex;
-use crate::repository::memory::RepositoryMemoryExt;
-use crate::repository::remote::RemoteSite;
+use crate::{
+    Branch, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _, RepositoryMemoryExt,
+    Upstream,
+};
 
 /// Command struct for selecting artifacts from a branch.
 pub struct Select<'a> {
@@ -67,7 +66,7 @@ impl Select<'_> {
             + 'static,
     {
         let remote = match self.branch.upstream() {
-            Some(UpstreamState::Remote { name, .. }) => self
+            Some(Upstream::Remote { remote: name, .. }) => self
                 .branch
                 .subject()
                 .remote(name)
@@ -85,7 +84,10 @@ impl Select<'_> {
     async fn execute<'s, S>(
         self,
         store: S,
-    ) -> Result<impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's, DialogProllyTreeError>
+    ) -> Result<
+        impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's,
+        DialogProllyTreeError,
+    >
     where
         S: ContentAddressedStorage<Hash = Blake3Hash, Error = DialogStorageError>
             + Clone

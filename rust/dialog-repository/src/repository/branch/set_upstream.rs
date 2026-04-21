@@ -1,28 +1,24 @@
 use dialog_capability::Provider;
 use dialog_effects::memory::Publish;
 
-use super::{Branch, UpstreamState};
-use crate::SetUpstreamError;
+use crate::{Branch, SetUpstreamError, Upstream, UpstreamBranch};
 
 /// Command struct for setting a branch's upstream.
 pub struct SetUpstream<'a> {
     branch: &'a Branch,
-    upstream: UpstreamState,
-}
-
-impl<'a> SetUpstream<'a> {
-    fn new(branch: &'a Branch, upstream: UpstreamState) -> Self {
-        Self { branch, upstream }
-    }
+    upstream: Upstream,
 }
 
 impl Branch {
     /// Create a command to set the upstream for this branch.
     ///
-    /// Accepts both `UpstreamState` and `RemoteBranch` directly via
-    /// `impl Into<UpstreamState>`.
-    pub fn set_upstream(&self, upstream: impl Into<UpstreamState>) -> SetUpstream<'_> {
-        SetUpstream::new(self, upstream.into())
+    /// Accepts either a `&Branch` or a `&RemoteBranch` (converted via
+    /// `From` impls on [`UpstreamBranch`]).
+    pub fn set_upstream(&self, source: impl Into<UpstreamBranch>) -> SetUpstream<'_> {
+        SetUpstream {
+            branch: self,
+            upstream: Upstream::from(source.into()),
+        }
     }
 }
 
@@ -33,7 +29,7 @@ impl SetUpstream<'_> {
         Env: Provider<Publish>,
     {
         // Validate: upstream must not be this branch itself
-        if let UpstreamState::Local { ref branch, .. } = self.upstream
+        if let Upstream::Local { ref branch, .. } = self.upstream
             && *branch == self.branch.name()
         {
             return Err(SetUpstreamError::UpstreamIsItself {
@@ -56,9 +52,7 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use crate::SetUpstreamError;
-    use crate::repository::branch::UpstreamState;
-    use crate::repository::tree::TreeReference;
+    use crate::{SetUpstreamError, Upstream};
     use anyhow::Result;
 
     use crate::helpers::{test_operator_with_profile, test_repo};
@@ -68,54 +62,51 @@ mod tests {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
 
-        let branch = repo.branch("feature").open().perform(&operator).await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        let main = repo.branch("main").open().perform(&operator).await?;
 
-        // Create upstream branch
-        let _main = repo.branch("main").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
 
-        branch
-            .set_upstream(UpstreamState::Local {
-                branch: "main".into(),
-                tree: TreeReference::default(),
-            })
-            .perform(&operator)
-            .await?;
-
-        let upstream = branch.upstream();
-        assert_eq!(
+        let upstream = feature.upstream();
+        assert!(matches!(
             upstream,
-            Some(UpstreamState::Local {
-                branch: "main".into(),
-                tree: TreeReference::default(),
-            })
-        );
+            Some(Upstream::Local { ref branch, .. }) if branch == "main"
+        ));
 
         Ok(())
     }
 
     #[dialog_common::test]
     async fn it_sets_remote_upstream() -> Result<()> {
+        use crate::SiteAddress;
+        use dialog_remote_s3::Address;
+
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
-        let branch = repo.branch("main").open().perform(&operator).await?;
 
-        branch
-            .set_upstream(UpstreamState::Remote {
-                name: "origin".into(),
-                branch: "main".into(),
-                tree: TreeReference::default(),
-            })
+        let site = SiteAddress::S3(
+            Address::builder("https://s3.us-east-1.amazonaws.com")
+                .region("us-east-1")
+                .bucket("bucket")
+                .build()
+                .unwrap(),
+        );
+        let origin = repo
+            .remote("origin")
+            .create(site)
             .perform(&operator)
             .await?;
+        let remote_main = origin.branch("main").open().perform(&operator).await?;
+
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch.set_upstream(&remote_main).perform(&operator).await?;
 
         let upstream = branch.upstream();
-        match upstream {
-            Some(UpstreamState::Remote { name, branch, .. }) => {
-                assert_eq!(name, "origin");
-                assert_eq!(branch.as_str(), "main");
-            }
-            _ => panic!("Expected Remote upstream"),
-        }
+        assert!(matches!(
+            upstream,
+            Some(Upstream::Remote { ref remote, ref branch, .. })
+                if remote == "origin" && branch == "main"
+        ));
 
         Ok(())
     }
@@ -126,13 +117,7 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
-        let result = branch
-            .set_upstream(UpstreamState::Local {
-                branch: "main".into(),
-                tree: TreeReference::default(),
-            })
-            .perform(&operator)
-            .await;
+        let result = branch.set_upstream(&branch).perform(&operator).await;
 
         assert!(matches!(
             result,

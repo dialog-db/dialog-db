@@ -1,14 +1,13 @@
 //! Resolve command for fetching a cell value.
 
+use super::cell::Cache;
+use crate::ResolveError;
 use dialog_capability::{Capability, Fork, Provider, Site, SiteAddress};
 use dialog_common::ConditionalSync;
 use dialog_effects::memory;
 use dialog_storage::Encoder;
 use parking_lot::RwLock;
 use serde::de::DeserializeOwned;
-
-use super::cell::Cache;
-use crate::ResolveError;
 
 /// Command to resolve (fetch) a cell value.
 ///

@@ -5,7 +5,6 @@
 //! a specific remote repository.
 
 use dialog_capability::Did;
-
 pub use dialog_network::Network as RemoteSite;
 pub use dialog_network::NetworkAddress as SiteAddress;
 

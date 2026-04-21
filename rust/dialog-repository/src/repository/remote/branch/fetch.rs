@@ -1,13 +1,9 @@
 //! Fetch command for remote branches.
 
+use crate::{FetchRemoteBranchError, RemoteBranch, RemoteSite, Revision};
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::memory::{Publish, Resolve};
-
-use super::RemoteBranch;
-use crate::FetchRemoteBranchError;
-use crate::repository::remote::RemoteSite;
-use crate::repository::revision::Revision;
 
 /// Command to fetch the latest revision from the remote.
 ///

@@ -1,5 +1,4 @@
-use std::io;
-
+use crate::TreeReference;
 use dialog_artifacts::DialogArtifactsError;
 use dialog_credentials::Ed25519SignerError;
 use dialog_effects::archive::ArchiveError;
@@ -8,9 +7,8 @@ use dialog_effects::memory::{MemoryError, Version};
 use dialog_effects::storage::StorageError;
 use dialog_prolly_tree::DialogProllyTreeError;
 use dialog_storage::DialogStorageError;
+use std::io;
 use thiserror::Error;
-
-use super::tree::TreeReference;
 
 /// The umbrella error type for the repository API.
 ///
@@ -108,10 +106,6 @@ pub enum RepositoryError {
 /// Errors returned by the open remote branch command.
 #[derive(Error, Debug)]
 pub enum OpenRemoteBranchError {
-    /// Loading the remote (to resolve its address) failed.
-    #[error("Failed to load remote during open: {0}")]
-    LoadRemote(#[from] LoadRemoteError),
-
     /// Resolving the local snapshot cache failed.
     #[error("Failed to resolve snapshot cache during open: {0}")]
     Resolve(#[from] ResolveError),

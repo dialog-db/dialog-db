@@ -1,12 +1,7 @@
+use crate::{Branch, FetchError, RemoteSite, RepositoryMemoryExt, Revision, Upstream};
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::memory::{Publish, Resolve};
-
-use super::{Branch, UpstreamState};
-use crate::FetchError;
-use crate::repository::memory::RepositoryMemoryExt;
-use crate::repository::remote::RemoteSite;
-use crate::repository::revision::Revision;
 
 /// Command struct for fetching the upstream branch's current revision.
 ///
@@ -52,7 +47,7 @@ impl Fetch<'_> {
             })?;
 
         match &upstream {
-            UpstreamState::Local { branch: name, .. } => {
+            Upstream::Local { branch: name, .. } => {
                 let upstream = self
                     .branch
                     .subject()
@@ -62,8 +57,8 @@ impl Fetch<'_> {
                     .await?;
                 Ok(upstream.revision())
             }
-            UpstreamState::Remote {
-                name,
+            Upstream::Remote {
+                remote: name,
                 branch: branch_name,
                 ..
             } => {
@@ -90,8 +85,6 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use crate::helpers::{test_operator_with_profile, test_repo};
-    use crate::repository::branch::UpstreamState;
-    use crate::repository::tree::TreeReference;
     use anyhow::Result;
 
     use dialog_artifacts::{Artifact, Instruction, Value};
@@ -115,13 +108,7 @@ mod tests {
         let main_revision = main.revision().expect("main should have a revision");
 
         let feature = repo.branch("feature").open().perform(&operator).await?;
-        feature
-            .set_upstream(UpstreamState::Local {
-                branch: "main".into(),
-                tree: TreeReference::default(),
-            })
-            .perform(&operator)
-            .await?;
+        feature.set_upstream(&main).perform(&operator).await?;
 
         let fetched = feature.fetch().perform(&operator).await?;
 
@@ -148,13 +135,7 @@ mod tests {
             .await?;
 
         let feature = repo.branch("feature").open().perform(&operator).await?;
-        feature
-            .set_upstream(UpstreamState::Local {
-                branch: "main".into(),
-                tree: TreeReference::default(),
-            })
-            .perform(&operator)
-            .await?;
+        feature.set_upstream(&main).perform(&operator).await?;
 
         let feature_revision_before = feature.revision();
 
