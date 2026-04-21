@@ -28,6 +28,8 @@ dialog-remote-s3 = { workspace = true }
 dialog-remote-ucan-s3 = { workspace = true }
 dialog-storage = { workspace = true }
 dialog-prolly-tree = { workspace = true }
+dialog-ucan = { workspace = true }
+dialog-ucan-core = { workspace = true }
 dialog-varsig = { workspace = true }
 parking_lot = { workspace = true }
 
@@ -40,6 +42,7 @@ serde = { workspace = true }
 serde_ipld_dagcbor = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "io-util"] }
+url = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 dialog-operator = { workspace = true, features = ["helpers"] }
@@ -48,6 +51,7 @@ dialog-remote-ucan-s3 = { workspace = true, features = ["helpers"] }
 dialog-storage = { workspace = true, features = ["helpers"] }
 dialog-common = { workspace = true, features = ["helpers"] }
 anyhow = { workspace = true }
+serde_json = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["fs"] }
