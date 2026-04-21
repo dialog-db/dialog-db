@@ -59,6 +59,14 @@ pub use reference::*;
 mod error;
 pub use error::*;
 
+/// Format-agnostic export trait for artifacts.
+pub mod exporter;
+pub use exporter::Exporter;
+
+/// Format-agnostic import trait for artifacts.
+pub mod importer;
+pub use importer::Importer;
+
 mod state;
 pub use state::*;
 

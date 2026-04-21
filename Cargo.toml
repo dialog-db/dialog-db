@@ -25,6 +25,7 @@ members = [
     "rust/dialog-diagnose",
     "rust/dialog-dbsp",
     "rust/dialog-encoding",
+    "rust/dialog-csv",
     "rust/dialog-prolly-tree",
     "rust/dialog-query",
     "rust/dialog-search-tree",
@@ -176,6 +177,9 @@ path = "./rust/dialog-credentials"
 
 [workspace.dependencies.dialog-encoding]
 path = "./rust/dialog-encoding"
+
+[workspace.dependencies.dialog-csv]
+path = "./rust/dialog-csv"
 
 [workspace.dependencies.dialog-prolly-tree]
 path = "./rust/dialog-prolly-tree"
