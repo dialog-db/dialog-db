@@ -286,7 +286,7 @@ pub enum FetchError {
 /// Errors specific to a commit operation.
 #[derive(Error, Debug)]
 pub enum CommitError {
-    /// A prolly-tree operation during commit failed.
+    /// A search-tree operation during commit failed.
     #[error("Tree operation failed during commit: {0}")]
     Tree(#[from] DialogProllyTreeError),
 
@@ -337,7 +337,7 @@ pub enum PullError {
     #[error("Failed to identify authority for merge: {0}")]
     Authority(#[from] AuthorityError),
 
-    /// A prolly-tree operation during pull failed.
+    /// A search-tree operation during pull failed.
     #[error("Tree operation failed during pull: {0}")]
     Tree(#[from] DialogProllyTreeError),
 
@@ -404,7 +404,7 @@ pub enum PushError {
     #[error("Failed to upload novel blocks: {0}")]
     Upload(#[from] UploadError),
 
-    /// A prolly-tree operation during push failed.
+    /// A search-tree operation during push failed.
     #[error("Tree operation failed during push: {0}")]
     Tree(#[from] DialogProllyTreeError),
 }

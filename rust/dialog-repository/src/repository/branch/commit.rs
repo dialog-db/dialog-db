@@ -41,7 +41,7 @@ where
 {
     /// Execute the commit, returning the newly-published [`Revision`].
     ///
-    /// Load the branch's current prolly tree, apply every change in the
+    /// Load the branch's current search tree, apply every change in the
     /// stream to the three (entity / attribute / value) indexes, then
     /// publish a new [`Revision`] to the branch's revision cell with the
     /// updated logical clock.

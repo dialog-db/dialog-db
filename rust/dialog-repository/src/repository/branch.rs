@@ -49,7 +49,7 @@ pub use upstream::*;
 #[cfg(all(test, feature = "integration-tests"))]
 mod integration_tests;
 
-/// Type alias for the prolly tree index.
+/// Type alias for the search tree index.
 pub type Index = Tree<GeometricDistribution, Key, State<Datum>, Blake3Hash>;
 
 /// A branch represents a named line of development within a repository.

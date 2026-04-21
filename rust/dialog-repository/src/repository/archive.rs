@@ -1,13 +1,13 @@
 //! Archive capabilities and CAS adapters.
 //!
 //! - [`RepositoryArchiveExt`] -- extension trait adding `.index()` to archive capabilities
-//! - [`local`] -- local CAS adapter for prolly tree storage
+//! - [`local`] -- local CAS adapter for search tree storage
 //! - [`networked`] -- networked CAS adapter falling back to a remote site
 use dialog_capability::Capability;
 use dialog_effects::archive::prelude::ArchiveExt;
 use dialog_effects::archive::{Archive, Catalog};
 
-/// Local CAS adapter bridging capabilities with prolly tree's ContentAddressedStorage.
+/// Local CAS adapter bridging capabilities with search tree's ContentAddressedStorage.
 pub mod local;
 pub use local::*;
 

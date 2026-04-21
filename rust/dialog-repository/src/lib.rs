@@ -15,7 +15,7 @@
 //!   `.fork(&address)` variants that retarget the same commands at a
 //!   remote site.
 //! - [`RepositoryArchiveExt`] and [`LocalIndex`] — extensions and CAS
-//!   adapters that bridge archive capabilities with the prolly tree's
+//!   adapters that bridge archive capabilities with the search tree's
 //!   `ContentAddressedStorage` trait.
 //!
 //! Branches, remotes, and sync operations build on this base in

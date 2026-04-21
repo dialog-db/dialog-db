@@ -11,7 +11,7 @@ use std::fmt::Debug;
 
 /// Local content-addressed index backed by archive capabilities.
 ///
-/// Bridges the capability system (`Get`/`Put` effects) with the prolly
+/// Bridges the capability system (`Get`/`Put` effects) with the search
 /// tree's `ContentAddressedStorage` trait. All reads and writes go to
 /// the local archive only.
 pub struct LocalIndex<'a, Env> {

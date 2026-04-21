@@ -3,7 +3,7 @@
 //! This module provides a repository abstraction built on top of the
 //! capability-based effect system (`dialog-capability` / `dialog-effects`).
 //!
-//! - [`archive`] — CAS adapter bridging capabilities with prolly tree storage
+//! - [`archive`] — CAS adapter bridging capabilities with search tree storage
 //! - [`memory`] — Transactional memory cells with edition tracking
 //! - [`revision`] — Revision tracking and logical timestamps
 use dialog_capability::{Capability, Did, Subject};
