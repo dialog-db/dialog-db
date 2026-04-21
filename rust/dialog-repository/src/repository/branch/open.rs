@@ -9,12 +9,13 @@ pub struct OpenBranch {
     branch: BranchReference,
 }
 
-impl OpenBranch {
-    /// Create from a branch reference.
-    pub fn new(branch: BranchReference) -> Self {
+impl From<BranchReference> for OpenBranch {
+    fn from(branch: BranchReference) -> Self {
         Self { branch }
     }
+}
 
+impl OpenBranch {
     /// Execute the open operation.
     pub async fn perform<Env>(self, env: &Env) -> Result<Branch, ResolveError>
     where

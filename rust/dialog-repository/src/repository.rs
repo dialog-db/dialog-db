@@ -187,14 +187,12 @@ mod tests {
     use futures_util::StreamExt;
     use futures_util::stream;
 
-    fn test_site_address() -> SiteAddress {
-        SiteAddress::S3(
-            S3Address::builder("https://s3.us-east-1.amazonaws.com")
-                .region("us-east-1")
-                .bucket("bucket")
-                .build()
-                .unwrap(),
-        )
+    fn test_site_address() -> S3Address {
+        S3Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("bucket")
+            .build()
+            .unwrap()
     }
 
     #[dialog_common::test]
@@ -309,7 +307,7 @@ mod tests {
 
         let loaded = repo.remote("origin").load().perform(&operator).await?;
         assert_eq!(loaded.site().name(), "origin");
-        assert_eq!(loaded.address().site(), &test_site_address());
+        assert_eq!(loaded.address().site(), &test_site_address().into());
 
         Ok(())
     }

@@ -1,39 +1,37 @@
-use crate::{Branch, BranchReference, LoadBranchError};
+use crate::{Branch, LoadBranchError, OpenBranch};
 use dialog_capability::Provider;
 use dialog_effects::memory::Resolve;
 
 /// Command to load an existing branch, erroring if it has no revision yet.
+///
+/// Behaves like [`OpenBranch`] but errors if the branch has no
+/// revision published yet (i.e. has never been committed to).
 pub struct LoadBranch {
-    branch: BranchReference,
+    open: OpenBranch,
+}
+
+impl<T> From<T> for LoadBranch
+where
+    T: Into<OpenBranch>,
+{
+    fn from(value: T) -> Self {
+        Self { open: value.into() }
+    }
 }
 
 impl LoadBranch {
-    /// Create from a branch reference.
-    pub fn new(branch: BranchReference) -> Self {
-        Self { branch }
-    }
-
     /// Execute the load operation.
     pub async fn perform<Env>(self, env: &Env) -> Result<Branch, LoadBranchError>
     where
         Env: Provider<Resolve>,
     {
-        let revision = self.branch.revision();
-        revision.resolve().perform(env).await?;
-        if revision.content().is_none() {
+        let branch = self.open.perform(env).await?;
+        if branch.revision().is_none() {
             return Err(LoadBranchError::NotFound {
-                name: self.branch.name().to_string(),
+                name: branch.name().to_string(),
             });
         }
-
-        let upstream = self.branch.upstream();
-        upstream.resolve().perform(env).await?;
-
-        Ok(Branch {
-            reference: self.branch,
-            revision,
-            upstream,
-        })
+        Ok(branch)
     }
 }
 

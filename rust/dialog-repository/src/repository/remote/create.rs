@@ -54,18 +54,17 @@ mod tests {
     use anyhow::Result;
     use dialog_credentials::Ed25519Signer;
     use dialog_remote_s3::Address;
+    use dialog_remote_ucan_s3::UcanAddress;
     use dialog_storage::provider::Volatile;
 
-    use crate::{CreateRemoteError, Repository, SiteAddress};
+    use crate::{CreateRemoteError, Repository};
 
-    fn test_site_address() -> SiteAddress {
-        SiteAddress::S3(
-            Address::builder("https://s3.us-east-1.amazonaws.com")
-                .region("us-east-1")
-                .bucket("my-bucket")
-                .build()
-                .unwrap(),
-        )
+    fn test_site_address() -> Address {
+        Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("my-bucket")
+            .build()
+            .unwrap()
     }
 
     async fn test_signer() -> Ed25519Signer {
@@ -84,7 +83,25 @@ mod tests {
             .await?;
 
         assert_eq!(remote.site().name(), "origin");
-        assert_eq!(remote.address().site(), &test_site_address());
+        assert_eq!(remote.address().site(), &test_site_address().into());
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_creates_remote_with_ucan_address() -> Result<()> {
+        let env = Volatile::new();
+        let repo = Repository::from(test_signer().await);
+
+        let ucan = UcanAddress::new("https://access.example.com");
+        let remote = repo
+            .remote("origin")
+            .create(ucan.clone())
+            .perform(&env)
+            .await?;
+
+        assert_eq!(remote.site().name(), "origin");
+        assert_eq!(remote.address().site(), &ucan.into());
 
         Ok(())
     }

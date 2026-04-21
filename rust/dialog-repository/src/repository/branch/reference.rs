@@ -37,13 +37,13 @@ impl BranchReference {
     }
 
     /// Open the branch, creating it if it doesn't exist.
-    pub fn open(&self) -> OpenBranch {
-        OpenBranch::new(self.clone())
+    pub fn open(self) -> OpenBranch {
+        self.into()
     }
 
     /// Load the branch, returning an error if it doesn't exist.
-    pub fn load(&self) -> LoadBranch {
-        LoadBranch::new(self.clone())
+    pub fn load(self) -> LoadBranch {
+        self.into()
     }
 
     /// The cell holding this branch's latest [`Revision`].

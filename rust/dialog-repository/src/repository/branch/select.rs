@@ -65,6 +65,10 @@ impl Select<'_> {
             + ConditionalSync
             + 'static,
     {
+        // Load the remote if the branch tracks one so the networked
+        // index can fall back to it for blocks missing locally. Failing
+        // to load the remote (e.g. no credentials) is non-fatal — the
+        // local archive alone may still satisfy the query.
         let remote = match self.branch.upstream() {
             Some(Upstream::Remote { remote: name, .. }) => self
                 .branch
@@ -94,10 +98,19 @@ impl Select<'_> {
             + ConditionalSync
             + 's,
     {
+        // Load the branch's search tree. Tree loading may have to hit
+        // the network through `store` (NetworkedIndex) when the root is
+        // remote-only, which is why this is async and fallible up front.
         let tree: Index = Tree::from_hash(&self.tree_hash(), &store).await?;
 
         let selector = self.selector;
 
+        // The tree indexes every datum under three parallel keys:
+        // `entity/…`, `attribute/…`, and `value/…`. We pick the prefix
+        // that matches the most specific constraint on the selector so
+        // `stream_range` can narrow the scan to the minimum key range;
+        // any remaining constraints are checked per-entry via
+        // `matches_selector`.
         Ok(async_stream::try_stream! {
             if selector.entity().is_some() {
                 let start = <EntityKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
@@ -106,6 +119,10 @@ impl Select<'_> {
                 tokio::pin!(stream);
                 for await item in stream {
                     let entry: Entry<Key, State<Datum>> = item?;
+                    // Filter out entries in the range that don't
+                    // satisfy the full selector, and skip retracted
+                    // entries (`State::Removed`) — only `Added` datums
+                    // surface as artifacts.
                     if entry.matches_selector(&selector)
                         && let Entry { value: State::Added(datum), .. } = entry
                     {
@@ -139,6 +156,9 @@ impl Select<'_> {
                     }
                 }
             } else {
+                // `Constrained` is a type-state marker that guarantees
+                // the selector has at least one of entity/value/
+                // attribute set, so this branch is unreachable.
                 unreachable!("ArtifactSelector will always have at least one field specified")
             };
         })

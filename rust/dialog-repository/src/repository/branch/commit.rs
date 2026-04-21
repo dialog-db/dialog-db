@@ -66,13 +66,9 @@ where
         // tree metadata, not every block). `NetworkedIndex` falls back
         // to the remote when a block is missing locally.
         let remote = match branch.upstream() {
-            Some(Upstream::Remote { remote: name, .. }) => branch
-                .subject()
-                .remote(name)
-                .load()
-                .perform(env)
-                .await
-                .ok(),
+            Some(Upstream::Remote { remote: name, .. }) => {
+                branch.subject().remote(name).load().perform(env).await.ok()
+            }
             _ => None,
         };
         let mut store = NetworkedIndex::new(env, branch.archive().index(), remote);

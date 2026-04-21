@@ -39,16 +39,14 @@ mod tests {
     use dialog_remote_s3::Address;
     use dialog_storage::provider::Volatile;
 
-    use crate::{LoadRemoteError, Repository, SiteAddress};
+    use crate::{LoadRemoteError, Repository};
 
-    fn test_site_address() -> SiteAddress {
-        SiteAddress::S3(
-            Address::builder("https://s3.us-east-1.amazonaws.com")
-                .region("us-east-1")
-                .bucket("my-bucket")
-                .build()
-                .unwrap(),
-        )
+    fn test_site_address() -> Address {
+        Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("my-bucket")
+            .build()
+            .unwrap()
     }
 
     async fn test_signer() -> Ed25519Signer {
@@ -67,7 +65,7 @@ mod tests {
 
         let loaded = repo.remote("origin").load().perform(&env).await?;
         assert_eq!(loaded.site().name(), "origin");
-        assert_eq!(loaded.address().site(), &test_site_address());
+        assert_eq!(loaded.address().site(), &test_site_address().into());
 
         Ok(())
     }

@@ -78,19 +78,16 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_sets_remote_upstream() -> Result<()> {
-        use crate::SiteAddress;
         use dialog_remote_s3::Address;
 
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
 
-        let site = SiteAddress::S3(
-            Address::builder("https://s3.us-east-1.amazonaws.com")
-                .region("us-east-1")
-                .bucket("bucket")
-                .build()
-                .unwrap(),
-        );
+        let site = Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("bucket")
+            .build()
+            .unwrap();
         let origin = repo
             .remote("origin")
             .create(site)
@@ -113,19 +110,16 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_persists_remote_upstream_across_reload() -> Result<()> {
-        use crate::SiteAddress;
         use dialog_remote_s3::Address;
 
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
 
-        let site = SiteAddress::S3(
-            Address::builder("https://s3.us-east-1.amazonaws.com")
-                .region("us-east-1")
-                .bucket("bucket")
-                .build()
-                .unwrap(),
-        );
+        let site = Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("bucket")
+            .build()
+            .unwrap();
         let origin = repo
             .remote("origin")
             .create(site)

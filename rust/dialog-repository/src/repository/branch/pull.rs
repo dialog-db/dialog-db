@@ -6,8 +6,8 @@ use dialog_effects::memory::{Publish, Resolve};
 use dialog_prolly_tree::{EMPT_TREE_HASH, Tree};
 
 use crate::{
-    Branch, Index, NetworkedIndex, PullError, RemoteRepository, RemoteSite,
-    RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference, Upstream,
+    Branch, Index, NetworkedIndex, PullError, RemoteSite, RepositoryArchiveExt as _,
+    RepositoryMemoryExt, Revision, TreeReference, Upstream,
 };
 
 /// Command struct for pulling from upstream (auto-dispatches local/remote).

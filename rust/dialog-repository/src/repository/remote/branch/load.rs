@@ -45,18 +45,15 @@ mod tests {
 
     use crate::LoadRemoteBranchError;
     use crate::helpers::{test_operator_with_profile, test_repo};
-    use crate::repository::remote::SiteAddress;
     use anyhow::Result;
     use dialog_remote_s3::Address;
 
-    fn test_site() -> SiteAddress {
-        SiteAddress::S3(
-            Address::builder("https://s3.us-east-1.amazonaws.com")
-                .region("us-east-1")
-                .bucket("bucket")
-                .build()
-                .unwrap(),
-        )
+    fn test_site() -> Address {
+        Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("bucket")
+            .build()
+            .unwrap()
     }
 
     #[dialog_common::test]
