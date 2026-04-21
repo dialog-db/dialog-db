@@ -14,6 +14,7 @@ mod error;
 mod load;
 mod memory;
 mod open;
+mod remote;
 mod revision;
 mod tree;
 
@@ -24,6 +25,7 @@ pub use error::*;
 pub use load::*;
 pub use memory::*;
 pub use open::*;
+pub use remote::*;
 pub use revision::*;
 pub use tree::*;
 
@@ -69,6 +71,13 @@ impl<C: Principal> Repository<C> {
     /// Call `.open()` or `.load()` on the returned reference.
     pub fn branch(&self, name: impl Into<String>) -> BranchReference {
         self.subject().branch(name)
+    }
+
+    /// Get a remote reference for the given name.
+    ///
+    /// Call `.create(address)` or `.load()` on the returned reference.
+    pub fn remote(&self, name: impl Into<String>) -> RemoteReference {
+        self.subject().remote(name)
     }
 }
 

@@ -1,5 +1,6 @@
 use dialog_artifacts::DialogArtifactsError;
 use dialog_credentials::Ed25519SignerError;
+use dialog_effects::archive::ArchiveError;
 use dialog_effects::authority::AuthorityError;
 use dialog_effects::memory::{MemoryError, Version};
 use dialog_effects::storage::StorageError;
@@ -18,7 +19,7 @@ use thiserror::Error;
 /// needed.
 ///
 /// Downstream crates layer additional variants on this same pattern
-/// for branch/remote/sync operations.
+/// for sync (push/pull/fetch) operations.
 #[derive(Error, Debug)]
 pub enum RepositoryError {
     /// Open-repository command failed.
@@ -40,6 +41,34 @@ pub enum RepositoryError {
     /// Commit command failed.
     #[error(transparent)]
     Commit(#[from] CommitError),
+
+    /// Load-remote command failed.
+    #[error(transparent)]
+    LoadRemote(#[from] LoadRemoteError),
+
+    /// Create-remote command failed.
+    #[error(transparent)]
+    CreateRemote(#[from] CreateRemoteError),
+
+    /// Open-remote-branch command failed.
+    #[error(transparent)]
+    OpenRemoteBranch(#[from] OpenRemoteBranchError),
+
+    /// Load-remote-branch command failed.
+    #[error(transparent)]
+    LoadRemoteBranch(#[from] LoadRemoteBranchError),
+
+    /// Fetch-remote-branch command failed.
+    #[error(transparent)]
+    FetchRemoteBranch(#[from] FetchRemoteBranchError),
+
+    /// Publish-remote-branch command failed.
+    #[error(transparent)]
+    PublishRemoteBranch(#[from] PublishRemoteBranchError),
+
+    /// Upload command (novel blocks to remote archive) failed.
+    #[error(transparent)]
+    Upload(#[from] UploadError),
 
     /// Cell publish failed (outside a command context).
     #[error(transparent)]
@@ -224,4 +253,104 @@ pub enum CommitError {
     /// Publishing the new revision failed.
     #[error("Failed to publish new revision: {0}")]
     Publish(#[from] PublishError),
+}
+
+/// Errors returned by the create remote command.
+#[derive(Error, Debug)]
+pub enum CreateRemoteError {
+    /// A remote with this name already exists.
+    #[error("Remote {name} already exists")]
+    AlreadyExists {
+        /// The remote name.
+        name: String,
+    },
+
+    /// Failed to resolve the remote's address cell to check for
+    /// existing record.
+    #[error("Failed to resolve remote address cell: {0}")]
+    Resolve(#[from] ResolveError),
+
+    /// Failed to publish the new remote's address.
+    #[error("Failed to publish remote address: {0}")]
+    Publish(#[from] PublishError),
+}
+
+/// Errors returned by the load remote command.
+#[derive(Error, Debug)]
+pub enum LoadRemoteError {
+    /// The remote has no recorded address (never created).
+    #[error("Remote {name} not found")]
+    NotFound {
+        /// The remote name.
+        name: String,
+    },
+
+    /// Failed to resolve the remote's address cell.
+    #[error("Failed to resolve remote address cell: {0}")]
+    Resolve(#[from] ResolveError),
+}
+
+/// Errors returned by the open remote branch command.
+#[derive(Error, Debug)]
+pub enum OpenRemoteBranchError {
+    /// Resolving the local snapshot cache failed.
+    #[error("Failed to resolve snapshot cache during open: {0}")]
+    Resolve(#[from] ResolveError),
+}
+
+/// Errors returned by the load remote branch command.
+#[derive(Error, Debug)]
+pub enum LoadRemoteBranchError {
+    /// The remote branch has no cached revision locally (never
+    /// fetched).
+    #[error("Remote branch {name} not found in local cache")]
+    NotFound {
+        /// The branch name.
+        name: String,
+    },
+
+    /// Opening the remote branch (to resolve address + cache) failed.
+    #[error("Failed to open remote branch during load: {0}")]
+    Open(#[from] OpenRemoteBranchError),
+}
+
+/// Errors returned by the fetch remote branch command.
+#[derive(Error, Debug)]
+pub enum FetchRemoteBranchError {
+    /// Resolving the upstream revision from the remote failed.
+    #[error("Failed to resolve upstream revision from remote: {0}")]
+    Resolve(#[from] ResolveError),
+
+    /// Persisting the fetched revision to the local cache failed.
+    #[error("Failed to persist fetched revision to local cache: {0}")]
+    Publish(#[from] PublishError),
+}
+
+/// Errors returned by the publish remote branch command.
+#[derive(Error, Debug)]
+pub enum PublishRemoteBranchError {
+    /// Publishing the revision to the upstream failed.
+    #[error("Failed to publish revision to upstream: {0}")]
+    Publish(#[from] PublishError),
+
+    /// The upstream cell has no edition after publish — this should
+    /// not happen in normal operation.
+    #[error("Upstream cell missing edition after publish")]
+    MissingEdition,
+}
+
+/// Errors returned by the remote archive upload command.
+#[derive(Error, Debug)]
+pub enum UploadError {
+    /// Failed to walk the local tree to enumerate novel nodes.
+    #[error("Failed to enumerate novel tree nodes: {0}")]
+    Tree(#[from] DialogProllyTreeError),
+
+    /// Failed to read a block from the local archive before uploading.
+    #[error("Failed to read block from local archive: {0}")]
+    LocalRead(ArchiveError),
+
+    /// Failed to write a block to the remote archive.
+    #[error("Failed to write block to remote archive: {0}")]
+    RemoteWrite(ArchiveError),
 }
