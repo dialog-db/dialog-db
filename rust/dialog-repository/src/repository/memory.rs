@@ -1,4 +1,7 @@
 //! Memory capabilities: cells, publish/resolve commands, and caching.
+use crate::{BranchReference, RemoteReference};
+use dialog_capability::Subject;
+use dialog_effects::memory::prelude::{MemoryExt, MemorySubjectExt};
 
 mod cell;
 pub use cell::*;
@@ -8,11 +11,6 @@ pub use publish::*;
 
 mod resolve;
 pub use resolve::*;
-
-use dialog_capability::Subject;
-use dialog_effects::memory::prelude::{MemoryExt, MemorySubjectExt};
-
-use crate::{BranchReference, RemoteReference};
 
 /// Extension trait for repository memory navigation.
 ///

@@ -7,8 +7,14 @@ use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_prolly_tree::{GeometricDistribution, Tree};
 use dialog_storage::Blake3Hash;
 
+mod claims;
+pub use claims::*;
+
 mod commit;
 pub use commit::*;
+
+mod fetch;
+pub use fetch::*;
 
 mod load;
 pub use load::*;
@@ -16,17 +22,32 @@ pub use load::*;
 mod open;
 pub use open::*;
 
+mod pull;
+pub use pull::*;
+
+mod push;
+pub use push::*;
+
 mod reference;
 pub use reference::*;
 
 mod reset;
 pub use reset::*;
 
+mod select;
+pub use select::*;
+
+mod set_upstream;
+pub use set_upstream::*;
+
 mod transaction;
 pub use transaction::*;
 
 mod upstream;
 pub use upstream::*;
+
+#[cfg(all(test, feature = "integration-tests"))]
+mod integration_tests;
 
 /// Type alias for the search tree index.
 pub type Index = Tree<GeometricDistribution, Key, State<Datum>, Blake3Hash>;

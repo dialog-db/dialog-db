@@ -1,6 +1,5 @@
+use crate::{Branch, RemoteBranch, TreeReference};
 use serde::{Deserialize, Serialize};
-
-use crate::TreeReference;
 
 /// The persisted form of a branch's upstream tracking state.
 ///
@@ -52,6 +51,62 @@ impl Upstream {
                 remote,
                 branch,
                 tree,
+            },
+        }
+    }
+}
+
+/// The input shape for [`Branch::set_upstream`](super::Branch::set_upstream).
+///
+/// Wraps a loaded local or remote branch handle. Convertible into
+/// [`Upstream`] (the persisted form) by extracting the names; the
+/// stored tree starts at [`TreeReference::default`] (empty) since the
+/// divergence point is "anything in the upstream from now on."
+///
+/// Construct via the `From<&Branch>` and `From<&RemoteBranch>` impls;
+/// `branch.set_upstream(&local_or_remote)` invokes them implicitly.
+pub enum UpstreamBranch {
+    /// A local branch upstream.
+    Local(Branch),
+    /// A remote branch upstream.
+    Remote(RemoteBranch),
+}
+
+impl From<&Branch> for UpstreamBranch {
+    fn from(branch: &Branch) -> Self {
+        UpstreamBranch::Local(branch.clone())
+    }
+}
+
+impl From<Branch> for UpstreamBranch {
+    fn from(branch: Branch) -> Self {
+        UpstreamBranch::Local(branch)
+    }
+}
+
+impl From<&RemoteBranch> for UpstreamBranch {
+    fn from(branch: &RemoteBranch) -> Self {
+        UpstreamBranch::Remote(branch.clone())
+    }
+}
+
+impl From<RemoteBranch> for UpstreamBranch {
+    fn from(branch: RemoteBranch) -> Self {
+        UpstreamBranch::Remote(branch)
+    }
+}
+
+impl From<UpstreamBranch> for Upstream {
+    fn from(source: UpstreamBranch) -> Self {
+        match source {
+            UpstreamBranch::Local(branch) => Upstream::Local {
+                branch: branch.name().to_string(),
+                tree: TreeReference::default(),
+            },
+            UpstreamBranch::Remote(branch) => Upstream::Remote {
+                remote: branch.repository().site().name().to_string(),
+                branch: branch.name().to_string(),
+                tree: TreeReference::default(),
             },
         }
     }
