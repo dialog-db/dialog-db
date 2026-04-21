@@ -23,10 +23,11 @@ impl CreateRepository {
     where
         Env: Provider<space::Create> + ConditionalSync,
     {
-        let signer = Ed25519Signer::generate().await?;
-        let credential = Credential::Signer(SignerCredential::from(signer));
-        let repository: Repository = Repository::from(self.0.create(credential).perform(env).await?);
-        Repository::<SignerCredential>::try_from(repository.credential().clone())
-            .map_err(|_| CreateRepositoryError::SignerRequired)
+        let signer = SignerCredential::from(Ed25519Signer::generate().await?);
+        self.0
+            .create(Credential::Signer(signer.clone()))
+            .perform(env)
+            .await?;
+        Ok(Repository::from(signer))
     }
 }

@@ -194,11 +194,6 @@ pub enum CreateRepositoryError {
     /// Backend storage failed during create.
     #[error("Storage failed during create: {0}")]
     Storage(#[from] StorageError),
-
-    /// The created repository couldn't be used as a signer (should
-    /// not happen — freshly generated credentials always have a key).
-    #[error("Expected signer credential after create, got verifier-only")]
-    SignerRequired,
 }
 
 /// Errors returned by the create remote command.
