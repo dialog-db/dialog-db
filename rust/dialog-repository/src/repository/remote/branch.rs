@@ -10,10 +10,11 @@ pub use open::*;
 pub use publish::*;
 pub use reference::*;
 
-use crate::repository::branch::BranchReference;
+use crate::repository::branch::{BranchReference, UpstreamState};
 use crate::repository::memory::Cell;
 use crate::repository::remote::{RemoteAddress, RemoteRepository};
 use crate::repository::revision::Revision;
+use crate::repository::tree::TreeReference;
 
 /// A loaded remote branch.
 ///
@@ -115,5 +116,21 @@ impl From<&RemoteBranch> for RemoteBranchReference {
 impl From<&LoadedRemoteBranchReference> for RemoteBranchReference {
     fn from(loaded: &LoadedRemoteBranchReference) -> Self {
         RemoteBranchReference::new(loaded.repository.site().clone(), loaded.branch.clone())
+    }
+}
+
+impl From<&RemoteBranch> for UpstreamState {
+    fn from(branch: &RemoteBranch) -> Self {
+        UpstreamState::Remote {
+            name: branch.repository.site().name().to_string(),
+            branch: branch.name().to_string(),
+            tree: TreeReference::default(),
+        }
+    }
+}
+
+impl From<RemoteBranch> for UpstreamState {
+    fn from(branch: RemoteBranch) -> Self {
+        UpstreamState::from(&branch)
     }
 }

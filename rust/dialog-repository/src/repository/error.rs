@@ -24,15 +24,15 @@ use super::tree::TreeReference;
 pub enum RepositoryError {
     /// Open-repository command failed.
     #[error(transparent)]
-    OpenRepository(#[from] OpenRepositoryError),
+    Open(#[from] OpenRepositoryError),
 
     /// Load-repository command failed.
     #[error(transparent)]
-    LoadRepository(#[from] LoadRepositoryError),
+    Load(#[from] LoadRepositoryError),
 
     /// Create-repository command failed.
     #[error(transparent)]
-    CreateRepository(#[from] CreateRepositoryError),
+    Create(#[from] CreateRepositoryError),
 
     /// Load-branch command failed.
     #[error(transparent)]
@@ -519,4 +519,3 @@ pub enum UploadError {
     #[error("Failed to write block to remote archive: {0}")]
     RemoteWrite(ArchiveError),
 }
-
