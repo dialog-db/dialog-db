@@ -147,6 +147,10 @@ pub enum PushError {
     #[error(transparent)]
     Publish(#[from] PublishError),
 
+    /// Uploading novel blocks to the remote archive failed.
+    #[error(transparent)]
+    Upload(#[from] UploadError),
+
     /// A prolly-tree operation during push failed.
     #[error(transparent)]
     Tree(#[from] DialogProllyTreeError),
@@ -197,5 +201,21 @@ impl From<MemoryError> for PublishError {
             MemoryError::Io(error) => Self::Io(error),
         }
     }
+}
+
+/// Errors returned by the remote archive upload command.
+#[derive(Error, Debug)]
+pub enum UploadError {
+    /// Failed to walk the local tree to enumerate novel nodes.
+    #[error("Failed to enumerate novel tree nodes: {0}")]
+    Tree(#[from] DialogProllyTreeError),
+
+    /// Failed to read a block from the local archive before uploading.
+    #[error("Failed to read block from local archive: {0}")]
+    LocalRead(ArchiveError),
+
+    /// Failed to write a block to the remote archive.
+    #[error("Failed to write block to remote archive: {0}")]
+    RemoteWrite(ArchiveError),
 }
 

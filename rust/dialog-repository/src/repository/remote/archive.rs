@@ -1,16 +1,16 @@
 //! Remote archive operations -- upload blocks to remote storage.
 
-use dialog_artifacts::{Datum, DialogArtifactsError, Key, State};
+use dialog_artifacts::{Datum, Key, State};
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::prelude::{ArchiveExt, ArchiveSubjectExt, CatalogExt};
-use dialog_effects::archive::{Catalog, Get, Put};
-use dialog_prolly_tree::Node;
+use dialog_effects::archive::{ArchiveError, Catalog, Get, Put};
+use dialog_prolly_tree::{DialogProllyTreeError, Node};
 use dialog_storage::Blake3Hash;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 
 use super::{RemoteRepository, RemoteSite};
-use crate::repository::error::RepositoryError;
+use crate::repository::error::UploadError;
 
 /// Remote archive scoped to a remote repository.
 pub struct RemoteArchive<'a> {
@@ -60,19 +60,18 @@ pub struct RemoteGet<'a> {
 
 impl RemoteGet<'_> {
     /// Execute the get operation.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Option<Vec<u8>>, RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<Option<Vec<u8>>, ArchiveError>
     where
         Env: Provider<Fork<RemoteSite, Get>> + ConditionalSync,
     {
         let address = self.index.repository.address();
-        Ok(self
-            .index
+        self.index
             .catalog
             .clone()
             .get(self.hash)
             .fork(address.site())
             .perform(env)
-            .await?)
+            .await
     }
 }
 
@@ -85,7 +84,7 @@ pub struct RemotePut<'a> {
 
 impl RemotePut<'_> {
     /// Execute the put operation.
-    pub async fn perform<Env>(self, env: &Env) -> Result<(), RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<(), ArchiveError>
     where
         Env: Provider<Fork<RemoteSite, Put>> + ConditionalSync,
     {
@@ -96,8 +95,7 @@ impl RemotePut<'_> {
             .put(self.hash, self.bytes)
             .fork(address.site())
             .perform(env)
-            .await?;
-        Ok(())
+            .await
     }
 }
 
@@ -107,7 +105,7 @@ impl RemoteArchiveIndex<'_> {
     /// `local_catalog` is used to read raw bytes from local storage.
     pub fn upload<'a, S>(&'a self, nodes: S, local_catalog: Capability<Catalog>) -> Upload<'a, S>
     where
-        S: Stream<Item = Result<Node<Key, State<Datum>, Blake3Hash>, DialogArtifactsError>>,
+        S: Stream<Item = Result<Node<Key, State<Datum>, Blake3Hash>, DialogProllyTreeError>>,
     {
         Upload {
             index: self,
@@ -128,11 +126,11 @@ const UPLOAD_CONCURRENCY: usize = 16;
 
 impl<S> Upload<'_, S>
 where
-    S: Stream<Item = Result<Node<Key, State<Datum>, Blake3Hash>, DialogArtifactsError>>,
+    S: Stream<Item = Result<Node<Key, State<Datum>, Blake3Hash>, DialogProllyTreeError>>,
 {
     /// Execute the upload, reading blocks locally and writing to remote
     /// with up to 16 concurrent uploads.
-    pub async fn perform<Env>(self, env: &Env) -> Result<(), RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<(), UploadError>
     where
         Env: Provider<Get> + Provider<Fork<RemoteSite, Put>> + ConditionalSync,
     {
@@ -140,26 +138,22 @@ where
         let local_catalog = &self.local_catalog;
 
         self.nodes
-            .map(|node_result| async move {
-                let node = node_result.map_err(|e| RepositoryError::PushFailed {
-                    cause: format!("Failed to compute novelty: {}", e),
-                })?;
-
+            .map(|node| async move {
+                let node = node?;
                 let hash = *node.hash();
-
                 let bytes: Option<Vec<u8>> = local_catalog
                     .clone()
                     .get(hash)
                     .perform(env)
                     .await
-                    .map_err(|e| RepositoryError::PushFailed {
-                        cause: format!("Failed to read local block: {}", e),
-                    })?;
-
+                    .map_err(UploadError::LocalRead)?;
                 if let Some(bytes) = bytes {
-                    index.put(hash, bytes).perform(env).await?;
+                    index
+                        .put(hash, bytes)
+                        .perform(env)
+                        .await
+                        .map_err(UploadError::RemoteWrite)?;
                 }
-
                 Ok(())
             })
             .buffer_unordered(UPLOAD_CONCURRENCY)
