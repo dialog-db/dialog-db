@@ -10,6 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
+helpers = ["dep:anyhow", "dialog-operator/helpers"]
 # Enable integration tests (tests with service provisioning)
 integration-tests = ["dialog-common/integration-tests"]
 # Enable web integration tests
@@ -22,11 +23,15 @@ dialog-common = { workspace = true }
 dialog-operator = { workspace = true }
 dialog-credentials = { workspace = true }
 dialog-effects = { workspace = true }
+dialog-network = { workspace = true }
+dialog-remote-s3 = { workspace = true }
+dialog-remote-ucan-s3 = { workspace = true }
 dialog-storage = { workspace = true }
 dialog-prolly-tree = { workspace = true }
 dialog-varsig = { workspace = true }
 parking_lot = { workspace = true }
 
+anyhow = { workspace = true, optional = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 base58 = { workspace = true }
@@ -37,6 +42,9 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "io-util"] }
 
 [dev-dependencies]
+dialog-operator = { workspace = true, features = ["helpers"] }
+dialog-remote-s3 = { workspace = true, features = ["helpers"] }
+dialog-remote-ucan-s3 = { workspace = true, features = ["helpers"] }
 dialog-storage = { workspace = true, features = ["helpers"] }
 dialog-common = { workspace = true, features = ["helpers"] }
 anyhow = { workspace = true }
