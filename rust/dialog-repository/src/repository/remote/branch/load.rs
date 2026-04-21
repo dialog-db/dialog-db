@@ -4,7 +4,7 @@ use dialog_capability::Provider;
 use dialog_effects::memory::Resolve;
 
 use super::{OpenRemoteBranch, RemoteBranch};
-use crate::repository::error::RepositoryError;
+use crate::LoadRemoteBranchError;
 
 /// Command to load an existing remote branch.
 ///
@@ -26,13 +26,13 @@ where
 
 impl LoadRemoteBranch {
     /// Execute the load operation.
-    pub async fn perform<Env>(self, env: &Env) -> Result<RemoteBranch, RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<RemoteBranch, LoadRemoteBranchError>
     where
         Env: Provider<Resolve>,
     {
         let branch = self.open.perform(env).await?;
         if branch.revision().is_none() {
-            return Err(RepositoryError::BranchNotFound {
+            return Err(LoadRemoteBranchError::NotFound {
                 name: branch.name().to_string(),
             });
         }

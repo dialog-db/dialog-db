@@ -85,6 +85,32 @@ pub enum RepositoryError {
     #[error(transparent)]
     TempLoadBranch(#[from] LoadBranchError),
 
+    /// Scaffolding: bubbles `LoadRemoteError` through commands that
+    /// still return `RepositoryError`. Remove once every remote load
+    /// caller has its own typed error.
+    #[error(transparent)]
+    TempLoadRemote(#[from] LoadRemoteError),
+
+    /// Scaffolding: bubbles `OpenRemoteBranchError` through commands
+    /// that still return `RepositoryError`.
+    #[error(transparent)]
+    TempOpenRemoteBranch(#[from] OpenRemoteBranchError),
+
+    /// Scaffolding: bubbles `LoadRemoteBranchError` through commands
+    /// that still return `RepositoryError`.
+    #[error(transparent)]
+    TempLoadRemoteBranch(#[from] LoadRemoteBranchError),
+
+    /// Scaffolding: bubbles `FetchRemoteBranchError` through commands
+    /// that still return `RepositoryError`.
+    #[error(transparent)]
+    TempFetchRemoteBranch(#[from] FetchRemoteBranchError),
+
+    /// Scaffolding: bubbles `PublishRemoteBranchError` through commands
+    /// that still return `RepositoryError`.
+    #[error(transparent)]
+    TempPublishRemoteBranch(#[from] PublishRemoteBranchError),
+
     /// An archive effect (get/put) failed.
     #[error(transparent)]
     Archive(#[from] ArchiveError),
@@ -127,6 +153,74 @@ pub enum RepositoryError {
         /// Description of the invalid state.
         message: String,
     },
+}
+
+/// Errors returned by the open remote branch command.
+#[derive(Error, Debug)]
+pub enum OpenRemoteBranchError {
+    /// Loading the remote (to resolve its address) failed.
+    #[error(transparent)]
+    LoadRemote(#[from] LoadRemoteError),
+
+    /// Resolving the local snapshot cache failed.
+    #[error(transparent)]
+    Resolve(#[from] ResolveError),
+}
+
+/// Errors returned by the fetch remote branch command.
+#[derive(Error, Debug)]
+pub enum FetchRemoteBranchError {
+    /// Resolving the upstream revision from the remote failed.
+    #[error(transparent)]
+    Resolve(#[from] ResolveError),
+
+    /// Persisting the fetched revision to the local cache failed.
+    #[error(transparent)]
+    Publish(#[from] PublishError),
+}
+
+/// Errors returned by the publish remote branch command.
+#[derive(Error, Debug)]
+pub enum PublishRemoteBranchError {
+    /// Publishing the revision to the upstream failed.
+    #[error(transparent)]
+    Publish(#[from] PublishError),
+
+    /// The upstream cell has no edition after publish — this should
+    /// not happen in normal operation.
+    #[error("Upstream cell missing edition after publish")]
+    MissingEdition,
+}
+
+/// Errors returned by the load remote branch command.
+#[derive(Error, Debug)]
+pub enum LoadRemoteBranchError {
+    /// The remote branch has no cached revision locally (never
+    /// fetched).
+    #[error("Remote branch {name} not found")]
+    NotFound {
+        /// The branch name.
+        name: String,
+    },
+
+    /// Opening the remote branch (to resolve address + cache) failed.
+    #[error(transparent)]
+    Open(#[from] OpenRemoteBranchError),
+}
+
+/// Errors returned by the load remote command.
+#[derive(Error, Debug)]
+pub enum LoadRemoteError {
+    /// The remote has no recorded address (never created).
+    #[error("Remote {name} not found")]
+    NotFound {
+        /// The remote name.
+        name: String,
+    },
+
+    /// Failed to resolve the remote's address cell.
+    #[error(transparent)]
+    Resolve(#[from] ResolveError),
 }
 
 /// Errors returned by the load branch command.
@@ -178,6 +272,22 @@ pub enum PushError {
     #[error(transparent)]
     Resolve(#[from] ResolveError),
 
+    /// Loading the configured remote failed.
+    #[error(transparent)]
+    LoadRemote(#[from] LoadRemoteError),
+
+    /// Opening the remote branch failed.
+    #[error(transparent)]
+    OpenRemoteBranch(#[from] OpenRemoteBranchError),
+
+    /// Fetching the upstream revision from the remote failed.
+    #[error(transparent)]
+    FetchRemoteBranch(#[from] FetchRemoteBranchError),
+
+    /// Publishing the revision to the remote upstream failed.
+    #[error(transparent)]
+    PublishRemoteBranch(#[from] PublishRemoteBranchError),
+
     /// Uploading novel blocks to the remote archive failed.
     #[error(transparent)]
     Upload(#[from] UploadError),
@@ -185,11 +295,6 @@ pub enum PushError {
     /// A prolly-tree operation during push failed.
     #[error(transparent)]
     Tree(#[from] DialogProllyTreeError),
-
-    /// Underlying repository operation (storage, network, capability,
-    /// etc.) failed during push.
-    #[error(transparent)]
-    Repository(#[from] RepositoryError),
 }
 
 /// Errors returned by cell resolve operations.

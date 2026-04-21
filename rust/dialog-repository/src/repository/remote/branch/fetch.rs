@@ -5,7 +5,7 @@ use dialog_common::ConditionalSync;
 use dialog_effects::memory::{Publish, Resolve};
 
 use super::RemoteBranch;
-use crate::repository::error::RepositoryError;
+use crate::FetchRemoteBranchError;
 use crate::repository::remote::RemoteSite;
 use crate::repository::revision::Revision;
 
@@ -24,7 +24,7 @@ impl<'a> FetchRemoteBranch<'a> {
     }
 
     /// Execute the fetch.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, FetchRemoteBranchError>
     where
         Env: Provider<Fork<RemoteSite, Resolve>> + Provider<Publish> + ConditionalSync,
     {

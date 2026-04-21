@@ -5,7 +5,7 @@ use dialog_common::ConditionalSync;
 use dialog_effects::memory::Publish;
 
 use super::RemoteBranch;
-use crate::repository::error::RepositoryError;
+use crate::PublishRemoteBranchError;
 use crate::repository::remote::RemoteSite;
 use crate::repository::revision::Revision;
 
@@ -25,7 +25,7 @@ impl<'a> PublishRemoteBranch<'a> {
     }
 
     /// Execute the publish.
-    pub async fn perform<Env>(self, env: &Env) -> Result<(), RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<(), PublishRemoteBranchError>
     where
         Env: Provider<Fork<RemoteSite, Publish>> + Provider<Publish> + ConditionalSync,
     {
@@ -43,13 +43,11 @@ impl<'a> PublishRemoteBranch<'a> {
 
         // Persist the upstream edition so that a future open/load can
         // hydrate its in-memory upstream cache without a round trip.
-        let edition =
-            self.branch
-                .upstream()
-                .edition()
-                .ok_or_else(|| RepositoryError::InvalidState {
-                    message: "upstream cell missing edition after publish".into(),
-                })?;
+        let edition = self
+            .branch
+            .upstream()
+            .edition()
+            .ok_or(PublishRemoteBranchError::MissingEdition)?;
         self.branch.cache().publish(edition).perform(env).await?;
 
         Ok(())

@@ -4,7 +4,7 @@ use dialog_capability::Provider;
 use dialog_effects::memory::Resolve;
 
 use super::{RemoteReference, RemoteRepository};
-use crate::repository::error::RepositoryError;
+use crate::LoadRemoteError;
 
 /// Command to load an existing remote repository.
 pub struct LoadRemote(RemoteReference);
@@ -16,7 +16,7 @@ impl LoadRemote {
     }
 
     /// Execute the load operation.
-    pub async fn perform<Env>(self, env: &Env) -> Result<RemoteRepository, RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<RemoteRepository, LoadRemoteError>
     where
         Env: Provider<Resolve>,
     {
@@ -24,8 +24,8 @@ impl LoadRemote {
         cell.resolve().perform(env).await?;
         match cell.content() {
             Some(address) => Ok(RemoteRepository::new(cell.retain(address), self.0)),
-            None => Err(RepositoryError::RemoteNotFound {
-                remote: self.0.name().to_string(),
+            None => Err(LoadRemoteError::NotFound {
+                name: self.0.name().to_string(),
             }),
         }
     }
@@ -41,8 +41,8 @@ mod tests {
     use dialog_remote_s3::Address;
     use dialog_storage::provider::Volatile;
 
+    use crate::LoadRemoteError;
     use crate::repository::Repository;
-    use crate::repository::error::RepositoryError;
     use crate::repository::remote::SiteAddress;
 
     fn test_site_address() -> SiteAddress {
@@ -82,10 +82,7 @@ mod tests {
         let repo = Repository::from(test_signer().await);
 
         let result = repo.remote("nonexistent").load().perform(&env).await;
-        assert!(matches!(
-            result,
-            Err(RepositoryError::RemoteNotFound { .. })
-        ));
+        assert!(matches!(result, Err(LoadRemoteError::NotFound { .. })));
 
         Ok(())
     }

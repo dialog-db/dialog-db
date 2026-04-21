@@ -4,7 +4,7 @@ use dialog_capability::Provider;
 use dialog_effects::memory::Resolve;
 
 use super::{LoadedRemoteBranchReference, RemoteBranch, RemoteBranchReference};
-use crate::repository::error::RepositoryError;
+use crate::OpenRemoteBranchError;
 
 /// Command to open a remote branch.
 ///
@@ -39,7 +39,7 @@ impl From<RemoteBranchReference> for OpenRemoteBranch {
 
 impl OpenRemoteBranch {
     /// Execute the open operation.
-    pub async fn perform<Env>(self, env: &Env) -> Result<RemoteBranch, RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<RemoteBranch, OpenRemoteBranchError>
     where
         Env: Provider<Resolve>,
     {

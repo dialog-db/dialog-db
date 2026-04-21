@@ -79,7 +79,7 @@ impl Fetch<'_> {
                     .open()
                     .perform(env)
                     .await?;
-                remote_branch.fetch().perform(env).await
+                Ok(remote_branch.fetch().perform(env).await?)
             }
         }
     }
