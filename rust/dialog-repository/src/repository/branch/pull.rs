@@ -4,60 +4,11 @@ use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::{Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_prolly_tree::{EMPT_TREE_HASH, Tree};
-use dialog_storage::{Blake3Hash, ContentAddressedStorage, DialogStorageError, Encoder};
-use futures_util::StreamExt;
 
 use crate::{
-    Branch, Index, LocalIndex, NetworkedIndex, PullError, RemoteSite, RepositoryArchiveExt as _,
-    RepositoryMemoryExt, Revision, TreeReference, Upstream,
+    Branch, Index, NetworkedIndex, PullError, RemoteRepository, RemoteSite,
+    RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference, Upstream,
 };
-
-/// Command struct for merging an explicit upstream revision.
-///
-/// Performs a three-way merge between the current branch, the base
-/// (last sync point), and the upstream revision.
-pub struct PullLocal<'a> {
-    branch: &'a Branch,
-    upstream_revision: Revision,
-}
-
-impl<'a> PullLocal<'a> {
-    fn new(branch: &'a Branch, upstream_revision: Revision) -> Self {
-        Self {
-            branch,
-            upstream_revision,
-        }
-    }
-}
-
-impl PullLocal<'_> {
-    /// Execute the merge, returning the new revision (or None if no changes).
-    pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, PullError>
-    where
-        Env: Provider<Get>
-            + Provider<Put>
-            + Provider<Resolve>
-            + Provider<Publish>
-            + Provider<Identify>
-            + ConditionalSync
-            + 'static,
-    {
-        let branch = self.branch;
-        let upstream_revision = self.upstream_revision;
-
-        let branch_base = branch
-            .upstream()
-            .map(|u| u.tree().clone())
-            .unwrap_or_default();
-
-        if branch_base == upstream_revision.tree {
-            return Ok(None);
-        }
-
-        let store = LocalIndex::new(env, branch.archive().index());
-        three_way_merge(branch, upstream_revision, store, env).await
-    }
-}
 
 /// Command struct for pulling from upstream (auto-dispatches local/remote).
 pub struct Pull<'a> {
@@ -74,11 +25,6 @@ impl Branch {
     /// Pull from the configured upstream.
     pub fn pull(&self) -> Pull<'_> {
         Pull::new(self)
-    }
-
-    /// Merge an explicit upstream revision into this branch.
-    pub fn merge(&self, upstream_revision: Revision) -> PullLocal<'_> {
-        PullLocal::new(self, upstream_revision)
     }
 }
 
@@ -103,131 +49,111 @@ impl Pull<'_> {
                 branch: branch.name().to_string(),
             })?;
 
-        match upstream {
+        // Resolve the upstream's current revision and, when the
+        // upstream is remote, keep a handle so the merge can fall back
+        // to the remote archive for blocks that aren't local.
+        let (upstream_revision, remote) = match upstream {
             Upstream::Local { branch: id, .. } => {
                 let upstream_branch = branch.subject().branch(id).load().perform(env).await?;
-
-                match upstream_branch.revision() {
-                    Some(rev) => branch.merge(rev).perform(env).await,
-                    None => Ok(None),
-                }
+                (upstream_branch.revision(), None)
             }
             Upstream::Remote {
                 remote: name,
                 branch: branch_name,
                 ..
             } => {
-                let remote_repo = branch.subject().remote(name).load().perform(env).await?;
-
-                let remote_branch = remote_repo.branch(branch_name).open().perform(env).await?;
-
-                let upstream_revision = match remote_branch.fetch().perform(env).await? {
-                    Some(rev) => rev,
-                    None => return Ok(None),
-                };
-
-                let branch_base = branch
-                    .upstream()
-                    .map(|u| u.tree().clone())
-                    .unwrap_or_default();
-
-                if branch_base == upstream_revision.tree {
-                    return Ok(None);
-                }
-
-                let store =
-                    NetworkedIndex::new(env, branch.archive().index(), Some(remote_repo.clone()));
-
-                let result = three_way_merge(branch, upstream_revision, store.clone(), env).await?;
-
-                // Replicate all tree blocks to local storage.
-                if let Some(rev) = branch.revision() {
-                    let target: Index = Tree::from_hash(rev.tree.hash(), &store).await?;
-                    let stream = target.stream(&store);
-                    tokio::pin!(stream);
-                    while let Some(r) = stream.next().await {
-                        r?;
-                    }
-                }
-
-                Ok(result)
+                let remote = branch.subject().remote(name).load().perform(env).await?;
+                let upstream = remote.branch(branch_name).open().perform(env).await?;
+                (upstream.fetch().perform(env).await?, Some(remote))
             }
+        };
+
+        // Upstream has never received a revision yet — nothing to
+        // merge in, so the pull is a no-op.
+        let Some(upstream_revision) = upstream_revision else {
+            return Ok(None);
+        };
+
+        // `base` is the upstream tree at our last sync point (the
+        // divergence marker). If it equals the upstream's current
+        // tree, the upstream hasn't moved and there's nothing to pull.
+        let base = branch
+            .upstream()
+            .map(|u| u.tree().clone())
+            .unwrap_or_default();
+
+        if base == upstream_revision.tree {
+            return Ok(None);
         }
-    }
-}
 
-/// Three-way merge: applies changes between base and current onto the
-/// upstream revision's tree. Publishes the resulting revision and updates
-/// the upstream tracking state.
-async fn three_way_merge<S>(
-    branch: &Branch,
-    upstream_revision: Revision,
-    store: S,
-    env: &(impl Provider<Resolve> + Provider<Publish> + Provider<Identify> + ConditionalSync),
-) -> Result<Option<Revision>, PullError>
-where
-    S: ContentAddressedStorage<Hash = Blake3Hash, Error = DialogStorageError>
-        + Encoder<Hash = Blake3Hash, Error = DialogStorageError>
-        + Clone
-        + ConditionalSync,
-{
-    let branch_base = branch
-        .upstream()
-        .map(|u| u.tree().clone())
-        .unwrap_or_default();
-    let branch_revision = branch.revision();
+        let local_revision = branch.revision();
+        let local_tree_hash = local_revision
+            .as_ref()
+            .map(|revision| *revision.tree.hash())
+            .unwrap_or(EMPT_TREE_HASH);
 
-    let mut target: Index = Tree::from_hash(upstream_revision.tree.hash(), &store).await?;
+        // `NetworkedIndex` reads from the local archive first and,
+        // when the upstream is remote, falls back to the remote
+        // archive for blocks that haven't been replicated. With
+        // `remote: None` it degrades to a plain local index.
+        let store = NetworkedIndex::new(env, branch.archive().index(), remote);
 
-    let base: Index = Tree::from_hash(branch_base.hash(), &store).await?;
-    let current_tree_hash = branch_revision
-        .as_ref()
-        .map(|rev| *rev.tree.hash())
-        .unwrap_or(EMPT_TREE_HASH);
-    let current: Index = Tree::from_hash(&current_tree_hash, &store).await?;
+        // Load the three trees: last-sync base, local current, and the
+        // upstream revision we're merging in.
+        let base: Index = Tree::from_hash(base.hash(), &store).await?;
+        let local: Index = Tree::from_hash(&local_tree_hash, &store).await?;
+        let mut merged: Index = Tree::from_hash(upstream_revision.tree.hash(), &store).await?;
 
-    let diff_store = store.clone();
-    let changes = base.differentiate(&current, &diff_store, &diff_store);
-    let mut write_store = store;
-    Box::pin(target.integrate(changes, &mut write_store)).await?;
+        // Replay local changes (base → local) on top of the upstream
+        // tree to produce the merged tree.
+        let read_store = store.clone();
+        let local_changes = base.differentiate(&local, &read_store, &read_store);
+        let mut write_store = store;
+        Box::pin(merged.integrate(local_changes, &mut write_store)).await?;
 
-    let tree = TreeReference::from(target.hash().copied().unwrap_or(EMPT_TREE_HASH));
+        let merged_tree = TreeReference::from(merged.hash().copied().unwrap_or(EMPT_TREE_HASH));
 
-    let new_revision = match branch_revision {
-        // Merging produced the upstream tree verbatim (fast-forward): just
-        // adopt the upstream revision — there's nothing novel to attribute.
-        _ if tree == upstream_revision.tree => upstream_revision.clone(),
-        // Branch has no prior revision to merge against; adopt the upstream
-        // revision directly (its identity still applies).
-        None => upstream_revision.clone(),
-        // Real three-way merge: mint a revision attributed to the current
-        // authority combining both sides.
-        Some(base) => {
-            let authority = Identify.perform(env).await?;
-            base.merge(
-                &upstream_revision,
-                tree,
-                authority.did(),
-                authority.profile().clone(),
-            )
-        }
-    };
+        let new_revision = match local_revision {
+            // Merging produced the upstream tree verbatim
+            // (fast-forward): adopt the upstream revision — there's
+            // nothing novel to attribute.
+            _ if merged_tree == upstream_revision.tree => upstream_revision.clone(),
+            // Branch has no prior revision; adopt the upstream
+            // revision directly (its identity still applies).
+            None => upstream_revision.clone(),
+            // Real three-way merge: mint a revision attributed to the
+            // current authority combining both sides.
+            Some(local) => {
+                let authority = Identify.perform(env).await?;
+                local.merge(
+                    &upstream_revision,
+                    merged_tree,
+                    authority.did(),
+                    authority.profile().clone(),
+                )
+            }
+        };
 
-    branch
-        .revision
-        .publish(new_revision.clone())
-        .perform(env)
-        .await?;
-
-    if let Some(upstream) = branch.upstream() {
+        // Publish the merged revision as the branch's new head.
         branch
-            .upstream
-            .publish(upstream.with_tree(upstream_revision.tree.clone()))
+            .revision
+            .publish(new_revision.clone())
             .perform(env)
             .await?;
-    }
 
-    Ok(Some(new_revision))
+        // Advance the recorded sync base to the upstream's tree we
+        // just merged in, so the next pull/push uses it as the
+        // divergence marker.
+        if let Some(upstream) = branch.upstream() {
+            branch
+                .upstream
+                .publish(upstream.with_tree(upstream_revision.tree.clone()))
+                .perform(env)
+                .await?;
+        }
+
+        Ok(Some(new_revision))
+    }
 }
 
 #[cfg(test)]
@@ -247,20 +173,19 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
-        let artifact = Artifact {
+        main.commit(stream::iter(vec![Instruction::Assert(Artifact {
             the: "user/name".parse()?,
             of: "user:seed".parse()?,
             is: Value::String("Seed".to_string()),
             cause: None,
-        };
-        let _hash = main
-            .commit(stream::iter(vec![Instruction::Assert(artifact)]))
-            .perform(&operator)
-            .await?;
-        let upstream_revision = main.revision().expect("main should have a revision");
+        })]))
+        .perform(&operator)
+        .await?;
 
         let feature = repo.branch("feature").open().perform(&operator).await?;
-        let pulled = feature.merge(upstream_revision).perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+
+        let pulled = feature.pull().perform(&operator).await?;
         assert!(pulled.is_some());
         Ok(())
     }
@@ -271,22 +196,20 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
-        let _hash = main
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "user/name".parse()?,
-                of: "user:main".parse()?,
-                is: Value::String("Main data".to_string()),
-                cause: None,
-            })]))
-            .perform(&operator)
-            .await?;
+        main.commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:main".parse()?,
+            is: Value::String("Main data".to_string()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
         let main_revision = main.revision().expect("main should have a revision");
 
         let feature = repo.branch("feature").open().perform(&operator).await?;
-        let pulled = feature
-            .merge(main_revision.clone())
-            .perform(&operator)
-            .await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+
+        let pulled = feature.pull().perform(&operator).await?;
         assert!(pulled.is_some());
         let feature_rev = feature
             .revision()
@@ -301,19 +224,19 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
-        let _hash = main
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "user/name".parse()?,
-                of: "user:main".parse()?,
-                is: Value::String("Main data".to_string()),
-                cause: None,
-            })]))
-            .perform(&operator)
-            .await?;
+        main.commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:main".parse()?,
+            is: Value::String("Main data".to_string()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
         let main_revision = main.revision().expect("main should have a revision");
 
         let feature = repo.branch("feature").open().perform(&operator).await?;
-        let _hash = feature
+        feature.set_upstream(&main).perform(&operator).await?;
+        feature
             .commit(stream::iter(vec![Instruction::Assert(Artifact {
                 the: "user/email".parse()?,
                 of: "user:feature".parse()?,
@@ -323,10 +246,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let pulled = feature
-            .merge(main_revision.clone())
-            .perform(&operator)
-            .await?;
+        let pulled = feature.pull().perform(&operator).await?;
         assert!(pulled.is_some());
         let feature_rev = feature
             .revision()

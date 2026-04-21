@@ -137,13 +137,11 @@ impl Push<'_> {
                 let difference =
                     TreeDifference::compute(&base_tree, &current_tree, &store, &store).await?;
                 let novelty = difference.novel_nodes().map_err(Into::into);
-                // Boxed because the upload future carries the full
-                // stream type and would otherwise trip
-                // clippy::large_futures on the surrounding perform
-                // future.
                 let remote_archive = remote.archive();
                 let remote_index = remote_archive.index();
                 let upload = remote_index.upload(novelty, index).perform(env);
+                // Boxed because the upload future carries the full
+                // stream type and produces large futures.
                 Box::pin(upload).await?;
 
                 upstream.publish(revision.clone()).perform(env).await?;
@@ -253,6 +251,36 @@ mod tests {
         let branch = repo.branch("feature").open().perform(&operator).await?;
 
         assert!(branch.upstream().is_none());
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_errors_pushing_branch_without_upstream() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("feature").open().perform(&operator).await?;
+
+        let result = branch.push().perform(&operator).await;
+        assert!(
+            matches!(result, Err(PushError::BranchHasNoUpstream { .. })),
+            "Push should fail with BranchHasNoUpstream, got: {result:?}"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_returns_none_when_pushing_empty_branch() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let main = repo.branch("main").open().perform(&operator).await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+
+        let result = feature.push().perform(&operator).await?;
+        assert!(result.is_none(), "Push with no revision should return None");
 
         Ok(())
     }

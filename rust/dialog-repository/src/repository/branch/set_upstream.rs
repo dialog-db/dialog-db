@@ -112,6 +112,44 @@ mod tests {
     }
 
     #[dialog_common::test]
+    async fn it_persists_remote_upstream_across_reload() -> Result<()> {
+        use crate::SiteAddress;
+        use dialog_remote_s3::Address;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let site = SiteAddress::S3(
+            Address::builder("https://s3.us-east-1.amazonaws.com")
+                .region("us-east-1")
+                .bucket("bucket")
+                .build()
+                .unwrap(),
+        );
+        let origin = repo
+            .remote("origin")
+            .create(site)
+            .perform(&operator)
+            .await?;
+        let remote_main = origin.branch("main").open().perform(&operator).await?;
+
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch.set_upstream(&remote_main).perform(&operator).await?;
+
+        // Reopen the branch from storage and verify the upstream survived
+        // the round trip through Publish/Resolve.
+        let reopened = repo.branch("main").open().perform(&operator).await?;
+        let upstream = reopened.upstream();
+        assert!(matches!(
+            upstream,
+            Some(Upstream::Remote { ref remote, ref branch, .. })
+                if remote == "origin" && branch == "main"
+        ));
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
     async fn it_errors_setting_upstream_to_self() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;

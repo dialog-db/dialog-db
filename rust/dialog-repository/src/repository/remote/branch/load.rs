@@ -37,3 +37,45 @@ impl LoadRemoteBranch {
         Ok(branch)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use crate::LoadRemoteBranchError;
+    use crate::helpers::{test_operator_with_profile, test_repo};
+    use crate::repository::remote::SiteAddress;
+    use anyhow::Result;
+    use dialog_remote_s3::Address;
+
+    fn test_site() -> SiteAddress {
+        SiteAddress::S3(
+            Address::builder("https://s3.us-east-1.amazonaws.com")
+                .region("us-east-1")
+                .bucket("bucket")
+                .build()
+                .unwrap(),
+        )
+    }
+
+    #[dialog_common::test]
+    async fn it_errors_loading_remote_branch_never_fetched() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let origin = repo
+            .remote("origin")
+            .create(test_site())
+            .perform(&operator)
+            .await?;
+
+        let result = origin.branch("main").load().perform(&operator).await;
+        assert!(
+            matches!(result, Err(LoadRemoteBranchError::NotFound { .. })),
+            "Load should fail with NotFound for never-fetched branch, got: {result:?}"
+        );
+
+        Ok(())
+    }
+}

@@ -1,11 +1,12 @@
 use crate::{
-    Branch, CommitError, Index, LocalIndex, RepositoryArchiveExt as _, Revision, TreeReference,
+    Branch, CommitError, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _,
+    RepositoryMemoryExt, Revision, TreeReference, Upstream,
 };
 use dialog_artifacts::{
     Artifact, AttributeKey, Cause, Datum, EntityKey, FromKey, Instruction, Key, KeyView,
     KeyViewConstruct, KeyViewMut, State, ValueKey,
 };
-use dialog_capability::Provider;
+use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::{Identify, OperatorExt};
@@ -51,6 +52,8 @@ where
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
     {
@@ -58,11 +61,21 @@ where
         let changes = self.changes;
         let base_revision = branch.revision();
 
-        // `LocalIndex` adapts the archive `Get`/`Put` capabilities into
-        // the prolly tree's `ContentAddressedStorage` trait, so tree
-        // operations below read and write tree blocks through the
-        // capability system.
-        let mut store = LocalIndex::new(env, branch.archive().index());
+        // If the branch tracks a remote upstream, commits must be able
+        // to read remote-only blocks on demand (pull only merges the
+        // tree metadata, not every block). `NetworkedIndex` falls back
+        // to the remote when a block is missing locally.
+        let remote = match branch.upstream() {
+            Some(Upstream::Remote { remote: name, .. }) => branch
+                .subject()
+                .remote(name)
+                .load()
+                .perform(env)
+                .await
+                .ok(),
+            _ => None,
+        };
+        let mut store = NetworkedIndex::new(env, branch.archive().index(), remote);
 
         // Walk forward from the current revision's tree root, or from
         // the empty tree if the branch has no commits yet.
