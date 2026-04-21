@@ -2,7 +2,7 @@ use dialog_capability::Provider;
 use dialog_effects::memory::Resolve;
 
 use super::{Branch, BranchReference};
-use crate::repository::error::RepositoryError;
+use crate::ResolveError;
 
 /// Command to open a branch. Resolves the branch's revision and upstream
 /// cells without ever erroring on a missing revision — a freshly-opened
@@ -18,7 +18,7 @@ impl OpenBranch {
     }
 
     /// Execute the open operation.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Branch, RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<Branch, ResolveError>
     where
         Env: Provider<Resolve>,
     {

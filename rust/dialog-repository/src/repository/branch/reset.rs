@@ -2,7 +2,7 @@ use dialog_capability::Provider;
 use dialog_effects::memory::Publish;
 
 use super::Branch;
-use crate::repository::error::RepositoryError;
+use crate::PublishError;
 use crate::repository::revision::Revision;
 
 /// Command that resets a branch to a given revision.
@@ -26,7 +26,7 @@ impl Branch {
 
 impl Reset<'_> {
     /// Execute the reset operation.
-    pub async fn perform<Env>(self, env: &Env) -> Result<(), RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<(), PublishError>
     where
         Env: Provider<Publish>,
     {
@@ -34,8 +34,7 @@ impl Reset<'_> {
             .revision
             .publish(self.revision)
             .perform(env)
-            .await?;
-        Ok(())
+            .await
     }
 }
 

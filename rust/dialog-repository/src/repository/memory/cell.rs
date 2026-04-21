@@ -13,7 +13,7 @@ use std::fmt::Debug;
 
 use super::publish::{Publish, RetainPublish};
 use super::resolve::{Resolve, RetainResolve};
-use crate::{PublishError, RepositoryError};
+use crate::{PublishError, ResolveError};
 
 /// Cached [`Edition`] behind a shared lock.
 pub type SharedState<T> = Arc<RwLock<Option<Edition<T>>>>;
@@ -69,8 +69,11 @@ where
     Codec: Encoder + Clone,
 {
     /// Decode bytes into a typed value.
-    pub async fn decode(&self, bytes: &[u8]) -> Result<T, RepositoryError> {
-        Ok(self.codec.decode(bytes).await.map_err(Into::into)?)
+    pub async fn decode(&self, bytes: &[u8]) -> Result<T, ResolveError> {
+        self.codec.decode(bytes).await.map_err(|error| {
+            let error: DialogStorageError = error.into();
+            ResolveError::Decode(error.to_string())
+        })
     }
 }
 
@@ -84,7 +87,7 @@ where
     pub async fn apply(
         &self,
         edition: Option<memory::Edition<Vec<u8>>>,
-    ) -> Result<(), RepositoryError> {
+    ) -> Result<(), ResolveError> {
         match edition {
             None => self.clear(),
             Some(raw) => {

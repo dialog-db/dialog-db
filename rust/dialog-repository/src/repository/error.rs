@@ -73,6 +73,18 @@ pub enum RepositoryError {
     #[error(transparent)]
     TempPublish(#[from] PublishError),
 
+    /// Scaffolding: same as `TempPublish` but for resolve. Remove once
+    /// every `cell.resolve(...).perform(env)` call site lives in a
+    /// command with its own typed error.
+    #[error(transparent)]
+    TempResolve(#[from] ResolveError),
+
+    /// Scaffolding: bubbles `LoadBranchError` through commands that
+    /// still return `RepositoryError`. Remove once every `.load()`
+    /// caller has its own typed error.
+    #[error(transparent)]
+    TempLoadBranch(#[from] LoadBranchError),
+
     /// An archive effect (get/put) failed.
     #[error(transparent)]
     Archive(#[from] ArchiveError),
@@ -117,6 +129,21 @@ pub enum RepositoryError {
     },
 }
 
+/// Errors returned by the load branch command.
+#[derive(Error, Debug)]
+pub enum LoadBranchError {
+    /// The branch has no revision yet (nothing to load).
+    #[error("Branch {name} not found")]
+    NotFound {
+        /// The branch name.
+        name: String,
+    },
+
+    /// Failed to resolve the branch's cells.
+    #[error(transparent)]
+    Resolve(#[from] ResolveError),
+}
+
 /// Errors specific to a push operation.
 #[derive(Error, Debug)]
 pub enum PushError {
@@ -147,6 +174,10 @@ pub enum PushError {
     #[error(transparent)]
     Publish(#[from] PublishError),
 
+    /// A cell resolve during push failed.
+    #[error(transparent)]
+    Resolve(#[from] ResolveError),
+
     /// Uploading novel blocks to the remote archive failed.
     #[error(transparent)]
     Upload(#[from] UploadError),
@@ -159,6 +190,48 @@ pub enum PushError {
     /// etc.) failed during push.
     #[error(transparent)]
     Repository(#[from] RepositoryError),
+}
+
+/// Errors returned by cell resolve operations.
+#[derive(Error, Debug)]
+pub enum ResolveError {
+    /// CAS edition mismatch — the backing store saw a different edition.
+    #[error("Version mismatch: expected {expected:?}, got {actual:?}")]
+    VersionMismatch {
+        /// The edition we held locally.
+        expected: Option<Version>,
+        /// The edition the backing store actually had.
+        actual: Option<Version>,
+    },
+
+    /// Storage backend failure.
+    #[error("Storage error: {0}")]
+    Storage(String),
+
+    /// Authorization denied.
+    #[error("Authorization error: {0}")]
+    Authorization(String),
+
+    /// IO failure.
+    #[error("IO error: {0}")]
+    Io(#[from] io::Error),
+
+    /// Failed to decode the resolved bytes.
+    #[error("Decode error: {0}")]
+    Decode(String),
+}
+
+impl From<MemoryError> for ResolveError {
+    fn from(error: MemoryError) -> Self {
+        match error {
+            MemoryError::VersionMismatch { expected, actual } => {
+                Self::VersionMismatch { expected, actual }
+            }
+            MemoryError::Storage(message) => Self::Storage(message),
+            MemoryError::Authorization(message) => Self::Authorization(message),
+            MemoryError::Io(error) => Self::Io(error),
+        }
+    }
 }
 
 /// Errors returned by cell publish operations.

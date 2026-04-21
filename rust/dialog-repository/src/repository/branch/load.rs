@@ -2,7 +2,7 @@ use dialog_capability::Provider;
 use dialog_effects::memory::Resolve;
 
 use super::{Branch, BranchReference};
-use crate::repository::error::RepositoryError;
+use crate::LoadBranchError;
 
 /// Command to load an existing branch, erroring if it has no revision yet.
 pub struct LoadBranch {
@@ -16,14 +16,14 @@ impl LoadBranch {
     }
 
     /// Execute the load operation.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Branch, RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<Branch, LoadBranchError>
     where
         Env: Provider<Resolve>,
     {
         let revision = self.branch.revision();
         revision.resolve().perform(env).await?;
         if revision.content().is_none() {
-            return Err(RepositoryError::BranchNotFound {
+            return Err(LoadBranchError::NotFound {
                 name: self.branch.name().to_string(),
             });
         }
@@ -49,7 +49,7 @@ mod tests {
     use dialog_storage::provider::Volatile;
     use dialog_varsig::did;
 
-    use crate::repository::error::RepositoryError;
+    use crate::LoadBranchError;
     use crate::repository::memory::RepositoryMemoryExt;
 
     #[dialog_common::test]
@@ -62,10 +62,7 @@ mod tests {
             .perform(&provider)
             .await;
 
-        assert!(matches!(
-            result,
-            Err(RepositoryError::BranchNotFound { .. })
-        ));
+        assert!(matches!(result, Err(LoadBranchError::NotFound { .. })));
         Ok(())
     }
 }
