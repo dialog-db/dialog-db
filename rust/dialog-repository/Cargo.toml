@@ -16,6 +16,7 @@ integration-tests = ["dialog-common/integration-tests"]
 web-integration-tests = ["dialog-common/web-integration-tests"]
 
 [dependencies]
+dialog-artifacts = { workspace = true }
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
 dialog-operator = { workspace = true }
@@ -26,11 +27,14 @@ dialog-prolly-tree = { workspace = true }
 dialog-varsig = { workspace = true }
 parking_lot = { workspace = true }
 
+async-stream = { workspace = true }
 async-trait = { workspace = true }
 base58 = { workspace = true }
+futures-util = { workspace = true }
 serde = { workspace = true }
 serde_ipld_dagcbor = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "macros", "io-util"] }
 
 [dev-dependencies]
 dialog-storage = { workspace = true, features = ["helpers"] }
@@ -38,7 +42,7 @@ dialog-common = { workspace = true, features = ["helpers"] }
 anyhow = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { workspace = true, features = ["sync", "macros", "io-util", "fs"] }
+tokio = { workspace = true, features = ["fs"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 getrandom = { workspace = true, features = ["js"] }

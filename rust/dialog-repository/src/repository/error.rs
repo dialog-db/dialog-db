@@ -1,6 +1,9 @@
+use dialog_artifacts::DialogArtifactsError;
 use dialog_credentials::Ed25519SignerError;
+use dialog_effects::authority::AuthorityError;
 use dialog_effects::memory::{MemoryError, Version};
 use dialog_effects::storage::StorageError;
+use dialog_prolly_tree::DialogProllyTreeError;
 use dialog_storage::DialogStorageError;
 use std::io;
 use thiserror::Error;
@@ -29,6 +32,14 @@ pub enum RepositoryError {
     /// Create-repository command failed.
     #[error(transparent)]
     Create(#[from] CreateRepositoryError),
+
+    /// Load-branch command failed.
+    #[error(transparent)]
+    LoadBranch(#[from] LoadBranchError),
+
+    /// Commit command failed.
+    #[error(transparent)]
+    Commit(#[from] CommitError),
 
     /// Cell publish failed (outside a command context).
     #[error(transparent)]
@@ -178,4 +189,39 @@ impl From<DialogStorageError> for ResolveError {
     fn from(error: DialogStorageError) -> Self {
         Self::Storage(error.to_string())
     }
+}
+
+/// Errors returned by the load branch command.
+#[derive(Error, Debug)]
+pub enum LoadBranchError {
+    /// The branch has no revision yet (nothing to load).
+    #[error("Branch {name} not found")]
+    NotFound {
+        /// The branch name.
+        name: String,
+    },
+
+    /// Failed to resolve the branch's cells.
+    #[error("Failed to resolve branch cells: {0}")]
+    Resolve(#[from] ResolveError),
+}
+
+/// Errors specific to a commit operation.
+#[derive(Error, Debug)]
+pub enum CommitError {
+    /// A search-tree operation during commit failed.
+    #[error("Tree operation failed during commit: {0}")]
+    Tree(#[from] DialogProllyTreeError),
+
+    /// An artifact decode during commit failed.
+    #[error("Artifact decode failed during commit: {0}")]
+    Artifact(#[from] DialogArtifactsError),
+
+    /// Identifying the current authority for the new revision failed.
+    #[error("Failed to identify authority for commit: {0}")]
+    Authority(#[from] AuthorityError),
+
+    /// Publishing the new revision failed.
+    #[error("Failed to publish new revision: {0}")]
+    Publish(#[from] PublishError),
 }
