@@ -60,6 +60,8 @@ pub mod schema;
 pub mod selection;
 /// Database sessions for querying and committing changes.
 pub mod session;
+/// Data source for query evaluation (branch + env + rules).
+pub mod source;
 /// Statement trait for asserting and retracting facts.
 pub mod statement;
 /// Stream utilities for async query result iteration.
@@ -98,4 +100,7 @@ pub use term::*;
 pub use types::*;
 
 pub use async_stream::try_stream;
+pub use dialog_capability::Provider;
+pub use dialog_common::ConditionalSync;
+pub use dialog_effects::archive;
 pub use dialog_macros::{Attribute, Concept, Formula};

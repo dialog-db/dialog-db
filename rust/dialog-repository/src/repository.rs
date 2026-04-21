@@ -699,4 +699,62 @@ mod tests {
             Ok(())
         }
     }
+
+    mod query_engine {
+        use crate::helpers::{test_operator_with_profile, test_repo};
+        use dialog_query::query::Output;
+        use dialog_query::{Concept, Entity, Query, Term};
+
+        mod employee {
+            #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+            pub struct Name(pub String);
+
+            #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+            pub struct Role(pub String);
+        }
+
+        #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        pub struct Employee {
+            this: Entity,
+            name: employee::Name,
+            role: employee::Role,
+        }
+
+        #[dialog_common::test]
+        async fn it_queries_via_session() -> anyhow::Result<()> {
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            branch
+                .transaction()
+                .assert(Employee {
+                    this: Entity::new()?,
+                    name: employee::Name("Alice".into()),
+                    role: employee::Role("Engineer".into()),
+                })
+                .assert(Employee {
+                    this: Entity::new()?,
+                    name: employee::Name("Bob".into()),
+                    role: employee::Role("Designer".into()),
+                })
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            let results: Vec<Employee> = branch
+                .query()
+                .select(Query::<Employee> {
+                    this: Term::var("this"),
+                    name: Term::var("name"),
+                    role: Term::var("role"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+
+            assert_eq!(results.len(), 2);
+            Ok(())
+        }
+    }
 }

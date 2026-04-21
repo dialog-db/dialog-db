@@ -6,12 +6,14 @@ use crate::environment::Environment;
 use crate::query::Application;
 use crate::query::Output;
 use crate::selection::{Match, Selection};
+use crate::source::SelectRules;
 use crate::types::{Any, Record};
 use crate::{
-    Entity, EvaluationError, Field, Parameters, Requirement, Schema, Source, Term, Type, Value,
-    try_stream,
+    Entity, EvaluationError, Field, Parameters, Requirement, Schema, Term, Type, Value, try_stream,
 };
-use dialog_artifacts::{Artifact, Cause};
+use dialog_artifacts::{Artifact, Cause, Select};
+use dialog_capability::Provider;
+use dialog_common::ConditionalSync;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
@@ -183,14 +185,22 @@ impl AttributeQueryAll {
     }
 
     /// Evaluate yielding all matching artifacts.
-    pub fn evaluate<S: Source, M: Selection>(self, source: S, selection: M) -> impl Selection {
+    pub fn evaluate<'a, Env, M: Selection + 'a>(
+        self,
+        env: &'a Env,
+        selection: M,
+    ) -> impl Selection + 'a
+    where
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    {
         let selector = self;
         try_stream! {
             for await candidate in selection {
                 let base = candidate?;
                 let selection = selector.resolve(&base);
 
-                for await artifact in source.select((&selection).try_into()?) {
+                let stream = Provider::<Select<'_>>::execute(env, (&selection).try_into()?).await?;
+                for await artifact in stream {
                     let artifact = artifact?;
                     let mut extension = base.clone();
                     selector.merge(&mut extension, &artifact)?;
@@ -201,19 +211,23 @@ impl AttributeQueryAll {
     }
 
     /// Execute this query, returning a stream of claims.
-    pub fn perform<S: Source>(self, source: &S) -> impl Output<Claim>
+    pub fn perform<'a, Env>(self, env: &'a Env) -> impl Output<Claim> + 'a
     where
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
         Self: Sized,
     {
-        Application::perform(self, source)
+        Application::perform(self, env)
     }
 }
 
 impl Application for AttributeQueryAll {
     type Conclusion = Claim;
 
-    fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
-        self.evaluate(source.clone(), selection)
+    fn evaluate<'a, Env, M: Selection + 'a>(self, selection: M, env: &'a Env) -> impl Selection + 'a
+    where
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    {
+        self.evaluate(env, selection)
     }
 
     fn realize(&self, input: Match) -> Result<Claim, EvaluationError> {
@@ -279,27 +293,33 @@ impl Display for AttributeQueryAll {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
     use super::*;
     use crate::query::Output;
-    use crate::{Session, the};
-    use dialog_storage::MemoryStorageBackend;
+    use crate::session::RuleRegistry;
+    use crate::source::test::TestEnv;
+    use crate::the;
+    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
 
     #[dialog_common::test]
     async fn it_scans_with_all_variables() -> anyhow::Result<()> {
-        use crate::artifact::Artifacts;
-
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
 
-        let mut session = Session::open(artifacts.clone());
-        session
-            .transact(vec![
+        branch
+            .transaction()
+            .assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alice".to_string()),
-            ])
+            )
+            .commit()
+            .perform(&operator)
             .await?;
 
         let query = AttributeQueryAll::new(
@@ -309,8 +329,8 @@ mod tests {
             Term::var("cause"),
         );
 
-        let session = Session::open(artifacts);
-        let results = query.perform(&session).try_vec().await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].of(), &alice);
@@ -321,22 +341,23 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_scans_with_constant_entity() -> anyhow::Result<()> {
-        use crate::artifact::Artifacts;
-
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        let mut session = Session::open(artifacts.clone());
-        session
-            .transact(vec![
+        branch
+            .transaction()
+            .assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alice".to_string()),
-                the!("person/name").of(bob.clone()).is("Bob".to_string()),
-            ])
+            )
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .commit()
+            .perform(&operator)
             .await?;
 
         let query = AttributeQueryAll::new(
@@ -346,8 +367,8 @@ mod tests {
             Term::var("cause"),
         );
 
-        let session = Session::open(artifacts);
-        let results = query.perform(&session).try_vec().await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].of(), &alice);
@@ -358,29 +379,32 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_returns_multiple_values() -> anyhow::Result<()> {
-        use crate::artifact::Artifacts;
-
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
 
-        let mut session = Session::open(artifacts.clone());
-        session
-            .transact(vec![
+        branch
+            .transaction()
+            .assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alice".to_string()),
-            ])
+            )
+            .commit()
+            .perform(&operator)
             .await?;
 
-        let mut session = Session::open(artifacts.clone());
-        session
-            .transact(vec![
+        branch
+            .transaction()
+            .assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alicia".to_string()),
-            ])
+            )
+            .commit()
+            .perform(&operator)
             .await?;
 
         let query = AttributeQueryAll::new(
@@ -390,8 +414,8 @@ mod tests {
             Term::var("cause"),
         );
 
-        let session = Session::open(artifacts);
-        let results = query.perform(&session).try_vec().await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(
             results.len(),
@@ -404,23 +428,26 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_scans_with_constant_value() -> anyhow::Result<()> {
-        use crate::artifact::Artifacts;
-
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
 
-        let mut session = Session::open(artifacts.clone());
-        session
-            .transact(vec![
+        branch
+            .transaction()
+            .assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alice".to_string()),
+            )
+            .assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alicia".to_string()),
-            ])
+            )
+            .commit()
+            .perform(&operator)
             .await?;
 
         let query = AttributeQueryAll::new(
@@ -430,8 +457,8 @@ mod tests {
             Term::var("cause"),
         );
 
-        let session = Session::open(artifacts);
-        let results = query.perform(&session).try_vec().await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].is(), &Value::String("Alice".to_string()));

@@ -40,7 +40,8 @@ impl<'a> Select<'a> {
             .unwrap_or(EMPT_TREE_HASH)
     }
 
-    fn catalog(&self) -> Capability<Catalog> {
+    /// The catalog (archive index) scoped to this branch's subject.
+    pub fn catalog(&self) -> Capability<Catalog> {
         self.branch.subject().archive().index()
     }
 }
@@ -85,7 +86,12 @@ impl Select<'_> {
         self.execute(store).await
     }
 
-    async fn execute<'s, S>(
+    /// Execute the select against the given content-addressed store.
+    ///
+    /// Unlike [`perform`](Self::perform) this does not pick a store for
+    /// you — useful when callers (e.g. query sessions) want to supply a
+    /// custom one such as a pre-configured [`NetworkedIndex`].
+    pub async fn execute<'s, S>(
         self,
         store: S,
     ) -> Result<
