@@ -10,7 +10,7 @@ use serde::Serialize;
 use std::fmt::Debug;
 
 use super::cell::Cache;
-use crate::RepositoryError;
+use crate::PublishError;
 
 /// Command to publish a cell value.
 ///
@@ -32,7 +32,7 @@ where
     Codec: Encoder<Bytes = Vec<u8>> + Clone,
 {
     /// Perform the publish against the local environment.
-    pub async fn perform<Env>(self, env: &Env) -> Result<(), RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<(), PublishError>
     where
         Env: Provider<memory::Publish>,
     {
@@ -80,7 +80,7 @@ where
     Codec: Encoder<Bytes = Vec<u8>> + Clone,
 {
     /// Perform the publish against the remote site.
-    pub async fn perform<Env>(self, env: &Env) -> Result<(), RepositoryError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<(), PublishError>
     where
         Env: Provider<Fork<A::Site, memory::Publish>> + ConditionalSync,
     {
@@ -120,7 +120,7 @@ where
     pub async fn perform(
         self,
         env: &(impl Provider<memory::Publish> + ConditionalSync),
-    ) -> Result<(), RepositoryError> {
+    ) -> Result<(), PublishError> {
         self.inner.perform(env).await?;
         *self.sticky.write() = self.value;
         Ok(())

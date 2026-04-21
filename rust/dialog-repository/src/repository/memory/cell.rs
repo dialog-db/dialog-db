@@ -7,13 +7,13 @@ use dialog_common::ConditionalSync;
 use dialog_effects::memory;
 use dialog_effects::memory::prelude::CellExt;
 use dialog_effects::memory::{Edition, Version};
-use dialog_storage::{CborEncoder, Encoder};
+use dialog_storage::{CborEncoder, DialogStorageError, Encoder};
 use serde::{Serialize, de::DeserializeOwned};
 use std::fmt::Debug;
 
 use super::publish::{Publish, RetainPublish};
 use super::resolve::{Resolve, RetainResolve};
-use crate::RepositoryError;
+use crate::{PublishError, RepositoryError};
 
 /// Cached [`Edition`] behind a shared lock.
 pub type SharedState<T> = Arc<RwLock<Option<Edition<T>>>>;
@@ -104,8 +104,11 @@ where
     Codec: Encoder<Bytes = Vec<u8>> + Clone,
 {
     /// Encode a value into bytes.
-    pub async fn encode(&self, value: &T) -> Result<Vec<u8>, RepositoryError> {
-        let (_hash, content) = self.codec.encode(value).await.map_err(Into::into)?;
+    pub async fn encode(&self, value: &T) -> Result<Vec<u8>, PublishError> {
+        let (_hash, content) = self.codec.encode(value).await.map_err(|error| {
+            let error: DialogStorageError = error.into();
+            PublishError::Encode(error.to_string())
+        })?;
         Ok(content)
     }
 }

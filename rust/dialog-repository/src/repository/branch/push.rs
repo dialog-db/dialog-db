@@ -8,7 +8,7 @@ use futures_util::TryStreamExt;
 use super::{Branch, Index, UpstreamState};
 use crate::repository::archive::RepositoryArchiveExt as _;
 use crate::repository::archive::local::LocalIndex;
-use crate::repository::error::RepositoryError;
+use crate::repository::error::PushError;
 use crate::repository::memory::RepositoryMemoryExt;
 use crate::repository::remote::RemoteSite;
 use crate::repository::revision::Revision;
@@ -40,9 +40,16 @@ impl Branch {
 impl Push<'_> {
     /// Execute the push operation.
     ///
-    /// Returns `Some(revision)` on success, `None` if the push could not
-    /// fast-forward (diverged).
-    pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, RepositoryError>
+    /// Push is fast-forward only:
+    ///
+    /// - `Ok(Some(revision))` — pushed; upstream now at `revision`.
+    /// - `Ok(None)` — nothing to push (branch has no local revision).
+    /// - `Err(PushError::NonFastForward)` — upstream has moved since
+    ///   the last sync; pull to integrate before pushing again.
+    ///
+    /// For remote upstream, novel tree blocks are uploaded before the
+    /// revision is published.
+    pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, PushError>
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -56,65 +63,46 @@ impl Push<'_> {
             + 'static,
     {
         let branch = self.branch;
-        let upstream = branch
+        let upstream_state = branch
             .upstream()
-            .ok_or_else(|| RepositoryError::BranchHasNoUpstream {
-                name: branch.name().to_string(),
+            .ok_or_else(|| PushError::BranchHasNoUpstream {
+                branch: branch.name().to_string(),
             })?;
 
-        match &upstream {
+        let revision = match branch.revision() {
+            Some(revision) => revision,
+            None => return Ok(None),
+        };
+        let base = upstream_state.tree().clone();
+
+        match &upstream_state {
             UpstreamState::Local {
                 branch: upstream_name,
                 ..
             } => {
-                // Fast-forward push to local upstream. Use `.open()` so
-                // pushing into an upstream branch with no prior commits
-                // still works — the upstream just starts at our tree.
-                let upstream = branch
+                let target = branch
                     .subject()
                     .branch(upstream_name.clone())
                     .open()
                     .perform(env)
                     .await?;
 
-                let revision = match branch.revision() {
-                    Some(revision) => revision,
-                    None => return Ok(None),
-                };
-                let base = branch
-                    .upstream()
-                    .map(|u| u.tree().clone())
-                    .unwrap_or_default();
-
-                let current = upstream
-                    .revision()
-                    .map(|r| r.tree.clone())
-                    .unwrap_or_default();
-
-                // Can only fast-forward if upstream hasn't diverged
+                let current = target.revision().map(|r| r.tree).unwrap_or_default();
                 if current != base {
-                    return Ok(None);
+                    return Err(PushError::NonFastForward {
+                        branch: branch.name().to_string(),
+                        expected: base,
+                        actual: current,
+                    });
                 }
 
-                upstream.reset(revision.clone()).perform(env).await?;
-
-                Ok(Some(revision))
+                target.reset(revision.clone()).perform(env).await?;
             }
             UpstreamState::Remote {
                 name: remote_name,
                 branch: upstream_branch_name,
                 ..
             } => {
-                let revision = match branch.revision() {
-                    Some(rev) => rev,
-                    None => return Ok(None),
-                };
-                let base = branch
-                    .upstream()
-                    .map(|u| u.tree().clone())
-                    .unwrap_or_default();
-
-                // Load remote repository and open remote branch
                 let remote = branch
                     .subject()
                     .remote(remote_name.clone())
@@ -128,40 +116,52 @@ impl Push<'_> {
                     .perform(env)
                     .await?;
 
-                // Compute and upload novel blocks: tree nodes that exist
-                // in the current tree but not in the base tree.
-                let index = branch.archive().index();
-                let store = LocalIndex::new(env, index.clone());
-                let base: Index = Tree::from_hash(base.hash(), &store).await?;
-                let current: Index = Tree::from_hash(revision.tree.hash(), &store).await?;
-                let difference = TreeDifference::compute(&base, &current, &store, &store).await?;
-                let novelty = difference.novel_nodes().map_err(Into::into);
-                // Boxed because the upload future carries the full
-                // stream type and would otherwise trip the
-                // `clippy::large_futures` lint when embedded in the
-                // surrounding `perform` future.
-                let target = remote.archive().index();
-                let upload = target.upload(novelty, index).perform(env);
-                Box::pin(upload).await?;
+                // Refresh the cache from the remote so our divergence
+                // check sees the latest upstream tree, not whatever
+                // was in our last snapshot.
+                upstream.fetch().perform(env).await?;
 
-                // Publish revision to remote
-                upstream.publish(revision.clone()).perform(env).await?;
-
-                // Update local upstream state
-                if let Some(upstream) = branch.upstream() {
-                    branch
-                        .upstream
-                        .publish(upstream.with_tree(revision.tree.clone()))
-                        .perform(env)
-                        .await
-                        .map_err(|e| RepositoryError::PushFailed {
-                            cause: format!("Failed to update upstream state: {:?}", e),
-                        })?;
+                let current = upstream.revision().map(|r| r.tree).unwrap_or_default();
+                if current != base {
+                    return Err(PushError::NonFastForward {
+                        branch: branch.name().to_string(),
+                        expected: base,
+                        actual: current,
+                    });
                 }
 
-                Ok(Some(revision))
+                // Upload tree nodes present in our current tree but not
+                // in the base, so the remote can hydrate the new tree
+                // before we publish the revision pointing at it.
+                let index = branch.archive().index();
+                let store = LocalIndex::new(env, index.clone());
+                let base_tree: Index = Tree::from_hash(base.hash(), &store).await?;
+                let current_tree: Index =
+                    Tree::from_hash(revision.tree.hash(), &store).await?;
+                let difference =
+                    TreeDifference::compute(&base_tree, &current_tree, &store, &store).await?;
+                let novelty = difference.novel_nodes().map_err(Into::into);
+                // Boxed because the upload future carries the full
+                // stream type and would otherwise trip
+                // clippy::large_futures on the surrounding perform
+                // future.
+                let remote_archive = remote.archive();
+                let remote_index = remote_archive.index();
+                let upload = remote_index.upload(novelty, index).perform(env);
+                Box::pin(upload).await?;
+
+                upstream.publish(revision.clone()).perform(env).await?;
             }
         }
+
+        // Advance our recorded sync point to the just-pushed tree.
+        branch
+            .upstream
+            .publish(upstream_state.with_tree(revision.tree.clone()))
+            .perform(env)
+            .await?;
+
+        Ok(Some(revision))
     }
 }
 
@@ -172,6 +172,7 @@ mod tests {
 
     use crate::helpers::{test_operator_with_profile, test_repo};
     use crate::repository::branch::UpstreamState;
+    use crate::repository::error::PushError;
     use crate::repository::tree::TreeReference;
     use anyhow::Result;
 
@@ -220,7 +221,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_returns_none_when_local_upstream_diverged() -> Result<()> {
+    async fn it_errors_non_fast_forward_on_local_upstream_diverged() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
 
@@ -254,8 +255,11 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let result = feature.push().perform(&operator).await?;
-        assert!(result.is_none(), "Push should return None when diverged");
+        let result = feature.push().perform(&operator).await;
+        assert!(
+            matches!(result, Err(PushError::NonFastForward { .. })),
+            "Push should fail with NonFastForward when diverged, got: {result:?}"
+        );
 
         Ok(())
     }
