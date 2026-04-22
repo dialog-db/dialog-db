@@ -156,9 +156,20 @@ pub fn derive(input: TokenStream) -> TokenStream {
         field_types.push(field_type);
         field_name_lits.push(field_name_lit.clone());
 
-        // Extract doc comment from the field (for Query struct docs)
-        let doc_comment = extract_doc_comments(&field.attrs);
-        let doc_comment_lit = syn::LitStr::new(&doc_comment, proc_macro2::Span::call_site());
+        // Forward the user's field doc when present, otherwise synthesize a
+        // fallback so `#![deny(missing_docs)]` in consumer crates is happy.
+        let user_doc = extract_doc_comments(&field.attrs);
+        let query_field_doc = if user_doc.is_empty() {
+            format!("Term matching the `{field_name_str}` field of [`{struct_name}`].",)
+        } else {
+            user_doc
+        };
+        let query_field_doc_lit =
+            syn::LitStr::new(&query_field_doc, proc_macro2::Span::call_site());
+        let terms_method_doc =
+            format!("Variable term for the `{field_name_str}` field of [`{struct_name}`].",);
+        let terms_method_doc_lit =
+            syn::LitStr::new(&terms_method_doc, proc_macro2::Span::call_site());
 
         // Extract the inner type from Attribute - the field type implements Attribute
         // and we need <FieldType as Attribute>::Type for the Term wrapper
@@ -166,11 +177,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         // Generate Query field (Term<InnerType>) where InnerType is the Attribute's Type
         query_fields.push(quote! {
-            #[doc = #doc_comment_lit]
+            #[doc = #query_field_doc_lit]
             pub #field_name: dialog_query::Term<#inner_type>
         });
 
         terms_methods.push(quote! {
+            #[doc = #terms_method_doc_lit]
             pub fn #field_name() -> dialog_query::Term<#inner_type> {
                 dialog_query::Term::<#inner_type>::var(#field_name_lit)
             }
@@ -212,6 +224,32 @@ pub fn derive(input: TokenStream) -> TokenStream {
         struct_name.span(),
     );
 
+    // Synthesized docs for generated types so consumer crates can enable
+    // `#![deny(missing_docs)]` without the lint firing on code they did
+    // not author. We only document items we fabricate; the user's own
+    // struct is left untouched so rustc can still warn if they forgot
+    // docs on their own concept.
+    let query_struct_doc = syn::LitStr::new(
+        &format!(
+            "Query pattern for [`{struct_name}`]. Each field is a [`dialog_query::Term`] used to match or bind that field when running the concept query.",
+        ),
+        proc_macro2::Span::call_site(),
+    );
+    let terms_struct_doc = syn::LitStr::new(
+        &format!(
+            "Typed variable-term accessors for [`{struct_name}`]. Each associated function returns a named `Term` variable for the corresponding concept field.",
+        ),
+        proc_macro2::Span::call_site(),
+    );
+    let terms_this_doc = syn::LitStr::new(
+        &format!("Variable term for the `this` field of [`{struct_name}`]."),
+        proc_macro2::Span::call_site(),
+    );
+    let query_this_field_doc = syn::LitStr::new(
+        &format!("Term matching the `this` entity of [`{struct_name}`]."),
+        proc_macro2::Span::call_site(),
+    );
+
     let expanded = quote! {
         // Compile-time validation that all fields (except 'this') implement Attribute + Descriptor
         const _: () = {
@@ -221,9 +259,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         };
 
+        #[doc = #query_struct_doc]
         #[derive(Debug, Clone, PartialEq)]
         pub struct #query_name {
-            /// The entity being matched
+            #[doc = #query_this_field_doc]
             pub this: dialog_query::Term<dialog_query::Entity>,
             #(#query_fields),*
         }
@@ -237,9 +276,11 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         }
 
+        #[doc = #terms_struct_doc]
         #[derive(Debug, Clone, PartialEq)]
         pub struct #terms_name {}
         impl #terms_name {
+            #[doc = #terms_this_doc]
             pub fn this() -> dialog_query::Term<dialog_query::Entity> {
                 dialog_query::Term::<dialog_query::Entity>::var("this")
             }
