@@ -303,35 +303,37 @@ mod tests {
         use super::*;
         use crate::helpers::unique_name;
 
-        type NativeStorage = Storage<NativeSpace>;
-
         #[dialog_common::test]
         async fn it_creates_and_loads_on_filesystem() {
-            let env = NativeStorage::default();
+            let env = Storage::temp();
             let name = unique_name("fs-create-load");
 
             let credential = test_credential().await;
             let expected_did = credential.did();
 
-            let cred = StorageFx::temp(&name)
+            let cred = StorageFx::profile(&name)
                 .create(credential)
                 .perform(&env)
                 .await
                 .unwrap();
             assert_eq!(cred.did(), expected_did);
 
-            let loaded = StorageFx::temp(&name).load().perform(&env).await.unwrap();
+            let loaded = StorageFx::profile(&name)
+                .load()
+                .perform(&env)
+                .await
+                .unwrap();
             assert_eq!(loaded.did(), expected_did);
         }
 
         #[dialog_common::test]
         async fn it_persists_archive_on_filesystem() {
-            let env = NativeStorage::default();
+            let env = Storage::temp();
             let name = unique_name("fs-archive");
 
             let credential = test_credential().await;
 
-            let did = StorageFx::temp(&name)
+            let did = StorageFx::profile(&name)
                 .create(credential)
                 .perform(&env)
                 .await
@@ -361,18 +363,18 @@ mod tests {
 
         #[dialog_common::test]
         async fn it_rejects_duplicate_create_on_filesystem() {
-            let env = NativeStorage::default();
+            let env = Storage::temp();
             let name = unique_name("fs-dup");
 
             let credential = test_credential().await;
 
-            StorageFx::temp(&name)
+            StorageFx::profile(&name)
                 .create(credential.clone())
                 .perform(&env)
                 .await
                 .unwrap();
 
-            let result = StorageFx::temp(&name)
+            let result = StorageFx::profile(&name)
                 .create(credential)
                 .perform(&env)
                 .await;

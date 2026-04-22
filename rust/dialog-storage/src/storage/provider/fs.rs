@@ -70,11 +70,7 @@ impl Resource<Location> for FileSystem {
     }
 }
 
-/// Resolve a `Location` (Directory + name) to a filesystem `Location`.
-///
-/// In test mode, all directories resolve under the platform temp dir
-/// to avoid polluting real profile or workspace directories.
-#[cfg(not(test))]
+/// Resolve a `Location` (Directory + name) to a filesystem handle.
 impl TryFrom<&Location> for FileSystemHandle {
     type Error = FileSystemError;
 
@@ -97,30 +93,6 @@ impl TryFrom<&Location> for FileSystemHandle {
             base
         } else {
             base.join(&location.name)
-        };
-
-        path.try_into()
-    }
-}
-
-/// Test mode: all directories resolve under temp dir to avoid
-/// polluting real profile or workspace directories.
-#[cfg(test)]
-impl TryFrom<&Location> for FileSystemHandle {
-    type Error = FileSystemError;
-
-    fn try_from(location: &Location) -> Result<Self, FileSystemError> {
-        let base = env::temp_dir().join(STORAGE_NAMESPACE);
-        let suffix = match &location.directory {
-            Directory::Profile => ".profile",
-            Directory::Current => ".space",
-            _ => "",
-        };
-
-        let path = if location.name.is_empty() {
-            base
-        } else {
-            base.join(format!("{}{suffix}", location.name))
         };
 
         path.try_into()
@@ -444,15 +416,54 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_mode_resolves_under_temp_dir() {
-        let location = StorageLocation::new(Directory::Profile, "test-alice");
+    async fn it_resolves_profile_under_platform_data_dir() {
+        let name = unique_name("profile-resolve");
+        let location = StorageLocation::new(Directory::Profile, &name);
         let space = FileSystem::open(&location).await.unwrap();
-        let archive = space.archive().unwrap();
-        let path = archive.path();
-        assert!(
-            path.contains("dialog") && path.contains("test-alice") && path.ends_with("/archive"),
-            "profile location should resolve under temp/dialog with .profile suffix: {path}"
-        );
+
+        let root: PathBuf = space.handle().clone().try_into().unwrap();
+        let expected = dirs::data_dir()
+            .expect("platform data dir is required for this test")
+            .join(STORAGE_NAMESPACE)
+            .join(&name);
+        assert_eq!(root, expected);
+    }
+
+    #[dialog_common::test]
+    async fn it_resolves_current_under_working_directory() {
+        let name = unique_name("current-resolve");
+        let location = StorageLocation::new(Directory::Current, &name);
+        let space = FileSystem::open(&location).await.unwrap();
+
+        let root: PathBuf = space.handle().clone().try_into().unwrap();
+        let expected = env::current_dir()
+            .expect("current working directory must be accessible")
+            .join(&name);
+        assert_eq!(root, expected);
+    }
+
+    #[dialog_common::test]
+    async fn it_resolves_temp_under_platform_temp_dir() {
+        let name = unique_name("temp-resolve");
+        let location = StorageLocation::new(Directory::Temp, &name);
+        let space = FileSystem::open(&location).await.unwrap();
+
+        let root: PathBuf = space.handle().clone().try_into().unwrap();
+        let expected = env::temp_dir().join(&name);
+        assert_eq!(root, expected);
+    }
+
+    #[dialog_common::test]
+    async fn it_resolves_at_under_explicit_path() {
+        // Use a tempdir as the explicit base so the test doesn't depend
+        // on any fixed filesystem layout.
+        let base = env::temp_dir().join(unique_name("at-base"));
+        let name = unique_name("at-resolve");
+        let location = StorageLocation::new(Directory::At(base.to_string_lossy().into()), &name);
+        let space = FileSystem::open(&location).await.unwrap();
+
+        let root: PathBuf = space.handle().clone().try_into().unwrap();
+        assert_eq!(root, base.join(&name));
     }
 
     #[dialog_common::test]
