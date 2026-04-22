@@ -16,6 +16,11 @@ use crate::IndexedDbStorageBackend;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use base58::ToBase58;
 
+#[cfg(not(target_arch = "wasm32"))]
+mod fs;
+#[cfg(not(target_arch = "wasm32"))]
+pub use fs::*;
+
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 type MakeTargetStorageOutput<K> = (IndexedDbStorageBackend<K, Vec<u8>>, ());
 #[cfg(not(target_arch = "wasm32"))]
