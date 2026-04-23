@@ -103,24 +103,8 @@ impl UcanProof {
     /// Build a permit from a delegation chain and scope.
     ///
     /// Used when importing externally-built delegation chains.
-    ///
-    /// Proofs are collected in root-to-leaf order by iterating
-    /// `chain.proof_cids()` and looking each delegation up in the
-    /// map. Iterating `chain.delegations().values()` instead would
-    /// yield an unspecified order, because `DelegationChain`'s
-    /// internal map is a `HashMap`. Downstream [`Proof::claim`]
-    /// rebuilds the chain via `DelegationChain::new` + `push`, which
-    /// rejects any ordering other than root-to-leaf with a principal
-    /// alignment error — so the iteration order here has to match
-    /// the canonical order the chain documents.
     pub fn from_chain(chain: &DelegationChain, scope: Scope) -> Self {
-        let delegations = chain.delegations();
-        let proofs = chain
-            .proof_cids()
-            .iter()
-            .filter_map(|cid| delegations.get(cid))
-            .map(|d| UcanCertificate(d.as_ref().clone()))
-            .collect();
+        let proofs = chain.proofs().map(|d| UcanCertificate(d.clone())).collect();
         let duration = TimeRange {
             not_before: chain.not_before().map(|t| t.to_unix()),
             expiration: chain.expiration().map(|t| t.to_unix()),
@@ -281,7 +265,7 @@ impl Authorization<Ucan> for UcanAuthorization {
         let args = self.scope.parameters.args();
 
         let (proofs, delegations_map) = match &self.chain {
-            Some(chain) => (chain.proof_cids().into(), chain.delegations().clone()),
+            Some(chain) => (chain.proof_cids().into(), chain.export().collect()),
             None => (vec![], Default::default()),
         };
 
@@ -346,9 +330,8 @@ impl AccessDelegation for UcanDelegation {
 
     fn certificates(&self) -> Vec<UcanCertificate> {
         self.0
-            .delegations()
-            .values()
-            .map(|d| UcanCertificate(d.as_ref().clone()))
+            .proofs()
+            .map(|d| UcanCertificate(d.clone()))
             .collect()
     }
 }
@@ -391,12 +374,12 @@ mod tests {
     }
 
     /// `UcanProof::from_chain` must yield proofs in root-to-leaf
-    /// order. Before the fix it iterated `chain.delegations().values()`,
-    /// which walks a `HashMap` in unspecified order — so for
-    /// multi-hop chains, `Proof::claim` would intermittently fail
-    /// with a principal alignment error when `chain.push` tried to
-    /// chain a delegation whose issuer didn't match the current
-    /// chain's audience.
+    /// order. Before `DelegationChain::proofs` existed, callers
+    /// iterated `chain.delegations().values()` — a `HashMap` walk in
+    /// unspecified order — so for multi-hop chains `Proof::claim`
+    /// would intermittently fail with a principal alignment error
+    /// when `chain.push` saw a delegation whose issuer didn't match
+    /// the current chain's audience.
     #[dialog_common::test]
     async fn from_chain_preserves_root_to_leaf_order_for_multi_hop_chains() {
         // root -> mid -> leaf, all scoped to `subject`.
