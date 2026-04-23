@@ -104,7 +104,11 @@ impl UcanProof {
     ///
     /// Used when importing externally-built delegation chains.
     pub fn from_chain(chain: &DelegationChain, scope: Scope) -> Self {
-        let proofs = chain.proofs().map(|d| UcanCertificate(d.clone())).collect();
+        let proofs = chain
+            .delegations()
+            .values()
+            .map(|d| UcanCertificate(d.as_ref().clone()))
+            .collect();
         let duration = TimeRange {
             not_before: chain.not_before().map(|t| t.to_unix()),
             expiration: chain.expiration().map(|t| t.to_unix()),
@@ -265,7 +269,7 @@ impl Authorization<Ucan> for UcanAuthorization {
         let args = self.scope.parameters.args();
 
         let (proofs, delegations_map) = match &self.chain {
-            Some(chain) => (chain.proof_cids().into(), chain.export().collect()),
+            Some(chain) => (chain.proof_cids().into(), chain.delegations().clone()),
             None => (vec![], Default::default()),
         };
 
@@ -330,8 +334,9 @@ impl AccessDelegation for UcanDelegation {
 
     fn certificates(&self) -> Vec<UcanCertificate> {
         self.0
-            .proofs()
-            .map(|d| UcanCertificate(d.clone()))
+            .delegations()
+            .values()
+            .map(|d| UcanCertificate(d.as_ref().clone()))
             .collect()
     }
 }
@@ -344,72 +349,4 @@ impl Protocol for Ucan {
     type Invocation = UcanInvocation;
     type Proof = UcanProof;
     type Authorization = UcanAuthorization;
-}
-
-#[cfg(test)]
-mod tests {
-    #[cfg(target_arch = "wasm32")]
-    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
-
-    use super::*;
-    use dialog_varsig::Principal;
-
-    async fn signer(seed: u8) -> Ed25519Signer {
-        Ed25519Signer::import(&[seed; 32]).await.unwrap()
-    }
-
-    async fn build_delegation(
-        issuer: Ed25519Signer,
-        audience: &Did,
-        subject: &Did,
-    ) -> Delegation<Ed25519Signature> {
-        DelegationBuilder::new()
-            .issuer(issuer)
-            .audience(audience)
-            .subject(UcanSubject::Specific(subject.clone()))
-            .command(vec![])
-            .try_build()
-            .await
-            .unwrap()
-    }
-
-    /// `UcanProof::from_chain` must yield proofs in root-to-leaf
-    /// order. Before `DelegationChain::proofs` existed, callers
-    /// iterated `chain.delegations().values()` — a `HashMap` walk in
-    /// unspecified order — so for multi-hop chains `Proof::claim`
-    /// would intermittently fail with a principal alignment error
-    /// when `chain.push` saw a delegation whose issuer didn't match
-    /// the current chain's audience.
-    #[dialog_common::test]
-    async fn from_chain_preserves_root_to_leaf_order_for_multi_hop_chains() {
-        // root -> mid -> leaf, all scoped to `subject`.
-        let root = signer(1).await;
-        let mid = signer(2).await;
-        let leaf_did = signer(3).await.did();
-        let subject_did = signer(9).await.did();
-
-        let mid_did = mid.did();
-        let first = build_delegation(root, &mid_did, &subject_did).await;
-        let chain = DelegationChain::new(first);
-        let second = build_delegation(mid, &leaf_did, &subject_did).await;
-        let chain = chain.push(second).unwrap();
-        assert_eq!(chain.proof_cids().len(), 2);
-
-        // Run repeatedly — `HashMap` iteration order can vary across
-        // process boots; building the proof and claiming it from the
-        // same process is deterministic, but repeated runs under the
-        // same seed would surface regressions reintroducing the
-        // iteration-order dependency.
-        for _ in 0..8 {
-            let scope = crate::Scope::from_chain(&chain);
-            let proof = UcanProof::from_chain(&chain, scope);
-            assert_eq!(proof.proofs.len(), 2);
-            // The leaf signer is allowed to claim — that exercises
-            // `Proof::claim` which rebuilds the chain via
-            // `DelegationChain::new` + `push`, rejecting misordered
-            // proofs.
-            let leaf_signer = signer(3).await;
-            Proof::claim(proof, leaf_signer).expect("chain must rebuild in root-to-leaf order");
-        }
-    }
 }

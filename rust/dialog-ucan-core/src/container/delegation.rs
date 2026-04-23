@@ -103,29 +103,9 @@ impl DelegationChain {
         &self.proof_cids
     }
 
-    /// Iterate the chain's delegations in root-to-leaf order.
-    pub fn proofs(&self) -> impl Iterator<Item = &Delegation<Ed25519Signature>> {
-        self.proof_cids
-            .iter()
-            .map(|cid| self.proof_for_cid(cid).as_ref())
-    }
-
-    /// Iterate `(cid, arc)` pairs in root-to-leaf order, cloning the
-    /// inner `Arc`s.
-    ///
-    /// For constructing a delegation lookup table — most commonly to
-    /// hand to `InvocationChain::new`. Collect into a `HashMap` at
-    /// the call site.
-    pub fn export(&self) -> impl Iterator<Item = (Cid, Arc<Delegation<Ed25519Signature>>)> + '_ {
-        self.proof_cids
-            .iter()
-            .map(|cid| (*cid, self.proof_for_cid(cid).clone()))
-    }
-
-    fn proof_for_cid(&self, cid: &Cid) -> &Arc<Delegation<Ed25519Signature>> {
-        self.delegations
-            .get(cid)
-            .expect("proof_cids and delegations are kept in sync by construction")
+    /// Get the delegations map for building InvocationChain.
+    pub fn delegations(&self) -> &HashMap<Cid, Arc<Delegation<Ed25519Signature>>> {
+        &self.delegations
     }
 
     /// Get the audience of the last delegation in the chain (closest to invoker).
@@ -398,6 +378,7 @@ mod tests {
 
         let chain = DelegationChain::new(delegation);
         assert_eq!(chain.proof_cids().len(), 1);
+        assert_eq!(chain.delegations().len(), 1);
         assert_eq!(chain.audience(), &operator_signer.did());
         assert_eq!(chain.subject(), Some(&space_did));
     }
@@ -432,6 +413,7 @@ mod tests {
         // Subject-first order: root delegation first, leaf delegation last
         let chain = DelegationChain::try_from(vec![delegation1, delegation2]).unwrap();
         assert_eq!(chain.proof_cids().len(), 2);
+        assert_eq!(chain.delegations().len(), 2);
     }
 
     #[dialog_common::test]
@@ -469,6 +451,7 @@ mod tests {
 
         // Extended chain should have 2 delegations
         assert_eq!(extended_chain.proof_cids().len(), 2);
+        assert_eq!(extended_chain.delegations().len(), 2);
 
         // Original chain should be unchanged
         assert_eq!(chain.proof_cids().len(), 1);
