@@ -103,10 +103,22 @@ impl UcanProof {
     /// Build a permit from a delegation chain and scope.
     ///
     /// Used when importing externally-built delegation chains.
+    ///
+    /// Proofs are collected in root-to-leaf order by iterating
+    /// `chain.proof_cids()` and looking each delegation up in the
+    /// map. Iterating `chain.delegations().values()` instead would
+    /// yield an unspecified order, because `DelegationChain`'s
+    /// internal map is a `HashMap`. Downstream [`Proof::claim`]
+    /// rebuilds the chain via `DelegationChain::new` + `push`, which
+    /// rejects any ordering other than root-to-leaf with a principal
+    /// alignment error — so the iteration order here has to match
+    /// the canonical order the chain documents.
     pub fn from_chain(chain: &DelegationChain, scope: Scope) -> Self {
+        let delegations = chain.delegations();
         let proofs = chain
-            .delegations()
-            .values()
+            .proof_cids()
+            .iter()
+            .filter_map(|cid| delegations.get(cid))
             .map(|d| UcanCertificate(d.as_ref().clone()))
             .collect();
         let duration = TimeRange {
@@ -349,4 +361,72 @@ impl Protocol for Ucan {
     type Invocation = UcanInvocation;
     type Proof = UcanProof;
     type Authorization = UcanAuthorization;
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::*;
+    use dialog_varsig::Principal;
+
+    async fn signer(seed: u8) -> Ed25519Signer {
+        Ed25519Signer::import(&[seed; 32]).await.unwrap()
+    }
+
+    async fn build_delegation(
+        issuer: Ed25519Signer,
+        audience: &Did,
+        subject: &Did,
+    ) -> Delegation<Ed25519Signature> {
+        DelegationBuilder::new()
+            .issuer(issuer)
+            .audience(audience)
+            .subject(UcanSubject::Specific(subject.clone()))
+            .command(vec![])
+            .try_build()
+            .await
+            .unwrap()
+    }
+
+    /// `UcanProof::from_chain` must yield proofs in root-to-leaf
+    /// order. Before the fix it iterated `chain.delegations().values()`,
+    /// which walks a `HashMap` in unspecified order — so for
+    /// multi-hop chains, `Proof::claim` would intermittently fail
+    /// with a principal alignment error when `chain.push` tried to
+    /// chain a delegation whose issuer didn't match the current
+    /// chain's audience.
+    #[dialog_common::test]
+    async fn from_chain_preserves_root_to_leaf_order_for_multi_hop_chains() {
+        // root -> mid -> leaf, all scoped to `subject`.
+        let root = signer(1).await;
+        let mid = signer(2).await;
+        let leaf_did = signer(3).await.did();
+        let subject_did = signer(9).await.did();
+
+        let mid_did = mid.did();
+        let first = build_delegation(root, &mid_did, &subject_did).await;
+        let chain = DelegationChain::new(first);
+        let second = build_delegation(mid, &leaf_did, &subject_did).await;
+        let chain = chain.push(second).unwrap();
+        assert_eq!(chain.proof_cids().len(), 2);
+
+        // Run repeatedly — `HashMap` iteration order can vary across
+        // process boots; building the proof and claiming it from the
+        // same process is deterministic, but repeated runs under the
+        // same seed would surface regressions reintroducing the
+        // iteration-order dependency.
+        for _ in 0..8 {
+            let scope = crate::Scope::from_chain(&chain);
+            let proof = UcanProof::from_chain(&chain, scope);
+            assert_eq!(proof.proofs.len(), 2);
+            // The leaf signer is allowed to claim — that exercises
+            // `Proof::claim` which rebuilds the chain via
+            // `DelegationChain::new` + `push`, rejecting misordered
+            // proofs.
+            let leaf_signer = signer(3).await;
+            Proof::claim(proof, leaf_signer).expect("chain must rebuild in root-to-leaf order");
+        }
+    }
 }
