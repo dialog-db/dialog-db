@@ -9,8 +9,8 @@
 use dialog_capability::{Capability, Did, Subject};
 use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
 use dialog_effects::space::SpaceSubjectExt;
-use dialog_operator::SpaceHandle;
 use dialog_operator::access::Access as ProfileAccess;
+use dialog_operator::{Profile, SpaceHandle};
 use dialog_varsig::Principal;
 
 mod archive;
@@ -144,6 +144,18 @@ impl TryFrom<Credential> for Repository<SignerCredential> {
 impl From<Ed25519Signer> for Repository<SignerCredential> {
     fn from(signer: Ed25519Signer) -> Self {
         SignerCredential::from(signer).into()
+    }
+}
+
+impl From<Profile> for Repository<SignerCredential> {
+    fn from(profile: Profile) -> Self {
+        Self::new(profile.signer().clone())
+    }
+}
+
+impl From<&Profile> for Repository<SignerCredential> {
+    fn from(profile: &Profile) -> Self {
+        Self::new(profile.signer().clone())
     }
 }
 
@@ -754,6 +766,128 @@ mod tests {
                 .await?;
 
             assert_eq!(results.len(), 2);
+            Ok(())
+        }
+    }
+
+    mod profile_as_repository {
+        use super::*;
+        use crate::helpers::test_operator_with_profile;
+        use dialog_query::{Entity, the};
+
+        #[dialog_common::test]
+        async fn repository_from_profile_shares_did() {
+            let (_operator, profile) = test_operator_with_profile().await;
+            let repo = Repository::from(&profile);
+            assert_eq!(
+                repo.did(),
+                profile.did(),
+                "Repository::from(&profile) must inherit the profile DID"
+            );
+        }
+
+        #[dialog_common::test]
+        async fn repository_from_profile_commits_through_profile_mount() -> Result<()> {
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = Repository::from(&profile);
+
+            let branch = repo.branch("main").open().perform(&operator).await?;
+            let alice = Entity::new()?;
+            branch
+                .transaction()
+                .assert(the!("user/name").of(alice).is("Alice".to_string()))
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            assert!(
+                branch.revision().is_some(),
+                "commit on profile-DID repo must succeed through the existing profile mount"
+            );
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn reopening_profile_as_repository_sees_prior_commits() -> Result<()> {
+            let (operator, profile) = test_operator_with_profile().await;
+
+            let writer = Repository::from(&profile);
+            let w_branch = writer.branch("trunk").open().perform(&operator).await?;
+            let alice = Entity::new()?;
+            w_branch
+                .transaction()
+                .assert(the!("user/name").of(alice).is("Alice".to_string()))
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            let reader = Repository::from(&profile);
+            let r_branch = reader.branch("trunk").load().perform(&operator).await?;
+
+            let results: Vec<_> = r_branch
+                .claims()
+                .select(ArtifactSelector::new().the("user/name".parse()?))
+                .perform(&operator)
+                .await?
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()?;
+
+            assert_eq!(
+                results.len(),
+                1,
+                "a second Repository::from(&profile) must read what the first wrote"
+            );
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn profile_repo_and_named_repo_are_distinct_spaces() -> Result<()> {
+            let (operator, profile) = test_operator_with_profile().await;
+
+            let profile_repo = Repository::from(&profile);
+            let named_repo = profile
+                .repository(unique_name("named"))
+                .open()
+                .perform(&operator)
+                .await?;
+
+            assert_ne!(
+                profile_repo.did(),
+                named_repo.did(),
+                "named repo must have its own DID, not the profile DID"
+            );
+
+            let profile_branch = profile_repo
+                .branch("main")
+                .open()
+                .perform(&operator)
+                .await?;
+            let item = Entity::new()?;
+            profile_branch
+                .transaction()
+                .assert(the!("item/tag").of(item).is("in-profile".to_string()))
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            let named_branch = named_repo.branch("main").open().perform(&operator).await?;
+            let results: Vec<_> = named_branch
+                .claims()
+                .select(ArtifactSelector::new().the("item/tag".parse()?))
+                .perform(&operator)
+                .await?
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()?;
+
+            assert_eq!(
+                results.len(),
+                0,
+                "named repo must not see artifacts written through the profile-DID repo"
+            );
             Ok(())
         }
     }
