@@ -228,6 +228,11 @@
         inherit (menuHelpers) makeMenu makeDevShellHook menuTestCommand;
 
         commands = {
+          "bench" = {
+            description = "Run all benchmarks";
+            command = "cargo bench";
+          };
+
           "lint" = {
             description = "Lint the full source tree";
             command = "nix flake check";
@@ -361,6 +366,7 @@
 
         devShells = with pkgs; {
           default = mkShell {
+            name = "dialog";
             env = developmentEnvVars;
             nativeBuildInputs = menu.commands ++ developmentBuildInputs;
             shellHook = makeDevShellHook menu;

@@ -1,10 +1,11 @@
-use dialog_common::Blake3Hash;
+use dialog_common::{Blake3Hash, ConditionalSend};
 
 use dialog_storage::{DialogStorageError, StorageBackend};
 
 /// Content-addressed storage wrapper for tree nodes.
 ///
 /// Provides hash-verified storage and retrieval operations.
+#[derive(Clone, Debug)]
 pub struct ContentAddressedStorage<Backend>
 where
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
@@ -14,11 +15,23 @@ where
 
 impl<Backend> ContentAddressedStorage<Backend>
 where
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSend
+        + 'static,
 {
     /// Creates a new content-addressed storage wrapper.
     pub fn new(backend: Backend) -> Self {
         Self { backend }
+    }
+
+    /// Get a reference to the interior `StorageBackend`
+    pub fn backend(&self) -> &Backend {
+        &self.backend
+    }
+
+    /// Get a mutable reference to the interior `StorageBackend`
+    pub fn backend_mut(&mut self) -> &mut Backend {
+        &mut self.backend
     }
 
     /// Stores bytes under their content hash, verifying the hash matches.
