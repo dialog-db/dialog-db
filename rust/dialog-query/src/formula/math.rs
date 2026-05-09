@@ -167,6 +167,7 @@ mod tests {
             output
                 .lookup(&Term::var("x"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| u32::try_from(v).ok()),
             Some(5)
         );
@@ -174,6 +175,7 @@ mod tests {
             output
                 .lookup(&Term::var("y"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| u32::try_from(v).ok()),
             Some(3)
         );
@@ -183,6 +185,7 @@ mod tests {
             output
                 .lookup(&Term::var("result"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| u32::try_from(v).ok()),
             Some(8)
         );
@@ -234,6 +237,7 @@ mod tests {
             result1
                 .lookup(&Term::var("a"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| u32::try_from(v).ok()),
             Some(2)
         );
@@ -241,6 +245,7 @@ mod tests {
             result1
                 .lookup(&Term::var("b"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| u32::try_from(v).ok()),
             Some(3)
         );
@@ -248,6 +253,7 @@ mod tests {
             result1
                 .lookup(&Term::var("sum"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| u32::try_from(v).ok()),
             Some(5)
         );
@@ -264,6 +270,7 @@ mod tests {
             result2
                 .lookup(&Term::var("a"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| u32::try_from(v).ok()),
             Some(10)
         );
@@ -271,6 +278,7 @@ mod tests {
             result2
                 .lookup(&Term::var("b"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| u32::try_from(v).ok()),
             Some(15)
         );
@@ -278,6 +286,7 @@ mod tests {
             result2
                 .lookup(&Term::var("sum"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| u32::try_from(v).ok()),
             Some(25)
         );
@@ -304,6 +313,7 @@ mod tests {
             result
                 .lookup(&Term::var("result"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| u32::try_from(v).ok()),
             Some(7)
         );
@@ -333,6 +343,7 @@ mod tests {
             result
                 .lookup(&Term::var("result"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| u32::try_from(v).ok()),
             Some(0)
         );
@@ -359,6 +370,7 @@ mod tests {
             result
                 .lookup(&Term::var("result"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| u32::try_from(v).ok()),
             Some(42)
         );
@@ -385,6 +397,7 @@ mod tests {
             result
                 .lookup(&Term::var("result"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| u32::try_from(v).ok()),
             Some(5)
         );
@@ -432,6 +445,7 @@ mod tests {
             result
                 .lookup(&Term::var("result"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| u32::try_from(v).ok()),
             Some(2)
         );
@@ -493,7 +507,14 @@ mod tests {
         let final_results = sum_formula.compute(sum_input)?;
         assert_eq!(final_results.len(), 1);
         assert_eq!(
-            u32::try_from(final_results[0].lookup(&Term::var("final_sum")).unwrap()).ok(),
+            u32::try_from(
+                final_results[0]
+                    .lookup(&Term::var("final_sum"))
+                    .unwrap()
+                    .content()
+                    .unwrap()
+            )
+            .ok(),
             Some(15)
         );
 
@@ -510,6 +531,8 @@ mod tests {
             String::try_from(
                 string_results[0]
                     .lookup(&Term::var("final_string"))
+                    .unwrap()
+                    .content()
                     .unwrap()
             )
             .ok(),

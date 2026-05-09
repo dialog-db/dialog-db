@@ -245,6 +245,23 @@ pub enum EvaluationError {
         variable_name: String,
     },
 
+    /// A binding for the variable exists, but it is
+    /// [`Binding::Absent`](crate::Binding::Absent) — i.e., an
+    /// optional resolver looked up the entity's attribute and
+    /// found no fact. Distinct from
+    /// [`Self::UnboundVariable`] (no binding at all): `Absent`
+    /// means "we looked, and the answer is no value." Consumers
+    /// that require a `Value` can call
+    /// [`Binding::content`](crate::Binding::content) to convert
+    /// this case into an error; consumers that handle optionality
+    /// (Coalesce, the macro's `realize`) pattern-match on
+    /// [`Binding`](crate::Binding) directly.
+    #[error("Variable {variable_name:?} is bound to Absent")]
+    Absent {
+        /// Name of the variable bound to Absent.
+        variable_name: String,
+    },
+
     /// A formula parameter references a variable that is not bound.
     #[error("Variable for '{parameter}' is not bound: {term}")]
     UnboundFormulaVariable {

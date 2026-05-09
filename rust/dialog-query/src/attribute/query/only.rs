@@ -53,14 +53,14 @@ where
 {
     try_stream! {
         let relation = selector.attribute();
-        let attribute = ArtifactsAttribute::try_from(candidate.lookup(&Term::from(&relation))?)?;
-        let entity = Entity::try_from(candidate.lookup(&Term::from(selector.of()))?)?;
-        let value = candidate.lookup(selector.is())?;
+        let attribute = ArtifactsAttribute::try_from(candidate.lookup(&Term::from(&relation))?.content()?)?;
+        let entity = Entity::try_from(candidate.lookup(&Term::from(selector.of()))?.content()?)?;
+        let value = candidate.lookup(selector.is())?.content()?;
         let cause_term = selector.cause();
         let cause = if cause_term.is_blank() {
             None
         } else {
-            Some(Cause::try_from(candidate.lookup(&Term::from(cause_term))?)?)
+            Some(Cause::try_from(candidate.lookup(&Term::from(cause_term))?.content()?)?)
         };
 
         let challengers = Provider::<Select<'_>>::execute(env, ArtifactSelector::new()

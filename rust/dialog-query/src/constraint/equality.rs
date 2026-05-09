@@ -8,8 +8,8 @@ use std::fmt;
 
 use crate::types::Any;
 pub use crate::{
-    Cardinality, Environment, EvaluationError, Field, Parameters, Requirement, Schema, Selection,
-    Term, Value, try_stream,
+    Binding, Cardinality, Environment, EvaluationError, Field, Parameters, Requirement, Schema,
+    Selection, Term, Value, try_stream,
 };
 use std::fmt::Display;
 
@@ -116,28 +116,31 @@ impl Equality {
                 let base = candidate?;
 
                 match (base.lookup(&this), base.lookup(&is)) {
-                    // Case 1: Both terms are bound - verify they are equal
-                    // Only pass through the match if the values are equal
-                    (Ok(this_val), Ok(is_val)) => {
+                    // Case 1: Both bound to Present values - verify equal.
+                    (Ok(Binding::Present(this_val)), Ok(Binding::Present(is_val))) => {
                         if this_val == is_val {
                             yield base;
                         }
                         // Otherwise filter out this match (no yield)
                     }
+                    // Case 1b: Either side is Absent — equality on
+                    // absence has no value to compare; filter out.
+                    (Ok(Binding::Absent), _) | (_, Ok(Binding::Absent)) => {
+                        // Filter out (no yield)
+                    }
                     // Case 2: Only "is" is bound - infer "this" from "is"
-                    (Err(_), Ok(is_val)) => {
+                    (Err(_), Ok(Binding::Present(is_val))) => {
                         let mut extension = base.clone();
                         extension.bind(&this, is_val)?;
                         yield extension;
                     }
                     // Case 3: Only "this" is bound - infer "is" from "this"
-                    (Ok(this_val), Err(_)) => {
+                    (Ok(Binding::Present(this_val)), Err(_)) => {
                         let mut extension = base.clone();
                         extension.bind(&is, this_val)?;
                         yield extension;
                     }
                     // Case 4: Neither term is bound - cannot evaluate
-                    // Raise a constraint violation error
                     (Err(_), Err(_)) => {
                         Err(EvaluationError::ConstraintViolation {
                             constraint: format!("{} == {}", this, is)
@@ -173,7 +176,7 @@ mod tests {
 
         assert_eq!(results.len(), 1, "Should have one result");
         assert_eq!(
-            results[0].lookup(&Term::var("x"))?,
+            results[0].lookup(&Term::var("x"))?.content()?,
             Value::from(42),
             "x should still be 42"
         );
@@ -211,7 +214,7 @@ mod tests {
 
         assert_eq!(results.len(), 1, "Should have one result");
         assert_eq!(
-            results[0].lookup(&Term::var("x"))?,
+            results[0].lookup(&Term::var("x"))?.content()?,
             Value::from(42),
             "x should be inferred as 42"
         );

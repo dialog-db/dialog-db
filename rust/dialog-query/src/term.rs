@@ -104,12 +104,13 @@ where
         }
     }
 
-    /// Resolve this term against a match. If the term is a variable
-    /// bound in the match, returns a constant term with the bound value.
-    /// Otherwise returns the term unchanged.
+    /// Resolve this term against a match. If the term is a
+    /// variable bound to a [`Binding::Present`](crate::Binding::Present)
+    /// value, returns a constant term with the bound value.
+    /// Otherwise (unbound or `Absent`) returns the term unchanged.
     pub fn resolve(&self, source: &selection::Match) -> Self {
         let term: Term<Any> = self.clone().into();
-        match source.lookup(&term) {
+        match source.lookup(&term).and_then(|b| b.content()) {
             Ok(value) => {
                 if let Ok(converted) = T::try_from(value) {
                     Term::Constant(converted.into())

@@ -14,17 +14,17 @@ use crate::schema::CONCEPT_OVERHEAD;
 use crate::selection::Selection;
 use crate::source::SelectRules;
 use crate::{
-    Cardinality, Environment, EvaluationError, Match, Parameters, Schema, Term, try_stream,
+    Binding, Cardinality, Environment, EvaluationError, Match, Parameters, Schema, Term, try_stream,
 };
 use dialog_artifacts::Select;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use std::fmt::Display;
 
-/// Extract a Match with parameter names from a Match with user variable names
-///
-/// This maps values from user-specified variable names to internal parameter names
-/// for scoped evaluation. All factors are copied with their original provenance.
+/// Extract a Match with parameter names from a Match with user
+/// variable names. Maps values from user-specified variable names
+/// to internal parameter names for scoped evaluation. Both Present
+/// and Absent bindings are propagated.
 fn extract_parameters(source: &Match, terms: &Parameters) -> Result<Match, EvaluationError> {
     let mut matched = Match::new();
 
@@ -32,8 +32,14 @@ fn extract_parameters(source: &Match, terms: &Parameters) -> Result<Match, Evalu
         match user_param {
             Term::Variable { name: Some(_), .. } => {
                 let param = Term::var(param_name);
-                if let Ok(value) = source.lookup(user_param) {
-                    matched.bind(&param, value)?;
+                match source.lookup(user_param) {
+                    Ok(Binding::Present(value)) => {
+                        matched.bind(&param, value)?;
+                    }
+                    Ok(Binding::Absent) => {
+                        matched.bind_absent(&param)?;
+                    }
+                    Err(_) => {}
                 }
             }
             Term::Constant(value) => {
@@ -47,10 +53,9 @@ fn extract_parameters(source: &Match, terms: &Parameters) -> Result<Match, Evalu
     Ok(matched)
 }
 
-/// Merge a Match with parameter names back into a Match with user variable names
-///
-/// This maps values from internal parameter names back to user-specified variable names
-/// after evaluation. All factors are copied with their original provenance.
+/// Merge a Match with parameter names back into a Match with user
+/// variable names after evaluation. Both Present and Absent
+/// bindings are propagated.
 fn merge_parameters(
     base: &Match,
     result: &Match,
@@ -64,8 +69,14 @@ fn merge_parameters(
         }
 
         let param = Term::var(param_name);
-        if let Ok(value) = result.lookup(&param) {
-            merged.bind(user_param, value)?;
+        match result.lookup(&param) {
+            Ok(Binding::Present(value)) => {
+                merged.bind(user_param, value)?;
+            }
+            Ok(Binding::Absent) => {
+                merged.bind_absent(user_param)?;
+            }
+            Err(_) => {}
         }
     }
 
@@ -377,8 +388,8 @@ mod tests {
         let mut found_bob = false;
 
         for match_result in selection.iter() {
-            let name = match_result.lookup(&name_param)?;
-            let age = match_result.lookup(&age_param)?;
+            let name = match_result.lookup(&name_param)?.content()?;
+            let age = match_result.lookup(&age_param)?.content()?;
 
             match name {
                 Value::String(n) if n == "Alice" => {
@@ -771,7 +782,7 @@ mod tests {
             "Should find only Alice, not both people"
         );
         assert_eq!(
-            selection[0].lookup(&Term::var("name"))?,
+            selection[0].lookup(&Term::var("name"))?.content()?,
             Value::String("Alice".to_string())
         );
 
@@ -843,11 +854,11 @@ mod tests {
 
         assert_eq!(selection.len(), 1, "Should find only Bob");
         assert_eq!(
-            selection[0].lookup(&Term::var("entity"))?,
+            selection[0].lookup(&Term::var("entity"))?.content()?,
             Value::Entity(bob.clone())
         );
         assert_eq!(
-            selection[0].lookup(&Term::var("age"))?,
+            selection[0].lookup(&Term::var("age"))?.content()?,
             Value::UnsignedInt(30)
         );
 
@@ -923,7 +934,7 @@ mod tests {
             "Should find only Alice with exact name and age match"
         );
         assert_eq!(
-            selection[0].lookup(&Term::var("entity"))?,
+            selection[0].lookup(&Term::var("entity"))?.content()?,
             Value::Entity(alice.clone())
         );
 

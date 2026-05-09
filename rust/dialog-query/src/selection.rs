@@ -92,6 +92,7 @@ mod tests {
 
         let result = candidate
             .lookup(&name_param)
+            .and_then(|b| b.content())
             .and_then(|v| String::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Alice");
@@ -106,6 +107,7 @@ mod tests {
 
         let result = candidate
             .lookup(&age_param)
+            .and_then(|b| b.content())
             .and_then(|v| u32::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 25);
@@ -120,6 +122,7 @@ mod tests {
 
         let result = candidate
             .lookup(&score_param)
+            .and_then(|b| b.content())
             .and_then(|v| i32::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), -10);
@@ -134,6 +137,7 @@ mod tests {
 
         let result = candidate
             .lookup(&active_param)
+            .and_then(|b| b.content())
             .and_then(|v| bool::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_ok());
         assert!(result.unwrap());
@@ -151,6 +155,7 @@ mod tests {
 
         let result = candidate
             .lookup(&entity_param)
+            .and_then(|b| b.content())
             .and_then(|v| Entity::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), entity_value);
@@ -163,6 +168,7 @@ mod tests {
 
         let result = candidate
             .lookup(&constant_param)
+            .and_then(|b| b.content())
             .and_then(|v| String::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "constant_value");
@@ -175,6 +181,7 @@ mod tests {
 
         let result = candidate
             .lookup(&name_param)
+            .and_then(|b| b.content())
             .and_then(|v| String::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -192,6 +199,7 @@ mod tests {
 
         let result = candidate
             .lookup(&blank_param)
+            .and_then(|b| b.content())
             .and_then(|v| String::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -211,6 +219,7 @@ mod tests {
 
         let result = candidate
             .lookup(&name_param)
+            .and_then(|b| b.content())
             .and_then(|v| u32::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -229,7 +238,10 @@ mod tests {
         candidate.bind(&name_term, value.clone()).unwrap();
         candidate.bind(&name_term, value.clone()).unwrap();
 
-        assert_eq!(candidate.lookup(&name_term).unwrap(), value);
+        assert_eq!(
+            candidate.lookup(&name_term).unwrap().content().unwrap(),
+            value
+        );
     }
 
     #[dialog_common::test]
@@ -258,10 +270,30 @@ mod tests {
             .bind(&Term::var("active"), Value::Boolean(true))
             .unwrap();
 
-        let name_result = String::try_from(candidate.lookup(&Term::var("name")).unwrap()).unwrap();
-        let age_result = u32::try_from(candidate.lookup(&Term::var("age")).unwrap()).unwrap();
-        let active_result =
-            bool::try_from(candidate.lookup(&Term::var("active")).unwrap()).unwrap();
+        let name_result = String::try_from(
+            candidate
+                .lookup(&Term::var("name"))
+                .unwrap()
+                .content()
+                .unwrap(),
+        )
+        .unwrap();
+        let age_result = u32::try_from(
+            candidate
+                .lookup(&Term::var("age"))
+                .unwrap()
+                .content()
+                .unwrap(),
+        )
+        .unwrap();
+        let active_result = bool::try_from(
+            candidate
+                .lookup(&Term::var("active"))
+                .unwrap()
+                .content()
+                .unwrap(),
+        )
+        .unwrap();
 
         assert_eq!(name_result, "Bob");
         assert_eq!(age_result, 30);

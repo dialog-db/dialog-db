@@ -288,8 +288,9 @@ mod tests {
         assert!(candidate.contains(&Term::var("person")));
         assert!(candidate.contains(&Term::var("name")));
 
-        let person_id: Entity = Entity::try_from(candidate.lookup(&Term::var("person"))?)?;
-        let name_value: crate::Value = candidate.lookup(&Term::var("name"))?;
+        let person_id: Entity =
+            Entity::try_from(candidate.lookup(&Term::var("person"))?.content()?)?;
+        let name_value: crate::Value = candidate.lookup(&Term::var("name"))?.content()?;
 
         assert_eq!(person_id, alice);
         assert_eq!(name_value, crate::Value::String("Alice".to_string()));

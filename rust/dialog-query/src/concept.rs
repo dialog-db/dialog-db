@@ -268,12 +268,20 @@ mod tests {
         fn try_from(input: Match) -> Result<Self, Self::Error> {
             Ok(Person {
                 this: Entity::try_from(
-                    input.lookup(&Term::from(&<Self as Concept>::Term::this()))?,
+                    input
+                        .lookup(&Term::from(&<Self as Concept>::Term::this()))?
+                        .content()?,
                 )?,
                 name: String::try_from(
-                    input.lookup(&Term::from(&<Self as Concept>::Term::name()))?,
+                    input
+                        .lookup(&Term::from(&<Self as Concept>::Term::name()))?
+                        .content()?,
                 )?,
-                age: u32::try_from(input.lookup(&Term::from(&<Self as Concept>::Term::age()))?)?,
+                age: u32::try_from(
+                    input
+                        .lookup(&Term::from(&<Self as Concept>::Term::age()))?
+                        .content()?,
+                )?,
             })
         }
     }
@@ -325,9 +333,9 @@ mod tests {
 
         fn realize(&self, source: Match) -> result::Result<Self::Conclusion, EvaluationError> {
             Ok(Person {
-                this: Entity::try_from(source.lookup(&Term::from(&self.this))?)?,
-                name: String::try_from(source.lookup(&Term::from(&self.name))?)?,
-                age: u32::try_from(source.lookup(&Term::from(&self.age))?)?,
+                this: Entity::try_from(source.lookup(&Term::from(&self.this))?.content()?)?,
+                name: String::try_from(source.lookup(&Term::from(&self.name))?.content()?)?,
+                age: u32::try_from(source.lookup(&Term::from(&self.age))?.content()?)?,
             })
         }
     }

@@ -108,11 +108,13 @@ impl AttributeQueryAll {
         Ok(())
     }
 
-    /// Resolves variables from the given match.
+    /// Resolves variables from the given match. `Absent` bindings
+    /// leave the term unchanged (same as unbound) — only Present
+    /// bindings substitute.
     pub fn resolve(&self, source: &Match) -> Self {
         let the = self.the.resolve(source);
         let of = self.of.resolve(source);
-        let is = match source.lookup(&self.is) {
+        let is = match source.lookup(&self.is).and_then(|b| b.content()) {
             Ok(value) => Term::Constant(value),
             Err(_) => self.is.clone(),
         };

@@ -330,8 +330,8 @@ mod tests {
         let mut found_bob = false;
 
         for match_result in selection.iter() {
-            let name = match_result.lookup(&name_param)?;
-            let age = match_result.lookup(&age_param)?;
+            let name = match_result.lookup(&name_param)?.content()?;
+            let age = match_result.lookup(&age_param)?.content()?;
 
             match name {
                 Value::String(n) if n == "Alice" => {
