@@ -68,6 +68,11 @@ pub mod statement;
 pub mod stream;
 /// Term types for pattern matching with variables and constants.
 pub mod term;
+/// Unified schema-layer type system (`Type`, `Definite`, `meet`,
+/// `accepts`). Replaces the older `schema::Type` enum and the
+/// descriptor's `Option<ValueType>` representation; see
+/// `notes/optional-fields.md`.
+pub mod type_system;
 /// Type system utilities bridging Rust types to dialog-artifacts types.
 pub mod types;
 
