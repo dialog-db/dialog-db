@@ -131,6 +131,15 @@ impl Primitive {
         (self.bits & NOTHING_BIT) != 0
     }
 
+    /// Returns a copy of this set with the `Nothing` atom removed.
+    /// Used to strip set-widening from an `Optional<T>` type back
+    /// to its underlying `T` shape.
+    pub fn without_nothing(self) -> Self {
+        Self {
+            bits: self.bits & !NOTHING_BIT,
+        }
+    }
+
     /// Set intersection. Returns `None` iff the result is empty.
     pub fn intersect(self, other: Self) -> Option<Self> {
         let merged = Self {
@@ -295,6 +304,16 @@ impl Type {
         match self {
             Type::Primitive(p) => Type::Primitive(p.union(Primitive::NOTHING)),
             Type::Composite(p, c) => Type::Composite(p.union(Primitive::NOTHING), c),
+        }
+    }
+
+    /// The inverse of [`optional`]: strip the `Nothing` atom if
+    /// present, yielding the underlying non-widened type.
+    /// Idempotent.
+    pub fn without_nothing(self) -> Type {
+        match self {
+            Type::Primitive(p) => Type::Primitive(p.without_nothing()),
+            Type::Composite(p, c) => Type::Composite(p.without_nothing(), c),
         }
     }
 
@@ -691,10 +710,6 @@ mod tests {
         let ba = b.union(&a);
 
         assert_eq!(ab, ba, "set equality is order-independent");
-        assert_eq!(
-            hash_of(&ab),
-            hash_of(&ba),
-            "set hash is order-independent"
-        );
+        assert_eq!(hash_of(&ab), hash_of(&ba), "set hash is order-independent");
     }
 }

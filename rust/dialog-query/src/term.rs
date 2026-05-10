@@ -18,7 +18,7 @@ use crate::Environment;
 use crate::Premise;
 use crate::artifact::{ArtifactsAttribute, Entity, Type, Value};
 use crate::attribute::The;
-use crate::constraint::{Constraint, Equality};
+use crate::constraint::{Coalesce, Constraint, Equality};
 use crate::error::{FieldTypeError, TypeError};
 use crate::proposition::Proposition;
 use crate::selection;
@@ -453,6 +453,53 @@ impl<U: Scalar> From<&Term<Option<U>>> for Term<Any> {
     }
 }
 
+/// Builder for a [`Coalesce`](crate::constraint::Coalesce)
+/// constraint. Produced by
+/// [`Term::<Option<U>>::unwrap_or`](Term::unwrap_or); finalized
+/// by [`UnwrapOr::is`].
+///
+/// The type parameter `U` is the inner scalar type — the source
+/// term has kind `Option<U>` and the fallback has kind `U`. The
+/// final output term passed to `is` must also have kind `U`,
+/// guaranteed by the `impl Into<Term<U>>` bound.
+pub struct UnwrapOr<U: Scalar> {
+    source: Term<Option<U>>,
+    fallback: Term<U>,
+}
+
+impl<U: Scalar> Term<Option<U>> {
+    /// Begin building a `Coalesce` constraint. Returns a builder
+    /// that completes when `.is(output)` is called.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let nickname: Term<Option<String>> = Term::var("nickname");
+    /// let display_name: Term<String> = Term::var("display_name");
+    /// let coalesce = nickname.unwrap_or("Anon").is(display_name);
+    /// ```
+    pub fn unwrap_or<F: Into<Term<U>>>(self, fallback: F) -> UnwrapOr<U> {
+        UnwrapOr {
+            source: self,
+            fallback: fallback.into(),
+        }
+    }
+}
+
+impl<U: Scalar> UnwrapOr<U> {
+    /// Bind the output term, producing a finished
+    /// [`Coalesce`](crate::constraint::Coalesce) constraint
+    /// wrapped in a [`Premise`] ready to drop into a rule body.
+    pub fn is<O: Into<Term<U>>>(self, output: O) -> Premise {
+        let source: Term<Any> = self.source.into();
+        let fallback: Term<Any> = self.fallback.into();
+        let is: Term<Any> = output.into().into();
+        Premise::Assert(Proposition::Constraint(Constraint::Coalesce(
+            Coalesce::new(source, fallback, is),
+        )))
+    }
+}
+
 /// Methods specific to `Term<Any>` — the dynamically-typed term.
 impl Term<Any> {
     /// Create a named variable with a specific type constraint.
@@ -680,6 +727,34 @@ mod tests {
         };
         assert_eq!(c, d);
         assert_eq!(hash_of(&c), hash_of(&d));
+    }
+
+    /// The `unwrap_or(...).is(...)` builder yields a Premise
+    /// containing a `Constraint::Coalesce` with the three slots
+    /// wired correctly. `U`'s static type enforces the source's
+    /// inner type, the fallback's type, and the output's type
+    /// must all match — call sites with type mismatches fail to
+    /// compile.
+    #[dialog_common::test]
+    fn it_builds_coalesce_via_unwrap_or() {
+        let nickname: Term<Option<String>> = Term::var("nickname");
+        let display: Term<String> = Term::var("display");
+        let premise = nickname.unwrap_or("Anon").is(display);
+
+        match premise {
+            Premise::Assert(Proposition::Constraint(Constraint::Coalesce(c))) => {
+                assert_eq!(c.source.name(), Some("nickname"));
+                assert_eq!(c.is.name(), Some("display"));
+                match &c.fallback {
+                    Term::Constant(Value::String(s)) => assert_eq!(s, "Anon"),
+                    other => panic!("expected fallback constant, got {:?}", other),
+                }
+            }
+            other => panic!(
+                "expected Premise::Assert(Constraint::Coalesce), got {:?}",
+                other
+            ),
+        }
     }
 
     #[dialog_common::test]

@@ -96,6 +96,11 @@ pub enum UnifyError {
         /// The offending variable.
         var: VarId,
     },
+    /// A `Coalesce` source type was expected to be set-widened
+    /// with `Nothing` but is not. Raised by
+    /// [`Coalesce::validate`](crate::constraint::Coalesce::validate).
+    #[error("Coalesce source is not Optional")]
+    SourceNotOptional,
 }
 
 /// A rank-1 polymorphic type scheme. Used by formula declarations
