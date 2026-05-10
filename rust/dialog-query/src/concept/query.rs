@@ -410,6 +410,122 @@ mod tests {
         Ok(())
     }
 
+    /// End-to-end: a concept with a `maybe` attribute returns
+    /// rows for entities that lack the optional fact, with the
+    /// optional slot bound to `Binding::Absent`. Entities that
+    /// have the fact get `Binding::Present(value)` for the slot.
+    /// This is the v2 set-widening behavior at the concept
+    /// projection layer, driven by `Resolution::Optional` on the
+    /// emitted `AttributeQuery`.
+    #[dialog_common::test]
+    async fn it_executes_concept_with_optional_field() -> anyhow::Result<()> {
+        use crate::Binding;
+        use dialog_artifacts::Entity;
+        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        // Alice has both name and nickname; Bob has only name.
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(
+                the!("person/nickname")
+                    .of(alice.clone())
+                    .is("Ali".to_string()),
+            )
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let concept = ConceptDescriptor::from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )])
+        .with_maybe(vec![(
+            "nickname",
+            AttributeDescriptor::new(
+                the!("person/nickname"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
+
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::var("person"));
+        terms.insert("name".to_string(), Term::var("name"));
+        terms.insert("nickname".to_string(), Term::var("nickname"));
+
+        let application = ConceptQuery {
+            terms,
+            predicate: concept,
+        };
+
+        let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
+            application.evaluate(Match::new().seed(), &source),
+        )
+        .await?;
+
+        assert_eq!(
+            selection.len(),
+            2,
+            "Should find 2 people (both Alice and Bob)"
+        );
+
+        let nickname_param = Term::var("nickname");
+        let name_param = Term::var("name");
+
+        let mut found_alice_with_nickname = false;
+        let mut found_bob_without_nickname = false;
+        for match_result in selection.iter() {
+            let name = match_result.lookup(&name_param)?.content()?;
+            let nickname = match_result.lookup(&nickname_param)?;
+            match (&name, nickname) {
+                (Value::String(n), Binding::Present(Value::String(nick)))
+                    if n == "Alice" && nick == "Ali" =>
+                {
+                    found_alice_with_nickname = true;
+                }
+                (Value::String(n), Binding::Absent) if n == "Bob" => {
+                    found_bob_without_nickname = true;
+                }
+                _ => panic!(
+                    "unexpected (name, nickname): ({:?}, {:?})",
+                    name,
+                    match_result.lookup(&nickname_param)
+                ),
+            }
+        }
+        assert!(
+            found_alice_with_nickname,
+            "Alice should have nickname Present"
+        );
+        assert!(
+            found_bob_without_nickname,
+            "Bob should have nickname Absent"
+        );
+
+        Ok(())
+    }
+
     #[dialog_common::test]
     async fn it_executes_query_with_bound_entity() -> anyhow::Result<()> {
         use dialog_artifacts::Entity;

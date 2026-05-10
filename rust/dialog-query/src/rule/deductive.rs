@@ -142,6 +142,9 @@ impl From<&ConceptDescriptor> for DeductiveRule {
         let mut premises = Vec::new();
 
         let this = Term::<Entity>::var("this");
+
+        // Required (`with`) attributes — standard EAV semantics.
+        // A missing fact filters the row out entirely.
         for (name, attribute) in concept.with().iter() {
             premises.push(
                 AttributeQuery::new(
@@ -153,6 +156,26 @@ impl From<&ConceptDescriptor> for DeductiveRule {
                 )
                 .into(),
             );
+        }
+
+        // Optional (`maybe`) attributes — set-widened semantics.
+        // A missing fact yields a fallback row with the slot
+        // bound to `Binding::Absent`. The `Resolution::Optional`
+        // policy on the emitted `AttributeQuery` carries this
+        // through to the runtime evaluator.
+        if let Some(maybe) = concept.maybe() {
+            for (name, attribute) in maybe.iter() {
+                premises.push(
+                    AttributeQuery::optional(
+                        Term::Constant(Value::from(attribute.the().clone())),
+                        this.clone(),
+                        Term::var(name),
+                        Term::blank(),
+                        Some(attribute.cardinality()),
+                    )
+                    .into(),
+                );
+            }
         }
 
         DeductiveRule::new(concept.clone(), premises).expect("Concept should compile")
@@ -500,5 +523,116 @@ mod tests {
             result.is_err(),
             "Should reject rule with negated constraint referencing unbound variable ?z (flipped)"
         );
+    }
+
+    /// Concept projection emits one premise per `with` attribute,
+    /// each with `Resolution::Required` (the default). A concept
+    /// with no `maybe` attributes produces only required
+    /// premises.
+    #[dialog_common::test]
+    fn from_concept_with_only_required_emits_required_premises() {
+        use crate::Premise;
+        use crate::attribute::query::Resolution;
+        use crate::proposition::Proposition;
+
+        let concept = ConceptDescriptor::from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
+
+        let rule = DeductiveRule::from(&concept);
+
+        let mut required = 0;
+        let mut optional = 0;
+        for step in rule.join.steps.iter() {
+            if let Premise::Assert(Proposition::Attribute(query)) = &step.premise {
+                match query.resolution() {
+                    Resolution::Required => required += 1,
+                    Resolution::Optional => optional += 1,
+                }
+            }
+        }
+        assert_eq!(required, 1, "expected one required premise");
+        assert_eq!(optional, 0, "expected no optional premises");
+    }
+
+    /// Concept projection emits one premise per `with` attribute
+    /// (Required) and one per `maybe` attribute (Optional).
+    #[dialog_common::test]
+    fn from_concept_with_maybe_emits_optional_resolver() {
+        use crate::Premise;
+        use crate::attribute::query::Resolution;
+        use crate::proposition::Proposition;
+
+        let concept = ConceptDescriptor::from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )])
+        .with_maybe(vec![(
+            "nickname",
+            AttributeDescriptor::new(
+                the!("person/nickname"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
+
+        let rule = DeductiveRule::from(&concept);
+
+        let mut required = 0;
+        let mut optional = 0;
+        for step in rule.join.steps.iter() {
+            if let Premise::Assert(Proposition::Attribute(query)) = &step.premise {
+                match query.resolution() {
+                    Resolution::Required => required += 1,
+                    Resolution::Optional => optional += 1,
+                }
+            }
+        }
+        assert_eq!(required, 1, "expected one required premise (name)");
+        assert_eq!(optional, 1, "expected one optional premise (nickname)");
+    }
+
+    /// `with_maybe` builder installs the maybe attributes; an
+    /// empty input clears the maybe slot.
+    #[dialog_common::test]
+    fn with_maybe_installs_and_clears() {
+        let concept = ConceptDescriptor::from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
+        assert!(concept.maybe().is_none(), "no maybe by default");
+
+        let with_maybe = concept.clone().with_maybe(vec![(
+            "nickname",
+            AttributeDescriptor::new(
+                the!("person/nickname"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
+        assert!(with_maybe.maybe().is_some(), "maybe installed");
+        assert_eq!(with_maybe.maybe().unwrap().iter().count(), 1);
+
+        let empty: Vec<(&str, AttributeDescriptor)> = Vec::new();
+        let cleared = with_maybe.with_maybe(empty);
+        assert!(cleared.maybe().is_none(), "empty input clears maybe");
     }
 }

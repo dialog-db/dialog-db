@@ -68,9 +68,37 @@ impl ConceptDescriptor {
         self.description.as_deref()
     }
 
-    /// Returns a reference to the named attributes.
+    /// Returns a reference to the required (`with`) attributes.
     pub fn with(&self) -> &NamedAttributes {
         &self.with
+    }
+
+    /// Returns a reference to the optional (`maybe`) attributes,
+    /// if any are declared. Optional fields are emitted into the
+    /// rule body as `AttributeQuery` premises with
+    /// `Resolution::Optional`, so that a missing fact yields a
+    /// fallback row with the slot bound to `Binding::Absent`
+    /// rather than dropping the row entirely.
+    pub fn maybe(&self) -> Option<&NamedAttributes> {
+        self.maybe.as_ref()
+    }
+
+    /// Returns a copy of this descriptor with the given optional
+    /// attributes installed in the `maybe` slot. Empty input
+    /// becomes `None` (no `maybe` block).
+    pub fn with_maybe<I, K>(mut self, maybe: I) -> Self
+    where
+        I: IntoIterator<Item = (K, AttributeDescriptor)>,
+        K: Into<String>,
+    {
+        let map: Vec<(String, AttributeDescriptor)> =
+            maybe.into_iter().map(|(k, v)| (k.into(), v)).collect();
+        self.maybe = if map.is_empty() {
+            None
+        } else {
+            Some(NamedAttributes::from(map))
+        };
+        self
     }
 
     /// Validates the provided parameters against the schema of the attributes.
