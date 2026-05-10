@@ -648,6 +648,14 @@ impl<'de, T: Typed> serde::Deserialize<'de> for Term<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash as HashTrait, Hasher};
+
+    fn hash_of<T: HashTrait>(t: &T) -> u64 {
+        let mut h = DefaultHasher::new();
+        t.hash(&mut h);
+        h.finish()
+    }
 
     /// Two `Term<Any>` values constructed with the same name in
     /// independent calls hash to the same value. This is the
@@ -655,15 +663,6 @@ mod tests {
     /// rule registries) depend on.
     #[dialog_common::test]
     fn it_hashes_equivalent_terms_to_same_value() {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        fn hash_of<T: Hash>(t: &T) -> u64 {
-            let mut h = DefaultHasher::new();
-            t.hash(&mut h);
-            h.finish()
-        }
-
         let a: Term<Any> = Term::var("x");
         let b: Term<Any> = Term::var("x");
         assert_eq!(a, b, "structurally equivalent terms must compare equal");
@@ -675,11 +674,11 @@ mod tests {
 
         let c: Term<Any> = Term::Variable {
             name: Some("x".into()),
-            descriptor: Some(crate::artifact::Type::String).into(),
+            descriptor: Some(Type::String).into(),
         };
         let d: Term<Any> = Term::Variable {
             name: Some("x".into()),
-            descriptor: Some(crate::artifact::Type::String).into(),
+            descriptor: Some(Type::String).into(),
         };
         assert_eq!(c, d);
         assert_eq!(hash_of(&c), hash_of(&d));

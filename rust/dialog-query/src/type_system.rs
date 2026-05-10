@@ -281,7 +281,7 @@ mod tests {
         Type::optional(vt)
     }
 
-    #[test]
+    #[dialog_common::test]
     fn primitive_set_singleton() {
         let s = PrimitiveSet::singleton(ValueType::String);
         assert!(s.contains(ValueType::String));
@@ -289,7 +289,7 @@ mod tests {
         assert_eq!(s.as_singleton(), Some(ValueType::String));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn primitive_set_intersect_overlap() {
         let s = PrimitiveSet::NUMERIC
             .intersect(PrimitiveSet::singleton(ValueType::UnsignedInt))
@@ -297,7 +297,7 @@ mod tests {
         assert_eq!(s.as_singleton(), Some(ValueType::UnsignedInt));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn primitive_set_intersect_disjoint() {
         assert!(
             PrimitiveSet::singleton(ValueType::String)
@@ -306,13 +306,13 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn primitive_set_includes_self() {
         assert!(PrimitiveSet::ALL.includes(PrimitiveSet::ALL));
         assert!(PrimitiveSet::NUMERIC.includes(PrimitiveSet::singleton(ValueType::UnsignedInt)));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn primitive_set_iter() {
         let s = PrimitiveSet::NUMERIC;
         let members: Vec<_> = s.iter().collect();
@@ -322,7 +322,7 @@ mod tests {
         assert!(members.contains(&ValueType::Float));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn primitive_set_serde_round_trip() {
         let s = PrimitiveSet::NUMERIC;
         let j = serde_json::to_string(&s).unwrap();
@@ -330,20 +330,20 @@ mod tests {
         assert_eq!(s, back);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn type_primitive_is_definite() {
         let t = p(ValueType::String);
         assert!(matches!(t, Type::Definite(_)));
         assert!(!t.is_optional());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn type_optional_wraps_definite() {
         let t = o(ValueType::String);
         assert!(t.is_optional());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn type_serde_round_trip_definite() {
         let t = p(ValueType::String);
         let j = serde_json::to_string(&t).unwrap();
@@ -351,7 +351,7 @@ mod tests {
         assert_eq!(t, back);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn type_serde_round_trip_optional() {
         let t = o(ValueType::Entity);
         let j = serde_json::to_string(&t).unwrap();
@@ -362,7 +362,7 @@ mod tests {
     /// Equivalent types hash and compare equal regardless of how
     /// they were constructed — the property the unifier-internal
     /// split was designed to enforce.
-    #[test]
+    #[dialog_common::test]
     fn type_hash_is_stable_across_constructions() {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
