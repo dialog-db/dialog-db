@@ -4,7 +4,7 @@
 
 use std::marker::PhantomData;
 
-use crate::{Attribute, Entity, Value};
+use crate::{AttributeName, Domain, Entity, Value};
 
 #[cfg(doc)]
 use crate::ArtifactStore;
@@ -17,7 +17,7 @@ pub struct Unconstrained;
 impl ArtifactSelectorState for Unconstrained {}
 
 /// A marker type that represents an [`ArtifactSelector`] that is constrained
-/// by at least the attribute, entity or value part of a triple.
+/// by at least one slot of a triple (domain, name, entity, or value).
 #[derive(Debug, Clone)]
 pub struct Constrained;
 impl ArtifactSelectorState for Constrained {}
@@ -26,8 +26,15 @@ trait ArtifactSelectorState {}
 
 /// The basic query system for selecting [`Artifact`]s from a [`ArtifactStore`]
 /// You can assign its fields directly, but for convenience and ergonomics it is
-/// also possible to construct it incrementally with the `the`, `of` and `is`
-/// methods.
+/// also possible to construct it incrementally with the [`within`](Self::within),
+/// [`named`](Self::named), [`of`](Self::of), and [`is`](Self::is) methods.
+///
+/// The attribute slot of an artifact is split into two halves: a [`Domain`]
+/// and an [`AttributeName`]. Constraining only [`domain`](Self::domain) (via
+/// [`within`](Self::within)) selects every artifact whose attribute is in
+/// that domain — a contiguous prefix of the attribute index. Constraining
+/// both yields a fully-bound attribute. Composite attribute handling lives
+/// at the layer above this one.
 ///
 /// When a field is specified, all [`Artifact`]s that are selected will share
 /// the same field value.
@@ -43,7 +50,8 @@ where
     State: ArtifactSelectorState,
 {
     entity: Option<Entity>,
-    attribute: Option<Attribute>,
+    domain: Option<Domain>,
+    name: Option<AttributeName>,
     value: Option<Value>,
 
     value_reference: Option<Blake3Hash>,
@@ -58,12 +66,13 @@ impl Default for ArtifactSelector<Unconstrained> {
 
 impl ArtifactSelector<Unconstrained> {
     /// Construct a new, unconstrained [`ArtifactSelector`]. It will need to be
-    /// constrained (by configuring at least an entity, attribute or value)
+    /// constrained (by configuring at least a domain, name, entity or value)
     /// before it can be used.
     pub fn new() -> Self {
         Self {
             entity: None,
-            attribute: None,
+            domain: None,
+            name: None,
             value: None,
             value_reference: None,
             state_type: PhantomData,
@@ -80,9 +89,17 @@ where
         self.entity.as_ref()
     }
 
-    /// The [`Attribute`] (or predicate) used in any selected [`Artifact`]s
-    pub fn attribute(&self) -> Option<&Attribute> {
-        self.attribute.as_ref()
+    /// The [`Domain`] half of the attribute used in any selected
+    /// [`Artifact`]s. When set without [`name`](Self::name) it implies a
+    /// prefix scan over the attribute index.
+    pub fn domain(&self) -> Option<&Domain> {
+        self.domain.as_ref()
+    }
+
+    /// The [`AttributeName`] half of the attribute used in any selected
+    /// [`Artifact`]s.
+    pub fn name(&self) -> Option<&AttributeName> {
+        self.name.as_ref()
     }
 
     /// The [`Value`] (or object) that selected [`Artifact`]s should refer to.
@@ -95,10 +112,34 @@ where
         self.value_reference.as_ref()
     }
 
-    /// Set the [`Attribute`] field (the predicate) of the [`ArtifactSelector`]
-    pub fn the(self, attribute: Attribute) -> ArtifactSelector<Constrained> {
+    /// Constrain the selector to artifacts whose attribute is in the given
+    /// [`Domain`].
+    ///
+    /// Used alone, this enables a contiguous prefix scan over the attribute
+    /// index. Combined with [`named`](Self::named) it pins the attribute
+    /// fully.
+    pub fn within(self, domain: Domain) -> ArtifactSelector<Constrained> {
         ArtifactSelector::<Constrained> {
-            attribute: Some(attribute),
+            domain: Some(domain),
+            name: self.name,
+            entity: self.entity,
+            value_reference: self.value_reference,
+            value: self.value,
+            state_type: PhantomData,
+        }
+    }
+
+    /// Constrain the selector to artifacts whose attribute name matches.
+    ///
+    /// Note: an attribute name alone does not constrain a contiguous range
+    /// of the index, so this method preserves the current state (it does
+    /// **not** mark the selector as `Constrained`). To constrain on name,
+    /// pair it with another field — typically a [`Domain`](Self::within),
+    /// an entity, or a value.
+    pub fn named(self, name: AttributeName) -> ArtifactSelector<State> {
+        ArtifactSelector {
+            domain: self.domain,
+            name: Some(name),
             entity: self.entity,
             value_reference: self.value_reference,
             value: self.value,
@@ -109,7 +150,8 @@ where
     /// Set the [`Entity`] field (the subject) of the [`ArtifactSelector`]
     pub fn of(self, entity: Entity) -> ArtifactSelector<Constrained> {
         ArtifactSelector::<Constrained> {
-            attribute: self.attribute,
+            domain: self.domain,
+            name: self.name,
             entity: Some(entity),
             value_reference: self.value_reference,
             value: self.value,
@@ -120,7 +162,8 @@ where
     /// Set the [`Value`] field (the object) of the [`ArtifactSelector`]
     pub fn is(self, value: Value) -> ArtifactSelector<Constrained> {
         ArtifactSelector::<Constrained> {
-            attribute: self.attribute,
+            domain: self.domain,
+            name: self.name,
             entity: self.entity,
             value_reference: Some(value.to_reference()),
             value: Some(value),

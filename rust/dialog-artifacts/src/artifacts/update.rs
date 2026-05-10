@@ -319,7 +319,8 @@ impl<'a> Provider<Select<'a>> for Changes {
         &self,
         input: ArtifactSelector<Constrained>,
     ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
-        let the = input.attribute();
+        let domain = input.domain();
+        let name = input.name();
         let of = input.entity();
         let is = input.value();
 
@@ -335,8 +336,13 @@ impl<'a> Provider<Select<'a>> for Changes {
                 continue;
             }
             for (attribute, changes) in attrs {
-                if let Some(the_target) = the
-                    && attribute != the_target
+                if let Some(domain_target) = domain
+                    && attribute.domain() != domain_target.as_str()
+                {
+                    continue;
+                }
+                if let Some(name_target) = name
+                    && attribute.name() != name_target.as_str()
                 {
                     continue;
                 }
@@ -389,6 +395,12 @@ mod tests {
     }
     fn role_attr() -> Attribute {
         "test/role".parse().expect("valid attribute")
+    }
+    /// Build a selector constrained to the full `test/name` attribute,
+    /// splitting the composite into its `within(domain).named(name)` halves.
+    fn name_selector() -> ArtifactSelector<Constrained> {
+        let (domain, name) = name_attr().split();
+        ArtifactSelector::new().within(domain).named(name)
     }
 
     #[dialog_common::test]
@@ -448,7 +460,7 @@ mod tests {
         let mut changes = Changes::new();
         changes.associate(name_attr(), alice(), Value::String("Alice".into()));
 
-        let results = artifacts(&changes, ArtifactSelector::new().the(name_attr())).await;
+        let results = artifacts(&changes, name_selector()).await;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].of, alice());
         assert_eq!(results[0].is, Value::String("Alice".into()));
@@ -473,7 +485,7 @@ mod tests {
         // Only the assert should surface. Retracts are deliberately
         // dropped because there's no negative-fact channel in
         // ArtifactStream.
-        let results = artifacts(&changes, ArtifactSelector::new().the(name_attr())).await;
+        let results = artifacts(&changes, name_selector()).await;
         let entities: Vec<&Entity> = results.iter().map(|a| &a.of).collect();
         assert_eq!(entities, vec![&alice()]);
     }
@@ -485,27 +497,17 @@ mod tests {
         changes.associate(name_attr(), bob(), Value::String("Bob".into()));
         changes.associate(role_attr(), alice(), Value::String("Engineer".into()));
 
-        // Filter by `the` only
-        let by_attr = artifacts(&changes, ArtifactSelector::new().the(name_attr())).await;
+        // Filter by attribute only
+        let by_attr = artifacts(&changes, name_selector()).await;
         assert_eq!(by_attr.len(), 2);
 
-        // Filter by `the` + `of`
-        let by_attr_entity = artifacts(
-            &changes,
-            ArtifactSelector::new().the(name_attr()).of(alice()),
-        )
-        .await;
+        // Filter by attribute + `of`
+        let by_attr_entity = artifacts(&changes, name_selector().of(alice())).await;
         assert_eq!(by_attr_entity.len(), 1);
         assert_eq!(by_attr_entity[0].of, alice());
 
         // Filter by `is`
-        let by_value = artifacts(
-            &changes,
-            ArtifactSelector::new()
-                .the(name_attr())
-                .is(Value::String("Bob".into())),
-        )
-        .await;
+        let by_value = artifacts(&changes, name_selector().is(Value::String("Bob".into()))).await;
         assert_eq!(by_value.len(), 1);
         assert_eq!(by_value[0].of, bob());
     }
