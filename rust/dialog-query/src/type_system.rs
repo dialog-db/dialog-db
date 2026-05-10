@@ -318,6 +318,21 @@ impl Type {
             Type::Definite(d) | Type::Optional(d) => d,
         }
     }
+
+    /// Lift this type to set-widened (`Optional`). Idempotent —
+    /// applying twice has no further effect (`Optional(Optional)`
+    /// would be structurally redundant; the outer enum prevents
+    /// it by construction).
+    ///
+    /// Used by [`DynamicAttributeQuery`](crate::DynamicAttributeQuery)
+    /// when its [`Resolution`](crate::attribute::query::Resolution) is
+    /// `Optional`: the schema's `is` slot needs to advertise
+    /// "this slot may bind to Absent at the row layer."
+    pub fn wrap_optional(self) -> Self {
+        match self {
+            Type::Definite(d) | Type::Optional(d) => Type::Optional(d),
+        }
+    }
 }
 
 impl Definite {

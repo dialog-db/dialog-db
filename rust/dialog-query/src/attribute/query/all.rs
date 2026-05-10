@@ -2,11 +2,13 @@ use crate::Cardinality;
 use crate::Claim;
 use crate::artifact::{ArtifactSelector, ArtifactsAttribute, Constrained};
 use crate::attribute::The;
+use crate::attribute::query::Resolution;
 use crate::environment::Environment;
 use crate::query::Application;
 use crate::query::Output;
 use crate::selection::{Match, Selection};
 use crate::source::SelectRules;
+use crate::type_system;
 use crate::types::{Any, Record};
 use crate::{
     Entity, EvaluationError, Field, Parameters, Requirement, Schema, Term, Type, Value, try_stream,
@@ -36,18 +38,52 @@ pub struct AttributeQueryAll {
     cause: Term<Cause>,
     /// Internal handle for claim storage.
     source: Term<Record>,
+    /// Resolution policy: `Required` (zero rows on miss, the
+    /// default) or `Optional` (yield one Absent fallback row on
+    /// miss). See [`Resolution`](crate::attribute::query::Resolution).
+    #[serde(default, skip_serializing_if = "is_required_resolution")]
+    resolution: Resolution,
+}
+
+fn is_required_resolution(r: &Resolution) -> bool {
+    matches!(r, Resolution::Required)
 }
 
 impl AttributeQueryAll {
-    /// Create a new attribute query that yields all matches.
+    /// Create a new attribute query that yields all matches with
+    /// `Resolution::Required` semantics — zero rows on miss.
     pub fn new(the: Term<The>, of: Term<Entity>, is: Term<Any>, cause: Term<Cause>) -> Self {
+        Self::with_resolution(the, of, is, cause, Resolution::Required)
+    }
+
+    /// Create a new attribute query that yields all matches with
+    /// `Resolution::Optional` semantics — one Absent fallback row
+    /// on miss.
+    pub fn optional(the: Term<The>, of: Term<Entity>, is: Term<Any>, cause: Term<Cause>) -> Self {
+        Self::with_resolution(the, of, is, cause, Resolution::Optional)
+    }
+
+    /// Create a new attribute query with explicit resolution.
+    pub fn with_resolution(
+        the: Term<The>,
+        of: Term<Entity>,
+        is: Term<Any>,
+        cause: Term<Cause>,
+        resolution: Resolution,
+    ) -> Self {
         Self {
             the,
             of,
             is,
             cause,
             source: Term::<Record>::unique(),
+            resolution,
         }
+    }
+
+    /// Returns the resolution policy of this query.
+    pub fn resolution(&self) -> Resolution {
+        self.resolution
     }
 
     /// Get the 'the' (attribute) term.
@@ -126,6 +162,7 @@ impl AttributeQueryAll {
             is,
             cause,
             source: self.source.clone(),
+            resolution: self.resolution,
         }
     }
 
@@ -154,11 +191,21 @@ impl AttributeQueryAll {
             },
         );
 
+        // Pull the underlying value-type tag from the `is` term's
+        // descriptor. `Some(vt)` lifts to `Definite(Primitive(vt))`;
+        // `None` lifts to an anonymous variable. If the resolution
+        // is `Optional`, wrap the result in `Type::Optional` so the
+        // planner sees the slot as set-widened.
+        let is_content: type_system::Type = self.is.content_type().into();
+        let is_content = match self.resolution {
+            Resolution::Required => is_content,
+            Resolution::Optional => is_content.wrap_optional(),
+        };
         schema.insert(
             "is".to_string(),
             Field {
                 description: "Value of the relation".to_string(),
-                content_type: None.into(),
+                content_type: is_content,
                 requirement: requirement.required(),
                 cardinality: Cardinality::One,
             },
@@ -187,6 +234,16 @@ impl AttributeQueryAll {
     }
 
     /// Evaluate yielding all matching artifacts.
+    ///
+    /// With [`Resolution::Required`] (the default), zero rows are
+    /// yielded for an input when no fact matches the lookup —
+    /// standard EAV semantics.
+    ///
+    /// With [`Resolution::Optional`], if no fact matches for an
+    /// input row, a single fallback row is yielded with the `is`
+    /// slot (and the `cause` slot, if a named variable) bound to
+    /// [`Binding::Absent`](crate::Binding::Absent). This is the
+    /// row-layer signal for "we looked, no fact found."
     pub fn evaluate<'a, Env, M: Selection + 'a>(
         self,
         env: &'a Env,
@@ -201,12 +258,26 @@ impl AttributeQueryAll {
                 let base = candidate?;
                 let selection = selector.resolve(&base);
 
+                let mut produced = false;
                 let stream = Provider::<Select<'_>>::execute(env, (&selection).try_into()?).await?;
                 for await artifact in stream {
                     let artifact = artifact?;
                     let mut extension = base.clone();
                     selector.merge(&mut extension, &artifact)?;
+                    produced = true;
                     yield extension;
+                }
+
+                // Optional fallback: if no rows were produced for
+                // this input and the resolution is Optional, yield
+                // one row with `is` (and named `cause`) bound to
+                // Absent.
+                if !produced && matches!(selector.resolution, Resolution::Optional) {
+                    let mut fallback = base;
+                    fallback.bind_absent(&selector.is)?;
+                    let cause_term: Term<Any> = Term::<Any>::from(&selector.cause);
+                    fallback.bind_absent(&cause_term)?;
+                    yield fallback;
                 }
             }
         }
