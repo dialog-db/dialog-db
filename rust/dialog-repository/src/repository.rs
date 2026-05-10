@@ -194,7 +194,7 @@ mod tests {
     use super::*;
     use crate::helpers::{test_operator_with_profile, test_repo, unique_name};
     use anyhow::Result;
-    use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
+    use dialog_artifacts::{Artifact, ArtifactSelector, Attribute, Instruction, Value};
     use dialog_remote_s3::Address as S3Address;
     use futures_util::StreamExt;
     use futures_util::stream;
@@ -423,7 +423,10 @@ mod tests {
 
         let results: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .select({
+                let (d, n) = "user/name".parse::<Attribute>()?.split();
+                ArtifactSelector::new().within(d).named(n)
+            })
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -502,7 +505,10 @@ mod tests {
 
         let results: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .select({
+                let (d, n) = "user/name".parse::<Attribute>()?.split();
+                ArtifactSelector::new().within(d).named(n)
+            })
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -537,7 +543,10 @@ mod tests {
         // Verify it's there
         let before: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .select({
+                let (d, n) = "user/name".parse::<Attribute>()?.split();
+                ArtifactSelector::new().within(d).named(n)
+            })
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -554,7 +563,10 @@ mod tests {
 
         let after: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .select({
+                let (d, n) = "user/name".parse::<Attribute>()?.split();
+                ArtifactSelector::new().within(d).named(n)
+            })
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -826,7 +838,10 @@ mod tests {
 
             let results: Vec<_> = r_branch
                 .claims()
-                .select(ArtifactSelector::new().the("user/name".parse()?))
+                .select({
+                    let (d, n) = "user/name".parse::<Attribute>()?.split();
+                    ArtifactSelector::new().within(d).named(n)
+                })
                 .perform(&operator)
                 .await?
                 .collect::<Vec<_>>()
@@ -875,7 +890,10 @@ mod tests {
             let named_branch = named_repo.branch("main").open().perform(&operator).await?;
             let results: Vec<_> = named_branch
                 .claims()
-                .select(ArtifactSelector::new().the("item/tag".parse()?))
+                .select({
+                    let (d, n) = "item/tag".parse::<Attribute>()?.split();
+                    ArtifactSelector::new().within(d).named(n)
+                })
                 .perform(&operator)
                 .await?
                 .collect::<Vec<_>>()

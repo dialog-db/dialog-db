@@ -3,6 +3,8 @@
 //! This module provides functionality for matching artifacts and index entries
 //! against artifact selectors during query operations.
 
+use std::str;
+
 use dialog_prolly_tree::Entry;
 
 use crate::{
@@ -10,10 +12,20 @@ use crate::{
     KeyView, State, VALUE_KEY_TAG, ValueKey, artifacts::selector::Constrained,
 };
 
+/// Splits the attribute slot bytes into `(domain, name)` halves.
+///
+/// The slot is `domain/name` UTF-8, zero-padded to its full length. Trailing
+/// zero bytes are trimmed before splitting on the `/`.
+fn split_attribute_slot(bytes: &[u8]) -> (&str, &str) {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    let s = str::from_utf8(&bytes[..end]).unwrap_or("");
+    s.split_once('/').unwrap_or((s, ""))
+}
+
 /// Checks if a key view matches the constraints in an artifact selector.
 ///
 /// This function performs the actual matching logic between selector constraints
-/// and key components (entity, attribute, value type, value reference).
+/// and key components (entity, attribute halves, value type, value reference).
 fn match_selector_and_key_view<K>(selector: &ArtifactSelector<Constrained>, key: K) -> bool
 where
     K: KeyView,
@@ -24,8 +36,17 @@ where
         return false;
     }
 
-    if let Some(attribute) = selector.attribute()
-        && attribute.key_bytes() != key.attribute().raw()
+    let attr_part = key.attribute();
+    let (key_domain, key_name) = split_attribute_slot(attr_part.raw());
+
+    if let Some(domain) = selector.domain()
+        && domain.as_str() != key_domain
+    {
+        return false;
+    }
+
+    if let Some(name) = selector.name()
+        && name.as_str() != key_name
     {
         return false;
     }
