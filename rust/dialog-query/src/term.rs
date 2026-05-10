@@ -423,6 +423,33 @@ impl<T: Scalar> From<&Term<T>> for Term<Any> {
     }
 }
 
+/// Type-erase a `Term<Option<U>>` to `Term<Any>`. Optionality is
+/// a Rust-API distinction; at evaluation time the value flows
+/// through the same `Term<Any>` path as any other term, with the
+/// row-layer [`Binding::Absent`](crate::Binding::Absent) carrying
+/// the absence signal. The descriptor's storage tag is preserved
+/// from the inner type — `Term<Option<String>>` erases to a
+/// `Term<Any>` whose descriptor reports
+/// `Some(Type::String)`.
+impl<U: Scalar> From<Term<Option<U>>> for Term<Any> {
+    fn from(term: Term<Option<U>>) -> Self {
+        match term {
+            Term::Variable { name, .. } => Term::Variable {
+                name,
+                descriptor: Any(<<U as Typed>::Descriptor as TypeDescriptor>::TYPE),
+            },
+            Term::Constant(value) => Term::Constant(value),
+        }
+    }
+}
+
+/// Borrow form of the optional-to-Any erasure.
+impl<U: Scalar> From<&Term<Option<U>>> for Term<Any> {
+    fn from(term: &Term<Option<U>>) -> Self {
+        Term::<Any>::from(term.clone())
+    }
+}
+
 /// Methods specific to `Term<Any>` — the dynamically-typed term.
 impl Term<Any> {
     /// Create a named variable with a specific type constraint.

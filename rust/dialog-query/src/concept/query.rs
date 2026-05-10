@@ -526,6 +526,98 @@ mod tests {
         Ok(())
     }
 
+    /// End-to-end: a `#[derive(Concept)]` struct with an `Option<T>`
+    /// field round-trips through the full query pipeline. Alice has
+    /// both `name` and `nickname`; Bob has only `name`. The macro
+    /// emits `Term<Option<String>>` for the `nickname` field; at
+    /// realize time, Alice's nickname appears as `Some(_)` and Bob's
+    /// as `None`.
+    #[dialog_common::test]
+    async fn it_executes_macro_concept_with_optional_field() -> anyhow::Result<()> {
+        use dialog_artifacts::Entity;
+        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+        use futures_util::TryStreamExt;
+
+        mod employee {
+            use crate::Attribute;
+
+            /// Employee given name
+            #[derive(Attribute, Clone, PartialEq)]
+            #[domain("person")]
+            pub struct Name(pub String);
+
+            /// Employee preferred nickname
+            #[derive(Attribute, Clone, PartialEq)]
+            #[domain("person")]
+            pub struct Nickname(pub String);
+        }
+
+        /// Employee with required name and optional nickname.
+        #[derive(crate::Concept, Debug, Clone)]
+        pub struct Employee {
+            /// Employee entity
+            pub this: Entity,
+            /// Required given name
+            pub name: employee::Name,
+            /// Optional nickname
+            pub nickname: Option<employee::Nickname>,
+        }
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(
+                the!("person/nickname")
+                    .of(alice.clone())
+                    .is("Ali".to_string()),
+            )
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let query = crate::Query::<Employee>::default();
+        let employees: Vec<Employee> = query.perform(&source).try_collect().await?;
+
+        assert_eq!(employees.len(), 2);
+
+        let mut found_alice = false;
+        let mut found_bob = false;
+        for emp in employees {
+            match emp.name.0.as_str() {
+                "Alice" => {
+                    assert_eq!(
+                        emp.nickname.as_ref().map(|n| n.0.as_str()),
+                        Some("Ali"),
+                        "Alice should have nickname Some(Ali)"
+                    );
+                    found_alice = true;
+                }
+                "Bob" => {
+                    assert!(emp.nickname.is_none(), "Bob should have nickname None");
+                    found_bob = true;
+                }
+                other => panic!("Unexpected name: {other}"),
+            }
+        }
+        assert!(found_alice && found_bob);
+
+        Ok(())
+    }
+
     #[dialog_common::test]
     async fn it_executes_query_with_bound_entity() -> anyhow::Result<()> {
         use dialog_artifacts::Entity;

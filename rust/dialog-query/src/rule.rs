@@ -403,4 +403,93 @@ mod tests {
         assert_eq!(birthday_desc.domain(), "macro-person");
         assert_eq!(birthday_desc.name(), "birthday");
     }
+
+    mod macro_employee {
+        use crate::Attribute;
+
+        /// Person's first name
+        #[derive(Attribute, Clone, PartialEq)]
+        pub struct GivenName(pub String);
+
+        /// Person's preferred nickname
+        #[derive(Attribute, Clone, PartialEq)]
+        pub struct Nickname(pub String);
+
+        /// Person's age in years
+        #[derive(Attribute, Clone, PartialEq)]
+        pub struct Age(pub u32);
+    }
+
+    /// Concept with both required and optional fields. Exercises the
+    /// `Option<T>` branch of the `#[derive(Concept)]` macro: typed
+    /// `Term<Option<U>>` query field, optional descriptor pair into
+    /// `with_maybe`, and optional realize via `Binding`.
+    #[derive(crate::Concept, Debug, Clone)]
+    pub struct MacroEmployee {
+        /// Employee entity
+        pub this: Entity,
+        /// Required given name
+        pub given_name: macro_employee::GivenName,
+        /// Optional preferred nickname
+        pub nickname: Option<macro_employee::Nickname>,
+        /// Optional age
+        pub age: Option<macro_employee::Age>,
+    }
+
+    #[dialog_common::test]
+    fn it_emits_typed_optional_terms_in_macro() {
+        // The query struct must accept `Term<Option<String>>` and
+        // `Term<Option<u32>>` for the optional fields. Constructing the
+        // query with these types is itself a compile-time test.
+        let _query = Query::<MacroEmployee> {
+            this: Term::var("emp"),
+            given_name: Term::<String>::var("emp_given"),
+            nickname: Term::<Option<String>>::var("emp_nickname"),
+            age: Term::<Option<u32>>::var("emp_age"),
+        };
+
+        // Default-constructed query: every field is a named variable
+        // including the optional ones.
+        let default = Query::<MacroEmployee>::default();
+        assert!(matches!(default.this, Term::Variable { .. }));
+        assert!(matches!(default.given_name, Term::Variable { .. }));
+        assert!(matches!(default.nickname, Term::Variable { .. }));
+        assert!(matches!(default.age, Term::Variable { .. }));
+
+        // Concept descriptor: required field flows into `with`,
+        // optional fields flow into `maybe`.
+        let concept: ConceptDescriptor = default.into();
+        let with: Vec<_> = concept.with().iter().collect();
+        assert_eq!(with.len(), 1);
+        assert_eq!(with[0].0, "given_name");
+
+        let maybe = concept.maybe().expect("concept has maybe attributes");
+        let maybe: Vec<_> = maybe.iter().collect();
+        assert_eq!(maybe.len(), 2);
+        assert_eq!(maybe[0].0, "nickname");
+        assert_eq!(maybe[1].0, "age");
+
+        // Rule body emits only required fields. Optional fields are
+        // resolved by the descriptor's deductive-rule projection
+        // separately, not via `when()`.
+        let when_result = MacroEmployee::when(Query::<MacroEmployee>::default());
+        assert_eq!(when_result.len(), 1);
+    }
+
+    #[dialog_common::test]
+    fn it_persists_only_some_optional_values() {
+        // IntoIterator emits a relation per field: required always,
+        // optional only when `Some(_)`. With one Some and one None,
+        // we should see exactly two statements (1 required + 1 Some).
+        let entity = Entity::new().unwrap();
+        let employee = MacroEmployee {
+            this: entity,
+            given_name: macro_employee::GivenName("Ada".into()),
+            nickname: Some(macro_employee::Nickname("AL".into())),
+            age: None,
+        };
+
+        let statements: Vec<AttributeStatement> = employee.into_iter().collect();
+        assert_eq!(statements.len(), 2);
+    }
 }

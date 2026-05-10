@@ -285,6 +285,20 @@ impl_typed!(The, Symbol);
 impl_typed!(Cause, Bytes);
 impl_typed!(Value, Any);
 
+/// `Option<U>: Typed` for any [`Scalar`] `U`. Maps to
+/// [`OptionalOf<U::Descriptor>`], so `Term<Option<String>>` and
+/// `Term<Option<u32>>` get a descriptor that reports
+/// `Type::Optional(Primitive(...))` via [`TypeDescriptor::kind`].
+///
+/// The `U: Scalar` bound is what structurally rejects nested
+/// optionality: `Option<U>` itself is not `Scalar` (no
+/// `impl Scalar for Option<U>`), so `Option<Option<U>>` fails to
+/// satisfy `Typed`. This is the v2 replacement for v1's
+/// `OptionalType: !DefiniteType` marker-trait fence.
+impl<U: Scalar> Typed for Option<U> {
+    type Descriptor = OptionalOf<<U as Typed>::Descriptor>;
+}
+
 /// A concrete type that can be used as a term value with bidirectional Value conversion.
 ///
 /// `Scalar` types have a known static [`TypeDescriptor`] (their `Tag` is `()`-like —
