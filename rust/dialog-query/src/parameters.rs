@@ -221,7 +221,7 @@ mod tests {
             param,
             &Term::Variable {
                 name: Some("x".into()),
-                descriptor: Any(Some(Type::String))
+                descriptor: Some(Type::String).into(),
             }
         );
     }

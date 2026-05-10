@@ -175,7 +175,7 @@ impl AttributeQueryAll {
             "the".to_string(),
             Field {
                 description: "The relation identifier".to_string(),
-                content_type: Some(Type::Symbol).into(),
+                content_type: Some(type_system::Type::primitive(Type::Symbol)),
                 requirement: requirement.required(),
                 cardinality: Cardinality::One,
             },
@@ -185,21 +185,25 @@ impl AttributeQueryAll {
             "of".to_string(),
             Field {
                 description: "Entity of the relation".to_string(),
-                content_type: Some(Type::Entity).into(),
+                content_type: Some(type_system::Type::primitive(Type::Entity)),
                 requirement: requirement.required(),
                 cardinality: Cardinality::One,
             },
         );
 
-        // Pull the underlying value-type tag from the `is` term's
-        // descriptor. `Some(vt)` lifts to `Definite(Primitive(vt))`;
-        // `None` lifts to an anonymous variable. If the resolution
-        // is `Optional`, wrap the result in `Type::Optional` so the
-        // planner sees the slot as set-widened.
-        let is_content: type_system::Type = self.is.content_type().into();
-        let is_content = match self.resolution {
-            Resolution::Required => is_content,
-            Resolution::Optional => is_content.wrap_optional(),
+        // Pull the kind from the `is` term. `None` means "no
+        // static info" — the unifier resolves at rule-compile
+        // time. For `Optional` resolution, the slot must carry an
+        // Optional-shaped kind so the planner sees set-widening
+        // even when the underlying primitive shape is unknown.
+        use crate::type_system::PrimitiveSet;
+        let is_content = match (self.is.kind(), self.resolution) {
+            (Some(k), Resolution::Required) => Some(k),
+            (Some(k), Resolution::Optional) => Some(k.wrap_optional()),
+            (None, Resolution::Required) => None,
+            (None, Resolution::Optional) => {
+                Some(type_system::Type::optional_set(PrimitiveSet::ALL))
+            }
         };
         schema.insert(
             "is".to_string(),
@@ -540,8 +544,7 @@ mod tests {
     }
 
     /// `AttributeQueryAll::schema()` declares the `the` slot as
-    /// `Type::Definite(Primitive(Symbol))`. Storage selectors
-    /// rely on this to filter facts by attribute identifier.
+    /// `Type::Definite(Primitive(Symbol))`.
     #[dialog_common::test]
     fn schema_the_slot_is_definite_symbol() {
         use crate::type_system::Definite;
@@ -553,10 +556,10 @@ mod tests {
         );
         let schema = query.schema();
         let the = schema.get("the").expect("the field present");
-        assert!(!the.content_type.is_optional());
-        assert_eq!(the.content_type.shape().as_singleton(), Some(Type::Symbol));
-        // Constraint type isn't a variable — it's a concrete primitive.
-        assert!(matches!(the.content_type.shape(), Definite::Primitive(_)));
+        let content = the.content_type().expect("symbol kind present");
+        assert!(!content.is_optional());
+        assert_eq!(content.shape().as_singleton(), Some(Type::Symbol));
+        assert!(matches!(content.shape(), Definite::Primitive(_)));
     }
 
     /// `AttributeQueryAll::schema()` declares the `of` slot as
@@ -571,17 +574,15 @@ mod tests {
         );
         let schema = query.schema();
         let of = schema.get("of").expect("of field present");
-        assert_eq!(of.content_type.shape().as_singleton(), Some(Type::Entity));
+        let content = of.content_type().expect("entity kind present");
+        assert_eq!(content.shape().as_singleton(), Some(Type::Entity));
     }
 
     /// `AttributeQueryAll::schema()` declares the `is` slot as
-    /// `Type::any()` — an anonymous type variable. The slot
-    /// accepts any value type at runtime; the unifier narrows
-    /// based on what other premises declare for the same
-    /// rule-level variable.
+    /// `None` (unknown) when the term carries no static info —
+    /// the unifier narrows at rule-compile time.
     #[dialog_common::test]
-    fn schema_is_slot_is_anonymous_variable() {
-        use crate::type_system::Definite;
+    fn schema_is_slot_is_unknown_when_untyped() {
         let query = AttributeQueryAll::new(
             Term::var("the"),
             Term::var("of"),
@@ -590,11 +591,9 @@ mod tests {
         );
         let schema = query.schema();
         let is = schema.get("is").expect("is field present");
-        assert!(!is.content_type.is_optional());
         assert!(
-            matches!(is.content_type.shape(), Definite::Variable(_)),
-            "expected anonymous variable, got {:?}",
-            is.content_type.shape()
+            is.content_type().is_none(),
+            "untyped `is` term should yield unknown content_type"
         );
     }
 }

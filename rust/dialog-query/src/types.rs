@@ -1,23 +1,21 @@
 //! Type system utilities for dialog-query
 //!
-//! This module provides the bridge between Rust's compile-time type system and
-//! the runtime type system. The core abstractions are:
+//! This module bridges Rust's compile-time type system to the
+//! query engine's runtime type system. The core abstractions are:
 //!
-//! - [`TypeDescriptor`] — a trait implemented by named ZSTs (like [`Text`],
-//!   [`Boolean`]) that carry a static `TYPE` constant and can report the
-//!   runtime type of a value. Now also exposes
-//!   [`kind`](TypeDescriptor::kind) returning the unified
-//!   [`type_system::Type`] for the v2 type system.
-//! - [`Typed`] — maps a Rust type (e.g. `String`) to its [`TypeDescriptor`]
-//!   (e.g. `Text`). Also implemented by the ZSTs themselves so that
-//!   `Term<String>` and `Term<Text>` are interchangeable.
-//! - [`Scalar`] — concrete types with bidirectional [`Value`] conversion.
-//! - [`Any`] — a descriptor that carries a runtime `Option<Type>`, used for
-//!   type-erased terms (`Term<Any>` replaces the old `Parameter`).
-//!   In v2, `Any::kind()` reports a fresh anonymous type variable
-//!   when the wrapped tag is `None`.
-//! - [`OptionalOf`] — a wrapper descriptor for `Term<Option<U>>`. Reports
-//!   `Type::Optional(...)` from the inner descriptor's `Type::Definite(...)`.
+//! - [`TypeDescriptor`] — a trait implemented by named ZSTs (like
+//!   [`Text`], [`Boolean`]) that report a unified
+//!   [`type_system::Type`] for a value via
+//!   [`kind`](TypeDescriptor::kind).
+//! - [`Typed`] — maps a Rust type (e.g. `String`) to its
+//!   [`TypeDescriptor`] (e.g. `Text`).
+//! - [`Scalar`] — concrete types with bidirectional [`Value`]
+//!   conversion.
+//! - [`Any`] — a descriptor that carries a runtime
+//!   `Option<type_system::Type>`. Used for type-erased terms.
+//! - [`OptionalOf`] — a wrapper descriptor for `Term<Option<U>>`.
+//!   Lifts the inner descriptor's `Type::Definite(...)` into
+//!   `Type::Optional(...)`.
 
 use crate::type_system;
 use dialog_common::ConditionalSend;
@@ -28,78 +26,43 @@ use std::marker::PhantomData;
 pub use crate::artifact::{ArtifactsAttribute, Cause, Entity, Type, Value};
 use crate::attribute::The;
 
-/// Trait implemented by type descriptors — named ZSTs that represent a
-/// runtime type at the Rust type level.
+/// Trait implemented by type descriptors — named ZSTs that
+/// represent a runtime type at the Rust type level.
 ///
-/// Each descriptor exposes three views of its represented type:
-/// 1. **Storage tag** — the legacy [`Type`] (alias for
-///    `dialog_artifacts::ValueDataType`) carried in
-///    [`Self::TYPE`]. `Some(Type::String)` for concrete
-///    descriptors, `None` for [`Any`]. This view is what storage
-///    selectors and wire-format value tags consume.
-/// 2. **Runtime tag** — [`Self::content_type`] returns the same
-///    `Option<Type>` but takes `&self`, allowing dynamic
-///    descriptors (like [`Any`]) to inspect their wrapped state.
-/// 3. **Unified type** — [`Self::kind`] returns the v2
-///    [`type_system::Type`], the rich representation used by the
-///    Damas-Milner unifier and rule-compile-time analysis.
-///    Lossless from `TYPE`: a `None` storage tag becomes a fresh
-///    anonymous variable; a `Some(vt)` becomes
-///    `Type::Definite(Primitive(singleton(vt)))`.
+/// Each descriptor reports its represented type via
+/// [`Self::kind`] returning `Option<type_system::Type>`. `None`
+/// means "unknown — the unifier decides at rule-compile time."
 pub trait TypeDescriptor:
     Clone + fmt::Debug + Default + PartialEq + Eq + Hash + Send + Sync + 'static
 {
-    /// The legacy storage tag, if statically known.
-    /// `None` means "any type" — determined at runtime.
+    /// The legacy storage tag, if statically known. `None` means
+    /// "any type."
     const TYPE: Option<Type>;
 
-    /// Report the runtime storage tag this descriptor represents.
-    ///
-    /// For concrete descriptors (e.g. [`Text`]) this returns
-    /// `Self::TYPE`. For [`Any`] this returns the wrapped
-    /// `Option<Type>`.
-    fn content_type(&self) -> Option<Type>;
-
     /// Report the unified [`type_system::Type`] this descriptor
-    /// represents.
+    /// represents. `None` means "no static info — leave to the
+    /// unifier."
     ///
-    /// Default implementation builds from [`Self::TYPE`]:
-    /// - `None` → a fresh anonymous variable with constraint
-    ///   [`PrimitiveSet::ALL`](type_system::PrimitiveSet::ALL).
-    /// - `Some(vt)` → `Type::Definite(Primitive(singleton(vt)))`.
-    ///
-    /// Dynamic descriptors ([`Any`]) override to inspect their
-    /// wrapped state. Wrapper descriptors ([`OptionalOf`])
-    /// override to lift the inner kind into `Type::Optional`.
-    fn kind(&self) -> type_system::Type {
-        match Self::TYPE {
-            Some(vt) => type_system::Type::primitive(vt),
-            None => type_system::Type::any(),
-        }
+    /// Default implementation lifts [`Self::TYPE`]:
+    /// `Some(vt) → Some(Type::primitive(vt))`, `None → None`.
+    fn kind(&self) -> Option<type_system::Type> {
+        Self::TYPE.map(type_system::Type::primitive)
     }
 
-    /// Reconstruct a descriptor from a runtime type tag.
+    /// Reconstruct a descriptor from a unified type kind.
     ///
-    /// For concrete descriptors this ignores the input and returns `Self::default()`.
-    /// For [`Any`] this wraps the type tag.
-    fn from_content_type(_type: Option<Type>) -> Self {
+    /// Concrete descriptors ignore the input. [`Any`] wraps it.
+    fn from_kind(_kind: Option<type_system::Type>) -> Self {
         Self::default()
     }
 }
 
 /// Maps a Rust type to its [`TypeDescriptor`].
-///
-/// For concrete types like `String`, this maps to a named ZST (`Text`).
-/// Each ZST also implements `Typed` mapping to itself, so `Term<String>`
-/// and `Term<Text>` use the same internal representation.
 pub trait Typed {
-    /// The descriptor type that represents this type in the term system.
+    /// The descriptor type that represents this type in the term
+    /// system.
     type Descriptor: TypeDescriptor;
 }
-
-// Named ZST descriptors and their TypeDescriptor + Typed implementations.
-// Each descriptor is a zero-sized type that carries type information at the
-// Rust type level, enabling Term<T> to store type metadata without overhead.
 
 macro_rules! define_descriptor {
     (
@@ -112,10 +75,6 @@ macro_rules! define_descriptor {
 
         impl TypeDescriptor for $name {
             const TYPE: Option<Type> = Some($variant);
-
-            fn content_type(&self) -> Option<Type> {
-                Some($variant)
-            }
         }
 
         impl Typed for $name {
@@ -169,38 +128,21 @@ define_descriptor!(
     Record, Type::Record
 );
 
-/// Descriptor for dynamically-typed values — carries an optional runtime
-/// type tag. `Term<Any>` is the unified replacement for the old `Parameter`.
+/// Descriptor for dynamically-typed values — carries an optional
+/// runtime type kind. `Term<Any>` is the unified replacement for
+/// the old `Parameter`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
-pub struct Any(pub Option<Type>);
+pub struct Any(pub Option<type_system::Type>);
 
 impl TypeDescriptor for Any {
     const TYPE: Option<Type> = None;
 
-    fn content_type(&self) -> Option<Type> {
-        self.0
+    fn kind(&self) -> Option<type_system::Type> {
+        self.0.clone()
     }
 
-    /// For [`Any`], `kind()` mirrors the wrapped storage tag:
-    /// - `Some(vt)` → `Type::Definite(Primitive(singleton(vt)))`.
-    /// - `None` → fresh anonymous variable
-    ///   (`Definite::Variable(VarId::global_fresh())`) with
-    ///   constraint [`PrimitiveSet::ALL`](type_system::PrimitiveSet::ALL).
-    ///
-    /// Each call with `None` allocates a new global `VarId`.
-    /// Callers that need stable identity across multiple
-    /// `kind()` calls on the same `Term<Any>` should consult
-    /// the rule-level [`UnificationContext`](type_system::UnificationContext)
-    /// rather than calling `kind()` repeatedly.
-    fn kind(&self) -> type_system::Type {
-        match self.0 {
-            Some(vt) => type_system::Type::primitive(vt),
-            None => type_system::Type::any(),
-        }
-    }
-
-    fn from_content_type(typ: Option<Type>) -> Self {
-        Any(typ)
+    fn from_kind(kind: Option<type_system::Type>) -> Self {
+        Any(kind)
     }
 }
 
@@ -208,52 +150,37 @@ impl Typed for Any {
     type Descriptor = Self;
 }
 
+impl From<Option<Type>> for Any {
+    /// Lift a legacy storage tag into an `Any` descriptor.
+    /// `Some(vt) → Some(Type::primitive(vt))`, `None → None`.
+    fn from(value: Option<Type>) -> Self {
+        Any(value.map(type_system::Type::primitive))
+    }
+}
+
 /// Wrapper descriptor lifting an inner [`TypeDescriptor`] into a
 /// set-widened (Optional) shape.
 ///
 /// Used by `Term<Option<U>>` to report its kind as
 /// `Type::Optional(...)` based on the inner descriptor's
-/// `Type::Definite(...)`. Adding `Option<U>` at the Rust type
-/// level produces a `Term<Option<U>>` whose descriptor is
-/// `OptionalOf<<U as Typed>::Descriptor>`.
-///
-/// `OptionalOf` is a ZST: it carries no runtime data, the inner
-/// descriptor's information is reached via `D::kind()`.
-///
-/// Note: only used in v2's typed surface for `Term<Option<U>>`.
-/// The macro layer (Step 7) emits `Term<Option<...>>` for
-/// `Option<T>` fields, which routes through this descriptor.
+/// `Type::Definite(...)`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct OptionalOf<D: TypeDescriptor>(PhantomData<D>);
 
 impl<D: TypeDescriptor> TypeDescriptor for OptionalOf<D> {
-    /// Optional doesn't have a single storage tag — it admits
-    /// either the inner type *or* `Absent`. The legacy `TYPE`
-    /// constant is `None` to signal "no single static tag";
-    /// callers needing the rich information call `kind()`.
     const TYPE: Option<Type> = D::TYPE;
 
-    fn content_type(&self) -> Option<Type> {
-        D::TYPE
-    }
-
-    /// Lift the inner descriptor's `kind()` from
-    /// `Type::Definite(d)` to `Type::Optional(d)`.
-    ///
-    /// If the inner descriptor reports a non-`Definite` kind
-    /// (e.g. another `Optional` — which the marker traits at the
-    /// Rust API layer prevent, but be defensive at runtime), the
-    /// kind passes through unchanged.
-    fn kind(&self) -> type_system::Type {
-        match D::default().kind() {
+    /// Lift the inner descriptor's `kind()` into `Optional`.
+    /// `Some(Type::Definite(d)) → Some(Type::Optional(d))`.
+    /// `Some(Type::Optional(d))` passes through.
+    /// `None → None`.
+    fn kind(&self) -> Option<type_system::Type> {
+        D::default().kind().map(|k| match k {
             type_system::Type::Definite(d) => type_system::Type::Optional(d),
             other => other,
-        }
+        })
     }
 }
-
-// Typed implementations for Rust primitive and dialog-artifacts types.
-// Each maps to the appropriate named ZST descriptor.
 
 macro_rules! impl_typed {
     ($rust_type:ty, $descriptor:ty) => {
@@ -286,24 +213,13 @@ impl_typed!(Cause, Bytes);
 impl_typed!(Value, Any);
 
 /// `Option<U>: Typed` for any [`Scalar`] `U`. Maps to
-/// [`OptionalOf<U::Descriptor>`], so `Term<Option<String>>` and
-/// `Term<Option<u32>>` get a descriptor that reports
-/// `Type::Optional(Primitive(...))` via [`TypeDescriptor::kind`].
-///
-/// The `U: Scalar` bound is what structurally rejects nested
-/// optionality: `Option<U>` itself is not `Scalar` (no
-/// `impl Scalar for Option<U>`), so `Option<Option<U>>` fails to
-/// satisfy `Typed`. This is the v2 replacement for v1's
-/// `OptionalType: !DefiniteType` marker-trait fence.
+/// [`OptionalOf<U::Descriptor>`].
 impl<U: Scalar> Typed for Option<U> {
     type Descriptor = OptionalOf<<U as Typed>::Descriptor>;
 }
 
-/// A concrete type that can be used as a term value with bidirectional Value conversion.
-///
-/// `Scalar` types have a known static [`TypeDescriptor`] (their `Tag` is `()`-like —
-/// a ZST) and can convert to/from [`Value`]. Every `Scalar` type must implement
-/// `Into<Value>` (typically via `From<T> for Value`) for the forward direction.
+/// A concrete type that can be used as a term value with
+/// bidirectional Value conversion.
 pub trait Scalar:
     Typed + Clone + fmt::Debug + Into<Value> + 'static + ConditionalSend + TryFrom<Value>
 {
@@ -340,12 +256,12 @@ impl Scalar for usize {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::type_system::{Definite, PrimitiveSet};
+    use crate::type_system::Definite;
 
-    /// `Text::kind()` reports `Type::Definite(Primitive(singleton(String)))`.
+    /// `Text::kind()` reports `Some(Type::Definite(Primitive(String)))`.
     #[test]
     fn text_descriptor_kind_is_definite_string() {
-        let kind = Text.kind();
+        let kind = Text.kind().expect("Text has a static kind");
         match kind {
             type_system::Type::Definite(d) => match *d {
                 Definite::Primitive(set) => {
@@ -360,129 +276,79 @@ mod tests {
     /// Each named ZST descriptor reports the right primitive.
     #[test]
     fn named_descriptors_report_their_primitives() {
-        assert_eq!(Text.kind().shape().as_singleton(), Some(Type::String));
-        assert_eq!(Boolean.kind().shape().as_singleton(), Some(Type::Boolean));
+        let to_singleton = |k: Option<type_system::Type>| k.unwrap().shape().as_singleton();
+        assert_eq!(to_singleton(Text.kind()), Some(Type::String));
+        assert_eq!(to_singleton(Boolean.kind()), Some(Type::Boolean));
         assert_eq!(
-            UnsignedInteger.kind().shape().as_singleton(),
+            to_singleton(UnsignedInteger.kind()),
             Some(Type::UnsignedInt)
         );
-        assert_eq!(
-            SignedInteger.kind().shape().as_singleton(),
-            Some(Type::SignedInt)
-        );
-        assert_eq!(Float.kind().shape().as_singleton(), Some(Type::Float));
-        assert_eq!(Bytes.kind().shape().as_singleton(), Some(Type::Bytes));
-        assert_eq!(EntityType.kind().shape().as_singleton(), Some(Type::Entity));
-        assert_eq!(Symbol.kind().shape().as_singleton(), Some(Type::Symbol));
-        assert_eq!(Record.kind().shape().as_singleton(), Some(Type::Record));
+        assert_eq!(to_singleton(SignedInteger.kind()), Some(Type::SignedInt));
+        assert_eq!(to_singleton(Float.kind()), Some(Type::Float));
+        assert_eq!(to_singleton(Bytes.kind()), Some(Type::Bytes));
+        assert_eq!(to_singleton(EntityType.kind()), Some(Type::Entity));
+        assert_eq!(to_singleton(Symbol.kind()), Some(Type::Symbol));
+        assert_eq!(to_singleton(Record.kind()), Some(Type::Record));
     }
 
-    /// `Any(Some(vt))` reports `Type::Definite(Primitive(singleton(vt)))`.
+    /// `Any(Some(Type::primitive(vt)))` reports the wrapped kind.
     #[test]
     fn any_descriptor_with_tag_reports_definite() {
-        let descriptor = Any(Some(Type::Entity));
-        let kind = descriptor.kind();
+        let descriptor = Any(Some(type_system::Type::primitive(Type::Entity)));
+        let kind = descriptor.kind().expect("kind present");
         assert!(!kind.is_optional());
         assert_eq!(kind.shape().as_singleton(), Some(Type::Entity));
     }
 
-    /// `Any(None)` reports an anonymous variable.
+    /// `Any(None)` reports `None` — no static info.
     #[test]
-    fn any_descriptor_without_tag_reports_variable() {
+    fn any_descriptor_without_tag_reports_none() {
         let descriptor = Any(None);
-        let kind = descriptor.kind();
-        match kind.shape() {
-            Definite::Variable(_) => {}
-            other => panic!("expected variable, got {:?}", other),
-        }
+        assert!(descriptor.kind().is_none());
     }
 
-    /// `Any(None).kind()` allocates a fresh `VarId` each call.
+    /// `Any::default()` yields `Any(None)`.
     #[test]
-    fn any_descriptor_kind_is_unique_per_call() {
-        let descriptor = Any(None);
-        let a = match descriptor.kind().shape() {
-            Definite::Variable(id) => *id,
-            _ => panic!("expected variable"),
-        };
-        let b = match descriptor.kind().shape() {
-            Definite::Variable(id) => *id,
-            _ => panic!("expected variable"),
-        };
-        assert_ne!(a, b);
+    fn any_default_is_none() {
+        let descriptor = Any::default();
+        assert_eq!(descriptor, Any(None));
+        assert!(descriptor.kind().is_none());
     }
 
-    /// `OptionalOf<Text>::kind()` reports `Type::Optional(Primitive(String))`.
+    /// `From<Option<Type>> for Any` lifts a legacy storage tag.
+    #[test]
+    fn from_option_value_type_lifts_into_any() {
+        let a: Any = Some(Type::String).into();
+        assert_eq!(a.kind(), Some(type_system::Type::primitive(Type::String)));
+        let b: Any = None.into();
+        assert_eq!(b, Any(None));
+    }
+
+    /// `OptionalOf<Text>::kind()` reports
+    /// `Some(Type::Optional(Primitive(String)))`.
     #[test]
     fn optional_of_text_reports_optional_string() {
         let descriptor: OptionalOf<Text> = OptionalOf::default();
-        let kind = descriptor.kind();
+        let kind = descriptor.kind().expect("present");
         assert!(kind.is_optional());
-        assert_eq!(
-            kind.shape().as_singleton(),
-            Some(Type::String),
-            "inner shape preserved through Optional wrap"
-        );
+        assert_eq!(kind.shape().as_singleton(), Some(Type::String));
     }
 
     /// `OptionalOf<EntityType>::kind()` reports
-    /// `Type::Optional(Primitive(Entity))`.
+    /// `Some(Type::Optional(Primitive(Entity)))`.
     #[test]
     fn optional_of_entity_reports_optional_entity() {
         let descriptor: OptionalOf<EntityType> = OptionalOf::default();
-        let kind = descriptor.kind();
+        let kind = descriptor.kind().expect("present");
         assert!(kind.is_optional());
         assert_eq!(kind.shape().as_singleton(), Some(Type::Entity));
     }
 
-    /// `OptionalOf<Any>` should pass through (Any's kind is a
-    /// variable, not Definite, so the Optional wrap is a no-op
-    /// per the defensive fall-through). Marker traits at the
-    /// Rust API layer prevent this case in well-typed code.
+    /// `OptionalOf<Any>` passes through `None` since `Any`'s
+    /// default kind is `None`.
     #[test]
-    fn optional_of_any_passes_through() {
+    fn optional_of_any_passes_through_none() {
         let descriptor: OptionalOf<Any> = OptionalOf::default();
-        let kind = descriptor.kind();
-        // Any's kind is Type::Definite(Variable(_)). Optional
-        // wrap turns that into Type::Optional(Variable(_)).
-        // Both are valid; our test just verifies kind() doesn't
-        // panic and produces a well-formed Type.
-        match kind {
-            type_system::Type::Optional(d) => match *d {
-                Definite::Variable(_) => {}
-                other => panic!("expected Variable, got {:?}", other),
-            },
-            type_system::Type::Definite(d) => match *d {
-                Definite::Variable(_) => {}
-                other => panic!("expected Variable, got {:?}", other),
-            },
-        }
-    }
-
-    /// The default `kind()` from `TYPE` matches the override
-    /// behavior — sanity check that the trait default and the
-    /// macro-generated impls agree.
-    #[test]
-    fn default_kind_matches_named_descriptor() {
-        // Text uses the default kind() from the trait. This test
-        // verifies the default impl is wired correctly.
-        let kind = Text.kind();
-        assert_eq!(kind.shape().as_singleton(), Some(Type::String));
-    }
-
-    /// Constraint set on `Any`'s anonymous variable is `ALL`.
-    #[test]
-    fn any_descriptor_variable_constraint_is_all() {
-        let descriptor = Any(None);
-        let kind = descriptor.kind();
-        let var_id = match kind.shape() {
-            Definite::Variable(id) => *id,
-            _ => panic!("expected variable"),
-        };
-        // The global VarId allocator doesn't track constraints;
-        // a fresh UnificationContext considering this VarId
-        // would treat its constraint as ALL by default.
-        let ctx = type_system::UnificationContext::new();
-        assert_eq!(ctx.constraint(var_id), PrimitiveSet::ALL);
+        assert!(descriptor.kind().is_none());
     }
 }

@@ -22,6 +22,7 @@ use crate::constraint::{Constraint, Equality};
 use crate::error::{FieldTypeError, TypeError};
 use crate::proposition::Proposition;
 use crate::selection;
+use crate::type_system;
 use crate::types::{Any, Scalar, TypeDescriptor, Typed};
 use serde::de::Error as DeserializeError;
 use std::hash::Hash;
@@ -182,19 +183,23 @@ impl<T: Typed> Term<T> {
         }
     }
 
-    /// Get the content type for this term.
+    /// Get the unified type kind for this term.
     ///
-    /// For variables: returns the type from the descriptor. For concrete
-    /// typed terms this is always `Some(Type::...)`. For `Any` it
-    /// depends on the runtime tag.
-    ///
-    /// For constants: inspects the stored `Value` to determine the type.
-    pub fn content_type(&self) -> Option<Type> {
+    /// For variables: delegates to the descriptor's `kind()`.
+    /// For constants: lifts the stored value's type into a
+    /// `Type::Definite(Primitive(...))`.
+    pub fn kind(&self) -> Option<type_system::Type> {
         match self {
-            Term::Variable { descriptor, .. } => <<T as Typed>::Descriptor as TypeDescriptor>::TYPE
-                .or_else(|| descriptor.content_type()),
-            Term::Constant(value) => Some(Type::from(value)),
+            Term::Variable { descriptor, .. } => descriptor.kind(),
+            Term::Constant(value) => Some(type_system::Type::primitive(Type::from(value))),
         }
+    }
+
+    /// Legacy view: collapse the unified kind to its singleton
+    /// primitive. Returns `None` for unknown or non-singleton
+    /// shapes.
+    pub fn content_type(&self) -> Option<Type> {
+        self.kind().and_then(|k| k.shape().as_singleton())
     }
 
     /// Get the constant value if this term is a constant.
@@ -260,9 +265,7 @@ where
                 name: Some(name),
                 descriptor,
             } => {
-                if let Some(data_type) = <<T as Typed>::Descriptor as TypeDescriptor>::TYPE
-                    .or_else(|| descriptor.content_type())
-                {
+                if let Some(data_type) = descriptor.kind().and_then(|k| k.shape().as_singleton()) {
                     write!(f, "?{}<{:?}>", name, data_type)
                 } else {
                     write!(f, "?{}<Value>", name)
@@ -409,7 +412,7 @@ impl<T: Scalar> From<Term<T>> for Term<Any> {
         match term {
             Term::Variable { name, .. } => Term::Variable {
                 name,
-                descriptor: Any(<<T as Typed>::Descriptor as TypeDescriptor>::TYPE),
+                descriptor: Any(<<T as Typed>::Descriptor>::default().kind()),
             },
             Term::Constant(value) => Term::Constant(value),
         }
@@ -436,7 +439,7 @@ impl<U: Scalar> From<Term<Option<U>>> for Term<Any> {
         match term {
             Term::Variable { name, .. } => Term::Variable {
                 name,
-                descriptor: Any(<<U as Typed>::Descriptor as TypeDescriptor>::TYPE),
+                descriptor: Any(<<U as Typed>::Descriptor>::default().kind()),
             },
             Term::Constant(value) => Term::Constant(value),
         }
@@ -454,13 +457,13 @@ impl<U: Scalar> From<&Term<Option<U>>> for Term<Any> {
 impl Term<Any> {
     /// Create a named variable with a specific type constraint.
     ///
-    /// Use `Term::<Any>::var("x")` for an untyped variable (inherited from
-    /// `impl<T: Typed> Term<T>`). Use this method when you need a runtime
-    /// type tag.
-    pub fn typed_var(name: impl Into<String>, typ: Option<Type>) -> Self {
+    /// Use `Term::<Any>::var("x")` for an untyped variable
+    /// (inherited from `impl<T: Typed> Term<T>`). Use this method
+    /// when you need a runtime type kind.
+    pub fn typed_var(name: impl Into<String>, kind: Option<type_system::Type>) -> Self {
         Term::Variable {
             name: Some(name.into()),
-            descriptor: Any(typ),
+            descriptor: Any(kind),
         }
     }
 
@@ -479,10 +482,9 @@ impl Term<Any> {
 
     /// Narrow a `Term<Any>` to a concrete `Term<T>`.
     ///
-    /// Both variables and constants are validated: if the term carries a known
-    /// type (via the `Any` descriptor or the constant's value) and `T` has a
-    /// statically known type, they must match. Returns
-    /// [`FieldTypeError::TypeMismatch`] on incompatible types.
+    /// Both variables and constants are validated: if the term
+    /// carries a known type and `T` has a statically known type,
+    /// they must match.
     pub fn narrow<T: Typed>(self) -> Result<Term<T>, FieldTypeError> {
         let target = <<T as Typed>::Descriptor as TypeDescriptor>::TYPE;
         let source = self.content_type();
@@ -524,7 +526,7 @@ impl From<Term<Value>> for Term<Any> {
         match term {
             Term::Variable { name, .. } => Term::Variable {
                 name,
-                descriptor: Any(<<Value as Typed>::Descriptor as TypeDescriptor>::TYPE),
+                descriptor: Any(<<Value as Typed>::Descriptor>::default().kind()),
             },
             Term::Constant(value) => Term::Constant(value),
         }
@@ -591,8 +593,9 @@ impl<T: Typed> serde::Serialize for Term<T> {
             Term::Variable {
                 name, descriptor, ..
             } => {
-                let content_type = <<T as Typed>::Descriptor as TypeDescriptor>::TYPE
-                    .or_else(|| descriptor.content_type());
+                // Wire format collapses to legacy Option<ValueType>;
+                // the rich kind is not transmitted today.
+                let content_type = descriptor.kind().and_then(|k| k.shape().as_singleton());
                 TermRepr::Variable {
                     var: VarInfo {
                         name: name.clone(),
@@ -616,9 +619,10 @@ impl<'de, T: Typed> serde::Deserialize<'de> for Term<T> {
             serde_json::Value::Object(map) if map.contains_key("?") => {
                 let var: VarInfo =
                     serde_json::from_value(map["?"].clone()).map_err(DeserializeError::custom)?;
+                let kind = var.content_type.map(type_system::Type::primitive);
                 Ok(Term::Variable {
                     name: var.name,
-                    descriptor: <T as Typed>::Descriptor::from_content_type(var.content_type),
+                    descriptor: <T as Typed>::Descriptor::from_kind(kind),
                 })
             }
             serde_json::Value::Number(n) => {
@@ -644,6 +648,42 @@ impl<'de, T: Typed> serde::Deserialize<'de> for Term<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two `Term<Any>` values constructed with the same name in
+    /// independent calls hash to the same value. This is the
+    /// stability guarantee that container caches (planner plans,
+    /// rule registries) depend on.
+    #[dialog_common::test]
+    fn it_hashes_equivalent_terms_to_same_value() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn hash_of<T: Hash>(t: &T) -> u64 {
+            let mut h = DefaultHasher::new();
+            t.hash(&mut h);
+            h.finish()
+        }
+
+        let a: Term<Any> = Term::var("x");
+        let b: Term<Any> = Term::var("x");
+        assert_eq!(a, b, "structurally equivalent terms must compare equal");
+        assert_eq!(
+            hash_of(&a),
+            hash_of(&b),
+            "structurally equivalent terms must hash to the same value"
+        );
+
+        let c: Term<Any> = Term::Variable {
+            name: Some("x".into()),
+            descriptor: Some(crate::artifact::Type::String).into(),
+        };
+        let d: Term<Any> = Term::Variable {
+            name: Some("x".into()),
+            descriptor: Some(crate::artifact::Type::String).into(),
+        };
+        assert_eq!(c, d);
+        assert_eq!(hash_of(&c), hash_of(&d));
+    }
 
     #[dialog_common::test]
     fn it_serializes_and_deserializes() {
@@ -830,7 +870,7 @@ mod tests {
             param,
             Term::Variable {
                 name: Some("name".into()),
-                descriptor: Any(Some(Type::String))
+                descriptor: Some(Type::String).into(),
             }
         );
     }
@@ -843,7 +883,7 @@ mod tests {
             param,
             Term::Variable {
                 name: None,
-                descriptor: Any(Some(Type::String))
+                descriptor: Some(Type::String).into(),
             }
         );
     }
@@ -863,7 +903,7 @@ mod tests {
             param,
             Term::Variable {
                 name: Some("entity".into()),
-                descriptor: Any(Some(Type::Entity))
+                descriptor: Some(Type::Entity).into(),
             }
         );
     }
@@ -879,7 +919,7 @@ mod tests {
     fn it_serializes_any_with_type() {
         let param: Term<Any> = Term::Variable {
             name: Some("x".into()),
-            descriptor: Any(Some(Type::String)),
+            descriptor: Some(Type::String).into(),
         };
         let json = serde_json::to_value(&param).unwrap();
         assert_eq!(
@@ -990,7 +1030,8 @@ mod tests {
     fn it_displays_any_correctly() {
         assert_eq!(Term::<Any>::blank().to_string(), "_");
         assert_eq!(
-            Term::<Any>::typed_var("x", Some(Type::String)).to_string(),
+            Term::<Any>::typed_var("x", Some(type_system::Type::primitive(Type::String)))
+                .to_string(),
             "?x<String>"
         );
         assert_eq!(Term::<Any>::var("y").to_string(), "?y<Value>");
@@ -1007,7 +1048,7 @@ mod tests {
 
         let variable: Term<Any> = Term::Variable {
             name: Some("x".into()),
-            descriptor: Any(Some(Type::String)),
+            descriptor: Some(Type::String).into(),
         };
         assert!(!variable.is_blank());
         assert!(!variable.is_constant());

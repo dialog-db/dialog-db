@@ -977,8 +977,8 @@ mod tests {
     }
 
     /// Required-resolution schema declares the `is` slot as a
-    /// concrete (Definite) type — the slot demands a Present
-    /// value.
+    /// concrete (Definite) type or unknown — the slot demands a
+    /// Present value.
     #[dialog_common::test]
     fn required_resolution_schema_is_definite() {
         let q = DynamicAttributeQuery::new(
@@ -990,9 +990,11 @@ mod tests {
         );
         let schema = q.schema();
         let is = schema.get("is").expect("is field present");
+        // Untyped `is` slot reports `None` (unknown) — not
+        // Optional in the sense of set-widening.
         assert!(
-            !is.content_type.is_optional(),
-            "Required resolution must produce non-Optional schema"
+            is.content_type().is_none() || !is.content_type().unwrap().is_optional(),
+            "Required resolution must not produce Optional schema"
         );
     }
 
@@ -1009,8 +1011,9 @@ mod tests {
         );
         let schema = q.schema();
         let is = schema.get("is").expect("is field present");
+        let content = is.content_type().expect("content_type present");
         assert!(
-            is.content_type.is_optional(),
+            content.is_optional(),
             "Optional resolution must produce Optional schema"
         );
     }
@@ -1022,7 +1025,11 @@ mod tests {
     #[dialog_common::test]
     fn optional_typed_is_preserves_inner_type() {
         use crate::artifact::Type as ValueType;
-        let typed_is = Term::<Any>::typed_var("name", Some(ValueType::String));
+        use crate::type_system;
+        let typed_is = Term::<Any>::typed_var(
+            "name",
+            Some(type_system::Type::primitive(ValueType::String)),
+        );
         let q = DynamicAttributeQuery::optional(
             Term::var("the"),
             Term::var("of"),
@@ -1032,9 +1039,10 @@ mod tests {
         );
         let schema = q.schema();
         let is = schema.get("is").expect("is field present");
-        assert!(is.content_type.is_optional());
+        let content = is.content_type().expect("content_type present");
+        assert!(content.is_optional());
         assert_eq!(
-            is.content_type.shape().as_singleton(),
+            content.shape().as_singleton(),
             Some(ValueType::String),
             "Optional wrap preserves the inner primitive type"
         );

@@ -61,7 +61,7 @@ impl Equality {
             "this".into(),
             Field {
                 description: "Term that must be equal to the \"is\" term.".into(),
-                content_type: self.this.content_type().into(),
+                content_type: self.this.kind(),
                 requirement: requirement.required(),
                 cardinality: Cardinality::One,
             },
@@ -70,7 +70,7 @@ impl Equality {
             "is".into(),
             Field {
                 description: "Term that must be equal to the \"this\" term.".into(),
-                content_type: self.is.content_type().into(),
+                content_type: self.is.kind(),
                 requirement: requirement.required(),
                 cardinality: Cardinality::One,
             },
@@ -248,28 +248,17 @@ mod tests {
         );
     }
 
-    /// `Equality::schema()` declares each side's content_type
-    /// from the term's `content_type()` storage tag, lifted into
-    /// the unified `type_system::Type`. Variables of unknown type
-    /// produce anonymous variables; constants of known type
-    /// produce concrete primitives.
+    /// Untyped term sides produce `None` content_type — no
+    /// static info is available without rule-compile time
+    /// unification.
     #[dialog_common::test]
-    fn schema_lifts_unknown_term_type_to_anonymous_variable() {
-        use crate::type_system::Definite;
+    fn schema_unknown_term_yields_none() {
         let constraint = Equality::new(Term::var("x"), Term::var("y"));
         let schema = constraint.schema();
         let this_field = schema.get("this").expect("this field present");
         let is_field = schema.get("is").expect("is field present");
-        // Both terms are untyped variables, so both fields lift
-        // to anonymous variables.
-        assert!(matches!(
-            this_field.content_type.shape(),
-            Definite::Variable(_)
-        ));
-        assert!(matches!(
-            is_field.content_type.shape(),
-            Definite::Variable(_)
-        ));
+        assert!(this_field.content_type().is_none());
+        assert!(is_field.content_type().is_none());
     }
 
     /// A typed constant on one side produces a concrete primitive
@@ -280,9 +269,7 @@ mod tests {
         let constraint = Equality::new(Term::var("x"), Term::constant(42u32));
         let schema = constraint.schema();
         let is_field = schema.get("is").expect("is field present");
-        assert_eq!(
-            is_field.content_type.shape().as_singleton(),
-            Some(ValueType::UnsignedInt)
-        );
+        let content = is_field.content_type().expect("content_type present");
+        assert_eq!(content.shape().as_singleton(), Some(ValueType::UnsignedInt));
     }
 }
