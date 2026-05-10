@@ -244,6 +244,104 @@ impl_scalar!(
 
 impl Scalar for usize {}
 
+// Kind-marker trait family — classify types by *shape* for
+// compile-time bounds, orthogonal to [`Typed`] (which is the
+// mechanical "what descriptor represents this Rust type" map).
+//
+// Membership table:
+// - `ScalarType`  — atomic value types ([`Scalar`] members).
+// - `ProductType` — record/product shapes. Reserved.
+// - `VariantType` — sum/variant shapes. Reserved.
+// - `OptionalType` — `Option<T>` for `T: DefiniteType`.
+// - `AnyType`     — the dynamic top, [`Any`].
+// - `DefiniteType` — umbrella over `Scalar`/`Product`/`Variant`,
+//   the canonical "any concrete shape, not optional, not dynamic"
+//   predicate. Used as the bound on `Option<T>`'s `Typed` impl,
+//   which is what structurally rejects `Option<Option<U>>` and
+//   `Option<Any>` at compile time.
+
+/// Kind marker for atomic (scalar) shapes — types like `String`,
+/// `i32`, `Entity`. Every [`Scalar`] is `ScalarType` via the
+/// blanket impl below.
+///
+/// New code that needs a pure kind bound (without the practical
+/// `Clone + Into<Value> + ...` bag carried by [`Scalar`]) should
+/// use `ScalarType`.
+pub trait ScalarType: Typed {}
+
+impl<T: Scalar> ScalarType for T {}
+
+/// Kind marker for product (record) shapes. Reserved for future
+/// use; no types impl this trait yet, but the slot exists so that
+/// product-only generic code reads symmetrically with
+/// [`ScalarType`] and [`VariantType`].
+pub trait ProductType: Typed {}
+
+/// Kind marker for variant (sum) shapes. Reserved for future
+/// use; no types impl this trait yet.
+pub trait VariantType: Typed {}
+
+/// Kind marker for the dynamic top type, [`Any`].
+///
+/// `Any` is deliberately *not* a [`DefiniteType`]: it already
+/// admits absence implicitly (via [`Binding`](crate::Binding))
+/// and wrapping it in `Option` would be a category error. This
+/// exclusion is what makes `Option<Any>` rejected at compile time.
+pub trait AnyType: Typed {}
+
+impl AnyType for Any {}
+
+/// Kind marker for the `Option<T>` shape family.
+///
+/// `Option<T>` impls `OptionalType` for any `T: DefiniteType`.
+/// The bound on `T` is the structural fence that makes:
+///
+/// - `Option<Option<U>>` reject (nested optionality is meaningless
+///   under set-widening; `OptionalType` does not impl
+///   `DefiniteType`).
+/// - `Option<Any>` reject (`AnyType` does not impl `DefiniteType`).
+///
+/// The compile-fail doctests below prove both rejections.
+///
+/// Nested optionality is rejected:
+///
+/// ```compile_fail
+/// # use dialog_query::Term;
+/// // Option<Option<String>> does not satisfy Typed because
+/// // Option<String> is not DefiniteType.
+/// let _: Term<Option<Option<String>>> = Term::var("x");
+/// ```
+///
+/// Optional-of-Any is rejected:
+///
+/// ```compile_fail
+/// # use dialog_query::{Term, types::Any};
+/// // Option<Any> does not satisfy Typed because Any is not
+/// // DefiniteType.
+/// let _: Term<Option<Any>> = Term::var("x");
+/// ```
+pub trait OptionalType: Typed {}
+
+impl<T: Scalar> OptionalType for Option<T> {}
+
+/// Umbrella supertrait for **definite** types — any concrete shape
+/// that is not the dynamic top ([`AnyType`]) and not set-widened
+/// ([`OptionalType`]).
+///
+/// **Membership.** Every [`Scalar`] is `DefiniteType` via a
+/// blanket impl. Future products and variants will join via their
+/// own `impl … for X` lines.
+///
+/// **Where the bound is used.** This is the bound on `T` in
+/// `Option<T>`'s [`Typed`] impl, and the canonical "any concrete
+/// value type, but not Any, not Optional" predicate. Rust trait
+/// bounds compose by intersection (`T: A + B` = both), so an
+/// umbrella supertrait is the right shape for *union* of
+/// `Scalar`/`Product`/`Variant`.
+pub trait DefiniteType: Typed {}
+
+impl<T: Scalar> DefiniteType for T {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,5 +429,29 @@ mod tests {
     fn optional_of_any_passes_through_none() {
         let descriptor: OptionalOf<Any> = OptionalOf::default();
         assert!(descriptor.kind().is_none());
+    }
+
+    /// Kind-marker family is consistent: scalar types are
+    /// `ScalarType` and `DefiniteType`; `Any` is `AnyType` but not
+    /// `DefiniteType`; `Option<T>` is `OptionalType`.
+    ///
+    /// These are compile-time checks: the test body uses
+    /// function-bound helpers that only accept types that satisfy
+    /// the corresponding marker trait.
+    #[dialog_common::test]
+    fn kind_markers_classify_consistently() {
+        fn requires_scalar<T: ScalarType>() {}
+        fn requires_definite<T: DefiniteType>() {}
+        fn requires_optional<T: OptionalType>() {}
+        fn requires_any<T: AnyType>() {}
+
+        requires_scalar::<String>();
+        requires_scalar::<u32>();
+        requires_scalar::<Entity>();
+        requires_definite::<String>();
+        requires_definite::<u32>();
+        requires_optional::<Option<String>>();
+        requires_optional::<Option<u32>>();
+        requires_any::<Any>();
     }
 }
