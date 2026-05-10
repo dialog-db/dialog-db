@@ -30,12 +30,10 @@ pub use typed::StaticAttributeQuery;
 ///   premise that wants set-widening optionality at the row
 ///   layer.
 ///
-/// Schema impact: `Resolution::Optional` lifts the `is` slot's
-/// `content_type` from `Type::Definite(...)` to
-/// `Type::Optional(...)` via
-/// [`Type::wrap_optional`](crate::type_system::Type::wrap_optional),
-/// signaling to the planner and unifier that this slot may bind
-/// to Absent.
+/// Schema impact: `Resolution::Optional` widens the `is` slot's
+/// `content_type` with the `Nothing` atom via
+/// [`Type::optional`](crate::type_system::Type::optional), signaling
+/// to the planner and unifier that this slot may bind to Absent.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Resolution {

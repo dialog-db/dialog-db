@@ -6,6 +6,14 @@
 //! [`Premise`](crate::Premise), [`DeductiveRule`](crate::DeductiveRule),
 //! and the schema layer.
 //!
+//! A [`Type`] is the set of admissible value shapes a slot may
+//! bind. It is built from a [`Primitive`] bitfield (the atomic
+//! shapes, plus a `Nothing` bit for set-widened optionality) and an
+//! optional set of [`Composite`] shapes (Product records, Variant
+//! tags). The two parts compose by set-union: a value satisfies
+//! [`Type`] iff it inhabits at least one of the primitive bits or
+//! one of the composite shapes.
+//!
 //! Type variables — used for compile-time unification of rules —
 //! live in the [`unifier`] submodule, never in the user-facing
 //! [`Type`]. This split lets the user-facing types derive
@@ -19,31 +27,51 @@ pub mod unifier;
 
 use crate::artifact::Type as ValueType;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 
-/// A bitfield over [`ValueType`] variants — a set of admissible
-/// primitive shapes.
+/// A bitfield over [`ValueType`] variants plus a `Nothing` bit —
+/// the set of admissible primitive shapes.
 ///
 /// Used everywhere a "kind constraint" is needed: type variables
-/// declare their constraint as a `PrimitiveSet`, formula schemas
+/// declare their constraint as a `Primitive`, formula schemas
 /// declare per-variable constraints, and unification intersects
-/// them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct PrimitiveSet {
-    /// One bit per [`ValueType`] variant. Bit position is the
-    /// variant's discriminant in [`Self::bit_for`].
+/// them. The `Nothing` bit (position 9) is a synthetic atom with
+/// no corresponding [`ValueType`]; it marks "Absent" admissibility
+/// at the row layer — the new home for what used to be the outer
+/// `Optional` variant.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
+pub struct Primitive {
+    /// One bit per [`ValueType`] variant (positions 0-8), plus a
+    /// `Nothing` bit at position 9.
     bits: u16,
 }
 
-impl PrimitiveSet {
-    /// Empty set — no admissible types. Constructible but
-    /// rejected at unification time (an empty set means
-    /// "no shape can satisfy this constraint").
+/// Bit position for the synthetic `Nothing` atom.
+const NOTHING_BIT: u16 = 1 << 9;
+
+impl Primitive {
+    /// Empty set — no admissible shapes. Rejected at unification
+    /// time.
     pub const EMPTY: Self = Self { bits: 0 };
 
-    /// Set containing every [`ValueType`] variant.
+    /// Every concrete [`ValueType`] variant, without `Nothing`.
+    /// This is the right default for constraint widening — a
+    /// variable that "accepts anything" still demands a Present
+    /// value.
     pub const ALL: Self = Self {
         bits: 0b1_1111_1111,
     };
+
+    /// Every shape including the `Nothing` atom — the broadest
+    /// possible set, including row-level absence.
+    pub const ANY: Self = Self {
+        bits: Self::ALL.bits | NOTHING_BIT,
+    };
+
+    /// Singleton set containing only the `Nothing` atom.
+    pub const NOTHING: Self = Self { bits: NOTHING_BIT };
 
     /// Numeric primitives: `UnsignedInt`, `SignedInt`, `Float`.
     pub const NUMERIC: Self = Self {
@@ -93,6 +121,16 @@ impl PrimitiveSet {
         self.bits == 0
     }
 
+    /// Returns `true` iff `vt` is a member of this set.
+    pub fn contains(self, vt: ValueType) -> bool {
+        (self.bits & Self::bit_for(vt)) != 0
+    }
+
+    /// Returns `true` iff the `Nothing` atom is a member.
+    pub fn contains_nothing(self) -> bool {
+        (self.bits & NOTHING_BIT) != 0
+    }
+
     /// Set intersection. Returns `None` iff the result is empty.
     pub fn intersect(self, other: Self) -> Option<Self> {
         let merged = Self {
@@ -117,23 +155,19 @@ impl PrimitiveSet {
         (self.bits & other.bits) == other.bits
     }
 
-    /// Returns `true` iff `vt` is a member of this set.
-    pub fn contains(self, vt: ValueType) -> bool {
-        (self.bits & Self::bit_for(vt)) != 0
-    }
-
-    /// If this set has exactly one member, return it.
+    /// If this set has exactly one `ValueType` member (and nothing
+    /// else, not even `Nothing`), return it. A `Nothing`-only set
+    /// returns `None` — it has no `ValueType`.
     pub fn as_singleton(self) -> Option<ValueType> {
-        let count = self.bits.count_ones();
-        if count != 1 {
+        if self.bits.count_ones() != 1 {
             return None;
         }
         let pos = self.bits.trailing_zeros();
         value_type_for_bit(pos)
     }
 
-    /// Iterate over the members of this set in `ValueType`
-    /// discriminant order.
+    /// Iterate the [`ValueType`] members in discriminant order.
+    /// Does **not** yield the `Nothing` atom.
     pub fn iter(self) -> impl Iterator<Item = ValueType> {
         let bits = self.bits;
         (0..9u32).filter_map(move |pos| {
@@ -161,7 +195,7 @@ fn value_type_for_bit(pos: u32) -> Option<ValueType> {
     })
 }
 
-impl From<ValueType> for PrimitiveSet {
+impl From<ValueType> for Primitive {
     fn from(vt: ValueType) -> Self {
         Self::singleton(vt)
     }
@@ -173,99 +207,202 @@ impl From<ValueType> for Type {
     }
 }
 
-/// Schema-layer type of a value, term, or schema slot.
+/// Schema-layer type — the set of admissible value shapes a slot
+/// can bind.
 ///
-/// Two outer variants distinguish set-widening (Optional) from
-/// concrete shapes (Definite). Optionality lives at the slot
-/// layer, never inside a [`Definite`]: this keeps "nested
-/// optionality" structurally unrepresentable.
+/// A [`Type`] is the union of two parts:
+///
+/// - A [`Primitive`] bitfield carrying atomic [`ValueType`] bits
+///   plus an optional `Nothing` atom (row-level absence).
+/// - An optional non-empty set of [`Composite`] shapes for
+///   structured values (records, variants).
+///
+/// Smart constructors enforce the invariant that
+/// `Composite(_, set)` always has `!set.is_empty()`; a request to
+/// build a composite with an empty set collapses to a plain
+/// `Primitive`.
+///
+/// Composites live in a [`BTreeSet`] rather than a [`HashSet`].
+/// Two reasons:
+///
+/// 1. `Type` derives [`Hash`]. `BTreeSet` iterates in a stable
+///    `Ord`-based order, so the derived hash is canonical:
+///    `Type::Composite(p, {a, b})` and `Type::Composite(p, {b, a})`
+///    have identical hashes. `HashSet` does not implement `Hash`
+///    in std, and any hand-rolled order-independent hash would
+///    have to sort internally anyway — `BTreeSet` is that already.
+///
+/// 2. Insertion order at construction never affects equality.
+///    Building the same set via different paths (different unions,
+///    different insert orders) yields equal [`Type`]s.
+///
+/// The cost is requiring [`Ord`] on [`Composite`], [`Type`], and
+/// [`Primitive`]. The ordering is structural plumbing — it has no
+/// semantic meaning (no claim that `u32 < String`); it exists only
+/// to keep the set canonical.
 ///
 /// `Type` is fully static — no type variables, no allocation
 /// state. Deriving [`PartialEq`]/[`Eq`]/[`Hash`] is safe and
 /// produces stable values for equivalent types.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Type {
-    /// A definite shape. Subtype of `Optional(definite)` via the
-    /// `T ⊆ Optional<T>` set-widening rule.
-    Definite(Box<Definite>),
-    /// Set-widened: the wrapped shape *or*
-    /// [`Binding::Absent`](crate::Binding::Absent) at the row
-    /// layer. Wraps a [`Definite`] (not a [`Type`]) so nested
-    /// optionality is structurally impossible.
-    Optional(Box<Definite>),
+    /// Pure primitive set (no composite shapes admitted).
+    Primitive(Primitive),
+    /// Primitive set together with at least one composite shape.
+    /// Invariant: the composite set is never empty.
+    Composite(Primitive, BTreeSet<Composite>),
 }
 
-/// A concrete value shape — non-`Optional`. Static; type variables
-/// live in [`unifier::Type`], not here.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// A composite (structured) value shape. Ordered by derived
+/// [`Ord`] for stable iteration and hashing inside a [`BTreeSet`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Definite {
-    /// Atomic value type, possibly a union over several primitive
-    /// shapes.
-    Primitive(PrimitiveSet),
-    /// Sum-type placeholder. Reserved for future use; not
-    /// constructed in current code paths.
-    Variant,
-    /// Product-type placeholder. Reserved for future use; not
-    /// constructed in current code paths.
-    Product,
+pub enum Composite {
+    /// Product (record) type with named fields. Field names ordered
+    /// by [`BTreeMap`] for stable equality and hashing.
+    Product(BTreeMap<String, Type>),
+    /// Sum-type variant carrying a single label and its payload.
+    Variant {
+        /// The discriminator label.
+        label: String,
+        /// The payload type for this label.
+        value: Type,
+    },
 }
 
 impl Type {
-    /// Construct a `Type::Definite(Primitive(singleton(vt)))`.
-    pub fn primitive(vt: ValueType) -> Self {
-        Type::Definite(Box::new(Definite::Primitive(PrimitiveSet::singleton(vt))))
+    /// Construct a [`Type::Primitive`] containing the single
+    /// `ValueType`.
+    pub fn primitive(vt: ValueType) -> Type {
+        Type::Primitive(Primitive::singleton(vt))
     }
 
-    /// Construct a `Type::Optional(Primitive(singleton(vt)))`.
-    pub fn optional(vt: ValueType) -> Self {
-        Type::Optional(Box::new(Definite::Primitive(PrimitiveSet::singleton(vt))))
+    /// Construct a [`Type::Primitive`] wrapping the given bitfield.
+    pub fn primitive_set(p: Primitive) -> Type {
+        Type::Primitive(p)
     }
 
-    /// Construct a `Type::Definite(Primitive(set))`.
-    pub fn primitive_set(set: PrimitiveSet) -> Self {
-        Type::Definite(Box::new(Definite::Primitive(set)))
+    /// The type whose only inhabitant is the `Nothing` atom — the
+    /// "absent" row-layer value.
+    pub fn nothing() -> Type {
+        Type::Primitive(Primitive::NOTHING)
     }
 
-    /// Construct a `Type::Optional(Primitive(set))`.
-    pub fn optional_set(set: PrimitiveSet) -> Self {
-        Type::Optional(Box::new(Definite::Primitive(set)))
+    /// Widen this type to also admit `Nothing` — the new home for
+    /// what used to be the outer `Optional` variant. Idempotent.
+    pub fn optional(self) -> Type {
+        match self {
+            Type::Primitive(p) => Type::Primitive(p.union(Primitive::NOTHING)),
+            Type::Composite(p, c) => Type::Composite(p.union(Primitive::NOTHING), c),
+        }
     }
 
-    /// Returns `true` iff this type is set-widened with `Absent`.
+    /// Smart constructor. Collapses `Composite(p, empty)` to
+    /// `Primitive(p)`. Use this rather than building the
+    /// `Composite` variant directly.
+    pub fn composite(primitive: Primitive, composite: BTreeSet<Composite>) -> Type {
+        if composite.is_empty() {
+            Type::Primitive(primitive)
+        } else {
+            Type::Composite(primitive, composite)
+        }
+    }
+
+    /// Build a record type from named fields.
+    pub fn product(fields: BTreeMap<String, Type>) -> Type {
+        let mut set = BTreeSet::new();
+        set.insert(Composite::Product(fields));
+        Type::Composite(Primitive::EMPTY, set)
+    }
+
+    /// Build a singleton variant type from a label and payload.
+    pub fn variant(label: impl Into<String>, value: Type) -> Type {
+        let mut set = BTreeSet::new();
+        set.insert(Composite::Variant {
+            label: label.into(),
+            value,
+        });
+        Type::Composite(Primitive::EMPTY, set)
+    }
+
+    /// Set intersection over both primitive and composite parts.
+    /// Returns `None` when the result is empty — no admissible
+    /// shapes survive.
+    pub fn intersect(&self, other: &Type) -> Option<Type> {
+        let p_self = self.primitive_part();
+        let p_other = other.primitive_part();
+        let p = Primitive {
+            bits: p_self.bits & p_other.bits,
+        };
+
+        let composite_intersection: BTreeSet<Composite> =
+            match (self.composite_part(), other.composite_part()) {
+                (Some(a), Some(b)) => a.intersection(b).cloned().collect(),
+                _ => BTreeSet::new(),
+            };
+
+        if p.is_empty() && composite_intersection.is_empty() {
+            None
+        } else {
+            Some(Type::composite(p, composite_intersection))
+        }
+    }
+
+    /// Set union over both primitive and composite parts.
+    pub fn union(&self, other: &Type) -> Type {
+        let p = self.primitive_part().union(other.primitive_part());
+        let mut composites: BTreeSet<Composite> = BTreeSet::new();
+        if let Some(s) = self.composite_part() {
+            composites.extend(s.iter().cloned());
+        }
+        if let Some(s) = other.composite_part() {
+            composites.extend(s.iter().cloned());
+        }
+        Type::composite(p, composites)
+    }
+
+    /// Subtype check. Returns `true` iff every shape `other`
+    /// admits is also admitted by `self`.
+    pub fn includes(&self, other: &Type) -> bool {
+        if !self.primitive_part().includes(other.primitive_part()) {
+            return false;
+        }
+        match (self.composite_part(), other.composite_part()) {
+            (_, None) => true,
+            (None, Some(b)) => b.is_empty(),
+            (Some(a), Some(b)) => b.iter().all(|x| a.contains(x)),
+        }
+    }
+
+    /// Returns `true` iff this type admits the `Nothing` atom.
     pub fn is_optional(&self) -> bool {
-        matches!(self, Type::Optional(_))
+        self.primitive_part().contains_nothing()
     }
 
-    /// Returns the underlying [`Definite`] regardless of whether
-    /// this is `Definite` or `Optional`.
-    pub fn shape(&self) -> &Definite {
+    /// The primitive part of this type, regardless of variant.
+    pub fn primitive_part(&self) -> Primitive {
         match self {
-            Type::Definite(d) | Type::Optional(d) => d,
+            Type::Primitive(p) => *p,
+            Type::Composite(p, _) => *p,
         }
     }
 
-    /// Lift this type to set-widened (`Optional`). Idempotent.
-    pub fn wrap_optional(self) -> Self {
+    /// The composite part of this type, or `None` if the type has
+    /// only a primitive part.
+    pub fn composite_part(&self) -> Option<&BTreeSet<Composite>> {
         match self {
-            Type::Definite(d) | Type::Optional(d) => Type::Optional(d),
+            Type::Primitive(_) => None,
+            Type::Composite(_, c) => Some(c),
         }
     }
-}
 
-impl Definite {
-    /// Construct a `Definite::Primitive(singleton(vt))`.
-    pub fn primitive(vt: ValueType) -> Self {
-        Definite::Primitive(PrimitiveSet::singleton(vt))
-    }
-
-    /// If this is a primitive shape with a singleton value type,
-    /// return it. `Variant`/`Product` placeholders return `None`.
-    pub fn as_singleton(&self) -> Option<ValueType> {
+    /// Legacy storage-codec view: if this type reduces to exactly
+    /// one [`ValueType`] (no `Nothing`, no composites), return it.
+    pub fn as_value_type(&self) -> Option<ValueType> {
         match self {
-            Definite::Primitive(set) => set.as_singleton(),
-            Definite::Variant | Definite::Product => None,
+            Type::Primitive(p) => p.as_singleton(),
+            Type::Composite(_, _) => None,
         }
     }
 }
@@ -278,73 +415,99 @@ mod tests {
         Type::primitive(vt)
     }
     fn o(vt: ValueType) -> Type {
-        Type::optional(vt)
+        Type::primitive(vt).optional()
     }
 
     #[dialog_common::test]
-    fn primitive_set_singleton() {
-        let s = PrimitiveSet::singleton(ValueType::String);
+    fn primitive_singleton() {
+        let s = Primitive::singleton(ValueType::String);
         assert!(s.contains(ValueType::String));
         assert!(!s.contains(ValueType::UnsignedInt));
+        assert!(!s.contains_nothing());
         assert_eq!(s.as_singleton(), Some(ValueType::String));
     }
 
     #[dialog_common::test]
-    fn primitive_set_intersect_overlap() {
-        let s = PrimitiveSet::NUMERIC
-            .intersect(PrimitiveSet::singleton(ValueType::UnsignedInt))
+    fn primitive_intersect_overlap() {
+        let s = Primitive::NUMERIC
+            .intersect(Primitive::singleton(ValueType::UnsignedInt))
             .unwrap();
         assert_eq!(s.as_singleton(), Some(ValueType::UnsignedInt));
     }
 
     #[dialog_common::test]
-    fn primitive_set_intersect_disjoint() {
+    fn primitive_intersect_disjoint() {
         assert!(
-            PrimitiveSet::singleton(ValueType::String)
-                .intersect(PrimitiveSet::singleton(ValueType::Entity))
+            Primitive::singleton(ValueType::String)
+                .intersect(Primitive::singleton(ValueType::Entity))
                 .is_none()
         );
     }
 
     #[dialog_common::test]
-    fn primitive_set_includes_self() {
-        assert!(PrimitiveSet::ALL.includes(PrimitiveSet::ALL));
-        assert!(PrimitiveSet::NUMERIC.includes(PrimitiveSet::singleton(ValueType::UnsignedInt)));
+    fn primitive_includes_self() {
+        assert!(Primitive::ALL.includes(Primitive::ALL));
+        assert!(Primitive::NUMERIC.includes(Primitive::singleton(ValueType::UnsignedInt)));
     }
 
     #[dialog_common::test]
-    fn primitive_set_iter() {
-        let s = PrimitiveSet::NUMERIC;
+    fn primitive_iter_skips_nothing() {
+        let s = Primitive::NUMERIC.union(Primitive::NOTHING);
         let members: Vec<_> = s.iter().collect();
         assert_eq!(members.len(), 3);
         assert!(members.contains(&ValueType::UnsignedInt));
         assert!(members.contains(&ValueType::SignedInt));
         assert!(members.contains(&ValueType::Float));
+        assert!(s.contains_nothing());
     }
 
     #[dialog_common::test]
-    fn primitive_set_serde_round_trip() {
-        let s = PrimitiveSet::NUMERIC;
+    fn primitive_nothing_singleton_returns_none() {
+        assert_eq!(Primitive::NOTHING.as_singleton(), None);
+    }
+
+    #[dialog_common::test]
+    fn primitive_all_excludes_nothing() {
+        assert!(!Primitive::ALL.contains_nothing());
+        assert!(Primitive::ANY.contains_nothing());
+        assert!(Primitive::ANY.includes(Primitive::ALL));
+        assert!(Primitive::ANY.includes(Primitive::NOTHING));
+    }
+
+    #[dialog_common::test]
+    fn primitive_serde_round_trip() {
+        let s = Primitive::NUMERIC;
         let j = serde_json::to_string(&s).unwrap();
-        let back: PrimitiveSet = serde_json::from_str(&j).unwrap();
+        let back: Primitive = serde_json::from_str(&j).unwrap();
         assert_eq!(s, back);
     }
 
     #[dialog_common::test]
-    fn type_primitive_is_definite() {
+    fn type_primitive_is_not_optional() {
         let t = p(ValueType::String);
-        assert!(matches!(t, Type::Definite(_)));
+        assert!(matches!(t, Type::Primitive(_)));
         assert!(!t.is_optional());
     }
 
     #[dialog_common::test]
-    fn type_optional_wraps_definite() {
+    fn type_optional_widens_with_nothing() {
         let t = o(ValueType::String);
         assert!(t.is_optional());
+        assert_eq!(t.as_value_type(), None);
+        assert_eq!(t.primitive_part().as_singleton(), None);
+        assert!(t.primitive_part().contains(ValueType::String));
+        assert!(t.primitive_part().contains_nothing());
     }
 
     #[dialog_common::test]
-    fn type_serde_round_trip_definite() {
+    fn type_optional_is_idempotent() {
+        let a = p(ValueType::String).optional();
+        let b = a.clone().optional();
+        assert_eq!(a, b);
+    }
+
+    #[dialog_common::test]
+    fn type_serde_round_trip_primitive() {
         let t = p(ValueType::String);
         let j = serde_json::to_string(&t).unwrap();
         let back: Type = serde_json::from_str(&j).unwrap();
@@ -360,19 +523,178 @@ mod tests {
     }
 
     /// Equivalent types hash and compare equal regardless of how
-    /// they were constructed — the property the unifier-internal
-    /// split was designed to enforce.
+    /// they were constructed.
     #[dialog_common::test]
     fn type_hash_is_stable_across_constructions() {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let a = p(ValueType::String);
-        let b = Type::Definite(Box::new(Definite::primitive(ValueType::String)));
+        let b = Type::primitive_set(Primitive::singleton(ValueType::String));
         let mut ha = DefaultHasher::new();
         let mut hb = DefaultHasher::new();
         a.hash(&mut ha);
         b.hash(&mut hb);
         assert_eq!(ha.finish(), hb.finish());
         assert_eq!(a, b);
+    }
+
+    #[dialog_common::test]
+    fn product_constructor_round_trip() {
+        let mut fields = BTreeMap::new();
+        fields.insert("name".to_string(), Type::primitive(ValueType::String));
+        fields.insert("age".to_string(), Type::primitive(ValueType::UnsignedInt));
+        let a = Type::product(fields.clone());
+        let b = Type::product(fields);
+        assert_eq!(a, b);
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut ha = DefaultHasher::new();
+        let mut hb = DefaultHasher::new();
+        a.hash(&mut ha);
+        b.hash(&mut hb);
+        assert_eq!(ha.finish(), hb.finish());
+    }
+
+    #[dialog_common::test]
+    fn variant_constructor_carries_label_and_payload() {
+        let some = Type::variant("Some", Type::primitive(ValueType::String));
+        let composites = some.composite_part().unwrap();
+        assert_eq!(composites.len(), 1);
+        let first = composites.iter().next().unwrap();
+        match first {
+            Composite::Variant { label, value } => {
+                assert_eq!(label, "Some");
+                assert_eq!(*value, Type::primitive(ValueType::String));
+            }
+            other => panic!("expected Variant, got {:?}", other),
+        }
+    }
+
+    #[dialog_common::test]
+    fn intersect_two_records_same_fields() {
+        let mut fields = BTreeMap::new();
+        fields.insert("x".to_string(), Type::primitive(ValueType::String));
+        let a = Type::product(fields.clone());
+        let b = Type::product(fields);
+        let c = a.intersect(&b).expect("intersection non-empty");
+        assert_eq!(a, c);
+    }
+
+    #[dialog_common::test]
+    fn intersect_primitive_and_composite_keeps_primitive_only() {
+        let mut fields = BTreeMap::new();
+        fields.insert("x".to_string(), Type::primitive(ValueType::String));
+        let composite = Type::product(fields);
+        let prim = Type::primitive(ValueType::String);
+        // primitive part of `composite` is EMPTY; composite part of `prim` is None.
+        // Intersection of primitive parts: EMPTY ∩ {String} = EMPTY.
+        // Intersection of composite parts: None ∩ {Product{...}} = empty.
+        // Overall: empty → None.
+        assert!(prim.intersect(&composite).is_none());
+
+        // But if the composite carries a Record primitive bit, the
+        // intersection has that bit alone.
+        let composite_with_record = Type::composite(
+            Primitive::singleton(ValueType::Record),
+            composite
+                .composite_part()
+                .cloned()
+                .unwrap_or_else(BTreeSet::new),
+        );
+        let record_prim = Type::primitive(ValueType::Record);
+        let intersected = record_prim.intersect(&composite_with_record).unwrap();
+        assert_eq!(
+            intersected.primitive_part().as_singleton(),
+            Some(ValueType::Record)
+        );
+        assert!(intersected.composite_part().is_none());
+    }
+
+    #[dialog_common::test]
+    fn includes_product_subtype_extra_fields_in_subject() {
+        // A type T "includes" U iff T admits every shape U admits.
+        // For our set semantics, T includes U requires every
+        // composite of U to be present in T's composite set. So
+        // larger composite sets in T are fine; an extra Product in
+        // U not in T breaks inclusion.
+        let mut a_fields = BTreeMap::new();
+        a_fields.insert("x".to_string(), Type::primitive(ValueType::String));
+        let a = Type::product(a_fields.clone());
+
+        let mut b_fields = BTreeMap::new();
+        b_fields.insert("x".to_string(), Type::primitive(ValueType::String));
+        b_fields.insert("y".to_string(), Type::primitive(ValueType::UnsignedInt));
+        let b = Type::product(b_fields);
+
+        // a and b are different products; neither includes the other.
+        assert!(!a.includes(&b));
+        assert!(!b.includes(&a));
+
+        // a includes itself.
+        assert!(a.includes(&a));
+
+        // Union of {a, b} includes both.
+        let union = a.union(&b);
+        assert!(union.includes(&a));
+        assert!(union.includes(&b));
+    }
+
+    #[dialog_common::test]
+    fn smart_constructor_collapses_empty_composite_set() {
+        let collapsed = Type::composite(Primitive::singleton(ValueType::String), BTreeSet::new());
+        assert!(matches!(collapsed, Type::Primitive(_)));
+        assert_eq!(collapsed.as_value_type(), Some(ValueType::String));
+    }
+
+    #[dialog_common::test]
+    fn nothing_constructor_yields_only_nothing() {
+        let t = Type::nothing();
+        assert!(t.is_optional());
+        assert_eq!(t.primitive_part().as_singleton(), None);
+        assert_eq!(t.as_value_type(), None);
+    }
+
+    #[dialog_common::test]
+    fn as_value_type_unique_singleton() {
+        assert_eq!(
+            p(ValueType::String).as_value_type(),
+            Some(ValueType::String)
+        );
+        assert_eq!(o(ValueType::String).as_value_type(), None);
+        assert_eq!(
+            Type::primitive_set(Primitive::NUMERIC).as_value_type(),
+            None
+        );
+    }
+
+    /// Insertion order of composite elements does not affect
+    /// equality or hash. The [`BTreeSet`] storage canonicalizes
+    /// the set, so different paths to the same set of shapes
+    /// produce equal `Type`s with equal hashes.
+    #[dialog_common::test]
+    fn composite_set_is_insertion_order_independent() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash as HashTrait, Hasher};
+
+        fn hash_of<T: HashTrait>(t: &T) -> u64 {
+            let mut h = DefaultHasher::new();
+            t.hash(&mut h);
+            h.finish()
+        }
+
+        let a = Type::variant("A", p(ValueType::String));
+        let b = Type::variant("B", p(ValueType::UnsignedInt));
+
+        // Build the same multi-element set two different ways:
+        // ({A, B}) via a.union(b), and ({B, A}) via b.union(a).
+        let ab = a.union(&b);
+        let ba = b.union(&a);
+
+        assert_eq!(ab, ba, "set equality is order-independent");
+        assert_eq!(
+            hash_of(&ab),
+            hash_of(&ba),
+            "set hash is order-independent"
+        );
     }
 }

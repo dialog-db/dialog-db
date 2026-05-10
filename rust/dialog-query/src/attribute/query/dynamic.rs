@@ -977,8 +977,8 @@ mod tests {
     }
 
     /// Required-resolution schema declares the `is` slot as a
-    /// concrete (Definite) type or unknown — the slot demands a
-    /// Present value.
+    /// concrete type or unknown — the slot demands a Present
+    /// value (no `Nothing` bit).
     #[dialog_common::test]
     fn required_resolution_schema_is_definite() {
         let q = DynamicAttributeQuery::new(
@@ -1020,8 +1020,7 @@ mod tests {
 
     /// When the `is` term is a typed `Term<Any>` carrying a known
     /// value type, Optional resolution produces a schema whose
-    /// `is` slot is `Type::Optional(Primitive(vt))` — preserving
-    /// the underlying type through the Optional wrap.
+    /// `is` slot admits both that type and `Nothing`.
     #[dialog_common::test]
     fn optional_typed_is_preserves_inner_type() {
         use crate::artifact::Type as ValueType;
@@ -1041,9 +1040,8 @@ mod tests {
         let is = schema.get("is").expect("is field present");
         let content = is.content_type().expect("content_type present");
         assert!(content.is_optional());
-        assert_eq!(
-            content.shape().as_singleton(),
-            Some(ValueType::String),
+        assert!(
+            content.primitive_part().contains(ValueType::String),
             "Optional wrap preserves the inner primitive type"
         );
     }

@@ -7,7 +7,7 @@
 //! [`type_system::Type`] enum rather than the legacy
 //! `Option<artifact::Type>`. The conversion between them is
 //! lossless: `None` becomes a fresh anonymous type variable,
-//! `Some(vt)` becomes `Type::Definite(Primitive(singleton(vt)))`.
+//! `Some(vt)` becomes `Type::Primitive(singleton(vt))`.
 
 use crate::type_system;
 use serde::{Deserialize, Serialize};
@@ -323,7 +323,7 @@ mod tests {
             Requirement::Required(None),
         );
         assert_eq!(
-            f.content_type().unwrap().shape().as_singleton(),
+            f.content_type().unwrap().as_value_type(),
             Some(ValueType::Boolean)
         );
         assert!(matches!(f.requirement(), Requirement::Required(_)));

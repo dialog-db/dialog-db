@@ -313,7 +313,7 @@ mod tests {
     /// `From<&Cells> for Schema` lifts each cell's
     /// `Option<Type>` content_type into the unified
     /// `Option<type_system::Type>`. Typed cells produce
-    /// `Some(Definite(Primitive(vt)))`; untyped cells produce
+    /// `Some(Primitive(singleton(vt)))`; untyped cells produce
     /// `None` (unknown).
     #[dialog_common::test]
     fn schema_from_cells_lifts_content_types() {
@@ -326,7 +326,7 @@ mod tests {
 
         let name = schema.get("name").expect("name field present");
         let content = name.content_type().expect("name kind present");
-        assert_eq!(content.shape().as_singleton(), Some(Type::String));
+        assert_eq!(content.as_value_type(), Some(Type::String));
 
         let untyped = schema.get("untyped").expect("untyped field present");
         assert!(untyped.content_type().is_none());

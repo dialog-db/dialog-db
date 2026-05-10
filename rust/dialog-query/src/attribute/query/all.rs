@@ -193,16 +193,15 @@ impl AttributeQueryAll {
 
         // Pull the kind from the `is` term. `None` means "no
         // static info" — the unifier resolves at rule-compile
-        // time. For `Optional` resolution, the slot must carry an
-        // Optional-shaped kind so the planner sees set-widening
-        // even when the underlying primitive shape is unknown.
-        use crate::type_system::PrimitiveSet;
+        // time. For `Optional` resolution, the slot must admit the
+        // `Nothing` atom so the planner sees set-widening even
+        // when the underlying primitive shape is unknown.
         let is_content = match (self.is.kind(), self.resolution) {
             (Some(k), Resolution::Required) => Some(k),
-            (Some(k), Resolution::Optional) => Some(k.wrap_optional()),
+            (Some(k), Resolution::Optional) => Some(k.optional()),
             (None, Resolution::Required) => None,
             (None, Resolution::Optional) => {
-                Some(type_system::Type::optional_set(PrimitiveSet::ALL))
+                Some(type_system::Type::primitive_set(type_system::Primitive::ALL).optional())
             }
         };
         schema.insert(
@@ -544,10 +543,9 @@ mod tests {
     }
 
     /// `AttributeQueryAll::schema()` declares the `the` slot as
-    /// `Type::Definite(Primitive(Symbol))`.
+    /// a singleton primitive over `Symbol`.
     #[dialog_common::test]
-    fn schema_the_slot_is_definite_symbol() {
-        use crate::type_system::Definite;
+    fn schema_the_slot_is_primitive_symbol() {
         let query = AttributeQueryAll::new(
             Term::var("the"),
             Term::var("of"),
@@ -558,14 +556,14 @@ mod tests {
         let the = schema.get("the").expect("the field present");
         let content = the.content_type().expect("symbol kind present");
         assert!(!content.is_optional());
-        assert_eq!(content.shape().as_singleton(), Some(Type::Symbol));
-        assert!(matches!(content.shape(), Definite::Primitive(_)));
+        assert_eq!(content.as_value_type(), Some(Type::Symbol));
+        assert!(matches!(content, type_system::Type::Primitive(_)));
     }
 
     /// `AttributeQueryAll::schema()` declares the `of` slot as
-    /// `Type::Definite(Primitive(Entity))`.
+    /// a singleton primitive over `Entity`.
     #[dialog_common::test]
-    fn schema_of_slot_is_definite_entity() {
+    fn schema_of_slot_is_primitive_entity() {
         let query = AttributeQueryAll::new(
             Term::var("the"),
             Term::var("of"),
@@ -575,7 +573,7 @@ mod tests {
         let schema = query.schema();
         let of = schema.get("of").expect("of field present");
         let content = of.content_type().expect("entity kind present");
-        assert_eq!(content.shape().as_singleton(), Some(Type::Entity));
+        assert_eq!(content.as_value_type(), Some(Type::Entity));
     }
 
     /// `AttributeQueryAll::schema()` declares the `is` slot as

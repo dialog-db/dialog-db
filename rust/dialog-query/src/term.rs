@@ -187,7 +187,7 @@ impl<T: Typed> Term<T> {
     ///
     /// For variables: delegates to the descriptor's `kind()`.
     /// For constants: lifts the stored value's type into a
-    /// `Type::Definite(Primitive(...))`.
+    /// singleton [`type_system::Type::Primitive`].
     pub fn kind(&self) -> Option<type_system::Type> {
         match self {
             Term::Variable { descriptor, .. } => descriptor.kind(),
@@ -195,11 +195,11 @@ impl<T: Typed> Term<T> {
         }
     }
 
-    /// Legacy view: collapse the unified kind to its singleton
-    /// primitive. Returns `None` for unknown or non-singleton
-    /// shapes.
+    /// Legacy storage-codec view: collapse the unified kind to its
+    /// singleton primitive. Returns `None` for unknown or
+    /// non-singleton shapes.
     pub fn content_type(&self) -> Option<Type> {
-        self.kind().and_then(|k| k.shape().as_singleton())
+        self.kind().and_then(|k| k.as_value_type())
     }
 
     /// Get the constant value if this term is a constant.
@@ -265,7 +265,7 @@ where
                 name: Some(name),
                 descriptor,
             } => {
-                if let Some(data_type) = descriptor.kind().and_then(|k| k.shape().as_singleton()) {
+                if let Some(data_type) = descriptor.kind().and_then(|k| k.as_value_type()) {
                     write!(f, "?{}<{:?}>", name, data_type)
                 } else {
                     write!(f, "?{}<Value>", name)
@@ -563,13 +563,17 @@ impl<T: Scalar> From<Term<T>> for Term<Value> {
     }
 }
 
-/// Serde helper for the variable inner object: `{"name": "x", "type": "Text"}`.
+/// Serde helper for the variable inner object: `{"name": "x", "type": <type_system::Type>}`.
+///
+/// The `type` field carries the full unified [`type_system::Type`]
+/// rather than a legacy [`ValueType`](Type) — `None` denotes an
+/// "untyped" variable.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct VarInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
-    content_type: Option<Type>,
+    content_type: Option<type_system::Type>,
 }
 
 /// Serde helper enum for `Term<T>`.
@@ -592,17 +596,12 @@ impl<T: Typed> serde::Serialize for Term<T> {
         let repr = match self {
             Term::Variable {
                 name, descriptor, ..
-            } => {
-                // Wire format collapses to legacy Option<ValueType>;
-                // the rich kind is not transmitted today.
-                let content_type = descriptor.kind().and_then(|k| k.shape().as_singleton());
-                TermRepr::Variable {
-                    var: VarInfo {
-                        name: name.clone(),
-                        content_type,
-                    },
-                }
-            }
+            } => TermRepr::Variable {
+                var: VarInfo {
+                    name: name.clone(),
+                    content_type: descriptor.kind(),
+                },
+            },
             Term::Constant(value) => TermRepr::Constant(value.clone()),
         };
         repr.serialize(serializer)
@@ -619,10 +618,9 @@ impl<'de, T: Typed> serde::Deserialize<'de> for Term<T> {
             serde_json::Value::Object(map) if map.contains_key("?") => {
                 let var: VarInfo =
                     serde_json::from_value(map["?"].clone()).map_err(DeserializeError::custom)?;
-                let kind = var.content_type.map(type_system::Type::primitive);
                 Ok(Term::Variable {
                     name: var.name,
-                    descriptor: <T as Typed>::Descriptor::from_kind(kind),
+                    descriptor: <T as Typed>::Descriptor::from_kind(var.content_type),
                 })
             }
             serde_json::Value::Number(n) => {
@@ -921,9 +919,13 @@ mod tests {
             descriptor: Some(Type::String).into(),
         };
         let json = serde_json::to_value(&param).unwrap();
+        // The wire format now carries the full unified type;
+        // a singleton String primitive serializes as the bitfield.
+        let expected_type = serde_json::to_value(type_system::Type::primitive(Type::String))
+            .expect("type serializes");
         assert_eq!(
             json,
-            serde_json::json!({"?": {"name": "x", "type": "Text"}})
+            serde_json::json!({"?": {"name": "x", "type": expected_type}})
         );
     }
 
@@ -953,9 +955,12 @@ mod tests {
 
     #[dialog_common::test]
     fn it_deserializes_any_with_type() {
-        let json = serde_json::json!({"?": {"name": "x", "type": "Text"}});
+        let type_value = serde_json::to_value(type_system::Type::primitive(Type::String))
+            .expect("type serializes");
+        let json = serde_json::json!({"?": {"name": "x", "type": type_value}});
         let param: Term<Any> = serde_json::from_value(json).unwrap();
         assert_eq!(param.name(), Some("x"));
+        assert_eq!(param.content_type(), Some(Type::String));
     }
 
     #[dialog_common::test]

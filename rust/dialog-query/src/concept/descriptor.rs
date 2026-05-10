@@ -1282,7 +1282,7 @@ mod tests {
         let name = schema.get("name").expect("name field present");
         let content = name.content_type().expect("content_type present");
         assert!(!content.is_optional());
-        assert_eq!(content.shape().as_singleton(), Some(Type::String));
+        assert_eq!(content.as_value_type(), Some(Type::String));
     }
 
     /// An attribute descriptor with `None` content type produces
@@ -1299,7 +1299,7 @@ mod tests {
     }
 
     /// The synthesized `this` field always declares
-    /// `Type::Definite(Primitive(Entity))`.
+    /// a singleton primitive over `Entity`.
     #[dialog_common::test]
     fn schema_from_concept_synthesizes_this_as_entity() {
         let descriptor = ConceptDescriptor::from(vec![(
@@ -1314,6 +1314,6 @@ mod tests {
         let schema = Schema::from(&descriptor);
         let this = schema.get("this").expect("this field present");
         let content = this.content_type().expect("entity kind present");
-        assert_eq!(content.shape().as_singleton(), Some(Type::Entity));
+        assert_eq!(content.as_value_type(), Some(Type::Entity));
     }
 }

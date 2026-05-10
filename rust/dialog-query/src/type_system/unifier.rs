@@ -11,8 +11,8 @@
 //! and [`Context::infer`].
 
 use crate::artifact::Type as ValueType;
+use crate::type_system::Primitive;
 use crate::type_system::Type as StaticType;
-use crate::type_system::{Definite, PrimitiveSet};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -38,13 +38,13 @@ impl Type {
     }
 
     /// Build a static primitive set, wrapped for unification.
-    pub fn primitive_set(set: PrimitiveSet) -> Self {
+    pub fn primitive_set(set: Primitive) -> Self {
         Type::Static(StaticType::primitive_set(set))
     }
 
     /// Build a static optional primitive, wrapped for unification.
     pub fn optional(vt: ValueType) -> Self {
-        Type::Static(StaticType::optional(vt))
+        Type::Static(StaticType::primitive(vt).optional())
     }
 }
 
@@ -84,9 +84,9 @@ pub enum UnifyError {
     #[error("constraint conflict between {left:?} and {right:?}")]
     ConstraintConflict {
         /// The narrower side.
-        left: PrimitiveSet,
+        left: Primitive,
         /// The other narrower side.
-        right: PrimitiveSet,
+        right: Primitive,
     },
     /// Occurs check: unifying a variable with a type that
     /// transitively contains the variable would produce an
@@ -103,7 +103,7 @@ pub enum UnifyError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeScheme {
     /// Quantified variables and their constraints.
-    pub quantified: Vec<(SchemeVarName, PrimitiveSet)>,
+    pub quantified: Vec<(SchemeVarName, Primitive)>,
     /// The scheme body, referencing quantified variables by name.
     pub body: SchemeBody,
 }
@@ -129,20 +129,24 @@ pub enum SchemeBody {
     Type(SchemeType),
 }
 
-/// A type expression inside a [`TypeScheme`].
+/// A type expression inside a [`TypeScheme`]. The `optional` flag
+/// requests set-widening (adds the `Nothing` bit) when the scheme
+/// is instantiated to a static type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchemeType {
-    /// `Definite(SchemeDefinite)`.
-    Definite(Box<SchemeDefinite>),
-    /// `Optional(SchemeDefinite)` — set-widened slot.
-    Optional(Box<SchemeDefinite>),
+    /// Required slot — produces a plain primitive after
+    /// instantiation.
+    Required(Box<SchemeShape>),
+    /// Optional slot — produces a primitive set widened with
+    /// `Nothing` after instantiation.
+    Optional(Box<SchemeShape>),
 }
 
-/// `Definite` shape inside a [`TypeScheme`].
+/// Primitive or variable shape inside a [`TypeScheme`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SchemeDefinite {
+pub enum SchemeShape {
     /// Concrete primitive set — no variable.
-    Primitive(PrimitiveSet),
+    Primitive(Primitive),
     /// Reference to a quantified variable by name.
     Variable(SchemeVarName),
 }
@@ -156,7 +160,7 @@ pub struct Context {
     /// type. Updated in-place by [`Self::unify`].
     substitution: HashMap<VarId, Type>,
     /// Per-variable primitive constraint.
-    constraints: HashMap<VarId, PrimitiveSet>,
+    constraints: HashMap<VarId, Primitive>,
     /// Lexically-scoped name → `VarId` map; ensures that the same
     /// name within a scope refers to the same variable.
     names: HashMap<String, VarId>,
@@ -171,7 +175,7 @@ impl Context {
     }
 
     /// Allocate a fresh `VarId` with the given constraint.
-    pub fn fresh(&mut self, constraint: PrimitiveSet) -> VarId {
+    pub fn fresh(&mut self, constraint: Primitive) -> VarId {
         let id = VarId(self.next_id);
         self.next_id += 1;
         self.constraints.insert(id, constraint);
@@ -179,9 +183,9 @@ impl Context {
     }
 
     /// Allocate a fresh anonymous variable type with constraint
-    /// [`PrimitiveSet::ALL`].
+    /// [`Primitive::ALL`].
     pub fn fresh_var(&mut self) -> Type {
-        Type::Variable(self.fresh(PrimitiveSet::ALL))
+        Type::Variable(self.fresh(Primitive::ALL))
     }
 
     /// Look up or allocate the `VarId` associated with a name in
@@ -191,19 +195,19 @@ impl Context {
         if let Some(id) = self.names.get(name) {
             return *id;
         }
-        let id = self.fresh(PrimitiveSet::ALL);
+        let id = self.fresh(Primitive::ALL);
         self.names.insert(name.to_string(), id);
         id
     }
 
     /// Look up the constraint for a variable. Returns
-    /// [`PrimitiveSet::ALL`] if the variable is unknown to this
+    /// [`Primitive::ALL`] if the variable is unknown to this
     /// context.
-    pub fn constraint(&self, var: VarId) -> PrimitiveSet {
+    pub fn constraint(&self, var: VarId) -> Primitive {
         self.constraints
             .get(&var)
             .copied()
-            .unwrap_or(PrimitiveSet::ALL)
+            .unwrap_or(Primitive::ALL)
     }
 
     /// Materialize a [`Type`] for a slot from optional name and
@@ -262,7 +266,7 @@ impl Context {
                 let cx = self.constraint(x);
                 let p = primitive_set_of(&s).ok_or(UnifyError::ConstraintConflict {
                     left: cx,
-                    right: PrimitiveSet::EMPTY,
+                    right: Primitive::EMPTY,
                 })?;
                 let merged = cx
                     .intersect(p)
@@ -274,12 +278,12 @@ impl Context {
             }
             (Type::Static(a), Type::Static(b)) => {
                 let pa = primitive_set_of(&a).ok_or(UnifyError::ConstraintConflict {
-                    left: PrimitiveSet::EMPTY,
-                    right: PrimitiveSet::EMPTY,
+                    left: Primitive::EMPTY,
+                    right: Primitive::EMPTY,
                 })?;
                 let pb = primitive_set_of(&b).ok_or(UnifyError::ConstraintConflict {
                     left: pa,
-                    right: PrimitiveSet::EMPTY,
+                    right: Primitive::EMPTY,
                 })?;
                 pa.intersect(pb)
                     .ok_or(UnifyError::ConstraintConflict {
@@ -306,14 +310,13 @@ impl Context {
     }
 }
 
-/// Extract the primitive set of a static type, ignoring
-/// optionality at the unifier layer. Returns `None` for the
-/// (currently unconstructible) `Variant`/`Product` placeholders.
-fn primitive_set_of(ty: &StaticType) -> Option<PrimitiveSet> {
-    match ty.shape() {
-        Definite::Primitive(set) => Some(*set),
-        Definite::Variant | Definite::Product => None,
-    }
+/// Extract the primitive set of a static type. For composite-only
+/// types (no primitive bits and no admissible singleton) returns
+/// `None`. The unifier currently operates over the primitive part
+/// alone; composite-only constraints are reserved for future use.
+fn primitive_set_of(ty: &StaticType) -> Option<Primitive> {
+    let p = ty.primitive_part();
+    if p.is_empty() { None } else { Some(p) }
 }
 
 fn instantiate_body(body: &SchemeBody, sub: &HashMap<SchemeVarName, VarId>) -> InstantiatedBody {
@@ -330,26 +333,22 @@ fn instantiate_body(body: &SchemeBody, sub: &HashMap<SchemeVarName, VarId>) -> I
 
 fn instantiate_type(ty: &SchemeType, sub: &HashMap<SchemeVarName, VarId>) -> Type {
     match ty {
-        SchemeType::Definite(d) => instantiate_definite(d, sub, false),
-        SchemeType::Optional(d) => instantiate_definite(d, sub, true),
+        SchemeType::Required(d) => instantiate_shape(d, sub, false),
+        SchemeType::Optional(d) => instantiate_shape(d, sub, true),
     }
 }
 
-fn instantiate_definite(
-    d: &SchemeDefinite,
-    sub: &HashMap<SchemeVarName, VarId>,
-    optional: bool,
-) -> Type {
+fn instantiate_shape(d: &SchemeShape, sub: &HashMap<SchemeVarName, VarId>, optional: bool) -> Type {
     match d {
-        SchemeDefinite::Primitive(p) => {
+        SchemeShape::Primitive(p) => {
             let static_ty = if optional {
-                StaticType::optional_set(*p)
+                StaticType::primitive_set(*p).optional()
             } else {
                 StaticType::primitive_set(*p)
             };
             Type::Static(static_ty)
         }
-        SchemeDefinite::Variable(name) => Type::Variable(
+        SchemeShape::Variable(name) => Type::Variable(
             *sub.get(name)
                 .expect("scheme references unquantified variable"),
         ),
@@ -386,16 +385,16 @@ mod tests {
     #[dialog_common::test]
     fn fresh_variables_are_distinct() {
         let mut ctx = Context::new();
-        let a = ctx.fresh(PrimitiveSet::ALL);
-        let b = ctx.fresh(PrimitiveSet::ALL);
+        let a = ctx.fresh(Primitive::ALL);
+        let b = ctx.fresh(Primitive::ALL);
         assert_ne!(a, b);
     }
 
     #[dialog_common::test]
     fn fresh_records_constraint() {
         let mut ctx = Context::new();
-        let a = ctx.fresh(PrimitiveSet::NUMERIC);
-        assert_eq!(ctx.constraint(a), PrimitiveSet::NUMERIC);
+        let a = ctx.fresh(Primitive::NUMERIC);
+        assert_eq!(ctx.constraint(a), Primitive::NUMERIC);
     }
 
     #[dialog_common::test]
@@ -415,13 +414,13 @@ mod tests {
     #[dialog_common::test]
     fn unify_variable_with_concrete_substitutes() {
         let mut ctx = Context::new();
-        let v = ctx.fresh(PrimitiveSet::NUMERIC);
+        let v = ctx.fresh(Primitive::NUMERIC);
         ctx.unify(&Type::Variable(v), &p(ValueType::UnsignedInt))
             .unwrap();
         let resolved = ctx.apply(&Type::Variable(v));
         match resolved {
             Type::Static(s) => {
-                assert_eq!(s.shape().as_singleton(), Some(ValueType::UnsignedInt));
+                assert_eq!(s.as_value_type(), Some(ValueType::UnsignedInt));
             }
             other => panic!("expected static, got {:?}", other),
         }
@@ -430,7 +429,7 @@ mod tests {
     #[dialog_common::test]
     fn unify_variable_with_concrete_outside_constraint_fails() {
         let mut ctx = Context::new();
-        let v = ctx.fresh(PrimitiveSet::NUMERIC);
+        let v = ctx.fresh(Primitive::NUMERIC);
         let result = ctx.unify(&Type::Variable(v), &p(ValueType::String));
         assert!(matches!(result, Err(UnifyError::ConstraintConflict { .. })));
     }
@@ -438,16 +437,13 @@ mod tests {
     #[dialog_common::test]
     fn unify_variable_constraint_propagates() {
         let mut ctx = Context::new();
-        let v = ctx.fresh(PrimitiveSet::NUMERIC);
+        let v = ctx.fresh(Primitive::NUMERIC);
         let v_ty = Type::Variable(v);
-        let comparable = Type::primitive_set(PrimitiveSet::COMPARABLE);
+        let comparable = Type::primitive_set(Primitive::COMPARABLE);
         ctx.unify(&v_ty, &comparable).unwrap();
         let resolved = ctx.apply(&v_ty);
         match resolved {
-            Type::Static(s) => match s.shape() {
-                Definite::Primitive(set) => assert_eq!(*set, PrimitiveSet::NUMERIC),
-                other => panic!("expected primitive, got {:?}", other),
-            },
+            Type::Static(s) => assert_eq!(s.primitive_part(), Primitive::NUMERIC),
             other => panic!("expected static, got {:?}", other),
         }
     }
@@ -455,18 +451,18 @@ mod tests {
     #[dialog_common::test]
     fn unify_two_variables_intersects_constraints() {
         let mut ctx = Context::new();
-        let a = ctx.fresh(PrimitiveSet::NUMERIC);
-        let b = ctx.fresh(PrimitiveSet::COMPARABLE);
+        let a = ctx.fresh(Primitive::NUMERIC);
+        let b = ctx.fresh(Primitive::COMPARABLE);
         ctx.unify(&Type::Variable(a), &Type::Variable(b)).unwrap();
-        assert_eq!(ctx.constraint(a), PrimitiveSet::NUMERIC);
-        assert_eq!(ctx.constraint(b), PrimitiveSet::NUMERIC);
+        assert_eq!(ctx.constraint(a), Primitive::NUMERIC);
+        assert_eq!(ctx.constraint(b), Primitive::NUMERIC);
     }
 
     #[dialog_common::test]
     fn unify_two_variables_disjoint_fails() {
         let mut ctx = Context::new();
-        let a = ctx.fresh(PrimitiveSet::NUMERIC);
-        let b = ctx.fresh(PrimitiveSet::singleton(ValueType::String));
+        let a = ctx.fresh(Primitive::NUMERIC);
+        let b = ctx.fresh(Primitive::singleton(ValueType::String));
         let result = ctx.unify(&Type::Variable(a), &Type::Variable(b));
         assert!(matches!(result, Err(UnifyError::ConstraintConflict { .. })));
     }
@@ -474,8 +470,8 @@ mod tests {
     #[dialog_common::test]
     fn chained_unification_propagates() {
         let mut ctx = Context::new();
-        let t = ctx.fresh(PrimitiveSet::NUMERIC);
-        let u = ctx.fresh(PrimitiveSet::NUMERIC);
+        let t = ctx.fresh(Primitive::NUMERIC);
+        let u = ctx.fresh(Primitive::NUMERIC);
         ctx.unify(&Type::Variable(t), &Type::Variable(u)).unwrap();
         ctx.unify(&Type::Variable(t), &p(ValueType::UnsignedInt))
             .unwrap();
@@ -483,8 +479,8 @@ mod tests {
         let u_resolved = ctx.apply(&Type::Variable(u));
         match (t_resolved, u_resolved) {
             (Type::Static(t), Type::Static(u)) => {
-                assert_eq!(t.shape().as_singleton(), Some(ValueType::UnsignedInt));
-                assert_eq!(u.shape().as_singleton(), Some(ValueType::UnsignedInt));
+                assert_eq!(t.as_value_type(), Some(ValueType::UnsignedInt));
+                assert_eq!(u.as_value_type(), Some(ValueType::UnsignedInt));
             }
             other => panic!("unexpected: {:?}", other),
         }
@@ -506,25 +502,19 @@ mod tests {
 
     fn sum_scheme() -> TypeScheme {
         TypeScheme {
-            quantified: vec![(SchemeVarName::new("T"), PrimitiveSet::NUMERIC)],
+            quantified: vec![(SchemeVarName::new("T"), Primitive::NUMERIC)],
             body: SchemeBody::Schema(vec![
                 (
                     "left".into(),
-                    SchemeType::Definite(Box::new(SchemeDefinite::Variable(SchemeVarName::new(
-                        "T",
-                    )))),
+                    SchemeType::Required(Box::new(SchemeShape::Variable(SchemeVarName::new("T")))),
                 ),
                 (
                     "right".into(),
-                    SchemeType::Definite(Box::new(SchemeDefinite::Variable(SchemeVarName::new(
-                        "T",
-                    )))),
+                    SchemeType::Required(Box::new(SchemeShape::Variable(SchemeVarName::new("T")))),
                 ),
                 (
                     "out".into(),
-                    SchemeType::Definite(Box::new(SchemeDefinite::Variable(SchemeVarName::new(
-                        "T",
-                    )))),
+                    SchemeType::Required(Box::new(SchemeShape::Variable(SchemeVarName::new("T")))),
                 ),
             ]),
         }
@@ -539,8 +529,8 @@ mod tests {
         let t1 = i1.variables.get(&SchemeVarName::new("T")).copied().unwrap();
         let t2 = i2.variables.get(&SchemeVarName::new("T")).copied().unwrap();
         assert_ne!(t1, t2);
-        assert_eq!(ctx.constraint(t1), PrimitiveSet::NUMERIC);
-        assert_eq!(ctx.constraint(t2), PrimitiveSet::NUMERIC);
+        assert_eq!(ctx.constraint(t1), Primitive::NUMERIC);
+        assert_eq!(ctx.constraint(t2), Primitive::NUMERIC);
     }
 
     #[dialog_common::test]
@@ -578,7 +568,7 @@ mod tests {
             let resolved = ctx.apply(ty);
             match resolved {
                 Type::Static(s) => assert_eq!(
-                    s.shape().as_singleton(),
+                    s.as_value_type(),
                     Some(ValueType::UnsignedInt),
                     "expected u32 after unification"
                 ),

@@ -264,12 +264,12 @@ mod tests {
     /// A typed constant on one side produces a concrete primitive
     /// for that field's content_type.
     #[dialog_common::test]
-    fn schema_lifts_typed_constant_to_definite_primitive() {
+    fn schema_lifts_typed_constant_to_primitive() {
         use crate::artifact::Type as ValueType;
         let constraint = Equality::new(Term::var("x"), Term::constant(42u32));
         let schema = constraint.schema();
         let is_field = schema.get("is").expect("is field present");
         let content = is_field.content_type().expect("content_type present");
-        assert_eq!(content.shape().as_singleton(), Some(ValueType::UnsignedInt));
+        assert_eq!(content.as_value_type(), Some(ValueType::UnsignedInt));
     }
 }

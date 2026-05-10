@@ -14,8 +14,8 @@
 //! - [`Any`] — a descriptor that carries a runtime
 //!   `Option<type_system::Type>`. Used for type-erased terms.
 //! - [`OptionalOf`] — a wrapper descriptor for `Term<Option<U>>`.
-//!   Lifts the inner descriptor's `Type::Definite(...)` into
-//!   `Type::Optional(...)`.
+//!   Widens the inner descriptor's kind with the `Nothing` atom via
+//!   [`type_system::Type::optional`].
 
 use crate::type_system;
 use dialog_common::ConditionalSend;
@@ -158,27 +158,18 @@ impl From<Option<Type>> for Any {
     }
 }
 
-/// Wrapper descriptor lifting an inner [`TypeDescriptor`] into a
-/// set-widened (Optional) shape.
-///
-/// Used by `Term<Option<U>>` to report its kind as
-/// `Type::Optional(...)` based on the inner descriptor's
-/// `Type::Definite(...)`.
+/// Wrapper descriptor widening an inner [`TypeDescriptor`]'s kind
+/// with the `Nothing` atom — used by `Term<Option<U>>`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct OptionalOf<D: TypeDescriptor>(PhantomData<D>);
 
 impl<D: TypeDescriptor> TypeDescriptor for OptionalOf<D> {
     const TYPE: Option<Type> = D::TYPE;
 
-    /// Lift the inner descriptor's `kind()` into `Optional`.
-    /// `Some(Type::Definite(d)) → Some(Type::Optional(d))`.
-    /// `Some(Type::Optional(d))` passes through.
-    /// `None → None`.
+    /// Widen the inner descriptor's `kind()` with the `Nothing`
+    /// atom via [`type_system::Type::optional`]. `None → None`.
     fn kind(&self) -> Option<type_system::Type> {
-        D::default().kind().map(|k| match k {
-            type_system::Type::Definite(d) => type_system::Type::Optional(d),
-            other => other,
-        })
+        D::default().kind().map(|k| k.optional())
     }
 }
 
@@ -256,27 +247,19 @@ impl Scalar for usize {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::type_system::Definite;
 
-    /// `Text::kind()` reports `Some(Type::Definite(Primitive(String)))`.
-    #[test]
-    fn text_descriptor_kind_is_definite_string() {
+    /// `Text::kind()` reports `Some(Type::Primitive({String}))`.
+    #[dialog_common::test]
+    fn text_descriptor_kind_is_primitive_string() {
         let kind = Text.kind().expect("Text has a static kind");
-        match kind {
-            type_system::Type::Definite(d) => match *d {
-                Definite::Primitive(set) => {
-                    assert_eq!(set.as_singleton(), Some(Type::String));
-                }
-                other => panic!("expected Primitive, got {:?}", other),
-            },
-            other => panic!("expected Definite, got {:?}", other),
-        }
+        assert_eq!(kind.as_value_type(), Some(Type::String));
+        assert!(!kind.is_optional());
     }
 
     /// Each named ZST descriptor reports the right primitive.
-    #[test]
+    #[dialog_common::test]
     fn named_descriptors_report_their_primitives() {
-        let to_singleton = |k: Option<type_system::Type>| k.unwrap().shape().as_singleton();
+        let to_singleton = |k: Option<type_system::Type>| k.unwrap().as_value_type();
         assert_eq!(to_singleton(Text.kind()), Some(Type::String));
         assert_eq!(to_singleton(Boolean.kind()), Some(Type::Boolean));
         assert_eq!(
@@ -292,23 +275,23 @@ mod tests {
     }
 
     /// `Any(Some(Type::primitive(vt)))` reports the wrapped kind.
-    #[test]
-    fn any_descriptor_with_tag_reports_definite() {
+    #[dialog_common::test]
+    fn any_descriptor_with_tag_reports_primitive() {
         let descriptor = Any(Some(type_system::Type::primitive(Type::Entity)));
         let kind = descriptor.kind().expect("kind present");
         assert!(!kind.is_optional());
-        assert_eq!(kind.shape().as_singleton(), Some(Type::Entity));
+        assert_eq!(kind.as_value_type(), Some(Type::Entity));
     }
 
     /// `Any(None)` reports `None` — no static info.
-    #[test]
+    #[dialog_common::test]
     fn any_descriptor_without_tag_reports_none() {
         let descriptor = Any(None);
         assert!(descriptor.kind().is_none());
     }
 
     /// `Any::default()` yields `Any(None)`.
-    #[test]
+    #[dialog_common::test]
     fn any_default_is_none() {
         let descriptor = Any::default();
         assert_eq!(descriptor, Any(None));
@@ -316,7 +299,7 @@ mod tests {
     }
 
     /// `From<Option<Type>> for Any` lifts a legacy storage tag.
-    #[test]
+    #[dialog_common::test]
     fn from_option_value_type_lifts_into_any() {
         let a: Any = Some(Type::String).into();
         assert_eq!(a.kind(), Some(type_system::Type::primitive(Type::String)));
@@ -324,29 +307,27 @@ mod tests {
         assert_eq!(b, Any(None));
     }
 
-    /// `OptionalOf<Text>::kind()` reports
-    /// `Some(Type::Optional(Primitive(String)))`.
-    #[test]
-    fn optional_of_text_reports_optional_string() {
+    /// `OptionalOf<Text>::kind()` widens String with `Nothing`.
+    #[dialog_common::test]
+    fn optional_of_text_widens_with_nothing() {
         let descriptor: OptionalOf<Text> = OptionalOf::default();
         let kind = descriptor.kind().expect("present");
         assert!(kind.is_optional());
-        assert_eq!(kind.shape().as_singleton(), Some(Type::String));
+        assert!(kind.primitive_part().contains(Type::String));
     }
 
-    /// `OptionalOf<EntityType>::kind()` reports
-    /// `Some(Type::Optional(Primitive(Entity)))`.
-    #[test]
-    fn optional_of_entity_reports_optional_entity() {
+    /// `OptionalOf<EntityType>::kind()` widens Entity with `Nothing`.
+    #[dialog_common::test]
+    fn optional_of_entity_widens_with_nothing() {
         let descriptor: OptionalOf<EntityType> = OptionalOf::default();
         let kind = descriptor.kind().expect("present");
         assert!(kind.is_optional());
-        assert_eq!(kind.shape().as_singleton(), Some(Type::Entity));
+        assert!(kind.primitive_part().contains(Type::Entity));
     }
 
     /// `OptionalOf<Any>` passes through `None` since `Any`'s
     /// default kind is `None`.
-    #[test]
+    #[dialog_common::test]
     fn optional_of_any_passes_through_none() {
         let descriptor: OptionalOf<Any> = OptionalOf::default();
         assert!(descriptor.kind().is_none());
