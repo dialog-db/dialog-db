@@ -138,7 +138,7 @@ impl AttributeQueryAll {
             "the".to_string(),
             Field {
                 description: "The relation identifier".to_string(),
-                content_type: Some(Type::Symbol),
+                content_type: Some(Type::Symbol).into(),
                 requirement: requirement.required(),
                 cardinality: Cardinality::One,
             },
@@ -148,7 +148,7 @@ impl AttributeQueryAll {
             "of".to_string(),
             Field {
                 description: "Entity of the relation".to_string(),
-                content_type: Some(Type::Entity),
+                content_type: Some(Type::Entity).into(),
                 requirement: requirement.required(),
                 cardinality: Cardinality::One,
             },
@@ -158,7 +158,7 @@ impl AttributeQueryAll {
             "is".to_string(),
             Field {
                 description: "Value of the relation".to_string(),
-                content_type: None,
+                content_type: None.into(),
                 requirement: requirement.required(),
                 cardinality: Cardinality::One,
             },
@@ -466,5 +466,64 @@ mod tests {
         assert_eq!(results[0].is(), &Value::String("Alice".to_string()));
 
         Ok(())
+    }
+
+    /// `AttributeQueryAll::schema()` declares the `the` slot as
+    /// `Type::Definite(Primitive(Symbol))`. Storage selectors
+    /// rely on this to filter facts by attribute identifier.
+    #[dialog_common::test]
+    fn schema_the_slot_is_definite_symbol() {
+        use crate::type_system::Definite;
+        let query = AttributeQueryAll::new(
+            Term::var("the"),
+            Term::var("of"),
+            Term::var("is"),
+            Term::var("cause"),
+        );
+        let schema = query.schema();
+        let the = schema.get("the").expect("the field present");
+        assert!(!the.content_type.is_optional());
+        assert_eq!(the.content_type.shape().as_singleton(), Some(Type::Symbol));
+        // Constraint type isn't a variable — it's a concrete primitive.
+        assert!(matches!(the.content_type.shape(), Definite::Primitive(_)));
+    }
+
+    /// `AttributeQueryAll::schema()` declares the `of` slot as
+    /// `Type::Definite(Primitive(Entity))`.
+    #[dialog_common::test]
+    fn schema_of_slot_is_definite_entity() {
+        let query = AttributeQueryAll::new(
+            Term::var("the"),
+            Term::var("of"),
+            Term::var("is"),
+            Term::var("cause"),
+        );
+        let schema = query.schema();
+        let of = schema.get("of").expect("of field present");
+        assert_eq!(of.content_type.shape().as_singleton(), Some(Type::Entity));
+    }
+
+    /// `AttributeQueryAll::schema()` declares the `is` slot as
+    /// `Type::any()` — an anonymous type variable. The slot
+    /// accepts any value type at runtime; the unifier narrows
+    /// based on what other premises declare for the same
+    /// rule-level variable.
+    #[dialog_common::test]
+    fn schema_is_slot_is_anonymous_variable() {
+        use crate::type_system::Definite;
+        let query = AttributeQueryAll::new(
+            Term::var("the"),
+            Term::var("of"),
+            Term::var("is"),
+            Term::var("cause"),
+        );
+        let schema = query.schema();
+        let is = schema.get("is").expect("is field present");
+        assert!(!is.content_type.is_optional());
+        assert!(
+            matches!(is.content_type.shape(), Definite::Variable(_)),
+            "expected anonymous variable, got {:?}",
+            is.content_type.shape()
+        );
     }
 }

@@ -255,7 +255,7 @@ impl From<&Cells> for Schema {
                 name.into(),
                 Field {
                     description: cell.description.clone(),
-                    content_type: cell.content_type,
+                    content_type: cell.content_type.into(),
                     requirement: cell.requirement.clone(),
                     cardinality: Cardinality::One,
                 },
@@ -307,5 +307,30 @@ mod tests {
             &Requirement::Optional
         );
         Ok(())
+    }
+
+    /// `From<&Cells> for Schema` lifts each cell's
+    /// `Option<Type>` content_type into the unified
+    /// `type_system::Type`. Typed cells produce
+    /// `Definite(Primitive(vt))`; untyped cells (`None`)
+    /// produce anonymous variables.
+    #[dialog_common::test]
+    fn schema_from_cells_lifts_content_types() {
+        use crate::Schema;
+        use crate::type_system::Definite;
+        let cells = Cells::define(|builder| {
+            builder.cell("name", Some(Type::String)).required();
+            builder.cell("untyped", None).required();
+        });
+        let schema = Schema::from(&cells);
+
+        let name = schema.get("name").expect("name field present");
+        assert_eq!(name.content_type.shape().as_singleton(), Some(Type::String));
+
+        let untyped = schema.get("untyped").expect("untyped field present");
+        assert!(matches!(
+            untyped.content_type.shape(),
+            Definite::Variable(_)
+        ));
     }
 }

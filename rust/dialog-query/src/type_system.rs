@@ -203,6 +203,31 @@ impl From<ValueType> for PrimitiveSet {
     }
 }
 
+impl From<ValueType> for Type {
+    fn from(vt: ValueType) -> Self {
+        Self::primitive(vt)
+    }
+}
+
+impl From<Option<ValueType>> for Type {
+    /// Lifts the legacy `Option<ValueType>` storage-tag
+    /// representation into the unified type system.
+    ///
+    /// - `None` → an anonymous unconstrained variable
+    ///   ([`Self::any`]). Each call allocates a fresh
+    ///   [`VarId`], so multiple `None.into()` invocations
+    ///   produce distinct variables. The unifier links them at
+    ///   rule-compile time when the same rule-level variable
+    ///   name is shared across slots.
+    /// - `Some(vt)` → `Type::Definite(Primitive(singleton(vt)))`.
+    fn from(value: Option<ValueType>) -> Self {
+        match value {
+            Some(vt) => Self::primitive(vt),
+            None => Self::any(),
+        }
+    }
+}
+
 /// Schema-layer type of a value, term, or schema slot.
 ///
 /// Two outer variants distinguish set-widening (Optional) from

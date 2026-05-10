@@ -231,7 +231,7 @@ impl From<&ConceptDescriptor> for Schema {
                 name.into(),
                 Field {
                     description: attribute.description().into(),
-                    content_type: attribute.content_type(),
+                    content_type: attribute.content_type().into(),
                     requirement: Requirement::Optional,
                     cardinality: attribute.cardinality(),
                 },
@@ -243,7 +243,7 @@ impl From<&ConceptDescriptor> for Schema {
                 "this".into(),
                 Field {
                     description: "The entity that this model represents".into(),
-                    content_type: Some(Type::Entity),
+                    content_type: Some(Type::Entity).into(),
                     requirement: Requirement::Optional,
                     cardinality: Cardinality::One,
                 },
@@ -1234,5 +1234,58 @@ mod tests {
             serde_json::from_str(json).expect("Should accept empty 'maybe'");
 
         assert_eq!(concept.maybe, None, "Empty 'maybe' should become None");
+    }
+
+    /// `From<&ConceptDescriptor> for Schema` produces Fields whose
+    /// `content_type` is the unified `type_system::Type`. A typed
+    /// attribute descriptor (e.g. with `Type::String`) lifts to
+    /// `Type::Definite(Primitive(String))`.
+    #[dialog_common::test]
+    fn schema_from_concept_uses_unified_type() {
+        let descriptor = ConceptDescriptor::from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
+        let schema = Schema::from(&descriptor);
+        let name = schema.get("name").expect("name field present");
+        assert!(!name.content_type.is_optional());
+        assert_eq!(name.content_type.shape().as_singleton(), Some(Type::String));
+    }
+
+    /// An attribute descriptor with `None` content type produces
+    /// a Field with an anonymous unconstrained variable.
+    #[dialog_common::test]
+    fn schema_from_concept_untyped_attribute_produces_variable() {
+        use crate::type_system::Definite;
+        let descriptor = ConceptDescriptor::from(vec![(
+            "tag",
+            AttributeDescriptor::new(the!("misc/tag"), "", Cardinality::One, None),
+        )]);
+        let schema = Schema::from(&descriptor);
+        let tag = schema.get("tag").expect("tag field present");
+        assert!(matches!(tag.content_type.shape(), Definite::Variable(_)));
+    }
+
+    /// The synthesized `this` field always declares
+    /// `Type::Definite(Primitive(Entity))`.
+    #[dialog_common::test]
+    fn schema_from_concept_synthesizes_this_as_entity() {
+        let descriptor = ConceptDescriptor::from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
+        let schema = Schema::from(&descriptor);
+        let this = schema.get("this").expect("this field present");
+        assert_eq!(this.content_type.shape().as_singleton(), Some(Type::Entity));
     }
 }

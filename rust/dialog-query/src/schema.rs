@@ -2,8 +2,14 @@
 //!
 //! This module provides a schema system that describes the structure,
 //! types, and requirements of parameters for different premise types.
+//!
+//! As of v2, [`Field::content_type`] uses the unified
+//! [`type_system::Type`] enum rather than the legacy
+//! `Option<artifact::Type>`. The conversion between them is
+//! lossless: `None` becomes a fresh anonymous type variable,
+//! `Some(vt)` becomes `Type::Definite(Primitive(singleton(vt)))`.
 
-use crate::Type;
+use crate::type_system;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -162,12 +168,20 @@ impl Cardinality {
 /// many values ([`Cardinality`]), and whether it must be bound before the
 /// premise can execute ([`Requirement`]). The planner reads these fields
 /// to classify each parameter as a prerequisite or a produced binding.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// [`Self::content_type`] is the unified
+/// [`type_system::Type`] — replaces v1's
+/// `Option<artifact::Type>`. `None` (any type) becomes
+/// `Type::any()` (an anonymous unconstrained variable);
+/// `Some(vt)` becomes
+/// `Type::Definite(Primitive(singleton(vt)))`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Field {
     /// Human-readable description of the field.
     pub description: String,
-    /// Expected value type, or `None` if unconstrained.
-    pub content_type: Option<Type>,
+    /// Expected value type. Use [`type_system::Type::any`] for an
+    /// unconstrained slot (the v2 replacement for v1's `None`).
+    pub content_type: type_system::Type,
     /// Whether the field is required or optional.
     pub requirement: Requirement,
     /// Whether the field holds one or many values.
@@ -177,7 +191,11 @@ pub struct Field {
 impl Field {
     /// Creates a new field with the given description, type, and requirement.
     /// Cardinality defaults to [`Cardinality::One`].
-    pub fn new(description: String, content_type: Option<Type>, requirement: Requirement) -> Self {
+    pub fn new(
+        description: String,
+        content_type: type_system::Type,
+        requirement: Requirement,
+    ) -> Self {
         Self {
             description,
             content_type,
@@ -191,9 +209,9 @@ impl Field {
         &self.description
     }
 
-    /// Returns the expected content type, if any.
-    pub fn content_type(&self) -> Option<Type> {
-        self.content_type
+    /// Returns a reference to the expected content type.
+    pub fn content_type(&self) -> &type_system::Type {
+        &self.content_type
     }
 
     /// Returns the field's requirement level.
@@ -293,6 +311,8 @@ impl Group {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artifact::Type as ValueType;
+    use crate::type_system::{Definite, PrimitiveSet};
 
     #[dialog_common::test]
     fn it_tracks_requirement_properties() {
@@ -301,5 +321,94 @@ mod tests {
 
         assert!(required.is_required());
         assert!(!derived.is_required());
+    }
+
+    /// Lifting a storage-tag `Some(vt)` into the unified type
+    /// produces `Definite(Primitive(singleton(vt)))`.
+    #[dialog_common::test]
+    fn field_content_type_lifts_some_to_definite_primitive() {
+        let content: type_system::Type = Some(ValueType::String).into();
+        match content {
+            type_system::Type::Definite(d) => match *d {
+                Definite::Primitive(set) => {
+                    assert_eq!(set.as_singleton(), Some(ValueType::String));
+                }
+                other => panic!("expected Primitive, got {:?}", other),
+            },
+            other => panic!("expected Definite, got {:?}", other),
+        }
+    }
+
+    /// Lifting `None` produces an anonymous unconstrained
+    /// variable (`Type::any()`).
+    #[dialog_common::test]
+    fn field_content_type_lifts_none_to_anonymous_variable() {
+        let content: type_system::Type = None.into();
+        match content.shape() {
+            Definite::Variable(_) => {}
+            other => panic!("expected anonymous variable, got {:?}", other),
+        }
+    }
+
+    /// Anonymous variables from successive `None.into()` calls
+    /// have distinct `VarId`s — they're independent type slots
+    /// that the unifier links at rule-compile time, not the same
+    /// variable.
+    #[dialog_common::test]
+    fn field_content_type_anonymous_variables_are_distinct() {
+        let a: type_system::Type = None.into();
+        let b: type_system::Type = None.into();
+        let id_a = match a.shape() {
+            Definite::Variable(id) => *id,
+            _ => panic!("expected variable"),
+        };
+        let id_b = match b.shape() {
+            Definite::Variable(id) => *id,
+            _ => panic!("expected variable"),
+        };
+        assert_ne!(id_a, id_b);
+    }
+
+    /// `Field::new` accepts the unified type directly.
+    #[dialog_common::test]
+    fn field_new_accepts_unified_type() {
+        let f = Field::new(
+            "test".into(),
+            type_system::Type::primitive(ValueType::Boolean),
+            Requirement::Required(None),
+        );
+        assert_eq!(
+            f.content_type().shape().as_singleton(),
+            Some(ValueType::Boolean)
+        );
+        assert!(matches!(f.requirement(), Requirement::Required(_)));
+    }
+
+    /// A constructed Field's content_type round-trips through
+    /// the descriptor: `Some(vt)` lifts to a definite primitive
+    /// with the right value type.
+    #[dialog_common::test]
+    fn field_round_trip_value_type() {
+        let f = Field::new(
+            "x".into(),
+            Some(ValueType::Entity).into(),
+            Requirement::Optional,
+        );
+        let recovered = f.content_type().shape().as_singleton();
+        assert_eq!(recovered, Some(ValueType::Entity));
+    }
+
+    /// Anonymous variables in Fields default to constraint
+    /// `PrimitiveSet::ALL` when consulted via a fresh
+    /// unification context.
+    #[dialog_common::test]
+    fn field_anonymous_variable_constraint_is_all() {
+        let f = Field::new("any_slot".into(), None.into(), Requirement::Optional);
+        let var = match f.content_type().shape() {
+            Definite::Variable(id) => *id,
+            _ => panic!("expected variable"),
+        };
+        let ctx = type_system::UnificationContext::new();
+        assert_eq!(ctx.constraint(var), PrimitiveSet::ALL);
     }
 }
