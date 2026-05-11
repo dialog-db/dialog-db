@@ -768,6 +768,103 @@ mod tests {
             assert_eq!(results.len(), 2);
             Ok(())
         }
+
+        #[dialog_common::test]
+        async fn it_resolves_only_latest_name_target_via_name_concept() -> anyhow::Result<()> {
+            /// The `dialog.meta/named-entity` attribute — the entity a
+            /// name currently points at. Cardinality `one` (the derive
+            /// default), so re-pointing a name supersedes the prior
+            /// claim instead of accumulating.
+            #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+            #[domain("dialog.meta")]
+            pub struct NamedEntity(pub Entity);
+
+            /// A user-published name — an `id:<n>` entity carrying a
+            /// single `entity` claim that points at the target the name
+            /// currently identifies.
+            #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+            pub struct Name {
+                /// The name entity — `id:<n>` for user-published names,
+                /// `db:<n>` for built-ins.
+                pub this: Entity,
+                /// The target this name currently identifies.
+                pub entity: NamedEntity,
+            }
+
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            // Use the `concept:` scheme for targets — this matches
+            // the real-world case where `concept!: &page` derives a
+            // content-hashed `concept:…` entity URI for each body.
+            // Same supersession path, different value scheme; this
+            // catches a bug where the cardinality-one filter was
+            // sensitive to the value's URI scheme.
+            let id_page: Entity = "id:page".parse()?;
+            let page_v1: Entity =
+                "concept:Fx8sv1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".parse()?;
+            let page_v2: Entity =
+                "concept:AfmLeBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB".parse()?;
+
+            // tx1 — point id:page at v1.
+            let v1 = branch
+                .transaction()
+                .assert(Name {
+                    this: id_page.clone(),
+                    entity: NamedEntity(page_v1.clone()),
+                })
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            assert_eq!(
+                branch
+                    .query()
+                    .select(Query::<Name> {
+                        this: id_page.clone().into(),
+                        entity: Term::var("entity"),
+                    })
+                    .perform(&operator)
+                    .try_vec()
+                    .await?,
+                vec![Name {
+                    this: id_page.clone(),
+                    entity: NamedEntity(page_v1.clone())
+                }]
+            );
+
+            // tx2 — point id:page at v2. Cardinality-one supersedes v1.
+            let v2 = branch
+                .transaction()
+                .assert(Name {
+                    this: id_page.clone(),
+                    entity: NamedEntity(page_v2.clone()),
+                })
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            assert_ne!(v1, v2);
+
+            assert_eq!(
+                branch
+                    .query()
+                    .select(Query::<Name> {
+                        this: id_page.clone().into(),
+                        entity: Term::var("entity"),
+                    })
+                    .perform(&operator)
+                    .try_vec()
+                    .await?,
+                vec![Name {
+                    this: id_page.clone(),
+                    entity: NamedEntity(page_v2.clone())
+                }]
+            );
+
+            Ok(())
+        }
     }
 
     mod profile_as_repository {
