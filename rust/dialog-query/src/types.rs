@@ -18,6 +18,7 @@
 //!   [`type_system::Type::optional`].
 
 use crate::type_system;
+use crate::type_system::Type as Kind;
 use dialog_common::ConditionalSend;
 use std::fmt;
 use std::hash::Hash;
@@ -46,7 +47,7 @@ pub trait TypeDescriptor:
     /// Default implementation lifts [`Self::TYPE`]:
     /// `Some(vt) → Some(Type::primitive(vt))`, `None → None`.
     fn kind(&self) -> Option<type_system::Type> {
-        Self::TYPE.map(type_system::Type::primitive)
+        Self::TYPE.map(Kind::primitive)
     }
 
     /// Reconstruct a descriptor from a unified type kind.
@@ -154,7 +155,7 @@ impl From<Option<Type>> for Any {
     /// Lift a legacy storage tag into an `Any` descriptor.
     /// `Some(vt) → Some(Type::primitive(vt))`, `None → None`.
     fn from(value: Option<Type>) -> Self {
-        Any(value.map(type_system::Type::primitive))
+        Any(value.map(Kind::primitive))
     }
 }
 
@@ -357,7 +358,7 @@ mod tests {
     /// Each named ZST descriptor reports the right primitive.
     #[dialog_common::test]
     fn named_descriptors_report_their_primitives() {
-        let to_singleton = |k: Option<type_system::Type>| k.unwrap().as_value_type();
+        let to_singleton = |k: Option<Kind>| k.unwrap().as_value_type();
         assert_eq!(to_singleton(Text.kind()), Some(Type::String));
         assert_eq!(to_singleton(Boolean.kind()), Some(Type::Boolean));
         assert_eq!(
@@ -375,7 +376,7 @@ mod tests {
     /// `Any(Some(Type::primitive(vt)))` reports the wrapped kind.
     #[dialog_common::test]
     fn any_descriptor_with_tag_reports_primitive() {
-        let descriptor = Any(Some(type_system::Type::primitive(Type::Entity)));
+        let descriptor = Any(Some(Kind::primitive(Type::Entity)));
         let kind = descriptor.kind().expect("kind present");
         assert!(!kind.is_optional());
         assert_eq!(kind.as_value_type(), Some(Type::Entity));
@@ -400,7 +401,7 @@ mod tests {
     #[dialog_common::test]
     fn from_option_value_type_lifts_into_any() {
         let a: Any = Some(Type::String).into();
-        assert_eq!(a.kind(), Some(type_system::Type::primitive(Type::String)));
+        assert_eq!(a.kind(), Some(Kind::primitive(Type::String)));
         let b: Any = None.into();
         assert_eq!(b, Any(None));
     }

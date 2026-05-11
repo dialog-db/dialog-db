@@ -8,7 +8,7 @@ use crate::query::Application;
 use crate::query::Output;
 use crate::selection::{Match, Selection};
 use crate::source::SelectRules;
-use crate::type_system;
+use crate::type_system::Type as Kind;
 use crate::types::{Any, Record};
 use crate::{
     Entity, EvaluationError, Field, Parameters, Requirement, Schema, Term, Type, Value, try_stream,
@@ -155,7 +155,7 @@ impl AttributeQueryAll {
             "the".to_string(),
             Field {
                 description: "The relation identifier".to_string(),
-                content_type: Some(type_system::Type::primitive(Type::Symbol)),
+                content_type: Some(Kind::primitive(Type::Symbol)),
                 requirement: requirement.required(),
                 cardinality: Cardinality::One,
             },
@@ -165,7 +165,7 @@ impl AttributeQueryAll {
             "of".to_string(),
             Field {
                 description: "Entity of the relation".to_string(),
-                content_type: Some(type_system::Type::primitive(Type::Entity)),
+                content_type: Some(Kind::primitive(Type::Entity)),
                 requirement: requirement.required(),
                 cardinality: Cardinality::One,
             },
@@ -188,9 +188,9 @@ impl AttributeQueryAll {
         // Present row; when the query is optional the fallback
         // row binds it to `Absent`, so the slot is set-widened.
         let cause_content = if self.is.is_optional() {
-            type_system::Type::primitive(Type::Bytes).optional()
+            Kind::primitive(Type::Bytes).optional()
         } else {
-            type_system::Type::primitive(Type::Bytes)
+            Kind::primitive(Type::Bytes)
         };
         schema.insert(
             "cause".to_string(),
@@ -546,7 +546,7 @@ mod tests {
         let content = the.content_type().expect("symbol kind present");
         assert!(!content.is_optional());
         assert_eq!(content.as_value_type(), Some(Type::Symbol));
-        assert!(matches!(content, type_system::Type::Primitive(_)));
+        assert!(matches!(content, Kind::Primitive(_)));
     }
 
     /// `AttributeQueryAll::schema()` declares the `of` slot as

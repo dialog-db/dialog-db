@@ -335,10 +335,7 @@ mod tests {
     /// Absent into a non-optional slot).
     #[dialog_common::test]
     async fn it_filters_absent_into_required_term() -> Result<(), EvaluationError> {
-        let constraint = Equality::new(
-            Term::var("x"),
-            Term::<Any>::from(Term::<String>::var("y")),
-        );
+        let constraint = Equality::new(Term::var("x"), Term::<Any>::from(Term::<String>::var("y")));
 
         let mut candidate = Match::new();
         candidate.bind_absent(&Term::<Any>::var("x"))?;

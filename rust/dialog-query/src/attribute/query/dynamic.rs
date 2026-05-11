@@ -252,17 +252,14 @@ mod tests {
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
     use crate::the;
-    use crate::type_system;
+    use crate::type_system::{Primitive, Type as Kind};
     use dialog_repository::helpers::{test_operator_with_profile, test_repo};
 
     /// Construct an optional `is` variable. The query derives its
     /// resolution from the `is` term, so typing the slot as optional
     /// is what flips the query into Absent-fallback mode.
     fn optional_is(name: &str) -> Term<Any> {
-        Term::<Any>::typed_var(
-            name,
-            type_system::Type::primitive_set(type_system::Primitive::ALL).optional(),
-        )
+        Term::<Any>::typed_var(name, Kind::primitive_set(Primitive::ALL).optional())
     }
 
     macro_rules! assert_relation {

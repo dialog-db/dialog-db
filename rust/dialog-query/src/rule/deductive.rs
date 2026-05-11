@@ -10,7 +10,6 @@ use crate::negation::Negation;
 pub use crate::planner::Plan;
 pub use crate::planner::{Conjunction, Planner};
 pub use crate::premise::Premise;
-use crate::type_system;
 use crate::type_system::Primitive;
 use crate::type_system::Type as Kind;
 use crate::type_system::unifier::Context;
@@ -136,8 +135,8 @@ impl DeductiveRule {
     ///
     /// Negation premises do not contribute — they don't bind
     /// variables, only filter on already-bound values.
-    fn meet_per_variable(&self) -> HashMap<String, type_system::Type> {
-        let mut by_variable: HashMap<String, type_system::Type> = HashMap::new();
+    fn meet_per_variable(&self) -> HashMap<String, Kind> {
+        let mut by_variable: HashMap<String, Kind> = HashMap::new();
 
         for step in &self.join.steps {
             let Premise::Assert(_) = &step.premise else {
@@ -154,16 +153,12 @@ impl DeductiveRule {
                     continue;
                 };
                 let owned;
-                let slot_type: &type_system::Type = match field.content_type() {
+                let slot_type: &Kind = match field.content_type() {
                     Some(t) => t,
                     None => {
                         owned = match field.requirement {
-                            Requirement::Required(_) => {
-                                type_system::Type::primitive_set(type_system::Primitive::ALL)
-                            }
-                            Requirement::Optional => {
-                                type_system::Type::primitive_set(type_system::Primitive::ANY)
-                            }
+                            Requirement::Required(_) => Kind::primitive_set(Primitive::ALL),
+                            Requirement::Optional => Kind::primitive_set(Primitive::ANY),
                         };
                         &owned
                     }

@@ -253,14 +253,14 @@ impl From<HashMap<String, AttributeDescriptor>> for ConceptDescriptor {
 
 impl From<&ConceptDescriptor> for Schema {
     fn from(predicate: &ConceptDescriptor) -> Self {
-        use crate::type_system;
+        use crate::type_system::Type as Kind;
         let mut schema = Schema::new();
         for (name, attribute) in predicate.with().iter() {
             schema.insert(
                 name.into(),
                 Field {
                     description: attribute.description().into(),
-                    content_type: attribute.content_type().map(type_system::Type::primitive),
+                    content_type: attribute.content_type().map(Kind::primitive),
                     requirement: Requirement::Optional,
                     cardinality: attribute.cardinality(),
                 },
@@ -272,7 +272,7 @@ impl From<&ConceptDescriptor> for Schema {
                 "this".into(),
                 Field {
                     description: "The entity that this model represents".into(),
-                    content_type: Some(type_system::Type::primitive(Type::Entity)),
+                    content_type: Some(Kind::primitive(Type::Entity)),
                     requirement: Requirement::Optional,
                     cardinality: Cardinality::One,
                 },

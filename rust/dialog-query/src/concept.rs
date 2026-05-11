@@ -13,7 +13,7 @@ use crate::error::EvaluationError;
 pub use crate::predicate::Predicate;
 use crate::selection::Binding;
 use crate::term::Term;
-use crate::type_system;
+use crate::type_system::{Primitive, Type as Kind};
 use crate::types::{Any, TypeDescriptor, Typed};
 use crate::{Entity, Parameters, Value};
 use dialog_common::ConditionalSend;
@@ -196,7 +196,7 @@ where
         };
         let kind = match value_param.kind() {
             Some(k) => k.optional(),
-            None => type_system::Type::primitive_set(type_system::Primitive::ALL).optional(),
+            None => Kind::primitive_set(Primitive::ALL).optional(),
         };
         Term::<Any>::typed_var(name, kind)
     }

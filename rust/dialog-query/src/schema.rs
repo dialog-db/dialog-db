@@ -304,6 +304,7 @@ impl Group {
 mod tests {
     use super::*;
     use crate::artifact::Type as ValueType;
+    use crate::type_system::Type as Kind;
 
     #[dialog_common::test]
     fn it_tracks_requirement_properties() {
@@ -319,7 +320,7 @@ mod tests {
     fn field_new_accepts_unified_type() {
         let f = Field::new(
             "test".into(),
-            Some(type_system::Type::primitive(ValueType::Boolean)),
+            Some(Kind::primitive(ValueType::Boolean)),
             Requirement::Required(None),
         );
         assert_eq!(
