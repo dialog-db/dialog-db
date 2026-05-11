@@ -116,31 +116,50 @@ impl Equality {
                 let base = candidate?;
 
                 match (base.lookup(&this), base.lookup(&is)) {
-                    // Case 1: Both bound to Present values - verify equal.
+                    // Both Present: yield iff values match.
                     (Ok(Binding::Present(this_val)), Ok(Binding::Present(is_val))) => {
                         if this_val == is_val {
                             yield base;
                         }
-                        // Otherwise filter out this match (no yield)
                     }
-                    // Case 1b: Either side is Absent — equality on
-                    // absence has no value to compare; filter out.
-                    (Ok(Binding::Absent), _) | (_, Ok(Binding::Absent)) => {
-                        // Filter out (no yield)
+                    // Both Absent: Nothing == Nothing, yield.
+                    (Ok(Binding::Absent), Ok(Binding::Absent)) => {
+                        yield base;
                     }
-                    // Case 2: Only "is" is bound - infer "this" from "is"
+                    // One side Absent, other Present: disjoint kinds
+                    // (Nothing vs primitive), can never be equal — filter.
+                    (Ok(Binding::Absent), Ok(Binding::Present(_)))
+                    | (Ok(Binding::Present(_)), Ok(Binding::Absent)) => {}
+                    // One side Present, other unbound: propagate the value.
                     (Err(_), Ok(Binding::Present(is_val))) => {
                         let mut extension = base.clone();
                         extension.bind(&this, is_val)?;
                         yield extension;
                     }
-                    // Case 3: Only "this" is bound - infer "is" from "this"
                     (Ok(Binding::Present(this_val)), Err(_)) => {
                         let mut extension = base.clone();
                         extension.bind(&is, this_val)?;
                         yield extension;
                     }
-                    // Case 4: Neither term is bound - cannot evaluate
+                    // One side Absent, other unbound: propagate Absent
+                    // iff the unbound term's kind admits Nothing.
+                    // Otherwise the row violates the unbound term's
+                    // type contract — filter.
+                    (Ok(Binding::Absent), Err(_)) => {
+                        if is.is_optional() || is.kind().is_none() {
+                            let mut extension = base.clone();
+                            extension.bind_absent(&is)?;
+                            yield extension;
+                        }
+                    }
+                    (Err(_), Ok(Binding::Absent)) => {
+                        if this.is_optional() || this.kind().is_none() {
+                            let mut extension = base.clone();
+                            extension.bind_absent(&this)?;
+                            yield extension;
+                        }
+                    }
+                    // Neither bound — equality has nothing to work with.
                     (Err(_), Err(_)) => {
                         Err(EvaluationError::ConstraintViolation {
                             constraint: format!("{} == {}", this, is)
@@ -259,6 +278,79 @@ mod tests {
         let is_field = schema.get("is").expect("is field present");
         assert!(this_field.content_type().is_none());
         assert!(is_field.content_type().is_none());
+    }
+
+    /// Absent on both sides — Nothing == Nothing, yield.
+    #[dialog_common::test]
+    async fn it_yields_when_both_sides_absent() -> Result<(), EvaluationError> {
+        let constraint = Equality::new(Term::var("x"), Term::var("y"));
+
+        let mut candidate = Match::new();
+        candidate.bind_absent(&Term::<Any>::var("x"))?;
+        candidate.bind_absent(&Term::<Any>::var("y"))?;
+
+        let results: Vec<Match> = constraint.evaluate(candidate.seed()).try_collect().await?;
+
+        assert_eq!(results.len(), 1, "Absent == Absent should yield");
+        Ok(())
+    }
+
+    /// Absent on one side, Present on the other — disjoint kinds,
+    /// filter.
+    #[dialog_common::test]
+    async fn it_filters_when_absent_meets_present() -> Result<(), EvaluationError> {
+        let constraint = Equality::new(Term::var("x"), Term::var("y"));
+
+        let mut candidate = Match::new();
+        candidate.bind_absent(&Term::<Any>::var("x"))?;
+        candidate.bind(&Term::var("y"), Value::from(42))?;
+
+        let results: Vec<Match> = constraint.evaluate(candidate.seed()).try_collect().await?;
+
+        assert_eq!(results.len(), 0, "Absent == Present should filter");
+        Ok(())
+    }
+
+    /// Absent on one side, unbound on the other where the unbound
+    /// term's kind admits Nothing — propagate Absent.
+    #[dialog_common::test]
+    async fn it_infers_absent_into_optional_term() -> Result<(), EvaluationError> {
+        let constraint = Equality::new(
+            Term::var("x"),
+            Term::<Any>::from(Term::<Option<String>>::var("y")),
+        );
+
+        let mut candidate = Match::new();
+        candidate.bind_absent(&Term::<Any>::var("x"))?;
+
+        let results: Vec<Match> = constraint.evaluate(candidate.seed()).try_collect().await?;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].lookup(&Term::<Any>::var("y"))?, Binding::Absent);
+        Ok(())
+    }
+
+    /// Absent on one side, unbound on the other where the unbound
+    /// term's kind does NOT admit Nothing — filter (would propagate
+    /// Absent into a non-optional slot).
+    #[dialog_common::test]
+    async fn it_filters_absent_into_required_term() -> Result<(), EvaluationError> {
+        let constraint = Equality::new(
+            Term::var("x"),
+            Term::<Any>::from(Term::<String>::var("y")),
+        );
+
+        let mut candidate = Match::new();
+        candidate.bind_absent(&Term::<Any>::var("x"))?;
+
+        let results: Vec<Match> = constraint.evaluate(candidate.seed()).try_collect().await?;
+
+        assert_eq!(
+            results.len(),
+            0,
+            "Absent cannot bind a non-optional term — filter"
+        );
+        Ok(())
     }
 
     /// A typed constant on one side produces a concrete primitive
