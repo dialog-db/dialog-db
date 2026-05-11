@@ -544,6 +544,14 @@ fn composite_includes(a: &Composite, b: &Composite) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash as HashTrait, Hasher};
+
+    fn hash_of<T: HashTrait>(t: &T) -> u64 {
+        let mut h = DefaultHasher::new();
+        t.hash(&mut h);
+        h.finish()
+    }
 
     fn p(vt: ValueType) -> Type {
         Type::primitive(vt)
@@ -882,15 +890,6 @@ mod tests {
     /// produce equal `Type`s with equal hashes.
     #[dialog_common::test]
     fn composite_set_is_insertion_order_independent() {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash as HashTrait, Hasher};
-
-        fn hash_of<T: HashTrait>(t: &T) -> u64 {
-            let mut h = DefaultHasher::new();
-            t.hash(&mut h);
-            h.finish()
-        }
-
         let a = Type::variant("A", p(ValueType::String));
         let b = Type::variant("B", p(ValueType::UnsignedInt));
 
@@ -901,5 +900,51 @@ mod tests {
 
         assert_eq!(ab, ba, "set equality is order-independent");
         assert_eq!(hash_of(&ab), hash_of(&ba), "set hash is order-independent");
+    }
+
+    /// Field insertion order into a `BTreeMap<String, Type>` does
+    /// not affect product equality or hash — the BTreeMap sorts
+    /// by key. Same product built via `{x, y}` vs `{y, x}` insert
+    /// orders must compare equal and hash equal.
+    #[dialog_common::test]
+    fn product_field_insertion_order_independent() {
+        let mut a_fields = BTreeMap::new();
+        a_fields.insert("x".to_string(), Type::primitive(ValueType::String));
+        a_fields.insert("y".to_string(), Type::primitive(ValueType::UnsignedInt));
+        let a = Type::product(a_fields);
+
+        let mut b_fields = BTreeMap::new();
+        b_fields.insert("y".to_string(), Type::primitive(ValueType::UnsignedInt));
+        b_fields.insert("x".to_string(), Type::primitive(ValueType::String));
+        let b = Type::product(b_fields);
+
+        assert_eq!(
+            a, b,
+            "product equality is field-insertion-order independent"
+        );
+        assert_eq!(
+            hash_of(&a),
+            hash_of(&b),
+            "product hash is field-insertion-order independent"
+        );
+    }
+
+    /// Combining two products via union also produces identical
+    /// hashes regardless of which product was unioned first.
+    #[dialog_common::test]
+    fn product_union_is_order_independent() {
+        let mut a_fields = BTreeMap::new();
+        a_fields.insert("x".to_string(), Type::primitive(ValueType::String));
+        let a = Type::product(a_fields);
+
+        let mut b_fields = BTreeMap::new();
+        b_fields.insert("y".to_string(), Type::primitive(ValueType::UnsignedInt));
+        let b = Type::product(b_fields);
+
+        let ab = a.union(&b);
+        let ba = b.union(&a);
+
+        assert_eq!(ab, ba);
+        assert_eq!(hash_of(&ab), hash_of(&ba));
     }
 }

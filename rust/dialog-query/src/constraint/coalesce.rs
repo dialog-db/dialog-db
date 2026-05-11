@@ -35,12 +35,15 @@ const COALESCE_COST: usize = 1;
 /// is `Absent`.
 ///
 /// Builder shape:
-/// ```ignore
-/// let coalesce = nickname_term.unwrap_or("Anon").is(display_name);
+/// ```no_run
+/// # use dialog_query::Term;
+/// let nickname: Term<Option<String>> = Term::var("nickname");
+/// let display_name: Term<String> = Term::var("display_name");
+/// let premise = nickname.unwrap_or("Anon").is(display_name);
 /// ```
 ///
-/// Type contract (checked at rule-compile time by the unifier
-/// integration in a later slice):
+/// Type contract (checked at rule-compile time by
+/// [`Coalesce::validate`]):
 /// - `source` has kind `Optional<α>` for some `α`.
 /// - `fallback` has kind `α`.
 /// - `is` has kind `α`.
@@ -69,10 +72,14 @@ impl Coalesce {
     ///
     /// The typed builder
     /// [`Term::<Option<U>>::unwrap_or`](crate::Term::unwrap_or)
-    /// enforces the type contract at Rust's type level. For
-    /// dynamic construction (wire-format deserialization, raw
-    /// builders), call [`Self::validate`] to check the contract
-    /// at runtime.
+    /// enforces the type contract at Rust's type level — call
+    /// sites with type mismatches fail to compile. For dynamic
+    /// construction (wire-format deserialization, raw
+    /// `Coalesce::new` calls), [`Self::validate`] checks the
+    /// contract at runtime; it is invoked automatically by
+    /// [`DeductiveRule::new`](crate::DeductiveRule::new) so any
+    /// Coalesce reaching the rule compiler is checked, regardless
+    /// of how it was constructed.
     pub fn new(source: Term<Any>, fallback: Term<Any>, is: Term<Any>) -> Self {
         Self {
             source,

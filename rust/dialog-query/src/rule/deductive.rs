@@ -308,7 +308,7 @@ impl From<&ConceptDescriptor> for DeductiveRule {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::artifact::{Entity, Type};
+    use crate::artifact::{Cause, Entity, Type};
     use crate::attribute::AttributeDescriptor;
     use crate::attribute::query::AttributeQuery;
     use crate::the;
@@ -893,6 +893,43 @@ mod tests {
             "untyped Required + typed Optional should compile (got {:?})",
             result.err()
         );
+    }
+
+    /// The `cause` slot of an Optional attribute query is set-
+    /// widened in the schema (since the fallback row binds it to
+    /// `Absent`). A rule where a required-head variable shares
+    /// its name with such a cause is therefore rejected by the
+    /// meet algebra.
+    #[dialog_common::test]
+    fn it_rejects_required_head_from_optional_cause() {
+        // Conclusion has a required `mark` field expecting a
+        // typed value (Bytes).
+        let conclusion = ConceptDescriptor::from(vec![(
+            "mark",
+            AttributeDescriptor::new(the!("person/mark"), "", Cardinality::One, Some(Type::Bytes)),
+        )]);
+        let this = Term::<Entity>::var("this");
+        // The optional attribute's cause slot shares the name
+        // `?mark` with the conclusion's required head — the
+        // meet's cause contribution carries Nothing, so the
+        // required head sees Optional.
+        let premises = vec![
+            AttributeQuery::optional(
+                Term::from(the!("user/name")),
+                this,
+                Term::<Any>::var("name"),
+                Term::<Cause>::var("mark"),
+                Some(Cardinality::One),
+            )
+            .into(),
+        ];
+        let result = DeductiveRule::new(conclusion, premises);
+        match result {
+            Err(TypeError::RequiredHeadFromOptional { variable, .. }) => {
+                assert_eq!(variable, "mark");
+            }
+            other => panic!("expected RequiredHeadFromOptional, got {other:?}"),
+        }
     }
 
     /// A rule containing a malformed Coalesce (non-Optional source)

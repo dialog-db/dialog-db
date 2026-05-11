@@ -214,6 +214,23 @@ impl AttributeQueryAll {
             },
         );
 
+        // The `cause` slot is bound by the merge step on every
+        // Present row; for Optional resolution the fallback row
+        // binds it to `Absent`, so the slot is set-widened.
+        let cause_content = match self.resolution {
+            Resolution::Required => type_system::Type::primitive(Type::Bytes),
+            Resolution::Optional => type_system::Type::primitive(Type::Bytes).optional(),
+        };
+        schema.insert(
+            "cause".to_string(),
+            Field {
+                description: "Causal stamp of the relation".to_string(),
+                content_type: Some(cause_content),
+                requirement: requirement.required(),
+                cardinality: Cardinality::One,
+            },
+        );
+
         schema
     }
 
@@ -233,6 +250,7 @@ impl AttributeQueryAll {
         params.insert("the".to_string(), Term::<Any>::from(&self.the));
         params.insert("of".to_string(), Term::<Any>::from(&self.of));
         params.insert("is".to_string(), self.is.clone());
+        params.insert("cause".to_string(), Term::<Any>::from(&self.cause));
         params
     }
 

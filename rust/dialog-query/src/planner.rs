@@ -259,7 +259,11 @@ mod tests {
             .expect("Planning should succeed");
 
         assert_eq!(plan.steps.len(), 2);
-        assert_eq!(plan.binds.len(), 2, "Should bind 2 variables");
+        // ?name, ?greeting, and ?cause — the cause slot is now
+        // declared in the AttributeQuery schema (bound by the
+        // merge step on every Present row), so it counts toward
+        // the plan's bind set.
+        assert_eq!(plan.binds.len(), 3, "Should bind name, greeting, cause");
     }
 
     #[dialog_common::test]

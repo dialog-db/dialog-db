@@ -1,10 +1,9 @@
-//! Unifier-internal type representation and Damas-Milner unifier.
+//! Unifier-internal type representation and unification.
 //!
 //! This submodule owns everything that needs to talk about
 //! per-rule type variables: [`VarId`] allocation, the
-//! [`Type`] enum with its `Static`/`Variable` distinction, the
-//! [`Context`] that drives unification, and the [`TypeScheme`]
-//! machinery for rank-1 polymorphic formula signatures.
+//! [`Type`] enum with its `Static`/`Variable` distinction, and
+//! the [`Context`] that drives unification.
 //!
 //! Variables never escape into the user-facing
 //! [`StaticType`]. Lifting between layers happens via [`lift`]
@@ -54,28 +53,6 @@ pub fn lift(ty: &StaticType) -> Type {
     Type::Static(ty.clone())
 }
 
-/// Slot-level optionality used during unification. Tracks whether
-/// a use site of a variable is wrapped in `Optional` independently
-/// of the variable's own shape.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum MatchOptionality {
-    /// The slot demands a Present value.
-    Required,
-    /// The slot tolerates `Absent`.
-    Optional,
-}
-
-impl MatchOptionality {
-    /// "Strictest wins" combine: `Required` ∧ `Optional` =
-    /// `Required`.
-    pub fn combine(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Required, _) | (_, Self::Required) => Self::Required,
-            (Self::Optional, Self::Optional) => Self::Optional,
-        }
-    }
-}
-
 /// Errors raised by unification.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum UnifyError {
@@ -101,59 +78,6 @@ pub enum UnifyError {
     /// [`Coalesce::validate`](crate::constraint::Coalesce::validate).
     #[error("Coalesce source is not Optional")]
     SourceNotOptional,
-}
-
-/// A rank-1 polymorphic type scheme. Used by formula declarations
-/// to express generic signatures.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TypeScheme {
-    /// Quantified variables and their constraints.
-    pub quantified: Vec<(SchemeVarName, Primitive)>,
-    /// The scheme body, referencing quantified variables by name.
-    pub body: SchemeBody,
-}
-
-/// A name binding a quantified type variable in a scheme.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SchemeVarName(pub String);
-
-impl SchemeVarName {
-    /// Construct a name.
-    pub fn new(name: impl Into<String>) -> Self {
-        Self(name.into())
-    }
-}
-
-/// The body of a [`TypeScheme`] — either a function-like signature
-/// or a single value type.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SchemeBody {
-    /// A function-like signature: parameter names → slot types.
-    Schema(Vec<(String, SchemeType)>),
-    /// A single value type.
-    Type(SchemeType),
-}
-
-/// A type expression inside a [`TypeScheme`]. The `optional` flag
-/// requests set-widening (adds the `Nothing` bit) when the scheme
-/// is instantiated to a static type.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SchemeType {
-    /// Required slot — produces a plain primitive after
-    /// instantiation.
-    Required(Box<SchemeShape>),
-    /// Optional slot — produces a primitive set widened with
-    /// `Nothing` after instantiation.
-    Optional(Box<SchemeShape>),
-}
-
-/// Primitive or variable shape inside a [`TypeScheme`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SchemeShape {
-    /// Concrete primitive set — no variable.
-    Primitive(Primitive),
-    /// Reference to a quantified variable by name.
-    Variable(SchemeVarName),
 }
 
 /// Per-rule unification context. Tracks the substitution map,
@@ -301,75 +225,6 @@ impl Context {
             }
         }
     }
-
-    /// Instantiate a [`TypeScheme`]: allocate fresh `VarId`s for
-    /// each quantified name, then materialize the body.
-    pub fn instantiate(&mut self, scheme: &TypeScheme) -> InstantiatedScheme {
-        let mut substitution: HashMap<SchemeVarName, VarId> = HashMap::new();
-        for (name, constraint) in &scheme.quantified {
-            let id = self.fresh(*constraint);
-            substitution.insert(name.clone(), id);
-        }
-        InstantiatedScheme {
-            body: instantiate_body(&scheme.body, &substitution),
-            variables: substitution,
-        }
-    }
-}
-
-fn instantiate_body(body: &SchemeBody, sub: &HashMap<SchemeVarName, VarId>) -> InstantiatedBody {
-    match body {
-        SchemeBody::Schema(fields) => InstantiatedBody::Schema(
-            fields
-                .iter()
-                .map(|(name, ty)| (name.clone(), instantiate_type(ty, sub)))
-                .collect(),
-        ),
-        SchemeBody::Type(ty) => InstantiatedBody::Type(instantiate_type(ty, sub)),
-    }
-}
-
-fn instantiate_type(ty: &SchemeType, sub: &HashMap<SchemeVarName, VarId>) -> Type {
-    match ty {
-        SchemeType::Required(d) => instantiate_shape(d, sub, false),
-        SchemeType::Optional(d) => instantiate_shape(d, sub, true),
-    }
-}
-
-fn instantiate_shape(d: &SchemeShape, sub: &HashMap<SchemeVarName, VarId>, optional: bool) -> Type {
-    match d {
-        SchemeShape::Primitive(p) => {
-            let static_ty = if optional {
-                StaticType::primitive_set(*p).optional()
-            } else {
-                StaticType::primitive_set(*p)
-            };
-            Type::Static(static_ty)
-        }
-        SchemeShape::Variable(name) => Type::Variable(
-            *sub.get(name)
-                .expect("scheme references unquantified variable"),
-        ),
-    }
-}
-
-/// The result of instantiating a [`TypeScheme`].
-#[derive(Debug, Clone)]
-pub struct InstantiatedScheme {
-    /// The instantiated body.
-    pub body: InstantiatedBody,
-    /// Maps each scheme variable name to the fresh `VarId`
-    /// allocated for this instantiation.
-    pub variables: HashMap<SchemeVarName, VarId>,
-}
-
-/// An instantiated [`SchemeBody`].
-#[derive(Debug, Clone)]
-pub enum InstantiatedBody {
-    /// Function-like signature.
-    Schema(Vec<(String, Type)>),
-    /// A single type.
-    Type(Type),
 }
 
 #[cfg(test)]
@@ -496,131 +351,6 @@ mod tests {
         let mut ctx = Context::new();
         let result = ctx.unify(&p(ValueType::String), &Type::optional(ValueType::Entity));
         assert!(matches!(result, Err(UnifyError::ConstraintConflict { .. })));
-    }
-
-    fn sum_scheme() -> TypeScheme {
-        TypeScheme {
-            quantified: vec![(SchemeVarName::new("T"), Primitive::NUMERIC)],
-            body: SchemeBody::Schema(vec![
-                (
-                    "left".into(),
-                    SchemeType::Required(Box::new(SchemeShape::Variable(SchemeVarName::new("T")))),
-                ),
-                (
-                    "right".into(),
-                    SchemeType::Required(Box::new(SchemeShape::Variable(SchemeVarName::new("T")))),
-                ),
-                (
-                    "out".into(),
-                    SchemeType::Required(Box::new(SchemeShape::Variable(SchemeVarName::new("T")))),
-                ),
-            ]),
-        }
-    }
-
-    #[dialog_common::test]
-    fn instantiate_allocates_fresh_variables() {
-        let scheme = sum_scheme();
-        let mut ctx = Context::new();
-        let i1 = ctx.instantiate(&scheme);
-        let i2 = ctx.instantiate(&scheme);
-        let t1 = i1.variables.get(&SchemeVarName::new("T")).copied().unwrap();
-        let t2 = i2.variables.get(&SchemeVarName::new("T")).copied().unwrap();
-        assert_ne!(t1, t2);
-        assert_eq!(ctx.constraint(t1), Primitive::NUMERIC);
-        assert_eq!(ctx.constraint(t2), Primitive::NUMERIC);
-    }
-
-    #[dialog_common::test]
-    fn instantiate_shared_variable_in_body() {
-        let scheme = sum_scheme();
-        let mut ctx = Context::new();
-        let inst = ctx.instantiate(&scheme);
-        if let InstantiatedBody::Schema(fields) = &inst.body {
-            let var_ids: Vec<VarId> = fields
-                .iter()
-                .map(|(_, ty)| match ty {
-                    Type::Variable(id) => *id,
-                    other => panic!("expected variable, got {:?}", other),
-                })
-                .collect();
-            assert_eq!(var_ids.len(), 3);
-            assert_eq!(var_ids[0], var_ids[1]);
-            assert_eq!(var_ids[1], var_ids[2]);
-        } else {
-            panic!("expected Schema body");
-        }
-    }
-
-    #[dialog_common::test]
-    fn instantiated_polymorphic_formula_unifies() {
-        let scheme = sum_scheme();
-        let mut ctx = Context::new();
-        let inst = ctx.instantiate(&scheme);
-        let fields = match &inst.body {
-            InstantiatedBody::Schema(f) => f,
-            _ => panic!(),
-        };
-        ctx.unify(&fields[0].1, &p(ValueType::UnsignedInt)).unwrap();
-        for (_, ty) in fields {
-            let resolved = ctx.apply(ty);
-            match resolved {
-                Type::Static(s) => assert_eq!(
-                    s.as_value_type(),
-                    Some(ValueType::UnsignedInt),
-                    "expected u32 after unification"
-                ),
-                other => panic!("expected static, got {:?}", other),
-            }
-        }
-    }
-
-    #[dialog_common::test]
-    fn instantiated_polymorphic_formula_rejects_mismatch() {
-        let scheme = sum_scheme();
-        let mut ctx = Context::new();
-        let inst = ctx.instantiate(&scheme);
-        let fields = match &inst.body {
-            InstantiatedBody::Schema(f) => f,
-            _ => panic!(),
-        };
-        ctx.unify(&fields[0].1, &p(ValueType::UnsignedInt)).unwrap();
-        let result = ctx.unify(&fields[1].1, &p(ValueType::String));
-        assert!(matches!(result, Err(UnifyError::ConstraintConflict { .. })));
-    }
-
-    #[dialog_common::test]
-    fn two_instantiations_are_independent() {
-        let scheme = sum_scheme();
-        let mut ctx = Context::new();
-        let i1 = ctx.instantiate(&scheme);
-        let i2 = ctx.instantiate(&scheme);
-        let i1_left = match &i1.body {
-            InstantiatedBody::Schema(f) => f[0].1.clone(),
-            _ => panic!(),
-        };
-        let i2_left = match &i2.body {
-            InstantiatedBody::Schema(f) => f[0].1.clone(),
-            _ => panic!(),
-        };
-        ctx.unify(&i1_left, &p(ValueType::UnsignedInt)).unwrap();
-        ctx.unify(&i2_left, &p(ValueType::Float)).unwrap();
-    }
-
-    #[dialog_common::test]
-    fn match_optionality_combine_strictest_wins() {
-        assert_eq!(
-            MatchOptionality::Required.combine(MatchOptionality::Optional),
-            MatchOptionality::Required
-        );
-        assert_eq!(
-            MatchOptionality::Optional.combine(MatchOptionality::Required),
-            MatchOptionality::Required
-        );
-        assert_eq!(
-            MatchOptionality::Optional.combine(MatchOptionality::Optional),
-            MatchOptionality::Optional
-        );
     }
 
     /// `infer` with no name and no kind allocates a fresh

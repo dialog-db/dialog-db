@@ -474,10 +474,11 @@ impl<U: Scalar> Term<Option<U>> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use dialog_query::Term;
     /// let nickname: Term<Option<String>> = Term::var("nickname");
     /// let display_name: Term<String> = Term::var("display_name");
-    /// let coalesce = nickname.unwrap_or("Anon").is(display_name);
+    /// let premise = nickname.unwrap_or("Anon").is(display_name);
     /// ```
     pub fn unwrap_or<F: Into<Term<U>>>(self, fallback: F) -> UnwrapOr<U> {
         UnwrapOr {
