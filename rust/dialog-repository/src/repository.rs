@@ -865,6 +865,70 @@ mod tests {
 
             Ok(())
         }
+
+        #[dialog_common::test]
+        async fn it_accumulates_two_cardinality_many_values_in_one_tx() -> anyhow::Result<()> {
+            // Regression guard: asserting two distinct values for the same
+            // (entity, attribute) inside a single transaction must keep
+            // both — cardinality-many accumulates, it does not collapse.
+            #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+            #[cardinality(many)]
+            #[domain("dialog.meta")]
+            pub struct Tag(pub String);
+
+            #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+            pub struct Tagged {
+                pub this: Entity,
+                pub tag: Tag,
+            }
+
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let post: Entity = "id:post".parse()?;
+
+            branch
+                .transaction()
+                .assert(Tagged {
+                    this: post.clone(),
+                    tag: Tag("red".into()),
+                })
+                .assert(Tagged {
+                    this: post.clone(),
+                    tag: Tag("blue".into()),
+                })
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            let mut results: Vec<Tagged> = branch
+                .query()
+                .select(Query::<Tagged> {
+                    this: post.clone().into(),
+                    tag: Term::var("tag"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            results.sort();
+
+            assert_eq!(
+                results,
+                vec![
+                    Tagged {
+                        this: post.clone(),
+                        tag: Tag("blue".into()),
+                    },
+                    Tagged {
+                        this: post.clone(),
+                        tag: Tag("red".into()),
+                    },
+                ]
+            );
+
+            Ok(())
+        }
     }
 
     mod profile_as_repository {
