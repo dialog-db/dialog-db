@@ -469,11 +469,13 @@ mod tests {
         assert_eq!(maybe[0].0, "nickname");
         assert_eq!(maybe[1].0, "age");
 
-        // Rule body emits only required fields. Optional fields are
-        // resolved by the descriptor's deductive-rule projection
-        // separately, not via `when()`.
+        // Rule body emits one attribute query per field (required
+        // *and* optional), with the resolution chosen by each
+        // field's `<F as ConceptField>::RESOLUTION` const. For
+        // MacroEmployee (1 required + 2 optional fields), `when()`
+        // returns 3 attribute queries.
         let when_result = MacroEmployee::when(Query::<MacroEmployee>::default());
-        assert_eq!(when_result.len(), 1);
+        assert_eq!(when_result.len(), 3);
     }
 
     #[dialog_common::test]
@@ -491,5 +493,43 @@ mod tests {
 
         let statements: Vec<AttributeStatement> = employee.into_iter().collect();
         assert_eq!(statements.len(), 2);
+    }
+
+    /// Aliasing `Option` to another name still routes through the
+    /// `ConceptField` impl for `Option<N>`. Proves the macro does
+    /// not depend on syntactic detection of the literal `Option`
+    /// identifier — Rust's type system resolves the alias to the
+    /// underlying `Option<N>` shape at type-check time, picking
+    /// up the right blanket impl.
+    #[dialog_common::test]
+    fn it_routes_optional_through_alias_via_concept_field() {
+        use core::option::Option as Maybe;
+
+        #[derive(crate::Concept, Debug, Clone)]
+        #[allow(dead_code)]
+        pub struct AliasedConcept {
+            /// Entity
+            pub this: Entity,
+            /// Required name
+            pub given_name: macro_employee::GivenName,
+            /// Optional nickname, spelled via an aliased Option
+            pub nickname: Maybe<macro_employee::Nickname>,
+        }
+
+        // Concept descriptor must route `nickname` into `maybe`,
+        // not `with`. If the macro were doing syntactic Option
+        // detection by ident name, `Maybe` would not match and
+        // `nickname` would land in `with` — wrong.
+        let concept: ConceptDescriptor = Query::<AliasedConcept>::default().into();
+        let with: Vec<_> = concept.with().iter().collect();
+        assert_eq!(with.len(), 1);
+        assert_eq!(with[0].0, "given_name");
+
+        let maybe = concept
+            .maybe()
+            .expect("AliasedConcept must have a `maybe` slot");
+        let maybe_entries: Vec<_> = maybe.iter().collect();
+        assert_eq!(maybe_entries.len(), 1);
+        assert_eq!(maybe_entries[0].0, "nickname");
     }
 }

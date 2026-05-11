@@ -73,39 +73,9 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{Data, DeriveInput, Fields, GenericArgument, PathArguments, Type, parse_macro_input};
+use syn::{Data, DeriveInput, Fields, parse_macro_input};
 
 use super::helpers::extract_doc_comments;
-
-/// If `ty` is syntactically `Option<T>`, return `Some(&T)`. Otherwise
-/// `None`. Recognizes the bare `Option<T>`, `std::option::Option<T>`,
-/// and `core::option::Option<T>` spellings.
-fn extract_option_inner(ty: &Type) -> Option<&Type> {
-    let Type::Path(type_path) = ty else {
-        return None;
-    };
-
-    let segments = &type_path.path.segments;
-    let last = segments.last()?;
-    if last.ident != "Option" {
-        return None;
-    }
-    if segments.len() > 1 {
-        let head = &segments[0].ident;
-        if head != "std" && head != "core" {
-            return None;
-        }
-    }
-
-    let PathArguments::AngleBracketed(args) = &last.arguments else {
-        return None;
-    };
-    let arg = args.args.first()?;
-    let GenericArgument::Type(inner) = arg else {
-        return None;
-    };
-    Some(inner)
-}
 
 pub fn derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -157,30 +127,29 @@ pub fn derive(input: TokenStream) -> TokenStream {
         .into();
     }
 
-    // Collect code fragments for each field. Required (non-Option types)
-    // and optional (`Option<T>`) fields are tracked in parallel vectors so
-    // the descriptor's `with` and `maybe` slots can be populated
-    // independently. The query/realize/iterator paths also branch by
-    // required vs optional.
-    let mut required_query_fields = Vec::new();
-    let mut required_field_names = Vec::new();
-    let mut required_field_name_lits = Vec::new();
-    let mut required_field_types = Vec::new();
-    let mut required_realize_fields = Vec::new();
-    let mut required_param_inserts = Vec::new();
-    let mut required_terms_methods = Vec::new();
-    let mut required_descriptor_pairs = Vec::new();
-    let mut required_statement_emits = Vec::new();
-
-    let mut optional_query_fields = Vec::new();
-    let mut optional_field_names = Vec::new();
-    let mut optional_field_name_lits = Vec::new();
-    let mut optional_inner_types = Vec::new();
-    let mut optional_realize_fields = Vec::new();
-    let mut optional_param_inserts = Vec::new();
-    let mut optional_terms_methods = Vec::new();
-    let mut optional_descriptor_pairs = Vec::new();
-    let mut optional_statement_emits = Vec::new();
+    // Collect code fragments for each field. The Concept derive
+    // does **not** branch syntactically on `Option<T>`. Instead it
+    // emits trait-based code that delegates to the `ConceptField`
+    // trait, which has two non-overlapping blanket impls in
+    // dialog-query:
+    //
+    // - `impl<N: Attribute> ConceptField for N` (required path)
+    // - `impl<N: Attribute> ConceptField for Option<N>` (optional)
+    //
+    // Rust's coherence permits these because `Option` is
+    // `#[fundamental]`. The macro emits `<F as ConceptField>::*`
+    // and the type system picks the right impl at type-check time,
+    // so aliases, prelude paths, and renamed imports all work
+    // without macro-time syntactic detection.
+    let mut query_fields = Vec::new();
+    let mut field_names = Vec::new();
+    let mut field_name_lits = Vec::new();
+    let mut field_types = Vec::new();
+    let mut realize_fields = Vec::new();
+    let mut param_inserts = Vec::new();
+    let mut terms_methods = Vec::new();
+    let mut descriptor_pair_pushes = Vec::new();
+    let mut statement_emits = Vec::new();
 
     let terms_name = syn::Ident::new(&format!("{}Terms", struct_name), struct_name.span());
 
@@ -210,137 +179,85 @@ pub fn derive(input: TokenStream) -> TokenStream {
         let terms_method_doc_lit =
             syn::LitStr::new(&terms_method_doc, proc_macro2::Span::call_site());
 
-        // Detect Option<T> wrapping. The wrapper preserves the optional
-        // kind at the Rust type level: the query exposes
-        // `Term<Option<Inner::Type>>`, distinguishing it from the
-        // non-optional `Term<Inner::Type>`. Presence is carried at
-        // runtime by `Binding::Present` / `Binding::Absent`.
-        if let Some(inner_type) = extract_option_inner(field_type) {
-            let inner_value_ty = quote! { <#inner_type as dialog_query::Attribute>::Type };
-            let optional_term_ty = quote! { dialog_query::Term<Option<#inner_value_ty>> };
+        // The query field's term type is driven by ConceptField:
+        // - Required field `N`: `<N as ConceptField>::TermType` =
+        //   `<N as Attribute>::Type`.
+        // - Optional field `Option<N>`: `<Option<N> as ConceptField>::TermType`
+        //   = `Option<<N as Attribute>::Type>`.
+        let term_type = quote! {
+            dialog_query::Term<<#field_type as dialog_query::ConceptField>::TermType>
+        };
 
-            optional_query_fields.push(quote! {
-                #[doc = #query_field_doc_lit]
-                pub #field_name: #optional_term_ty
-            });
-
-            optional_terms_methods.push(quote! {
-                #[doc = #terms_method_doc_lit]
-                pub fn #field_name() -> #optional_term_ty {
-                    dialog_query::Term::<Option<#inner_value_ty>>::var(#field_name_lit)
-                }
-            });
-
-            // Realize: pattern-match on Binding. Present(value) wraps
-            // in Some(_); Absent maps to None. Lookup errors (e.g.
-            // unbound — no premise produced this variable) propagate.
-            //
-            // `Term::<Any>::from(&self.#field_name)` uses the
-            // `From<&Term<Option<T>>> for Term<Any>` borrow-form
-            // conversion to type-erase for lookup.
-            optional_realize_fields.push(quote! {
-                #field_name: match source.lookup(&dialog_query::Term::<dialog_query::types::Any>::from(&self.#field_name))? {
-                    dialog_query::Binding::Present(value) => Some(#inner_type(value.try_into()?)),
-                    dialog_query::Binding::Absent => None,
-                }
-            });
-
-            optional_param_inserts.push(quote! {
-                terms.insert(
-                    #field_name_lit.into(),
-                    dialog_query::Term::<dialog_query::types::Any>::from(source.#field_name),
-                );
-            });
-
-            optional_descriptor_pairs.push(quote! {
-                (
-                    #field_name_lit,
-                    <#inner_type as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().clone(),
-                )
-            });
-
-            // IntoIterator / Statement: emit a relation only when `Some(_)`.
-            // None means "don't persist None" — there is no fact to record.
-            optional_statement_emits.push(quote! {
-                if let Some(__inner) = self.#field_name.as_ref() {
-                    let __expr = dialog_query::attribute::expression::dynamic::DynamicAttributeExpression {
-                        the: <#inner_type as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().the().clone(),
-                        of: self.this.clone(),
-                        is: dialog_query::Value::from(<#inner_type as dialog_query::Attribute>::value(__inner).clone()),
-                        cause: None,
-                        cardinality: Some(<#inner_type as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().cardinality()),
-                    };
-                    __statements.push(__expr.into());
-                }
-            });
-
-            optional_field_names.push(field_name);
-            optional_field_name_lits.push(field_name_lit);
-            optional_inner_types.push(inner_type);
-            continue;
-        }
-
-        // Required (non-Option) field path.
-        let inner_value_ty = quote! { <#field_type as dialog_query::Attribute>::Type };
-
-        required_query_fields.push(quote! {
+        query_fields.push(quote! {
             #[doc = #query_field_doc_lit]
-            pub #field_name: dialog_query::Term<#inner_value_ty>
+            pub #field_name: #term_type
         });
 
-        required_terms_methods.push(quote! {
+        terms_methods.push(quote! {
             #[doc = #terms_method_doc_lit]
-            pub fn #field_name() -> dialog_query::Term<#inner_value_ty> {
-                dialog_query::Term::<#inner_value_ty>::var(#field_name_lit)
+            pub fn #field_name() -> #term_type {
+                <#term_type>::var(#field_name_lit)
             }
         });
 
-        required_realize_fields.push(quote! {
-            #field_name: #field_type(
-                source.lookup(&dialog_query::Term::from(&self.#field_name))?.content()?.try_into()?
-            )
+        // Realize via the trait method. Required and optional impls
+        // each handle their own Binding semantics.
+        realize_fields.push(quote! {
+            #field_name: <#field_type as dialog_query::ConceptField>::realize(
+                source.lookup(&dialog_query::Term::<dialog_query::types::Any>::from(&self.#field_name))?
+            )?
         });
 
-        required_param_inserts.push(quote! {
+        param_inserts.push(quote! {
             terms.insert(
                 #field_name_lit.into(),
                 dialog_query::Term::<dialog_query::types::Any>::from(source.#field_name),
             );
         });
 
-        required_descriptor_pairs.push(quote! {
-            (
-                #field_name_lit,
-                <#field_type as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().clone(),
-            )
-        });
-
-        required_statement_emits.push(quote! {
+        // The descriptor for the attribute underlying this field —
+        // whether the field is `N` or `Option<N>`, the
+        // `<F as ConceptField>::Attribute` projection lifts to `N`,
+        // which is the type that carries the AttributeDescriptor.
+        // Routing into `with` vs `maybe` is decided at runtime via
+        // the RESOLUTION const.
+        descriptor_pair_pushes.push(quote! {
             {
-                let __expr = dialog_query::attribute::expression::dynamic::DynamicAttributeExpression {
-                    the: <#field_type as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().the().clone(),
-                    of: self.this.clone(),
-                    is: dialog_query::Value::from(<#field_type as dialog_query::Attribute>::value(&self.#field_name).clone()),
-                    cause: None,
-                    cardinality: Some(<#field_type as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().cardinality()),
-                };
-                __statements.push(__expr.into());
+                let __pair = (
+                    #field_name_lit,
+                    <<#field_type as dialog_query::ConceptField>::Attribute
+                        as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().clone(),
+                );
+                match <#field_type as dialog_query::ConceptField>::RESOLUTION {
+                    dialog_query::attribute::query::Resolution::Required => __with.push(__pair),
+                    dialog_query::attribute::query::Resolution::Optional => __maybe.push(__pair),
+                }
             }
         });
 
-        required_field_names.push(field_name);
-        required_field_name_lits.push(field_name_lit);
-        required_field_types.push(field_type);
+        // Statement emission via the trait method. The concept's
+        // `this` field is an `Entity` (concept structs always have
+        // `this: Entity`), passed through to each field's
+        // statement(s). Required impls push one statement; optional
+        // impls push zero or one depending on Some/None.
+        statement_emits.push(quote! {
+            <#field_type as dialog_query::ConceptField>::push_statements(
+                &self.#field_name,
+                self.this.clone(),
+                &mut __statements,
+            );
+        });
+
+        field_names.push(field_name);
+        field_name_lits.push(field_name_lit);
+        field_types.push(field_type);
     }
 
-    // The `assert_implements_attribute` validation needs to run on every
-    // attribute type, including those wrapped in `Option<T>`. Build a
-    // unified list of types to validate.
-    let validated_types: Vec<_> = required_field_types
-        .iter()
-        .map(|t| quote! { #t })
-        .chain(optional_inner_types.iter().map(|t| quote! { #t }))
-        .collect();
+    // Compile-time assertion list: every field type must implement
+    // ConceptField. The trait's blanket impls make this true for
+    // any `N: Attribute + Descriptor<AttributeDescriptor>` and for
+    // any `Option<N>` with the same bound on `N`.
+    let validated_types: Vec<_> = field_types.iter().map(|t| quote! { #t }).collect();
 
     // Generate type names based on struct name
     let query_name = syn::Ident::new(&format!("{}Query", struct_name), struct_name.span());
@@ -378,13 +295,17 @@ pub fn derive(input: TokenStream) -> TokenStream {
     );
 
     let expanded = quote! {
-        // Compile-time validation that all fields (except 'this') implement
-        // Attribute + Descriptor. Includes the inner type of any `Option<T>`
-        // field — `Option<T>` itself is not an Attribute.
+        // Compile-time validation that every concept field
+        // implements [`ConceptField`](dialog_query::ConceptField).
+        // The trait's two blanket impls cover both required
+        // `T: Attribute` and optional `Option<T>` shapes — anything
+        // outside that pair (e.g. `String`, a non-attribute newtype,
+        // `Option<Option<T>>`) fails this assertion with a clear
+        // bound-not-satisfied error.
         const _: () = {
-            fn assert_implements_attribute<T: dialog_query::Attribute + dialog_query::Descriptor<dialog_query::AttributeDescriptor>>() {}
+            fn assert_implements_concept_field<F: dialog_query::ConceptField>() {}
             fn #validate_fn_name() {
-                #(assert_implements_attribute::<#validated_types>();)*
+                #(assert_implements_concept_field::<#validated_types>();)*
             }
         };
 
@@ -393,16 +314,14 @@ pub fn derive(input: TokenStream) -> TokenStream {
         pub struct #query_name {
             #[doc = #query_this_field_doc]
             pub this: dialog_query::Term<dialog_query::Entity>,
-            #(#required_query_fields,)*
-            #(#optional_query_fields,)*
+            #(#query_fields,)*
         }
 
         impl Default for #query_name {
             fn default() -> Self {
                 Self {
                     this: dialog_query::Term::var("this"),
-                    #(#required_field_names: dialog_query::Term::var(#required_field_name_lits),)*
-                    #(#optional_field_names: dialog_query::Term::var(#optional_field_name_lits),)*
+                    #(#field_names: dialog_query::Term::var(#field_name_lits),)*
                 }
             }
         }
@@ -415,8 +334,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             pub fn this() -> dialog_query::Term<dialog_query::Entity> {
                 dialog_query::Term::<dialog_query::Entity>::var("this")
             }
-            #(#required_terms_methods)*
-            #(#optional_terms_methods)*
+            #(#terms_methods)*
         }
 
         // Implement Application trait for the Query struct
@@ -442,8 +360,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     this: dialog_query::Entity::try_from(
                         source.lookup(&dialog_query::Term::from(&self.this))?.content()?
                     )?,
-                    #(#required_realize_fields,)*
-                    #(#optional_realize_fields,)*
+                    #(#realize_fields,)*
                 })
             }
         }
@@ -471,8 +388,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
                 terms.insert("this".into(), dialog_query::Term::<dialog_query::types::Any>::from(source.this));
 
-                #(#required_param_inserts)*
-                #(#optional_param_inserts)*
+                #(#param_inserts)*
 
                 terms
             }
@@ -480,33 +396,27 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         // Implement From<StructName> for ConceptDescriptor.
         //
-        // Required fields populate `with`; `Option<T>` fields populate
-        // `maybe`. The two slots are independent, and a concept may have
-        // either or both. The `Vec<(&str, AttributeDescriptor)>` annotation
-        // is necessary so type inference works when the optional list is
-        // empty (no `Option<T>` fields on the struct).
+        // Each field is routed into `with` or `maybe` at runtime
+        // based on its `<F as ConceptField>::RESOLUTION` const —
+        // `Required` fields populate `with`, `Optional` fields
+        // populate `maybe`. The two slots are independent, and a
+        // concept may have either or both.
         impl From<#struct_name> for dialog_query::ConceptDescriptor {
             fn from(_: #struct_name) -> Self {
-                let __maybe: Vec<(&str, dialog_query::AttributeDescriptor)> = vec![
-                    #(#optional_descriptor_pairs),*
-                ];
-                dialog_query::ConceptDescriptor::from(vec![
-                    #(#required_descriptor_pairs),*
-                ])
-                .with_maybe(__maybe)
+                let mut __with: Vec<(&str, dialog_query::AttributeDescriptor)> = Vec::new();
+                let mut __maybe: Vec<(&str, dialog_query::AttributeDescriptor)> = Vec::new();
+                #(#descriptor_pair_pushes)*
+                dialog_query::ConceptDescriptor::from(__with).with_maybe(__maybe)
             }
         }
 
         // Implement From<Query> for ConceptDescriptor
         impl From<#query_name> for dialog_query::ConceptDescriptor {
             fn from(_: #query_name) -> Self {
-                let __maybe: Vec<(&str, dialog_query::AttributeDescriptor)> = vec![
-                    #(#optional_descriptor_pairs),*
-                ];
-                dialog_query::ConceptDescriptor::from(vec![
-                    #(#required_descriptor_pairs),*
-                ])
-                .with_maybe(__maybe)
+                let mut __with: Vec<(&str, dialog_query::AttributeDescriptor)> = Vec::new();
+                let mut __maybe: Vec<(&str, dialog_query::AttributeDescriptor)> = Vec::new();
+                #(#descriptor_pair_pushes)*
+                dialog_query::ConceptDescriptor::from(__with).with_maybe(__maybe)
             }
         }
 
@@ -589,8 +499,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
             fn into_iter(self) -> Self::IntoIter {
                 let mut __statements: Vec<dialog_query::AttributeStatement> = Vec::new();
-                #(#required_statement_emits)*
-                #(#optional_statement_emits)*
+                #(#statement_emits)*
                 __statements.into_iter()
             }
         }
@@ -599,8 +508,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl dialog_query::Statement for #struct_name {
             fn assert(self, update: &mut impl dialog_query::Update) {
                 let mut __statements: Vec<dialog_query::AttributeStatement> = Vec::new();
-                #(#required_statement_emits)*
-                #(#optional_statement_emits)*
+                #(#statement_emits)*
                 for __s in __statements {
                     dialog_query::Statement::assert(__s, update);
                 }
@@ -608,8 +516,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
             fn retract(self, update: &mut impl dialog_query::Update) {
                 let mut __statements: Vec<dialog_query::AttributeStatement> = Vec::new();
-                #(#required_statement_emits)*
-                #(#optional_statement_emits)*
+                #(#statement_emits)*
                 for __s in __statements {
                     dialog_query::Statement::retract(__s, update);
                 }
@@ -631,32 +538,38 @@ pub fn derive(input: TokenStream) -> TokenStream {
             type Descriptor = dialog_query::ConceptDescriptor;
         }
 
-        // Implement Rule trait — the body lists only required attribute
-        // queries. Optional (`Option<T>`) fields are resolved by a
-        // separate optional-resolution premise inside the concept
-        // descriptor's deductive-rule projection (see
-        // `From<&ConceptDescriptor> for DeductiveRule`).
+        // Implement Rule trait — emit one AttributeQuery per
+        // field, with resolution chosen by the field's
+        // `<F as ConceptField>::RESOLUTION` const. Required fields
+        // get the standard (Resolution::Required) attribute query;
+        // optional fields get the set-widened
+        // (Resolution::Optional) variant which yields an Absent
+        // fallback row when no fact matches.
         impl #struct_name {
             fn when(terms: dialog_query::Query<Self>) -> dialog_query::Premises {
-                let selectors: Vec<dialog_query::AttributeQuery> = vec![
-                    #(
-                        {
-                            let value_param = dialog_query::Term::<dialog_query::types::Any>::from(
-                                terms.#required_field_names.clone()
-                            );
-
-                            dialog_query::AttributeQuery::new(
-                                dialog_query::Term::Constant(dialog_query::Value::from(
-                                    <#required_field_types as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().the().clone()
-                                )),
-                                terms.this.clone(),
-                                value_param,
-                                dialog_query::Term::blank(),
-                                Some(<#required_field_types as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().cardinality()),
-                            )
-                        }
-                    ),*
-                ];
+                let mut selectors: Vec<dialog_query::AttributeQuery> = Vec::new();
+                #(
+                    {
+                        let value_param = dialog_query::Term::<dialog_query::types::Any>::from(
+                            terms.#field_names.clone()
+                        );
+                        let descriptor = <<#field_types as dialog_query::ConceptField>::Attribute
+                            as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor();
+                        let the_term = dialog_query::Term::Constant(
+                            dialog_query::Value::from(descriptor.the().clone())
+                        );
+                        let cardinality = Some(descriptor.cardinality());
+                        let query = dialog_query::AttributeQuery::with_resolution(
+                            the_term,
+                            terms.this.clone(),
+                            value_param,
+                            dialog_query::Term::blank(),
+                            cardinality,
+                            <#field_types as dialog_query::ConceptField>::RESOLUTION,
+                        );
+                        selectors.push(query);
+                    }
+                )*
 
                 selectors.into()
             }

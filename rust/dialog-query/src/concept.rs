@@ -6,8 +6,15 @@ pub mod query;
 pub use descriptor::ConceptDescriptor;
 pub use query::ConceptQuery;
 
+use crate::artifact::Type as ValueType;
+use crate::attribute::query::Resolution;
+use crate::attribute::{Attribute, AttributeDescriptor, AttributeStatement};
+use crate::descriptor::Descriptor;
+use crate::error::EvaluationError;
 pub use crate::predicate::Predicate;
-use crate::{Entity, Parameters};
+use crate::selection::Binding;
+use crate::types::{TypeDescriptor, Typed};
+use crate::{Entity, Parameters, Value};
 use dialog_common::ConditionalSend;
 use std::fmt::Debug;
 
@@ -38,6 +45,160 @@ where
 
     /// Content-addressed identity for this concept.
     fn this(&self) -> Entity;
+}
+
+/// Field-level abstraction used by `#[derive(Concept)]` to dispatch
+/// between required (`N: Attribute`) and optional (`Option<N>`)
+/// concept fields without doing syntactic type matching in the
+/// proc macro.
+///
+/// Two blanket impls cover the two cases:
+///
+/// - `impl<N: Attribute> ConceptField for N` — required path.
+/// - `impl<N: Attribute> ConceptField for Option<N>` — optional path.
+///
+/// These don't overlap because `Option` is `#[fundamental]`: Rust's
+/// trait coherence treats `Option<T>` as structurally distinct from
+/// a bare type parameter `T`. The Concept derive refers to
+/// `<F as ConceptField>::TermType` etc. without inspecting `F`'s
+/// syntactic shape — Rust resolves the right impl at type-check
+/// time. Aliases, prelude paths, and renamed imports all work.
+pub trait ConceptField: Sized + Clone {
+    /// The underlying attribute newtype. For both required `N` and
+    /// optional `Option<N>`, this is `N`.
+    type Attribute: Attribute
+        + Descriptor<AttributeDescriptor>
+        + From<<Self::Attribute as Attribute>::Type>;
+
+    /// The type wrapping the attribute's scalar at the term layer.
+    /// - Required (`N`): `<N as Attribute>::Type`.
+    /// - Optional (`Option<N>`): `Option<<N as Attribute>::Type>`.
+    type TermType: Typed + Clone + Debug + ConditionalSend + 'static;
+
+    /// Resolution policy for the field's attribute query.
+    /// `Required` for `N`, `Optional` for `Option<N>`.
+    const RESOLUTION: Resolution;
+
+    /// Realize a value of `Self` from the row binding for this slot.
+    ///
+    /// - Required: the binding must be `Present`; the inner scalar
+    ///   is unwrapped via `TryFrom<Value>` and wrapped in `N`.
+    /// - Optional: `Present(v)` becomes `Some(N(v))`, `Absent`
+    ///   becomes `None`.
+    fn realize(binding: Binding) -> Result<Self, EvaluationError>;
+
+    /// Push the attribute statement(s) for this field into `buf`.
+    ///
+    /// - Required: always one statement.
+    /// - Optional: one if `Some`, none if `None`.
+    fn push_statements(&self, this: Entity, buf: &mut Vec<AttributeStatement>);
+}
+
+// Required path: any `N` that satisfies the attribute bounds gets
+// the `ConceptField` impl with `RESOLUTION = Required` and
+// `TermType = N::Type`. This is the "bare attribute" case in a
+// concept field — `pub name: GivenName` and similar.
+//
+// Coherence note: this blanket and the next one (`for Option<N>`)
+// are non-overlapping because `Option` is `#[fundamental]`. The
+// `#[fundamental]` annotation on std's `Option` tells the trait
+// checker to treat `Option<T>` as structurally distinct from a
+// bare type parameter `T`, so `impl<N> Trait for N` and
+// `impl<N> Trait for Option<N>` are allowed to coexist.
+//
+// Other `#[fundamental]` types where this same pattern would work
+// include `Box<T>`, `&T`, `&mut T`, and `Pin<T>`.
+impl<N> ConceptField for N
+where
+    N: Attribute + Descriptor<AttributeDescriptor> + Clone + From<<N as Attribute>::Type>,
+    <N as Attribute>::Type: Into<Value>,
+{
+    type Attribute = N;
+    type TermType = <N as Attribute>::Type;
+    const RESOLUTION: Resolution = Resolution::Required;
+
+    fn realize(binding: Binding) -> Result<Self, EvaluationError> {
+        let value = binding.content()?;
+        let inner = <<N as Attribute>::Type>::try_from(value).map_err(|_| {
+            EvaluationError::TypeMismatch {
+                expected: <<<N as Attribute>::Type as Typed>::Descriptor as TypeDescriptor>::TYPE
+                    .unwrap_or(ValueType::Symbol),
+                actual: ValueType::Symbol,
+            }
+        })?;
+        Ok(N::from(inner))
+    }
+
+    fn push_statements(&self, this: Entity, buf: &mut Vec<AttributeStatement>) {
+        let descriptor = <Self as Descriptor<AttributeDescriptor>>::descriptor();
+        let expr = AttributeStatement {
+            the: descriptor.the().clone(),
+            of: this,
+            is: <<N as Attribute>::Type as Into<Value>>::into(
+                <Self as Attribute>::value(self).clone(),
+            ),
+            cause: None,
+            cardinality: Some(descriptor.cardinality()),
+        };
+        buf.push(expr);
+    }
+}
+
+// Optional path: `Option<N>` (where `N: Attribute`) gets the
+// `ConceptField` impl with `RESOLUTION = Optional` and
+// `TermType = Option<N::Type>`. This is the "set-widened" case in
+// a concept field — `pub nickname: Option<Nickname>` and similar.
+// `realize` maps `Binding::Absent` to `None`; `push_statements`
+// emits zero records when the value is `None` (absence is never
+// persisted).
+//
+// Resolution at the call site is purely type-system driven —
+// `<Option<N> as ConceptField>` resolves to *this* impl by virtue
+// of the structural `Option<N>` shape. Aliased imports
+// (`use core::option::Option as Maybe`, etc.) resolve identically
+// at the type level even though the surface syntax differs, which
+// is why no proc-macro syntactic detection is needed.
+impl<N> ConceptField for Option<N>
+where
+    N: Attribute + Descriptor<AttributeDescriptor> + Clone + From<<N as Attribute>::Type>,
+    <N as Attribute>::Type: Into<Value>,
+{
+    type Attribute = N;
+    type TermType = Option<<N as Attribute>::Type>;
+    const RESOLUTION: Resolution = Resolution::Optional;
+
+    fn realize(binding: Binding) -> Result<Self, EvaluationError> {
+        match binding {
+            Binding::Present(value) => {
+                let inner = <<N as Attribute>::Type>::try_from(value).map_err(|_| {
+                    EvaluationError::TypeMismatch {
+                        expected:
+                            <<<N as Attribute>::Type as Typed>::Descriptor as TypeDescriptor>::TYPE
+                                .unwrap_or(ValueType::Symbol),
+                        actual: ValueType::Symbol,
+                    }
+                })?;
+                Ok(Some(N::from(inner)))
+            }
+            Binding::Absent => Ok(None),
+        }
+    }
+
+    fn push_statements(&self, this: Entity, buf: &mut Vec<AttributeStatement>) {
+        if let Some(inner) = self.as_ref() {
+            let descriptor = <N as Descriptor<AttributeDescriptor>>::descriptor();
+            let expr = AttributeStatement {
+                the: descriptor.the().clone(),
+                of: this,
+                is: <<N as Attribute>::Type as Into<Value>>::into(
+                    <N as Attribute>::value(inner).clone(),
+                ),
+                cause: None,
+                cardinality: Some(descriptor.cardinality()),
+            };
+            buf.push(expr);
+        }
+    }
 }
 
 // Blanket impl for &T -> Parameters that uses the generated From<T> impl
@@ -114,7 +275,7 @@ mod tests {
     use crate::AttributeStatement;
     use crate::Query;
     use crate::artifact::{ArtifactSelector, ArtifactsAttribute, Select, Type, Value};
-    use crate::attribute::{Attribute as _, AttributeDescriptor};
+    use crate::attribute::AttributeDescriptor;
     use crate::error::EvaluationError;
     use crate::query::Application;
     use crate::query::Output;
