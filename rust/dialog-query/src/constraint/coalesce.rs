@@ -394,16 +394,11 @@ mod tests {
     /// fallback / is are both `String`.
     #[dialog_common::test]
     fn validate_accepts_matching_types() {
-        use crate::artifact::Type as ValueType;
-        use crate::type_system;
         use crate::type_system::unifier::Context;
 
-        let source = Term::<Any>::typed_var(
-            "source",
-            type_system::Type::primitive(ValueType::String).optional(),
-        );
+        let source: Term<Any> = Term::<Option<String>>::var("source").into();
         let fallback = Term::<Any>::constant("Anon".to_string());
-        let is = Term::<Any>::typed_var("is", type_system::Type::primitive(ValueType::String));
+        let is: Term<Any> = Term::<String>::var("is").into();
 
         let coalesce = Coalesce::new(source, fallback, is);
         let mut ctx = Context::new();
@@ -415,13 +410,10 @@ mod tests {
     /// `validate` rejects a source whose kind isn't set-widened.
     #[dialog_common::test]
     fn validate_rejects_non_optional_source() {
-        use crate::artifact::Type as ValueType;
-        use crate::type_system;
         use crate::type_system::unifier::{Context, UnifyError};
 
         // Source kind is `String`, not `Optional<String>` — bug.
-        let source =
-            Term::<Any>::typed_var("source", type_system::Type::primitive(ValueType::String));
+        let source: Term<Any> = Term::<String>::var("source").into();
         let fallback = Term::<Any>::constant("Anon".to_string());
         let is = Term::<Any>::var("is");
 
@@ -437,14 +429,9 @@ mod tests {
     /// underlying is `String`, fallback is `u32`.
     #[dialog_common::test]
     fn validate_rejects_fallback_type_mismatch() {
-        use crate::artifact::Type as ValueType;
-        use crate::type_system;
         use crate::type_system::unifier::{Context, UnifyError};
 
-        let source = Term::<Any>::typed_var(
-            "source",
-            type_system::Type::primitive(ValueType::String).optional(),
-        );
+        let source: Term<Any> = Term::<Option<String>>::var("source").into();
         let fallback = Term::<Any>::constant(42u32);
         let is = Term::<Any>::var("is");
 

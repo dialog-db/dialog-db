@@ -830,8 +830,8 @@ mod tests {
         // information to combine. An untyped `Term::var` produces
         // `None` content_type, which contributes nothing to the
         // meet — the optional side then wins.
-        let typed_name = Term::<Any>::typed_var("name", type_system::Type::primitive(Type::String));
-        let optional_name = optional_term("name", Some(Type::String));
+        let typed_name: Term<Any> = Term::<String>::var("name").into();
+        let optional_name: Term<Any> = Term::<Option<String>>::var("name").into();
 
         let premises = vec![
             // Optional `is` term: contributes a slot type with Nothing.
@@ -968,11 +968,10 @@ mod tests {
             ),
         )]);
         let this = Term::<Entity>::var("this");
-        let typed_name = Term::<Any>::typed_var("name", type_system::Type::primitive(Type::String));
+        let typed_name: Term<Any> = Term::<String>::var("name").into();
 
         // Source is a `Term<Any>` carrying `String` (not Optional<String>).
-        let bad_source =
-            Term::<Any>::typed_var("source", type_system::Type::primitive(Type::String));
+        let bad_source: Term<Any> = Term::<String>::var("source").into();
         let bad_coalesce = Coalesce::new(
             bad_source,
             Term::<Any>::constant("Anon".to_string()),

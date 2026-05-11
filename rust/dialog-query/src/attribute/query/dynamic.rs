@@ -1004,16 +1004,12 @@ mod tests {
         );
     }
 
-    /// When the `is` term is a typed `Term<Any>` carrying a known
-    /// value type wrapped as optional, the schema's `is` slot
-    /// admits both that type and `Nothing`.
+    /// When the `is` term is a typed `Term<Option<U>>`, the schema's
+    /// `is` slot admits both `U` and `Nothing`.
     #[dialog_common::test]
     fn it_preserves_inner_type_when_is_term_is_optional() {
         use crate::artifact::Type as ValueType;
-        let typed_is = Term::<Any>::typed_var(
-            "name",
-            type_system::Type::primitive(ValueType::String).optional(),
-        );
+        let typed_is: Term<Any> = Term::<Option<String>>::var("name").into();
         let q = DynamicAttributeQuery::new(
             Term::var("the"),
             Term::var("of"),
