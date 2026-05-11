@@ -464,7 +464,7 @@ mod tests {
     /// Coalesce round-trips through Proposition. Regression for
     /// the bug where Proposition::deserialize matched only "==" as
     /// a constraint and routed every other string to FormulaQuery.
-    #[test]
+    #[dialog_common::test]
     fn it_round_trips_coalesce_as_proposition() {
         let coalesce = Coalesce::new(
             Term::<Any>::var("source"),

@@ -290,13 +290,13 @@ mod tests {
     use super::*;
     use crate::artifact::Value;
 
-    #[test]
+    #[dialog_common::test]
     fn binding_content_returns_value_for_present() {
         let b = Binding::Present(Value::String("hello".into()));
         assert_eq!(b.content(), Ok(Value::String("hello".into())));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn binding_content_errors_on_absent() {
         let b = Binding::Absent;
         match b.content() {
@@ -307,7 +307,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[dialog_common::test]
     fn binding_content_for_attaches_variable_name() {
         let b = Binding::Absent;
         match b.content_for(Some("nickname")) {
@@ -318,7 +318,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[dialog_common::test]
     fn binding_predicates() {
         assert!(Binding::Present(Value::UnsignedInt(0)).is_present());
         assert!(!Binding::Present(Value::UnsignedInt(0)).is_absent());
@@ -326,7 +326,7 @@ mod tests {
         assert!(!Binding::Absent.is_present());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn match_bind_absent_creates_absent_binding() {
         let mut m = Match::new();
         let term = Term::var("nickname");
@@ -334,7 +334,7 @@ mod tests {
         assert_eq!(m.lookup(&term).unwrap(), Binding::Absent);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn match_bind_then_bind_absent_conflicts() {
         let mut m = Match::new();
         let term = Term::var("name");
@@ -343,7 +343,7 @@ mod tests {
         assert!(matches!(result, Err(EvaluationError::Assignment { .. })));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn match_bind_absent_then_bind_conflicts() {
         let mut m = Match::new();
         let term = Term::var("name");
@@ -352,7 +352,7 @@ mod tests {
         assert!(matches!(result, Err(EvaluationError::Assignment { .. })));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn match_bind_absent_is_idempotent() {
         let mut m = Match::new();
         let term = Term::var("nickname");
@@ -361,7 +361,7 @@ mod tests {
         assert_eq!(m.lookup(&term).unwrap(), Binding::Absent);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn match_lookup_unbound_returns_unbound_error() {
         let m = Match::new();
         match m.lookup(&Term::var("nope")) {
@@ -372,7 +372,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[dialog_common::test]
     fn match_is_present_distinguishes_present_from_absent() {
         let mut m = Match::new();
         let pname = Term::var("name");
