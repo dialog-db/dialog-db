@@ -70,8 +70,8 @@ pub enum TypeError {
     /// a required-binding premise for the variable, or by coalescing
     /// the optional source with a fallback before reaching the head.
     #[error(
-        "Rule {rule} required head \"{variable}\" is bound only by optional premises; \
-         the rule could produce Absent in a required slot"
+        "Rule {rule}: field \"{variable}\" is optional but the conclusion requires a value. \
+         Use coalesce(...) to provide a fallback, or bind \"{variable}\" from a required premise."
     )]
     RequiredHeadFromOptional {
         /// The offending rule.
