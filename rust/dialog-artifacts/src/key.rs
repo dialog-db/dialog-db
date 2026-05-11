@@ -216,20 +216,28 @@ pub trait KeyViewMut: KeyView {
         };
 
         match (selector.domain(), selector.name()) {
-            (Some(d), Some(n)) => {
+            (Some(domain), Some(name)) => {
                 // Both halves bound: write the joined attribute. The join
-                // can't exceed the slot length because both halves were
-                // validated against the budget at construction.
-                let attr = Attribute::from_parts(d, n)
-                    .expect("Domain + AttributeName fit in attribute slot by construction");
+                // succeeds because both halves were validated against the
+                // joint budget when the selector was built.
+                let attr = Attribute::from_parts(domain, name)
+                    .expect("Symbol pair fits in attribute slot by construction");
                 key = key.set_attribute(AttributeKeyPart::from(&attr));
             }
-            (Some(d), None) => {
-                key = key.set_attribute_prefix(&d.key_prefix_bytes());
+            (Some(domain), None) => {
+                // Domain-only: write `domain ++ DELIMITER` as the prefix.
+                // The trailing delimiter prevents the scan from matching
+                // attributes whose domain merely starts with these bytes
+                // (e.g. `dialog.concept.with-other`).
+                let domain_bytes = domain.as_bytes();
+                let mut prefix = Vec::with_capacity(domain_bytes.len() + 1);
+                prefix.extend_from_slice(domain_bytes);
+                prefix.push(b'/');
+                key = key.set_attribute_prefix(&prefix);
             }
             (None, Some(_)) => {
                 // Name without domain doesn't constrain a contiguous range
-                // on the attribute index — let post-filter handle it.
+                // on the attribute index; the post-filter handles correctness.
             }
             (None, None) => {}
         }

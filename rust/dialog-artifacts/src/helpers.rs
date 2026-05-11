@@ -15,7 +15,7 @@ pub fn generate_data(entity_count: usize) -> Result<Vec<Artifact>> {
     let item_name_attribute = Attribute::from_str("item/name")?;
     let item_pointer_attribute = Attribute::from_str("attribute/pointer")?;
     let back_reference_attribute = Attribute::from_str("back/reference")?;
-    let parent_attribute = Attribute::from_str("relationship/parentOf")?;
+    let parent_attribute = Attribute::from_str("relationship/parentof")?;
 
     let mut rng = ChaCha8Rng::from_seed([0u8; 32]);
     let mut data = vec![];
