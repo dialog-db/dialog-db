@@ -7,11 +7,13 @@ use crate::negation::Negation;
 pub use crate::planner::Plan;
 pub use crate::planner::{Conjunction, Planner};
 pub use crate::premise::Premise;
+use crate::type_system;
 pub use crate::{Attribute, Cardinality, Parameters, Proposition, Requirement, Value};
 use crate::{Environment, Term, Type};
 use descriptor::DeductiveRuleDescriptor;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 
 /// Represents a deductive rule that can be applied creating a premise.
@@ -27,8 +29,10 @@ pub struct DeductiveRule {
 impl DeductiveRule {
     /// Compile a rule from a conclusion and premises.
     ///
-    /// Plans the optimal premise execution order and validates that every
-    /// conclusion variable is grounded by at least one positive premise.
+    /// Plans the optimal premise execution order, validates that every
+    /// conclusion variable is grounded by at least one positive premise,
+    /// and runs the meet-algebra check that required head variables
+    /// are not bound only by optional (set-widened) sources.
     pub fn new(conclusion: ConceptDescriptor, premises: Vec<Premise>) -> Result<Self, TypeError> {
         // Plan the order of premises in a scope where none of the rule
         // parameters are bound to find the optimal execution order, or to
@@ -52,7 +56,75 @@ impl DeductiveRule {
             });
         }
 
+        // Compute the meet across positive premises for every variable
+        // the conclusion's required slots reference. If the meet admits
+        // `Nothing`, the rule could produce Absent for a required head —
+        // reject.
+        let meet = rule.meet_per_variable();
+        let optional_head = rule
+            .conclusion
+            .operands()
+            .find(|name| meet.get(*name).is_some_and(|kind| kind.is_optional()))
+            .map(String::from);
+
+        if let Some(variable) = optional_head {
+            return Err(TypeError::RequiredHeadFromOptional {
+                rule: Box::new(rule),
+                variable,
+            });
+        }
+
         Ok(rule)
+    }
+
+    /// For each variable used by a positive premise, compute the
+    /// meet (intersection) of the kinds the premise slots ascribe
+    /// to it.
+    ///
+    /// The meet algebra: a variable's kind across the rule is the
+    /// intersection of the kinds claimed by every binding slot it
+    /// appears in. If any slot requires a Present value (no
+    /// `Nothing` in its primitive set), the variable is Required
+    /// in the rule — even if other slots are Optional. Only when
+    /// *every* binding is Optional does the variable carry
+    /// `Nothing` in its meet.
+    ///
+    /// Negation premises do not contribute — they don't bind
+    /// variables, only filter on already-bound values.
+    fn meet_per_variable(&self) -> HashMap<String, type_system::Type> {
+        let mut by_variable: HashMap<String, type_system::Type> = HashMap::new();
+
+        for step in &self.join.steps {
+            let Premise::Assert(_) = &step.premise else {
+                continue;
+            };
+            let schema = step.premise.schema();
+            let params = step.premise.parameters();
+
+            for (slot_name, field) in schema.iter() {
+                let Some(slot_type) = field.content_type() else {
+                    continue;
+                };
+                let Some(param) = params.get(slot_name) else {
+                    continue;
+                };
+                let Some(var_name) = param.name() else {
+                    continue;
+                };
+                match by_variable.get(var_name) {
+                    Some(accumulated) => {
+                        if let Some(merged) = accumulated.intersect(slot_type) {
+                            by_variable.insert(var_name.to_string(), merged);
+                        }
+                    }
+                    None => {
+                        by_variable.insert(var_name.to_string(), slot_type.clone());
+                    }
+                }
+            }
+        }
+
+        by_variable
     }
 
     /// Returns the conclusion predicate for this rule.
@@ -189,6 +261,7 @@ mod tests {
     use crate::attribute::AttributeDescriptor;
     use crate::attribute::query::AttributeQuery;
     use crate::the;
+    use crate::types::Any;
 
     #[dialog_common::test]
     fn it_compiles_with_valid_premises() {
@@ -634,5 +707,93 @@ mod tests {
         let empty: Vec<(&str, AttributeDescriptor)> = Vec::new();
         let cleared = with_maybe.with_maybe(empty);
         assert!(cleared.maybe().is_none(), "empty input clears maybe");
+    }
+
+    /// A conclusion variable bound only by an optional attribute
+    /// query carries `Nothing` in its meet. Required heads cannot
+    /// accept that — the rule could produce an Absent value in a
+    /// required slot. Reject.
+    #[dialog_common::test]
+    fn it_rejects_required_head_from_optional_premise() {
+        let conclusion = ConceptDescriptor::from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
+        let this = Term::<Entity>::var("this");
+        // Bind ?name with an Optional resolution — the meet for ?name
+        // includes Nothing.
+        let premises = vec![
+            AttributeQuery::optional(
+                Term::from(the!("user/name")),
+                this,
+                Term::var("name"),
+                Term::var("cause"),
+                Some(Cardinality::One),
+            )
+            .into(),
+        ];
+        let result = DeductiveRule::new(conclusion, premises);
+        match result {
+            Err(TypeError::RequiredHeadFromOptional { variable, .. }) => {
+                assert_eq!(variable, "name");
+            }
+            other => panic!("expected RequiredHeadFromOptional, got {other:?}"),
+        }
+    }
+
+    /// A conclusion variable bound by *both* an optional and a
+    /// required premise (with a typed `is` slot) has the Nothing
+    /// bit removed by the meet — at least one premise guarantees
+    /// Present. Accept.
+    #[dialog_common::test]
+    fn it_accepts_required_head_when_meet_strips_nothing() {
+        let conclusion = ConceptDescriptor::from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
+        let this = Term::<Entity>::var("this");
+        // The `is` slot must carry a typed kind so the meet has
+        // information to combine. An untyped `Term::var` produces
+        // `None` content_type, which contributes nothing to the
+        // meet — the optional side then wins.
+        let typed_name =
+            Term::<Any>::typed_var("name", Some(type_system::Type::primitive(Type::String)));
+
+        let premises = vec![
+            // Optional resolution: contributes a slot type with Nothing.
+            AttributeQuery::optional(
+                Term::from(the!("user/name")),
+                this.clone(),
+                typed_name.clone(),
+                Term::var("cause1"),
+                Some(Cardinality::One),
+            )
+            .into(),
+            // Required resolution: contributes a slot type without Nothing.
+            AttributeQuery::new(
+                Term::from(the!("user/canonical-name")),
+                this,
+                typed_name,
+                Term::var("cause2"),
+                Some(Cardinality::One),
+            )
+            .into(),
+        ];
+        let result = DeductiveRule::new(conclusion, premises);
+        assert!(
+            result.is_ok(),
+            "meet of Required + Optional strips Nothing — should compile (got {:?})",
+            result.err()
+        );
     }
 }

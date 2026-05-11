@@ -63,6 +63,23 @@ pub enum TypeError {
         variable: String,
     },
 
+    /// A rule's conclusion references a required variable that is
+    /// bound only by Optional (set-widened) premises — the rule
+    /// could produce a row with the conclusion variable in Absent
+    /// state, which a required head cannot accept. Fix by adding
+    /// a required-binding premise for the variable, or by coalescing
+    /// the optional source with a fallback before reaching the head.
+    #[error(
+        "Rule {rule} required head \"{variable}\" is bound only by optional premises; \
+         the rule could produce Absent in a required slot"
+    )]
+    RequiredHeadFromOptional {
+        /// The offending rule.
+        rule: Box<DeductiveRule>,
+        /// Name of the optionally-bound head variable.
+        variable: String,
+    },
+
     /// A rule application omits a required parameter.
     #[error("Rule {rule} application omits required parameter \"{parameter}\"")]
     OmittedParameter {
