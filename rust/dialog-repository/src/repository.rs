@@ -929,6 +929,74 @@ mod tests {
 
             Ok(())
         }
+
+        #[dialog_common::test]
+        async fn it_is_noop_when_reasserting_same_cardinality_one_value() -> anyhow::Result<()> {
+            // Reasserting the same value for a cardinality-one attribute
+            // must be a no-op at the storage layer: the tree must not
+            // change, so the revision's tree hash stays the same.
+            #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+            #[domain("dialog.meta")]
+            pub struct NamedEntity(pub Entity);
+
+            #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+            pub struct Name {
+                pub this: Entity,
+                pub entity: NamedEntity,
+            }
+
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let id_page: Entity = "id:page".parse()?;
+            let page_v1: Entity =
+                "concept:Fx8sv1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".parse()?;
+
+            let r1 = branch
+                .transaction()
+                .assert(Name {
+                    this: id_page.clone(),
+                    entity: NamedEntity(page_v1.clone()),
+                })
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            let r2 = branch
+                .transaction()
+                .assert(Name {
+                    this: id_page.clone(),
+                    entity: NamedEntity(page_v1.clone()),
+                })
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            assert_eq!(
+                r1.tree, r2.tree,
+                "reasserting the same value must not change the tree"
+            );
+
+            // And the query must still yield exactly the one claim.
+            assert_eq!(
+                branch
+                    .query()
+                    .select(Query::<Name> {
+                        this: id_page.clone().into(),
+                        entity: Term::var("entity"),
+                    })
+                    .perform(&operator)
+                    .try_vec()
+                    .await?,
+                vec![Name {
+                    this: id_page.clone(),
+                    entity: NamedEntity(page_v1.clone()),
+                }]
+            );
+
+            Ok(())
+        }
     }
 
     mod profile_as_repository {
