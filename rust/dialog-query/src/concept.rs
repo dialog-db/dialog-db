@@ -7,13 +7,14 @@ pub use descriptor::ConceptDescriptor;
 pub use query::ConceptQuery;
 
 use crate::artifact::Type as ValueType;
-use crate::attribute::query::Resolution;
 use crate::attribute::{Attribute, AttributeDescriptor, AttributeStatement};
 use crate::descriptor::Descriptor;
 use crate::error::EvaluationError;
 pub use crate::predicate::Predicate;
 use crate::selection::Binding;
-use crate::types::{TypeDescriptor, Typed};
+use crate::term::Term;
+use crate::type_system;
+use crate::types::{Any, TypeDescriptor, Typed};
 use crate::{Entity, Parameters, Value};
 use dialog_common::ConditionalSend;
 use std::fmt::Debug;
@@ -75,9 +76,19 @@ pub trait ConceptField: Sized + Clone {
     /// - Optional (`Option<N>`): `Option<<N as Attribute>::Type>`.
     type TermType: Typed + Clone + Debug + ConditionalSend + 'static;
 
-    /// Resolution policy for the field's attribute query.
-    /// `Required` for `N`, `Optional` for `Option<N>`.
-    const RESOLUTION: Resolution;
+    /// `true` if this field is set-widened (the `Option<N>` impl),
+    /// `false` for the bare-attribute (`N`) impl. Used by the
+    /// `#[derive(Concept)]` macro to route the field's descriptor
+    /// into either the `with` (required) or `maybe` (optional)
+    /// section of the generated `ConceptDescriptor`.
+    const OPTIONAL: bool;
+
+    /// Build the `is` slot term for this field's attribute query.
+    /// Required fields pass the user's `value_param` through
+    /// unchanged. Optional fields return an optional-typed term
+    /// so the `AttributeQuery` evaluates with Absent-fallback
+    /// semantics (resolution is derived from the term's kind).
+    fn term(value_param: Term<Any>) -> Term<Any>;
 
     /// Realize a value of `Self` from the row binding for this slot.
     ///
@@ -115,7 +126,13 @@ where
 {
     type Attribute = N;
     type TermType = <N as Attribute>::Type;
-    const RESOLUTION: Resolution = Resolution::Required;
+    const OPTIONAL: bool = false;
+
+    fn term(value_param: Term<Any>) -> Term<Any> {
+        // Required: pass the user's term through as-is; its kind
+        // (if any) is not optional, so the query stays required.
+        value_param
+    }
 
     fn realize(binding: Binding) -> Result<Self, EvaluationError> {
         let value = binding.content()?;
@@ -165,7 +182,24 @@ where
 {
     type Attribute = N;
     type TermType = Option<<N as Attribute>::Type>;
-    const RESOLUTION: Resolution = Resolution::Optional;
+    const OPTIONAL: bool = true;
+
+    fn term(value_param: Term<Any>) -> Term<Any> {
+        // Optional: return an optional-typed term. The underlying
+        // kind (if any) is wrapped via `Type::optional`; an untyped
+        // term becomes "any primitive, optional." The
+        // `AttributeQuery` reads `is.is_optional()` and switches to
+        // the Absent-fallback evaluation path.
+        let name = match value_param.name() {
+            Some(n) => n.to_string(),
+            None => return value_param,
+        };
+        let kind = match value_param.kind() {
+            Some(k) => k.optional(),
+            None => type_system::Type::primitive_set(type_system::Primitive::ALL).optional(),
+        };
+        Term::<Any>::typed_var(name, kind)
+    }
 
     fn realize(binding: Binding) -> Result<Self, EvaluationError> {
         match binding {

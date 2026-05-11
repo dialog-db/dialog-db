@@ -202,6 +202,13 @@ impl<T: Typed> Term<T> {
         self.kind().and_then(|k| k.as_value_type())
     }
 
+    /// Returns `true` iff this term's kind admits the `Nothing`
+    /// atom — i.e. the slot is set-widened. Untyped terms (no
+    /// kind) return `false`.
+    pub fn is_optional(&self) -> bool {
+        self.kind().is_some_and(|k| k.is_optional())
+    }
+
     /// Get the constant value if this term is a constant.
     ///
     /// Returns None for variables.
@@ -504,15 +511,15 @@ impl<U: Scalar> UnwrapOr<U> {
 
 /// Methods specific to `Term<Any>` — the dynamically-typed term.
 impl Term<Any> {
-    /// Create a named variable with a specific type constraint.
+    /// Create a named variable with a specific type kind.
     ///
     /// Use `Term::<Any>::var("x")` for an untyped variable
     /// (inherited from `impl<T: Typed> Term<T>`). Use this method
     /// when you need a runtime type kind.
-    pub fn typed_var(name: impl Into<String>, kind: Option<type_system::Type>) -> Self {
+    pub fn typed_var(name: impl Into<String>, kind: type_system::Type) -> Self {
         Term::Variable {
             name: Some(name.into()),
-            descriptor: Any(kind),
+            descriptor: Any(Some(kind)),
         }
     }
 
@@ -1144,8 +1151,7 @@ mod tests {
     fn it_displays_any_correctly() {
         assert_eq!(Term::<Any>::blank().to_string(), "_");
         assert_eq!(
-            Term::<Any>::typed_var("x", Some(type_system::Type::primitive(Type::String)))
-                .to_string(),
+            Term::<Any>::typed_var("x", type_system::Type::primitive(Type::String)).to_string(),
             "?x<String>"
         );
         assert_eq!(Term::<Any>::var("y").to_string(), "?y<Value>");

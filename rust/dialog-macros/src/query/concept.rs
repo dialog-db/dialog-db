@@ -220,7 +220,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         // `<F as ConceptField>::Attribute` projection lifts to `N`,
         // which is the type that carries the AttributeDescriptor.
         // Routing into `with` vs `maybe` is decided at runtime via
-        // the RESOLUTION const.
+        // the OPTIONAL const.
         descriptor_pair_pushes.push(quote! {
             {
                 let __pair = (
@@ -228,9 +228,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     <<#field_type as dialog_query::ConceptField>::Attribute
                         as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().clone(),
                 );
-                match <#field_type as dialog_query::ConceptField>::RESOLUTION {
-                    dialog_query::attribute::query::Resolution::Required => __with.push(__pair),
-                    dialog_query::attribute::query::Resolution::Optional => __maybe.push(__pair),
+                if <#field_type as dialog_query::ConceptField>::OPTIONAL {
+                    __maybe.push(__pair);
+                } else {
+                    __with.push(__pair);
                 }
             }
         });
@@ -539,33 +540,34 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
 
         // Implement Rule trait — emit one AttributeQuery per
-        // field, with resolution chosen by the field's
-        // `<F as ConceptField>::RESOLUTION` const. Required fields
-        // get the standard (Resolution::Required) attribute query;
-        // optional fields get the set-widened
-        // (Resolution::Optional) variant which yields an Absent
-        // fallback row when no fact matches.
+        // field. Required fields pass the user's term through
+        // unchanged; optional fields go through
+        // `<F as ConceptField>::is_term` which widens the slot's
+        // kind to admit the `Nothing` atom. AttributeQuery derives
+        // its resolution from that kind, so optional fields end up
+        // with set-widened semantics (an Absent fallback row when
+        // no fact matches).
         impl #struct_name {
             fn when(terms: dialog_query::Query<Self>) -> dialog_query::Premises {
                 let mut selectors: Vec<dialog_query::AttributeQuery> = Vec::new();
                 #(
                     {
-                        let value_param = dialog_query::Term::<dialog_query::types::Any>::from(
+                        let raw_param = dialog_query::Term::<dialog_query::types::Any>::from(
                             terms.#field_names.clone()
                         );
+                        let value_param = <#field_types as dialog_query::ConceptField>::term(raw_param);
                         let descriptor = <<#field_types as dialog_query::ConceptField>::Attribute
                             as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor();
                         let the_term = dialog_query::Term::Constant(
                             dialog_query::Value::from(descriptor.the().clone())
                         );
                         let cardinality = Some(descriptor.cardinality());
-                        let query = dialog_query::AttributeQuery::with_resolution(
+                        let query = dialog_query::AttributeQuery::new(
                             the_term,
                             terms.this.clone(),
                             value_param,
                             dialog_query::Term::blank(),
                             cardinality,
-                            <#field_types as dialog_query::ConceptField>::RESOLUTION,
                         );
                         selectors.push(query);
                     }

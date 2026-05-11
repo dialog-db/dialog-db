@@ -400,11 +400,10 @@ mod tests {
 
         let source = Term::<Any>::typed_var(
             "source",
-            Some(type_system::Type::primitive(ValueType::String).optional()),
+            type_system::Type::primitive(ValueType::String).optional(),
         );
         let fallback = Term::<Any>::constant("Anon".to_string());
-        let is =
-            Term::<Any>::typed_var("is", Some(type_system::Type::primitive(ValueType::String)));
+        let is = Term::<Any>::typed_var("is", type_system::Type::primitive(ValueType::String));
 
         let coalesce = Coalesce::new(source, fallback, is);
         let mut ctx = Context::new();
@@ -421,10 +420,8 @@ mod tests {
         use crate::type_system::unifier::{Context, UnifyError};
 
         // Source kind is `String`, not `Optional<String>` — bug.
-        let source = Term::<Any>::typed_var(
-            "source",
-            Some(type_system::Type::primitive(ValueType::String)),
-        );
+        let source =
+            Term::<Any>::typed_var("source", type_system::Type::primitive(ValueType::String));
         let fallback = Term::<Any>::constant("Anon".to_string());
         let is = Term::<Any>::var("is");
 
@@ -446,7 +443,7 @@ mod tests {
 
         let source = Term::<Any>::typed_var(
             "source",
-            Some(type_system::Type::primitive(ValueType::String).optional()),
+            type_system::Type::primitive(ValueType::String).optional(),
         );
         let fallback = Term::<Any>::constant(42u32);
         let is = Term::<Any>::var("is");

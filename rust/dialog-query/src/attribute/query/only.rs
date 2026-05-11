@@ -99,34 +99,14 @@ pub struct AttributeQueryOnly {
 }
 
 impl AttributeQueryOnly {
-    /// Create a new winner-selecting attribute query with
-    /// `Resolution::Required` semantics — zero rows on miss.
+    /// Create a new winner-selecting attribute query. The
+    /// resolution (Required vs Optional) is derived from the
+    /// typed `is` term: if its kind admits the `Nothing` atom the
+    /// query is treated as optional and yields an `Absent`
+    /// fallback row on miss.
     pub fn new(the: Term<The>, of: Term<Entity>, is: Term<Any>, cause: Term<Cause>) -> Self {
         Self {
             query: AttributeQueryAll::new(the, of, is, cause),
-        }
-    }
-
-    /// Create a new winner-selecting attribute query with
-    /// `Resolution::Optional` semantics — one Absent fallback row
-    /// on miss.
-    pub fn optional(the: Term<The>, of: Term<Entity>, is: Term<Any>, cause: Term<Cause>) -> Self {
-        Self {
-            query: AttributeQueryAll::optional(the, of, is, cause),
-        }
-    }
-
-    /// Create a new winner-selecting attribute query with
-    /// explicit resolution.
-    pub fn with_resolution(
-        the: Term<The>,
-        of: Term<Entity>,
-        is: Term<Any>,
-        cause: Term<Cause>,
-        resolution: Resolution,
-    ) -> Self {
-        Self {
-            query: AttributeQueryAll::with_resolution(the, of, is, cause, resolution),
         }
     }
 
@@ -211,7 +191,6 @@ impl AttributeQueryOnly {
         Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
     {
         let selector = self.query;
-        let resolution = selector.resolution();
         try_stream! {
             for await each in selection {
                 let base = each?;
@@ -285,7 +264,7 @@ impl AttributeQueryOnly {
                 // this input and the resolution is Optional, yield
                 // one row with `is` (and named `cause`) bound to
                 // Absent.
-                if !produced && matches!(resolution, Resolution::Optional) {
+                if !produced && selector.is().is_optional() {
                     let mut fallback = base;
                     fallback.bind_absent(selector.is())?;
                     let cause_term: Term<Any> = Term::<Any>::from(selector.cause());

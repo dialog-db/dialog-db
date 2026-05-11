@@ -38,52 +38,33 @@ pub struct AttributeQueryAll {
     cause: Term<Cause>,
     /// Internal handle for claim storage.
     source: Term<Record>,
-    /// Resolution policy: `Required` (zero rows on miss, the
-    /// default) or `Optional` (yield one Absent fallback row on
-    /// miss). See [`Resolution`](crate::attribute::query::Resolution).
-    #[serde(default, skip_serializing_if = "is_required_resolution")]
-    resolution: Resolution,
-}
-
-fn is_required_resolution(r: &Resolution) -> bool {
-    matches!(r, Resolution::Required)
 }
 
 impl AttributeQueryAll {
-    /// Create a new attribute query that yields all matches with
-    /// `Resolution::Required` semantics — zero rows on miss.
-    pub fn new(the: Term<The>, of: Term<Entity>, is: Term<Any>, cause: Term<Cause>) -> Self {
-        Self::with_resolution(the, of, is, cause, Resolution::Required)
-    }
-
-    /// Create a new attribute query that yields all matches with
-    /// `Resolution::Optional` semantics — one Absent fallback row
+    /// Create a new attribute query. The resolution policy is
+    /// derived from `is`'s kind: a set-widened (`Nothing`-bit-set)
+    /// kind yields [`Resolution::Optional`] — one Absent fallback
+    /// row on miss; otherwise [`Resolution::Required`] — zero rows
     /// on miss.
-    pub fn optional(the: Term<The>, of: Term<Entity>, is: Term<Any>, cause: Term<Cause>) -> Self {
-        Self::with_resolution(the, of, is, cause, Resolution::Optional)
-    }
-
-    /// Create a new attribute query with explicit resolution.
-    pub fn with_resolution(
-        the: Term<The>,
-        of: Term<Entity>,
-        is: Term<Any>,
-        cause: Term<Cause>,
-        resolution: Resolution,
-    ) -> Self {
+    pub fn new(the: Term<The>, of: Term<Entity>, is: Term<Any>, cause: Term<Cause>) -> Self {
         Self {
             the,
             of,
             is,
             cause,
             source: Term::<Record>::unique(),
-            resolution,
         }
     }
 
-    /// Returns the resolution policy of this query.
+    /// Resolution policy derived from `is`'s kind. A set-widened
+    /// `is` (admits `Nothing`) is [`Resolution::Optional`];
+    /// otherwise [`Resolution::Required`].
     pub fn resolution(&self) -> Resolution {
-        self.resolution
+        if self.is.is_optional() {
+            Resolution::Optional
+        } else {
+            Resolution::Required
+        }
     }
 
     /// Get the 'the' (attribute) term.
@@ -162,7 +143,6 @@ impl AttributeQueryAll {
             is,
             cause,
             source: self.source.clone(),
-            resolution: self.resolution,
         }
     }
 
@@ -191,35 +171,26 @@ impl AttributeQueryAll {
             },
         );
 
-        // Pull the kind from the `is` term. `None` means "no
-        // static info" — the unifier resolves at rule-compile
-        // time. For `Optional` resolution, the slot must admit the
-        // `Nothing` atom so the planner sees set-widening even
-        // when the underlying primitive shape is unknown.
-        let is_content = match (self.is.kind(), self.resolution) {
-            (Some(k), Resolution::Required) => Some(k),
-            (Some(k), Resolution::Optional) => Some(k.optional()),
-            (None, Resolution::Required) => None,
-            (None, Resolution::Optional) => {
-                Some(type_system::Type::primitive_set(type_system::Primitive::ALL).optional())
-            }
-        };
+        // The `is` term's kind already encodes optionality via the
+        // `Nothing` atom. `None` means "no static info" — the
+        // unifier resolves at rule-compile time.
         schema.insert(
             "is".to_string(),
             Field {
                 description: "Value of the relation".to_string(),
-                content_type: is_content,
+                content_type: self.is.kind(),
                 requirement: requirement.required(),
                 cardinality: Cardinality::One,
             },
         );
 
         // The `cause` slot is bound by the merge step on every
-        // Present row; for Optional resolution the fallback row
-        // binds it to `Absent`, so the slot is set-widened.
-        let cause_content = match self.resolution {
-            Resolution::Required => type_system::Type::primitive(Type::Bytes),
-            Resolution::Optional => type_system::Type::primitive(Type::Bytes).optional(),
+        // Present row; when the query is optional the fallback
+        // row binds it to `Absent`, so the slot is set-widened.
+        let cause_content = if self.is.is_optional() {
+            type_system::Type::primitive(Type::Bytes).optional()
+        } else {
+            type_system::Type::primitive(Type::Bytes)
         };
         schema.insert(
             "cause".to_string(),
@@ -293,7 +264,7 @@ impl AttributeQueryAll {
                 // this input and the resolution is Optional, yield
                 // one row with `is` (and named `cause`) bound to
                 // Absent.
-                if !produced && matches!(selector.resolution, Resolution::Optional) {
+                if !produced && selector.is.is_optional() {
                     let mut fallback = base;
                     fallback.bind_absent(&selector.is)?;
                     let cause_term: Term<Any> = Term::<Any>::from(&selector.cause);

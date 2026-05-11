@@ -11,7 +11,10 @@ pub use crate::planner::Plan;
 pub use crate::planner::{Conjunction, Planner};
 pub use crate::premise::Premise;
 use crate::type_system;
+use crate::type_system::Primitive;
+use crate::type_system::Type as Kind;
 use crate::type_system::unifier::Context;
+use crate::types::Any;
 pub use crate::{Attribute, Cardinality, Parameters, Proposition, Requirement, Value};
 use crate::{Environment, Term, Type};
 use descriptor::DeductiveRuleDescriptor;
@@ -281,18 +284,21 @@ impl From<&ConceptDescriptor> for DeductiveRule {
             );
         }
 
-        // Optional (`maybe`) attributes — set-widened semantics.
-        // A missing fact yields a fallback row with the slot
-        // bound to `Binding::Absent`. The `Resolution::Optional`
-        // policy on the emitted `AttributeQuery` carries this
-        // through to the runtime evaluator.
+        // Optional (`maybe`) attributes — a missing fact yields a
+        // fallback row with the slot bound to `Binding::Absent`.
+        // We encode this by typing the `is` term as optional;
+        // `AttributeQuery` derives its resolution from that kind.
         if let Some(maybe) = concept.maybe() {
             for (name, attribute) in maybe.iter() {
+                let kind = match attribute.content_type() {
+                    Some(ty) => Kind::primitive(ty).optional(),
+                    None => Kind::primitive_set(Primitive::ALL).optional(),
+                };
                 premises.push(
-                    AttributeQuery::optional(
+                    AttributeQuery::new(
                         Term::Constant(Value::from(attribute.the().clone())),
                         this.clone(),
-                        Term::var(name),
+                        Term::<Any>::typed_var(name, kind),
                         Term::blank(),
                         Some(attribute.cardinality()),
                     )
@@ -313,6 +319,17 @@ mod tests {
     use crate::attribute::query::AttributeQuery;
     use crate::the;
     use crate::types::Any;
+
+    /// Helper: produce an optional `Term<Any>` — this is how an
+    /// AttributeQuery is told to run with optional resolution, since
+    /// resolution is derived from `is.is_optional()`.
+    fn optional_term(name: &str, inner: Option<Type>) -> Term<Any> {
+        let kind = match inner {
+            Some(ty) => Kind::primitive(ty).optional(),
+            None => Kind::primitive_set(Primitive::ALL).optional(),
+        };
+        Term::<Any>::typed_var(name, kind)
+    }
 
     #[dialog_common::test]
     fn it_compiles_with_valid_premises() {
@@ -772,13 +789,13 @@ mod tests {
             ),
         )]);
         let this = Term::<Entity>::var("this");
-        // Bind ?name with an Optional resolution — the meet for ?name
+        // Bind ?name with an optional `is` term — the meet for ?name
         // includes Nothing.
         let premises = vec![
-            AttributeQuery::optional(
+            AttributeQuery::new(
                 Term::from(the!("user/name")),
                 this,
-                Term::var("name"),
+                optional_term("name", None),
                 Term::var("cause"),
                 Some(Cardinality::One),
             )
@@ -813,20 +830,20 @@ mod tests {
         // information to combine. An untyped `Term::var` produces
         // `None` content_type, which contributes nothing to the
         // meet — the optional side then wins.
-        let typed_name =
-            Term::<Any>::typed_var("name", Some(type_system::Type::primitive(Type::String)));
+        let typed_name = Term::<Any>::typed_var("name", type_system::Type::primitive(Type::String));
+        let optional_name = optional_term("name", Some(Type::String));
 
         let premises = vec![
-            // Optional resolution: contributes a slot type with Nothing.
-            AttributeQuery::optional(
+            // Optional `is` term: contributes a slot type with Nothing.
+            AttributeQuery::new(
                 Term::from(the!("user/name")),
                 this.clone(),
-                typed_name.clone(),
+                optional_name,
                 Term::var("cause1"),
                 Some(Cardinality::One),
             )
             .into(),
-            // Required resolution: contributes a slot type without Nothing.
+            // Required `is` term: contributes a slot type without Nothing.
             AttributeQuery::new(
                 Term::from(the!("user/canonical-name")),
                 this,
@@ -862,22 +879,21 @@ mod tests {
             ),
         )]);
         let this = Term::<Entity>::var("this");
-        let typed_name =
-            Term::<Any>::typed_var("name", Some(type_system::Type::primitive(Type::String)));
+        let optional_name = optional_term("name", Some(Type::String));
 
         let premises = vec![
-            // Optional resolution with typed `is`.
-            AttributeQuery::optional(
+            // Optional `is` (typed): contributes `{String, Nothing}`.
+            AttributeQuery::new(
                 Term::from(the!("user/name")),
                 this.clone(),
-                typed_name,
+                optional_name,
                 Term::var("cause1"),
                 Some(Cardinality::One),
             )
             .into(),
-            // Required resolution with *untyped* `is` (Term::var
-            // without a kind). Should contribute "any present
-            // value" to the meet via the None-content_type branch.
+            // Required with *untyped* `is` (Term::var without a
+            // kind). Contributes "any present value" to the meet
+            // via the None-content_type branch.
             AttributeQuery::new(
                 Term::from(the!("user/canonical-name")),
                 this,
@@ -914,10 +930,10 @@ mod tests {
         // meet's cause contribution carries Nothing, so the
         // required head sees Optional.
         let premises = vec![
-            AttributeQuery::optional(
+            AttributeQuery::new(
                 Term::from(the!("user/name")),
                 this,
-                Term::<Any>::var("name"),
+                optional_term("name", None),
                 Term::<Cause>::var("mark"),
                 Some(Cardinality::One),
             )
@@ -952,12 +968,11 @@ mod tests {
             ),
         )]);
         let this = Term::<Entity>::var("this");
-        let typed_name =
-            Term::<Any>::typed_var("name", Some(type_system::Type::primitive(Type::String)));
+        let typed_name = Term::<Any>::typed_var("name", type_system::Type::primitive(Type::String));
 
         // Source is a `Term<Any>` carrying `String` (not Optional<String>).
         let bad_source =
-            Term::<Any>::typed_var("source", Some(type_system::Type::primitive(Type::String)));
+            Term::<Any>::typed_var("source", type_system::Type::primitive(Type::String));
         let bad_coalesce = Coalesce::new(
             bad_source,
             Term::<Any>::constant("Anon".to_string()),
