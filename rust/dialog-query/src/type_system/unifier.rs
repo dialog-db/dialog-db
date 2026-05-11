@@ -250,6 +250,12 @@ impl Context {
 
     /// Robinson unification with constraint propagation. Updates
     /// `self` in-place. Returns `Err` on constraint conflict.
+    ///
+    /// Static types intersect via [`StaticType::intersect`], which
+    /// narrows both primitive and composite parts (products by
+    /// shared field-name set, variants by label). Variables carry
+    /// a [`Primitive`] constraint that's intersected with the
+    /// primitive part of any concrete type they're unified with.
     pub fn unify(&mut self, a: &Type, b: &Type) -> Result<(), UnifyError> {
         let a = self.apply(a);
         let b = self.apply(b);
@@ -269,33 +275,29 @@ impl Context {
             }
             (Type::Variable(x), Type::Static(s)) | (Type::Static(s), Type::Variable(x)) => {
                 let cx = self.constraint(x);
-                let p = primitive_set_of(&s).ok_or(UnifyError::ConstraintConflict {
-                    left: cx,
-                    right: Primitive::EMPTY,
-                })?;
+                // Intersect the variable's primitive constraint
+                // against the static's primitive part. The variable
+                // resolves to the narrowed static type — preserving
+                // any composite part of the static side.
+                let p = s.primitive_part();
                 let merged = cx
                     .intersect(p)
                     .ok_or(UnifyError::ConstraintConflict { left: cx, right: p })?;
                 self.constraints.insert(x, merged);
-                self.substitution
-                    .insert(x, Type::Static(StaticType::primitive_set(merged)));
+                let resolved = match s.composite_part() {
+                    Some(c) if !c.is_empty() => StaticType::composite(merged, c.clone()),
+                    _ => StaticType::primitive_set(merged),
+                };
+                self.substitution.insert(x, Type::Static(resolved));
                 Ok(())
             }
             (Type::Static(a), Type::Static(b)) => {
-                let pa = primitive_set_of(&a).ok_or(UnifyError::ConstraintConflict {
-                    left: Primitive::EMPTY,
-                    right: Primitive::EMPTY,
-                })?;
-                let pb = primitive_set_of(&b).ok_or(UnifyError::ConstraintConflict {
-                    left: pa,
-                    right: Primitive::EMPTY,
-                })?;
-                pa.intersect(pb)
-                    .ok_or(UnifyError::ConstraintConflict {
-                        left: pa,
-                        right: pb,
-                    })
+                a.intersect(&b)
                     .map(|_| ())
+                    .ok_or_else(|| UnifyError::ConstraintConflict {
+                        left: a.primitive_part(),
+                        right: b.primitive_part(),
+                    })
             }
         }
     }
@@ -313,15 +315,6 @@ impl Context {
             variables: substitution,
         }
     }
-}
-
-/// Extract the primitive set of a static type. For composite-only
-/// types (no primitive bits and no admissible singleton) returns
-/// `None`. The unifier currently operates over the primitive part
-/// alone; composite-only constraints are reserved for future use.
-fn primitive_set_of(ty: &StaticType) -> Option<Primitive> {
-    let p = ty.primitive_part();
-    if p.is_empty() { None } else { Some(p) }
 }
 
 fn instantiate_body(body: &SchemeBody, sub: &HashMap<SchemeVarName, VarId>) -> InstantiatedBody {

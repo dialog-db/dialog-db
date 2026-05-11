@@ -1,13 +1,17 @@
 /// Serializable rule descriptor matching the formal notation.
 pub mod descriptor;
 
+use crate::artifact::Entity;
+use crate::attribute::query::AttributeQuery;
 pub use crate::concept::descriptor::ConceptDescriptor;
+use crate::constraint::Constraint;
 use crate::error::TypeError;
 use crate::negation::Negation;
 pub use crate::planner::Plan;
 pub use crate::planner::{Conjunction, Planner};
 pub use crate::premise::Premise;
 use crate::type_system;
+use crate::type_system::unifier::Context;
 pub use crate::{Attribute, Cardinality, Parameters, Proposition, Requirement, Value};
 use crate::{Environment, Term, Type};
 use descriptor::DeductiveRuleDescriptor;
@@ -74,7 +78,37 @@ impl DeductiveRule {
             });
         }
 
+        // Validate every Coalesce constraint's type contract. Each
+        // Coalesce is independent — fresh unifier context per
+        // constraint. Catches wire-format and raw-builder
+        // mismatches where the typed builder isn't the construction
+        // path.
+        let coalesce_error = rule.coalesce_validation_error();
+        if let Some(reason) = coalesce_error {
+            return Err(TypeError::CoalesceTypeMismatch {
+                rule: Box::new(rule),
+                reason,
+            });
+        }
+
         Ok(rule)
+    }
+
+    /// Run [`Coalesce::validate`](crate::constraint::Coalesce::validate)
+    /// on every Coalesce constraint reachable from this rule's
+    /// positive premises. Returns the first failure, if any.
+    fn coalesce_validation_error(&self) -> Option<String> {
+        for step in &self.join.steps {
+            let Premise::Assert(Proposition::Constraint(Constraint::Coalesce(c))) = &step.premise
+            else {
+                continue;
+            };
+            let mut ctx = Context::new();
+            if let Err(err) = c.validate(&mut ctx) {
+                return Some(format!("{err}"));
+            }
+        }
+        None
     }
 
     /// For each variable used by a positive premise, compute the
@@ -89,6 +123,14 @@ impl DeductiveRule {
     /// *every* binding is Optional does the variable carry
     /// `Nothing` in its meet.
     ///
+    /// Slots without an explicit `content_type` contribute their
+    /// requirement shape: a `Required` slot contributes "any
+    /// present value" (`Primitive::ALL`); an `Optional` slot
+    /// contributes "any present or absent value"
+    /// (`Primitive::ANY`). This keeps "untyped Required + typed
+    /// Optional" symmetric with "typed Required + typed Optional":
+    /// both produce a meet without `Nothing`.
+    ///
     /// Negation premises do not contribute — they don't bind
     /// variables, only filter on already-bound values.
     fn meet_per_variable(&self) -> HashMap<String, type_system::Type> {
@@ -102,14 +144,26 @@ impl DeductiveRule {
             let params = step.premise.parameters();
 
             for (slot_name, field) in schema.iter() {
-                let Some(slot_type) = field.content_type() else {
-                    continue;
-                };
                 let Some(param) = params.get(slot_name) else {
                     continue;
                 };
                 let Some(var_name) = param.name() else {
                     continue;
+                };
+                let owned;
+                let slot_type: &type_system::Type = match field.content_type() {
+                    Some(t) => t,
+                    None => {
+                        owned = match field.requirement {
+                            Requirement::Required(_) => {
+                                type_system::Type::primitive_set(type_system::Primitive::ALL)
+                            }
+                            Requirement::Optional => {
+                                type_system::Type::primitive_set(type_system::Primitive::ANY)
+                            }
+                        };
+                        &owned
+                    }
                 };
                 match by_variable.get(var_name) {
                     Some(accumulated) => {
@@ -208,9 +262,6 @@ impl Display for DeductiveRule {
 
 impl From<&ConceptDescriptor> for DeductiveRule {
     fn from(concept: &ConceptDescriptor) -> Self {
-        use crate::artifact::Entity;
-        use crate::attribute::query::AttributeQuery;
-
         let mut premises = Vec::new();
 
         let this = Term::<Entity>::var("this");
@@ -528,8 +579,6 @@ mod tests {
 
     #[dialog_common::test]
     fn it_rejects_negated_constraint_with_unbound_variable() {
-        use crate::attribute::query::AttributeQuery;
-
         let conclusion = ConceptDescriptor::from(vec![(
             "name",
             AttributeDescriptor::new(
@@ -564,8 +613,6 @@ mod tests {
 
     #[dialog_common::test]
     fn it_rejects_negated_constraint_with_unbound_variable_on_left() {
-        use crate::attribute::query::AttributeQuery;
-
         let conclusion = ConceptDescriptor::from(vec![(
             "name",
             AttributeDescriptor::new(
@@ -795,5 +842,108 @@ mod tests {
             "meet of Required + Optional strips Nothing — should compile (got {:?})",
             result.err()
         );
+    }
+
+    /// Symmetric case: an *untyped* Required premise paired with a
+    /// typed Optional premise should also strip Nothing from the
+    /// meet. The untyped Required contribution is "any present
+    /// value" (`Primitive::ALL`), so intersected with
+    /// `Optional<String>` (i.e. `{String, Nothing}`) the meet
+    /// resolves to `{String}` — no Nothing. Rule compiles.
+    #[dialog_common::test]
+    fn it_accepts_untyped_required_paired_with_typed_optional() {
+        let conclusion = ConceptDescriptor::from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
+        let this = Term::<Entity>::var("this");
+        let typed_name =
+            Term::<Any>::typed_var("name", Some(type_system::Type::primitive(Type::String)));
+
+        let premises = vec![
+            // Optional resolution with typed `is`.
+            AttributeQuery::optional(
+                Term::from(the!("user/name")),
+                this.clone(),
+                typed_name,
+                Term::var("cause1"),
+                Some(Cardinality::One),
+            )
+            .into(),
+            // Required resolution with *untyped* `is` (Term::var
+            // without a kind). Should contribute "any present
+            // value" to the meet via the None-content_type branch.
+            AttributeQuery::new(
+                Term::from(the!("user/canonical-name")),
+                this,
+                Term::<Any>::var("name"),
+                Term::var("cause2"),
+                Some(Cardinality::One),
+            )
+            .into(),
+        ];
+        let result = DeductiveRule::new(conclusion, premises);
+        assert!(
+            result.is_ok(),
+            "untyped Required + typed Optional should compile (got {:?})",
+            result.err()
+        );
+    }
+
+    /// A rule containing a malformed Coalesce (non-Optional source)
+    /// is rejected at compile time. This is the regression test for
+    /// validate-not-called: previously `Coalesce::validate` existed
+    /// but no production path invoked it, so wire-format or
+    /// raw-constructor mismatches silently passed.
+    #[dialog_common::test]
+    fn it_rejects_coalesce_with_non_optional_source() {
+        use crate::constraint::{Coalesce, Constraint};
+        use crate::premise::Premise;
+
+        let conclusion = ConceptDescriptor::from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
+        let this = Term::<Entity>::var("this");
+        let typed_name =
+            Term::<Any>::typed_var("name", Some(type_system::Type::primitive(Type::String)));
+
+        // Source is a `Term<Any>` carrying `String` (not Optional<String>).
+        let bad_source =
+            Term::<Any>::typed_var("source", Some(type_system::Type::primitive(Type::String)));
+        let bad_coalesce = Coalesce::new(
+            bad_source,
+            Term::<Any>::constant("Anon".to_string()),
+            typed_name.clone(),
+        );
+
+        let premises = vec![
+            // Required premise so the rule has a chance of compiling
+            // up to the coalesce-validation step.
+            AttributeQuery::new(
+                Term::from(the!("user/name")),
+                this,
+                typed_name,
+                Term::var("cause"),
+                Some(Cardinality::One),
+            )
+            .into(),
+            Premise::Assert(Proposition::Constraint(Constraint::Coalesce(bad_coalesce))),
+        ];
+        let result = DeductiveRule::new(conclusion, premises);
+        match result {
+            Err(TypeError::CoalesceTypeMismatch { .. }) => {}
+            other => panic!("expected CoalesceTypeMismatch, got {other:?}"),
+        }
     }
 }

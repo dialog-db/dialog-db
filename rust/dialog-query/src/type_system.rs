@@ -348,6 +348,14 @@ impl Type {
     /// Set intersection over both primitive and composite parts.
     /// Returns `None` when the result is empty — no admissible
     /// shapes survive.
+    ///
+    /// Composite shapes narrow structurally: two
+    /// `Composite::Product` values with the same field-name set
+    /// intersect their field types recursively (if any field
+    /// intersection is empty, the product is eliminated). Products
+    /// with disjoint field-name sets do not intersect — they
+    /// describe disjoint records. Variants intersect by matching
+    /// label, recursing into payload types.
     pub fn intersect(&self, other: &Type) -> Option<Type> {
         let p_self = self.primitive_part();
         let p_other = other.primitive_part();
@@ -357,7 +365,7 @@ impl Type {
 
         let composite_intersection: BTreeSet<Composite> =
             match (self.composite_part(), other.composite_part()) {
-                (Some(a), Some(b)) => a.intersection(b).cloned().collect(),
+                (Some(a), Some(b)) => intersect_composite_sets(a, b),
                 _ => BTreeSet::new(),
             };
 
@@ -383,6 +391,13 @@ impl Type {
 
     /// Subtype check. Returns `true` iff every shape `other`
     /// admits is also admitted by `self`.
+    ///
+    /// For composites: each shape in `other` must be included by
+    /// some shape in `self`. Inclusion is structural — a Product
+    /// `{x: T1, y: T2}` includes a Product `{x: T1', y: T2'}` when
+    /// the field-name sets match and each `Ti` includes `Ti'`. A
+    /// product with extra fields includes one with fewer fields
+    /// (width subtyping is not assumed; equal field sets only).
     pub fn includes(&self, other: &Type) -> bool {
         if !self.primitive_part().includes(other.primitive_part()) {
             return false;
@@ -390,7 +405,9 @@ impl Type {
         match (self.composite_part(), other.composite_part()) {
             (_, None) => true,
             (None, Some(b)) => b.is_empty(),
-            (Some(a), Some(b)) => b.iter().all(|x| a.contains(x)),
+            (Some(a), Some(b)) => b
+                .iter()
+                .all(|b_shape| a.iter().any(|a_shape| composite_includes(a_shape, b_shape))),
         }
     }
 
@@ -423,6 +440,104 @@ impl Type {
             Type::Primitive(p) => p.as_singleton(),
             Type::Composite(_, _) => None,
         }
+    }
+}
+
+/// Structurally intersect two sets of [`Composite`] shapes.
+///
+/// For each `Composite::Product` in `a`, look for a same-field-set
+/// `Composite::Product` in `b` and intersect their field types
+/// pairwise; if any field intersection is empty, the product is
+/// eliminated. For each `Composite::Variant` in `a`, look for a
+/// same-label `Composite::Variant` in `b` and intersect their
+/// payload types. Anything in `a` or `b` without a structural
+/// counterpart on the other side is dropped — set intersection
+/// only keeps shapes admitted by both sides.
+fn intersect_composite_sets(
+    a: &BTreeSet<Composite>,
+    b: &BTreeSet<Composite>,
+) -> BTreeSet<Composite> {
+    let mut result = BTreeSet::new();
+    for a_shape in a {
+        for b_shape in b {
+            if let Some(merged) = intersect_composite(a_shape, b_shape) {
+                result.insert(merged);
+            }
+        }
+    }
+    result
+}
+
+/// Pairwise intersection of two [`Composite`] shapes. Two
+/// products intersect iff they share the same set of field names;
+/// two variants iff they share the same label.
+fn intersect_composite(a: &Composite, b: &Composite) -> Option<Composite> {
+    match (a, b) {
+        (Composite::Product(fa), Composite::Product(fb)) => {
+            if fa.len() != fb.len() {
+                return None;
+            }
+            let mut out = BTreeMap::new();
+            for (name, ta) in fa {
+                let tb = fb.get(name)?;
+                let merged = ta.intersect(tb)?;
+                out.insert(name.clone(), merged);
+            }
+            Some(Composite::Product(out))
+        }
+        (
+            Composite::Variant {
+                label: la,
+                value: va,
+            },
+            Composite::Variant {
+                label: lb,
+                value: vb,
+            },
+        ) => {
+            if la != lb {
+                return None;
+            }
+            let merged = va.intersect(vb)?;
+            Some(Composite::Variant {
+                label: la.clone(),
+                value: merged,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Structural inclusion check between two [`Composite`] shapes.
+/// `a` includes `b` iff they are the same shape kind, have matching
+/// keys/labels, and each of `a`'s recursive types includes `b`'s.
+fn composite_includes(a: &Composite, b: &Composite) -> bool {
+    match (a, b) {
+        (Composite::Product(fa), Composite::Product(fb)) => {
+            if fa.len() != fb.len() {
+                return false;
+            }
+            for (name, ta) in fa {
+                let Some(tb) = fb.get(name) else {
+                    return false;
+                };
+                if !ta.includes(tb) {
+                    return false;
+                }
+            }
+            true
+        }
+        (
+            Composite::Variant {
+                label: la,
+                value: va,
+            },
+            Composite::Variant {
+                label: lb,
+                value: vb,
+            },
+        ) => la == lb && va.includes(vb),
+        _ => false,
     }
 }
 
@@ -597,6 +712,81 @@ mod tests {
         let b = Type::product(fields);
         let c = a.intersect(&b).expect("intersection non-empty");
         assert_eq!(a, c);
+    }
+
+    /// Two products with the same field names but different field
+    /// types narrow structurally: intersect each field's type
+    /// recursively. If every field intersection is non-empty, the
+    /// product survives with the narrowed fields.
+    #[dialog_common::test]
+    fn intersect_products_narrows_field_types() {
+        let mut a_fields = BTreeMap::new();
+        a_fields.insert("x".to_string(), Type::primitive_set(Primitive::NUMERIC));
+        let a = Type::product(a_fields);
+
+        let mut b_fields = BTreeMap::new();
+        b_fields.insert("x".to_string(), Type::primitive(ValueType::UnsignedInt));
+        let b = Type::product(b_fields);
+
+        let merged = a.intersect(&b).expect("narrows to UnsignedInt");
+        let composite = merged.composite_part().expect("composite present");
+        let product = composite.iter().next().expect("one product");
+        match product {
+            Composite::Product(fields) => {
+                let x_type = fields.get("x").expect("x field");
+                assert_eq!(x_type.as_value_type(), Some(ValueType::UnsignedInt));
+            }
+            other => panic!("expected Product, got {other:?}"),
+        }
+    }
+
+    /// Two products with disjoint field types fail to intersect.
+    #[dialog_common::test]
+    fn intersect_products_disjoint_fields_eliminated() {
+        let mut a_fields = BTreeMap::new();
+        a_fields.insert("x".to_string(), Type::primitive(ValueType::String));
+        let a = Type::product(a_fields);
+
+        let mut b_fields = BTreeMap::new();
+        b_fields.insert("x".to_string(), Type::primitive(ValueType::UnsignedInt));
+        let b = Type::product(b_fields);
+
+        assert!(a.intersect(&b).is_none());
+    }
+
+    /// Two products with different field-name sets do not
+    /// intersect — they describe disjoint record shapes.
+    #[dialog_common::test]
+    fn intersect_products_different_keys_eliminated() {
+        let mut a_fields = BTreeMap::new();
+        a_fields.insert("x".to_string(), Type::primitive(ValueType::String));
+        let a = Type::product(a_fields);
+
+        let mut b_fields = BTreeMap::new();
+        b_fields.insert("y".to_string(), Type::primitive(ValueType::String));
+        let b = Type::product(b_fields);
+
+        assert!(a.intersect(&b).is_none());
+    }
+
+    /// Two variants with the same label intersect their payloads;
+    /// different labels do not intersect.
+    #[dialog_common::test]
+    fn intersect_variants_by_label() {
+        let a = Type::variant("Some", Type::primitive_set(Primitive::NUMERIC));
+        let b = Type::variant("Some", Type::primitive(ValueType::UnsignedInt));
+        let merged = a.intersect(&b).expect("same label narrows payload");
+        let composite = merged.composite_part().expect("composite present");
+        match composite.iter().next().expect("one variant") {
+            Composite::Variant { label, value } => {
+                assert_eq!(label, "Some");
+                assert_eq!(value.as_value_type(), Some(ValueType::UnsignedInt));
+            }
+            other => panic!("expected Variant, got {other:?}"),
+        }
+
+        let c = Type::variant("Other", Type::primitive(ValueType::UnsignedInt));
+        assert!(a.intersect(&c).is_none());
     }
 
     #[dialog_common::test]

@@ -426,20 +426,21 @@ impl<T: Scalar> From<&Term<T>> for Term<Any> {
     }
 }
 
-/// Type-erase a `Term<Option<U>>` to `Term<Any>`. Optionality is
-/// a Rust-API distinction; at evaluation time the value flows
+/// Type-erase a `Term<Option<U>>` to `Term<Any>`. The descriptor
+/// is widened to carry the `Nothing` bit so that downstream
+/// type-checking (e.g. `Coalesce::validate`) can recognize the
+/// term as set-widened. At evaluation time the value flows
 /// through the same `Term<Any>` path as any other term, with the
 /// row-layer [`Binding::Absent`](crate::Binding::Absent) carrying
-/// the absence signal. The descriptor's storage tag is preserved
-/// from the inner type — `Term<Option<String>>` erases to a
-/// `Term<Any>` whose descriptor reports
-/// `Some(Type::String)`.
+/// the absence signal at runtime.
 impl<U: Scalar> From<Term<Option<U>>> for Term<Any> {
     fn from(term: Term<Option<U>>) -> Self {
         match term {
             Term::Variable { name, .. } => Term::Variable {
                 name,
-                descriptor: Any(<<U as Typed>::Descriptor>::default().kind()),
+                descriptor: Any(<<U as Typed>::Descriptor>::default()
+                    .kind()
+                    .map(|k| k.optional())),
             },
             Term::Constant(value) => Term::Constant(value),
         }
@@ -749,11 +750,44 @@ mod tests {
                     Term::Constant(Value::String(s)) => assert_eq!(s, "Anon"),
                     other => panic!("expected fallback constant, got {:?}", other),
                 }
+                // The source's erased kind must preserve the
+                // Nothing bit so downstream type-checking can
+                // recognize it as set-widened. Without this,
+                // Coalesce::validate would reject the builder's
+                // own output with `SourceNotOptional`.
+                let source_kind = c.source.kind().expect("erased source has a kind");
+                assert!(
+                    source_kind.is_optional(),
+                    "Term<Option<String>>::into::<Term<Any>>() must preserve Nothing"
+                );
             }
             other => panic!(
                 "expected Premise::Assert(Constraint::Coalesce), got {:?}",
                 other
             ),
+        }
+    }
+
+    /// The erased Coalesce from the typed builder passes
+    /// `Coalesce::validate` against a fresh unifier context.
+    /// This is the regression test for the bug where the
+    /// `Term<Option<U>> -> Term<Any>` conversion stripped the
+    /// Nothing bit.
+    #[dialog_common::test]
+    fn it_validates_builder_coalesce_end_to_end() {
+        use crate::type_system::unifier::Context;
+
+        let nickname: Term<Option<String>> = Term::var("nickname");
+        let display: Term<String> = Term::var("display");
+        let premise = nickname.unwrap_or("Anon").is(display);
+
+        match premise {
+            Premise::Assert(Proposition::Constraint(Constraint::Coalesce(c))) => {
+                let mut ctx = Context::new();
+                c.validate(&mut ctx)
+                    .expect("builder-produced Coalesce must validate");
+            }
+            other => panic!("expected Constraint::Coalesce, got {:?}", other),
         }
     }
 

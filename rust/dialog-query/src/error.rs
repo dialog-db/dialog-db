@@ -80,6 +80,17 @@ pub enum TypeError {
         variable: String,
     },
 
+    /// A `Coalesce` constraint in this rule violates its type
+    /// contract: its source must be set-widened (`Optional<α>`)
+    /// and its `fallback` and `is` must each unify with `α`.
+    #[error("Rule {rule} has an invalid Coalesce constraint: {reason}")]
+    CoalesceTypeMismatch {
+        /// The offending rule.
+        rule: Box<DeductiveRule>,
+        /// Human-readable reason for the mismatch.
+        reason: String,
+    },
+
     /// A rule application omits a required parameter.
     #[error("Rule {rule} application omits required parameter \"{parameter}\"")]
     OmittedParameter {

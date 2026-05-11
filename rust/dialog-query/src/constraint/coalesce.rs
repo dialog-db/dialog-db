@@ -84,26 +84,36 @@ impl Coalesce {
     /// Validate the type contract of this coalesce against a
     /// unification context: pick a fresh `α`, then unify `α` with
     /// `source`'s underlying (non-Nothing) shape, `fallback`'s
-    /// kind, and `is`'s kind. If `source`'s kind is given, it
-    /// must include `Nothing` (set-widened) — otherwise this
-    /// coalesce can never trigger the fallback path.
+    /// kind, and `is`'s kind.
     ///
-    /// Used at rule-compile time and at wire-format
-    /// deserialization to catch type mismatches that bypass the
-    /// typed builder.
+    /// **Source typing is enforced.** If `source` carries a static
+    /// kind, it must be set-widened (admit `Nothing`); otherwise
+    /// the coalesce can never trigger the fallback path and is
+    /// rejected with [`UnifyError::SourceNotOptional`]. If `source`
+    /// has no static kind (`kind() == None`), it is treated as
+    /// fully unconstrained — the unifier may not narrow it. The
+    /// caller is then responsible for ensuring the source is
+    /// actually set-widened at runtime; the typed
+    /// [`unwrap_or`](crate::Term::unwrap_or) builder enforces this
+    /// at the Rust type level.
     ///
-    /// Terms with no static kind contribute no constraint — `α`
-    /// stays open.
+    /// **`fallback` and `is` with static kinds** must unify with
+    /// `α` — so they agree with each other and with the source's
+    /// underlying shape (when known).
     pub fn validate(&self, ctx: &mut Context) -> Result<(), UnifyError> {
         let alpha = ctx.fresh_var();
 
-        if let Some(source) = self.source.kind() {
-            if !source.is_optional() {
-                return Err(UnifyError::SourceNotOptional);
+        match self.source.kind() {
+            Some(source) if source.is_optional() => {
+                // Strip the Nothing bit to get α's underlying shape.
+                let underlying = source.without_nothing();
+                ctx.unify(&UnifierType::Static(underlying), &alpha)?;
             }
-            // Strip the Nothing bit to get α's underlying shape.
-            let underlying = source.without_nothing();
-            ctx.unify(&UnifierType::Static(underlying), &alpha)?;
+            Some(_) => return Err(UnifyError::SourceNotOptional),
+            None => {
+                // No static kind on source — caller takes responsibility.
+                // α stays open; fallback/is still link to it below.
+            }
         }
         if let Some(k) = self.fallback.kind() {
             ctx.unify(&lift(&k), &alpha)?;
