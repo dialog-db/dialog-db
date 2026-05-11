@@ -415,8 +415,14 @@ impl From<Infallible> for EvaluationError {
 
 impl From<ArtifactTypeError> for EvaluationError {
     fn from(error: ArtifactTypeError) -> Self {
-        let ArtifactTypeError::TypeMismatch(expected, actual) = error;
-        EvaluationError::TypeMismatch { expected, actual }
+        match error {
+            ArtifactTypeError::TypeMismatch(expected, actual) => {
+                EvaluationError::TypeMismatch { expected, actual }
+            }
+            other @ ArtifactTypeError::InvalidValue { .. } => {
+                EvaluationError::Store(other.to_string())
+            }
+        }
     }
 }
 

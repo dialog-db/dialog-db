@@ -337,12 +337,12 @@ impl<'a> Provider<Select<'a>> for Changes {
             }
             for (attribute, changes) in attrs {
                 if let Some(domain_target) = domain
-                    && attribute.domain() != domain_target.as_str()
+                    && attribute.domain() != domain_target
                 {
                     continue;
                 }
                 if let Some(name_target) = name
-                    && attribute.name() != name_target.as_str()
+                    && attribute.name() != name_target
                 {
                     continue;
                 }

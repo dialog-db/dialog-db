@@ -25,8 +25,8 @@ pub use update::{Change, ChangeStream, Changes, SortKey, Statement, Update, sort
 mod attribute;
 pub use attribute::*;
 
-mod domain;
-pub use domain::*;
+mod symbol;
+pub use symbol::*;
 
 mod entity;
 pub use entity::*;
@@ -438,7 +438,7 @@ mod tests {
     use crate::helpers::generate_data;
     use crate::{
         Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMutExt, Artifacts, Attribute,
-        DialogArtifactsError, Domain, Entity, Instruction, NULL_REVISION_HASH, Value,
+        DialogArtifactsError, Entity, Instruction, NULL_REVISION_HASH, Symbol, Value,
         make_reference,
     };
 
@@ -1238,9 +1238,9 @@ mod tests {
             ])
             .await?;
 
-        let domain: Domain = "dialog.concept.with".parse()?;
+        let namespace: Symbol = "dialog.concept.with".parse()?;
         let mut hits: Vec<Artifact> = artifacts
-            .select(ArtifactSelector::new().within(domain))
+            .select(ArtifactSelector::new().within(namespace))
             .map(|r| r.unwrap())
             .collect()
             .await;
@@ -1281,9 +1281,9 @@ mod tests {
             ])
             .await?;
 
-        let domain: Domain = "dialog.concept.with".parse()?;
+        let namespace: Symbol = "dialog.concept.with".parse()?;
         let hits: Vec<Artifact> = artifacts
-            .select(ArtifactSelector::new().within(domain))
+            .select(ArtifactSelector::new().within(namespace))
             .map(|r| r.unwrap())
             .collect()
             .await;
