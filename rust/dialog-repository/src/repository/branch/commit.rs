@@ -3,8 +3,8 @@ use crate::{
     RepositoryMemoryExt, Revision, TreeReference, Upstream,
 };
 use dialog_artifacts::{
-    Artifact, AttributeKey, Cause, Datum, EntityKey, FromKey, Instruction, Key, KeyView,
-    KeyViewConstruct, KeyViewMut, State, ValueKey,
+    Artifact, AttributeKey, Datum, EntityKey, FromKey, Instruction, Key, KeyView, KeyViewConstruct,
+    KeyViewMut, State, ValueKey,
 };
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -96,52 +96,73 @@ where
 
                     let datum = Datum::from(artifact);
 
-                    // When asserting with a cause, find and remove the
-                    // ancestor so the new version replaces it in all
-                    // three indexes.
-                    if let Some(cause) = &datum.cause {
-                        let ancestor_key = {
-                            let search_start = <EntityKey<Key> as KeyViewConstruct>::min()
-                                .set_entity(entity_key.entity())
-                                .set_attribute(entity_key.attribute())
-                                .into_key();
-                            let search_end = <EntityKey<Key> as KeyViewConstruct>::max()
-                                .set_entity(entity_key.entity())
-                                .set_attribute(entity_key.attribute())
-                                .into_key();
+                    tree.set(
+                        entity_key.into_key(),
+                        State::Added(datum.clone()),
+                        &mut store,
+                    )
+                    .await?;
+                    tree.set(
+                        attribute_key.into_key(),
+                        State::Added(datum.clone()),
+                        &mut store,
+                    )
+                    .await?;
+                    tree.set(value_key.into_key(), State::Added(datum), &mut store)
+                        .await?;
+                }
+                Instruction::Replace(artifact) => {
+                    let entity_key = EntityKey::from(&artifact);
 
-                            // Pinned because `stream_range` borrows from `tree` and
-                            // `store` across await points below.
-                            let search_stream = tree.stream_range(search_start..search_end, &store);
-                            tokio::pin!(search_stream);
+                    // Scan priors at this (entity, attribute). Same-valued
+                    // priors already represent the desired state; only
+                    // different-valued ones need superseding.
+                    let mut superseded_keys: Vec<Key> = Vec::new();
+                    let mut found_same_value = false;
+                    {
+                        let search_start = <EntityKey<Key> as KeyViewConstruct>::min()
+                            .set_entity(entity_key.entity())
+                            .set_attribute(entity_key.attribute())
+                            .into_key();
+                        let search_end = <EntityKey<Key> as KeyViewConstruct>::max()
+                            .set_entity(entity_key.entity())
+                            .set_attribute(entity_key.attribute())
+                            .into_key();
 
-                            let mut ancestor_key = None;
-                            while let Some(candidate) = search_stream.try_next().await? {
-                                if let State::Added(current_element) = candidate.value {
-                                    let current_artifact = Artifact::try_from(current_element)?;
-                                    let current_artifact_reference = Cause::from(&current_artifact);
+                        let search_stream = tree.stream_range(search_start..search_end, &store);
+                        tokio::pin!(search_stream);
 
-                                    if cause == &current_artifact_reference {
-                                        ancestor_key = Some(candidate.key);
-                                        break;
-                                    }
+                        while let Some(candidate) = search_stream.try_next().await? {
+                            if let State::Added(current_element) = candidate.value {
+                                let current = Artifact::try_from(current_element)?;
+                                if current.is == artifact.is {
+                                    found_same_value = true;
+                                } else {
+                                    superseded_keys.push(candidate.key);
                                 }
                             }
-
-                            ancestor_key
-                        };
-
-                        if let Some(key) = ancestor_key {
-                            let entity_key = EntityKey(key);
-                            let value_key: ValueKey<Key> = ValueKey::from_key(&entity_key);
-                            let attribute_key: AttributeKey<Key> =
-                                AttributeKey::from_key(&entity_key);
-
-                            tree.delete(&entity_key.into_key(), &mut store).await?;
-                            tree.delete(&value_key.into_key(), &mut store).await?;
-                            tree.delete(&attribute_key.into_key(), &mut store).await?;
                         }
                     }
+
+                    for key in superseded_keys {
+                        let entity_key = EntityKey(key);
+                        let value_key = ValueKey::from_key(&entity_key);
+                        let attribute_key = AttributeKey::from_key(&entity_key);
+
+                        tree.delete(&entity_key.into_key(), &mut store).await?;
+                        tree.delete(&value_key.into_key(), &mut store).await?;
+                        tree.delete(&attribute_key.into_key(), &mut store).await?;
+                    }
+
+                    // Skip insert if a same-value prior is already in place.
+                    if found_same_value {
+                        continue;
+                    }
+
+                    let entity_key = EntityKey::from(&artifact);
+                    let value_key = ValueKey::from_key(&entity_key);
+                    let attribute_key = AttributeKey::from_key(&entity_key);
+                    let datum = Datum::from(artifact);
 
                     tree.set(
                         entity_key.into_key(),

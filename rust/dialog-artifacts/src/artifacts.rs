@@ -441,60 +441,85 @@ where
 
                         let datum = Datum::from(artifact);
 
-                        if let Some(cause) = &datum.cause {
-                            let ancestor_key = {
-                                let search_start = <EntityKey<Key> as KeyViewConstruct>::min()
-                                    .set_entity(entity_key.entity())
-                                    .set_attribute(entity_key.attribute())
-                                    .into_key();
-                                let search_end = <EntityKey<Key> as KeyViewConstruct>::max()
-                                    .set_entity(entity_key.entity())
-                                    .set_attribute(entity_key.attribute())
-                                    .into_key();
+                        // TODO: Make it concurrent / parallel
+                        index
+                            .set(
+                                entity_key.into_key(),
+                                State::Added(datum.clone()),
+                                &mut self.storage,
+                            )
+                            .await?;
+                        index
+                            .set(
+                                attribute_key.into_key(),
+                                State::Added(datum.clone()),
+                                &mut self.storage,
+                            )
+                            .await?;
+                        index
+                            .set(value_key.into_key(), State::Added(datum), &mut self.storage)
+                            .await?;
+                    }
+                    Instruction::Replace(artifact) => {
+                        let entity_key = EntityKey::from(&artifact);
 
-                                let search_stream =
-                                    index.stream_range(search_start..search_end, &self.storage);
+                        // Scan priors at this (entity, attribute). Same-valued
+                        // priors already represent the desired state; only
+                        // different-valued ones need superseding.
+                        let mut superseded_keys: Vec<Key> = Vec::new();
+                        let mut found_same_value = false;
+                        {
+                            let search_start = <EntityKey<Key> as KeyViewConstruct>::min()
+                                .set_entity(entity_key.entity())
+                                .set_attribute(entity_key.attribute())
+                                .into_key();
+                            let search_end = <EntityKey<Key> as KeyViewConstruct>::max()
+                                .set_entity(entity_key.entity())
+                                .set_attribute(entity_key.attribute())
+                                .into_key();
 
-                                let mut ancestor_key = None;
+                            let search_stream =
+                                index.stream_range(search_start..search_end, &self.storage);
+                            tokio::pin!(search_stream);
 
-                                tokio::pin!(search_stream);
-
-                                while let Some(candidate) = search_stream.try_next().await? {
-                                    if let State::Added(current_element) = candidate.value {
-                                        let current_artifact = Artifact::try_from(current_element)?;
-                                        let current_artifact_reference =
-                                            Cause::from(&current_artifact);
-
-                                        if cause == &current_artifact_reference {
-                                            ancestor_key = Some(candidate.key);
-                                            break;
-                                        }
+                            while let Some(candidate) = search_stream.try_next().await? {
+                                if let State::Added(current_element) = candidate.value {
+                                    let current = Artifact::try_from(current_element)?;
+                                    if current.is == artifact.is {
+                                        found_same_value = true;
+                                    } else {
+                                        superseded_keys.push(candidate.key);
                                     }
                                 }
-
-                                ancestor_key
-                            };
-
-                            if let Some(key) = ancestor_key {
-                                // Prune the old entry from the indexes
-                                let entity_key = EntityKey(key);
-                                let value_key = ValueKey::from_key(&entity_key);
-                                let attribute_key = AttributeKey::from_key(&entity_key);
-
-                                // TODO: Make it concurrent / parallel
-                                index
-                                    .delete(&entity_key.into_key(), &mut self.storage)
-                                    .await?;
-                                index
-                                    .delete(&value_key.into_key(), &mut self.storage)
-                                    .await?;
-                                index
-                                    .delete(&attribute_key.into_key(), &mut self.storage)
-                                    .await?;
                             }
                         }
 
-                        // TODO: Make it concurrent / parallel
+                        for key in superseded_keys {
+                            let entity_key = EntityKey(key);
+                            let value_key = ValueKey::from_key(&entity_key);
+                            let attribute_key = AttributeKey::from_key(&entity_key);
+
+                            index
+                                .delete(&entity_key.into_key(), &mut self.storage)
+                                .await?;
+                            index
+                                .delete(&value_key.into_key(), &mut self.storage)
+                                .await?;
+                            index
+                                .delete(&attribute_key.into_key(), &mut self.storage)
+                                .await?;
+                        }
+
+                        // Skip insert if a same-value prior is already in place.
+                        if found_same_value {
+                            continue;
+                        }
+
+                        let entity_key = EntityKey::from(&artifact);
+                        let value_key = ValueKey::from_key(&entity_key);
+                        let attribute_key = AttributeKey::from_key(&entity_key);
+                        let datum = Datum::from(artifact);
+
                         index
                             .set(
                                 entity_key.into_key(),
@@ -1005,20 +1030,24 @@ mod tests {
         let attribute = Attribute::from_str("test/attribute")?;
         let entity = Entity::new()?;
         let artifact = Artifact {
-            the: attribute,
+            the: attribute.clone(),
             of: entity.clone(),
             is: Value::Boolean(false),
             cause: None,
         };
 
-        artifacts
-            .commit([Instruction::Assert(artifact.clone())])
-            .await?;
+        artifacts.commit([Instruction::Assert(artifact)]).await?;
 
-        let updated_artifact = artifact.update(Value::Boolean(true));
+        // Replace supersedes priors at (entity, attribute) regardless of value.
+        let updated_artifact = Artifact {
+            the: attribute,
+            of: entity.clone(),
+            is: Value::Boolean(true),
+            cause: None,
+        };
 
         artifacts
-            .commit([Instruction::Assert(updated_artifact.clone())])
+            .commit([Instruction::Replace(updated_artifact.clone())])
             .await?;
 
         let results = artifacts

@@ -8,8 +8,11 @@ use std::vec::IntoIter;
 /// A single write operation on an `(entity, attribute)` pair.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Change {
-    /// Assert a value for an entity-attribute pair.
+    /// Assert a value for an entity-attribute pair (cardinality-many).
     Assert(Value),
+    /// Replace any prior value(s) at this `(entity, attribute)` with this one
+    /// (cardinality-one). Supersession of priors happens at commit time.
+    Replace(Value),
     /// Retract a value from an entity-attribute pair.
     Retract(Value),
 }
@@ -89,6 +92,12 @@ impl Changes {
                             is: value,
                             cause: None,
                         }),
+                        Change::Replace(value) => Instruction::Replace(Artifact {
+                            the: attribute.clone(),
+                            of: entity.clone(),
+                            is: value,
+                            cause: None,
+                        }),
                         Change::Retract(value) => Instruction::Retract(Artifact {
                             the: attribute.clone(),
                             of: entity.clone(),
@@ -118,7 +127,7 @@ impl Update for Changes {
         self.0
             .entry(of)
             .or_default()
-            .insert(the, vec![Change::Assert(is)]);
+            .insert(the, vec![Change::Replace(is)]);
     }
 
     fn dissociate(&mut self, the: Attribute, of: Entity, is: Value) {
