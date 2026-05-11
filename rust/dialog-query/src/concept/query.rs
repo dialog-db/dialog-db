@@ -39,7 +39,14 @@ fn extract_parameters(source: &Match, terms: &Parameters) -> Result<Match, Evalu
                     Ok(Binding::Absent) => {
                         matched.bind_absent(&param)?;
                     }
-                    Err(_) => {}
+                    // Unbound is expected here: the user supplied a
+                    // placeholder term (e.g. `Term::var("alice")` in
+                    // `Query<Person> { this: ..., ... }`) that the
+                    // concept query is about to bind. Skip it —
+                    // downstream evaluation fills it in. Propagate
+                    // any other error.
+                    Err(EvaluationError::UnboundVariable { .. }) => {}
+                    Err(e) => return Err(e),
                 }
             }
             Term::Constant(value) => {
@@ -76,7 +83,12 @@ fn merge_parameters(
             Ok(Binding::Absent) => {
                 merged.bind_absent(user_param)?;
             }
-            Err(_) => {}
+            // Unbound is expected: not every parameter survives the
+            // concept evaluation (e.g. a blank slot the rule never
+            // touched). Skip and let the user variable stay
+            // un-extended. Propagate any other error.
+            Err(EvaluationError::UnboundVariable { .. }) => {}
+            Err(e) => return Err(e),
         }
     }
 
