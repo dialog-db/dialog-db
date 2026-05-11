@@ -1,10 +1,10 @@
 #![allow(private_bounds)]
 
-//! Domain module for the [`ArtifactSelector`]
+//! Selector for querying artifacts.
 
 use std::marker::PhantomData;
 
-use crate::{AttributeName, Domain, Entity, Value};
+use crate::{Entity, Symbol, Value};
 
 #[cfg(doc)]
 use crate::ArtifactStore;
@@ -29,12 +29,12 @@ trait ArtifactSelectorState {}
 /// also possible to construct it incrementally with the [`within`](Self::within),
 /// [`named`](Self::named), [`of`](Self::of), and [`is`](Self::is) methods.
 ///
-/// The attribute slot of an artifact is split into two halves: a [`Domain`]
-/// and an [`AttributeName`]. Constraining only [`domain`](Self::domain) (via
-/// [`within`](Self::within)) selects every artifact whose attribute is in
-/// that domain — a contiguous prefix of the attribute index. Constraining
-/// both yields a fully-bound attribute. Composite attribute handling lives
-/// at the layer above this one.
+/// The attribute slot of an artifact is structurally two [`Symbol`]s: a
+/// domain half and a name half. Constraining only [`domain`](Self::domain)
+/// (via [`within`](Self::within)) selects every artifact whose domain
+/// matches, enabling a contiguous prefix scan of the attribute index.
+/// Constraining both yields a fully-bound attribute. Composite-attribute
+/// handling lives at the layer above this one.
 ///
 /// When a field is specified, all [`Artifact`]s that are selected will share
 /// the same field value.
@@ -50,8 +50,8 @@ where
     State: ArtifactSelectorState,
 {
     entity: Option<Entity>,
-    domain: Option<Domain>,
-    name: Option<AttributeName>,
+    domain: Option<Symbol>,
+    name: Option<Symbol>,
     value: Option<Value>,
 
     value_reference: Option<Blake3Hash>,
@@ -89,16 +89,15 @@ where
         self.entity.as_ref()
     }
 
-    /// The [`Domain`] half of the attribute used in any selected
+    /// The domain half of the attribute used in any selected
     /// [`Artifact`]s. When set without [`name`](Self::name) it implies a
     /// prefix scan over the attribute index.
-    pub fn domain(&self) -> Option<&Domain> {
+    pub fn domain(&self) -> Option<&Symbol> {
         self.domain.as_ref()
     }
 
-    /// The [`AttributeName`] half of the attribute used in any selected
-    /// [`Artifact`]s.
-    pub fn name(&self) -> Option<&AttributeName> {
+    /// The name half of the attribute used in any selected [`Artifact`]s.
+    pub fn name(&self) -> Option<&Symbol> {
         self.name.as_ref()
     }
 
@@ -112,13 +111,13 @@ where
         self.value_reference.as_ref()
     }
 
-    /// Constrain the selector to artifacts whose attribute is in the given
-    /// [`Domain`].
+    /// Constrain the selector to artifacts whose attribute domain is the
+    /// given [`Symbol`].
     ///
     /// Used alone, this enables a contiguous prefix scan over the attribute
     /// index. Combined with [`named`](Self::named) it pins the attribute
     /// fully.
-    pub fn within(self, domain: Domain) -> ArtifactSelector<Constrained> {
+    pub fn within(self, domain: Symbol) -> ArtifactSelector<Constrained> {
         ArtifactSelector::<Constrained> {
             domain: Some(domain),
             name: self.name,
@@ -131,12 +130,12 @@ where
 
     /// Constrain the selector to artifacts whose attribute name matches.
     ///
-    /// Note: an attribute name alone does not constrain a contiguous range
-    /// of the index, so this method preserves the current state (it does
-    /// **not** mark the selector as `Constrained`). To constrain on name,
-    /// pair it with another field — typically a [`Domain`](Self::within),
-    /// an entity, or a value.
-    pub fn named(self, name: AttributeName) -> ArtifactSelector<State> {
+    /// Note: a name alone does not constrain a contiguous range of the
+    /// index, so this method preserves the current state (it does **not**
+    /// mark the selector as `Constrained`). To constrain on name, pair it
+    /// with another field: a domain (via [`within`](Self::within)), an
+    /// entity, or a value.
+    pub fn named(self, name: Symbol) -> ArtifactSelector<State> {
         ArtifactSelector {
             domain: self.domain,
             name: Some(name),

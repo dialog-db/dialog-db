@@ -92,4 +92,13 @@ pub enum TypeError {
     /// Expected type and actual type mismatch.
     #[error("Type mismatch: expected {0}, got {1}")]
     TypeMismatch(ValueDataType, ValueDataType),
+
+    /// A value of the right type failed validation for a refined type.
+    #[error("Invalid {expected}: {reason}")]
+    InvalidValue {
+        /// Name of the refined type that rejected the value (e.g. "Symbol").
+        expected: &'static str,
+        /// Why the value was rejected.
+        reason: String,
+    },
 }

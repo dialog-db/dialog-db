@@ -113,7 +113,7 @@ mod tests {
     use super::*;
     use crate::AttributeStatement;
     use crate::Query;
-    use crate::artifact::{ArtifactSelector, AttributeName, Domain, Select, Type, Value};
+    use crate::artifact::{ArtifactSelector, Select, Symbol, Type, Value};
     use crate::attribute::{Attribute as _, AttributeDescriptor};
     use crate::error::EvaluationError;
     use crate::query::Application;
@@ -707,9 +707,9 @@ mod tests {
         // Verify Alice exists
         use futures_util::TryStreamExt;
 
-        let person_domain: Domain = "person".parse()?;
-        let name_field: AttributeName = "name".parse()?;
-        let age_field: AttributeName = "age".parse()?;
+        let person_domain: Symbol = "person".parse()?;
+        let name_field: Symbol = "name".parse()?;
+        let age_field: Symbol = "age".parse()?;
 
         let name_facts: Vec<_> = branch
             .claims()
@@ -801,8 +801,8 @@ mod tests {
 
         let alice = Entity::new()?;
         let name_attr = the!("user/name");
-        let user_domain: Domain = "user".parse()?;
-        let name_field: AttributeName = "name".parse()?;
+        let user_domain: Symbol = "user".parse()?;
+        let name_field: Symbol = "name".parse()?;
 
         let name_relation: AttributeStatement = name_attr
             .clone()
