@@ -41,19 +41,6 @@ pub struct Artifact {
     pub cause: Option<Cause>,
 }
 
-impl Artifact {
-    /// Change the value of the [`Artifact`], assigning the hash of its
-    /// antecedent as the `cause`.
-    pub fn update(self, value: Value) -> Self {
-        let cause = Some(Cause::from(&self));
-        Self {
-            is: value,
-            cause,
-            ..self
-        }
-    }
-}
-
 impl Debug for Artifact {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.debug_struct("Artifact")
@@ -85,33 +72,5 @@ impl TryFrom<Datum> for Artifact {
             is: Value::try_from((ValueDataType::from(value.value_type), value.value))?,
             cause: value.cause,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::str::FromStr;
-
-    use anyhow::Result;
-
-    use crate::{Attribute, Cause, Entity, Value};
-
-    use super::Artifact;
-
-    #[test]
-    fn it_points_to_causal_ancestor_when_updated() -> Result<()> {
-        let artifact = Artifact {
-            the: Attribute::from_str("test/predicate")?,
-            of: Entity::new()?,
-            is: Value::Boolean(false),
-            cause: None,
-        };
-        let causal_reference = Cause::from(&artifact);
-        let descendent = artifact.update(Value::Boolean(true));
-
-        assert_eq!(descendent.is, Value::Boolean(true));
-        assert_eq!(descendent.cause, Some(causal_reference));
-
-        Ok(())
     }
 }

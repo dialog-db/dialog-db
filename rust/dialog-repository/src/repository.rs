@@ -768,6 +768,235 @@ mod tests {
             assert_eq!(results.len(), 2);
             Ok(())
         }
+
+        #[dialog_common::test]
+        async fn it_resolves_only_latest_name_target_via_name_concept() -> anyhow::Result<()> {
+            /// The `dialog.meta/named-entity` attribute — the entity a
+            /// name currently points at. Cardinality `one` (the derive
+            /// default), so re-pointing a name supersedes the prior
+            /// claim instead of accumulating.
+            #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+            #[domain("dialog.meta")]
+            pub struct NamedEntity(pub Entity);
+
+            /// A user-published name — an `id:<n>` entity carrying a
+            /// single `entity` claim that points at the target the name
+            /// currently identifies.
+            #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+            pub struct Name {
+                /// The name entity — `id:<n>` for user-published names,
+                /// `db:<n>` for built-ins.
+                pub this: Entity,
+                /// The target this name currently identifies.
+                pub entity: NamedEntity,
+            }
+
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            // Use the `concept:` scheme for targets — this matches
+            // the real-world case where `concept!: &page` derives a
+            // content-hashed `concept:…` entity URI for each body.
+            // Same supersession path, different value scheme; this
+            // catches a bug where the cardinality-one filter was
+            // sensitive to the value's URI scheme.
+            let id_page: Entity = "id:page".parse()?;
+            let page_v1: Entity =
+                "concept:Fx8sv1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".parse()?;
+            let page_v2: Entity =
+                "concept:AfmLeBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB".parse()?;
+
+            // tx1 — point id:page at v1.
+            let v1 = branch
+                .transaction()
+                .assert(Name {
+                    this: id_page.clone(),
+                    entity: NamedEntity(page_v1.clone()),
+                })
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            assert_eq!(
+                branch
+                    .query()
+                    .select(Query::<Name> {
+                        this: id_page.clone().into(),
+                        entity: Term::var("entity"),
+                    })
+                    .perform(&operator)
+                    .try_vec()
+                    .await?,
+                vec![Name {
+                    this: id_page.clone(),
+                    entity: NamedEntity(page_v1.clone())
+                }]
+            );
+
+            // tx2 — point id:page at v2. Cardinality-one supersedes v1.
+            let v2 = branch
+                .transaction()
+                .assert(Name {
+                    this: id_page.clone(),
+                    entity: NamedEntity(page_v2.clone()),
+                })
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            assert_ne!(v1, v2);
+
+            assert_eq!(
+                branch
+                    .query()
+                    .select(Query::<Name> {
+                        this: id_page.clone().into(),
+                        entity: Term::var("entity"),
+                    })
+                    .perform(&operator)
+                    .try_vec()
+                    .await?,
+                vec![Name {
+                    this: id_page.clone(),
+                    entity: NamedEntity(page_v2.clone())
+                }]
+            );
+
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn it_accumulates_two_cardinality_many_values_in_one_tx() -> anyhow::Result<()> {
+            // Regression guard: asserting two distinct values for the same
+            // (entity, attribute) inside a single transaction must keep
+            // both — cardinality-many accumulates, it does not collapse.
+            #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+            #[cardinality(many)]
+            #[domain("dialog.meta")]
+            pub struct Tag(pub String);
+
+            #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+            pub struct Tagged {
+                pub this: Entity,
+                pub tag: Tag,
+            }
+
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let post: Entity = "id:post".parse()?;
+
+            branch
+                .transaction()
+                .assert(Tagged {
+                    this: post.clone(),
+                    tag: Tag("red".into()),
+                })
+                .assert(Tagged {
+                    this: post.clone(),
+                    tag: Tag("blue".into()),
+                })
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            let mut results: Vec<Tagged> = branch
+                .query()
+                .select(Query::<Tagged> {
+                    this: post.clone().into(),
+                    tag: Term::var("tag"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            results.sort();
+
+            assert_eq!(
+                results,
+                vec![
+                    Tagged {
+                        this: post.clone(),
+                        tag: Tag("blue".into()),
+                    },
+                    Tagged {
+                        this: post.clone(),
+                        tag: Tag("red".into()),
+                    },
+                ]
+            );
+
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn it_is_noop_when_reasserting_same_cardinality_one_value() -> anyhow::Result<()> {
+            // Reasserting the same value for a cardinality-one attribute
+            // must be a no-op at the storage layer: the tree must not
+            // change, so the revision's tree hash stays the same.
+            #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+            #[domain("dialog.meta")]
+            pub struct NamedEntity(pub Entity);
+
+            #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+            pub struct Name {
+                pub this: Entity,
+                pub entity: NamedEntity,
+            }
+
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let id_page: Entity = "id:page".parse()?;
+            let page_v1: Entity =
+                "concept:Fx8sv1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".parse()?;
+
+            let r1 = branch
+                .transaction()
+                .assert(Name {
+                    this: id_page.clone(),
+                    entity: NamedEntity(page_v1.clone()),
+                })
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            let r2 = branch
+                .transaction()
+                .assert(Name {
+                    this: id_page.clone(),
+                    entity: NamedEntity(page_v1.clone()),
+                })
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            assert_eq!(
+                r1.tree, r2.tree,
+                "reasserting the same value must not change the tree"
+            );
+
+            // And the query must still yield exactly the one claim.
+            assert_eq!(
+                branch
+                    .query()
+                    .select(Query::<Name> {
+                        this: id_page.clone().into(),
+                        entity: Term::var("entity"),
+                    })
+                    .perform(&operator)
+                    .try_vec()
+                    .await?,
+                vec![Name {
+                    this: id_page.clone(),
+                    entity: NamedEntity(page_v1.clone()),
+                }]
+            );
+
+            Ok(())
+        }
     }
 
     mod profile_as_repository {
