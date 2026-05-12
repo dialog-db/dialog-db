@@ -71,6 +71,7 @@
 //! // PersonQuery → Parameters, Premise, Proposition, ConceptQuery
 //! ```
 
+use convert_case::{Case, Casing};
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::ext::IdentExt;
@@ -142,12 +143,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
     for field in fields {
         let field_name = field.ident.as_ref().unwrap();
-        // `unraw()` drops the `r#` prefix on raw identifiers so a field
-        // declared as `r#type` appears in the descriptor as `"type"`.
-        let field_name_str = field_name.unraw().to_string();
+        // The Rust field name is normalized for the descriptor / query
+        // surface: `unraw()` drops any `r#` raw-identifier prefix, then
+        // `to_case(Case::Kebab)` matches the formal-notation convention
+        // used by attribute names elsewhere.
+        let raw_field_name = field_name.unraw().to_string();
+        let field_name_str = raw_field_name.to_case(Case::Kebab);
 
         // Skip the 'this' field - it's handled specially
-        if field_name_str == "this" {
+        if raw_field_name == "this" {
             continue;
         }
 
