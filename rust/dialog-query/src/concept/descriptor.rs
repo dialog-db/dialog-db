@@ -39,8 +39,13 @@ use std::ops::Not;
 ///
 /// Serializes to the formal notation:
 /// ```json
-/// { "description": "...", "with": { "fieldName": { "the": "domain/name", ... } } }
+/// { "description": "...", "with": { "field-name": { "the": "domain/name", ... } } }
 /// ```
+///
+/// Field-name keys follow the kebab-case convention used elsewhere in the
+/// formal notation; Rust field names are normalized on derive (e.g. a
+/// `display_name`, `displayName`, or `DisplayName` field all serialize as
+/// `"display-name"`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConceptDescriptor {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1218,6 +1223,118 @@ mod tests {
         assert!(
             parsed.get("maybe").is_none(),
             "Should not serialize 'maybe' when absent"
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_strips_raw_identifier_prefix_from_concept_field_names() {
+        use crate as dialog_query;
+        use crate::{Attribute, Concept, Entity};
+
+        #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        #[domain("dialog.test")]
+        pub struct TypeAttr(pub String);
+
+        #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        pub struct Sample {
+            pub this: Entity,
+            /// `type` is a Rust keyword so the field has to be written
+            /// `r#type` — but the descriptor's `with` map key must be
+            /// the cooked name `"type"`, not `"r#type"`.
+            pub r#type: TypeAttr,
+        }
+
+        let descriptor: ConceptDescriptor =
+            <Sample as crate::Predicate>::Application::default().into();
+
+        // Round-trip the descriptor through JSON and assert the field
+        // key in the `with` map is `type`, not `r#type`.
+        let json = serde_json::to_value(&descriptor).expect("serialize");
+        let with = json["with"].as_object().expect("with map");
+
+        assert!(
+            with.contains_key("type"),
+            "descriptor should expose `type`, got keys: {:?}",
+            with.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !with.contains_key("r#type"),
+            "descriptor should NOT expose raw-ident `r#type`",
+        );
+
+        let round_tripped: ConceptDescriptor = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(
+            round_tripped.this(),
+            descriptor.this(),
+            "JSON round-trip must preserve the concept's content hash"
+        );
+    }
+
+    #[dialog_common::test]
+    #[allow(nonstandard_style)]
+    fn it_kebab_cases_concept_field_names() {
+        use crate as dialog_query;
+        use crate::{Attribute, Concept, Entity};
+
+        // The descriptor's `with` map keys follow the formal-notation
+        // convention: lower-case kebab. snake_case, camelCase, and
+        // PascalCase field names all collapse to kebab-case. A field
+        // already in single-word lower form is unchanged.
+
+        #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        #[domain("dialog.test")]
+        pub struct A(pub String);
+
+        #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        #[domain("dialog.test")]
+        pub struct B(pub String);
+
+        #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        #[domain("dialog.test")]
+        pub struct C(pub String);
+
+        #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        #[domain("dialog.test")]
+        pub struct D(pub String);
+
+        #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        pub struct Sample {
+            pub this: Entity,
+            /// snake_case → kebab
+            pub display_name: A,
+            /// camelCase → kebab
+            pub firstName: B,
+            /// PascalCase → kebab
+            pub LastName: C,
+            /// already lowercase single-word → unchanged
+            pub email: D,
+        }
+
+        let descriptor: ConceptDescriptor =
+            <Sample as crate::Predicate>::Application::default().into();
+
+        let json = serde_json::to_value(&descriptor).expect("serialize");
+        let with = json["with"].as_object().expect("with map");
+        let keys: Vec<&String> = with.keys().collect();
+
+        for expected in ["display-name", "first-name", "last-name", "email"] {
+            assert!(
+                with.contains_key(expected),
+                "descriptor should expose `{expected}`, got keys: {keys:?}",
+            );
+        }
+        for unexpected in ["display_name", "firstName", "LastName"] {
+            assert!(
+                !with.contains_key(unexpected),
+                "descriptor should NOT expose raw `{unexpected}`",
+            );
+        }
+
+        let round_tripped: ConceptDescriptor = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(
+            round_tripped.this(),
+            descriptor.this(),
+            "JSON round-trip must preserve the concept's content hash"
         );
     }
 
