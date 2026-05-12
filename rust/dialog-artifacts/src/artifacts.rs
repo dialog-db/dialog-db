@@ -619,7 +619,7 @@ mod tests {
             .await?;
 
         let (d, n) = Attribute::from_str("profile/name")?.split();
-        let fact_stream = facts.select(ArtifactSelector::new().within(d).named(n));
+        let fact_stream = facts.select(ArtifactSelector::new().with_domain(d).with_name(n));
 
         let mut facts: Vec<Artifact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
         facts.sort_by(entity_order);
@@ -647,8 +647,8 @@ mod tests {
 
         let stream = artifacts.select(
             ArtifactSelector::new()
-                .with_domain("item")?
-                .with_name("id")?,
+                .with_domain("item".parse()?)
+                .with_name("id".parse()?),
         );
 
         tokio::pin!(stream);
@@ -682,7 +682,7 @@ mod tests {
 
             let (d, n) = Attribute::from_str("item/id")?.split();
             let ids = artifacts
-                .select(ArtifactSelector::new().within(d).named(n))
+                .select(ArtifactSelector::new().with_domain(d).with_name(n))
                 .map(|result| result.unwrap())
                 .collect::<Vec<Artifact>>()
                 .await;
@@ -700,7 +700,7 @@ mod tests {
 
         let (d, n) = Attribute::from_str("item/id")?.split();
         let actual_ids = artifacts
-            .select(ArtifactSelector::new().within(d).named(n))
+            .select(ArtifactSelector::new().with_domain(d).with_name(n))
             .map(|result| result.unwrap())
             .collect::<Vec<Artifact>>()
             .await;
@@ -792,7 +792,12 @@ mod tests {
         };
 
         let (d, n) = attribute.split();
-        let fact_stream = facts.select(ArtifactSelector::new().within(d).named(n).is(name.clone()));
+        let fact_stream = facts.select(
+            ArtifactSelector::new()
+                .with_domain(d)
+                .with_name(n)
+                .is(name.clone()),
+        );
 
         let results: Vec<Artifact> = fact_stream.map(|result| result.unwrap()).collect().await;
 
@@ -854,7 +859,7 @@ mod tests {
         assert_eq!(net_writes, 0);
 
         let (d, n) = Attribute::from_str("item/id")?.split();
-        let fact_stream = facts.select(ArtifactSelector::new().within(d).named(n));
+        let fact_stream = facts.select(ArtifactSelector::new().with_domain(d).with_name(n));
 
         let results: Vec<Artifact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
 
@@ -1066,8 +1071,8 @@ mod tests {
         let results = artifacts
             .select(
                 ArtifactSelector::new()
-                    .with_domain("item")?
-                    .with_name("id")?,
+                    .with_domain("item".parse()?)
+                    .with_name("id".parse()?),
             )
             .map(|result| result.unwrap())
             .collect::<Vec<Artifact>>()
@@ -1165,7 +1170,7 @@ mod tests {
         // Verify the data exists
         let (d, n) = attribute.split();
         let results = artifacts
-            .select(ArtifactSelector::new().within(d).named(n))
+            .select(ArtifactSelector::new().with_domain(d).with_name(n))
             .map(|r| r.unwrap())
             .collect::<Vec<_>>()
             .await;
@@ -1200,7 +1205,11 @@ mod tests {
         // Verify the data exists
         let (d, n) = attribute.split();
         let results = artifacts
-            .select(ArtifactSelector::new().within(d.clone()).named(n.clone()))
+            .select(
+                ArtifactSelector::new()
+                    .with_domain(d.clone())
+                    .with_name(n.clone()),
+            )
             .map(|r| r.unwrap())
             .collect::<Vec<_>>()
             .await;
@@ -1211,7 +1220,7 @@ mod tests {
 
         // Verify data is gone (empty state)
         let results = artifacts
-            .select(ArtifactSelector::new().within(d).named(n))
+            .select(ArtifactSelector::new().with_domain(d).with_name(n))
             .map(|r| r.unwrap())
             .collect::<Vec<_>>()
             .await;
@@ -1282,7 +1291,7 @@ mod tests {
         // Query the data to verify it was stored
         let (d, n) = attribute.split();
         let results = artifacts_mut
-            .select(ArtifactSelector::new().within(d).named(n))
+            .select(ArtifactSelector::new().with_domain(d).with_name(n))
             .map(|r| r.unwrap())
             .collect::<Vec<_>>()
             .await;
@@ -1385,7 +1394,7 @@ mod tests {
 
         let namespace: Symbol = "dialog.concept.with".parse()?;
         let mut hits: Vec<Artifact> = artifacts
-            .select(ArtifactSelector::new().within(namespace))
+            .select(ArtifactSelector::new().with_domain(namespace))
             .map(|r| r.unwrap())
             .collect()
             .await;
@@ -1428,7 +1437,7 @@ mod tests {
 
         let namespace: Symbol = "dialog.concept.with".parse()?;
         let hits: Vec<Artifact> = artifacts
-            .select(ArtifactSelector::new().within(namespace))
+            .select(ArtifactSelector::new().with_domain(namespace))
             .map(|r| r.unwrap())
             .collect()
             .await;

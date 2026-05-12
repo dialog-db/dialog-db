@@ -312,8 +312,8 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
             })?;
             let (d, n) = relation.split();
             selector = Some(match selector {
-                None => ArtifactSelector::new().within(d).named(n),
-                Some(s) => s.within(d).named(n),
+                None => ArtifactSelector::new().with_domain(d).with_name(n),
+                Some(s) => s.with_domain(d).with_name(n),
             });
         }
 

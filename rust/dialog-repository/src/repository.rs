@@ -425,8 +425,8 @@ mod tests {
             .claims()
             .select(
                 ArtifactSelector::new()
-                    .with_domain("user")?
-                    .with_name("name")?,
+                    .with_domain("user".parse()?)
+                    .with_name("name".parse()?),
             )
             .perform(&operator)
             .await?
@@ -508,8 +508,8 @@ mod tests {
             .claims()
             .select(
                 ArtifactSelector::new()
-                    .with_domain("user")?
-                    .with_name("name")?,
+                    .with_domain("user".parse()?)
+                    .with_name("name".parse()?),
             )
             .perform(&operator)
             .await?
@@ -547,8 +547,8 @@ mod tests {
             .claims()
             .select(
                 ArtifactSelector::new()
-                    .with_domain("user")?
-                    .with_name("name")?,
+                    .with_domain("user".parse()?)
+                    .with_name("name".parse()?),
             )
             .perform(&operator)
             .await?
@@ -568,8 +568,8 @@ mod tests {
             .claims()
             .select(
                 ArtifactSelector::new()
-                    .with_domain("user")?
-                    .with_name("name")?,
+                    .with_domain("user".parse()?)
+                    .with_name("name".parse()?),
             )
             .perform(&operator)
             .await?
@@ -844,8 +844,8 @@ mod tests {
                 .claims()
                 .select(
                     ArtifactSelector::new()
-                        .with_domain("user")?
-                        .with_name("name")?,
+                        .with_domain("user".parse()?)
+                        .with_name("name".parse()?),
                 )
                 .perform(&operator)
                 .await?
@@ -897,8 +897,8 @@ mod tests {
                 .claims()
                 .select(
                     ArtifactSelector::new()
-                        .with_domain("item")?
-                        .with_name("tag")?,
+                        .with_domain("item".parse()?)
+                        .with_name("tag".parse()?),
                 )
                 .perform(&operator)
                 .await?

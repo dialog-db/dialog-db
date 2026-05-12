@@ -231,8 +231,8 @@ mod tests {
 
         // Select should find the artifact
         let selector = ArtifactSelector::new()
-            .with_domain("user")?
-            .with_name("name")?;
+            .with_domain("user".parse()?)
+            .with_name("name".parse()?);
         let stream = branch.claims().select(selector).perform(&operator).await?;
         tokio::pin!(stream);
 
