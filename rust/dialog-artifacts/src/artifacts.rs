@@ -645,8 +645,11 @@ mod tests {
             .commit(data.into_iter().map(Instruction::Assert))
             .await?;
 
-        let (d, n) = "item/id".parse::<Attribute>()?.split();
-        let stream = artifacts.select(ArtifactSelector::new().within(d).named(n));
+        let stream = artifacts.select(
+            ArtifactSelector::new()
+                .with_domain("item")?
+                .with_name("id")?,
+        );
 
         tokio::pin!(stream);
 
@@ -1060,9 +1063,12 @@ mod tests {
 
         artifacts.reset(Some(revision)).await?;
 
-        let (d, n) = "item/id".parse::<Attribute>()?.split();
         let results = artifacts
-            .select(ArtifactSelector::new().within(d).named(n))
+            .select(
+                ArtifactSelector::new()
+                    .with_domain("item")?
+                    .with_name("id")?,
+            )
             .map(|result| result.unwrap())
             .collect::<Vec<Artifact>>()
             .await;

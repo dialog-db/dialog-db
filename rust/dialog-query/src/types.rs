@@ -183,9 +183,7 @@ macro_rules! impl_typed {
 }
 
 impl_typed!(String, Text);
-// Symbol rides Value::String for now (validated identifier carrier).
-// Future: when Value::Symbol is reshaped to carry single symbols (instead
-// of full attributes), switch Symbol's descriptor to SymbolType.
+// Symbol serializes through Value::String; maps to the Text descriptor.
 impl_typed!(Symbol, Text);
 impl_typed!(bool, Boolean);
 impl_typed!(usize, UnsignedInteger);

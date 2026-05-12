@@ -4,7 +4,7 @@
 
 use std::marker::PhantomData;
 
-use crate::{Entity, Symbol, Value};
+use crate::{DialogArtifactsError, Entity, Symbol, Value};
 
 #[cfg(doc)]
 use crate::ArtifactStore;
@@ -144,6 +144,24 @@ where
             value: self.value,
             state_type: PhantomData,
         }
+    }
+
+    /// String-accepting form of [`within`](Self::within): parse `domain`
+    /// into a [`Symbol`] and constrain the selector to that domain.
+    pub fn with_domain(
+        self,
+        domain: impl AsRef<str>,
+    ) -> Result<ArtifactSelector<Constrained>, DialogArtifactsError> {
+        Ok(self.within(domain.as_ref().parse()?))
+    }
+
+    /// String-accepting form of [`named`](Self::named): parse `name` into
+    /// a [`Symbol`] and constrain the selector to that name.
+    pub fn with_name(
+        self,
+        name: impl AsRef<str>,
+    ) -> Result<ArtifactSelector<State>, DialogArtifactsError> {
+        Ok(self.named(name.as_ref().parse()?))
     }
 
     /// Set the [`Entity`] field (the subject) of the [`ArtifactSelector`]
