@@ -141,22 +141,25 @@ impl Display for Attribute {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
     use super::*;
 
-    #[test]
+    #[dialog_common::test]
     fn it_parses_attribute_string() {
         let attr: Attribute = "person/name".parse().unwrap();
         assert_eq!(attr.domain().as_str(), "person");
         assert_eq!(attr.name().as_str(), "name");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_round_trips_to_string() {
         let attr: Attribute = "dialog.concept.with/name".parse().unwrap();
         assert_eq!(attr.to_string(), "dialog.concept.with/name");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_splits_into_symbols() {
         let attr: Attribute = "dialog.concept.with/name".parse().unwrap();
         let (ns, nm) = attr.split();
@@ -164,7 +167,7 @@ mod tests {
         assert_eq!(nm.as_str(), "name");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_composes_from_parts() {
         let ns: Symbol = "person".parse().unwrap();
         let nm: Symbol = "age".parse().unwrap();
@@ -172,7 +175,7 @@ mod tests {
         assert_eq!(attr.to_string(), "person/age");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_round_trips_via_from_parts() {
         let attr: Attribute = "person/age".parse().unwrap();
         let (ns, nm) = attr.split();
@@ -180,7 +183,7 @@ mod tests {
         assert_eq!(attr, rebuilt);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_rejects_oversized_join() {
         // Symbol max length is ATTRIBUTE_LENGTH - 1 = 63. Two symbols of
         // length 32 plus a delimiter is 65, exceeding the 64-byte budget.
@@ -189,24 +192,24 @@ mod tests {
         assert!(Attribute::from_parts(&ns, &nm).is_err());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_rejects_string_without_slash() {
         assert!("foobar".parse::<Attribute>().is_err());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_rejects_string_with_invalid_domain() {
         assert!("Foo/bar".parse::<Attribute>().is_err());
         assert!("3foo/bar".parse::<Attribute>().is_err());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_rejects_string_with_invalid_name() {
         assert!("foo/Bar".parse::<Attribute>().is_err());
         assert!("foo/bar-".parse::<Attribute>().is_err());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_encodes_key_bytes_with_delimiter() {
         let attr: Attribute = "person/name".parse().unwrap();
         let bytes = attr.key_bytes();
@@ -217,7 +220,7 @@ mod tests {
         assert!(bytes[11..].iter().all(|&b| b == 0));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_round_trips_through_serde() {
         let attr: Attribute = "person/age".parse().unwrap();
         let json = serde_json::to_string(&attr).unwrap();
