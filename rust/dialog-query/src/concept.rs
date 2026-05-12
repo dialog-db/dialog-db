@@ -775,8 +775,8 @@ mod tests {
             .claims()
             .select(
                 ArtifactSelector::new()
-                    .within(person_domain.clone())
-                    .named(name_field.clone())
+                    .with_domain(person_domain.clone())
+                    .with_name(name_field.clone())
                     .of(alice.clone()),
             )
             .perform(&operator)
@@ -794,8 +794,8 @@ mod tests {
             .claims()
             .select(
                 ArtifactSelector::new()
-                    .within(person_domain.clone())
-                    .named(age_field.clone())
+                    .with_domain(person_domain.clone())
+                    .with_name(age_field.clone())
                     .of(alice.clone()),
             )
             .perform(&operator)
@@ -818,8 +818,8 @@ mod tests {
             .claims()
             .select(
                 ArtifactSelector::new()
-                    .within(person_domain.clone())
-                    .named(name_field)
+                    .with_domain(person_domain.clone())
+                    .with_name(name_field)
                     .of(alice.clone()),
             )
             .perform(&operator)
@@ -836,8 +836,8 @@ mod tests {
             .claims()
             .select(
                 ArtifactSelector::new()
-                    .within(person_domain)
-                    .named(age_field)
+                    .with_domain(person_domain)
+                    .with_name(age_field)
                     .of(alice.clone()),
             )
             .perform(&operator)
@@ -884,8 +884,8 @@ mod tests {
             .claims()
             .select(
                 ArtifactSelector::new()
-                    .within(user_domain.clone())
-                    .named(name_field.clone())
+                    .with_domain(user_domain.clone())
+                    .with_name(name_field.clone())
                     .of(alice.clone()),
             )
             .perform(&operator)
@@ -907,8 +907,8 @@ mod tests {
             .claims()
             .select(
                 ArtifactSelector::new()
-                    .within(user_domain)
-                    .named(name_field)
+                    .with_domain(user_domain)
+                    .with_name(name_field)
                     .of(alice.clone()),
             )
             .perform(&operator)

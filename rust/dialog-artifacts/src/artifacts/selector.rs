@@ -4,7 +4,7 @@
 
 use std::marker::PhantomData;
 
-use crate::{DialogArtifactsError, Entity, Symbol, Value};
+use crate::{Entity, Symbol, Value};
 
 #[cfg(doc)]
 use crate::ArtifactStore;
@@ -26,12 +26,13 @@ trait ArtifactSelectorState {}
 
 /// The basic query system for selecting [`Artifact`]s from a [`ArtifactStore`]
 /// You can assign its fields directly, but for convenience and ergonomics it is
-/// also possible to construct it incrementally with the [`within`](Self::within),
-/// [`named`](Self::named), [`of`](Self::of), and [`is`](Self::is) methods.
+/// also possible to construct it incrementally with the
+/// [`with_domain`](Self::with_domain), [`with_name`](Self::with_name),
+/// [`of`](Self::of), and [`is`](Self::is) methods.
 ///
 /// The attribute slot of an artifact is structurally two [`Symbol`]s: a
 /// domain half and a name half. Constraining only [`domain`](Self::domain)
-/// (via [`within`](Self::within)) selects every artifact whose domain
+/// (via [`with_domain`](Self::with_domain)) selects every artifact whose domain
 /// matches, enabling a contiguous prefix scan of the attribute index.
 /// Constraining both yields a fully-bound attribute. Composite-attribute
 /// handling lives at the layer above this one.
@@ -115,9 +116,9 @@ where
     /// given [`Symbol`].
     ///
     /// Used alone, this enables a contiguous prefix scan over the attribute
-    /// index. Combined with [`named`](Self::named) it pins the attribute
-    /// fully.
-    pub fn within(self, domain: Symbol) -> ArtifactSelector<Constrained> {
+    /// index. Combined with [`with_name`](Self::with_name) it pins the
+    /// attribute fully.
+    pub fn with_domain(self, domain: Symbol) -> ArtifactSelector<Constrained> {
         ArtifactSelector::<Constrained> {
             domain: Some(domain),
             name: self.name,
@@ -133,9 +134,9 @@ where
     /// Note: a name alone does not constrain a contiguous range of the
     /// index, so this method preserves the current state (it does **not**
     /// mark the selector as `Constrained`). To constrain on name, pair it
-    /// with another field: a domain (via [`within`](Self::within)), an
-    /// entity, or a value.
-    pub fn named(self, name: Symbol) -> ArtifactSelector<State> {
+    /// with another field: a domain (via [`with_domain`](Self::with_domain)),
+    /// an entity, or a value.
+    pub fn with_name(self, name: Symbol) -> ArtifactSelector<State> {
         ArtifactSelector {
             domain: self.domain,
             name: Some(name),
@@ -144,24 +145,6 @@ where
             value: self.value,
             state_type: PhantomData,
         }
-    }
-
-    /// String-accepting form of [`within`](Self::within): parse `domain`
-    /// into a [`Symbol`] and constrain the selector to that domain.
-    pub fn with_domain(
-        self,
-        domain: impl AsRef<str>,
-    ) -> Result<ArtifactSelector<Constrained>, DialogArtifactsError> {
-        Ok(self.within(domain.as_ref().parse()?))
-    }
-
-    /// String-accepting form of [`named`](Self::named): parse `name` into
-    /// a [`Symbol`] and constrain the selector to that name.
-    pub fn with_name(
-        self,
-        name: impl AsRef<str>,
-    ) -> Result<ArtifactSelector<State>, DialogArtifactsError> {
-        Ok(self.named(name.as_ref().parse()?))
     }
 
     /// Set the [`Entity`] field (the subject) of the [`ArtifactSelector`]

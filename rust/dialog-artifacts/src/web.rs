@@ -665,7 +665,7 @@ impl TryFrom<JsValue> for ArtifactSelector<Constrained> {
         {
             let attr = Attribute::try_from(the)?;
             let (d, n) = attr.split();
-            Some(ArtifactSelector::new().within(d).named(n))
+            Some(ArtifactSelector::new().with_domain(d).with_name(n))
         } else {
             None
         };

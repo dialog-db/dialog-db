@@ -67,8 +67,8 @@ where
 
         let (d, n) = attribute.split();
         let challengers = Provider::<Select<'_>>::execute(env, ArtifactSelector::new()
-            .within(d)
-            .named(n)
+            .with_domain(d)
+            .with_name(n)
             .of(entity)).await?;
 
         let mut winner: Option<Artifact> = None;

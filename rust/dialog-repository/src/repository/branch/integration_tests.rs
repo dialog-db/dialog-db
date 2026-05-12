@@ -211,8 +211,8 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> Result<()> {
         .claims()
         .select(
             ArtifactSelector::new()
-                .with_domain("user")?
-                .with_name("name")?,
+                .with_domain("user".parse()?)
+                .with_name("name".parse()?),
         )
         .perform(&operator)
         .await?
@@ -297,8 +297,8 @@ async fn it_two_party_convergence(s3: S3Address) -> Result<()> {
         .claims()
         .select(
             ArtifactSelector::new()
-                .with_domain("user")?
-                .with_name("name")?,
+                .with_domain("user".parse()?)
+                .with_name("name".parse()?),
         )
         .perform(&operator)
         .await?
@@ -311,8 +311,8 @@ async fn it_two_party_convergence(s3: S3Address) -> Result<()> {
         .claims()
         .select(
             ArtifactSelector::new()
-                .with_domain("user")?
-                .with_name("name")?,
+                .with_domain("user".parse()?)
+                .with_name("name".parse()?),
         )
         .perform(&operator)
         .await?
@@ -457,8 +457,8 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> Result<()> 
         .claims()
         .select(
             ArtifactSelector::new()
-                .with_domain("user")?
-                .with_name("name")?,
+                .with_domain("user".parse()?)
+                .with_name("name".parse()?),
         )
         .perform(&bob_operator)
         .await?
@@ -492,8 +492,8 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> Result<()> 
         .claims()
         .select(
             ArtifactSelector::new()
-                .with_domain("user")?
-                .with_name("name")?,
+                .with_domain("user".parse()?)
+                .with_name("name".parse()?),
         )
         .perform(&alice_operator)
         .await?
@@ -569,8 +569,8 @@ async fn it_pushes_and_pulls_via_ucan(ucan: UcanS3Address) -> Result<()> {
         .claims()
         .select(
             ArtifactSelector::new()
-                .with_domain("user")?
-                .with_name("name")?,
+                .with_domain("user".parse()?)
+                .with_name("name".parse()?),
         )
         .perform(&operator)
         .await?
@@ -640,8 +640,8 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> Result<()>
         .claims()
         .select(
             ArtifactSelector::new()
-                .with_domain("user")?
-                .with_name("name")?,
+                .with_domain("user".parse()?)
+                .with_name("name".parse()?),
         )
         .perform(&operator)
         .await;
@@ -662,8 +662,8 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> Result<()>
         .claims()
         .select(
             ArtifactSelector::new()
-                .with_domain("user")?
-                .with_name("name")?,
+                .with_domain("user".parse()?)
+                .with_name("name".parse()?),
         )
         .perform(&operator)
         .await?
@@ -685,8 +685,8 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> Result<()>
         .claims()
         .select(
             ArtifactSelector::new()
-                .with_domain("user")?
-                .with_name("name")?,
+                .with_domain("user".parse()?)
+                .with_name("name".parse()?),
         )
         .perform(&operator)
         .await?
@@ -878,8 +878,8 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> Result<()> {
         .claims()
         .select(
             ArtifactSelector::new()
-                .with_domain("user")?
-                .with_name("name")?,
+                .with_domain("user".parse()?)
+                .with_name("name".parse()?),
         )
         .perform(&bob_operator)
         .await?
