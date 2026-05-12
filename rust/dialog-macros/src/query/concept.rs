@@ -73,6 +73,7 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
+use syn::ext::IdentExt;
 use syn::{Data, DeriveInput, Fields, parse_macro_input};
 
 use super::helpers::extract_doc_comments;
@@ -141,7 +142,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
     for field in fields {
         let field_name = field.ident.as_ref().unwrap();
-        let field_name_str = field_name.to_string();
+        // `unraw()` drops the `r#` prefix on raw identifiers so a field
+        // declared as `r#type` appears in the descriptor as `"type"`.
+        let field_name_str = field_name.unraw().to_string();
 
         // Skip the 'this' field - it's handled specially
         if field_name_str == "this" {

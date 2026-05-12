@@ -70,6 +70,7 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
+use syn::ext::IdentExt;
 use syn::{Data, DeriveInput, Fields, parse_macro_input};
 
 use super::helpers::{extract_doc_comments, parse_output_attribute, type_to_value_data_type};
@@ -213,12 +214,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
         })
         .collect();
 
+    // `unraw()` drops the `r#` prefix on raw identifiers so a field
+    // declared as `r#type` appears in parameter names as `"type"`.
+
     // Generate field names for Input TryFrom
     let input_field_names: Vec<_> = input_fields.iter().map(|(name, _, _)| name).collect();
     let input_field_name_lits: Vec<_> = input_fields
         .iter()
         .map(|(name, _, _)| {
-            let name_str = name.to_string();
+            let name_str = name.unraw().to_string();
             syn::LitStr::new(&name_str, proc_macro2::Span::call_site())
         })
         .collect();
@@ -228,7 +232,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let all_field_name_lits: Vec<_> = all_fields
         .iter()
         .map(|(name, _, _, _, _)| {
-            let name_str = name.to_string();
+            let name_str = name.unraw().to_string();
             syn::LitStr::new(&name_str, proc_macro2::Span::call_site())
         })
         .collect();

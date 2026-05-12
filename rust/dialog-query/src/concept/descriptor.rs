@@ -1222,6 +1222,49 @@ mod tests {
     }
 
     #[dialog_common::test]
+    fn it_strips_raw_identifier_prefix_from_concept_field_names() {
+        use crate as dialog_query;
+        use crate::{Attribute, Concept, Entity};
+
+        #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        #[domain("test")]
+        pub struct TypeAttr(pub String);
+
+        #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        pub struct Sample {
+            pub this: Entity,
+            /// `type` is a Rust keyword so the field has to be written
+            /// `r#type` — but the descriptor's `with` map key must be
+            /// the cooked name `"type"`, not `"r#type"`.
+            pub r#type: TypeAttr,
+        }
+
+        let descriptor: ConceptDescriptor =
+            <Sample as crate::Predicate>::Application::default().into();
+
+        // Round-trip the descriptor through JSON and assert the field
+        // key in the `with` map is `type`, not `r#type`.
+        let json = serde_json::to_value(&descriptor).expect("serialize");
+        let with = json["with"].as_object().expect("with map");
+
+        assert!(
+            with.contains_key("type"),
+            "descriptor should expose `type`, got keys: {:?}",
+            with.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !with.contains_key("r#type"),
+            "descriptor should NOT expose raw-ident `r#type`",
+        );
+
+        let round_tripped: ConceptDescriptor = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(
+            round_tripped, descriptor,
+            "JSON round-trip must be lossless"
+        );
+    }
+
+    #[dialog_common::test]
     fn it_deserializes_empty_maybe_as_none() {
         let json = r#"{
             "with": {
