@@ -19,7 +19,6 @@ use crate::{Environment, Term, Type};
 use descriptor::DeductiveRuleDescriptor;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::HashMap;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 
 /// Represents a deductive rule that can be applied creating a premise.
@@ -62,15 +61,19 @@ impl DeductiveRule {
             });
         }
 
-        // Compute the meet across positive premises for every variable
-        // the conclusion's required slots reference. If the meet admits
-        // `Nothing`, the rule could produce Absent for a required head —
-        // reject.
-        let meet = rule.meet_per_variable();
+        // Reject if any conclusion variable's inferred type admits
+        // `Nothing` — the rule could produce Absent for a required
+        // head. Inference runs once during planning and is stored on
+        // the conjunction.
         let optional_head = rule
             .conclusion
             .operands()
-            .find(|name| meet.get(*name).is_some_and(|kind| kind.is_optional()))
+            .find(|name| {
+                rule.join
+                    .types
+                    .get(name)
+                    .is_some_and(|kind| kind.is_optional())
+            })
             .map(String::from);
 
         if let Some(variable) = optional_head {
@@ -111,72 +114,6 @@ impl DeductiveRule {
             }
         }
         None
-    }
-
-    /// For each variable used by a positive premise, compute the
-    /// meet (intersection) of the kinds the premise slots ascribe
-    /// to it.
-    ///
-    /// The meet algebra: a variable's kind across the rule is the
-    /// intersection of the kinds claimed by every binding slot it
-    /// appears in. If any slot requires a Present value (no
-    /// `Nothing` in its primitive set), the variable is Required
-    /// in the rule — even if other slots are Optional. Only when
-    /// *every* binding is Optional does the variable carry
-    /// `Nothing` in its meet.
-    ///
-    /// Slots without an explicit `content_type` contribute their
-    /// requirement shape: a `Required` slot contributes "any
-    /// present value" (`Primitive::ALL`); an `Optional` slot
-    /// contributes "any present or absent value"
-    /// (`Primitive::ANY`). This keeps "untyped Required + typed
-    /// Optional" symmetric with "typed Required + typed Optional":
-    /// both produce a meet without `Nothing`.
-    ///
-    /// Negation premises do not contribute — they don't bind
-    /// variables, only filter on already-bound values.
-    fn meet_per_variable(&self) -> HashMap<String, Kind> {
-        let mut by_variable: HashMap<String, Kind> = HashMap::new();
-
-        for step in &self.join.steps {
-            let Premise::Assert(_) = &step.premise else {
-                continue;
-            };
-            let schema = step.premise.schema();
-            let params = step.premise.parameters();
-
-            for (slot_name, field) in schema.iter() {
-                let Some(param) = params.get(slot_name) else {
-                    continue;
-                };
-                let Some(var_name) = param.name() else {
-                    continue;
-                };
-                let owned;
-                let slot_type: &Kind = match field.content_type() {
-                    Some(t) => t,
-                    None => {
-                        owned = match field.requirement {
-                            Requirement::Required(_) => Kind::primitive_set(Primitive::ALL),
-                            Requirement::Optional => Kind::primitive_set(Primitive::ANY),
-                        };
-                        &owned
-                    }
-                };
-                match by_variable.get(var_name) {
-                    Some(accumulated) => {
-                        if let Some(merged) = accumulated.intersect(slot_type) {
-                            by_variable.insert(var_name.to_string(), merged);
-                        }
-                    }
-                    None => {
-                        by_variable.insert(var_name.to_string(), slot_type.clone());
-                    }
-                }
-            }
-        }
-
-        by_variable
     }
 
     /// Returns the conclusion predicate for this rule.

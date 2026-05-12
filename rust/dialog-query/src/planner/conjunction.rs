@@ -1,6 +1,7 @@
 use super::{Plan, Planner};
 use crate::Environment;
 use crate::error::TypeError;
+use crate::rule::types::TypeEnv;
 use crate::selection::Selection;
 use crate::source::SelectRules;
 use core::pin::Pin;
@@ -31,6 +32,11 @@ pub struct Conjunction {
     pub binds: Environment,
     /// Variables required in the environment to execute this join
     pub env: Environment,
+    /// Inferred types for every named variable mentioned by the
+    /// positive premises. Built once at planning time; consulted by
+    /// evaluators that want rule-level type information rather than
+    /// per-term local kinds.
+    pub types: TypeEnv,
 }
 
 impl Conjunction {

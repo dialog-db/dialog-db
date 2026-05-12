@@ -9,6 +9,7 @@ pub use disjunction::*;
 pub use plan::*;
 
 use crate::error::TypeError;
+use crate::rule::types::TypeEnv;
 use crate::{Environment, Premise};
 
 /// State machine that greedily selects the cheapest viable premise at each
@@ -64,11 +65,14 @@ impl Planner {
             }
         }
 
+        let types = TypeEnv::infer(&steps);
+
         Ok(Conjunction {
             steps,
             cost,
             binds,
             env,
+            types,
         })
     }
 
