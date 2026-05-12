@@ -114,6 +114,19 @@ impl TypeEnv {
         self.by_name.get(name)
     }
 
+    /// Return a new `TypeEnv` containing only the entries for the
+    /// given variable names. Used to project the rule-wide
+    /// environment down to a single plan step's variables.
+    pub fn project<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut by_name = HashMap::new();
+        for name in names {
+            if let Some(kind) = self.by_name.get(name) {
+                by_name.insert(name.to_string(), kind.clone());
+            }
+        }
+        Self { by_name }
+    }
+
     /// Iterate over `(name, inferred kind)` pairs.
     pub fn iter(&self) -> impl Iterator<Item = (&String, &Kind)> {
         self.by_name.iter()

@@ -1,3 +1,4 @@
+use crate::rule::types::TypeEnv;
 use crate::selection::Selection;
 use crate::source::SelectRules;
 use crate::{Environment, Premise};
@@ -25,6 +26,12 @@ pub struct Plan {
     pub binds: Environment,
     /// Variables already bound in the environment when this plan runs.
     pub env: Environment,
+    /// Rule-level inferred types for the variables this plan
+    /// references. Empty when the plan runs outside any rule
+    /// context (e.g. top-level `.perform()` on a standalone
+    /// query). Populated by the planner during rule compilation
+    /// via [`TypeEnv::project`].
+    pub types: TypeEnv,
 }
 
 impl Plan {

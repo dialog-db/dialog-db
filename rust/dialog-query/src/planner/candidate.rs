@@ -1,5 +1,6 @@
 use super::Plan;
 use crate::error::TypeError;
+use crate::rule::types::TypeEnv;
 use crate::{Environment, Parameters, Premise, Requirement, Schema};
 use std::collections::HashSet;
 
@@ -378,12 +379,15 @@ impl TryFrom<Candidate> for Plan {
                 env,
                 ..
             } => {
-                // Drop schema/params - don't need them in the final plan
+                // Drop schema/params - don't need them in the final plan.
+                // `types` starts empty; the planner fills it in once
+                // it has built the rule-wide TypeEnv from all steps.
                 Ok(Plan {
                     premise,
                     cost,
                     binds,
                     env,
+                    types: TypeEnv::new(),
                 })
             }
             Candidate::Blocked { requires, .. } => {

@@ -67,6 +67,18 @@ impl Planner {
 
         let types = TypeEnv::infer(&steps);
 
+        // Project the rule-wide TypeEnv onto each step's variables
+        // so evaluators can look up inferred kinds locally.
+        for step in &mut steps {
+            let names: Vec<String> = step
+                .premise
+                .parameters()
+                .iter()
+                .filter_map(|(_, term)| term.name().map(String::from))
+                .collect();
+            step.types = types.project(names.iter().map(String::as_str));
+        }
+
         Ok(Conjunction {
             steps,
             cost,
