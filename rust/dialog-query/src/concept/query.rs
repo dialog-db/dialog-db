@@ -19,6 +19,7 @@ use crate::{
 use dialog_artifacts::Select;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
+use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 
 /// Extract a Match with parameter names from a Match with user variable names
@@ -74,12 +75,17 @@ fn merge_parameters(
 
 /// Represents an application of a concept with specific term bindings.
 /// This is used when querying for entities that match a concept pattern.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Serializes as the formal notation:
+/// `{ "assert": <ConceptDescriptor>, "where": <Parameters> }`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConceptQuery {
-    /// The term bindings for this concept application.
-    pub terms: Parameters,
     /// The concept predicate being applied.
+    #[serde(rename = "assert")]
     pub predicate: ConceptDescriptor,
+    /// The term bindings for this concept application.
+    #[serde(rename = "where")]
+    pub terms: Parameters,
 }
 
 impl ConceptQuery {
@@ -289,6 +295,8 @@ mod tests {
     use crate::attribute::query::AttributeQuery;
     use crate::concept::descriptor::ConceptDescriptor;
     use crate::the;
+    use crate::types::Any;
+    use std::collections::BTreeSet;
 
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
@@ -928,5 +936,134 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    /// Build a representative two-attribute Person concept query with mixed
+    /// variable / constant bindings for the serde round-trip tests.
+    fn sample_concept_query() -> ConceptQuery {
+        let predicate = ConceptDescriptor::from(vec![
+            (
+                "name",
+                AttributeDescriptor::new(
+                    the!("person/name"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                ),
+            ),
+            (
+                "age",
+                AttributeDescriptor::new(
+                    the!("person/age"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::UnsignedInt),
+                ),
+            ),
+        ]);
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::<Any>::var("entity"));
+        terms.insert("name".into(), Term::Constant(Value::String("Alice".into())));
+        terms.insert("age".into(), Term::<Any>::var("age"));
+
+        ConceptQuery { predicate, terms }
+    }
+
+    #[dialog_common::test]
+    fn it_serializes_concept_query_in_formal_notation_shape() {
+        let cq = sample_concept_query();
+        let value: serde_json::Value = serde_json::to_value(&cq).expect("serialize");
+
+        let obj = value.as_object().expect("object");
+        assert_eq!(
+            obj.keys().collect::<BTreeSet<_>>(),
+            ["assert".to_string(), "where".to_string()]
+                .iter()
+                .collect::<BTreeSet<_>>(),
+            "ConceptQuery must serialize as {{assert, where}}"
+        );
+
+        assert!(
+            value["assert"].is_object(),
+            "`assert` must hold the concept descriptor"
+        );
+        assert!(
+            value["where"].is_object(),
+            "`where` must hold the parameter map"
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_round_trips_concept_query_through_json() {
+        let cq = sample_concept_query();
+
+        let json = serde_json::to_string(&cq).expect("serialize");
+        let restored: ConceptQuery = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(
+            restored.predicate.this(),
+            cq.predicate.this(),
+            "predicate content hash must survive round-trip"
+        );
+
+        let original_keys: BTreeSet<&String> = cq.terms.keys().collect();
+        let restored_keys: BTreeSet<&String> = restored.terms.keys().collect();
+        assert_eq!(
+            original_keys, restored_keys,
+            "parameter names must survive round-trip"
+        );
+
+        for (name, original_term) in cq.terms.iter() {
+            assert_eq!(
+                restored.terms.get(name),
+                Some(original_term),
+                "binding for `{name}` must survive round-trip"
+            );
+        }
+    }
+
+    #[dialog_common::test]
+    fn it_matches_proposition_concept_serialization() {
+        let cq = sample_concept_query();
+        let prop: Proposition = cq.clone().into();
+
+        let cq_json = serde_json::to_value(&cq).expect("serialize");
+        let prop_json = serde_json::to_value(&prop).expect("serialize");
+
+        assert_eq!(
+            cq_json, prop_json,
+            "ConceptQuery and Proposition::Concept must produce identical JSON"
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_validates_concept_query_deserialization() {
+        let only_assert = serde_json::json!({ "assert": { "with": {
+            "name": { "the": "person/name", "as": "Text" }
+        }}});
+        assert!(
+            serde_json::from_value::<ConceptQuery>(only_assert).is_err(),
+            "missing `where` must fail to deserialize"
+        );
+
+        let only_where = serde_json::json!({ "where": {} });
+        assert!(
+            serde_json::from_value::<ConceptQuery>(only_where).is_err(),
+            "missing `assert` must fail to deserialize"
+        );
+
+        // Unknown fields are ignored, consistent with other formal-notation
+        // types in this crate. This keeps wire-format readers tolerant of
+        // forward-compatible additions.
+        let extra_field = serde_json::json!({
+            "assert": { "with": { "name": { "the": "person/name", "as": "Text" } } },
+            "where": {},
+            "stranger": true,
+        });
+        assert!(
+            serde_json::from_value::<ConceptQuery>(extra_field).is_ok(),
+            "unknown fields must be ignored on deserialize"
+        );
     }
 }
