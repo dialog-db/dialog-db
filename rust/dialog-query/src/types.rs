@@ -17,7 +17,7 @@ use dialog_common::ConditionalSend;
 use std::fmt;
 use std::hash::Hash;
 
-pub use crate::artifact::{ArtifactsAttribute, Cause, Entity, Type, Value};
+pub use crate::artifact::{ArtifactsAttribute, Cause, Entity, Symbol, Type, Value};
 use crate::attribute::The;
 
 /// Trait implemented by type descriptors — named ZSTs that represent a
@@ -124,8 +124,8 @@ define_descriptor!(
 );
 
 define_descriptor!(
-    /// Descriptor for attribute symbols.
-    Symbol, Type::Symbol
+    /// Descriptor for symbol values (validated identifier strings).
+    SymbolType, Type::Symbol
 );
 
 define_descriptor!(
@@ -166,6 +166,10 @@ macro_rules! impl_typed {
 }
 
 impl_typed!(String, Text);
+// Symbol rides Value::String for now (validated identifier carrier).
+// Future: when Value::Symbol is reshaped to carry single symbols (instead
+// of full attributes), switch Symbol's descriptor to SymbolType.
+impl_typed!(Symbol, Text);
 impl_typed!(bool, Boolean);
 impl_typed!(usize, UnsignedInteger);
 impl_typed!(u128, UnsignedInteger);
@@ -182,8 +186,8 @@ impl_typed!(f64, Float);
 impl_typed!(f32, Float);
 impl_typed!(Vec<u8>, Bytes);
 impl_typed!(Entity, EntityType);
-impl_typed!(ArtifactsAttribute, Symbol);
-impl_typed!(The, Symbol);
+impl_typed!(ArtifactsAttribute, SymbolType);
+impl_typed!(The, SymbolType);
 impl_typed!(Cause, Bytes);
 impl_typed!(Value, Any);
 
@@ -206,6 +210,7 @@ macro_rules! impl_scalar {
 impl_scalar!(
     bool,
     String,
+    Symbol,
     u16,
     u32,
     u64,

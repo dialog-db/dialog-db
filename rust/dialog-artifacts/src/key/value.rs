@@ -101,6 +101,13 @@ where
         self
     }
 
+    fn set_attribute_prefix(mut self, prefix: &[u8]) -> Self {
+        let bytes = self.0.as_mut();
+        let start = ATTRIBUTE_OFFSET;
+        bytes[start..start + prefix.len()].copy_from_slice(prefix);
+        self
+    }
+
     fn set_value_type(mut self, value_type: ValueDataType) -> Self {
         self.0.as_mut()[VALUE_DATA_TYPE_OFFSET] = value_type.into();
         self
