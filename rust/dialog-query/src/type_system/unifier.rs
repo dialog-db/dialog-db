@@ -118,15 +118,25 @@ impl Context {
     }
 
     /// Look up or allocate the `VarId` associated with a name in
-    /// this scope. The first call for a given name allocates;
-    /// later calls return the same id.
+    /// this scope. The first call for a given name allocates with
+    /// the maximally-permissive constraint [`Primitive::ANY`] —
+    /// includes `Nothing`, so optionality can survive unification.
+    /// Narrowing happens when slot kinds without `Nothing` unify
+    /// against the variable.
+    /// Later calls return the same id.
     pub fn var_for_name(&mut self, name: &str) -> VarId {
         if let Some(id) = self.names.get(name) {
             return *id;
         }
-        let id = self.fresh(Primitive::ALL);
+        let id = self.fresh(Primitive::ANY);
         self.names.insert(name.to_string(), id);
         id
+    }
+
+    /// Iterate over `(name, VarId)` pairs for every named variable
+    /// allocated in this context. The order is unspecified.
+    pub fn named_vars(&self) -> impl Iterator<Item = (&String, &VarId)> {
+        self.names.iter()
     }
 
     /// Look up the constraint for a variable. Returns
@@ -172,6 +182,20 @@ impl Context {
         }
     }
 
+    /// Walk the substitution following variable-to-variable links
+    /// (union-find style), returning the canonical [`VarId`] for
+    /// the chain. Stops at the first non-variable substitution or
+    /// at an unsubstituted variable.
+    fn root(&self, mut id: VarId) -> VarId {
+        while let Some(Type::Variable(next)) = self.substitution.get(&id) {
+            if *next == id {
+                break;
+            }
+            id = *next;
+        }
+        id
+    }
+
     /// Robinson unification with constraint propagation. Updates
     /// `self` in-place. Returns `Err` on constraint conflict.
     ///
@@ -181,11 +205,27 @@ impl Context {
     /// a [`Primitive`] constraint that's intersected with the
     /// primitive part of any concrete type they're unified with.
     pub fn unify(&mut self, a: &Type, b: &Type) -> Result<(), UnifyError> {
-        let a = self.apply(a);
-        let b = self.apply(b);
         match (a, b) {
-            (Type::Variable(x), Type::Variable(y)) if x == y => Ok(()),
             (Type::Variable(x), Type::Variable(y)) => {
+                let x = self.root(*x);
+                let y = self.root(*y);
+                if x == y {
+                    return Ok(());
+                }
+                // If either side has already been resolved to a
+                // static, unify that resolved static against the
+                // other variable instead.
+                let xs = self.substitution.get(&x).cloned();
+                let ys = self.substitution.get(&y).cloned();
+                match (xs, ys) {
+                    (Some(Type::Static(sx)), _) => {
+                        return self.unify(&Type::Static(sx), &Type::Variable(y));
+                    }
+                    (_, Some(Type::Static(sy))) => {
+                        return self.unify(&Type::Variable(x), &Type::Static(sy));
+                    }
+                    _ => {}
+                }
                 let cx = self.constraint(x);
                 let cy = self.constraint(y);
                 let merged = cx.intersect(cy).ok_or(UnifyError::ConstraintConflict {
@@ -198,17 +238,32 @@ impl Context {
                 Ok(())
             }
             (Type::Variable(x), Type::Static(s)) | (Type::Static(s), Type::Variable(x)) => {
+                let x = self.root(*x);
+                // If `x` is already resolved to a static, intersect
+                // the previous resolution with the new static — the
+                // variable's resolved type is the narrowest static
+                // satisfying every unify call that touched it.
+                let prev = match self.substitution.get(&x) {
+                    Some(Type::Static(prev)) => Some(prev.clone()),
+                    _ => None,
+                };
+                let narrowed_static = match prev {
+                    Some(prev) => {
+                        prev.intersect(s)
+                            .ok_or_else(|| UnifyError::ConstraintConflict {
+                                left: prev.primitive_part(),
+                                right: s.primitive_part(),
+                            })?
+                    }
+                    None => s.clone(),
+                };
                 let cx = self.constraint(x);
-                // Intersect the variable's primitive constraint
-                // against the static's primitive part. The variable
-                // resolves to the narrowed static type — preserving
-                // any composite part of the static side.
-                let p = s.primitive_part();
+                let p = narrowed_static.primitive_part();
                 let merged = cx
                     .intersect(p)
                     .ok_or(UnifyError::ConstraintConflict { left: cx, right: p })?;
                 self.constraints.insert(x, merged);
-                let resolved = match s.composite_part() {
+                let resolved = match narrowed_static.composite_part() {
                     Some(c) if !c.is_empty() => StaticType::composite(merged, c.clone()),
                     _ => StaticType::primitive_set(merged),
                 };
@@ -216,7 +271,7 @@ impl Context {
                 Ok(())
             }
             (Type::Static(a), Type::Static(b)) => {
-                a.intersect(&b)
+                a.intersect(b)
                     .map(|_| ())
                     .ok_or_else(|| UnifyError::ConstraintConflict {
                         left: a.primitive_part(),

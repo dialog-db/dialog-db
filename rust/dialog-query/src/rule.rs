@@ -9,12 +9,15 @@
 pub mod deductive;
 /// Premises collection type.
 pub mod premises;
+/// Type inference over a rule's premises.
+pub mod types;
 /// When trait and tuple implementations.
 pub mod when;
 
 pub use deductive::DeductiveRule;
 pub use deductive::descriptor::DeductiveRuleDescriptor;
 pub use premises::*;
+pub use types::TypeEnv;
 pub use when::*;
 
 /// Macro for creating When collections with clean array-like syntax
