@@ -2,8 +2,14 @@
 //!
 //! This module provides a schema system that describes the structure,
 //! types, and requirements of parameters for different premise types.
+//!
+//! As of v2, [`Field::content_type`] uses the unified
+//! [`type_system::Type`] enum rather than the legacy
+//! `Option<artifact::Type>`. The conversion between them is
+//! lossless: `None` becomes a fresh anonymous type variable,
+//! `Some(vt)` becomes `Type::Primitive(singleton(vt))`.
 
-use crate::Type;
+use crate::type_system;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -158,16 +164,16 @@ impl Cardinality {
 
 /// Metadata for a single named parameter in a [`Schema`].
 ///
-/// Captures the parameter's expected value type, whether it accepts one or
-/// many values ([`Cardinality`]), and whether it must be bound before the
-/// premise can execute ([`Requirement`]). The planner reads these fields
-/// to classify each parameter as a prerequisite or a produced binding.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// `content_type` is the unified
+/// [`type_system::Type`], wrapped in `Option` so that "no static
+/// info known" is representable directly (the unifier resolves
+/// it at rule-compile time).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Field {
     /// Human-readable description of the field.
     pub description: String,
-    /// Expected value type, or `None` if unconstrained.
-    pub content_type: Option<Type>,
+    /// Expected value type, or `None` if unknown.
+    pub content_type: Option<type_system::Type>,
     /// Whether the field is required or optional.
     pub requirement: Requirement,
     /// Whether the field holds one or many values.
@@ -177,7 +183,11 @@ pub struct Field {
 impl Field {
     /// Creates a new field with the given description, type, and requirement.
     /// Cardinality defaults to [`Cardinality::One`].
-    pub fn new(description: String, content_type: Option<Type>, requirement: Requirement) -> Self {
+    pub fn new(
+        description: String,
+        content_type: Option<type_system::Type>,
+        requirement: Requirement,
+    ) -> Self {
         Self {
             description,
             content_type,
@@ -191,9 +201,9 @@ impl Field {
         &self.description
     }
 
-    /// Returns the expected content type, if any.
-    pub fn content_type(&self) -> Option<Type> {
-        self.content_type
+    /// Returns the expected content type, if known.
+    pub fn content_type(&self) -> Option<&type_system::Type> {
+        self.content_type.as_ref()
     }
 
     /// Returns the field's requirement level.
@@ -293,6 +303,8 @@ impl Group {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artifact::Type as ValueType;
+    use crate::type_system::Type as Kind;
 
     #[dialog_common::test]
     fn it_tracks_requirement_properties() {
@@ -301,5 +313,27 @@ mod tests {
 
         assert!(required.is_required());
         assert!(!derived.is_required());
+    }
+
+    /// `Field::new` accepts the unified type directly.
+    #[dialog_common::test]
+    fn field_new_accepts_unified_type() {
+        let f = Field::new(
+            "test".into(),
+            Some(Kind::primitive(ValueType::Boolean)),
+            Requirement::Required(None),
+        );
+        assert_eq!(
+            f.content_type().unwrap().as_value_type(),
+            Some(ValueType::Boolean)
+        );
+        assert!(matches!(f.requirement(), Requirement::Required(_)));
+    }
+
+    /// A field with no static info reports `None`.
+    #[dialog_common::test]
+    fn field_unknown_type_reports_none() {
+        let f = Field::new("x".into(), None, Requirement::Optional);
+        assert!(f.content_type().is_none());
     }
 }

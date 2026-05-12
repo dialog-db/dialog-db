@@ -63,6 +63,34 @@ pub enum TypeError {
         variable: String,
     },
 
+    /// A rule's conclusion references a required variable that is
+    /// bound only by Optional (set-widened) premises — the rule
+    /// could produce a row with the conclusion variable in Absent
+    /// state, which a required head cannot accept. Fix by adding
+    /// a required-binding premise for the variable, or by coalescing
+    /// the optional source with a fallback before reaching the head.
+    #[error(
+        "Rule {rule}: field \"{variable}\" is optional but the conclusion requires a value. \
+         Use coalesce(...) to provide a fallback, or bind \"{variable}\" from a required premise."
+    )]
+    RequiredHeadFromOptional {
+        /// The offending rule.
+        rule: Box<DeductiveRule>,
+        /// Name of the optionally-bound head variable.
+        variable: String,
+    },
+
+    /// A `Coalesce` constraint in this rule violates its type
+    /// contract: its source must be set-widened (`Optional<α>`)
+    /// and its `fallback` and `is` must each unify with `α`.
+    #[error("Rule {rule} has an invalid Coalesce constraint: {reason}")]
+    CoalesceTypeMismatch {
+        /// The offending rule.
+        rule: Box<DeductiveRule>,
+        /// Human-readable reason for the mismatch.
+        reason: String,
+    },
+
     /// A rule application omits a required parameter.
     #[error("Rule {rule} application omits required parameter \"{parameter}\"")]
     OmittedParameter {
@@ -242,6 +270,23 @@ pub enum EvaluationError {
     #[error("Unbound variable {variable_name:?}")]
     UnboundVariable {
         /// Name of the unbound variable.
+        variable_name: String,
+    },
+
+    /// A binding for the variable exists, but it is
+    /// [`Binding::Absent`](crate::Binding::Absent) — i.e., an
+    /// optional resolver looked up the entity's attribute and
+    /// found no fact. Distinct from
+    /// [`Self::UnboundVariable`] (no binding at all): `Absent`
+    /// means "we looked, and the answer is no value." Consumers
+    /// that require a `Value` can call
+    /// [`Binding::content`](crate::Binding::content) to convert
+    /// this case into an error; consumers that handle optionality
+    /// (Coalesce, the macro's `realize`) pattern-match on
+    /// [`Binding`](crate::Binding) directly.
+    #[error("Variable {variable_name:?} is bound to Absent")]
+    Absent {
+        /// Name of the variable bound to Absent.
         variable_name: String,
     },
 

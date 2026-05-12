@@ -102,8 +102,8 @@ mod tests {
         let mut found_bob = false;
 
         for match_result in selection.iter() {
-            let person_name = match_result.lookup(&name_param)?;
-            let person_age = match_result.lookup(&age_param)?;
+            let person_name = match_result.lookup(&name_param)?.content()?;
+            let person_age = match_result.lookup(&age_param)?.content()?;
 
             match person_name {
                 Value::String(name_str) if name_str == "Alice" => {
@@ -227,8 +227,8 @@ mod tests {
         let mut found_bob = false;
 
         for match_result in selection.iter() {
-            let person_name = match_result.lookup(&name_param)?;
-            let person_age = match_result.lookup(&age_param)?;
+            let person_name = match_result.lookup(&name_param)?.content()?;
+            let person_age = match_result.lookup(&age_param)?.content()?;
 
             match person_name {
                 Value::String(name_str) if name_str == "Alice" => {
@@ -1294,12 +1294,12 @@ mod tests {
 
         assert_eq!(results.len(), 1, "Should find exactly one person (Alice)");
         assert_eq!(
-            results[0].lookup(&name_param)?,
+            results[0].lookup(&name_param)?.content()?,
             Value::String("Alice".into()),
             "Should resolve to Alice"
         );
         assert_eq!(
-            results[0].lookup(&age_param)?,
+            results[0].lookup(&age_param)?.content()?,
             Value::UnsignedInt(30),
             "Should have Alice's age"
         );

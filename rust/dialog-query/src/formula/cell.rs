@@ -248,6 +248,7 @@ impl<T: Iterator<Item = Cell>> From<T> for Cells {
 
 impl From<&Cells> for Schema {
     fn from(cells: &Cells) -> Self {
+        use crate::type_system;
         use crate::{Cardinality, Field};
         let mut schema = Schema::new();
         for (name, cell) in cells.iter() {
@@ -255,7 +256,7 @@ impl From<&Cells> for Schema {
                 name.into(),
                 Field {
                     description: cell.description.clone(),
-                    content_type: cell.content_type,
+                    content_type: cell.content_type.map(type_system::Type::primitive),
                     requirement: cell.requirement.clone(),
                     cardinality: Cardinality::One,
                 },
@@ -307,5 +308,27 @@ mod tests {
             &Requirement::Optional
         );
         Ok(())
+    }
+
+    /// `From<&Cells> for Schema` lifts each cell's
+    /// `Option<Type>` content_type into the unified
+    /// `Option<type_system::Type>`. Typed cells produce
+    /// `Some(Primitive(singleton(vt)))`; untyped cells produce
+    /// `None` (unknown).
+    #[dialog_common::test]
+    fn schema_from_cells_lifts_content_types() {
+        use crate::Schema;
+        let cells = Cells::define(|builder| {
+            builder.cell("name", Some(Type::String)).required();
+            builder.cell("untyped", None).required();
+        });
+        let schema = Schema::from(&cells);
+
+        let name = schema.get("name").expect("name field present");
+        let content = name.content_type().expect("name kind present");
+        assert_eq!(content.as_value_type(), Some(Type::String));
+
+        let untyped = schema.get("untyped").expect("untyped field present");
+        assert!(untyped.content_type().is_none());
     }
 }

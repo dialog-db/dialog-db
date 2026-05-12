@@ -68,9 +68,37 @@ impl ConceptDescriptor {
         self.description.as_deref()
     }
 
-    /// Returns a reference to the named attributes.
+    /// Returns a reference to the required (`with`) attributes.
     pub fn with(&self) -> &NamedAttributes {
         &self.with
+    }
+
+    /// Returns a reference to the optional (`maybe`) attributes,
+    /// if any are declared. Optional fields are emitted into the
+    /// rule body as `AttributeQuery` premises with
+    /// `Resolution::Optional`, so that a missing fact yields a
+    /// fallback row with the slot bound to `Binding::Absent`
+    /// rather than dropping the row entirely.
+    pub fn maybe(&self) -> Option<&NamedAttributes> {
+        self.maybe.as_ref()
+    }
+
+    /// Returns a copy of this descriptor with the given optional
+    /// attributes installed in the `maybe` slot. Empty input
+    /// becomes `None` (no `maybe` block).
+    pub fn with_maybe<I, K>(mut self, maybe: I) -> Self
+    where
+        I: IntoIterator<Item = (K, AttributeDescriptor)>,
+        K: Into<String>,
+    {
+        let map: Vec<(String, AttributeDescriptor)> =
+            maybe.into_iter().map(|(k, v)| (k.into(), v)).collect();
+        self.maybe = if map.is_empty() {
+            None
+        } else {
+            Some(NamedAttributes::from(map))
+        };
+        self
     }
 
     /// Validates the provided parameters against the schema of the attributes.
@@ -225,13 +253,14 @@ impl From<HashMap<String, AttributeDescriptor>> for ConceptDescriptor {
 
 impl From<&ConceptDescriptor> for Schema {
     fn from(predicate: &ConceptDescriptor) -> Self {
+        use crate::type_system::Type as Kind;
         let mut schema = Schema::new();
         for (name, attribute) in predicate.with().iter() {
             schema.insert(
                 name.into(),
                 Field {
                     description: attribute.description().into(),
-                    content_type: attribute.content_type(),
+                    content_type: attribute.content_type().map(Kind::primitive),
                     requirement: Requirement::Optional,
                     cardinality: attribute.cardinality(),
                 },
@@ -243,7 +272,7 @@ impl From<&ConceptDescriptor> for Schema {
                 "this".into(),
                 Field {
                     description: "The entity that this model represents".into(),
-                    content_type: Some(Type::Entity),
+                    content_type: Some(Kind::primitive(Type::Entity)),
                     requirement: Requirement::Optional,
                     cardinality: Cardinality::One,
                 },
@@ -393,11 +422,11 @@ impl ConceptConclusion {
                 name: Some(name), ..
             } => {
                 let typed_term: Term<T> = Term::var(name.clone());
-                T::try_from(self.source.lookup(&Term::from(&typed_term))?).map_err(|_| {
-                    EvaluationError::UnboundVariable {
+                T::try_from(self.source.lookup(&Term::from(&typed_term))?.content()?).map_err(
+                    |_| EvaluationError::UnboundVariable {
                         variable_name: field.to_string(),
-                    }
-                })
+                    },
+                )
             }
             Term::Constant(value) => {
                 T::try_from(value.clone()).map_err(|_| EvaluationError::UnboundVariable {
@@ -456,7 +485,7 @@ impl Application for ConceptQuery {
                 name: Some(name), ..
             } => {
                 let typed_term: Term<Entity> = Term::var(name.clone());
-                Entity::try_from(source.lookup(&Term::from(&typed_term))?)?
+                Entity::try_from(source.lookup(&Term::from(&typed_term))?.content()?)?
             }
             Term::Constant(value) => match value {
                 Value::Entity(e) => e.clone(),
@@ -1234,5 +1263,57 @@ mod tests {
             serde_json::from_str(json).expect("Should accept empty 'maybe'");
 
         assert_eq!(concept.maybe, None, "Empty 'maybe' should become None");
+    }
+
+    /// `From<&ConceptDescriptor> for Schema` lifts a typed
+    /// attribute's content_type into the unified `type_system::Type`.
+    #[dialog_common::test]
+    fn schema_from_concept_uses_unified_type() {
+        let descriptor = ConceptDescriptor::from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
+        let schema = Schema::from(&descriptor);
+        let name = schema.get("name").expect("name field present");
+        let content = name.content_type().expect("content_type present");
+        assert!(!content.is_optional());
+        assert_eq!(content.as_value_type(), Some(Type::String));
+    }
+
+    /// An attribute descriptor with `None` content type produces
+    /// a Field with `None` content_type — unknown.
+    #[dialog_common::test]
+    fn schema_from_concept_untyped_attribute_produces_none() {
+        let descriptor = ConceptDescriptor::from(vec![(
+            "tag",
+            AttributeDescriptor::new(the!("misc/tag"), "", Cardinality::One, None),
+        )]);
+        let schema = Schema::from(&descriptor);
+        let tag = schema.get("tag").expect("tag field present");
+        assert!(tag.content_type().is_none());
+    }
+
+    /// The synthesized `this` field always declares
+    /// a singleton primitive over `Entity`.
+    #[dialog_common::test]
+    fn schema_from_concept_synthesizes_this_as_entity() {
+        let descriptor = ConceptDescriptor::from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
+        let schema = Schema::from(&descriptor);
+        let this = schema.get("this").expect("this field present");
+        let content = this.content_type().expect("entity kind present");
+        assert_eq!(content.as_value_type(), Some(Type::Entity));
     }
 }

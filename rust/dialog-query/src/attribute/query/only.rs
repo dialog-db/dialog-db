@@ -2,6 +2,7 @@ use super::all::AttributeQueryAll;
 use crate::Claim;
 use crate::artifact::{ArtifactSelector, ArtifactsAttribute, Constrained};
 use crate::attribute::The;
+use crate::attribute::query::Resolution;
 use crate::environment::Environment;
 use crate::query::Application;
 use crate::query::Output;
@@ -53,14 +54,14 @@ where
 {
     try_stream! {
         let relation = selector.attribute();
-        let attribute = ArtifactsAttribute::try_from(candidate.lookup(&Term::from(&relation))?)?;
-        let entity = Entity::try_from(candidate.lookup(&Term::from(selector.of()))?)?;
-        let value = candidate.lookup(selector.is())?;
+        let attribute = ArtifactsAttribute::try_from(candidate.lookup(&Term::from(&relation))?.content()?)?;
+        let entity = Entity::try_from(candidate.lookup(&Term::from(selector.of()))?.content()?)?;
+        let value = candidate.lookup(selector.is())?.content()?;
         let cause_term = selector.cause();
         let cause = if cause_term.is_blank() {
             None
         } else {
-            Some(Cause::try_from(candidate.lookup(&Term::from(cause_term))?)?)
+            Some(Cause::try_from(candidate.lookup(&Term::from(cause_term))?.content()?)?)
         };
 
         let challengers = Provider::<Select<'_>>::execute(env, ArtifactSelector::new()
@@ -98,11 +99,21 @@ pub struct AttributeQueryOnly {
 }
 
 impl AttributeQueryOnly {
-    /// Create a new winner-selecting attribute query.
+    /// Create a new winner-selecting attribute query. The
+    /// resolution (Required vs Optional) is derived from the
+    /// typed `is` term: if its kind admits the `Nothing` atom the
+    /// query is treated as optional and yields an `Absent`
+    /// fallback row on miss.
     pub fn new(the: Term<The>, of: Term<Entity>, is: Term<Any>, cause: Term<Cause>) -> Self {
         Self {
             query: AttributeQueryAll::new(the, of, is, cause),
         }
+    }
+
+    /// Returns the resolution policy of this query (delegates to
+    /// the wrapped `AttributeQueryAll`).
+    pub fn resolution(&self) -> Resolution {
+        self.query.resolution()
     }
 
     /// Get the 'the' (attribute) term.
@@ -192,6 +203,7 @@ impl AttributeQueryOnly {
                 let attribute_known = resolved.the().is_constant();
                 let value_known = resolved.is().is_constant();
 
+                let mut produced = false;
                 if entity_known || (attribute_known && !value_known) {
                     // Sliding window path.
                     let value_constraint = resolved.is().as_constant().cloned();
@@ -217,6 +229,7 @@ impl AttributeQueryOnly {
                                 if value_constraint.is_none() || value_constraint.as_ref() == Some(&winner.is) {
                                     let mut extension = base.clone();
                                     selector.merge(&mut extension, &winner)?;
+                                    produced = true;
                                     yield extension;
                                 }
                                 artifact
@@ -231,6 +244,7 @@ impl AttributeQueryOnly {
                     {
                         let mut extension = base.clone();
                         selector.merge(&mut extension, &winner)?;
+                        produced = true;
                         yield extension;
                     }
                 } else {
@@ -240,9 +254,22 @@ impl AttributeQueryOnly {
                         let candidate = candidate?;
                         let verified = Box::pin(challenge(env, selector.clone(), candidate));
                         for await v in verified {
+                            produced = true;
                             yield v?;
                         }
                     }
+                }
+
+                // Optional fallback: if no rows were produced for
+                // this input and the resolution is Optional, yield
+                // one row with `is` (and named `cause`) bound to
+                // Absent.
+                if !produced && selector.is().is_optional() {
+                    let mut fallback = base;
+                    fallback.bind_absent(selector.is())?;
+                    let cause_term: Term<Any> = Term::<Any>::from(selector.cause());
+                    fallback.bind_absent(&cause_term)?;
+                    yield fallback;
                 }
             }
         }

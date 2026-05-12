@@ -14,17 +14,17 @@ use crate::schema::CONCEPT_OVERHEAD;
 use crate::selection::Selection;
 use crate::source::SelectRules;
 use crate::{
-    Cardinality, Environment, EvaluationError, Match, Parameters, Schema, Term, try_stream,
+    Binding, Cardinality, Environment, EvaluationError, Match, Parameters, Schema, Term, try_stream,
 };
 use dialog_artifacts::Select;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use std::fmt::Display;
 
-/// Extract a Match with parameter names from a Match with user variable names
-///
-/// This maps values from user-specified variable names to internal parameter names
-/// for scoped evaluation. All factors are copied with their original provenance.
+/// Extract a Match with parameter names from a Match with user
+/// variable names. Maps values from user-specified variable names
+/// to internal parameter names for scoped evaluation. Both Present
+/// and Absent bindings are propagated.
 fn extract_parameters(source: &Match, terms: &Parameters) -> Result<Match, EvaluationError> {
     let mut matched = Match::new();
 
@@ -32,8 +32,21 @@ fn extract_parameters(source: &Match, terms: &Parameters) -> Result<Match, Evalu
         match user_param {
             Term::Variable { name: Some(_), .. } => {
                 let param = Term::var(param_name);
-                if let Ok(value) = source.lookup(user_param) {
-                    matched.bind(&param, value)?;
+                match source.lookup(user_param) {
+                    Ok(Binding::Present(value)) => {
+                        matched.bind(&param, value)?;
+                    }
+                    Ok(Binding::Absent) => {
+                        matched.bind_absent(&param)?;
+                    }
+                    // Unbound is expected here: the user supplied a
+                    // placeholder term (e.g. `Term::var("alice")` in
+                    // `Query<Person> { this: ..., ... }`) that the
+                    // concept query is about to bind. Skip it —
+                    // downstream evaluation fills it in. Propagate
+                    // any other error.
+                    Err(EvaluationError::UnboundVariable { .. }) => {}
+                    Err(e) => return Err(e),
                 }
             }
             Term::Constant(value) => {
@@ -47,10 +60,9 @@ fn extract_parameters(source: &Match, terms: &Parameters) -> Result<Match, Evalu
     Ok(matched)
 }
 
-/// Merge a Match with parameter names back into a Match with user variable names
-///
-/// This maps values from internal parameter names back to user-specified variable names
-/// after evaluation. All factors are copied with their original provenance.
+/// Merge a Match with parameter names back into a Match with user
+/// variable names after evaluation. Both Present and Absent
+/// bindings are propagated.
 fn merge_parameters(
     base: &Match,
     result: &Match,
@@ -64,8 +76,19 @@ fn merge_parameters(
         }
 
         let param = Term::var(param_name);
-        if let Ok(value) = result.lookup(&param) {
-            merged.bind(user_param, value)?;
+        match result.lookup(&param) {
+            Ok(Binding::Present(value)) => {
+                merged.bind(user_param, value)?;
+            }
+            Ok(Binding::Absent) => {
+                merged.bind_absent(user_param)?;
+            }
+            // Unbound is expected: not every parameter survives the
+            // concept evaluation (e.g. a blank slot the rule never
+            // touched). Skip and let the user variable stay
+            // un-extended. Propagate any other error.
+            Err(EvaluationError::UnboundVariable { .. }) => {}
+            Err(e) => return Err(e),
         }
     }
 
@@ -377,8 +400,8 @@ mod tests {
         let mut found_bob = false;
 
         for match_result in selection.iter() {
-            let name = match_result.lookup(&name_param)?;
-            let age = match_result.lookup(&age_param)?;
+            let name = match_result.lookup(&name_param)?.content()?;
+            let age = match_result.lookup(&age_param)?.content()?;
 
             match name {
                 Value::String(n) if n == "Alice" => {
@@ -395,6 +418,214 @@ mod tests {
 
         assert!(found_alice, "Should find Alice");
         assert!(found_bob, "Should find Bob");
+
+        Ok(())
+    }
+
+    /// End-to-end: a concept with a `maybe` attribute returns
+    /// rows for entities that lack the optional fact, with the
+    /// optional slot bound to `Binding::Absent`. Entities that
+    /// have the fact get `Binding::Present(value)` for the slot.
+    /// This is the v2 set-widening behavior at the concept
+    /// projection layer, driven by `Resolution::Optional` on the
+    /// emitted `AttributeQuery`.
+    #[dialog_common::test]
+    async fn it_executes_concept_with_optional_field() -> anyhow::Result<()> {
+        use crate::Binding;
+        use dialog_artifacts::Entity;
+        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        // Alice has both name and nickname; Bob has only name.
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(
+                the!("person/nickname")
+                    .of(alice.clone())
+                    .is("Ali".to_string()),
+            )
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let concept = ConceptDescriptor::from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )])
+        .with_maybe(vec![(
+            "nickname",
+            AttributeDescriptor::new(
+                the!("person/nickname"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
+
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::var("person"));
+        terms.insert("name".to_string(), Term::var("name"));
+        terms.insert("nickname".to_string(), Term::var("nickname"));
+
+        let application = ConceptQuery {
+            terms,
+            predicate: concept,
+        };
+
+        let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
+            application.evaluate(Match::new().seed(), &source),
+        )
+        .await?;
+
+        assert_eq!(
+            selection.len(),
+            2,
+            "Should find 2 people (both Alice and Bob)"
+        );
+
+        let nickname_param = Term::var("nickname");
+        let name_param = Term::var("name");
+
+        let mut found_alice_with_nickname = false;
+        let mut found_bob_without_nickname = false;
+        for match_result in selection.iter() {
+            let name = match_result.lookup(&name_param)?.content()?;
+            let nickname = match_result.lookup(&nickname_param)?;
+            match (&name, nickname) {
+                (Value::String(n), Binding::Present(Value::String(nick)))
+                    if n == "Alice" && nick == "Ali" =>
+                {
+                    found_alice_with_nickname = true;
+                }
+                (Value::String(n), Binding::Absent) if n == "Bob" => {
+                    found_bob_without_nickname = true;
+                }
+                _ => panic!(
+                    "unexpected (name, nickname): ({:?}, {:?})",
+                    name,
+                    match_result.lookup(&nickname_param)
+                ),
+            }
+        }
+        assert!(
+            found_alice_with_nickname,
+            "Alice should have nickname Present"
+        );
+        assert!(
+            found_bob_without_nickname,
+            "Bob should have nickname Absent"
+        );
+
+        Ok(())
+    }
+
+    /// End-to-end: a `#[derive(Concept)]` struct with an `Option<T>`
+    /// field round-trips through the full query pipeline. Alice has
+    /// both `name` and `nickname`; Bob has only `name`. The macro
+    /// emits `Term<Option<String>>` for the `nickname` field; at
+    /// realize time, Alice's nickname appears as `Some(_)` and Bob's
+    /// as `None`.
+    #[dialog_common::test]
+    async fn it_executes_macro_concept_with_optional_field() -> anyhow::Result<()> {
+        use dialog_artifacts::Entity;
+        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+        use futures_util::TryStreamExt;
+
+        mod employee {
+            use crate::Attribute;
+
+            /// Employee given name
+            #[derive(Attribute, Clone, PartialEq)]
+            #[domain("person")]
+            pub struct Name(pub String);
+
+            /// Employee preferred nickname
+            #[derive(Attribute, Clone, PartialEq)]
+            #[domain("person")]
+            pub struct Nickname(pub String);
+        }
+
+        /// Employee with required name and optional nickname.
+        #[derive(crate::Concept, Debug, Clone)]
+        pub struct Employee {
+            /// Employee entity
+            pub this: Entity,
+            /// Required given name
+            pub name: employee::Name,
+            /// Optional nickname
+            pub nickname: Option<employee::Nickname>,
+        }
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(
+                the!("person/nickname")
+                    .of(alice.clone())
+                    .is("Ali".to_string()),
+            )
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let query = crate::Query::<Employee>::default();
+        let employees: Vec<Employee> = query.perform(&source).try_collect().await?;
+
+        assert_eq!(employees.len(), 2);
+
+        let mut found_alice = false;
+        let mut found_bob = false;
+        for emp in employees {
+            match emp.name.0.as_str() {
+                "Alice" => {
+                    assert_eq!(
+                        emp.nickname.as_ref().map(|n| n.0.as_str()),
+                        Some("Ali"),
+                        "Alice should have nickname Some(Ali)"
+                    );
+                    found_alice = true;
+                }
+                "Bob" => {
+                    assert!(emp.nickname.is_none(), "Bob should have nickname None");
+                    found_bob = true;
+                }
+                other => panic!("Unexpected name: {other}"),
+            }
+        }
+        assert!(found_alice && found_bob);
 
         Ok(())
     }
@@ -771,7 +1002,7 @@ mod tests {
             "Should find only Alice, not both people"
         );
         assert_eq!(
-            selection[0].lookup(&Term::var("name"))?,
+            selection[0].lookup(&Term::var("name"))?.content()?,
             Value::String("Alice".to_string())
         );
 
@@ -843,11 +1074,11 @@ mod tests {
 
         assert_eq!(selection.len(), 1, "Should find only Bob");
         assert_eq!(
-            selection[0].lookup(&Term::var("entity"))?,
+            selection[0].lookup(&Term::var("entity"))?.content()?,
             Value::Entity(bob.clone())
         );
         assert_eq!(
-            selection[0].lookup(&Term::var("age"))?,
+            selection[0].lookup(&Term::var("age"))?.content()?,
             Value::UnsignedInt(30)
         );
 
@@ -923,7 +1154,7 @@ mod tests {
             "Should find only Alice with exact name and age match"
         );
         assert_eq!(
-            selection[0].lookup(&Term::var("entity"))?,
+            selection[0].lookup(&Term::var("entity"))?.content()?,
             Value::Entity(alice.clone())
         );
 

@@ -175,16 +175,18 @@ impl<'de> Deserialize<'de> for Proposition {
                     .and_then(|v| serde_json::from_value(v.clone()).map_err(de::Error::custom))?;
                 Ok(Proposition::Concept(ConceptQuery { predicate, terms }))
             }
-            // String "==" → Constraint
-            serde_json::Value::String(name) if name == "==" => {
-                let constraint: Constraint =
-                    serde_json::from_value(raw).map_err(de::Error::custom)?;
-                Ok(Proposition::Constraint(constraint))
-            }
-            // Other string → FormulaQuery
+            // String → Constraint or FormulaQuery. Try Constraint
+            // first because its variants are named ("==", "coalesce",
+            // etc.); FormulaQuery is the catchall fallback for any
+            // other formula name.
             serde_json::Value::String(_) => {
-                let fq: FormulaQuery = serde_json::from_value(raw).map_err(de::Error::custom)?;
-                Ok(Proposition::Formula(fq))
+                if let Ok(constraint) = serde_json::from_value::<Constraint>(raw.clone()) {
+                    Ok(Proposition::Constraint(constraint))
+                } else {
+                    let fq: FormulaQuery =
+                        serde_json::from_value(raw).map_err(de::Error::custom)?;
+                    Ok(Proposition::Formula(fq))
+                }
             }
             _ => Err(de::Error::custom(
                 "\"assert\" must be a concept object or a formula/constraint name string",
