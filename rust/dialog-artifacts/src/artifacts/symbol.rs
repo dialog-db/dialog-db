@@ -144,98 +144,101 @@ impl TryFrom<Value> for Symbol {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
     use super::*;
 
-    #[test]
+    #[dialog_common::test]
     fn it_parses_a_simple_symbol() {
         let s: Symbol = "foo".parse().unwrap();
         assert_eq!(s.as_str(), "foo");
         assert_eq!(s.as_bytes(), b"foo");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_parses_a_dotted_symbol() {
         let s: Symbol = "dialog.concept.with".parse().unwrap();
         assert_eq!(s.as_str(), "dialog.concept.with");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_parses_a_kebab_case_symbol() {
         let s: Symbol = "ingredient-name".parse().unwrap();
         assert_eq!(s.as_str(), "ingredient-name");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_parses_a_symbol_with_digits() {
         let s: Symbol = "web3".parse().unwrap();
         assert_eq!(s.as_str(), "web3");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_parses_a_single_letter_symbol() {
         let s: Symbol = "a".parse().unwrap();
         assert_eq!(s.as_str(), "a");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_rejects_empty_symbol() {
         assert!("".parse::<Symbol>().is_err());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_rejects_symbol_with_slash() {
         assert!("foo/bar".parse::<Symbol>().is_err());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_rejects_symbol_starting_with_digit() {
         assert!("3foo".parse::<Symbol>().is_err());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_rejects_symbol_starting_with_hyphen() {
         assert!("-foo".parse::<Symbol>().is_err());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_rejects_symbol_starting_with_dot() {
         assert!(".foo".parse::<Symbol>().is_err());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_rejects_symbol_ending_with_hyphen() {
         assert!("foo-".parse::<Symbol>().is_err());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_rejects_symbol_ending_with_dot() {
         assert!("foo.".parse::<Symbol>().is_err());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_rejects_uppercase() {
         assert!("Foo".parse::<Symbol>().is_err());
         assert!("foo Bar".parse::<Symbol>().is_err());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_rejects_underscore() {
         assert!("foo_bar".parse::<Symbol>().is_err());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_rejects_symbol_too_long() {
         let long = "a".repeat(MAX_SYMBOL_LENGTH + 1);
         assert!(long.parse::<Symbol>().is_err());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_accepts_max_length_symbol() {
         let max = "a".repeat(MAX_SYMBOL_LENGTH);
         assert!(max.parse::<Symbol>().is_ok());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_round_trips_through_value() {
         let s: Symbol = "dialog.concept.with".parse().unwrap();
         let v: Value = s.clone().into();
@@ -243,13 +246,13 @@ mod tests {
         assert_eq!(s, restored);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_rejects_non_string_value() {
         let v = Value::UnsignedInt(42);
         assert!(Symbol::try_from(v).is_err());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_rejects_invalid_string_value() {
         let v = Value::String("Bad/Symbol".into());
         assert!(Symbol::try_from(v).is_err());
