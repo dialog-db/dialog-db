@@ -423,7 +423,10 @@ mod tests {
 
         let results: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().with_attribute("user/name".parse::<Attribute>()?))
+            .select({
+                let (d, n) = "user/name".parse::<Attribute>()?.split();
+                ArtifactSelector::new().with_domain(d).with_name(n)
+            })
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -502,7 +505,10 @@ mod tests {
 
         let results: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().with_attribute("user/name".parse::<Attribute>()?))
+            .select({
+                let (d, n) = "user/name".parse::<Attribute>()?.split();
+                ArtifactSelector::new().with_domain(d).with_name(n)
+            })
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -537,7 +543,10 @@ mod tests {
         // Verify it's there
         let before: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().with_attribute("user/name".parse::<Attribute>()?))
+            .select({
+                let (d, n) = "user/name".parse::<Attribute>()?.split();
+                ArtifactSelector::new().with_domain(d).with_name(n)
+            })
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -554,7 +563,10 @@ mod tests {
 
         let after: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().with_attribute("user/name".parse::<Attribute>()?))
+            .select({
+                let (d, n) = "user/name".parse::<Attribute>()?.split();
+                ArtifactSelector::new().with_domain(d).with_name(n)
+            })
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -826,7 +838,10 @@ mod tests {
 
             let results: Vec<_> = r_branch
                 .claims()
-                .select(ArtifactSelector::new().with_attribute("user/name".parse::<Attribute>()?))
+                .select({
+                    let (d, n) = "user/name".parse::<Attribute>()?.split();
+                    ArtifactSelector::new().with_domain(d).with_name(n)
+                })
                 .perform(&operator)
                 .await?
                 .collect::<Vec<_>>()
@@ -875,7 +890,10 @@ mod tests {
             let named_branch = named_repo.branch("main").open().perform(&operator).await?;
             let results: Vec<_> = named_branch
                 .claims()
-                .select(ArtifactSelector::new().with_attribute("item/tag".parse::<Attribute>()?))
+                .select({
+                    let (d, n) = "item/tag".parse::<Attribute>()?.split();
+                    ArtifactSelector::new().with_domain(d).with_name(n)
+                })
                 .perform(&operator)
                 .await?
                 .collect::<Vec<_>>()

@@ -64,8 +64,10 @@ where
             Some(Cause::try_from(candidate.lookup(&Term::from(cause_term))?.content()?)?)
         };
 
+        let (d, n) = attribute.split();
         let challengers = Provider::<Select<'_>>::execute(env, ArtifactSelector::new()
-            .with_attribute(attribute)
+            .with_domain(d)
+            .with_name(n)
             .of(entity)).await?;
 
         let mut winner: Option<Artifact> = None;
