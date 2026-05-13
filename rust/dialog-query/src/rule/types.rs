@@ -234,6 +234,48 @@ mod tests {
         assert_eq!(name_kind.as_value_type(), Some(ValueType::String));
     }
 
+    /// Negation premises don't contribute to inference. A
+    /// negation that mentions `?x` with kind `String` doesn't
+    /// constrain the rule-level type of `?x`; the positive
+    /// premise that binds `?x` is the sole contributor.
+    #[dialog_common::test]
+    fn it_ignores_negation_contributions_during_inference() {
+        use crate::Proposition;
+        use crate::negation::Negation;
+        // Positive premise binds ?name optionally (Option<String>).
+        let optional_name: Term<Any> = Term::<Option<String>>::var("name").into();
+        let positive = AttributeQuery::new(
+            Term::from(the!("person/name")),
+            Term::<Entity>::var("this"),
+            optional_name,
+            Term::var("cause"),
+            Some(Cardinality::One),
+        );
+        // Negation references ?name as Term<String> (non-optional).
+        // If this contributed to inference, ?name's inferred kind
+        // would be narrowed to String (no Nothing). But it doesn't,
+        // so ?name stays Optional<String>.
+        let strict_name: Term<Any> = Term::<String>::var("name").into();
+        let neg_query = AttributeQuery::new(
+            Term::from(the!("person/nickname")),
+            Term::<Entity>::var("this"),
+            strict_name,
+            Term::blank(),
+            Some(Cardinality::One),
+        );
+        let premises = vec![
+            positive.into(),
+            Premise::Unless(Negation(Proposition::Attribute(Box::new(neg_query)))),
+        ];
+        let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
+        let env = TypeEnv::infer(&plan.steps).unwrap();
+        let name_kind = env.get("name").expect("name inferred");
+        assert!(
+            name_kind.is_optional(),
+            "negation should not strip Nothing from `?name`'s inferred kind"
+        );
+    }
+
     /// A variable used as `Term<String>` in one premise and as
     /// `Term<u32>` in another has no consistent type — inference
     /// must report a conflict rather than silently producing one
