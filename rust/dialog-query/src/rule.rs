@@ -172,7 +172,7 @@ pub(crate) fn fmt_rule_schema(conclusion: &ConceptDescriptor, f: &mut Formatter<
     write!(f, "this: {},", Type::Entity)?;
     for (name, attribute) in conclusion.with().iter() {
         match attribute.content_type() {
-            Some(ty) => write!(f, "{}: {},", name, ty)?,
+            Some(ty) => write!(f, "{}: {:?},", name, ty)?,
             None => write!(f, "{}: Any,", name)?,
         }
     }
@@ -331,7 +331,7 @@ mod tests {
         assert_eq!(name.domain(), "macro-person");
         assert_eq!(name.name(), "name");
         assert_eq!(name.description(), "Name of the person");
-        assert_eq!(name.content_type(), Some(Type::String));
+        assert_eq!(name.value_type(), Some(Type::String));
 
         let birthday = attrs
             .iter()
@@ -341,7 +341,7 @@ mod tests {
         assert_eq!(birthday.domain(), "macro-person");
         assert_eq!(birthday.name(), "birthday");
         assert_eq!(birthday.description(), "Birthday of the person");
-        assert_eq!(birthday.content_type(), Some(Type::UnsignedInt));
+        assert_eq!(birthday.value_type(), Some(Type::UnsignedInt));
 
         // Test that MacroPerson implements Rule
         let test_match = Query::<MacroPerson> {

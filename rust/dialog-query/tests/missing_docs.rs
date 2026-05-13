@@ -67,7 +67,7 @@ fn it_compiles_under_deny_missing_docs() {
     let _ = Name::descriptor();
     let _ = Name::the();
     let _ = Name::cardinality();
-    let _ = Name::content_type();
+    let _ = Name::value_type();
     let _ = Age::of::<Entity>;
     let _ = Age::descriptor();
     let _ = Nickname::of::<Entity>;

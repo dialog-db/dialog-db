@@ -132,7 +132,7 @@ impl From<&ConceptDescriptor> for DeductiveRule {
             // fallback row with the slot bound to `Binding::Absent`.
             let value = if field.is_optional() {
                 let kind = match field.content_type() {
-                    Some(ty) => Kind::primitive(ty).optional(),
+                    Some(ty) => ty.clone().optional(),
                     None => Kind::primitive_set(Primitive::ALL).optional(),
                 };
                 Term::<Any>::typed_var(name, kind)

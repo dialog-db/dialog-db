@@ -5,8 +5,9 @@ use crate::attribute::query::AttributeQuery;
 use crate::error::{FieldTypeError, TypeError};
 use crate::schema::Cardinality;
 use crate::term::Term;
+use crate::type_system::{Composite, Type as Kind};
 use crate::types::Any;
-use crate::types::Type;
+use crate::types::Type as ValueType;
 
 use base58::ToBase58;
 use serde::{Deserialize, Serialize};
@@ -40,17 +41,42 @@ pub struct AttributeDescriptor {
     description: String,
     #[serde(default)]
     cardinality: Cardinality,
-    #[serde(rename = "as", default, skip_serializing_if = "Option::is_none")]
-    content_type: Option<Type>,
+    #[serde(
+        rename = "as",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "content_type_serde"
+    )]
+    content_type: Option<Kind>,
 }
 
 impl AttributeDescriptor {
-    /// Creates a new descriptor from a validated [`The`] selector.
+    /// Creates a new descriptor from a validated [`The`] selector
+    /// with a primitive content type.
+    ///
+    /// For richer content types (e.g. [`Composite::Directory`]) use
+    /// [`AttributeDescriptor::with_kind`].
     pub fn new(
         the: The,
         description: impl Into<String>,
         cardinality: Cardinality,
-        content_type: Option<Type>,
+        content_type: Option<ValueType>,
+    ) -> Self {
+        Self::with_kind(
+            the,
+            description,
+            cardinality,
+            content_type.map(Kind::primitive),
+        )
+    }
+
+    /// Creates a new descriptor from a validated [`The`] selector
+    /// with an arbitrary [`Kind`] content type.
+    pub fn with_kind(
+        the: The,
+        description: impl Into<String>,
+        cardinality: Cardinality,
+        content_type: Option<Kind>,
     ) -> Self {
         Self {
             the,
@@ -85,9 +111,18 @@ impl AttributeDescriptor {
         self.cardinality
     }
 
-    /// Returns the expected value type, or `None` if any type is accepted.
-    pub fn content_type(&self) -> Option<Type> {
-        self.content_type
+    /// Returns the expected content type, or `None` if any type is
+    /// accepted.
+    pub fn content_type(&self) -> Option<&Kind> {
+        self.content_type.as_ref()
+    }
+
+    /// Legacy storage-codec view: returns the primitive [`ValueType`]
+    /// when the content type collapses to a single primitive.
+    /// Returns `None` for composite content types (e.g.
+    /// [`Composite::Directory`]) and for absent content types.
+    pub fn value_type(&self) -> Option<ValueType> {
+        self.content_type.as_ref().and_then(|k| k.as_value_type())
     }
 
     /// Checks that the given parameter's type is compatible with this
@@ -108,11 +143,32 @@ impl AttributeDescriptor {
         Ok(())
     }
 
+    /// The expected primitive type of a single matched row's value
+    /// for this attribute. For a primitive content_type this is the
+    /// primitive itself; for a [`Composite::Directory`] content_type
+    /// it is the directory's inner primitive type (since each row
+    /// binds one value of that type). Returns `None` for anything
+    /// else, including absent content_type.
+    fn expected_value_type(&self) -> Option<ValueType> {
+        match self.content_type()? {
+            Kind::Primitive(_) => self.content_type()?.as_value_type(),
+            Kind::Composite(_, composites) => composites.iter().find_map(|c| match c {
+                Composite::Directory(inner) => inner.as_value_type(),
+                _ => None,
+            }),
+        }
+    }
+
     /// Validates a concrete [`Value`] against this attribute's content type and
     /// produces an [`Attribution`] — a validated (attribute, value, cardinality)
     /// triple ready for storage.
+    ///
+    /// For a [`Composite::Directory`] content type, the value is
+    /// type-checked against the directory's inner primitive type:
+    /// each row holds a single value of the inner type, the
+    /// directory aggregation lives a layer above.
     pub fn resolve(&self, value: Value) -> Result<Attribution, FieldTypeError> {
-        let type_matches = match self.content_type() {
+        let type_matches = match self.expected_value_type() {
             Some(expected) => value.data_type() == expected,
             None => true,
         };
@@ -125,7 +181,7 @@ impl AttributeDescriptor {
             })
         } else {
             Err(FieldTypeError::TypeMismatch {
-                expected: self.content_type().unwrap(), // Safe because we checked Some above
+                expected: self.expected_value_type().unwrap(),
                 actual: Box::new(Term::Constant(value.clone())),
             })
         }
@@ -153,11 +209,11 @@ impl AttributeDescriptor {
         // Check that if `this` parameter is provided, it has entity type.
         if let Some(this) = parameters.get("this")
             && let Some(actual) = this.content_type()
-            && actual != Type::Entity
+            && actual != ValueType::Entity
         {
             return Err(TypeError::TypeMismatch {
                 binding: "this".to_string(),
-                expected: Type::Entity,
+                expected: ValueType::Entity,
                 actual: Box::new(this.clone()),
             });
         }
@@ -215,7 +271,7 @@ impl AttributeDescriptor {
             name: &'a str,
             cardinality: Cardinality,
             #[serde(rename = "type")]
-            content_type: Option<Type>,
+            content_type: Option<&'a Kind>,
         }
 
         let schema = CborAttributeDescriptor {
@@ -278,10 +334,97 @@ impl From<AttributeDescriptor> for ArtifactsAttribute {
     }
 }
 
+/// Schema-document shorthand for the `as:` field of an
+/// [`AttributeDescriptor`].
+///
+/// The descriptor stores its content type as a full
+/// [`type_system::Type`], which has a verbose JSON encoding. Schema
+/// authors write the value in shorthand:
+///
+/// - A bare primitive name, e.g. `"Text"` or `"Entity"`, denotes
+///   the primitive type.
+/// - `{"directory": "<TypeName>"}` denotes a [`Composite::Directory`]
+///   wrapping the named primitive.
+///
+/// Other [`type_system::Type`] shapes (variant, product, unions,
+/// `Nothing`-widened optionality, etc.) are not part of the
+/// schema-document vocabulary at this time and round-trip through
+/// the descriptor only via direct Rust construction.
+mod content_type_serde {
+    use super::{Composite, Kind, ValueType};
+    use serde::ser::Error as SerError;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(untagged)]
+    enum Schema {
+        Scalar(ValueType),
+        Directory { directory: ValueType },
+    }
+
+    /// Reduce a [`Kind`] to its schema-document shorthand. Returns
+    /// `None` when the kind is not expressible in the shorthand
+    /// vocabulary.
+    fn to_schema(kind: &Kind) -> Option<Schema> {
+        match kind {
+            Kind::Primitive(_) => kind.as_value_type().map(Schema::Scalar),
+            Kind::Composite(_, composites) => {
+                // Look for a single Directory shape with a singleton
+                // primitive inner. Other composite shapes aren't
+                // expressible in the shorthand.
+                let mut iter = composites.iter();
+                let only = iter.next()?;
+                if iter.next().is_some() {
+                    return None;
+                }
+                match only {
+                    Composite::Directory(inner) => inner
+                        .as_value_type()
+                        .map(|vt| Schema::Directory { directory: vt }),
+                    _ => None,
+                }
+            }
+        }
+    }
+
+    fn from_schema(schema: Schema) -> Kind {
+        match schema {
+            Schema::Scalar(vt) => Kind::primitive(vt),
+            Schema::Directory { directory } => Kind::directory(Kind::primitive(directory)),
+        }
+    }
+
+    pub fn serialize<S>(value: &Option<Kind>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(kind) => {
+                let schema = to_schema(kind).ok_or_else(|| {
+                    <S::Error as SerError>::custom(format!(
+                        "content type {kind:?} is not expressible in schema-document shorthand"
+                    ))
+                })?;
+                schema.serialize(serializer)
+            }
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Kind>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let opt = Option::<Schema>::deserialize(deserializer)?;
+        Ok(opt.map(from_schema))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::the;
+    use crate::types::Type;
 
     #[dialog_common::test]
     fn it_serializes_all_fields() {
@@ -347,6 +490,46 @@ mod tests {
     }
 
     #[dialog_common::test]
+    fn it_serializes_directory_content_type() {
+        let attr = AttributeDescriptor::with_kind(
+            the!("person/favorites"),
+            "Favorites by name",
+            Cardinality::One,
+            Some(Kind::directory(Kind::primitive(Type::Entity))),
+        );
+        let json: serde_json::Value = serde_json::to_value(&attr).unwrap();
+        assert_eq!(json["as"], serde_json::json!({ "directory": "Entity" }));
+    }
+
+    #[dialog_common::test]
+    fn it_deserializes_directory_content_type() {
+        let json = r#"{
+            "the": "person/favorites",
+            "as": { "directory": "Entity" }
+        }"#;
+        let attr: AttributeDescriptor = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            attr.content_type(),
+            Some(&Kind::directory(Kind::primitive(Type::Entity)))
+        );
+        // value_type() returns None for composite content types.
+        assert_eq!(attr.value_type(), None);
+    }
+
+    #[dialog_common::test]
+    fn it_round_trips_directory_content_type() {
+        let original = AttributeDescriptor::with_kind(
+            the!("person/favorites"),
+            "Favorites by name",
+            Cardinality::One,
+            Some(Kind::directory(Kind::primitive(Type::String))),
+        );
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: AttributeDescriptor = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
+    }
+
+    #[dialog_common::test]
     fn it_deserializes_all_fields() {
         let json = r#"{
             "the": "io.gozala.person/name",
@@ -359,7 +542,7 @@ mod tests {
         assert_eq!(attr.name(), "name");
         assert_eq!(attr.description(), "Name of the person");
         assert_eq!(attr.cardinality(), Cardinality::One);
-        assert_eq!(attr.content_type(), Some(Type::String));
+        assert_eq!(attr.value_type(), Some(Type::String));
     }
 
     #[dialog_common::test]
@@ -425,7 +608,7 @@ mod tests {
         assert_eq!(
             attr.content_type(),
             None,
-            "'type' field should be ignored — must use 'as'"
+            "'type' field should be ignored - must use 'as'"
         );
     }
 

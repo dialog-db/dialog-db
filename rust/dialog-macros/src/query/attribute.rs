@@ -277,9 +277,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 Self::descriptor().cardinality()
             }
 
-            /// Returns the expected value type, or `None` if any type is accepted.
-            pub fn content_type() -> Option<dialog_query::attribute::Type> {
-                Self::descriptor().content_type()
+            /// Returns the expected primitive value type, or `None`
+            /// if absent or the content type is a composite shape.
+            pub fn value_type() -> Option<dialog_query::attribute::Type> {
+                Self::descriptor().value_type()
             }
         }
 

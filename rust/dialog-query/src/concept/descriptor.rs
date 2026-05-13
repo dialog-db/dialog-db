@@ -317,7 +317,7 @@ impl From<&ConceptDescriptor> for Schema {
                 name.into(),
                 Field {
                     description: field.description().into(),
-                    content_type: field.content_type().map(Kind::primitive),
+                    content_type: field.content_type().cloned(),
                     // Every concept slot is `Optional` at the schema
                     // layer: a `concept:` query *produces* its fields
                     // rather than requiring the caller to supply them.
@@ -666,7 +666,7 @@ mod tests {
         assert_eq!(email_attr.domain(), "person");
         assert_eq!(email_attr.name(), "email");
         assert_eq!(email_attr.description(), "Person's email address");
-        assert_eq!(email_attr.content_type(), Some(Type::String));
+        assert_eq!(email_attr.value_type(), Some(Type::String));
 
         let active_attr = predicate
             .with()
@@ -677,7 +677,7 @@ mod tests {
         assert_eq!(active_attr.domain(), "person");
         assert_eq!(active_attr.name(), "active");
         assert_eq!(active_attr.description(), "Whether person is active");
-        assert_eq!(active_attr.content_type(), Some(Type::Boolean));
+        assert_eq!(active_attr.value_type(), Some(Type::Boolean));
     }
 
     #[dialog_common::test]
