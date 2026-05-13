@@ -310,9 +310,10 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
             let relation = ArtifactsAttribute::try_from(the.clone()).map_err(|_| {
                 EvaluationError::Store("Could not convert value to Attribute".to_string())
             })?;
+            let (d, n) = relation.split();
             selector = Some(match selector {
-                None => ArtifactSelector::new().the(relation),
-                Some(s) => s.the(relation),
+                None => ArtifactSelector::new().with_domain(d).with_name(n),
+                Some(s) => s.with_domain(d).with_name(n),
             });
         }
 

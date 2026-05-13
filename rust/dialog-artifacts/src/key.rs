@@ -36,7 +36,11 @@ macro_rules! mutable_slice {
 
 pub(crate) use mutable_slice;
 
-use crate::{ArtifactSelector, DialogArtifactsError, ValueDataType, selector::Constrained};
+use std::str::FromStr;
+
+use crate::{
+    ArtifactSelector, Attribute, DialogArtifactsError, ValueDataType, selector::Constrained,
+};
 
 /// Length of the key tag field in bytes
 pub(crate) const TAG_LENGTH: usize = 1;
@@ -187,6 +191,16 @@ pub trait KeyViewMut: KeyView {
     /// [`KeyView`].
     fn set_attribute(self, attribute: AttributeKeyPart) -> Self;
 
+    /// Write `prefix` into the leading bytes of the attribute slot, leaving
+    /// the remaining bytes untouched.
+    ///
+    /// This is the primitive for domain-prefix range scans: starting from
+    /// `min()` the trailing bytes are zero (forming the lower bound of the
+    /// range), and from `max()` they are `0xff` (the upper bound). If
+    /// `prefix.len() > ATTRIBUTE_LENGTH` the call panics — callers must
+    /// validate input length before invoking.
+    fn set_attribute_prefix(self, prefix: &[u8]) -> Self;
+
     /// Set the [`ValueDataType`] that is represented by this [`KeyView`].
     fn set_value_type(self, value_type: ValueDataType) -> Self;
 
@@ -203,8 +217,31 @@ pub trait KeyViewMut: KeyView {
             key = key.set_entity(entity.into());
         };
 
-        if let Some(attribute) = selector.attribute() {
-            key = key.set_attribute(attribute.into());
+        match (selector.domain(), selector.name()) {
+            (Some(domain), Some(name)) => {
+                // Both halves bound: write the joined attribute. The join
+                // succeeds because both halves were validated against the
+                // joint budget when the selector was built.
+                let attr = Attribute::from_str(&format!("{domain}/{name}"))
+                    .expect("Symbol pair fits in attribute slot by construction");
+                key = key.set_attribute(AttributeKeyPart::from(&attr));
+            }
+            (Some(domain), None) => {
+                // Domain-only: write `domain ++ DELIMITER` as the prefix.
+                // The trailing delimiter prevents the scan from matching
+                // attributes whose domain merely starts with these bytes
+                // (e.g. `dialog.concept.with-other`).
+                let domain_bytes = domain.as_bytes();
+                let mut prefix = Vec::with_capacity(domain_bytes.len() + 1);
+                prefix.extend_from_slice(domain_bytes);
+                prefix.push(b'/');
+                key = key.set_attribute_prefix(&prefix);
+            }
+            (None, Some(_)) => {
+                // Name without domain doesn't constrain a contiguous range
+                // on the attribute index; the post-filter handles correctness.
+            }
+            (None, None) => {}
         }
 
         if let Some(value_type) = selector.value().map(|value| value.data_type()) {
