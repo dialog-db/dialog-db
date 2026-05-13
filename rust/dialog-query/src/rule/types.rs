@@ -33,6 +33,20 @@ use std::collections::HashMap;
 
 use super::super::type_system::Primitive;
 
+/// Errors raised by [`TypeEnv::infer`].
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum InferenceError {
+    /// A variable appears in slots whose declared kinds have no
+    /// common type — unification produced a contradiction.
+    #[error("variable {variable} has conflicting kinds across premises: {reason}")]
+    Conflict {
+        /// Name of the offending variable.
+        variable: String,
+        /// Underlying unifier error message.
+        reason: String,
+    },
+}
+
 /// Inferred types for every named variable referenced by a rule's
 /// positive premises.
 ///
@@ -54,14 +68,11 @@ impl TypeEnv {
     /// named variable mentioned by any positive premise's slots,
     /// unify the slot kinds and record the resulting type.
     ///
-    /// Returns the environment even if unification fails for some
-    /// variable: failures collapse that variable's type to the
-    /// narrower input. The compile-time check for required-head
-    /// optionality reads from the environment, so a failure here
-    /// surfaces as either a missing key or an unexpected
-    /// `Nothing`-admitting result — both already handled by the
-    /// rule compiler.
-    pub fn infer(steps: &[Plan]) -> Self {
+    /// Returns `Err` if any variable's kind is contradictory across
+    /// slots (e.g. `?x` is `String` in one premise and `Entity` in
+    /// another). The variable name is returned with the error so
+    /// the caller can surface a useful diagnostic.
+    pub fn infer(steps: &[Plan]) -> Result<Self, InferenceError> {
         let mut ctx = Context::new();
         for step in steps {
             // Negation premises don't contribute — they filter on
@@ -87,10 +98,12 @@ impl TypeEnv {
                     },
                 };
                 let var = ctx.var_for_name(var_name);
-                // Errors here mean the rule has contradictory slot
-                // kinds for the same variable — leave that for the
-                // compile-time check to surface.
-                let _ = ctx.unify(&lift(&slot_kind), &Inferred::Variable(var));
+                if let Err(reason) = ctx.unify(&lift(&slot_kind), &Inferred::Variable(var)) {
+                    return Err(InferenceError::Conflict {
+                        variable: var_name.to_string(),
+                        reason: reason.to_string(),
+                    });
+                }
             }
         }
 
@@ -106,7 +119,7 @@ impl TypeEnv {
                 by_name.insert(name.clone(), Kind::primitive_set(ctx.constraint(*var_id)));
             }
         }
-        Self { by_name }
+        Ok(Self { by_name })
     }
 
     /// Look up the inferred type for a variable by name.
@@ -170,7 +183,7 @@ mod tests {
             .into(),
         ];
         let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
-        let env = TypeEnv::infer(&plan.steps);
+        let env = TypeEnv::infer(&plan.steps).unwrap();
         let name_kind = env.get("name").expect("name inferred");
         assert_eq!(name_kind.as_value_type(), Some(ValueType::String));
     }
@@ -191,7 +204,7 @@ mod tests {
             .into(),
         ];
         let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
-        let env = TypeEnv::infer(&plan.steps);
+        let env = TypeEnv::infer(&plan.steps).unwrap();
         let name_kind = env.get("name").expect("name inferred");
         assert!(
             name_kind.is_optional(),
@@ -225,12 +238,54 @@ mod tests {
             .into(),
         ];
         let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
-        let env = TypeEnv::infer(&plan.steps);
+        let env = TypeEnv::infer(&plan.steps).unwrap();
         let name_kind = env.get("name").expect("name inferred");
         assert!(
             !name_kind.is_optional(),
             "Required + Optional bindings strip Nothing from the inferred type"
         );
         assert_eq!(name_kind.as_value_type(), Some(ValueType::String));
+    }
+
+    /// A variable used as `Term<String>` in one premise and as
+    /// `Term<u32>` in another has no consistent type — inference
+    /// must report a conflict rather than silently producing one
+    /// or the other. The planner surfaces this as
+    /// `TypeError::TypeInference`.
+    #[dialog_common::test]
+    fn it_rejects_planning_when_variable_kinds_disagree() {
+        use crate::error::TypeError;
+        let as_string: Term<Any> = Term::<String>::var("x").into();
+        let as_u32: Term<Any> = Term::<u32>::var("x").into();
+        let premises = vec![
+            AttributeQuery::new(
+                Term::from(the!("thing/label")),
+                Term::<Entity>::var("this"),
+                as_string,
+                Term::var("cause1"),
+                Some(Cardinality::One),
+            )
+            .into(),
+            AttributeQuery::new(
+                Term::from(the!("thing/count")),
+                Term::<Entity>::var("this"),
+                as_u32,
+                Term::var("cause2"),
+                Some(Cardinality::One),
+            )
+            .into(),
+        ];
+        let err = Planner::from(premises)
+            .plan(&Environment::new())
+            .unwrap_err();
+        match err {
+            TypeError::TypeInference { reason } => {
+                assert!(
+                    reason.contains("x"),
+                    "error mentions the conflicting variable name; got: {reason}"
+                );
+            }
+            other => panic!("expected TypeInference, got {other:?}"),
+        }
     }
 }

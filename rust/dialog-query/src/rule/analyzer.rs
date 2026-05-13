@@ -161,6 +161,13 @@ impl DependencyGraph {
 /// after planning, so callers get the rule embedded for display.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum AnalysisError {
+    /// Type inference produced a contradiction — see
+    /// [`InferenceError`](super::types::InferenceError).
+    #[error("type inference failed: {reason}")]
+    Inference {
+        /// Description of the conflict.
+        reason: String,
+    },
     /// A conclusion variable's inferred type admits `Nothing` —
     /// the rule could produce `Absent` in a required slot.
     #[error("conclusion variable {variable} is optional")]
@@ -227,7 +234,11 @@ pub fn analyze(
     conclusion: ConceptDescriptor,
     steps: &[Plan],
 ) -> Result<AnalyzedRule, AnalysisError> {
-    let types = Arc::new(TypeEnv::infer(steps));
+    let types = Arc::new(
+        TypeEnv::infer(steps).map_err(|err| AnalysisError::Inference {
+            reason: err.to_string(),
+        })?,
+    );
 
     // Required heads must not admit `Nothing`.
     if let Some(variable) = conclusion

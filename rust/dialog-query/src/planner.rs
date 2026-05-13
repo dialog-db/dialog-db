@@ -66,7 +66,10 @@ impl Planner {
             }
         }
 
-        let types = Arc::new(TypeEnv::infer(&steps));
+        let types = TypeEnv::infer(&steps).map_err(|err| TypeError::TypeInference {
+            reason: err.to_string(),
+        })?;
+        let types = Arc::new(types);
 
         // For each step: stamp the shared `Arc<TypeEnv>` (cheap
         // clone) and rewrite the premise's variable terms so they

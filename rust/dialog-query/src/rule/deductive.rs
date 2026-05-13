@@ -48,6 +48,7 @@ impl DeductiveRule {
         if let Err(err) = analyzer::analyze(conclusion.clone(), &join.steps) {
             let rule = DeductiveRule { conclusion, join };
             return Err(match err {
+                AnalysisError::Inference { reason } => TypeError::TypeInference { reason },
                 AnalysisError::RequiredHeadFromOptional { variable } => {
                     TypeError::RequiredHeadFromOptional {
                         rule: Box::new(rule),

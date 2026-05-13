@@ -184,6 +184,67 @@ mod tests {
         }
     }
 
+    /// End-to-end: with rule-level narrowing applied, an optional
+    /// attribute query whose `?nick` is narrowed to non-optional by
+    /// a sibling premise no longer emits Absent-fallback rows.
+    ///
+    /// The test asserts a stronger fact than "rows are filtered":
+    /// it walks the plan's stored premises and verifies the
+    /// optional attribute's `is` term has been rewritten to a
+    /// non-optional kind. Without that rewrite, the attribute's
+    /// `evaluate` would emit one Absent fallback row per entity
+    /// without a nickname.
+    #[dialog_common::test]
+    fn it_suppresses_absent_fallback_under_rule_inference() {
+        let optional_nick: Term<Any> = Term::<Option<String>>::var("nick").into();
+        let typed_nick: Term<Any> = Term::<String>::var("nick").into();
+        let nickname_query = AttributeQuery::new(
+            Term::from(the!("person/nickname")),
+            Term::<Entity>::var("this"),
+            optional_nick,
+            Term::var("cause1"),
+            Some(Cardinality::One),
+        );
+        let name_query = AttributeQuery::new(
+            Term::from(the!("person/name")),
+            Term::<Entity>::var("this"),
+            typed_nick,
+            Term::var("cause2"),
+            Some(Cardinality::One),
+        );
+
+        // Before planning, the nickname query's `is` is optional.
+        assert!(
+            nickname_query.is().is_optional(),
+            "the local optional kind is preserved on the user's query"
+        );
+
+        let plan = Planner::from(vec![nickname_query.into(), name_query.into()])
+            .plan(&crate::Environment::new())
+            .unwrap();
+
+        // After planning, every attribute step that references
+        // `?nick` should have an `is` term whose kind is no
+        // longer optional — the narrowing was applied at plan
+        // time, not deferred to evaluation.
+        let mut narrowed_count = 0;
+        for step in &plan.steps {
+            if let Premise::Assert(Proposition::Attribute(boxed)) = &step.premise
+                && boxed.is().name() == Some("nick")
+            {
+                assert!(
+                    !boxed.is().is_optional(),
+                    "rule-level narrowing should have stripped Nothing from ?nick"
+                );
+                narrowed_count += 1;
+            }
+        }
+        assert_eq!(
+            narrowed_count, 2,
+            "both attribute steps reference ?nick and should both be checked"
+        );
+    }
+
     /// `apply_types` reaches into negated propositions too. A
     /// negated attribute query that references an inferred
     /// variable should see its `is` rewritten to match the env.

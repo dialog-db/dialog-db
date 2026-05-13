@@ -91,6 +91,17 @@ pub enum TypeError {
         reason: String,
     },
 
+    /// Type inference over a rule's premises produced a
+    /// contradiction (a variable appears in slots with conflicting
+    /// kinds). The planner cannot proceed because the rule has no
+    /// valid interpretation.
+    #[error("Type inference failed: {reason}")]
+    TypeInference {
+        /// Human-readable description of the conflict, including
+        /// the offending variable.
+        reason: String,
+    },
+
     /// A rule application omits a required parameter.
     #[error("Rule {rule} application omits required parameter \"{parameter}\"")]
     OmittedParameter {
