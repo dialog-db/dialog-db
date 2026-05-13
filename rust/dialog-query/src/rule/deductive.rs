@@ -19,6 +19,7 @@ use descriptor::DeductiveRuleDescriptor;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::sync::Arc;
 
 /// Represents a deductive rule that can be applied creating a premise.
 #[derive(Debug, Clone, PartialEq)]
@@ -38,32 +39,38 @@ impl DeductiveRule {
     /// and runs the meet-algebra check that required head variables
     /// are not bound only by optional (set-widened) sources.
     pub fn new(conclusion: ConceptDescriptor, premises: Vec<Premise>) -> Result<Self, TypeError> {
-        // Plan the order of premises in a scope where none of the rule
-        // parameters are bound to find the optimal execution order, or to
-        // discover unsatisfiable premises (e.g. a formula whose required
-        // cell is never derived by another premise).
+        // Plan first so analysis can read the optimized step order.
         let join = Planner::from(premises).plan(&Environment::new())?;
 
         // Run rule-level type analysis: inference + required-head
         // check + Coalesce contract validation. Failures here are
         // wrapped into the corresponding `TypeError::*` variants so
         // the user sees the rule embedded in the error.
-        if let Err(err) = analyzer::analyze(conclusion.clone(), &join.steps) {
-            let rule = DeductiveRule { conclusion, join };
-            return Err(match err {
-                AnalysisError::RequiredHeadFromOptional { variable } => {
-                    TypeError::RequiredHeadFromOptional {
-                        rule: Box::new(rule),
-                        variable,
+        let analyzed = match analyzer::analyze(conclusion.clone(), &join.steps) {
+            Ok(analyzed) => Arc::new(analyzed),
+            Err(err) => {
+                let rule = DeductiveRule { conclusion, join };
+                return Err(match err {
+                    AnalysisError::RequiredHeadFromOptional { variable } => {
+                        TypeError::RequiredHeadFromOptional {
+                            rule: Box::new(rule),
+                            variable,
+                        }
                     }
-                }
-                AnalysisError::CoalesceTypeMismatch { reason } => TypeError::CoalesceTypeMismatch {
-                    rule: Box::new(rule),
-                    reason,
-                },
-            });
-        }
+                    AnalysisError::CoalesceTypeMismatch { reason } => {
+                        TypeError::CoalesceTypeMismatch {
+                            rule: Box::new(rule),
+                            reason,
+                        }
+                    }
+                });
+            }
+        };
 
+        // Replan via the analyzed-rule path so future
+        // `Conjunction::plan(&scope)` calls reuse the same analyzed
+        // premises (with their inference and dependency graph).
+        let join = Planner::from_analyzed(analyzed).plan(&Environment::new())?;
         let rule = DeductiveRule { conclusion, join };
 
         // Verify that every conclusion parameter is derived by one of the

@@ -9,8 +9,10 @@ pub use disjunction::*;
 pub use plan::*;
 
 use crate::error::TypeError;
+use crate::rule::analyzer::AnalyzedRule;
 use crate::rule::types::TypeEnv;
 use crate::{Environment, Premise};
+use std::sync::Arc;
 
 /// State machine that greedily selects the cheapest viable premise at each
 /// step, building an ordered execution plan.
@@ -85,6 +87,7 @@ impl Planner {
             binds,
             env,
             types,
+            analyzed: None,
         })
     }
 
@@ -185,6 +188,40 @@ impl Planner {
 impl From<Vec<Premise>> for Planner {
     fn from(premises: Vec<Premise>) -> Self {
         Self::Idle { premises }
+    }
+}
+
+impl Planner {
+    /// Build a planner from an analyzed rule. The resulting plan
+    /// carries an `Arc<AnalyzedRule>` reference so future replan
+    /// calls (`Conjunction::plan(&scope)`) reuse the same analyzed
+    /// premises rather than re-running analysis.
+    pub fn from_analyzed(rule: Arc<AnalyzedRule>) -> PlannerWithRule {
+        let premises: Vec<Premise> = rule
+            .premises()
+            .map(|analyzed| analyzed.source.clone())
+            .collect();
+        PlannerWithRule {
+            inner: Self::Idle { premises },
+            rule,
+        }
+    }
+}
+
+/// A [`Planner`] bound to an analyzed rule. `plan` propagates the
+/// rule reference into the resulting `Conjunction.analyzed`.
+pub struct PlannerWithRule {
+    inner: Planner,
+    rule: Arc<AnalyzedRule>,
+}
+
+impl PlannerWithRule {
+    /// Plan against the given scope. Returns a `Conjunction` whose
+    /// `analyzed` field points at the same `Arc<AnalyzedRule>`.
+    pub fn plan(self, scope: &Environment) -> Result<Conjunction, TypeError> {
+        let mut conjunction = self.inner.plan(scope)?;
+        conjunction.analyzed = Some(self.rule);
+        Ok(conjunction)
     }
 }
 
