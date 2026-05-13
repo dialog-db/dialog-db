@@ -5,6 +5,8 @@
 //!
 //! The design follows the patterns described in notes/rules.md.
 
+/// Rule analysis — inference and dependency graph over premises.
+pub mod analyzer;
 /// Deductive rule definitions for deriving new facts.
 pub mod deductive;
 /// Premises collection type.
@@ -14,6 +16,7 @@ pub mod types;
 /// When trait and tuple implementations.
 pub mod when;
 
+pub use analyzer::{Analyzed, AnalyzedRule, analyze};
 pub use deductive::DeductiveRule;
 pub use deductive::descriptor::DeductiveRuleDescriptor;
 pub use premises::*;
