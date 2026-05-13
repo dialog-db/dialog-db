@@ -26,9 +26,133 @@ use crate::constraint::Constraint;
 use crate::planner::Plan;
 use crate::proposition::Proposition;
 use crate::rule::types::TypeEnv;
+use crate::schema::Requirement;
 use crate::type_system::Type as Kind;
 use crate::type_system::unifier::Context;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
+
+/// Variable-usage information for a single premise.
+///
+/// Computed during analysis by walking the premise's schema and
+/// parameters: a variable is in `binds` if the premise will produce
+/// a value for it (positive premise; non-blank parameter slot), and
+/// in `needs` if the premise reads it without binding (e.g. a
+/// required slot the premise can't satisfy on its own, or a value
+/// it has to look up). A variable can appear in both sets when the
+/// schema lists it under multiple slots with mixed requirements.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PremiseVars {
+    /// Variables this premise will bind upon execution.
+    pub binds: BTreeSet<String>,
+    /// Variables this premise needs already bound to execute.
+    pub needs: BTreeSet<String>,
+}
+
+/// Per-premise variable usage plus precomputed dependency edges.
+///
+/// `requires[i]` is the set of premise indices that must execute
+/// before premise `i` because they bind a variable in `needs[i]`.
+/// The graph respects the user's original premise order: a premise
+/// that binds a variable can satisfy any later premise's need for
+/// it, regardless of cost. Reordering happens during planning, not
+/// here.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DependencyGraph {
+    /// Per-premise variable usage in the original order.
+    pub usage: Vec<PremiseVars>,
+    /// `requires[i]` lists the premise indices `j` such that
+    /// premise `j` binds a variable premise `i` needs.
+    pub requires: Vec<BTreeSet<usize>>,
+}
+
+impl DependencyGraph {
+    /// Returns `true` if no premises were analyzed.
+    pub fn is_empty(&self) -> bool {
+        self.usage.is_empty()
+    }
+
+    /// Number of premises in the graph.
+    pub fn len(&self) -> usize {
+        self.usage.len()
+    }
+
+    /// Compute the dependency graph for a sequence of planned steps.
+    /// Walks each step's schema once: a non-blank named parameter
+    /// goes into `binds` if the schema field is `Optional` or part
+    /// of a satisfied choice group, otherwise into `needs`. Choice
+    /// groups satisfied by a constant or already-bound parameter
+    /// don't contribute to `needs`.
+    pub fn from_steps(steps: &[Plan]) -> Self {
+        let mut usage = Vec::with_capacity(steps.len());
+
+        for step in steps {
+            let is_negation = matches!(step.premise, Premise::Unless(_));
+            let schema = step.premise.schema();
+            let params = step.premise.parameters();
+
+            // Identify choice groups satisfied by a constant in
+            // this step's parameters.
+            let mut satisfied_groups = HashSet::new();
+            for (slot_name, field) in schema.iter() {
+                if let Some(param) = params.get(slot_name)
+                    && let Requirement::Required(Some(group)) = &field.requirement
+                    && param.is_constant()
+                {
+                    satisfied_groups.insert(*group);
+                }
+            }
+
+            let mut vars = PremiseVars::default();
+            for (slot_name, field) in schema.iter() {
+                let Some(param) = params.get(slot_name) else {
+                    continue;
+                };
+                if param.is_constant() || param.is_blank() {
+                    continue;
+                }
+                let Some(name) = param.name() else {
+                    continue;
+                };
+                match &field.requirement {
+                    Requirement::Required(None) => {
+                        vars.needs.insert(name.to_string());
+                    }
+                    Requirement::Required(Some(group)) => {
+                        if satisfied_groups.contains(group) {
+                            if !is_negation {
+                                vars.binds.insert(name.to_string());
+                            }
+                        } else {
+                            vars.needs.insert(name.to_string());
+                        }
+                    }
+                    Requirement::Optional => {
+                        if !is_negation {
+                            vars.binds.insert(name.to_string());
+                        }
+                    }
+                }
+            }
+            usage.push(vars);
+        }
+
+        // For each premise i, find every other premise j (j != i)
+        // that binds something i needs.
+        let mut requires = vec![BTreeSet::new(); usage.len()];
+        for (i, vars) in usage.iter().enumerate() {
+            for need in &vars.needs {
+                for (j, other) in usage.iter().enumerate() {
+                    if j != i && other.binds.contains(need) {
+                        requires[i].insert(j);
+                    }
+                }
+            }
+        }
+
+        Self { usage, requires }
+    }
+}
 
 /// Errors detected by [`analyze`]. These are pre-rule type
 /// problems: inference produced a contradiction or a constraint's
@@ -114,6 +238,9 @@ pub struct AnalyzedRule {
     pub premises: Vec<Analyzed<Premise>>,
     /// The rule-wide inferred type environment.
     pub types: Arc<TypeEnv>,
+    /// Per-premise variable usage and dependency edges. Indexed in
+    /// the same order as `premises`.
+    pub graph: DependencyGraph,
 }
 
 impl AnalyzedRule {
@@ -177,10 +304,12 @@ pub fn analyze(
         .iter()
         .map(|step| Analyzed::new(step.premise.clone(), types.clone()))
         .collect();
+    let graph = DependencyGraph::from_steps(steps);
     Ok(AnalyzedRule {
         conclusion,
         premises,
         types,
+        graph,
     })
 }
 
@@ -235,6 +364,40 @@ mod tests {
         // Every premise in the same rule shares the same Arc.
         for premise in analyzed.premises() {
             assert!(Arc::ptr_eq(&premise.types, &analyzed.types));
+        }
+    }
+
+    /// Two premises that share a variable `?entity`: one binds it
+    /// (the entity slot is a free variable), and one needs it (the
+    /// entity slot is the same variable, satisfied by the first
+    /// premise binding it). The graph records the dependency edge.
+    #[dialog_common::test]
+    fn it_records_dependency_edge_between_premises() {
+        let q1 = AttributeQuery::new(
+            Term::from(the!("person/name")),
+            Term::<Entity>::var("entity"),
+            Term::<String>::var("name").into(),
+            Term::var("cause"),
+            Some(Cardinality::One),
+        );
+        let q2 = AttributeQuery::new(
+            Term::from(the!("person/age")),
+            Term::<Entity>::var("entity"),
+            Term::<Any>::var("age"),
+            Term::var("cause2"),
+            Some(Cardinality::One),
+        );
+        let premises = vec![q1.into(), q2.into()];
+        let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
+        let analyzed = analyze(person_with_name(), &plan.steps).unwrap();
+
+        assert_eq!(analyzed.graph.len(), 2);
+
+        // Each step's vars include `entity` (the schema groups
+        // the/of/is/cause as one choice; with a constant `the`,
+        // the group is satisfied, so all of them are binds).
+        for vars in &analyzed.graph.usage {
+            assert!(vars.binds.contains("entity"));
         }
     }
 
