@@ -35,7 +35,7 @@ impl DeductiveRule {
     ///
     /// Plans the optimal premise execution order, validates that every
     /// conclusion variable is grounded by at least one positive premise,
-    /// and runs the meet-algebra check that required head variables
+    /// and runs the type-inference check that required head variables
     /// are not bound only by optional (set-widened) sources.
     pub fn new(conclusion: ConceptDescriptor, premises: Vec<Premise>) -> Result<Self, TypeError> {
         // Plan first so analysis can read the optimized step order.
@@ -715,7 +715,7 @@ mod tests {
     /// bit removed by the meet — at least one premise guarantees
     /// Present. Accept.
     #[dialog_common::test]
-    fn it_accepts_required_head_when_meet_strips_nothing() {
+    fn it_accepts_required_head_when_inference_strips_nothing() {
         let conclusion = ConceptDescriptor::from(vec![(
             "name",
             AttributeDescriptor::new(
