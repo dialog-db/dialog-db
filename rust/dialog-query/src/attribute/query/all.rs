@@ -83,10 +83,11 @@ impl AttributeQueryAll {
     }
 
     /// Return a copy of this query with the `is` term replaced.
-    /// Used by the planner at evaluation time to narrow the slot
-    /// to the rule-inferred kind without mutating the user's
-    /// original premise.
-    pub fn with_is(self, is: Term<Any>) -> Self {
+    /// Internal hook used by the planner to stamp rule-inferred
+    /// kinds onto the term before evaluation. Not for external
+    /// callers — user-supplied queries should construct fresh
+    /// instances via [`new`](Self::new).
+    pub(crate) fn with_is(self, is: Term<Any>) -> Self {
         Self { is, ..self }
     }
 

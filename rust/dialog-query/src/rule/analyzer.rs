@@ -176,76 +176,32 @@ pub enum AnalysisError {
     },
 }
 
-/// A piece of the user's rule with the rule-wide type environment
-/// attached. The `source` is whatever the user wrote; `types` is the
-/// inferred environment for the rule containing it. Evaluators
-/// that want a variable's inferred kind ask the environment by name.
-///
-/// `Analyzed` is the common shape for premises after analysis. The
-/// rule-wide [`TypeEnv`] is shared via [`Arc`] so each premise gets
-/// a cheap clone-able view rather than its own projection.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Analyzed<T> {
-    /// The user-supplied form.
-    pub source: T,
-    /// The rule-wide type environment. Shared across every
-    /// `Analyzed` in the same rule.
-    pub types: Arc<TypeEnv>,
-}
-
-impl<T> Analyzed<T> {
-    /// Wrap `source` with a shared type environment.
-    pub fn new(source: T, types: Arc<TypeEnv>) -> Self {
-        Self { source, types }
-    }
-
-    /// Map the wrapped value while preserving the shared environment.
-    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Analyzed<U> {
-        Analyzed {
-            source: f(self.source),
-            types: self.types,
-        }
-    }
-
-    /// Borrow the wrapped value alongside the shared environment.
-    pub fn as_ref(&self) -> Analyzed<&T> {
-        Analyzed {
-            source: &self.source,
-            types: self.types.clone(),
-        }
-    }
-}
-
 /// A rule that has passed analysis. Carries the conclusion, the
-/// analyzed premises (each with a shared view of the rule-wide
-/// type environment), and the type environment itself.
+/// original premises in their planned order, the rule-wide
+/// inferred type environment, and a per-premise dependency graph.
 ///
-/// This is the artifact the planner consumes. It is immutable: the
-/// planner doesn't modify the analyzed rule, it reads from it to
-/// build a [`Conjunction`](crate::planner::Conjunction) ordered for
-/// a given scope.
-///
-/// The dependency graph (which premise binds which variable, which
-/// premises require what) is computed during analysis and will be
-/// added in a follow-up step; the planner currently still derives
-/// it on the fly.
+/// This is the artifact of analysis. The planner reads it (or its
+/// pieces) to build per-step plans; future iterations of the
+/// planner can consume the dependency graph directly to avoid
+/// re-walking schemas on every iteration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnalyzedRule {
     /// The rule's conclusion.
     pub conclusion: ConceptDescriptor,
-    /// The analyzed premises in their original order. Planning may
-    /// reorder them; analysis preserves user order.
-    pub premises: Vec<Analyzed<Premise>>,
-    /// The rule-wide inferred type environment.
+    /// The premises in their planned order. Analysis preserves
+    /// the planner's ordering; it doesn't re-order on its own.
+    pub premises: Vec<Premise>,
+    /// The rule-wide inferred type environment. Shared via
+    /// [`Arc`] across consumers.
     pub types: Arc<TypeEnv>,
-    /// Per-premise variable usage and dependency edges. Indexed in
-    /// the same order as `premises`.
+    /// Per-premise variable usage and dependency edges. Indexed
+    /// in the same order as `premises`.
     pub graph: DependencyGraph,
 }
 
 impl AnalyzedRule {
     /// Iterate over the analyzed premises.
-    pub fn premises(&self) -> impl Iterator<Item = &Analyzed<Premise>> {
+    pub fn premises(&self) -> impl Iterator<Item = &Premise> {
         self.premises.iter()
     }
 
@@ -300,10 +256,7 @@ pub fn analyze(
         }
     }
 
-    let premises = steps
-        .iter()
-        .map(|step| Analyzed::new(step.premise.clone(), types.clone()))
-        .collect();
+    let premises = steps.iter().map(|step| step.premise.clone()).collect();
     let graph = DependencyGraph::from_steps(steps);
     Ok(AnalyzedRule {
         conclusion,
@@ -339,8 +292,7 @@ mod tests {
         )])
     }
 
-    /// Analysis output carries the inferred type environment and
-    /// wraps each premise with a clone of the shared `Arc<TypeEnv>`.
+    /// Analysis output carries the inferred type environment.
     #[dialog_common::test]
     fn it_analyzes_a_single_typed_premise() {
         let typed_name: Term<Any> = Term::<String>::var("name").into();
@@ -360,11 +312,6 @@ mod tests {
         assert_eq!(analyzed.premises.len(), 1);
         let name_kind = analyzed.type_of("name").expect("name has an inferred type");
         assert_eq!(name_kind.as_value_type(), Some(ValueType::String));
-
-        // Every premise in the same rule shares the same Arc.
-        for premise in analyzed.premises() {
-            assert!(Arc::ptr_eq(&premise.types, &analyzed.types));
-        }
     }
 
     /// Two premises that share a variable `?entity`: one binds it
@@ -399,6 +346,69 @@ mod tests {
         for vars in &analyzed.graph.usage {
             assert!(vars.binds.contains("entity"));
         }
+    }
+
+    /// A formula premise that needs `?text` and binds `?len`
+    /// depends on an earlier attribute premise that binds `?text`.
+    /// The dependency graph records an edge from the formula's
+    /// `requires[]` to the attribute's index.
+    #[dialog_common::test]
+    fn it_records_formula_dependency_on_attribute() {
+        use crate::formula::Formula;
+        use crate::formula::string::Length;
+        use crate::{Parameters, Premise};
+
+        // Premise 0: attribute query that binds ?text.
+        let attr = AttributeQuery::new(
+            Term::from(the!("note/body")),
+            Term::<Entity>::var("this"),
+            Term::<String>::var("text").into(),
+            Term::var("cause"),
+            Some(Cardinality::One),
+        );
+
+        // Premise 1: Length formula, needs ?text bound, binds ?len.
+        let mut params = Parameters::new();
+        params.insert("of".to_string(), Term::var("text"));
+        params.insert("is".to_string(), Term::var("len"));
+        let length = Length::apply(params).unwrap();
+
+        let premises: Vec<Premise> = vec![attr.into(), Premise::from(length)];
+        let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
+        let analyzed = analyze(person_with_name(), &plan.steps).unwrap();
+
+        assert_eq!(analyzed.graph.len(), 2);
+
+        // The formula step needs `text`; some other step binds it.
+        // Concretely: the attribute step's index should appear in
+        // the formula step's `requires` set.
+        //
+        // The planner orders attribute first (cost), so attribute
+        // is step 0 and formula is step 1. The formula needs
+        // ?text bound by step 0.
+        let formula_idx = analyzed
+            .premises
+            .iter()
+            .position(|p| matches!(p, Premise::Assert(crate::Proposition::Formula(_))))
+            .expect("formula step present");
+        let attr_idx = analyzed
+            .premises
+            .iter()
+            .position(|p| matches!(p, Premise::Assert(crate::Proposition::Attribute(_))))
+            .expect("attribute step present");
+
+        assert!(
+            analyzed.graph.requires[formula_idx].contains(&attr_idx),
+            "formula step should depend on the attribute step that binds ?text"
+        );
+        assert!(
+            analyzed.graph.usage[formula_idx].needs.contains("text"),
+            "formula step should record ?text in its needs"
+        );
+        assert!(
+            analyzed.graph.usage[attr_idx].binds.contains("text"),
+            "attribute step should record ?text in its binds"
+        );
     }
 
     /// Analysis rejects a conclusion variable whose inferred type

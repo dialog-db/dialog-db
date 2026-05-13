@@ -131,9 +131,9 @@ impl AttributeQueryOnly {
         self.query.is()
     }
 
-    /// Return a copy with the `is` term replaced. See
-    /// [`AttributeQueryAll::with_is`].
-    pub fn with_is(self, is: Term<Any>) -> Self {
+    /// Return a copy with the `is` term replaced. Internal hook;
+    /// see [`AttributeQueryAll::with_is`].
+    pub(crate) fn with_is(self, is: Term<Any>) -> Self {
         Self {
             query: self.query.with_is(is),
         }

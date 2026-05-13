@@ -16,7 +16,7 @@ pub mod types;
 /// When trait and tuple implementations.
 pub mod when;
 
-pub use analyzer::{Analyzed, AnalyzedRule, analyze};
+pub use analyzer::{AnalyzedRule, analyze};
 pub use deductive::DeductiveRule;
 pub use deductive::descriptor::DeductiveRuleDescriptor;
 pub use premises::*;

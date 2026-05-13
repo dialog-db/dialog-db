@@ -1,5 +1,6 @@
 use crate::Term;
 use crate::attribute::query::AttributeQuery;
+use crate::negation::Negation;
 use crate::proposition::Proposition;
 use crate::rule::types::TypeEnv;
 use crate::selection::Selection;
@@ -55,15 +56,6 @@ impl Plan {
     }
 
     /// Evaluate this plan with the given selection and environment.
-    ///
-    /// Before evaluation, the plan narrows the premise's variable
-    /// slots to the kinds inferred for them at the rule level. The
-    /// user-supplied premise (carrying the user's local term kinds)
-    /// stays untouched; only the in-flight working copy reflects
-    /// the rule-inferred kinds. This is how
-    /// [`AttributeQuery::evaluate`]'s `is.is_optional()` check
-    /// picks up rule-level narrowing — the term it consults is
-    /// already the narrowed one.
     pub fn evaluate<'a, Env, M: Selection + 'a>(
         self,
         selection: M,
@@ -72,25 +64,40 @@ impl Plan {
     where
         Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
     {
-        let narrowed = apply_types(self.premise, &self.types);
-        narrowed.evaluate(selection, env)
+        self.premise.evaluate(selection, env)
     }
 }
 
-/// Replace each premise's variable terms with copies whose kinds
-/// match the rule-level inferred environment. Currently only
-/// `AttributeQuery::is` is rewritten — that's the slot whose
-/// `is_optional()` answer drives the planner-visible behavior
-/// difference (Absent-fallback emission).
-fn apply_types(premise: Premise, types: &TypeEnv) -> Premise {
+/// Rewrite a premise to reflect rule-level inferred types.
+///
+/// Currently only [`AttributeQuery::is`] is rewritten — that's the
+/// slot whose `is_optional()` answer drives the planner-visible
+/// behavior difference (Absent-fallback emission). Negated
+/// attribute queries are walked too, so a negation over an
+/// optional attribute picks up the same narrowing as its positive
+/// counterpart.
+///
+/// Called once when a [`Plan`] is built. The user-supplied premise
+/// stays untouched; the plan stores the rewritten working copy.
+pub(crate) fn apply_types(premise: Premise, types: &TypeEnv) -> Premise {
     if types.is_empty() {
         return premise;
     }
     match premise {
-        Premise::Assert(Proposition::Attribute(boxed)) => {
+        Premise::Assert(proposition) => {
+            Premise::Assert(apply_types_to_proposition(proposition, types))
+        }
+        Premise::Unless(Negation(proposition)) => {
+            Premise::Unless(Negation(apply_types_to_proposition(proposition, types)))
+        }
+    }
+}
+
+fn apply_types_to_proposition(proposition: Proposition, types: &TypeEnv) -> Proposition {
+    match proposition {
+        Proposition::Attribute(boxed) => {
             let query = *boxed;
-            let narrowed = narrow_attribute(query, types);
-            Premise::Assert(Proposition::Attribute(Box::new(narrowed)))
+            Proposition::Attribute(Box::new(narrow_attribute(query, types)))
         }
         other => other,
     }
@@ -120,10 +127,11 @@ mod tests {
     use crate::{Cardinality, Term};
 
     /// A rule where one premise binds `?name` optionally (so its
-    /// local `is` term carries `String | Nothing`) and another binds
-    /// it required (kind `String`). Rule-level inference narrows
-    /// `?name` to `String`. `Plan::apply_types` should hand the
-    /// evaluator an `is` term whose kind no longer admits `Nothing`.
+    /// local `is` term carries `String | Nothing`) and another
+    /// binds it required (kind `String`). Rule-level inference
+    /// narrows `?name` to `String`, and the planner stamps the
+    /// narrowed term into each plan step's premise so the
+    /// evaluator's `is.is_optional()` check returns `false`.
     #[dialog_common::test]
     fn it_narrows_optional_is_term_via_rule_inference() {
         let optional_name: Term<Any> = Term::<Option<String>>::var("name").into();
@@ -164,18 +172,74 @@ mod tests {
             "inference should strip Nothing when a required binding also exists"
         );
 
-        // `apply_types` rewrites the optional `is` to the narrowed
-        // kind for the optional premise. After rewriting, the
-        // attribute query's `is` is no longer optional, so the
-        // evaluator won't emit Absent-fallback rows.
+        // Every plan step's stored premise already has the
+        // narrowed `is` — the rewrite happens at plan time.
         for step in plan.steps {
-            let narrowed = apply_types(step.premise.clone(), &step.types);
-            if let Premise::Assert(Proposition::Attribute(boxed)) = narrowed {
+            if let Premise::Assert(Proposition::Attribute(boxed)) = &step.premise {
                 assert!(
                     !boxed.is().is_optional(),
                     "rule-level narrowing should leave `is` non-optional"
                 );
             }
+        }
+    }
+
+    /// `apply_types` reaches into negated propositions too. A
+    /// negated attribute query that references an inferred
+    /// variable should see its `is` rewritten to match the env.
+    #[dialog_common::test]
+    fn it_narrows_negated_attribute_via_rule_inference() {
+        use crate::artifact::Type as ValueType;
+        use crate::negation::Negation;
+        use crate::type_system::Type as Kind;
+
+        let env = {
+            // Build an env via the public path: a one-premise rule
+            // with a typed Term<String>. The single binding
+            // dictates the inferred kind.
+            let typed_name: Term<Any> = Term::<String>::var("name").into();
+            let premises = vec![
+                AttributeQuery::new(
+                    Term::from(the!("person/name")),
+                    Term::<Entity>::var("this"),
+                    typed_name,
+                    Term::var("cause"),
+                    Some(Cardinality::One),
+                )
+                .into(),
+            ];
+            let plan = Planner::from(premises)
+                .plan(&crate::Environment::new())
+                .unwrap();
+            plan.steps.into_iter().next().unwrap().types
+        };
+
+        // Build a negated attribute query that uses `?name` with
+        // the still-optional local term kind.
+        let optional_name: Term<Any> = Term::<Option<String>>::var("name").into();
+        let neg = AttributeQuery::new(
+            Term::from(the!("person/nickname")),
+            Term::<Entity>::var("this"),
+            optional_name,
+            Term::var("cause"),
+            Some(Cardinality::One),
+        );
+        let original = Premise::Unless(Negation(Proposition::Attribute(Box::new(neg))));
+
+        let narrowed = apply_types(original, &env);
+        if let Premise::Unless(Negation(Proposition::Attribute(boxed))) = narrowed {
+            assert!(
+                !boxed.is().is_optional(),
+                "rule-level narrowing should reach into negated attributes"
+            );
+            assert_eq!(
+                boxed.is().kind().and_then(|k| k.as_value_type()),
+                Some(ValueType::String),
+                "narrowed `is` should carry the inferred String kind"
+            );
+            let _ = Kind::primitive(ValueType::String);
+        } else {
+            panic!("expected negated attribute proposition");
         }
     }
 }

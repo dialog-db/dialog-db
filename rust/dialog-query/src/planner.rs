@@ -68,13 +68,20 @@ impl Planner {
 
         let types = Arc::new(TypeEnv::infer(&steps));
 
-        // Every step in the same rule shares the same Arc — cheap
-        // clone, single lookup target. Evaluators consult
-        // `self.types.get(name)` to read the rule-level inferred
-        // kind for a variable.
-        for step in &mut steps {
-            step.types = types.clone();
-        }
+        // For each step: stamp the shared `Arc<TypeEnv>` (cheap
+        // clone) and rewrite the premise's variable terms so they
+        // reflect rule-level inference. The rewrite happens once
+        // here, not on every evaluation. Standalone queries (empty
+        // env) skip the rewrite entirely.
+        let stamped: Vec<Plan> = steps
+            .into_iter()
+            .map(|step| Plan {
+                premise: plan::apply_types(step.premise, &types),
+                types: types.clone(),
+                ..step
+            })
+            .collect();
+        let steps = stamped;
 
         Ok(Conjunction {
             steps,
