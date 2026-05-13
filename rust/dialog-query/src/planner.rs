@@ -67,18 +67,14 @@ impl Planner {
             }
         }
 
-        let types = TypeEnv::infer(&steps);
+        let types = Arc::new(TypeEnv::infer(&steps));
 
-        // Project the rule-wide TypeEnv onto each step's variables
-        // so evaluators can look up inferred kinds locally.
+        // Every step in the same rule shares the same Arc — cheap
+        // clone, single lookup target. Evaluators consult
+        // `self.types.get(name)` to read the rule-level inferred
+        // kind for a variable.
         for step in &mut steps {
-            let names: Vec<String> = step
-                .premise
-                .parameters()
-                .iter()
-                .filter_map(|(_, term)| term.name().map(String::from))
-                .collect();
-            step.types = types.project(names.iter().map(String::as_str));
+            step.types = types.clone();
         }
 
         Ok(Conjunction {
@@ -86,7 +82,7 @@ impl Planner {
             cost,
             binds,
             env,
-            types,
+            types: (*types).clone(),
             analyzed: None,
         })
     }

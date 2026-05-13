@@ -96,6 +96,15 @@ impl DynamicAttributeQuery {
         }
     }
 
+    /// Return a copy with the `is` term replaced. See
+    /// [`AttributeQueryAll::with_is`].
+    pub fn with_is(self, is: Term<Any>) -> Self {
+        match self {
+            DynamicAttributeQuery::All(q) => DynamicAttributeQuery::All(q.with_is(is)),
+            DynamicAttributeQuery::Only(q) => DynamicAttributeQuery::Only(q.with_is(is)),
+        }
+    }
+
     /// Get the 'cause' term.
     pub fn cause(&self) -> &Term<Cause> {
         match self {

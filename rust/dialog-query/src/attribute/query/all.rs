@@ -82,6 +82,14 @@ impl AttributeQueryAll {
         &self.is
     }
 
+    /// Return a copy of this query with the `is` term replaced.
+    /// Used by the planner at evaluation time to narrow the slot
+    /// to the rule-inferred kind without mutating the user's
+    /// original premise.
+    pub fn with_is(self, is: Term<Any>) -> Self {
+        Self { is, ..self }
+    }
+
     /// Get the 'cause' term.
     pub fn cause(&self) -> &Term<Cause> {
         &self.cause
