@@ -1,15 +1,12 @@
 use super::{Plan, Planner};
 use crate::Environment;
 use crate::error::TypeError;
-use crate::rule::analyzer::AnalyzedRule;
-use crate::rule::types::TypeEnv;
 use crate::selection::Selection;
 use crate::source::SelectRules;
 use core::pin::Pin;
 use dialog_artifacts::Select;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
-use std::sync::Arc;
 
 /// An ordered sequence of [`Plan`] steps produced by the query planner.
 ///
@@ -34,18 +31,6 @@ pub struct Conjunction {
     pub binds: Environment,
     /// Variables required in the environment to execute this join
     pub env: Environment,
-    /// Inferred types for every named variable mentioned by the
-    /// positive premises. Built once at planning time; consulted by
-    /// evaluators that want rule-level type information rather than
-    /// per-term local kinds.
-    pub types: TypeEnv,
-    /// The analyzed rule this conjunction was planned from. Replan
-    /// (`Conjunction::plan(&scope)`) reuses the same analyzed
-    /// premises (with their inference and dependency graph) so we
-    /// don't re-run analysis on every scope change. Standalone
-    /// queries that plan a raw `Vec<Premise>` have no analyzed
-    /// rule; the field is `None` for those.
-    pub analyzed: Option<Arc<AnalyzedRule>>,
 }
 
 impl Conjunction {
@@ -54,17 +39,12 @@ impl Conjunction {
     /// Converts the steps back into planner candidates and re-orders them
     /// for optimal execution given the new bindings. This is used when a
     /// rule's premises need to be re-evaluated with different known bindings
-    /// (e.g. adornment-based optimization in concepts).
+    /// (e.g. adornment-based optimization in concepts). Type inference
+    /// runs again on the fresh order — its output is stable across
+    /// reorderings, so this is cheap and idempotent.
     pub fn plan(&self, scope: &Environment) -> Result<Self, TypeError> {
-        let mut conjunction = match &self.analyzed {
-            Some(rule) => Planner::from_analyzed(rule.clone()).plan(scope)?,
-            None => {
-                let premises: Vec<_> = self.steps.iter().map(|step| step.premise.clone()).collect();
-                Planner::from(premises).plan(scope)?
-            }
-        };
-        conjunction.analyzed = self.analyzed.clone();
-        Ok(conjunction)
+        let premises: Vec<_> = self.steps.iter().map(|step| step.premise.clone()).collect();
+        Planner::from(premises).plan(scope)
     }
 
     /// Evaluate this conjunction by executing all steps in order.

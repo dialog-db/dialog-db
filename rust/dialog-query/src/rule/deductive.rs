@@ -19,7 +19,6 @@ use descriptor::DeductiveRuleDescriptor;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt::{Display, Formatter, Result as FmtResult};
-use std::sync::Arc;
 
 /// Represents a deductive rule that can be applied creating a premise.
 #[derive(Debug, Clone, PartialEq)]
@@ -46,31 +45,22 @@ impl DeductiveRule {
         // check + Coalesce contract validation. Failures here are
         // wrapped into the corresponding `TypeError::*` variants so
         // the user sees the rule embedded in the error.
-        let analyzed = match analyzer::analyze(conclusion.clone(), &join.steps) {
-            Ok(analyzed) => Arc::new(analyzed),
-            Err(err) => {
-                let rule = DeductiveRule { conclusion, join };
-                return Err(match err {
-                    AnalysisError::RequiredHeadFromOptional { variable } => {
-                        TypeError::RequiredHeadFromOptional {
-                            rule: Box::new(rule),
-                            variable,
-                        }
+        if let Err(err) = analyzer::analyze(conclusion.clone(), &join.steps) {
+            let rule = DeductiveRule { conclusion, join };
+            return Err(match err {
+                AnalysisError::RequiredHeadFromOptional { variable } => {
+                    TypeError::RequiredHeadFromOptional {
+                        rule: Box::new(rule),
+                        variable,
                     }
-                    AnalysisError::CoalesceTypeMismatch { reason } => {
-                        TypeError::CoalesceTypeMismatch {
-                            rule: Box::new(rule),
-                            reason,
-                        }
-                    }
-                });
-            }
-        };
+                }
+                AnalysisError::CoalesceTypeMismatch { reason } => TypeError::CoalesceTypeMismatch {
+                    rule: Box::new(rule),
+                    reason,
+                },
+            });
+        }
 
-        // Replan via the analyzed-rule path so future
-        // `Conjunction::plan(&scope)` calls reuse the same analyzed
-        // premises (with their inference and dependency graph).
-        let join = Planner::from_analyzed(analyzed).plan(&Environment::new())?;
         let rule = DeductiveRule { conclusion, join };
 
         // Verify that every conclusion parameter is derived by one of the
