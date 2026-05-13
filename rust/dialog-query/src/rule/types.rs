@@ -8,9 +8,8 @@
 //! This module runs that inference using the [`Context`] from
 //! [`crate::type_system::unifier`] and produces a [`TypeEnv`] —
 //! a name-keyed map from each variable to its inferred type. The
-//! result is carried on the [`Conjunction`](super::Plan) so
-//! downstream evaluators can consult per-variable types instead of
-//! re-deriving them from each term's local kind.
+//! planner consumes the env to rewrite each premise's variable
+//! terms so they carry the inferred kinds at evaluation time.
 //!
 //! Untyped slots (those with no static `content_type`) still
 //! contribute to inference via their requirement shape:
@@ -27,11 +26,10 @@
 use crate::Premise;
 use crate::planner::Plan;
 use crate::schema::Requirement;
+use crate::type_system::Primitive;
 use crate::type_system::Type as Kind;
 use crate::type_system::unifier::{Context, Type as Inferred, lift};
 use std::collections::HashMap;
-
-use super::super::type_system::Primitive;
 
 /// Errors raised by [`TypeEnv::infer`].
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -50,9 +48,11 @@ pub enum InferenceError {
 /// Inferred types for every named variable referenced by a rule's
 /// positive premises.
 ///
-/// Built by [`TypeEnv::infer`] during planning; carried on
-/// [`Conjunction`](crate::planner::Conjunction) so evaluators can
-/// look up rule-level types without re-running inference.
+/// Built by [`TypeEnv::infer`] during planning. The planner uses
+/// the result to narrow each premise's variable terms so they
+/// carry rule-level kinds at evaluation time. Also carried on
+/// [`AnalyzedRule`](super::AnalyzedRule) (wrapped in an `Arc`) for
+/// later phases that want type-by-variable lookups.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TypeEnv {
     by_name: HashMap<String, Kind>,
@@ -125,19 +125,6 @@ impl TypeEnv {
     /// Look up the inferred type for a variable by name.
     pub fn get(&self, name: &str) -> Option<&Kind> {
         self.by_name.get(name)
-    }
-
-    /// Return a new `TypeEnv` containing only the entries for the
-    /// given variable names. Used to project the rule-wide
-    /// environment down to a single plan step's variables.
-    pub fn project<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> Self {
-        let mut by_name = HashMap::new();
-        for name in names {
-            if let Some(kind) = self.by_name.get(name) {
-                by_name.insert(name.to_string(), kind.clone());
-            }
-        }
-        Self { by_name }
     }
 
     /// Iterate over `(name, inferred kind)` pairs.

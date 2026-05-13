@@ -11,7 +11,6 @@ pub use plan::*;
 use crate::error::TypeError;
 use crate::rule::types::TypeEnv;
 use crate::{Environment, Premise};
-use std::sync::Arc;
 
 /// State machine that greedily selects the cheapest viable premise at each
 /// step, building an ordered execution plan.
@@ -69,22 +68,18 @@ impl Planner {
         let types = TypeEnv::infer(&steps).map_err(|err| TypeError::TypeInference {
             reason: err.to_string(),
         })?;
-        let types = Arc::new(types);
 
-        // For each step: stamp the shared `Arc<TypeEnv>` (cheap
-        // clone) and rewrite the premise's variable terms so they
-        // reflect rule-level inference. The rewrite happens once
-        // here, not on every evaluation. Standalone queries (empty
-        // env) skip the rewrite entirely.
-        let stamped: Vec<Plan> = steps
+        // Rewrite each step's premise so its variable terms reflect
+        // the rule-level inferred kinds. Done once here, not on
+        // every evaluation. Standalone queries (empty env) skip the
+        // rewrite entirely.
+        let steps: Vec<Plan> = steps
             .into_iter()
             .map(|step| Plan {
                 premise: plan::apply_types(step.premise, &types),
-                types: types.clone(),
                 ..step
             })
             .collect();
-        let steps = stamped;
 
         Ok(Conjunction {
             steps,

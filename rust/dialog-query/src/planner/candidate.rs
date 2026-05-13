@@ -1,9 +1,7 @@
 use super::Plan;
 use crate::error::TypeError;
-use crate::rule::types::TypeEnv;
 use crate::{Environment, Parameters, Premise, Requirement, Schema};
 use std::collections::HashSet;
-use std::sync::Arc;
 
 /// A premise under consideration by the query planner, tracking whether it
 /// can execute given the current variable bindings.
@@ -380,16 +378,13 @@ impl TryFrom<Candidate> for Plan {
                 env,
                 ..
             } => {
-                // Drop schema/params - don't need them in the final plan.
-                // `types` starts as an empty shared env; the planner
-                // replaces it with the real `Arc<TypeEnv>` once
-                // it has built the rule-wide TypeEnv from all steps.
+                // Drop schema/params — they're only needed during
+                // planning, not at evaluation time.
                 Ok(Plan {
                     premise,
                     cost,
                     binds,
                     env,
-                    types: Arc::new(TypeEnv::new()),
                 })
             }
             Candidate::Blocked { requires, .. } => {

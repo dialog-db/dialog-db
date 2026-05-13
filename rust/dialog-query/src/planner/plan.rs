@@ -10,7 +10,6 @@ use crate::{Environment, Premise};
 use dialog_artifacts::Select;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
-use std::sync::Arc;
 
 /// A finalized, ready-to-execute premise produced by the query planner.
 ///
@@ -20,11 +19,14 @@ use std::sync::Arc;
 /// bound in the environment. The cached schema and parameter data used during
 /// planning are dropped at this point.
 ///
-/// Plans are assembled into a [`Conjunction`](crate::Conjunction) — an ordered sequence of
-/// steps that the query engine evaluates to produce results.
+/// The premise has already been narrowed at plan time via
+/// [`apply_types`] — its variable terms reflect the rule-level
+/// inferred kinds, so evaluators don't need to consult any external
+/// type environment to know which slots are optional.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
-    /// The premise this plan will execute.
+    /// The premise this plan will execute. Variable terms have
+    /// been narrowed to the rule-level inferred kinds.
     pub premise: Premise,
     /// Estimated execution cost.
     pub cost: usize,
@@ -32,11 +34,6 @@ pub struct Plan {
     pub binds: Environment,
     /// Variables already bound in the environment when this plan runs.
     pub env: Environment,
-    /// Shared view of the rule-wide inferred type environment.
-    /// Every step of the same rule points at the same `Arc`.
-    /// Standalone queries (no rule context) get an empty
-    /// environment.
-    pub types: Arc<TypeEnv>,
 }
 
 impl Plan {
@@ -158,22 +155,10 @@ mod tests {
             .plan(&crate::Environment::new())
             .unwrap();
 
-        // The shared TypeEnv should have narrowed `name` to non-
-        // optional. Each step's `types` Arc points at it.
-        let name_kind = plan
-            .steps
-            .first()
-            .unwrap()
-            .types
-            .get("name")
-            .expect("inferred kind for name");
-        assert!(
-            !name_kind.is_optional(),
-            "inference should strip Nothing when a required binding also exists"
-        );
-
-        // Every plan step's stored premise already has the
-        // narrowed `is` — the rewrite happens at plan time.
+        // Every plan step's stored premise has the narrowed `is` —
+        // the rewrite happens at plan time. The first premise's
+        // user-supplied `is` was `Option<String>`; after planning
+        // it should be `String` only.
         for step in plan.steps {
             if let Premise::Assert(Proposition::Attribute(boxed)) = &step.premise {
                 assert!(
@@ -272,7 +257,7 @@ mod tests {
             let plan = Planner::from(premises)
                 .plan(&crate::Environment::new())
                 .unwrap();
-            plan.steps.into_iter().next().unwrap().types
+            TypeEnv::infer(&plan.steps).unwrap()
         };
 
         // Build a negated attribute query that uses `?name` with
