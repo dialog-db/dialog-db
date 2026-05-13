@@ -278,6 +278,10 @@ pub enum Composite {
         /// The payload type for this label.
         value: Type,
     },
+    /// Directory: a [`Symbol`]-keyed collection of values, each of
+    /// the given inner [`Type`]. Realized one-entry-per-row at the
+    /// query layer; an assertion may emit many entries.
+    Directory(Type),
 }
 
 impl Type {
@@ -342,6 +346,14 @@ impl Type {
             label: label.into(),
             value,
         });
+        Type::Composite(Primitive::EMPTY, set)
+    }
+
+    /// Build a directory type — a Symbol-keyed collection whose
+    /// values are of the given inner type.
+    pub fn directory(inner: Type) -> Type {
+        let mut set = BTreeSet::new();
+        set.insert(Composite::Directory(inner));
         Type::Composite(Primitive::EMPTY, set)
     }
 
@@ -504,6 +516,10 @@ fn intersect_composite(a: &Composite, b: &Composite) -> Option<Composite> {
                 value: merged,
             })
         }
+        (Composite::Directory(va), Composite::Directory(vb)) => {
+            let merged = va.intersect(vb)?;
+            Some(Composite::Directory(merged))
+        }
         _ => None,
     }
 }
@@ -537,6 +553,7 @@ fn composite_includes(a: &Composite, b: &Composite) -> bool {
                 value: vb,
             },
         ) => la == lb && va.includes(vb),
+        (Composite::Directory(va), Composite::Directory(vb)) => va.includes(vb),
         _ => false,
     }
 }
@@ -795,6 +812,64 @@ mod tests {
 
         let c = Type::variant("Other", Type::primitive(ValueType::UnsignedInt));
         assert!(a.intersect(&c).is_none());
+    }
+
+    #[dialog_common::test]
+    fn directory_constructor_carries_inner_type() {
+        let dir = Type::directory(Type::primitive(ValueType::Entity));
+        let composites = dir.composite_part().unwrap();
+        assert_eq!(composites.len(), 1);
+        match composites.iter().next().unwrap() {
+            Composite::Directory(inner) => {
+                assert_eq!(*inner, Type::primitive(ValueType::Entity));
+            }
+            other => panic!("expected Directory, got {:?}", other),
+        }
+    }
+
+    #[dialog_common::test]
+    fn intersect_directories_narrows_inner() {
+        let a = Type::directory(Type::primitive_set(Primitive::NUMERIC));
+        let b = Type::directory(Type::primitive(ValueType::UnsignedInt));
+        let merged = a.intersect(&b).expect("narrows to UnsignedInt");
+        let composite = merged.composite_part().expect("composite present");
+        match composite.iter().next().expect("one directory") {
+            Composite::Directory(inner) => {
+                assert_eq!(inner.as_value_type(), Some(ValueType::UnsignedInt));
+            }
+            other => panic!("expected Directory, got {other:?}"),
+        }
+    }
+
+    #[dialog_common::test]
+    fn intersect_directories_disjoint_inner_eliminated() {
+        let a = Type::directory(Type::primitive(ValueType::String));
+        let b = Type::directory(Type::primitive(ValueType::Entity));
+        assert!(a.intersect(&b).is_none());
+    }
+
+    #[dialog_common::test]
+    fn includes_directory_by_inner_subtype() {
+        let wide = Type::directory(Type::primitive_set(Primitive::NUMERIC));
+        let narrow = Type::directory(Type::primitive(ValueType::UnsignedInt));
+        assert!(wide.includes(&narrow));
+        assert!(!narrow.includes(&wide));
+    }
+
+    #[dialog_common::test]
+    fn intersect_directory_and_variant_eliminated() {
+        let dir = Type::directory(Type::primitive(ValueType::String));
+        let var = Type::variant("Some", Type::primitive(ValueType::String));
+        // Two different composite shapes — no overlap.
+        assert!(dir.intersect(&var).is_none());
+    }
+
+    #[dialog_common::test]
+    fn directory_serde_round_trip() {
+        let dir = Type::directory(Type::primitive(ValueType::Entity));
+        let j = serde_json::to_string(&dir).unwrap();
+        let back: Type = serde_json::from_str(&j).unwrap();
+        assert_eq!(dir, back);
     }
 
     #[dialog_common::test]
