@@ -148,7 +148,7 @@ impl Select<'_> {
                         yield Artifact::try_from(datum)?;
                     }
                 }
-            } else if selector.domain().is_some() {
+            } else if selector.attribute().is_some() {
                 let start = <AttributeKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
                 let end = <AttributeKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
                 let stream = tree.stream_range(Range { start, end }, &store);

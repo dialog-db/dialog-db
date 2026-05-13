@@ -8,8 +8,8 @@ use std::str;
 use dialog_prolly_tree::Entry;
 
 use crate::{
-    ATTRIBUTE_KEY_TAG, ArtifactSelector, AttributeKey, Datum, ENTITY_KEY_TAG, EntityKey, Key,
-    KeyView, State, VALUE_KEY_TAG, ValueKey, artifacts::selector::Constrained,
+    ATTRIBUTE_KEY_TAG, ArtifactSelector, AttributeKey, AttributePattern, Datum, ENTITY_KEY_TAG,
+    EntityKey, Key, KeyView, State, VALUE_KEY_TAG, ValueKey, artifacts::selector::Constrained,
 };
 
 /// Splits the attribute slot bytes into `(domain, name)` halves.
@@ -39,16 +39,18 @@ where
     let attr_part = key.attribute();
     let (key_domain, key_name) = split_attribute_slot(attr_part.raw());
 
-    if let Some(domain) = selector.domain()
-        && domain.as_str() != key_domain
-    {
-        return false;
-    }
-
-    if let Some(name) = selector.name()
-        && name.as_str() != key_name
-    {
-        return false;
+    match selector.attribute() {
+        Some(AttributePattern::Exact(attribute)) => {
+            if attribute.domain() != key_domain || attribute.name() != key_name {
+                return false;
+            }
+        }
+        Some(AttributePattern::Domain(domain)) => {
+            if domain.as_str() != key_domain {
+                return false;
+            }
+        }
+        None => {}
     }
 
     if let Some(value) = selector.value()
