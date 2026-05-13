@@ -120,7 +120,7 @@ mod tests {
     use crate::helpers::{test_operator_with_profile, test_repo};
     use anyhow::Result;
 
-    use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
+    use dialog_artifacts::{Artifact, ArtifactSelector, Attribute, Instruction, Value};
     use futures_util::{StreamExt, stream};
 
     #[dialog_common::test]
@@ -142,9 +142,7 @@ mod tests {
         assert_ne!(revision.tree, TreeReference::default());
 
         // Select should find the artifact
-        let selector = ArtifactSelector::new()
-            .with_domain("user".parse()?)
-            .with_name("name".parse()?);
+        let selector = ArtifactSelector::new().with_attribute("user/name".parse::<Attribute>()?);
         let stream = branch.claims().select(selector).perform(&operator).await?;
         tokio::pin!(stream);
 
