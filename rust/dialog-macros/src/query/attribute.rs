@@ -227,11 +227,13 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     let the = format!("{}/{}", #domain_expr, #attr_name_lit)
                         .parse::<dialog_query::The>()
                         .expect("attribute selector must be valid");
-                    dialog_query::AttributeDescriptor::new(
+                    dialog_query::AttributeDescriptor::with_kind(
                         the,
                         #description_lit,
                         #cardinality,
-                        <<#wrapped_type as dialog_query::Typed>::Descriptor as dialog_query::TypeDescriptor>::TYPE,
+                        <<#wrapped_type as dialog_query::Typed>::Descriptor as dialog_query::TypeDescriptor>::kind(
+                            &<<#wrapped_type as dialog_query::Typed>::Descriptor as ::std::default::Default>::default(),
+                        ),
                     )
                 })
             }
