@@ -4,15 +4,14 @@ pub mod descriptor;
 use crate::artifact::Entity;
 use crate::attribute::query::AttributeQuery;
 pub use crate::concept::descriptor::ConceptDescriptor;
-use crate::constraint::Constraint;
 use crate::error::TypeError;
 use crate::negation::Negation;
 pub use crate::planner::Plan;
 pub use crate::planner::{Conjunction, Planner};
 pub use crate::premise::Premise;
+use crate::rule::analyzer::{self, AnalysisError};
 use crate::type_system::Primitive;
 use crate::type_system::Type as Kind;
-use crate::type_system::unifier::Context;
 use crate::types::Any;
 pub use crate::{Attribute, Cardinality, Parameters, Proposition, Requirement, Value};
 use crate::{Environment, Term, Type};
@@ -44,10 +43,33 @@ impl DeductiveRule {
         // discover unsatisfiable premises (e.g. a formula whose required
         // cell is never derived by another premise).
         let join = Planner::from(premises).plan(&Environment::new())?;
+
+        // Run rule-level type analysis: inference + required-head
+        // check + Coalesce contract validation. Failures here are
+        // wrapped into the corresponding `TypeError::*` variants so
+        // the user sees the rule embedded in the error.
+        if let Err(err) = analyzer::analyze(conclusion.clone(), &join.steps) {
+            let rule = DeductiveRule { conclusion, join };
+            return Err(match err {
+                AnalysisError::RequiredHeadFromOptional { variable } => {
+                    TypeError::RequiredHeadFromOptional {
+                        rule: Box::new(rule),
+                        variable,
+                    }
+                }
+                AnalysisError::CoalesceTypeMismatch { reason } => TypeError::CoalesceTypeMismatch {
+                    rule: Box::new(rule),
+                    reason,
+                },
+            });
+        }
+
         let rule = DeductiveRule { conclusion, join };
 
         // Verify that every conclusion parameter is derived by one of the
         // premises; otherwise the rule could never fully bind its output.
+        // This check depends on the planner's `binds` set, so it lives
+        // here rather than in analysis.
         let unbound = rule
             .conclusion
             .operands()
@@ -61,59 +83,7 @@ impl DeductiveRule {
             });
         }
 
-        // Reject if any conclusion variable's inferred type admits
-        // `Nothing` — the rule could produce Absent for a required
-        // head. Inference runs once during planning and is stored on
-        // the conjunction.
-        let optional_head = rule
-            .conclusion
-            .operands()
-            .find(|name| {
-                rule.join
-                    .types
-                    .get(name)
-                    .is_some_and(|kind| kind.is_optional())
-            })
-            .map(String::from);
-
-        if let Some(variable) = optional_head {
-            return Err(TypeError::RequiredHeadFromOptional {
-                rule: Box::new(rule),
-                variable,
-            });
-        }
-
-        // Validate every Coalesce constraint's type contract. Each
-        // Coalesce is independent — fresh unifier context per
-        // constraint. Catches wire-format and raw-builder
-        // mismatches where the typed builder isn't the construction
-        // path.
-        let coalesce_error = rule.coalesce_validation_error();
-        if let Some(reason) = coalesce_error {
-            return Err(TypeError::CoalesceTypeMismatch {
-                rule: Box::new(rule),
-                reason,
-            });
-        }
-
         Ok(rule)
-    }
-
-    /// Run [`Coalesce::validate`](crate::constraint::Coalesce::validate)
-    /// on every Coalesce constraint reachable from this rule's
-    /// positive premises. Returns the first failure, if any.
-    fn coalesce_validation_error(&self) -> Option<String> {
-        for step in &self.join.steps {
-            let Premise::Assert(Proposition::Constraint(Constraint::Coalesce(c))) = &step.premise
-            else {
-                continue;
-            };
-            let mut ctx = Context::new();
-            if let Err(err) = c.validate(&mut ctx) {
-                return Some(format!("{err}"));
-            }
-        }
-        None
     }
 
     /// Returns the conclusion predicate for this rule.

@@ -21,10 +21,36 @@
 //! bindings change).
 
 use crate::Premise;
+use crate::concept::descriptor::ConceptDescriptor;
+use crate::constraint::Constraint;
 use crate::planner::Plan;
+use crate::proposition::Proposition;
 use crate::rule::types::TypeEnv;
 use crate::type_system::Type as Kind;
+use crate::type_system::unifier::Context;
 use std::sync::Arc;
+
+/// Errors detected by [`analyze`]. These are pre-rule type
+/// problems: inference produced a contradiction or a constraint's
+/// type contract isn't satisfied. `DeductiveRule::new` wraps these
+/// in the full [`TypeError`](crate::error::TypeError) variants
+/// after planning, so callers get the rule embedded for display.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum AnalysisError {
+    /// A conclusion variable's inferred type admits `Nothing` —
+    /// the rule could produce `Absent` in a required slot.
+    #[error("conclusion variable {variable} is optional")]
+    RequiredHeadFromOptional {
+        /// Name of the offending head variable.
+        variable: String,
+    },
+    /// A `Coalesce` constraint's type contract is violated.
+    #[error("Coalesce type mismatch: {reason}")]
+    CoalesceTypeMismatch {
+        /// Human-readable reason from the unifier.
+        reason: String,
+    },
+}
 
 /// A piece of the user's rule with the rule-wide type environment
 /// attached. The `source` is whatever the user wrote; `types` is the
@@ -81,6 +107,8 @@ impl<T> Analyzed<T> {
 /// it on the fly.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnalyzedRule {
+    /// The rule's conclusion.
+    pub conclusion: ConceptDescriptor,
     /// The analyzed premises in their original order. Planning may
     /// reorder them; analysis preserves user order.
     pub premises: Vec<Analyzed<Premise>>,
@@ -100,25 +128,60 @@ impl AnalyzedRule {
     }
 }
 
-/// Run analysis over the rule's premises: infer types, build the
-/// shared environment, wrap each premise as an `Analyzed<Premise>`.
+/// Run analysis over the rule's premises:
 ///
-/// This is currently a thin wrapper around [`TypeEnv::infer`] that
-/// runs against a `Vec<Plan>` shape (because that's what `infer`
-/// consumes today). It will gain the dependency-graph computation
-/// and richer error reporting in follow-up commits.
+/// 1. Infer the rule-wide type environment from each premise's
+///    slot kinds.
+/// 2. Check that no conclusion variable's inferred type admits
+///    `Nothing` — a required head can't accept `Absent`.
+/// 3. Validate every Coalesce constraint's type contract.
 ///
-/// Returns the analyzed rule. Type errors detected during analysis
-/// (e.g. `RequiredHeadFromOptional`) are not raised here yet —
-/// `DeductiveRule::new` still owns those checks. Moving them into
-/// the analyzer is a later step.
-pub fn analyze(steps: &[Plan]) -> AnalyzedRule {
+/// Returns the analyzed rule on success, or an [`AnalysisError`]
+/// describing the type problem. `DeductiveRule::new` wraps these
+/// in the corresponding [`TypeError`](crate::error::TypeError)
+/// variants with the planned rule embedded for display.
+pub fn analyze(
+    conclusion: ConceptDescriptor,
+    steps: &[Plan],
+) -> Result<AnalyzedRule, AnalysisError> {
     let types = Arc::new(TypeEnv::infer(steps));
+
+    // Required heads must not admit `Nothing`.
+    if let Some(variable) = conclusion
+        .operands()
+        .find(|name| types.get(name).is_some_and(Kind::is_optional))
+    {
+        return Err(AnalysisError::RequiredHeadFromOptional {
+            variable: variable.to_string(),
+        });
+    }
+
+    // Each Coalesce constraint validates against a fresh unifier
+    // context. Catches wire-format and raw-builder mismatches
+    // where the typed builder isn't the construction path.
+    for step in steps {
+        let Premise::Assert(Proposition::Constraint(Constraint::Coalesce(coalesce))) =
+            &step.premise
+        else {
+            continue;
+        };
+        let mut ctx = Context::new();
+        if let Err(err) = coalesce.validate(&mut ctx) {
+            return Err(AnalysisError::CoalesceTypeMismatch {
+                reason: err.to_string(),
+            });
+        }
+    }
+
     let premises = steps
         .iter()
         .map(|step| Analyzed::new(step.premise.clone(), types.clone()))
         .collect();
-    AnalyzedRule { premises, types }
+    Ok(AnalyzedRule {
+        conclusion,
+        premises,
+        types,
+    })
 }
 
 #[cfg(test)]
@@ -128,11 +191,24 @@ mod tests {
 
     use super::*;
     use crate::artifact::{Entity, Type as ValueType};
+    use crate::attribute::AttributeDescriptor;
     use crate::attribute::query::AttributeQuery;
     use crate::planner::Planner;
     use crate::the;
     use crate::types::Any;
     use crate::{Cardinality, Environment, Term};
+
+    fn person_with_name() -> ConceptDescriptor {
+        ConceptDescriptor::from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "",
+                Cardinality::One,
+                Some(ValueType::String),
+            ),
+        )])
+    }
 
     /// Analysis output carries the inferred type environment and
     /// wraps each premise with a clone of the shared `Arc<TypeEnv>`.
@@ -150,7 +226,7 @@ mod tests {
             .into(),
         ];
         let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
-        let analyzed = analyze(&plan.steps);
+        let analyzed = analyze(person_with_name(), &plan.steps).unwrap();
 
         assert_eq!(analyzed.premises.len(), 1);
         let name_kind = analyzed.type_of("name").expect("name has an inferred type");
@@ -159,6 +235,31 @@ mod tests {
         // Every premise in the same rule shares the same Arc.
         for premise in analyzed.premises() {
             assert!(Arc::ptr_eq(&premise.types, &analyzed.types));
+        }
+    }
+
+    /// Analysis rejects a conclusion variable whose inferred type
+    /// admits `Nothing` — the rule could yield Absent in the head.
+    #[dialog_common::test]
+    fn it_rejects_required_head_bound_only_by_optional_premises() {
+        let optional_name: Term<Any> = Term::<Option<String>>::var("name").into();
+        let premises = vec![
+            AttributeQuery::new(
+                Term::from(the!("person/name")),
+                Term::<Entity>::var("this"),
+                optional_name,
+                Term::var("cause"),
+                Some(Cardinality::One),
+            )
+            .into(),
+        ];
+        let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
+        let err = analyze(person_with_name(), &plan.steps).unwrap_err();
+        match err {
+            AnalysisError::RequiredHeadFromOptional { variable } => {
+                assert_eq!(variable, "name");
+            }
+            other => panic!("expected RequiredHeadFromOptional, got {other:?}"),
         }
     }
 }
