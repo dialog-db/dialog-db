@@ -142,7 +142,8 @@ mod tests {
         assert_ne!(revision.tree, TreeReference::default());
 
         // Select should find the artifact
-        let selector = ArtifactSelector::new().with_attribute("user/name".parse::<Attribute>()?);
+        let (d, n) = "user/name".parse::<Attribute>()?.split();
+        let selector = ArtifactSelector::new().with_domain(d).with_name(n);
         let stream = branch.claims().select(selector).perform(&operator).await?;
         tokio::pin!(stream);
 

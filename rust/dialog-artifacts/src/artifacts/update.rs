@@ -1,8 +1,8 @@
 use crate::artifacts::query::Select;
 use crate::selector::Constrained;
 use crate::{
-    Artifact, ArtifactSelector, ArtifactStream, Attribute, AttributePattern, DialogArtifactsError,
-    Entity, Instruction, Value,
+    Artifact, ArtifactSelector, ArtifactStream, Attribute, DialogArtifactsError, Entity,
+    Instruction, Value,
 };
 use async_trait::async_trait;
 use dialog_capability::Provider;
@@ -319,7 +319,8 @@ impl<'a> Provider<Select<'a>> for Changes {
         &self,
         input: ArtifactSelector<Constrained>,
     ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
-        let pattern = input.attribute();
+        let domain = input.domain();
+        let name = input.name();
         let of = input.entity();
         let is = input.value();
 
@@ -335,14 +336,15 @@ impl<'a> Provider<Select<'a>> for Changes {
                 continue;
             }
             for (attribute, changes) in attrs {
-                match pattern {
-                    Some(AttributePattern::Exact(exact)) if attribute != exact => continue,
-                    Some(AttributePattern::Domain(domain))
-                        if attribute.domain() != domain.as_str() =>
-                    {
-                        continue;
-                    }
-                    _ => {}
+                if let Some(domain_target) = domain
+                    && attribute.domain() != domain_target.as_str()
+                {
+                    continue;
+                }
+                if let Some(name_target) = name
+                    && attribute.name() != name_target.as_str()
+                {
+                    continue;
                 }
                 for change in changes {
                     let value = match change {
@@ -394,10 +396,11 @@ mod tests {
     fn role_attr() -> Attribute {
         "test/role".parse().expect("valid attribute")
     }
-    /// Build a selector constrained to the full `test/name` attribute via
-    /// an [`AttributePattern::Exact`] point lookup.
+    /// Build a selector constrained to the full `test/name` attribute,
+    /// splitting the composite into its `with_domain` / `with_name` halves.
     fn name_selector() -> ArtifactSelector<Constrained> {
-        ArtifactSelector::new().with_attribute(name_attr())
+        let (domain, name) = name_attr().split();
+        ArtifactSelector::new().with_domain(domain).with_name(name)
     }
 
     #[dialog_common::test]

@@ -64,6 +64,17 @@ impl Attribute {
             .expect("Attribute always contains the delimiter");
         &self.0[slash + 1..]
     }
+
+    /// Splits this attribute into its domain and name [`Symbol`]
+    /// halves. Each half was validated as a [`Symbol`] at construction
+    /// time, so re-parsing here is infallible by construction.
+    pub fn split(&self) -> (Symbol, Symbol) {
+        let domain = Symbol::try_from(self.domain().to_owned())
+            .expect("Attribute halves are validated Symbols");
+        let name = Symbol::try_from(self.name().to_owned())
+            .expect("Attribute halves are validated Symbols");
+        (domain, name)
+    }
 }
 
 impl TryFrom<String> for Attribute {

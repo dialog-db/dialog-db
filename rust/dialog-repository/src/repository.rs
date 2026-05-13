@@ -423,7 +423,10 @@ mod tests {
 
         let results: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().with_attribute("user/name".parse::<Attribute>()?))
+            .select({
+                let (d, n) = "user/name".parse::<Attribute>()?.split();
+                ArtifactSelector::new().with_domain(d).with_name(n)
+            })
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -502,7 +505,10 @@ mod tests {
 
         let results: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().with_attribute("user/name".parse::<Attribute>()?))
+            .select({
+                let (d, n) = "user/name".parse::<Attribute>()?.split();
+                ArtifactSelector::new().with_domain(d).with_name(n)
+            })
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -537,7 +543,10 @@ mod tests {
         // Verify it's there
         let before: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().with_attribute("user/name".parse::<Attribute>()?))
+            .select({
+                let (d, n) = "user/name".parse::<Attribute>()?.split();
+                ArtifactSelector::new().with_domain(d).with_name(n)
+            })
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -554,7 +563,10 @@ mod tests {
 
         let after: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().with_attribute("user/name".parse::<Attribute>()?))
+            .select({
+                let (d, n) = "user/name".parse::<Attribute>()?.split();
+                ArtifactSelector::new().with_domain(d).with_name(n)
+            })
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -1553,10 +1565,12 @@ mod tests {
             // Scan the branch's underlying claims directly for the
             // dialog.branch/name attribute — bypasses the QuerySession
             // overlay so any hit would mean facts leaked into the tree.
-            let attribute = "dialog.branch/name".parse::<dialog_artifacts::Attribute>()?;
+            let (domain, name) = "dialog.branch/name"
+                .parse::<dialog_artifacts::Attribute>()?
+                .split();
             let select = branch
                 .claims()
-                .select(ArtifactSelector::new().with_attribute(attribute));
+                .select(ArtifactSelector::new().with_domain(domain).with_name(name));
             let store = crate::NetworkedIndex::new(&operator, select.catalog(), None);
             let stream = select.execute(store).await?;
             let leaked: Vec<_> = stream.collect::<Vec<_>>().await;
@@ -1808,10 +1822,10 @@ mod tests {
 
             let scan_modes: &[(&str, ArtifactSelector<Constrained>)] = &[
                 ("EAV (.of)", ArtifactSelector::new().of(alice.clone())),
-                (
-                    "AEV (.with_attribute)",
-                    ArtifactSelector::new().with_attribute(name_attr.clone()),
-                ),
+                ("AEV (.with_domain.with_name)", {
+                    let (domain, name) = name_attr.split();
+                    ArtifactSelector::new().with_domain(domain).with_name(name)
+                }),
                 // VAE: "Shared" lives under two different attributes
                 // (name on charlie, role on alice) — exercises the
                 // (attribute, entity) residual ordering, not just
@@ -1905,7 +1919,10 @@ mod tests {
 
             let results: Vec<_> = r_branch
                 .claims()
-                .select(ArtifactSelector::new().with_attribute("user/name".parse::<Attribute>()?))
+                .select({
+                    let (d, n) = "user/name".parse::<Attribute>()?.split();
+                    ArtifactSelector::new().with_domain(d).with_name(n)
+                })
                 .perform(&operator)
                 .await?
                 .collect::<Vec<_>>()
@@ -1954,7 +1971,10 @@ mod tests {
             let named_branch = named_repo.branch("main").open().perform(&operator).await?;
             let results: Vec<_> = named_branch
                 .claims()
-                .select(ArtifactSelector::new().with_attribute("item/tag".parse::<Attribute>()?))
+                .select({
+                    let (d, n) = "item/tag".parse::<Attribute>()?.split();
+                    ArtifactSelector::new().with_domain(d).with_name(n)
+                })
                 .perform(&operator)
                 .await?
                 .collect::<Vec<_>>()

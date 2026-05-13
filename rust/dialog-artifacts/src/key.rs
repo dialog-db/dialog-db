@@ -36,8 +36,10 @@ macro_rules! mutable_slice {
 
 pub(crate) use mutable_slice;
 
+use std::str::FromStr;
+
 use crate::{
-    ArtifactSelector, AttributePattern, DialogArtifactsError, ValueDataType, selector::Constrained,
+    ArtifactSelector, Attribute, DialogArtifactsError, ValueDataType, selector::Constrained,
 };
 
 /// Length of the key tag field in bytes
@@ -215,11 +217,16 @@ pub trait KeyViewMut: KeyView {
             key = key.set_entity(entity.into());
         };
 
-        match selector.attribute() {
-            Some(AttributePattern::Exact(attribute)) => {
-                key = key.set_attribute(AttributeKeyPart::from(attribute));
+        match (selector.domain(), selector.name()) {
+            (Some(domain), Some(name)) => {
+                // Both halves bound: write the joined attribute. The join
+                // succeeds because both halves were validated against the
+                // joint budget when the selector was built.
+                let attr = Attribute::from_str(&format!("{domain}/{name}"))
+                    .expect("Symbol pair fits in attribute slot by construction");
+                key = key.set_attribute(AttributeKeyPart::from(&attr));
             }
-            Some(AttributePattern::Domain(domain)) => {
+            (Some(domain), None) => {
                 // Domain-only: write `domain ++ DELIMITER` as the prefix.
                 // The trailing delimiter prevents the scan from matching
                 // attributes whose domain merely starts with these bytes
@@ -230,7 +237,11 @@ pub trait KeyViewMut: KeyView {
                 prefix.push(b'/');
                 key = key.set_attribute_prefix(&prefix);
             }
-            None => {}
+            (None, Some(_)) => {
+                // Name without domain doesn't constrain a contiguous range
+                // on the attribute index; the post-filter handles correctness.
+            }
+            (None, None) => {}
         }
 
         if let Some(value_type) = selector.value().map(|value| value.data_type()) {
