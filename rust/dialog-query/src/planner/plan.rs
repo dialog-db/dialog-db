@@ -230,6 +230,84 @@ mod tests {
         );
     }
 
+    /// A standalone query (single optional premise, nothing
+    /// constraining it further) keeps its `is` term's optional
+    /// kind through planning. The rewrite doesn't strip
+    /// optionality when inference didn't strip it either.
+    #[dialog_common::test]
+    fn it_preserves_local_optionality_when_no_other_premise_narrows() {
+        let optional_name: Term<Any> = Term::<Option<String>>::var("name").into();
+        let premises = vec![
+            AttributeQuery::new(
+                Term::from(the!("person/name")),
+                Term::<Entity>::var("this"),
+                optional_name,
+                Term::var("cause"),
+                Some(Cardinality::One),
+            )
+            .into(),
+        ];
+        let plan = Planner::from(premises)
+            .plan(&crate::Environment::new())
+            .unwrap();
+
+        if let Premise::Assert(Proposition::Attribute(boxed)) = &plan.steps[0].premise {
+            assert!(
+                boxed.is().is_optional(),
+                "single optional premise should keep its optional `is`"
+            );
+        }
+    }
+
+    /// Replanning a `Conjunction` preserves the rule-level
+    /// narrowing. The fresh inference pass over already-narrowed
+    /// premises is idempotent and yields the same non-optional
+    /// `is` kinds.
+    #[dialog_common::test]
+    fn it_preserves_narrowing_across_replans() {
+        use crate::planner::Conjunction;
+        let optional_name: Term<Any> = Term::<Option<String>>::var("nick").into();
+        let typed_name: Term<Any> = Term::<String>::var("nick").into();
+        let premises = vec![
+            AttributeQuery::new(
+                Term::from(the!("person/nickname")),
+                Term::<Entity>::var("this"),
+                optional_name,
+                Term::var("cause1"),
+                Some(Cardinality::One),
+            )
+            .into(),
+            AttributeQuery::new(
+                Term::from(the!("person/name")),
+                Term::<Entity>::var("this"),
+                typed_name,
+                Term::var("cause2"),
+                Some(Cardinality::One),
+            )
+            .into(),
+        ];
+        let plan = Planner::from(premises)
+            .plan(&crate::Environment::new())
+            .unwrap();
+
+        // Replan against a new scope where `this` is bound.
+        let mut scope = crate::Environment::new();
+        scope.add("this");
+        let replanned: Conjunction = plan.plan(&scope).unwrap();
+
+        // The replanned steps still have the narrowed `is`.
+        for step in &replanned.steps {
+            if let Premise::Assert(Proposition::Attribute(boxed)) = &step.premise
+                && boxed.is().name() == Some("nick")
+            {
+                assert!(
+                    !boxed.is().is_optional(),
+                    "narrowing must survive replanning"
+                );
+            }
+        }
+    }
+
     /// `apply_types` reaches into negated propositions too. A
     /// negated attribute query that references an inferred
     /// variable should see its `is` rewritten to match the env.

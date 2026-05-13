@@ -234,6 +234,51 @@ mod tests {
         assert_eq!(name_kind.as_value_type(), Some(ValueType::String));
     }
 
+    /// Three premises, all referencing `?name`: two optional, one
+    /// required. The required one alone is enough to strip
+    /// `Nothing` from the inferred type. Verifies that
+    /// inference is *intersection*, not union.
+    #[dialog_common::test]
+    fn it_strips_nothing_when_any_premise_is_required() {
+        let opt_a: Term<Any> = Term::<Option<String>>::var("name").into();
+        let opt_b: Term<Any> = Term::<Option<String>>::var("name").into();
+        let req: Term<Any> = Term::<String>::var("name").into();
+        let premises = vec![
+            AttributeQuery::new(
+                Term::from(the!("person/nickname")),
+                Term::<Entity>::var("this"),
+                opt_a,
+                Term::var("c1"),
+                Some(Cardinality::One),
+            )
+            .into(),
+            AttributeQuery::new(
+                Term::from(the!("person/alias")),
+                Term::<Entity>::var("this"),
+                opt_b,
+                Term::var("c2"),
+                Some(Cardinality::One),
+            )
+            .into(),
+            AttributeQuery::new(
+                Term::from(the!("person/name")),
+                Term::<Entity>::var("this"),
+                req,
+                Term::var("c3"),
+                Some(Cardinality::One),
+            )
+            .into(),
+        ];
+        let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
+        let env = TypeEnv::infer(&plan.steps).unwrap();
+        let name_kind = env.get("name").expect("name inferred");
+        assert!(
+            !name_kind.is_optional(),
+            "a single required binding among many optional ones strips Nothing"
+        );
+        assert_eq!(name_kind.as_value_type(), Some(ValueType::String));
+    }
+
     /// Negation premises don't contribute to inference. A
     /// negation that mentions `?x` with kind `String` doesn't
     /// constrain the rule-level type of `?x`; the positive
