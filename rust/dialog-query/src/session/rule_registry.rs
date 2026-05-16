@@ -61,6 +61,28 @@ impl RuleRegistry {
             .or_insert_with(|| ConceptRules::new(predicate))
             .clone())
     }
+
+    /// Merge every per-concept rule set from `other` into this registry.
+    ///
+    /// Entries that exist on both sides are folded together via
+    /// [`ConceptRules::extend`] so installed rules from both contribute.
+    pub fn extend(&mut self, other: &RuleRegistry) -> Result<(), EvaluationError> {
+        let other_rules = other
+            .rules
+            .read()
+            .map_err(|e| EvaluationError::Store(e.to_string()))?;
+        let mut self_rules = self
+            .rules
+            .write()
+            .map_err(|e| EvaluationError::Store(e.to_string()))?;
+        for (entity, rules) in other_rules.iter() {
+            self_rules
+                .entry(entity.clone())
+                .and_modify(|existing| existing.extend(rules))
+                .or_insert_with(|| rules.clone());
+        }
+        Ok(())
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]

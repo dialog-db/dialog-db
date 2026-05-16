@@ -16,11 +16,17 @@
 //! - [`Overlay`] — facts + a [`RuleRegistry`], implements both providers.
 //! - [`Overlaid<P, O>`] — combines two sources; selects union, rules merge.
 //!
+//! Both [`InMemoryFacts`] and [`Overlay`] implement
+//! [`Update`](dialog_artifacts::Update), so the `assert<C: Statement>` /
+//! `retract<C: Statement>` API mirrors the one on
+//! [`Transaction`](#crate-tx) — any concept instance, attribute expression,
+//! or other [`Statement`](dialog_artifacts::Statement) writes the same way.
+//!
 //! ```ignore
 //! use dialog_query::overlay::{Overlay, Overlaid};
 //!
 //! let overlay = Overlay::new()
-//!     .fact("dialog.meta/name", "dialog:branch", "main".to_string())?
+//!     .assert(Employee { this: id, name: Name("Alice".into()), role: Role("PM".into()) })
 //!     .register(my_rule)?;
 //!
 //! let env = Overlaid::new(branch_env, overlay);
@@ -29,7 +35,8 @@
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStream, DialogArtifactsError, Entity, Select, Value,
+    Artifact, ArtifactSelector, ArtifactStream, Attribute, DialogArtifactsError, Entity, Select,
+    Statement, Update, Value,
 };
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
@@ -44,8 +51,10 @@ use crate::source::SelectRules;
 
 /// An in-memory collection of artifacts that serves as a fact source.
 ///
-/// `InMemoryFacts` implements [`Provider<Select<'a>>`] by filtering its facts
-/// against the selector. Use [`Overlay`] when you also need to attach rules.
+/// Implements [`Update`] so [`assert`](Self::assert) and
+/// [`retract`](Self::retract) accept any [`Statement`] — the same surface
+/// used by transactions. Implements [`Provider<Select<'a>>`] by filtering
+/// its facts against the selector.
 #[derive(Debug, Default, Clone)]
 pub struct InMemoryFacts {
     facts: Vec<Artifact>,
@@ -57,30 +66,58 @@ impl InMemoryFacts {
         Self::default()
     }
 
-    /// Append an artifact to the in-memory store.
-    pub fn assert(mut self, artifact: Artifact) -> Self {
-        self.facts.push(artifact);
+    /// Assert a [`Statement`] into the overlay — same shape as
+    /// [`Transaction::assert`](#crate-tx).
+    pub fn assert<S: Statement>(mut self, statement: S) -> Self {
+        statement.assert(&mut self);
         self
     }
 
-    /// Append an artifact constructed from triple parts.
-    pub fn fact(
-        self,
-        the: impl AsRef<str>,
-        of: impl AsRef<str>,
-        is: impl Into<Value>,
-    ) -> Result<Self, DialogArtifactsError> {
-        Ok(self.assert(Artifact {
-            the: the.as_ref().parse()?,
-            of: of.as_ref().parse::<Entity>()?,
-            is: is.into(),
-            cause: None,
-        }))
+    /// Retract a [`Statement`] from the overlay.
+    ///
+    /// Removes any artifact whose `(the, of, is)` triple was previously
+    /// asserted by the same statement.
+    pub fn retract<S: Statement>(mut self, statement: S) -> Self {
+        statement.retract(&mut self);
+        self
     }
 
     /// The stored artifacts.
     pub fn facts(&self) -> &[Artifact] {
         &self.facts
+    }
+
+    /// Append every artifact from `other` to this store.
+    pub fn extend(mut self, other: InMemoryFacts) -> Self {
+        self.facts.extend(other.facts);
+        self
+    }
+}
+
+impl Update for InMemoryFacts {
+    fn associate(&mut self, the: Attribute, of: Entity, is: Value) {
+        self.facts.push(Artifact {
+            the,
+            of,
+            is,
+            cause: None,
+        });
+    }
+
+    fn associate_unique(&mut self, the: Attribute, of: Entity, is: Value) {
+        // Cardinality-one supersedes any prior (the, of) entry.
+        self.facts.retain(|a| !(a.the == the && a.of == of));
+        self.facts.push(Artifact {
+            the,
+            of,
+            is,
+            cause: None,
+        });
+    }
+
+    fn dissociate(&mut self, the: Attribute, of: Entity, is: Value) {
+        self.facts
+            .retain(|a| !(a.the == the && a.of == of && a.is == is));
     }
 }
 
@@ -122,10 +159,14 @@ impl<'a> Provider<Select<'a>> for InMemoryFacts {
 
 /// An in-memory overlay carrying both synthetic facts and deductive rules.
 ///
-/// `Overlay` is the bundle a [`QuerySession`](crate::session) or similar wires
-/// onto a real fact source. Facts asserted here are unioned with the primary
-/// during evaluation; rules registered here are merged with the primary's
-/// rules per concept so both sets contribute candidates.
+/// `Overlay` is the bundle a [`QuerySession`](crate::session) wires onto a
+/// real fact source. Facts asserted here are unioned with the primary during
+/// evaluation; rules registered here are merged with the primary's rules
+/// per concept so both sets contribute candidates.
+///
+/// The fact-mutation surface mirrors
+/// [`Transaction`](#crate-tx): use [`assert`](Self::assert) /
+/// [`retract`](Self::retract) with any [`Statement`].
 #[derive(Debug, Default, Clone)]
 pub struct Overlay {
     facts: InMemoryFacts,
@@ -138,21 +179,16 @@ impl Overlay {
         Self::default()
     }
 
-    /// Append an artifact.
-    pub fn assert(mut self, artifact: Artifact) -> Self {
-        self.facts = self.facts.assert(artifact);
+    /// Assert a [`Statement`] into the overlay.
+    pub fn assert<S: Statement>(mut self, statement: S) -> Self {
+        statement.assert(&mut self);
         self
     }
 
-    /// Append an artifact constructed from triple parts.
-    pub fn fact(
-        mut self,
-        the: impl AsRef<str>,
-        of: impl AsRef<str>,
-        is: impl Into<Value>,
-    ) -> Result<Self, DialogArtifactsError> {
-        self.facts = self.facts.fact(the, of, is)?;
-        Ok(self)
+    /// Retract a [`Statement`] from the overlay.
+    pub fn retract<S: Statement>(mut self, statement: S) -> Self {
+        statement.retract(&mut self);
+        self
     }
 
     /// Register a pre-built deductive rule on this overlay.
@@ -174,6 +210,29 @@ impl Overlay {
     /// Mutably borrow the rule registry.
     pub fn rules_mut(&mut self) -> &mut RuleRegistry {
         &mut self.rules
+    }
+
+    /// Merge another overlay's facts and rules into this one.
+    ///
+    /// Facts append; rules merge per-concept via [`RuleRegistry::extend`].
+    pub fn extend(mut self, other: Overlay) -> Result<Self, EvaluationError> {
+        self.facts = self.facts.extend(other.facts);
+        self.rules.extend(&other.rules)?;
+        Ok(self)
+    }
+}
+
+impl Update for Overlay {
+    fn associate(&mut self, the: Attribute, of: Entity, is: Value) {
+        self.facts.associate(the, of, is);
+    }
+
+    fn associate_unique(&mut self, the: Attribute, of: Entity, is: Value) {
+        self.facts.associate_unique(the, of, is);
+    }
+
+    fn dissociate(&mut self, the: Attribute, of: Entity, is: Value) {
+        self.facts.dissociate(the, of, is);
     }
 }
 
@@ -281,14 +340,18 @@ mod tests {
 
     #[dialog_common::test]
     async fn in_memory_facts_filters_by_attribute() -> anyhow::Result<()> {
-        let entity: Entity = "dialog:branch".parse()?;
+        let entity: Entity = "id:branch".parse()?;
         let overlay = InMemoryFacts::new()
-            .fact("dialog.meta/name", "dialog:branch", "main".to_string())?
-            .fact(
-                "dialog.meta/upstream",
-                "dialog:branch",
-                "origin".to_string(),
-            )?;
+            .assert(
+                the!("dialog.meta/name")
+                    .of(entity.clone())
+                    .is("main".to_string()),
+            )
+            .assert(
+                the!("dialog.meta/upstream")
+                    .of(entity.clone())
+                    .is("origin".to_string()),
+            );
 
         let selector = ArtifactSelector::new().the("dialog.meta/name".parse()?);
         let stream = Provider::<Select<'_>>::execute(&overlay, selector).await?;
@@ -302,12 +365,30 @@ mod tests {
     }
 
     #[dialog_common::test]
+    async fn retract_removes_matching_fact() -> anyhow::Result<()> {
+        let entity: Entity = "id:branch".parse()?;
+        let overlay = InMemoryFacts::new()
+            .assert(
+                the!("dialog.meta/name")
+                    .of(entity.clone())
+                    .is("main".to_string()),
+            )
+            .retract(
+                the!("dialog.meta/name")
+                    .of(entity.clone())
+                    .is("main".to_string()),
+            );
+
+        assert!(overlay.facts().is_empty(), "retracted fact should be gone");
+        Ok(())
+    }
+
+    #[dialog_common::test]
     async fn overlay_unions_primary_and_overlay_facts() -> anyhow::Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
-        // Write one real fact under dialog.meta/name on a user entity.
         let alice = Entity::new()?;
         branch
             .transaction()
@@ -320,13 +401,12 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        // Overlay adds a synthetic "main" branch name fact.
-        let synthetic: Entity = "dialog:branch".parse()?;
-        let overlay = Overlay::new().fact(
-            "dialog.meta/name",
-            "dialog:branch",
-            "main".to_string(),
-        )?;
+        let synthetic: Entity = "id:branch".parse()?;
+        let overlay = Overlay::new().assert(
+            the!("dialog.meta/name")
+                .of(synthetic.clone())
+                .is("main".to_string()),
+        );
 
         let primary = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let env = Overlaid::new(primary, overlay);
@@ -346,7 +426,6 @@ mod tests {
         assert!(names.contains(&Value::String("Alice".into())));
         assert!(names.contains(&Value::String("main".into())));
 
-        // Sanity check: overlay-only entity must come back when filtered.
         let only_branch = AttributeQuery::new(
             Term::from(the!("dialog.meta/name")),
             Term::from(synthetic),
