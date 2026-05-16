@@ -717,7 +717,7 @@ mod tests {
         use dialog_query::query::Output;
         use dialog_query::{Concept, Entity, Query, Term};
 
-        mod employee {
+        pub mod employee {
             #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
             pub struct Name(pub String);
 
@@ -727,9 +727,9 @@ mod tests {
 
         #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
         pub struct Employee {
-            this: Entity,
-            name: employee::Name,
-            role: employee::Role,
+            pub this: Entity,
+            pub name: employee::Name,
+            pub role: employee::Role,
         }
 
         #[dialog_common::test]
@@ -1000,8 +1000,8 @@ mod tests {
     }
 
     mod overlay {
+        use super::query_engine::{Employee, employee};
         use crate::helpers::{test_operator_with_profile, test_repo};
-        use dialog_artifacts::{Artifact, Value};
         use dialog_query::query::Output;
         use dialog_query::{Concept, Entity, Query, Term, the};
 
@@ -1023,20 +1023,20 @@ mod tests {
 
         #[dialog_common::test]
         async fn session_assert_exposes_overlay_facts_in_query() -> anyhow::Result<()> {
-            // The user-facing path: `session.assert(...)` followed by a
-            // normal `.select(...)` should see the asserted overlay.
+            // The user-facing path: `session.assert(...)` (same surface as
+            // `transaction.assert(...)`) followed by a normal `.select(...)`
+            // should see the asserted overlay.
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
-            let synthetic: Entity = "dialog:branch".parse()?;
+            let synthetic: Entity = "id:branch".parse()?;
             let results: Vec<BranchMeta> = branch
                 .query()
-                .fact(
-                    "dialog.meta/name",
-                    "dialog:branch",
-                    Value::String("main".into()),
-                )?
+                .assert(BranchMeta {
+                    this: synthetic.clone(),
+                    name: branch_meta::Name("main".into()),
+                })
                 .select(Query::<BranchMeta> {
                     this: synthetic.clone().into(),
                     name: Term::var("name"),
@@ -1048,6 +1048,34 @@ mod tests {
             assert_eq!(results.len(), 1);
             assert_eq!(results[0].this, synthetic);
             assert_eq!(results[0].name.0, "main");
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn session_retract_removes_overlay_fact() -> anyhow::Result<()> {
+            // assert + retract should net to no overlay fact.
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let synthetic: Entity = "id:branch".parse()?;
+            let asserted = BranchMeta {
+                this: synthetic.clone(),
+                name: branch_meta::Name("main".into()),
+            };
+            let results: Vec<BranchMeta> = branch
+                .query()
+                .assert(asserted.clone())
+                .retract(asserted)
+                .select(Query::<BranchMeta> {
+                    this: synthetic.into(),
+                    name: Term::var("name"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+
+            assert!(results.is_empty());
             Ok(())
         }
 
@@ -1069,10 +1097,10 @@ mod tests {
             // Reload the branch so its revision cell reflects the commit.
             let branch = repo.branch("main").load().perform(&operator).await?;
 
-            let synthetic: Entity = "dialog:branch".parse()?;
+            let synthetic: Entity = "id:branch".parse()?;
             let names: Vec<BranchMeta> = branch
                 .query()
-                .with_overlay(branch.metadata())
+                .overlay(branch.metadata())?
                 .select(Query::<BranchMeta> {
                     this: synthetic.clone().into(),
                     name: Term::var("name"),
@@ -1087,7 +1115,7 @@ mod tests {
             // The revision-hash fact should be present.
             let revision: Vec<branch_meta::RevisionHash> = branch
                 .query()
-                .with_overlay(branch.metadata())
+                .overlay(branch.metadata())?
                 .select(Query::<RevisionConcept> {
                     this: synthetic.clone().into(),
                     revision_hash: Term::var("hash"),
@@ -1111,6 +1139,106 @@ mod tests {
         }
 
         #[dialog_common::test]
+        async fn overlay_unions_two_branches() -> anyhow::Result<()> {
+            // Layering a second branch onto a query session should union
+            // both branches' facts during select.
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let main = repo.branch("main").open().perform(&operator).await?;
+            let feature = repo.branch("feature").open().perform(&operator).await?;
+
+            main.transaction()
+                .assert(Employee {
+                    this: Entity::new()?,
+                    name: employee::Name("Alice".into()),
+                    role: employee::Role("Engineer".into()),
+                })
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            feature
+                .transaction()
+                .assert(Employee {
+                    this: Entity::new()?,
+                    name: employee::Name("Bob".into()),
+                    role: employee::Role("Designer".into()),
+                })
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            // Reload so the branch handles know about their revisions.
+            let main = repo.branch("main").load().perform(&operator).await?;
+            let feature = repo.branch("feature").load().perform(&operator).await?;
+
+            let mut names: Vec<String> = feature
+                .query()
+                .overlay(&main)?
+                .select(Query::<Employee> {
+                    this: Term::var("this"),
+                    name: Term::var("name"),
+                    role: Term::var("role"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?
+                .into_iter()
+                .map(|e| e.name.0)
+                .collect();
+            names.sort();
+            assert_eq!(names, vec!["Alice".to_string(), "Bob".to_string()]);
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn overlay_chains_branch_and_memory() -> anyhow::Result<()> {
+            // Same session can layer a branch *and* an in-memory Overlay.
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let main = repo.branch("main").open().perform(&operator).await?;
+            let scratch = repo.branch("scratch").open().perform(&operator).await?;
+
+            main.transaction()
+                .assert(Employee {
+                    this: Entity::new()?,
+                    name: employee::Name("Alice".into()),
+                    role: employee::Role("Engineer".into()),
+                })
+                .commit()
+                .perform(&operator)
+                .await?;
+            let main = repo.branch("main").load().perform(&operator).await?;
+            // `scratch` has no commits yet — `open()` is enough, the branch
+            // simply selects against the empty tree.
+            let mut names: Vec<String> = scratch
+                .query()
+                .overlay(&main)?
+                .assert(Employee {
+                    this: Entity::new()?,
+                    name: employee::Name("Synthetic".into()),
+                    role: employee::Role("Bot".into()),
+                })
+                .select(Query::<Employee> {
+                    this: Term::var("this"),
+                    name: Term::var("name"),
+                    role: Term::var("role"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?
+                .into_iter()
+                .map(|e| e.name.0)
+                .collect();
+            names.sort();
+            assert_eq!(
+                names,
+                vec!["Alice".to_string(), "Synthetic".to_string()]
+            );
+            Ok(())
+        }
+
+        #[dialog_common::test]
         async fn overlay_facts_union_with_stored_facts() -> anyhow::Result<()> {
             // Asserting an overlay fact under the same attribute as a stored
             // fact should yield both rows when queried.
@@ -1130,13 +1258,12 @@ mod tests {
                 .perform(&operator)
                 .await?;
 
+            let synthetic: Entity = "id:branch".parse()?;
             let names: Vec<BranchMeta> = branch
                 .query()
-                .assert(Artifact {
-                    the: "dialog.meta/name".parse()?,
-                    of: "dialog:branch".parse()?,
-                    is: Value::String("main".into()),
-                    cause: None,
+                .assert(BranchMeta {
+                    this: synthetic.clone(),
+                    name: branch_meta::Name("main".into()),
                 })
                 .select(Query::<BranchMeta> {
                     this: Term::var("this"),
