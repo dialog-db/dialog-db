@@ -1,7 +1,5 @@
 use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{
-    ArtifactSelector, ArtifactStream, DialogArtifactsError, Select, Statement,
-};
+use dialog_artifacts::{ArtifactSelector, ArtifactStream, DialogArtifactsError, Select};
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
@@ -11,49 +9,62 @@ use dialog_query::concept::query::ConceptRules;
 use dialog_query::error::EvaluationError;
 use dialog_query::overlay::Overlay;
 use dialog_query::query::{Application, Output};
-use dialog_query::rule::When;
-use dialog_query::rule::deductive::DeductiveRule;
 use dialog_query::source::SelectRules;
 
 use crate::{Branch, NetworkedIndex, RemoteSite, RepositoryMemoryExt, Upstream};
 
 /// A query session on a branch.
 ///
-/// Created by [`Branch::query`]. The session is a composition surface:
-/// - `.assert(stmt)` / `.retract(stmt)` push facts into an in-memory
-///   [`Overlay`] using the same [`Statement`] API as [`Transaction`].
-/// - `.install(rule_fn)` / `.register(rule)` add deductive rules to the
-///   overlay so they merge per-concept with the implicit rules.
-/// - `.overlay(layer)` layers another source (a `&Branch` or a pre-built
-///   `Overlay`) on top. Layers compose incrementally; selects union from
-///   every layer at perform time.
+/// Created by [`Branch::query`]. The session is a thin composition surface:
+/// it layers additional sources on top of the primary branch via
+/// `.with(layer)`, then runs queries with `.select(q).perform(&env)`.
 ///
-/// All layering is captured on the session itself — no environment is
-/// referenced until `.select(...).perform(env)` runs.
+/// Mutable state — synthetic facts, installed rules — lives on the
+/// [`Overlay`] *layers* the caller builds, not on the session. Build a
+/// layer end-to-end, then attach it:
+///
+/// ```ignore
+/// let metadata = branch.metadata();              // a pre-built overlay
+/// let synthetic = Overlay::new()
+///     .assert(my_concept_instance)
+///     .install(|q: Query<Derived>| (...,))?;
+///
+/// branch.query()
+///     .with(&other_branch)?                      // union with another branch
+///     .with(metadata)?                           // union with branch metadata
+///     .with(synthetic)?                          // union with in-memory layer
+///     .select(query)
+///     .perform(&env);
+/// ```
+///
+/// No environment reference is captured on the session itself —
+/// `CompositeEnv` is built fresh at `.perform(env)`.
 pub struct QuerySession<'a> {
     primary: &'a Branch,
     branches: Vec<&'a Branch>,
     overlay: Overlay,
 }
 
-/// A source that can be added as an overlay layer on a [`QuerySession`].
+/// A source that can be layered onto a [`QuerySession`] via
+/// [`QuerySession::with`].
 ///
 /// Implemented for `&'a Branch` (adds another branch's facts to the union)
-/// and `Overlay` (merges in-memory facts and rules into the session's
-/// accumulator). Avoids exposing the layer enum or capturing the env.
-pub trait OverlayLayer<'a> {
+/// and [`Overlay`] (merges in-memory facts and rules into the session's
+/// accumulator). The trait keeps the session's composition API polymorphic
+/// without exposing the underlying layer enum or capturing the env.
+pub trait QueryLayer<'a> {
     /// Apply this layer to the given session.
     fn apply(self, session: QuerySession<'a>) -> Result<QuerySession<'a>, EvaluationError>;
 }
 
-impl<'a> OverlayLayer<'a> for &'a Branch {
+impl<'a> QueryLayer<'a> for &'a Branch {
     fn apply(self, mut session: QuerySession<'a>) -> Result<QuerySession<'a>, EvaluationError> {
         session.branches.push(self);
         Ok(session)
     }
 }
 
-impl<'a> OverlayLayer<'a> for Overlay {
+impl<'a> QueryLayer<'a> for Overlay {
     fn apply(self, mut session: QuerySession<'a>) -> Result<QuerySession<'a>, EvaluationError> {
         session.overlay = session.overlay.extend(self)?;
         Ok(session)
@@ -61,72 +72,24 @@ impl<'a> OverlayLayer<'a> for Overlay {
 }
 
 impl<'a> QuerySession<'a> {
-    /// Register a pre-built deductive rule on the session overlay.
-    pub fn register(mut self, rule: DeductiveRule) -> Result<Self, EvaluationError> {
-        self.overlay = self.overlay.register(rule)?;
-        Ok(self)
-    }
-
-    /// Install a deductive rule from a function.
-    pub fn install<M, W>(mut self, rule: impl Fn(M) -> W) -> Result<Self, EvaluationError>
-    where
-        M: Application + Default + Into<ConceptDescriptor>,
-        W: When,
-    {
-        let query = M::default();
-        let concept: ConceptDescriptor = query.clone().into();
-        let when = rule(query).into_premises();
-        let premises = when.into_vec();
-        let rule =
-            DeductiveRule::new(concept, premises).map_err(|e| EvaluationError::Planning {
-                message: e.to_string(),
-            })?;
-        self.overlay = self.overlay.register(rule)?;
-        Ok(self)
-    }
-
-    /// Assert a [`Statement`] into the session's overlay — same shape as
-    /// [`Transaction::assert`](super::Transaction::assert), but the result
-    /// is queryable in-memory rather than committed to storage.
-    pub fn assert<S: Statement>(mut self, statement: S) -> Self {
-        self.overlay = self.overlay.assert(statement);
-        self
-    }
-
-    /// Retract a [`Statement`] from the session's overlay.
-    pub fn retract<S: Statement>(mut self, statement: S) -> Self {
-        self.overlay = self.overlay.retract(statement);
-        self
-    }
-
     /// Layer another source on top of this session.
     ///
-    /// Accepts any [`OverlayLayer`] — currently a `&Branch` (its data is
+    /// Accepts any [`QueryLayer`] — currently a `&Branch` (its data is
     /// unioned at perform time) or an [`Overlay`] (merged into the
     /// session's in-memory accumulator). Chainable.
-    ///
-    /// ```ignore
-    /// let main = repo.branch("main").load().perform(&op).await?;
-    /// let feature = repo.branch("feature/x").load().perform(&op).await?;
-    /// let results = feature.query()
-    ///     .overlay(&main)
-    ///     .overlay(feature.metadata())
-    ///     .assert(my_synthetic_fact)
-    ///     .select(query)
-    ///     .perform(&op);
-    /// ```
-    pub fn overlay<L: OverlayLayer<'a>>(self, layer: L) -> Result<Self, EvaluationError> {
+    pub fn with<L: QueryLayer<'a>>(self, layer: L) -> Result<Self, EvaluationError> {
         layer.apply(self)
-    }
-
-    /// Borrow the accumulated overlay.
-    pub fn current_overlay(&self) -> &Overlay {
-        &self.overlay
     }
 
     /// Borrow the extra branches layered on this session.
     pub fn layered_branches(&self) -> &[&'a Branch] {
         &self.branches
+    }
+
+    /// Borrow the merged overlay (combination of every [`Overlay`] layered
+    /// onto this session).
+    pub fn layered_overlay(&self) -> &Overlay {
+        &self.overlay
     }
 
     /// Select with a query application. Call `.perform(&operator)` to execute.
@@ -289,10 +252,9 @@ impl<Env: ConditionalSync> Provider<SelectRules> for CompositeEnv<'_, Env> {
 impl Branch {
     /// Open a query session on this branch.
     ///
-    /// The session starts with an empty overlay and no layered branches.
-    /// Use `.assert(...)` / `.retract(...)` to inject in-memory facts,
-    /// `.install(...)` / `.register(...)` to attach deductive rules, and
-    /// `.overlay(...)` to layer another `&Branch` or a pre-built `Overlay`.
+    /// The session starts empty — no layered branches, no in-memory facts.
+    /// Use `.with(layer)` to attach a `&Branch` or a pre-built `Overlay`
+    /// (which is where you assert facts and install rules).
     pub fn query(&self) -> QuerySession<'_> {
         QuerySession {
             primary: self,
@@ -305,7 +267,7 @@ impl Branch {
     /// (name, revision hash, upstream, hosting repository) under the
     /// `dialog.meta/*` attribute namespace.
     ///
-    /// Compose with `branch.query().overlay(branch.metadata())?` to make
+    /// Compose with `branch.query().with(branch.metadata())?` to make
     /// branch internals queryable like any other fact.
     pub fn metadata(&self) -> Overlay {
         super::metadata::branch_metadata(self)

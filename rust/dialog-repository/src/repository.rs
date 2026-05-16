@@ -1002,6 +1002,7 @@ mod tests {
     mod overlay {
         use super::query_engine::{Employee, employee};
         use crate::helpers::{test_operator_with_profile, test_repo};
+        use dialog_query::overlay::Overlay;
         use dialog_query::query::Output;
         use dialog_query::{Concept, Entity, Query, Term, the};
 
@@ -1022,21 +1023,21 @@ mod tests {
         }
 
         #[dialog_common::test]
-        async fn session_assert_exposes_overlay_facts_in_query() -> anyhow::Result<()> {
-            // The user-facing path: `session.assert(...)` (same surface as
-            // `transaction.assert(...)`) followed by a normal `.select(...)`
-            // should see the asserted overlay.
+        async fn overlay_layer_exposes_asserted_facts() -> anyhow::Result<()> {
+            // Build an Overlay end-to-end, then attach via .with(...).
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
             let synthetic: Entity = "id:branch".parse()?;
+            let layer = Overlay::new().assert(BranchMeta {
+                this: synthetic.clone(),
+                name: branch_meta::Name("main".into()),
+            });
+
             let results: Vec<BranchMeta> = branch
                 .query()
-                .assert(BranchMeta {
-                    this: synthetic.clone(),
-                    name: branch_meta::Name("main".into()),
-                })
+                .with(layer)?
                 .select(Query::<BranchMeta> {
                     this: synthetic.clone().into(),
                     name: Term::var("name"),
@@ -1052,8 +1053,8 @@ mod tests {
         }
 
         #[dialog_common::test]
-        async fn session_retract_removes_overlay_fact() -> anyhow::Result<()> {
-            // assert + retract should net to no overlay fact.
+        async fn overlay_retract_on_layer_removes_fact() -> anyhow::Result<()> {
+            // assert + retract on the layer net to no fact.
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
@@ -1063,10 +1064,11 @@ mod tests {
                 this: synthetic.clone(),
                 name: branch_meta::Name("main".into()),
             };
+            let layer = Overlay::new().assert(asserted.clone()).retract(asserted);
+
             let results: Vec<BranchMeta> = branch
                 .query()
-                .assert(asserted.clone())
-                .retract(asserted)
+                .with(layer)?
                 .select(Query::<BranchMeta> {
                     this: synthetic.into(),
                     name: Term::var("name"),
@@ -1100,7 +1102,7 @@ mod tests {
             let synthetic: Entity = "id:branch".parse()?;
             let names: Vec<BranchMeta> = branch
                 .query()
-                .overlay(branch.metadata())?
+                .with(branch.metadata())?
                 .select(Query::<BranchMeta> {
                     this: synthetic.clone().into(),
                     name: Term::var("name"),
@@ -1115,7 +1117,7 @@ mod tests {
             // The revision-hash fact should be present.
             let revision: Vec<branch_meta::RevisionHash> = branch
                 .query()
-                .overlay(branch.metadata())?
+                .with(branch.metadata())?
                 .select(Query::<RevisionConcept> {
                     this: synthetic.clone().into(),
                     revision_hash: Term::var("hash"),
@@ -1174,7 +1176,7 @@ mod tests {
 
             let mut names: Vec<String> = feature
                 .query()
-                .overlay(&main)?
+                .with(&main)?
                 .select(Query::<Employee> {
                     this: Term::var("this"),
                     name: Term::var("name"),
@@ -1211,14 +1213,15 @@ mod tests {
             let main = repo.branch("main").load().perform(&operator).await?;
             // `scratch` has no commits yet — `open()` is enough, the branch
             // simply selects against the empty tree.
+            let synthetic_layer = Overlay::new().assert(Employee {
+                this: Entity::new()?,
+                name: employee::Name("Synthetic".into()),
+                role: employee::Role("Bot".into()),
+            });
             let mut names: Vec<String> = scratch
                 .query()
-                .overlay(&main)?
-                .assert(Employee {
-                    this: Entity::new()?,
-                    name: employee::Name("Synthetic".into()),
-                    role: employee::Role("Bot".into()),
-                })
+                .with(&main)?
+                .with(synthetic_layer)?
                 .select(Query::<Employee> {
                     this: Term::var("this"),
                     name: Term::var("name"),
@@ -1259,12 +1262,13 @@ mod tests {
                 .await?;
 
             let synthetic: Entity = "id:branch".parse()?;
+            let layer = Overlay::new().assert(BranchMeta {
+                this: synthetic,
+                name: branch_meta::Name("main".into()),
+            });
             let names: Vec<BranchMeta> = branch
                 .query()
-                .assert(BranchMeta {
-                    this: synthetic.clone(),
-                    name: branch_meta::Name("main".into()),
-                })
+                .with(layer)?
                 .select(Query::<BranchMeta> {
                     this: Term::var("this"),
                     name: Term::var("name"),

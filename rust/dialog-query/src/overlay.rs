@@ -45,6 +45,8 @@ use futures_util::stream::{self, StreamExt};
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::concept::query::ConceptRules;
 use crate::error::EvaluationError;
+use crate::query::Application;
+use crate::rule::When;
 use crate::rule::deductive::DeductiveRule;
 use crate::session::RuleRegistry;
 use crate::source::SelectRules;
@@ -195,6 +197,37 @@ impl Overlay {
     pub fn register(mut self, rule: DeductiveRule) -> Result<Self, EvaluationError> {
         self.rules.register(rule)?;
         Ok(self)
+    }
+
+    /// Install a deductive rule from a closure that builds its body from a
+    /// fresh query of the conclusion concept.
+    ///
+    /// The closure receives a default-constructed `Query<M>`; whatever
+    /// premises it returns become the rule body.
+    ///
+    /// ```ignore
+    /// let overlay = Overlay::new()
+    ///     .install(|employee: Query<Employee>| {
+    ///         (
+    ///             Query::<Stuff> { this: employee.this.clone(), ... },
+    ///             ...
+    ///         )
+    ///     })?;
+    /// ```
+    pub fn install<M, W>(self, rule: impl Fn(M) -> W) -> Result<Self, EvaluationError>
+    where
+        M: Application + Default + Into<ConceptDescriptor>,
+        W: When,
+    {
+        let query = M::default();
+        let concept: ConceptDescriptor = query.clone().into();
+        let when = rule(query).into_premises();
+        let premises = when.into_vec();
+        let rule =
+            DeductiveRule::new(concept, premises).map_err(|e| EvaluationError::Planning {
+                message: e.to_string(),
+            })?;
+        self.register(rule)
     }
 
     /// Borrow the underlying fact store.
