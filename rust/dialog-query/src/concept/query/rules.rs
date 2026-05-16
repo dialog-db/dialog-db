@@ -51,6 +51,23 @@ impl ConceptRules {
         }
     }
 
+    /// The explicitly installed rules (does not include the implicit rule).
+    pub fn installed(&self) -> &[DeductiveRule] {
+        &self.installed
+    }
+
+    /// Install every rule from `other` into this `ConceptRules`.
+    ///
+    /// Used when combining two rule sources (e.g. a primary registry and an
+    /// overlay) so all installed rules contribute to planning. The implicit
+    /// rule is the same in both — it is derived from the concept descriptor —
+    /// so only the `installed` set is merged.
+    pub fn extend(&mut self, other: &ConceptRules) {
+        for rule in &other.installed {
+            self.install(rule.clone());
+        }
+    }
+
     /// Get or compute a cached plan for the given binding pattern.
     pub fn plan(&self, terms: &Parameters, matched: &Match) -> Arc<Disjunction> {
         let adornment = Adornment::derive(terms, matched);

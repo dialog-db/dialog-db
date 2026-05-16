@@ -42,6 +42,8 @@ pub mod error;
 pub mod formula;
 /// Negation support for excluding matching results.
 pub mod negation;
+/// In-memory overlays unioned with a primary source during evaluation.
+pub mod overlay;
 /// Named parameter bindings for rule and formula applications.
 pub mod parameters;
 /// Query planner that compiles premises into execution plans.
@@ -84,6 +86,7 @@ pub use environment::*;
 pub use error::*;
 pub use formula::*;
 pub use negation::*;
+pub use overlay::{InMemoryFacts, Overlaid, Overlay};
 pub use parameters::*;
 pub use planner::*;
 pub use predicate::*;

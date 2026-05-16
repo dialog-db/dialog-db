@@ -3,6 +3,8 @@ use crate::EvaluationError;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::concept::query::ConceptRules;
 use crate::rule::deductive::DeductiveRule;
+use crate::source::SelectRules;
+use dialog_capability::Provider;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -58,5 +60,13 @@ impl RuleRegistry {
             .entry(entity)
             .or_insert_with(|| ConceptRules::new(predicate))
             .clone())
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<SelectRules> for RuleRegistry {
+    async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
+        self.acquire(&input)
     }
 }
