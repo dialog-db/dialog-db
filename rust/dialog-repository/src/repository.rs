@@ -1448,6 +1448,89 @@ mod tests {
             pub role: stuff_role::Role,
         }
 
+        mod cardinality_one_attr {
+            #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+            #[domain("person")]
+            pub struct Nickname(pub String);
+        }
+
+        #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        pub struct WithNickname {
+            pub this: Entity,
+            pub nickname: cardinality_one_attr::Nickname,
+        }
+
+        #[dialog_common::test]
+        async fn cross_branch_overlay_preserves_cardinality_one_winner() -> anyhow::Result<()> {
+            // Regression for the streaming merge: two branches both holding
+            // facts for the same (attribute, entity) pair under a
+            // cardinality-one attribute must still yield exactly one winner
+            // per entity when queried through a composed session. The
+            // sliding-window in `only.rs` assumes consecutive `(the, of)`
+            // grouping, so the composite env must merge — not chain —
+            // branch streams.
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let main = repo.branch("main").open().perform(&operator).await?;
+            let feature = repo.branch("feature").open().perform(&operator).await?;
+
+            let alice: Entity = "id:alice".parse()?;
+            let bob: Entity = "id:bob".parse()?;
+
+            main.transaction()
+                .assert(WithNickname {
+                    this: alice.clone(),
+                    nickname: cardinality_one_attr::Nickname("Ali".into()),
+                })
+                .assert(WithNickname {
+                    this: bob.clone(),
+                    nickname: cardinality_one_attr::Nickname("Bobby".into()),
+                })
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            feature
+                .transaction()
+                .assert(WithNickname {
+                    this: alice.clone(),
+                    nickname: cardinality_one_attr::Nickname("Ally".into()),
+                })
+                .assert(WithNickname {
+                    this: bob.clone(),
+                    nickname: cardinality_one_attr::Nickname("Rob".into()),
+                })
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            let main = repo.branch("main").load().perform(&operator).await?;
+            let feature = repo.branch("feature").load().perform(&operator).await?;
+
+            let results: Vec<WithNickname> = feature
+                .query()
+                .with(&main)?
+                .select(Query::<WithNickname> {
+                    this: Term::var("this"),
+                    nickname: Term::var("nickname"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+
+            assert_eq!(
+                results.len(),
+                2,
+                "cardinality-one across composed branches must yield one row per entity"
+            );
+            let mut entities: Vec<Entity> = results.into_iter().map(|w| w.this).collect();
+            entities.sort();
+            let mut expected = vec![alice, bob];
+            expected.sort();
+            assert_eq!(entities, expected);
+            Ok(())
+        }
+
         #[dialog_common::test]
         async fn install_rule_on_layer_derives_facts_in_query() -> anyhow::Result<()> {
             // End-to-end: rule installed on an Overlay layer derives Employee

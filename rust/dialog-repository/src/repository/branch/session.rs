@@ -7,7 +7,7 @@ use dialog_effects::memory::Resolve;
 use dialog_query::concept::descriptor::ConceptDescriptor;
 use dialog_query::concept::query::ConceptRules;
 use dialog_query::error::EvaluationError;
-use dialog_query::overlay::Overlay;
+use dialog_query::overlay::{Overlay, merge_grouped};
 use dialog_query::query::{Application, Output};
 use dialog_query::source::SelectRules;
 
@@ -223,19 +223,18 @@ where
         &self,
         input: ArtifactSelector<Constrained>,
     ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
-        // Each branch produces a stream; collect them, then chain with the
-        // in-memory overlay. Streams are returned eagerly (the inner state
-        // is loaded up front) so chaining preserves correctness without
-        // re-selecting.
+        // Each source independently yields items with same-`(the, of)`
+        // consecutive (branches by tree key, `InMemoryFacts` by explicit
+        // sort). A plain chain would separate cross-source items sharing a
+        // key and break the cardinality-one sliding window in `only.rs`;
+        // `merge_grouped` interleaves them so the invariant holds.
         let mut streams: Vec<ArtifactStream<'a>> = Vec::with_capacity(self.branches.len() + 2);
         streams.push(Self::select_branch(self.primary, self.env, input.clone()).await?);
         for branch in &self.branches {
             streams.push(Self::select_branch(branch, self.env, input.clone()).await?);
         }
         streams.push(Provider::<Select<'a>>::execute(&self.overlay, input).await?);
-        use futures_util::StreamExt;
-        use futures_util::stream;
-        Ok(Box::pin(stream::iter(streams).flatten()))
+        Ok(merge_grouped(streams))
     }
 }
 

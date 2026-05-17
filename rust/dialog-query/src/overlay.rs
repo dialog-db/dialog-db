@@ -51,6 +51,81 @@ use crate::rule::deductive::DeductiveRule;
 use crate::session::RuleRegistry;
 use crate::source::SelectRules;
 
+/// The canonical group key for artifacts traveling through a query stream.
+///
+/// Downstream consumers — notably the cardinality-one sliding window in
+/// [`AttributeQueryOnly::evaluate`](crate::attribute::query::AttributeQuery) —
+/// assume that artifacts sharing the same `(the, of)` pair arrive
+/// consecutively. Anything that unions facts from multiple sources must
+/// preserve that invariant; this helper produces the comparable key used
+/// when sorting or merging.
+pub fn group_key(artifact: &Artifact) -> (Vec<u8>, Vec<u8>) {
+    (
+        artifact.the.key_bytes().to_vec(),
+        artifact.of.key_bytes().to_vec(),
+    )
+}
+
+/// Merge already-grouped sorted streams into a single stream that preserves
+/// `(the, of)` grouping across all sources.
+///
+/// Each input stream is assumed to be sorted by [`group_key`] — meaning
+/// items with the same `(the, of)` are consecutive within that stream.
+/// The output stream interleaves all sources by the same key so cross-source
+/// items with the same `(the, of)` also become consecutive.
+///
+/// Implemented as a streaming k-way merge with peekable inputs (O(n log k)),
+/// so neither the in-memory overlay nor any branch source has to be
+/// buffered up-front.
+pub fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStream<'a> {
+    use futures_util::StreamExt as _;
+
+    if streams.is_empty() {
+        return Box::pin(stream::empty());
+    }
+    if streams.len() == 1 {
+        // Single source — its order already satisfies the invariant.
+        return streams.into_iter().next().expect("len == 1");
+    }
+
+    use std::pin::Pin;
+
+    let mut peekable: Vec<_> = streams.into_iter().map(StreamExt::peekable).collect();
+
+    Box::pin(async_stream::try_stream! {
+        loop {
+            // Pick the index of the stream whose current head has the
+            // smallest group_key. Errors short-circuit immediately so they
+            // propagate to the caller without losing context.
+            let mut min_idx: Option<usize> = None;
+            let mut min_key: Option<(Vec<u8>, Vec<u8>)> = None;
+            for (i, s) in peekable.iter_mut().enumerate() {
+                match Pin::new(s).peek().await {
+                    None => continue,
+                    Some(Err(_)) => {
+                        min_idx = Some(i);
+                        break;
+                    }
+                    Some(Ok(head)) => {
+                        let key = group_key(head);
+                        if min_key.as_ref().is_none_or(|cur| &key < cur) {
+                            min_key = Some(key);
+                            min_idx = Some(i);
+                        }
+                    }
+                }
+            }
+
+            let Some(idx) = min_idx else { break };
+            let item = peekable[idx]
+                .next()
+                .await
+                .expect("peek returned Some, so next must too");
+            yield item?;
+        }
+    })
+}
+
 /// An in-memory collection of artifacts that serves as a fact source.
 ///
 /// Implements [`Update`] so [`assert`](Self::assert) and
@@ -149,12 +224,16 @@ impl<'a> Provider<Select<'a>> for InMemoryFacts {
         &self,
         input: ArtifactSelector<Constrained>,
     ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
-        let matching: Vec<Artifact> = self
+        let mut matching: Vec<Artifact> = self
             .facts
             .iter()
             .filter(|a| matches(a, &input))
             .cloned()
             .collect();
+        // Sort by (the, of) so items sharing a key are consecutive — the
+        // invariant the cardinality-one sliding window depends on. Insertion
+        // order from `.assert(...)` is not guaranteed to match.
+        matching.sort_by_key(group_key);
         Ok(Box::pin(stream::iter(matching.into_iter().map(Ok))))
     }
 }
@@ -336,9 +415,14 @@ where
         &self,
         input: ArtifactSelector<Constrained>,
     ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
+        // Both inputs are assumed sorted by `group_key` (BranchEnv yields by
+        // tree key order — same (the, of) consecutive — and `InMemoryFacts`
+        // explicitly sorts). A simple chain would separate cross-source
+        // same-(the, of) items and break the cardinality-one sliding window
+        // in `only.rs`; merge_grouped interleaves them correctly.
         let primary = self.primary.execute(input.clone()).await?;
         let overlay = self.overlay.execute(input).await?;
-        Ok(Box::pin(primary.chain(overlay)))
+        Ok(merge_grouped(vec![primary, overlay]))
     }
 }
 
@@ -750,6 +834,190 @@ mod tests {
         let cloned = combined.clone();
         assert_eq!(cloned.primary().facts().len(), 1);
         assert!(cloned.overlay().facts().is_empty());
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn merge_grouped_interleaves_by_the_of() -> anyhow::Result<()> {
+        // Two sources each individually sorted by (the, of); merge_grouped
+        // should produce a stream where all items sharing a (the, of) pair
+        // are consecutive.
+        let alice: Entity = "id:alice".parse()?;
+        let bob: Entity = "id:bob".parse()?;
+
+        let a = InMemoryFacts::new()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("AliceA".to_string()),
+            )
+            .assert(the!("person/name").of(bob.clone()).is("BobA".to_string()));
+        let b = InMemoryFacts::new()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("AliceB".to_string()),
+            )
+            .assert(the!("person/name").of(bob.clone()).is("BobB".to_string()));
+
+        let selector = ArtifactSelector::new().the("person/name".parse()?);
+        let s_a = Provider::<Select<'_>>::execute(&a, selector.clone()).await?;
+        let s_b = Provider::<Select<'_>>::execute(&b, selector).await?;
+
+        let merged = merge_grouped(vec![s_a, s_b]);
+        let results: Vec<Artifact> = merged
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_, _>>()?;
+
+        assert_eq!(results.len(), 4);
+        // Within consecutive runs of same (the, of), at most one transition
+        // back to a previously-seen key is allowed (in fact none).
+        use std::collections::HashSet;
+        let mut seen_keys = HashSet::new();
+        let mut current = None;
+        for r in &results {
+            let key = (r.the.clone(), r.of.clone());
+            if current.as_ref() != Some(&key) {
+                assert!(
+                    seen_keys.insert(key.clone()),
+                    "group {:?} reappears after switching away — merge broke (the, of) grouping",
+                    (key.0.to_string(), key.1.to_string()),
+                );
+                current = Some(key);
+            }
+        }
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn merge_grouped_single_stream_passes_through() -> anyhow::Result<()> {
+        let alice: Entity = "id:alice".parse()?;
+        let only = InMemoryFacts::new().assert(
+            the!("person/name")
+                .of(alice.clone())
+                .is("Alice".to_string()),
+        );
+        let selector = ArtifactSelector::new().the("person/name".parse()?);
+        let stream = Provider::<Select<'_>>::execute(&only, selector).await?;
+        let merged = merge_grouped(vec![stream]);
+        let results: Vec<Artifact> = merged
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_, _>>()?;
+        assert_eq!(results.len(), 1);
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn merge_grouped_empty_inputs_yield_empty() -> anyhow::Result<()> {
+        let merged: ArtifactStream<'static> = merge_grouped(Vec::new());
+        let results: Vec<_> = merged.collect::<Vec<_>>().await;
+        assert!(results.is_empty());
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn in_memory_facts_yields_sorted_by_group_key() -> anyhow::Result<()> {
+        // Assertion order is alice → bob → alice; the stream must reorder so
+        // alice's two facts are adjacent.
+        let alice: Entity = "id:alice".parse()?;
+        let bob: Entity = "id:bob".parse()?;
+        let store = InMemoryFacts::new()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("AliceA".to_string()),
+            )
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("AliceB".to_string()),
+            );
+
+        let selector = ArtifactSelector::new().the("person/name".parse()?);
+        let stream = Provider::<Select<'_>>::execute(&store, selector).await?;
+        let results: Vec<Artifact> = stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_, _>>()?;
+
+        assert_eq!(results.len(), 3);
+        // alice's two values must be consecutive — bob splits them iff sort
+        // is broken.
+        let positions: Vec<usize> = results
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.of == alice)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(positions, vec![0, 1], "alice's facts must be consecutive");
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn overlaid_preserves_cardinality_one_grouping() -> anyhow::Result<()> {
+        // Regression: `only.rs`'s sliding window groups items by consecutive
+        // `(the, of)`. If two sources both have facts for the same `(the, of)`
+        // pair but the merge step does not group them together, the sliding
+        // window emits each "group" as a separate winner — producing
+        // duplicate rows.
+        //
+        // Setup: a branch with (alice, name, "Alice") and (bob, name, "Bob"),
+        // and an overlay with (alice, name, "Alicia") and (bob, name, "Robert").
+        // A cardinality-one query for `person/name` should yield exactly one
+        // row per entity — total 2 — not 4.
+        use crate::Cardinality;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice: Entity = "id:alice".parse()?;
+        let bob: Entity = "id:bob".parse()?;
+
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let overlay = Overlay::new()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alicia".to_string()),
+            )
+            .assert(the!("person/name").of(bob.clone()).is("Robert".to_string()));
+
+        let primary = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let env = Overlaid::new(primary, overlay);
+
+        // Cardinality::One — exactly one winner per (attribute, entity).
+        let results = the!("person/name")
+            .of(Term::<Entity>::var("person"))
+            .is(Term::<String>::var("name"))
+            .cardinality(Cardinality::One)
+            .perform(&env)
+            .try_vec()
+            .await?;
+
+        assert_eq!(
+            results.len(),
+            2,
+            "cardinality-one must yield exactly one row per entity even when \
+             facts come from multiple sources"
+        );
         Ok(())
     }
 
