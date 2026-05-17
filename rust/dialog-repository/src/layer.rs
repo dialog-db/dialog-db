@@ -36,8 +36,8 @@ use async_trait::async_trait;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree as artifact_tree;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStream, Attribute, Changes, DialogArtifactsError, Entity,
-    Select, Statement, Update, Value,
+    Artifact, ArtifactSelector, ArtifactStream, Attribute, Cause, Changes, DialogArtifactsError,
+    Entity, Select, Statement, Update, Value,
 };
 use dialog_capability::{Capability, Provider, Subject};
 use dialog_common::ConditionalSync;
@@ -78,26 +78,46 @@ pub fn group_key(artifact: &Artifact) -> (Vec<u8>, Vec<u8>) {
 }
 
 /// Merge already-grouped sorted streams into one stream that preserves
-/// `(the, of)` grouping across all sources.
+/// `(the, of)` grouping across all sources, deduplicating identical
+/// claims that appear in more than one source.
 ///
 /// Each input is assumed sorted by [`group_key`] (true of branch selects
 /// and of layer selects, by construction). The output stream interleaves
 /// all sources by the same key so cross-source items with the same
-/// `(the, of)` also become consecutive. Implemented as a streaming
-/// k-way merge with peekable inputs.
+/// `(the, of)` become consecutive. Implemented as a streaming k-way merge
+/// with peekable inputs.
+///
+/// "The same claim from two sources is still one claim." When the same
+/// `(the, of, is, cause)` artifact appears in multiple inputs, only the
+/// first occurrence within a `(the, of)` run is yielded. Dedup uses
+/// [`Cause::from(&artifact)`] (a hash over all four fields) so it is
+/// position-independent: duplicates that don't end up adjacent — e.g.
+/// stream A: `[X, Y]`, stream B: `[X]` — are still collapsed because we
+/// track the set of fingerprints seen for the current `(the, of)` group
+/// and reset it when the group key advances.
 pub fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStream<'a> {
+    use std::collections::HashSet;
     use std::pin::Pin;
 
     if streams.is_empty() {
         return Box::pin(stream::empty());
     }
     if streams.len() == 1 {
+        // A single-stream merge can still surface duplicates if the
+        // caller passes an already-unioned stream, but for branch /
+        // layer scans every key is unique within a single stream so the
+        // dedup pass would be pure overhead. Pass through unchanged.
         return streams.into_iter().next().expect("len == 1");
     }
 
     let mut peekable: Vec<_> = streams.into_iter().map(StreamExt::peekable).collect();
 
     Box::pin(async_stream::try_stream! {
+        // Fingerprints already yielded within the current (the, of) run.
+        // Cleared whenever the run advances to a new group_key.
+        let mut current_key: Option<(Vec<u8>, Vec<u8>)> = None;
+        let mut seen: HashSet<Cause> = HashSet::new();
+
         loop {
             let mut min_idx: Option<usize> = None;
             let mut min_key: Option<(Vec<u8>, Vec<u8>)> = None;
@@ -121,8 +141,18 @@ pub fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStream<'a>
             let item = peekable[idx]
                 .next()
                 .await
-                .expect("peek returned Some, so next must too");
-            yield item?;
+                .expect("peek returned Some, so next must too")?;
+
+            let key = group_key(&item);
+            if current_key.as_ref() != Some(&key) {
+                current_key = Some(key);
+                seen.clear();
+            }
+            // `Cause::from(&Artifact)` hashes (the, of, is, cause) — two
+            // artifacts with identical fields produce identical fingerprints.
+            if seen.insert(Cause::from(&item)) {
+                yield item;
+            }
         }
     })
 }
@@ -509,6 +539,87 @@ mod tests {
         let entities: Vec<_> = results.into_iter().map(|a| a.of).collect();
         assert!(entities.contains(&alice));
         assert!(entities.contains(&bob));
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn union_dedupes_identical_claims_from_two_layers() -> anyhow::Result<()> {
+        // Two layers asserting the literally same (the, of, is, cause).
+        // The same fact existing in two places is still one fact — the
+        // user should see one row, not two.
+        let alice: Entity = "id:alice".parse()?;
+        let primary = Layer::new().assert(
+            the!("person/name")
+                .of(alice.clone())
+                .is("Alice".to_string()),
+        );
+        let secondary = Layer::new().assert(
+            the!("person/name")
+                .of(alice.clone())
+                .is("Alice".to_string()),
+        );
+
+        let combined = Union::new(primary, secondary);
+        let selector = ArtifactSelector::new().the("person/name".parse()?);
+        let stream = Provider::<Select<'_>>::execute(&combined, selector).await?;
+        let results: Vec<Artifact> = stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_, _>>()?;
+
+        assert_eq!(
+            results.len(),
+            1,
+            "identical claims from two layers must be deduplicated; got {results:?}"
+        );
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn union_dedupes_when_duplicate_interleaves_with_distinct_value() -> anyhow::Result<()> {
+        // Primary asserts both (alice, AliceA) and (alice, AliceB);
+        // secondary asserts just (alice, AliceA). The duplicate AliceA
+        // sits across streams with a distinct AliceB in between in
+        // primary's scan order, so naive consecutive-only dedup would
+        // miss it. We still expect two unique rows total.
+        let alice: Entity = "id:alice".parse()?;
+        let primary = Layer::new()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("AliceA".to_string()),
+            )
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("AliceB".to_string()),
+            );
+        let secondary = Layer::new().assert(
+            the!("person/name")
+                .of(alice.clone())
+                .is("AliceA".to_string()),
+        );
+
+        let combined = Union::new(primary, secondary);
+        let selector = ArtifactSelector::new().the("person/name".parse()?);
+        let stream = Provider::<Select<'_>>::execute(&combined, selector).await?;
+        let results: Vec<Artifact> = stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_, _>>()?;
+
+        let mut values: Vec<_> = results.iter().map(|a| a.is.clone()).collect();
+        values.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+        assert_eq!(
+            values,
+            vec![
+                Value::String("AliceA".into()),
+                Value::String("AliceB".into())
+            ],
+            "duplicate (alice, AliceA) across layers must dedupe to one row; got {results:?}"
+        );
         Ok(())
     }
 
