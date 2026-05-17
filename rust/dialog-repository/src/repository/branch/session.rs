@@ -234,7 +234,8 @@ where
         }
         streams.push(Provider::<Select<'a>>::execute(&self.overlay, input).await?);
         use futures_util::StreamExt;
-        Ok(Box::pin(futures_util::stream::iter(streams).flatten()))
+        use futures_util::stream;
+        Ok(Box::pin(stream::iter(streams).flatten()))
     }
 }
 

@@ -1283,6 +1283,220 @@ mod tests {
             assert_eq!(values, vec!["Alice".to_string(), "main".to_string()]);
             Ok(())
         }
+
+        // -- Branch::metadata coverage -------------------------------------
+
+        mod repo_meta {
+            #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+            #[domain("dialog.meta")]
+            pub struct Did(pub String);
+        }
+
+        #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        pub struct RepoConcept {
+            pub this: Entity,
+            pub did: repo_meta::Did,
+        }
+
+        #[dialog_common::test]
+        async fn branch_metadata_exposes_repository_did() -> anyhow::Result<()> {
+            // dialog.meta/did on the synthetic `id:repository` entity should
+            // match the branch's host DID.
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+            let expected_did = branch.of().to_string();
+
+            let repo_entity: Entity = "id:repository".parse()?;
+            let results: Vec<RepoConcept> = branch
+                .query()
+                .with(branch.metadata())?
+                .select(Query::<RepoConcept> {
+                    this: repo_entity.into(),
+                    did: Term::var("did"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+
+            assert_eq!(results.len(), 1, "repository DID fact must be present");
+            assert_eq!(results[0].did.0, expected_did);
+            Ok(())
+        }
+
+        mod upstream_meta {
+            #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+            #[domain("dialog.meta")]
+            pub struct Kind(pub String);
+
+            #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+            #[domain("dialog.meta")]
+            pub struct Branch(pub String);
+        }
+
+        #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        pub struct UpstreamConcept {
+            pub this: Entity,
+            pub kind: upstream_meta::Kind,
+            pub branch: upstream_meta::Branch,
+        }
+
+        #[dialog_common::test]
+        async fn branch_metadata_exposes_upstream_when_configured() -> anyhow::Result<()> {
+            // After set_upstream, the metadata overlay should report kind=local
+            // and the upstream branch name on the `id:upstream` entity.
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let main = repo.branch("main").open().perform(&operator).await?;
+            let feature = repo.branch("feature").open().perform(&operator).await?;
+            feature.set_upstream(&main).perform(&operator).await?;
+
+            let upstream_entity: Entity = "id:upstream".parse()?;
+            let results: Vec<UpstreamConcept> = feature
+                .query()
+                .with(feature.metadata())?
+                .select(Query::<UpstreamConcept> {
+                    this: upstream_entity.into(),
+                    kind: Term::var("kind"),
+                    branch: Term::var("branch"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].kind.0, "local");
+            assert_eq!(results[0].branch.0, "main");
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn branch_metadata_omits_upstream_facts_when_none() -> anyhow::Result<()> {
+            // Without an upstream configured, no UpstreamConcept should match.
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let upstream_entity: Entity = "id:upstream".parse()?;
+            let results: Vec<UpstreamConcept> = branch
+                .query()
+                .with(branch.metadata())?
+                .select(Query::<UpstreamConcept> {
+                    this: upstream_entity.into(),
+                    kind: Term::var("kind"),
+                    branch: Term::var("branch"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+
+            assert!(results.is_empty());
+            Ok(())
+        }
+
+        // -- QuerySession accessors ----------------------------------------
+
+        #[dialog_common::test]
+        async fn query_session_accessors_reflect_layers() -> anyhow::Result<()> {
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let main = repo.branch("main").open().perform(&operator).await?;
+            let feature = repo.branch("feature").open().perform(&operator).await?;
+
+            let synthetic = Overlay::new().assert(Employee {
+                this: Entity::new()?,
+                name: employee::Name("Synth".into()),
+                role: employee::Role("Bot".into()),
+            });
+
+            let session = feature.query().with(&main)?.with(synthetic)?;
+            assert_eq!(session.layered_branches().len(), 1);
+            assert_eq!(session.layered_branches()[0].name(), "main");
+            // Each Employee concept asserts two attribute triples (name, role).
+            assert_eq!(session.layered_overlay().facts().facts().len(), 2);
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn empty_session_has_no_layers() -> anyhow::Result<()> {
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let session = branch.query();
+            assert!(session.layered_branches().is_empty());
+            assert!(session.layered_overlay().facts().facts().is_empty());
+            Ok(())
+        }
+
+        // -- Overlay::install end-to-end via a session ---------------------
+
+        mod stuff_role {
+            #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+            #[domain("stuff")]
+            pub struct Name(pub String);
+
+            #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+            #[domain("stuff")]
+            pub struct Role(pub String);
+        }
+
+        #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        pub struct Stuff {
+            pub this: Entity,
+            pub name: stuff_role::Name,
+            pub role: stuff_role::Role,
+        }
+
+        #[dialog_common::test]
+        async fn install_rule_on_layer_derives_facts_in_query() -> anyhow::Result<()> {
+            // End-to-end: rule installed on an Overlay layer derives Employee
+            // facts from Stuff facts stored on the branch.
+            use dialog_query::rule::When;
+
+            fn employee_from_stuff(employee: Query<Employee>) -> impl When {
+                // Term<String> erases the Attribute wrapper, so the Stuff
+                // query reuses the same terms directly.
+                (Query::<Stuff> {
+                    this: employee.this,
+                    name: employee.name,
+                    role: employee.role,
+                },)
+            }
+
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            branch
+                .transaction()
+                .assert(Stuff {
+                    this: Entity::new()?,
+                    name: stuff_role::Name("Alice".into()),
+                    role: stuff_role::Role("PM".into()),
+                })
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            let layer = Overlay::new().install(employee_from_stuff)?;
+            let derived: Vec<Employee> = branch
+                .query()
+                .with(layer)?
+                .select(Query::<Employee> {
+                    this: Term::var("this"),
+                    name: Term::var("name"),
+                    role: Term::var("role"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+
+            assert_eq!(derived.len(), 1, "rule should derive one employee");
+            assert_eq!(derived[0].name.0, "Alice");
+            assert_eq!(derived[0].role.0, "PM");
+            Ok(())
+        }
     }
 
     mod profile_as_repository {

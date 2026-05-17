@@ -87,3 +87,135 @@ impl ConceptRules {
         fork
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::*;
+    use crate::Term;
+    use crate::attribute::query::AttributeQuery;
+    use crate::attribute::{AttributeDescriptor, Cardinality, Type};
+    use crate::the;
+
+    fn person_concept() -> ConceptDescriptor {
+        ConceptDescriptor::from([(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "person name",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )])
+    }
+
+    fn alt_rule(descriptor: &ConceptDescriptor) -> DeductiveRule {
+        // Distinct rule body so install does not dedup against the implicit.
+        DeductiveRule::new(
+            descriptor.clone(),
+            vec![
+                AttributeQuery::new(
+                    Term::from(the!("person/name")),
+                    Term::var("this"),
+                    Term::var("name"),
+                    Term::blank(),
+                    None,
+                )
+                .into(),
+            ],
+        )
+        .expect("alt rule compiles")
+    }
+
+    #[test]
+    fn installed_returns_empty_for_fresh_concept_rules() {
+        let rules = ConceptRules::new(&person_concept());
+        assert!(rules.installed().is_empty());
+    }
+
+    #[test]
+    fn installed_lists_registered_rules_in_order() {
+        let descriptor = person_concept();
+        let mut rules = ConceptRules::new(&descriptor);
+        let a = alt_rule(&descriptor);
+        rules.install(a.clone());
+        assert_eq!(rules.installed(), &[a]);
+    }
+
+    #[test]
+    fn extend_merges_installed_rules_from_other() {
+        let descriptor = person_concept();
+        let mut a = ConceptRules::new(&descriptor);
+        let mut b = ConceptRules::new(&descriptor);
+
+        let rule = alt_rule(&descriptor);
+        b.install(rule.clone());
+        a.extend(&b);
+
+        assert_eq!(a.installed().len(), 1);
+        assert_eq!(a.installed()[0], rule);
+    }
+
+    #[test]
+    fn extend_dedups_against_existing_installed() {
+        let descriptor = person_concept();
+        let rule = alt_rule(&descriptor);
+        let mut a = ConceptRules::new(&descriptor);
+        a.install(rule.clone());
+        let mut b = ConceptRules::new(&descriptor);
+        b.install(rule.clone());
+        a.extend(&b);
+        assert_eq!(a.installed().len(), 1, "duplicate rule must not be added twice");
+    }
+
+    #[test]
+    fn extend_invalidates_plan_cache_when_rules_change() {
+        let descriptor = person_concept();
+        let mut rules = ConceptRules::new(&descriptor);
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("e"));
+        terms.insert("name".into(), Term::var("n"));
+
+        let candidate = Match::new();
+        let plan_before = rules.plan(&terms, &candidate);
+
+        let mut other = ConceptRules::new(&descriptor);
+        other.install(alt_rule(&descriptor));
+        rules.extend(&other);
+
+        let plan_after = rules.plan(&terms, &candidate);
+        assert!(
+            !Arc::ptr_eq(&plan_before, &plan_after),
+            "extend that adds a new rule must invalidate the plan cache"
+        );
+    }
+
+    #[test]
+    fn extend_keeps_plan_cache_when_nothing_new() {
+        let descriptor = person_concept();
+        let rules = ConceptRules::new(&descriptor);
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("e"));
+        terms.insert("name".into(), Term::var("n"));
+
+        let candidate = Match::new();
+        let plan_before = rules.plan(&terms, &candidate);
+
+        // Extend with an empty other: no new installed rules, cache preserved.
+        let empty = ConceptRules::new(&descriptor);
+        let mut rules_clone = rules.clone();
+        rules_clone.extend(&empty);
+
+        // The clone shares the plan cache Arc with the original; planning the
+        // same adornment hits the cache.
+        let plan_after = rules_clone.plan(&terms, &candidate);
+        assert!(
+            Arc::ptr_eq(&plan_before, &plan_after),
+            "no-op extend must not clear cached plans"
+        );
+    }
+}

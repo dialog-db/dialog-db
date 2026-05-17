@@ -92,3 +92,103 @@ impl Provider<SelectRules> for RuleRegistry {
         self.acquire(&input)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::*;
+    use crate::attribute::{AttributeDescriptor, Cardinality, Type};
+    use crate::the;
+
+    fn person_concept() -> ConceptDescriptor {
+        ConceptDescriptor::from([(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "person name",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )])
+    }
+
+    #[dialog_common::test]
+    async fn select_rules_provider_returns_implicit_rules_for_unseen_concept() {
+        let registry = RuleRegistry::new();
+        let descriptor = person_concept();
+        let rules = Provider::<SelectRules>::execute(&registry, descriptor)
+            .await
+            .expect("acquire should succeed");
+        assert!(
+            rules.installed().is_empty(),
+            "no rules installed, only implicit"
+        );
+    }
+
+    #[dialog_common::test]
+    async fn select_rules_provider_surfaces_registered_rule() {
+        let mut registry = RuleRegistry::new();
+        let descriptor = person_concept();
+        let rule = DeductiveRule::from(&descriptor);
+        registry.register(rule.clone()).unwrap();
+
+        let rules = Provider::<SelectRules>::execute(&registry, descriptor)
+            .await
+            .expect("acquire");
+        assert_eq!(rules.installed().len(), 1);
+        assert_eq!(rules.installed()[0], rule);
+    }
+
+    #[dialog_common::test]
+    async fn extend_copies_entries_for_unseen_concepts() {
+        let descriptor = person_concept();
+        let rule = DeductiveRule::from(&descriptor);
+        let mut src = RuleRegistry::new();
+        src.register(rule.clone()).unwrap();
+
+        let mut dst = RuleRegistry::new();
+        dst.extend(&src).unwrap();
+        assert_eq!(dst.acquire(&descriptor).unwrap().installed()[0], rule);
+    }
+
+    #[dialog_common::test]
+    async fn extend_merges_installed_rules_for_shared_concept() {
+        // Two registries with different rules for the same concept; extend
+        // should produce a registry where both rules are installed.
+        use crate::Term;
+        use crate::attribute::query::AttributeQuery;
+
+        let descriptor = person_concept();
+        let rule_a = DeductiveRule::from(&descriptor);
+        // Same conclusion, body uses `None` cardinality (`All` variant)
+        // instead of the implicit `One` — produces a distinct rule.
+        let rule_b = DeductiveRule::new(
+            descriptor.clone(),
+            vec![
+                AttributeQuery::new(
+                    Term::from(the!("person/name")),
+                    Term::var("this"),
+                    Term::var("name"),
+                    Term::blank(),
+                    None,
+                )
+                .into(),
+            ],
+        )
+        .expect("rule_b is valid");
+        assert_ne!(rule_a, rule_b);
+
+        let mut a = RuleRegistry::new();
+        a.register(rule_a.clone()).unwrap();
+        let mut b = RuleRegistry::new();
+        b.register(rule_b.clone()).unwrap();
+
+        a.extend(&b).unwrap();
+        let merged = a.acquire(&descriptor).unwrap();
+        assert_eq!(merged.installed().len(), 2);
+        assert!(merged.installed().contains(&rule_a));
+        assert!(merged.installed().contains(&rule_b));
+    }
+}
