@@ -17,7 +17,7 @@
 
 use base58::ToBase58;
 use dialog_artifacts::Entity;
-use dialog_query::layer::Layer;
+use crate::layer::Layer;
 use dialog_query::the;
 
 use crate::{Branch, Upstream};

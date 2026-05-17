@@ -35,6 +35,9 @@
 mod repository;
 pub use repository::*;
 
+/// In-memory layers and source-composition primitives for query evaluation.
+pub mod layer;
+
 pub use dialog_artifacts::{Exporter, Importer};
 
 /// Test helpers for setting up profiles, operators, repositories, and test data.

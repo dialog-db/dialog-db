@@ -1002,7 +1002,7 @@ mod tests {
     mod layer {
         use super::query_engine::{Employee, employee};
         use crate::helpers::{test_operator_with_profile, test_repo};
-        use dialog_query::layer::Layer;
+        use crate::layer::Layer;
         use dialog_query::query::Output;
         use dialog_query::{Concept, Entity, Query, Term, the};
 
@@ -1412,8 +1412,7 @@ mod tests {
             let session = feature.query().with(&main)?.with(synthetic)?;
             assert_eq!(session.layered_branches().len(), 1);
             assert_eq!(session.layered_branches()[0].name(), "main");
-            // Each Employee concept asserts two attribute triples (name, role).
-            assert_eq!(session.layer().facts().facts().len(), 2);
+            assert_eq!(session.layers().len(), 1);
             Ok(())
         }
 
@@ -1425,7 +1424,7 @@ mod tests {
 
             let session = branch.query();
             assert!(session.layered_branches().is_empty());
-            assert!(session.layer().facts().facts().is_empty());
+            assert!(session.layers().is_empty());
             Ok(())
         }
 

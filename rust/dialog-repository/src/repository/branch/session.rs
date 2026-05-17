@@ -7,10 +7,10 @@ use dialog_effects::memory::Resolve;
 use dialog_query::concept::descriptor::ConceptDescriptor;
 use dialog_query::concept::query::ConceptRules;
 use dialog_query::error::EvaluationError;
-use dialog_query::layer::{Layer, merge_grouped};
 use dialog_query::query::{Application, Output};
 use dialog_query::source::SelectRules;
 
+use crate::layer::{Layer, merge_grouped};
 use crate::{Branch, NetworkedIndex, RemoteSite, RepositoryMemoryExt, Upstream};
 
 /// A query session on a branch.
@@ -19,9 +19,11 @@ use crate::{Branch, NetworkedIndex, RemoteSite, RepositoryMemoryExt, Upstream};
 /// it layers additional sources on top of the primary branch via
 /// `.with(layer)`, then runs queries with `.select(q).perform(&env)`.
 ///
-/// Mutable state — synthetic facts, installed rules — lives on the
-/// [`Layer`] *layers* the caller builds, not on the session. Build a
-/// layer end-to-end, then attach it:
+/// Each source — the primary branch, every additional `&Branch`, every
+/// [`Layer`] — is kept independent. At evaluation time their selects are
+/// unioned via [`merge_grouped`] and their rules merged per concept.
+/// Mutable state (synthetic facts, installed rules) lives on the
+/// `Layer`s the caller builds, not on the session itself.
 ///
 /// ```ignore
 /// let metadata = branch.metadata();              // a pre-built layer
@@ -42,16 +44,16 @@ use crate::{Branch, NetworkedIndex, RemoteSite, RepositoryMemoryExt, Upstream};
 pub struct QuerySession<'a> {
     primary: &'a Branch,
     branches: Vec<&'a Branch>,
-    layer: Layer,
+    layers: Vec<Layer>,
 }
 
 /// A source that can be layered onto a [`QuerySession`] via
 /// [`QuerySession::with`].
 ///
-/// Implemented for `&'a Branch` (adds another branch's facts to the union)
-/// and [`Layer`] (merges in-memory facts and rules into the session's
-/// accumulator). The trait keeps the session's composition API polymorphic
-/// without capturing the env.
+/// Implemented for `&'a Branch` (adds another branch's facts to the
+/// union) and [`Layer`] (adds an in-memory fact + rule source).
+/// Polymorphic without exposing how each layer is dispatched internally
+/// and without capturing the env.
 pub trait QueryLayer<'a> {
     /// Apply this layer to the given session.
     fn apply(self, session: QuerySession<'a>) -> Result<QuerySession<'a>, EvaluationError>;
@@ -66,7 +68,7 @@ impl<'a> QueryLayer<'a> for &'a Branch {
 
 impl<'a> QueryLayer<'a> for Layer {
     fn apply(self, mut session: QuerySession<'a>) -> Result<QuerySession<'a>, EvaluationError> {
-        session.layer = session.layer.extend(self)?;
+        session.layers.push(self);
         Ok(session)
     }
 }
@@ -75,8 +77,8 @@ impl<'a> QuerySession<'a> {
     /// Layer another source on top of this session.
     ///
     /// Accepts any [`QueryLayer`] — currently a `&Branch` (its data is
-    /// unioned at perform time) or a [`Layer`] (merged into the
-    /// session's in-memory accumulator). Chainable.
+    /// unioned at perform time) or a [`Layer`] (kept independent and
+    /// unioned at perform time). Chainable.
     pub fn with<L: QueryLayer<'a>>(self, layer: L) -> Result<Self, EvaluationError> {
         layer.apply(self)
     }
@@ -86,10 +88,9 @@ impl<'a> QuerySession<'a> {
         &self.branches
     }
 
-    /// Borrow the merged [`Layer`] (the union of every `Layer` passed to
-    /// [`with`](Self::with)).
-    pub fn layer(&self) -> &Layer {
-        &self.layer
+    /// Borrow the layers (in `with`-call order) attached to this session.
+    pub fn layers(&self) -> &[Layer] {
+        &self.layers
     }
 
     /// Select with a query application. Call `.perform(&operator)` to execute.
@@ -97,7 +98,7 @@ impl<'a> QuerySession<'a> {
         SelectQuery {
             primary: self.primary,
             branches: self.branches.clone(),
-            layer: self.layer.clone(),
+            layers: self.layers.clone(),
             query,
         }
     }
@@ -107,7 +108,7 @@ impl<'a> QuerySession<'a> {
 pub struct SelectQuery<'a, Q> {
     primary: &'a Branch,
     branches: Vec<&'a Branch>,
-    layer: Layer,
+    layers: Vec<Layer>,
     query: Q,
 }
 
@@ -116,7 +117,7 @@ impl<'a, Q> SelectQuery<'a, Q> {
         Self {
             primary: branch,
             branches: Vec::new(),
-            layer: Layer::new(),
+            layers: Vec::new(),
             query,
         }
     }
@@ -137,7 +138,7 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
         let composite = CompositeEnv {
             primary: self.primary,
             branches: self.branches,
-            layer: self.layer,
+            layers: self.layers,
             env,
         };
         let query = self.query;
@@ -150,15 +151,16 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
     }
 }
 
-/// The runtime environment that bridges a primary branch plus any layered
-/// branches and an in-memory layer into the query engine's Provider bounds.
+/// The runtime environment that bridges a primary branch plus any
+/// layered branches and in-memory layers into the query engine's
+/// Provider bounds.
 ///
 /// Built fresh on each `.perform(env)` so the environment reference is
 /// never captured on the session itself.
 pub(crate) struct CompositeEnv<'a, Env> {
     primary: &'a Branch,
     branches: Vec<&'a Branch>,
-    layer: Layer,
+    layers: Vec<Layer>,
     env: &'a Env,
 }
 
@@ -167,7 +169,7 @@ impl<Env> Clone for CompositeEnv<'_, Env> {
         Self {
             primary: self.primary,
             branches: self.branches.clone(),
-            layer: self.layer.clone(),
+            layers: self.layers.clone(),
             env: self.env,
         }
     }
@@ -223,17 +225,20 @@ where
         &self,
         input: ArtifactSelector<Constrained>,
     ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
-        // Each source independently yields items with same-`(the, of)`
-        // consecutive (branches by tree key, `InMemoryFacts` by explicit
-        // sort). A plain chain would separate cross-source items sharing a
-        // key and break the cardinality-one sliding window in `only.rs`;
-        // `merge_grouped` interleaves them so the invariant holds.
-        let mut streams: Vec<ArtifactStream<'a>> = Vec::with_capacity(self.branches.len() + 2);
+        // Every source independently yields artifacts with same-`(the, of)`
+        // consecutive (branches by tree key, layers by their own tree
+        // scan). `merge_grouped` interleaves them so cross-source items
+        // sharing a key stay adjacent — the invariant the cardinality-one
+        // sliding window in `only.rs` depends on.
+        let mut streams: Vec<ArtifactStream<'a>> =
+            Vec::with_capacity(1 + self.branches.len() + self.layers.len());
         streams.push(Self::select_branch(self.primary, self.env, input.clone()).await?);
         for branch in &self.branches {
             streams.push(Self::select_branch(branch, self.env, input.clone()).await?);
         }
-        streams.push(Provider::<Select<'a>>::execute(&self.layer, input).await?);
+        for layer in &self.layers {
+            streams.push(Provider::<Select<'a>>::execute(layer, input.clone()).await?);
+        }
         Ok(merge_grouped(streams))
     }
 }
@@ -242,24 +247,36 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<Env: ConditionalSync> Provider<SelectRules> for CompositeEnv<'_, Env> {
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
-        // Branches don't currently carry rules of their own, so all rules
-        // come from the in-memory layer (which also fills in the implicit
-        // per-concept rule on first acquire).
-        self.layer.rules().acquire(&input)
+        // Branches don't currently carry rules of their own. Each layer's
+        // rule registry contributes alternative deductive rules per
+        // concept; we acquire from each and merge installed rules
+        // together. The implicit rule (auto-derived from the concept
+        // descriptor) is the same across registries, so dedup happens
+        // naturally via `ConceptRules::extend`.
+        let mut iter = self.layers.iter();
+        let mut acquired = match iter.next() {
+            Some(layer) => layer.rules().acquire(&input)?,
+            None => ConceptRules::new(&input),
+        };
+        for layer in iter {
+            let more = layer.rules().acquire(&input)?;
+            acquired.extend(&more);
+        }
+        Ok(acquired)
     }
 }
 
 impl Branch {
     /// Open a query session on this branch.
     ///
-    /// The session starts empty — no layered branches, no in-memory facts.
+    /// The session starts empty — no layered branches, no layers.
     /// Use `.with(layer)` to attach a `&Branch` or a pre-built `Layer`
     /// (which is where you assert facts and install rules).
     pub fn query(&self) -> QuerySession<'_> {
         QuerySession {
             primary: self,
             branches: Vec::new(),
-            layer: Layer::new(),
+            layers: Vec::new(),
         }
     }
 

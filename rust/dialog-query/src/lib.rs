@@ -42,8 +42,6 @@ pub mod error;
 pub mod formula;
 /// Negation support for excluding matching results.
 pub mod negation;
-/// Layer + union primitives for composing fact/rule sources at query time.
-pub mod layer;
 /// Named parameter bindings for rule and formula applications.
 pub mod parameters;
 /// Query planner that compiles premises into execution plans.
@@ -86,7 +84,6 @@ pub use environment::*;
 pub use error::*;
 pub use formula::*;
 pub use negation::*;
-pub use layer::{InMemoryFacts, Layer, Union};
 pub use parameters::*;
 pub use planner::*;
 pub use predicate::*;
