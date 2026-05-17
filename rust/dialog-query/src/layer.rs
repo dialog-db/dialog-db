@@ -1,35 +1,38 @@
-//! Overlay support for query evaluation.
+//! Layer support for query evaluation.
 //!
-//! An *overlay* is an auxiliary fact + rule source that gets unioned with a
-//! primary source during query evaluation. Overlays expose synthetic,
+//! A *layer* is an auxiliary fact + rule source that gets unioned with a
+//! primary source during query evaluation. Layers expose synthetic,
 //! in-memory information — branch metadata, system state, derived views —
 //! alongside the real artifact store, queried with the same
 //! [`Application`](crate::query::Application) API.
 //!
 //! The Datomic comparison: just as `:db/ident` and similar attributes show up
-//! as regular facts that participate in queries, an overlay's artifacts are
+//! as regular facts that participate in queries, a layer's artifacts are
 //! indistinguishable from stored ones from the query engine's perspective.
 //!
 //! # Types
 //!
 //! - [`InMemoryFacts`] — a `Vec<Artifact>` exposed as a [`Provider<Select<'a>>`].
-//! - [`Overlay`] — facts + a [`RuleRegistry`], implements both providers.
-//! - [`Overlaid<P, O>`] — combines two sources; selects union, rules merge.
+//! - [`Layer`] — facts + a [`RuleRegistry`], implements both providers.
+//! - [`Union<P, O>`] — combines two sources; selects union, rules merge.
+//!   Parallels how the planner's
+//!   [`Disjunction`](crate::planner::Disjunction) unions alternative
+//!   plan streams — `Union` unions alternative fact sources.
 //!
-//! Both [`InMemoryFacts`] and [`Overlay`] implement
+//! Both [`InMemoryFacts`] and [`Layer`] implement
 //! [`Update`](dialog_artifacts::Update), so the `assert<C: Statement>` /
 //! `retract<C: Statement>` API mirrors the one on
 //! [`Transaction`](#crate-tx) — any concept instance, attribute expression,
 //! or other [`Statement`](dialog_artifacts::Statement) writes the same way.
 //!
 //! ```ignore
-//! use dialog_query::overlay::{Overlay, Overlaid};
+//! use dialog_query::layer::{Layer, Union};
 //!
-//! let overlay = Overlay::new()
+//! let layer = Layer::new()
 //!     .assert(Employee { this: id, name: Name("Alice".into()), role: Role("PM".into()) })
 //!     .register(my_rule)?;
 //!
-//! let env = Overlaid::new(branch_env, overlay);
+//! let env = Union::new(branch_env, layer);
 //! let results = my_query.perform(&env).try_vec().await?;
 //! ```
 
@@ -75,7 +78,7 @@ pub fn group_key(artifact: &Artifact) -> (Vec<u8>, Vec<u8>) {
 /// items with the same `(the, of)` also become consecutive.
 ///
 /// Implemented as a streaming k-way merge with peekable inputs (O(n log k)),
-/// so neither the in-memory overlay nor any branch source has to be
+/// so neither the in-memory layer nor any branch source has to be
 /// buffered up-front.
 pub fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStream<'a> {
     use futures_util::StreamExt as _;
@@ -143,14 +146,14 @@ impl InMemoryFacts {
         Self::default()
     }
 
-    /// Assert a [`Statement`] into the overlay — same shape as
+    /// Assert a [`Statement`] into the layer — same shape as
     /// [`Transaction::assert`](#crate-tx).
     pub fn assert<S: Statement>(mut self, statement: S) -> Self {
         statement.assert(&mut self);
         self
     }
 
-    /// Retract a [`Statement`] from the overlay.
+    /// Retract a [`Statement`] from the layer.
     ///
     /// Removes any artifact whose `(the, of, is)` triple was previously
     /// asserted by the same statement.
@@ -238,41 +241,41 @@ impl<'a> Provider<Select<'a>> for InMemoryFacts {
     }
 }
 
-/// An in-memory overlay carrying both synthetic facts and deductive rules.
+/// An in-memory layer carrying both synthetic facts and deductive rules.
 ///
-/// `Overlay` is the bundle a [`QuerySession`](crate::session) wires onto a
-/// real fact source. Facts asserted here are unioned with the primary during
-/// evaluation; rules registered here are merged with the primary's rules
-/// per concept so both sets contribute candidates.
+/// `Layer` is the bundle a [`QuerySession`](crate::session) wires onto a
+/// real fact source via [`Union`]. Facts asserted here are unioned with
+/// the primary during evaluation; rules registered here are merged with
+/// the primary's rules per concept so both sets contribute candidates.
 ///
 /// The fact-mutation surface mirrors
 /// [`Transaction`](#crate-tx): use [`assert`](Self::assert) /
 /// [`retract`](Self::retract) with any [`Statement`].
 #[derive(Debug, Default, Clone)]
-pub struct Overlay {
+pub struct Layer {
     facts: InMemoryFacts,
     rules: RuleRegistry,
 }
 
-impl Overlay {
-    /// Create an empty overlay.
+impl Layer {
+    /// Create an empty layer.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Assert a [`Statement`] into the overlay.
+    /// Assert a [`Statement`] into the layer.
     pub fn assert<S: Statement>(mut self, statement: S) -> Self {
         statement.assert(&mut self);
         self
     }
 
-    /// Retract a [`Statement`] from the overlay.
+    /// Retract a [`Statement`] from the layer.
     pub fn retract<S: Statement>(mut self, statement: S) -> Self {
         statement.retract(&mut self);
         self
     }
 
-    /// Register a pre-built deductive rule on this overlay.
+    /// Register a pre-built deductive rule on this layer.
     pub fn register(mut self, rule: DeductiveRule) -> Result<Self, EvaluationError> {
         self.rules.register(rule)?;
         Ok(self)
@@ -285,7 +288,7 @@ impl Overlay {
     /// premises it returns become the rule body.
     ///
     /// ```ignore
-    /// let overlay = Overlay::new()
+    /// let layer = Layer::new()
     ///     .install(|employee: Query<Employee>| {
     ///         (
     ///             Query::<Stuff> { this: employee.this.clone(), ... },
@@ -324,17 +327,17 @@ impl Overlay {
         &mut self.rules
     }
 
-    /// Merge another overlay's facts and rules into this one.
+    /// Merge another layer's facts and rules into this one.
     ///
     /// Facts append; rules merge per-concept via [`RuleRegistry::extend`].
-    pub fn extend(mut self, other: Overlay) -> Result<Self, EvaluationError> {
+    pub fn extend(mut self, other: Layer) -> Result<Self, EvaluationError> {
         self.facts = self.facts.extend(other.facts);
         self.rules.extend(&other.rules)?;
         Ok(self)
     }
 }
 
-impl Update for Overlay {
+impl Update for Layer {
     fn associate(&mut self, the: Attribute, of: Entity, is: Value) {
         self.facts.associate(the, of, is);
     }
@@ -350,7 +353,7 @@ impl Update for Overlay {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<'a> Provider<Select<'a>> for Overlay {
+impl<'a> Provider<Select<'a>> for Layer {
     async fn execute(
         &self,
         input: ArtifactSelector<Constrained>,
@@ -361,27 +364,29 @@ impl<'a> Provider<Select<'a>> for Overlay {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<SelectRules> for Overlay {
+impl Provider<SelectRules> for Layer {
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
         self.rules.acquire(&input)
     }
 }
 
-/// A query environment that unions a primary source with an overlay.
+/// A query environment that unions two sources during evaluation.
 ///
-/// `Overlaid` is the bridge that lets a query see both stored artifacts and
-/// overlay-supplied ones, plus rules from either side. Selects yield results
-/// from both sources (primary first, then overlay). Rules are merged per
-/// concept: every installed rule from both sides contributes alternatives.
-pub struct Overlaid<P, O> {
+/// `Union` is the data-source counterpart to the planner's
+/// [`Disjunction`](crate::planner::Disjunction): where `Disjunction`
+/// unions the result streams of alternative plans, `Union` unions the
+/// fact streams (and rule sets) of alternative sources. The query sees
+/// artifacts from both sides at once, with rules merged per concept so
+/// every installed rule contributes to planning.
+pub struct Union<P, O> {
     primary: P,
-    overlay: O,
+    secondary: O,
 }
 
-impl<P, O> Overlaid<P, O> {
-    /// Wrap a primary source with an overlay.
-    pub fn new(primary: P, overlay: O) -> Self {
-        Self { primary, overlay }
+impl<P, O> Union<P, O> {
+    /// Union a primary source with a secondary one.
+    pub fn new(primary: P, secondary: O) -> Self {
+        Self { primary, secondary }
     }
 
     /// Borrow the primary source.
@@ -389,24 +394,24 @@ impl<P, O> Overlaid<P, O> {
         &self.primary
     }
 
-    /// Borrow the overlay source.
-    pub fn overlay(&self) -> &O {
-        &self.overlay
+    /// Borrow the secondary source.
+    pub fn secondary(&self) -> &O {
+        &self.secondary
     }
 }
 
-impl<P: Clone, O: Clone> Clone for Overlaid<P, O> {
+impl<P: Clone, O: Clone> Clone for Union<P, O> {
     fn clone(&self) -> Self {
         Self {
             primary: self.primary.clone(),
-            overlay: self.overlay.clone(),
+            secondary: self.secondary.clone(),
         }
     }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<'a, P, O> Provider<Select<'a>> for Overlaid<P, O>
+impl<'a, P, O> Provider<Select<'a>> for Union<P, O>
 where
     P: Provider<Select<'a>> + ConditionalSync,
     O: Provider<Select<'a>> + ConditionalSync,
@@ -421,22 +426,22 @@ where
         // same-(the, of) items and break the cardinality-one sliding window
         // in `only.rs`; merge_grouped interleaves them correctly.
         let primary = self.primary.execute(input.clone()).await?;
-        let overlay = self.overlay.execute(input).await?;
-        Ok(merge_grouped(vec![primary, overlay]))
+        let secondary = self.secondary.execute(input).await?;
+        Ok(merge_grouped(vec![primary, secondary]))
     }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<P, O> Provider<SelectRules> for Overlaid<P, O>
+impl<P, O> Provider<SelectRules> for Union<P, O>
 where
     P: Provider<SelectRules> + ConditionalSync,
     O: Provider<SelectRules> + ConditionalSync,
 {
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
         let mut primary = self.primary.execute(input.clone()).await?;
-        let overlay = self.overlay.execute(input).await?;
-        primary.extend(&overlay);
+        let secondary = self.secondary.execute(input).await?;
+        primary.extend(&secondary);
         Ok(primary)
     }
 }
@@ -488,7 +493,7 @@ mod tests {
     #[dialog_common::test]
     async fn in_memory_facts_filters_by_attribute() -> anyhow::Result<()> {
         let entity: Entity = "id:branch".parse()?;
-        let overlay = InMemoryFacts::new()
+        let layer = InMemoryFacts::new()
             .assert(
                 the!("dialog.meta/name")
                     .of(entity.clone())
@@ -501,7 +506,7 @@ mod tests {
             );
 
         let selector = ArtifactSelector::new().the("dialog.meta/name".parse()?);
-        let stream = Provider::<Select<'_>>::execute(&overlay, selector).await?;
+        let stream = Provider::<Select<'_>>::execute(&layer, selector).await?;
         let results: Vec<_> = stream.collect::<Vec<_>>().await;
 
         assert_eq!(results.len(), 1);
@@ -515,7 +520,7 @@ mod tests {
     async fn in_memory_facts_filters_by_entity() -> anyhow::Result<()> {
         let alice: Entity = "id:alice".parse()?;
         let bob: Entity = "id:bob".parse()?;
-        let overlay = InMemoryFacts::new()
+        let layer = InMemoryFacts::new()
             .assert(
                 the!("person/name")
                     .of(alice.clone())
@@ -524,7 +529,7 @@ mod tests {
             .assert(the!("person/name").of(bob).is("Bob".to_string()));
 
         let selector = ArtifactSelector::new().of(alice.clone());
-        let stream = Provider::<Select<'_>>::execute(&overlay, selector).await?;
+        let stream = Provider::<Select<'_>>::execute(&layer, selector).await?;
         let results: Vec<_> = stream.collect::<Vec<_>>().await;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].as_ref().unwrap().of, alice);
@@ -535,7 +540,7 @@ mod tests {
     async fn in_memory_facts_filters_by_value() -> anyhow::Result<()> {
         let alice: Entity = "id:alice".parse()?;
         let bob: Entity = "id:bob".parse()?;
-        let overlay = InMemoryFacts::new()
+        let layer = InMemoryFacts::new()
             .assert(
                 the!("person/name")
                     .of(alice)
@@ -544,7 +549,7 @@ mod tests {
             .assert(the!("person/name").of(bob).is("Bob".to_string()));
 
         let selector = ArtifactSelector::new().is(Value::String("Bob".into()));
-        let stream = Provider::<Select<'_>>::execute(&overlay, selector).await?;
+        let stream = Provider::<Select<'_>>::execute(&layer, selector).await?;
         let results: Vec<_> = stream.collect::<Vec<_>>().await;
         assert_eq!(results.len(), 1);
         assert_eq!(
@@ -557,7 +562,7 @@ mod tests {
     #[dialog_common::test]
     async fn in_memory_facts_retract_removes_matching_fact() -> anyhow::Result<()> {
         let entity: Entity = "id:branch".parse()?;
-        let overlay = InMemoryFacts::new()
+        let layer = InMemoryFacts::new()
             .assert(
                 the!("dialog.meta/name")
                     .of(entity.clone())
@@ -569,7 +574,7 @@ mod tests {
                     .is("main".to_string()),
             );
 
-        assert!(overlay.facts().is_empty(), "retracted fact should be gone");
+        assert!(layer.facts().is_empty(), "retracted fact should be gone");
         Ok(())
     }
 
@@ -579,21 +584,21 @@ mod tests {
         // latest value — `Update::associate_unique` retains nothing for
         // the matching (the, of) pair before appending.
         let alice: Entity = "id:alice".parse()?;
-        let mut overlay = InMemoryFacts::new();
+        let mut layer = InMemoryFacts::new();
         // Bypass the Statement layer to drive `associate_unique` directly.
-        overlay.associate_unique(
+        layer.associate_unique(
             "person/name".parse()?,
             alice.clone(),
             Value::String("Alice".into()),
         );
-        overlay.associate_unique(
+        layer.associate_unique(
             "person/name".parse()?,
             alice.clone(),
             Value::String("Alicia".into()),
         );
 
-        assert_eq!(overlay.facts().len(), 1, "prior value should be replaced");
-        assert_eq!(overlay.facts()[0].is, Value::String("Alicia".into()));
+        assert_eq!(layer.facts().len(), 1, "prior value should be replaced");
+        assert_eq!(layer.facts()[0].is, Value::String("Alicia".into()));
         Ok(())
     }
 
@@ -617,36 +622,36 @@ mod tests {
         Ok(())
     }
 
-    // -- Overlay -----------------------------------------------------------
+    // -- Layer -----------------------------------------------------------
 
     #[dialog_common::test]
-    async fn overlay_assert_routes_to_underlying_facts() -> anyhow::Result<()> {
+    async fn layer_assert_routes_to_underlying_facts() -> anyhow::Result<()> {
         let alice: Entity = "id:alice".parse()?;
-        let overlay = Overlay::new().assert(
+        let layer = Layer::new().assert(
             the!("person/name")
                 .of(alice.clone())
                 .is("Alice".to_string()),
         );
 
-        assert_eq!(overlay.facts().facts().len(), 1);
-        assert_eq!(overlay.facts().facts()[0].of, alice);
+        assert_eq!(layer.facts().facts().len(), 1);
+        assert_eq!(layer.facts().facts()[0].of, alice);
         Ok(())
     }
 
     #[dialog_common::test]
-    async fn overlay_register_records_rule() -> anyhow::Result<()> {
+    async fn layer_register_records_rule() -> anyhow::Result<()> {
         let descriptor = person_concept();
         let rule = DeductiveRule::from(&descriptor);
-        let overlay = Overlay::new().register(rule.clone())?;
+        let layer = Layer::new().register(rule.clone())?;
 
-        let acquired = overlay.rules().acquire(&descriptor)?;
+        let acquired = layer.rules().acquire(&descriptor)?;
         assert_eq!(acquired.installed().len(), 1);
         assert_eq!(acquired.installed()[0], rule);
         Ok(())
     }
 
     #[dialog_common::test]
-    async fn overlay_install_closure_records_derived_rule() -> anyhow::Result<()> {
+    async fn layer_install_closure_records_derived_rule() -> anyhow::Result<()> {
         // `install` is a sugar over `register` that builds a DeductiveRule
         // from a closure. We verify it ends up in the registry.
         use crate::rule::When;
@@ -676,9 +681,9 @@ mod tests {
             ),)
         }
 
-        let overlay = Overlay::new().install(greeter_rule)?;
+        let layer = Layer::new().install(greeter_rule)?;
         let descriptor: ConceptDescriptor = Query::<Greeter>::default().into();
-        let acquired = overlay.rules().acquire(&descriptor)?;
+        let acquired = layer.rules().acquire(&descriptor)?;
         assert_eq!(
             acquired.installed().len(),
             1,
@@ -688,18 +693,18 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn overlay_extend_merges_facts_and_rules() -> anyhow::Result<()> {
+    async fn layer_extend_merges_facts_and_rules() -> anyhow::Result<()> {
         let alice: Entity = "id:alice".parse()?;
         let bob: Entity = "id:bob".parse()?;
         let descriptor = person_concept();
         let rule = DeductiveRule::from(&descriptor);
 
-        let a = Overlay::new().assert(
+        let a = Layer::new().assert(
             the!("person/name")
                 .of(alice.clone())
                 .is("Alice".to_string()),
         );
-        let b = Overlay::new()
+        let b = Layer::new()
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
             .register(rule.clone())?;
 
@@ -710,23 +715,23 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn overlay_rules_mut_allows_in_place_registration() -> anyhow::Result<()> {
+    async fn layer_rules_mut_allows_in_place_registration() -> anyhow::Result<()> {
         let descriptor = person_concept();
         let rule = DeductiveRule::from(&descriptor);
 
-        let mut overlay = Overlay::new();
-        overlay.rules_mut().register(rule.clone())?;
-        assert_eq!(overlay.rules().acquire(&descriptor)?.installed()[0], rule);
+        let mut layer = Layer::new();
+        layer.rules_mut().register(rule.clone())?;
+        assert_eq!(layer.rules().acquire(&descriptor)?.installed()[0], rule);
         Ok(())
     }
 
     #[dialog_common::test]
-    async fn overlay_select_rules_returns_default_for_unknown_concept() -> anyhow::Result<()> {
-        // Overlay::SelectRules should always return a ConceptRules — the
+    async fn layer_select_rules_returns_default_for_unknown_concept() -> anyhow::Result<()> {
+        // Layer::SelectRules should always return a ConceptRules — the
         // implicit per-concept rule is created on demand.
-        let overlay = Overlay::new();
+        let layer = Layer::new();
         let descriptor = person_concept();
-        let rules = Provider::<SelectRules>::execute(&overlay, descriptor).await?;
+        let rules = Provider::<SelectRules>::execute(&layer, descriptor).await?;
         assert!(
             rules.installed().is_empty(),
             "no rules installed, only implicit"
@@ -734,10 +739,10 @@ mod tests {
         Ok(())
     }
 
-    // -- Overlaid ----------------------------------------------------------
+    // -- Union ----------------------------------------------------------
 
     #[dialog_common::test]
-    async fn overlaid_chains_select_streams_from_both_sides() -> anyhow::Result<()> {
+    async fn union_chains_select_streams_from_both_sides() -> anyhow::Result<()> {
         let alice: Entity = "id:alice".parse()?;
         let bob: Entity = "id:bob".parse()?;
         let primary = InMemoryFacts::new().assert(
@@ -745,10 +750,10 @@ mod tests {
                 .of(alice.clone())
                 .is("Alice".to_string()),
         );
-        let overlay =
+        let secondary =
             InMemoryFacts::new().assert(the!("person/name").of(bob.clone()).is("Bob".to_string()));
 
-        let combined = Overlaid::new(primary, overlay);
+        let combined = Union::new(primary, secondary);
         let selector = ArtifactSelector::new().the("person/name".parse()?);
         let stream = Provider::<Select<'_>>::execute(&combined, selector).await?;
         let results: Vec<_> = stream.collect::<Vec<_>>().await;
@@ -763,15 +768,15 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn overlaid_merges_rules_from_both_sides() -> anyhow::Result<()> {
+    async fn union_merges_rules_from_both_sides() -> anyhow::Result<()> {
         // Two RuleRegistries each carrying a distinct deductive rule for the
-        // same concept; Overlaid should expose both via its SelectRules
+        // same concept; Union should expose both via its SelectRules
         // provider so planning sees every alternative.
         let descriptor = person_concept();
 
         // Build two distinct rules so install dedup is no-op.
         let mut primary = RuleRegistry::new();
-        let mut overlay_rules = RuleRegistry::new();
+        let mut secondary = RuleRegistry::new();
 
         let rule_a = DeductiveRule::from(&descriptor);
         // Construct a second, distinct rule for the same concept by adding
@@ -800,9 +805,9 @@ mod tests {
         assert_ne!(rule_a, rule_b);
 
         primary.register(rule_a.clone())?;
-        overlay_rules.register(rule_b.clone())?;
+        secondary.register(rule_b.clone())?;
 
-        let combined = Overlaid::new(primary, overlay_rules);
+        let combined = Union::new(primary, secondary);
         let acquired = Provider::<SelectRules>::execute(&combined, descriptor).await?;
         let installed = acquired.installed();
         assert_eq!(installed.len(), 2);
@@ -812,28 +817,28 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn overlaid_primary_and_overlay_accessors_borrow_underlying() {
+    async fn union_primary_and_secondary_accessors_borrow_underlying() {
         let primary = InMemoryFacts::new();
-        let overlay = InMemoryFacts::new();
-        let combined = Overlaid::new(primary, overlay);
+        let secondary = InMemoryFacts::new();
+        let combined = Union::new(primary, secondary);
         // Accessors compile-check the return types and don't move the
         // underlying values.
         assert!(combined.primary().facts().is_empty());
-        assert!(combined.overlay().facts().is_empty());
+        assert!(combined.secondary().facts().is_empty());
     }
 
     #[dialog_common::test]
-    async fn overlaid_clone_clones_both_sides() -> anyhow::Result<()> {
+    async fn union_clone_clones_both_sides() -> anyhow::Result<()> {
         let alice: Entity = "id:alice".parse()?;
         let primary = InMemoryFacts::new().assert(
             the!("person/name")
                 .of(alice)
                 .is("Alice".to_string()),
         );
-        let combined = Overlaid::new(primary, InMemoryFacts::new());
+        let combined = Union::new(primary, InMemoryFacts::new());
         let cloned = combined.clone();
         assert_eq!(cloned.primary().facts().len(), 1);
-        assert!(cloned.overlay().facts().is_empty());
+        assert!(cloned.secondary().facts().is_empty());
         Ok(())
     }
 
@@ -960,7 +965,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn overlaid_preserves_cardinality_one_grouping() -> anyhow::Result<()> {
+    async fn union_preserves_cardinality_one_grouping() -> anyhow::Result<()> {
         // Regression: `only.rs`'s sliding window groups items by consecutive
         // `(the, of)`. If two sources both have facts for the same `(the, of)`
         // pair but the merge step does not group them together, the sliding
@@ -968,7 +973,7 @@ mod tests {
         // duplicate rows.
         //
         // Setup: a branch with (alice, name, "Alice") and (bob, name, "Bob"),
-        // and an overlay with (alice, name, "Alicia") and (bob, name, "Robert").
+        // and a layer with (alice, name, "Alicia") and (bob, name, "Robert").
         // A cardinality-one query for `person/name` should yield exactly one
         // row per entity — total 2 — not 4.
         use crate::Cardinality;
@@ -992,7 +997,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let overlay = Overlay::new()
+        let layer = Layer::new()
             .assert(
                 the!("person/name")
                     .of(alice.clone())
@@ -1001,7 +1006,7 @@ mod tests {
             .assert(the!("person/name").of(bob.clone()).is("Robert".to_string()));
 
         let primary = TestEnv::new(&branch, &operator, RuleRegistry::new());
-        let env = Overlaid::new(primary, overlay);
+        let env = Union::new(primary, layer);
 
         // Cardinality::One — exactly one winner per (attribute, entity).
         let results = the!("person/name")
@@ -1022,9 +1027,9 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn overlay_unions_primary_and_overlay_facts() -> anyhow::Result<()> {
-        // End-to-end: a real branch as primary, an in-memory Overlay as the
-        // overlay; queries see both sides.
+    async fn layer_unions_primary_and_secondary_facts() -> anyhow::Result<()> {
+        // End-to-end: a real branch as primary, an in-memory Layer as the
+        // secondary layer; queries see both sides.
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -1042,14 +1047,14 @@ mod tests {
             .await?;
 
         let synthetic: Entity = "id:branch".parse()?;
-        let overlay = Overlay::new().assert(
+        let layer = Layer::new().assert(
             the!("dialog.meta/name")
                 .of(synthetic.clone())
                 .is("main".to_string()),
         );
 
         let primary = TestEnv::new(&branch, &operator, RuleRegistry::new());
-        let env = Overlaid::new(primary, overlay);
+        let env = Union::new(primary, layer);
 
         let query = AttributeQuery::new(
             Term::from(the!("dialog.meta/name")),
@@ -1060,7 +1065,7 @@ mod tests {
         );
 
         let results = query.perform(&env).try_vec().await?;
-        assert_eq!(results.len(), 2, "should see both real and overlay facts");
+        assert_eq!(results.len(), 2, "should see both real and layered facts");
 
         let names: Vec<_> = results.iter().map(|c| c.is().clone()).collect();
         assert!(names.contains(&Value::String("Alice".into())));

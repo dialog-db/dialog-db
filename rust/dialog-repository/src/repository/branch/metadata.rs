@@ -1,6 +1,6 @@
-//! Branch metadata overlay.
+//! Branch metadata layer.
 //!
-//! Builds an [`Overlay`] populated with synthetic facts describing a
+//! Builds an [`Layer`] populated with synthetic facts describing a
 //! [`Branch`]: its name, current revision, hosting repository, and upstream
 //! tracking state — all exposed under the `dialog.meta/*` attribute
 //! namespace.
@@ -17,7 +17,7 @@
 
 use base58::ToBase58;
 use dialog_artifacts::Entity;
-use dialog_query::overlay::Overlay;
+use dialog_query::layer::Layer;
 use dialog_query::the;
 
 use crate::{Branch, Upstream};
@@ -34,15 +34,15 @@ fn upstream_entity() -> Entity {
     "id:upstream".parse().expect("valid entity")
 }
 
-/// Build the metadata overlay for `branch`.
+/// Build the metadata layer for `branch`.
 ///
 /// Always emits `dialog.meta/name` for the branch and `dialog.meta/did` for
 /// the repository. Adds revision and upstream facts when present.
-pub fn branch_metadata(branch: &Branch) -> Overlay {
+pub fn branch_metadata(branch: &Branch) -> Layer {
     let branch_id = branch_entity();
     let repo_id = repository_entity();
 
-    let mut overlay = Overlay::new()
+    let mut layer = Layer::new()
         .assert(
             the!("dialog.meta/name")
                 .of(branch_id.clone())
@@ -63,7 +63,7 @@ pub fn branch_metadata(branch: &Branch) -> Overlay {
         let hash_bytes: &[u8] = revision.tree.hash();
         let hash_b58 = ToBase58::to_base58(hash_bytes);
 
-        overlay = overlay
+        layer = layer
             .assert(
                 the!("dialog.meta/revision-hash")
                     .of(branch_id.clone())
@@ -93,7 +93,7 @@ pub fn branch_metadata(branch: &Branch) -> Overlay {
 
     if let Some(upstream) = branch.upstream() {
         let upstream_id = upstream_entity();
-        overlay = overlay.assert(
+        layer = layer.assert(
             the!("dialog.meta/upstream")
                 .of(branch_id.clone())
                 .is(upstream_id.clone()),
@@ -103,7 +103,7 @@ pub fn branch_metadata(branch: &Branch) -> Overlay {
             Upstream::Local { .. } => "local",
             Upstream::Remote { .. } => "remote",
         };
-        overlay = overlay
+        layer = layer
             .assert(
                 the!("dialog.meta/kind")
                     .of(upstream_id.clone())
@@ -116,7 +116,7 @@ pub fn branch_metadata(branch: &Branch) -> Overlay {
             );
 
         if let Upstream::Remote { remote, .. } = &upstream {
-            overlay = overlay.assert(
+            layer = layer.assert(
                 the!("dialog.meta/remote")
                     .of(upstream_id)
                     .is(remote.clone()),
@@ -124,5 +124,5 @@ pub fn branch_metadata(branch: &Branch) -> Overlay {
         }
     }
 
-    overlay
+    layer
 }

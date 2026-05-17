@@ -999,10 +999,10 @@ mod tests {
         }
     }
 
-    mod overlay {
+    mod layer {
         use super::query_engine::{Employee, employee};
         use crate::helpers::{test_operator_with_profile, test_repo};
-        use dialog_query::overlay::Overlay;
+        use dialog_query::layer::Layer;
         use dialog_query::query::Output;
         use dialog_query::{Concept, Entity, Query, Term, the};
 
@@ -1023,14 +1023,14 @@ mod tests {
         }
 
         #[dialog_common::test]
-        async fn overlay_layer_exposes_asserted_facts() -> anyhow::Result<()> {
-            // Build an Overlay end-to-end, then attach via .with(...).
+        async fn layer_exposes_asserted_facts() -> anyhow::Result<()> {
+            // Build a Layer end-to-end, then attach via .with(...).
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
             let synthetic: Entity = "id:branch".parse()?;
-            let layer = Overlay::new().assert(BranchMeta {
+            let layer = Layer::new().assert(BranchMeta {
                 this: synthetic.clone(),
                 name: branch_meta::Name("main".into()),
             });
@@ -1053,7 +1053,7 @@ mod tests {
         }
 
         #[dialog_common::test]
-        async fn overlay_retract_on_layer_removes_fact() -> anyhow::Result<()> {
+        async fn retract_on_layer_removes_fact() -> anyhow::Result<()> {
             // assert + retract on the layer net to no fact.
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
@@ -1064,7 +1064,7 @@ mod tests {
                 this: synthetic.clone(),
                 name: branch_meta::Name("main".into()),
             };
-            let layer = Overlay::new().assert(asserted.clone()).retract(asserted);
+            let layer = Layer::new().assert(asserted.clone()).retract(asserted);
 
             let results: Vec<BranchMeta> = branch
                 .query()
@@ -1082,8 +1082,8 @@ mod tests {
         }
 
         #[dialog_common::test]
-        async fn branch_metadata_overlay_exposes_branch_internals() -> anyhow::Result<()> {
-            // The built-in branch metadata overlay should make the branch
+        async fn branch_metadata_layer_exposes_branch_internals() -> anyhow::Result<()> {
+            // The built-in branch metadata layer should make the branch
             // name and revision queryable as ordinary facts.
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
@@ -1141,7 +1141,7 @@ mod tests {
         }
 
         #[dialog_common::test]
-        async fn overlay_unions_two_branches() -> anyhow::Result<()> {
+        async fn layer_unions_two_branches() -> anyhow::Result<()> {
             // Layering a second branch onto a query session should union
             // both branches' facts during select.
             let (operator, profile) = test_operator_with_profile().await;
@@ -1194,8 +1194,8 @@ mod tests {
         }
 
         #[dialog_common::test]
-        async fn overlay_chains_branch_and_memory() -> anyhow::Result<()> {
-            // Same session can layer a branch *and* an in-memory Overlay.
+        async fn layer_chains_branch_and_memory() -> anyhow::Result<()> {
+            // Same session can layer a branch *and* an in-memory Layer.
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
             let main = repo.branch("main").open().perform(&operator).await?;
@@ -1213,7 +1213,7 @@ mod tests {
             let main = repo.branch("main").load().perform(&operator).await?;
             // `scratch` has no commits yet — `open()` is enough, the branch
             // simply selects against the empty tree.
-            let synthetic_layer = Overlay::new().assert(Employee {
+            let synthetic_layer = Layer::new().assert(Employee {
                 this: Entity::new()?,
                 name: employee::Name("Synthetic".into()),
                 role: employee::Role("Bot".into()),
@@ -1242,8 +1242,8 @@ mod tests {
         }
 
         #[dialog_common::test]
-        async fn overlay_facts_union_with_stored_facts() -> anyhow::Result<()> {
-            // Asserting an overlay fact under the same attribute as a stored
+        async fn layer_facts_union_with_stored_facts() -> anyhow::Result<()> {
+            // Asserting a layered fact under the same attribute as a stored
             // fact should yield both rows when queried.
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
@@ -1262,7 +1262,7 @@ mod tests {
                 .await?;
 
             let synthetic: Entity = "id:branch".parse()?;
-            let layer = Overlay::new().assert(BranchMeta {
+            let layer = Layer::new().assert(BranchMeta {
                 this: synthetic,
                 name: branch_meta::Name("main".into()),
             });
@@ -1343,7 +1343,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn branch_metadata_exposes_upstream_when_configured() -> anyhow::Result<()> {
-            // After set_upstream, the metadata overlay should report kind=local
+            // After set_upstream, the metadata layer should report kind=local
             // and the upstream branch name on the `id:upstream` entity.
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
@@ -1403,7 +1403,7 @@ mod tests {
             let main = repo.branch("main").open().perform(&operator).await?;
             let feature = repo.branch("feature").open().perform(&operator).await?;
 
-            let synthetic = Overlay::new().assert(Employee {
+            let synthetic = Layer::new().assert(Employee {
                 this: Entity::new()?,
                 name: employee::Name("Synth".into()),
                 role: employee::Role("Bot".into()),
@@ -1413,7 +1413,7 @@ mod tests {
             assert_eq!(session.layered_branches().len(), 1);
             assert_eq!(session.layered_branches()[0].name(), "main");
             // Each Employee concept asserts two attribute triples (name, role).
-            assert_eq!(session.layered_overlay().facts().facts().len(), 2);
+            assert_eq!(session.layer().facts().facts().len(), 2);
             Ok(())
         }
 
@@ -1425,11 +1425,11 @@ mod tests {
 
             let session = branch.query();
             assert!(session.layered_branches().is_empty());
-            assert!(session.layered_overlay().facts().facts().is_empty());
+            assert!(session.layer().facts().facts().is_empty());
             Ok(())
         }
 
-        // -- Overlay::install end-to-end via a session ---------------------
+        // -- Layer::install end-to-end via a session ---------------------
 
         mod stuff_role {
             #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -1461,7 +1461,7 @@ mod tests {
         }
 
         #[dialog_common::test]
-        async fn cross_branch_overlay_preserves_cardinality_one_winner() -> anyhow::Result<()> {
+        async fn cross_branch_layer_preserves_cardinality_one_winner() -> anyhow::Result<()> {
             // Regression for the streaming merge: two branches both holding
             // facts for the same (attribute, entity) pair under a
             // cardinality-one attribute must still yield exactly one winner
@@ -1533,7 +1533,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn install_rule_on_layer_derives_facts_in_query() -> anyhow::Result<()> {
-            // End-to-end: rule installed on an Overlay layer derives Employee
+            // End-to-end: rule installed on an Layer layer derives Employee
             // facts from Stuff facts stored on the branch.
             use dialog_query::rule::When;
 
@@ -1562,7 +1562,7 @@ mod tests {
                 .perform(&operator)
                 .await?;
 
-            let layer = Overlay::new().install(employee_from_stuff)?;
+            let layer = Layer::new().install(employee_from_stuff)?;
             let derived: Vec<Employee> = branch
                 .query()
                 .with(layer)?

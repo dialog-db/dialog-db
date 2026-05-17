@@ -7,7 +7,7 @@ use dialog_effects::memory::Resolve;
 use dialog_query::concept::descriptor::ConceptDescriptor;
 use dialog_query::concept::query::ConceptRules;
 use dialog_query::error::EvaluationError;
-use dialog_query::overlay::{Overlay, merge_grouped};
+use dialog_query::layer::{Layer, merge_grouped};
 use dialog_query::query::{Application, Output};
 use dialog_query::source::SelectRules;
 
@@ -20,12 +20,12 @@ use crate::{Branch, NetworkedIndex, RemoteSite, RepositoryMemoryExt, Upstream};
 /// `.with(layer)`, then runs queries with `.select(q).perform(&env)`.
 ///
 /// Mutable state — synthetic facts, installed rules — lives on the
-/// [`Overlay`] *layers* the caller builds, not on the session. Build a
+/// [`Layer`] *layers* the caller builds, not on the session. Build a
 /// layer end-to-end, then attach it:
 ///
 /// ```ignore
-/// let metadata = branch.metadata();              // a pre-built overlay
-/// let synthetic = Overlay::new()
+/// let metadata = branch.metadata();              // a pre-built layer
+/// let synthetic = Layer::new()
 ///     .assert(my_concept_instance)
 ///     .install(|q: Query<Derived>| (...,))?;
 ///
@@ -42,16 +42,16 @@ use crate::{Branch, NetworkedIndex, RemoteSite, RepositoryMemoryExt, Upstream};
 pub struct QuerySession<'a> {
     primary: &'a Branch,
     branches: Vec<&'a Branch>,
-    overlay: Overlay,
+    layer: Layer,
 }
 
 /// A source that can be layered onto a [`QuerySession`] via
 /// [`QuerySession::with`].
 ///
 /// Implemented for `&'a Branch` (adds another branch's facts to the union)
-/// and [`Overlay`] (merges in-memory facts and rules into the session's
+/// and [`Layer`] (merges in-memory facts and rules into the session's
 /// accumulator). The trait keeps the session's composition API polymorphic
-/// without exposing the underlying layer enum or capturing the env.
+/// without capturing the env.
 pub trait QueryLayer<'a> {
     /// Apply this layer to the given session.
     fn apply(self, session: QuerySession<'a>) -> Result<QuerySession<'a>, EvaluationError>;
@@ -64,9 +64,9 @@ impl<'a> QueryLayer<'a> for &'a Branch {
     }
 }
 
-impl<'a> QueryLayer<'a> for Overlay {
+impl<'a> QueryLayer<'a> for Layer {
     fn apply(self, mut session: QuerySession<'a>) -> Result<QuerySession<'a>, EvaluationError> {
-        session.overlay = session.overlay.extend(self)?;
+        session.layer = session.layer.extend(self)?;
         Ok(session)
     }
 }
@@ -75,7 +75,7 @@ impl<'a> QuerySession<'a> {
     /// Layer another source on top of this session.
     ///
     /// Accepts any [`QueryLayer`] — currently a `&Branch` (its data is
-    /// unioned at perform time) or an [`Overlay`] (merged into the
+    /// unioned at perform time) or a [`Layer`] (merged into the
     /// session's in-memory accumulator). Chainable.
     pub fn with<L: QueryLayer<'a>>(self, layer: L) -> Result<Self, EvaluationError> {
         layer.apply(self)
@@ -86,10 +86,10 @@ impl<'a> QuerySession<'a> {
         &self.branches
     }
 
-    /// Borrow the merged overlay (combination of every [`Overlay`] layered
-    /// onto this session).
-    pub fn layered_overlay(&self) -> &Overlay {
-        &self.overlay
+    /// Borrow the merged [`Layer`] (the union of every `Layer` passed to
+    /// [`with`](Self::with)).
+    pub fn layer(&self) -> &Layer {
+        &self.layer
     }
 
     /// Select with a query application. Call `.perform(&operator)` to execute.
@@ -97,7 +97,7 @@ impl<'a> QuerySession<'a> {
         SelectQuery {
             primary: self.primary,
             branches: self.branches.clone(),
-            overlay: self.overlay.clone(),
+            layer: self.layer.clone(),
             query,
         }
     }
@@ -107,7 +107,7 @@ impl<'a> QuerySession<'a> {
 pub struct SelectQuery<'a, Q> {
     primary: &'a Branch,
     branches: Vec<&'a Branch>,
-    overlay: Overlay,
+    layer: Layer,
     query: Q,
 }
 
@@ -116,7 +116,7 @@ impl<'a, Q> SelectQuery<'a, Q> {
         Self {
             primary: branch,
             branches: Vec::new(),
-            overlay: Overlay::new(),
+            layer: Layer::new(),
             query,
         }
     }
@@ -137,7 +137,7 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
         let composite = CompositeEnv {
             primary: self.primary,
             branches: self.branches,
-            overlay: self.overlay,
+            layer: self.layer,
             env,
         };
         let query = self.query;
@@ -151,14 +151,14 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
 }
 
 /// The runtime environment that bridges a primary branch plus any layered
-/// branches and an in-memory overlay into the query engine's Provider bounds.
+/// branches and an in-memory layer into the query engine's Provider bounds.
 ///
 /// Built fresh on each `.perform(env)` so the environment reference is
 /// never captured on the session itself.
 pub(crate) struct CompositeEnv<'a, Env> {
     primary: &'a Branch,
     branches: Vec<&'a Branch>,
-    overlay: Overlay,
+    layer: Layer,
     env: &'a Env,
 }
 
@@ -167,7 +167,7 @@ impl<Env> Clone for CompositeEnv<'_, Env> {
         Self {
             primary: self.primary,
             branches: self.branches.clone(),
-            overlay: self.overlay.clone(),
+            layer: self.layer.clone(),
             env: self.env,
         }
     }
@@ -233,7 +233,7 @@ where
         for branch in &self.branches {
             streams.push(Self::select_branch(branch, self.env, input.clone()).await?);
         }
-        streams.push(Provider::<Select<'a>>::execute(&self.overlay, input).await?);
+        streams.push(Provider::<Select<'a>>::execute(&self.layer, input).await?);
         Ok(merge_grouped(streams))
     }
 }
@@ -243,9 +243,9 @@ where
 impl<Env: ConditionalSync> Provider<SelectRules> for CompositeEnv<'_, Env> {
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
         // Branches don't currently carry rules of their own, so all rules
-        // come from the in-memory overlay (which also fills in the implicit
+        // come from the in-memory layer (which also fills in the implicit
         // per-concept rule on first acquire).
-        self.overlay.rules().acquire(&input)
+        self.layer.rules().acquire(&input)
     }
 }
 
@@ -253,23 +253,23 @@ impl Branch {
     /// Open a query session on this branch.
     ///
     /// The session starts empty — no layered branches, no in-memory facts.
-    /// Use `.with(layer)` to attach a `&Branch` or a pre-built `Overlay`
+    /// Use `.with(layer)` to attach a `&Branch` or a pre-built `Layer`
     /// (which is where you assert facts and install rules).
     pub fn query(&self) -> QuerySession<'_> {
         QuerySession {
             primary: self,
             branches: Vec::new(),
-            overlay: Overlay::new(),
+            layer: Layer::new(),
         }
     }
 
-    /// The branch metadata overlay — synthetic facts describing the branch
+    /// The branch metadata layer — synthetic facts describing the branch
     /// (name, revision hash, upstream, hosting repository) under the
     /// `dialog.meta/*` attribute namespace.
     ///
     /// Compose with `branch.query().with(branch.metadata())?` to make
     /// branch internals queryable like any other fact.
-    pub fn metadata(&self) -> Overlay {
+    pub fn metadata(&self) -> Layer {
         super::metadata::branch_metadata(self)
     }
 }
