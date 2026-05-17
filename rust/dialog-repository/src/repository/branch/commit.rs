@@ -2,17 +2,14 @@ use crate::{
     Branch, CommitError, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _,
     RepositoryMemoryExt, Revision, TreeReference, Upstream,
 };
-use dialog_artifacts::{
-    Artifact, AttributeKey, Datum, EntityKey, FromKey, Instruction, Key, KeyView, KeyViewConstruct,
-    KeyViewMut, State, ValueKey,
-};
+use dialog_artifacts::{Instruction, tree};
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::{Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_prolly_tree::{EMPT_TREE_HASH, Tree};
-use futures_util::{Stream, StreamExt, TryStreamExt};
+use futures_util::Stream;
 
 /// Command that commits a stream of changes (assert/retract) to a branch.
 ///
@@ -82,117 +79,11 @@ where
 
         let mut tree: Index = Tree::from_hash(&base_tree_hash, &store).await?;
 
-        // `changes` is a user-provided `Stream`; pinning it on the stack
-        // lets us advance it with `.next().await` below without moving
-        // self-referential state.
-        tokio::pin!(changes);
-
-        while let Some(change) = changes.next().await {
-            match change {
-                Instruction::Assert(artifact) => {
-                    let entity_key = EntityKey::from(&artifact);
-                    let value_key = ValueKey::from_key(&entity_key);
-                    let attribute_key = AttributeKey::from_key(&entity_key);
-
-                    let datum = Datum::from(artifact);
-
-                    tree.set(
-                        entity_key.into_key(),
-                        State::Added(datum.clone()),
-                        &mut store,
-                    )
-                    .await?;
-                    tree.set(
-                        attribute_key.into_key(),
-                        State::Added(datum.clone()),
-                        &mut store,
-                    )
-                    .await?;
-                    tree.set(value_key.into_key(), State::Added(datum), &mut store)
-                        .await?;
-                }
-                Instruction::Replace(artifact) => {
-                    let entity_key = EntityKey::from(&artifact);
-
-                    // Scan priors at this (entity, attribute). Same-valued
-                    // priors already represent the desired state; only
-                    // different-valued ones need superseding.
-                    let mut superseded_keys: Vec<Key> = Vec::new();
-                    let mut found_same_value = false;
-                    {
-                        let search_start = <EntityKey<Key> as KeyViewConstruct>::min()
-                            .set_entity(entity_key.entity())
-                            .set_attribute(entity_key.attribute())
-                            .into_key();
-                        let search_end = <EntityKey<Key> as KeyViewConstruct>::max()
-                            .set_entity(entity_key.entity())
-                            .set_attribute(entity_key.attribute())
-                            .into_key();
-
-                        let search_stream = tree.stream_range(search_start..search_end, &store);
-                        tokio::pin!(search_stream);
-
-                        while let Some(candidate) = search_stream.try_next().await? {
-                            if let State::Added(current_element) = candidate.value {
-                                let current = Artifact::try_from(current_element)?;
-                                if current.is == artifact.is {
-                                    found_same_value = true;
-                                } else {
-                                    superseded_keys.push(candidate.key);
-                                }
-                            }
-                        }
-                    }
-
-                    for key in superseded_keys {
-                        let entity_key = EntityKey(key);
-                        let value_key = ValueKey::from_key(&entity_key);
-                        let attribute_key = AttributeKey::from_key(&entity_key);
-
-                        tree.delete(&entity_key.into_key(), &mut store).await?;
-                        tree.delete(&value_key.into_key(), &mut store).await?;
-                        tree.delete(&attribute_key.into_key(), &mut store).await?;
-                    }
-
-                    // Skip insert if a same-value prior is already in place.
-                    if found_same_value {
-                        continue;
-                    }
-
-                    let entity_key = EntityKey::from(&artifact);
-                    let value_key = ValueKey::from_key(&entity_key);
-                    let attribute_key = AttributeKey::from_key(&entity_key);
-                    let datum = Datum::from(artifact);
-
-                    tree.set(
-                        entity_key.into_key(),
-                        State::Added(datum.clone()),
-                        &mut store,
-                    )
-                    .await?;
-                    tree.set(
-                        attribute_key.into_key(),
-                        State::Added(datum.clone()),
-                        &mut store,
-                    )
-                    .await?;
-                    tree.set(value_key.into_key(), State::Added(datum), &mut store)
-                        .await?;
-                }
-                Instruction::Retract(fact) => {
-                    let entity_key = EntityKey::from(&fact);
-                    let value_key = ValueKey::from_key(&entity_key);
-                    let attribute_key = AttributeKey::from_key(&entity_key);
-
-                    tree.set(entity_key.into_key(), State::Removed, &mut store)
-                        .await?;
-                    tree.set(attribute_key.into_key(), State::Removed, &mut store)
-                        .await?;
-                    tree.set(value_key.into_key(), State::Removed, &mut store)
-                        .await?;
-                }
-            }
-        }
+        // Drain the change stream into the tree. All EAV/AEV/VAE writes,
+        // cardinality-one supersession, and retraction live in the shared
+        // helper so branch commits and in-memory layers agree exactly on
+        // key layout.
+        tree::apply(&mut tree, &mut store, changes).await?;
 
         // `tree.hash()` returns `None` only when the tree is empty, which
         // we represent as the canonical empty-tree hash.
