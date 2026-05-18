@@ -1230,6 +1230,7 @@ dependencies = [
  "dialog-storage",
  "dialog-varsig",
  "getrandom 0.2.16",
+ "pidlock",
  "serde",
  "serde_json",
  "tempfile",

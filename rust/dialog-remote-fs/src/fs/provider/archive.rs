@@ -18,11 +18,9 @@ use dialog_common::Blake3Hash;
 use dialog_effects::archive::prelude::PutExt;
 use dialog_effects::archive::*;
 
-use crate::FsError;
 use crate::fs::{Fs, FsInvocation};
+use crate::fs::provider::{navigate, split_target};
 use crate::handle::FsHandle;
-use crate::registry;
-use crate::request::FsRequest;
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -44,7 +42,7 @@ impl Provider<ForkInvocation<Fs, Get>> for Fs {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<FsInvocation<Get>> for Fs {
     async fn execute(&self, input: FsInvocation<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
-        let target = navigate(&input.permit.request, &input.permit.handle_id).await?;
+        let target = navigate(&input.permit.handle_id, &input.permit.request.path).await?;
         target.read_optional().await.map_err(ArchiveError::from)
     }
 }
@@ -81,21 +79,8 @@ impl Provider<FsInvocation<Put>> for Fs {
             });
         }
 
-        let request = &input.permit.request;
-        let handle_id = &input.permit.handle_id;
-
-        // Split the request path: `[archive, catalog, base58digest]` → the
-        // last element is the file name; everything before is the parent
-        // directory we need to ensure exists for the atomic temp+rename.
-        let (file_name, parent_segments) =
-            request.path.split_last().ok_or_else(|| FsError::Io(
-                "empty path for archive Put — request translation produced no segments".into(),
-            ))?;
-
-        let mut parent = registry::lookup(handle_id)?;
-        for segment in parent_segments {
-            parent = parent.resolve(segment).await?;
-        }
+        let (parent, file_name) =
+            split_target(&input.permit.handle_id, &input.permit.request.path).await?;
         parent.ensure_dir().await?;
 
         let target = parent.resolve(file_name).await?;
@@ -109,18 +94,4 @@ impl Provider<FsInvocation<Put>> for Fs {
         tmp.rename(&target).await?;
         Ok(())
     }
-}
-
-/// Navigate the request's path under the registered handle and return the
-/// resolved leaf handle. Used by Get; Put needs the parent separately for
-/// the temp+rename dance so it open-codes the navigation.
-async fn navigate(
-    request: &FsRequest,
-    handle_id: &str,
-) -> Result<crate::handle::Handle, FsError> {
-    let mut current = registry::lookup(handle_id)?;
-    for segment in &request.path {
-        current = current.resolve(segment).await?;
-    }
-    Ok(current)
 }
