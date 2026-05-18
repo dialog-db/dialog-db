@@ -34,7 +34,6 @@
 //! [`VolatileLayer::query`](crate::layer::VolatileLayer::query).
 
 use std::collections::HashSet;
-use std::pin::Pin;
 
 use async_trait::async_trait;
 use dialog_artifacts::selector::Constrained;
@@ -57,7 +56,7 @@ use futures_util::stream;
 
 use crate::Branch;
 use crate::RemoteSite;
-use crate::layer::{VolatileLayer, merge_grouped, sort_key};
+use crate::layer::{SortKey, VolatileLayer, merge_grouped, sort_key};
 use crate::repository::branch::select_from_branch;
 
 /// Tombstone identity for a pending retraction.
@@ -67,7 +66,7 @@ use crate::repository::branch::select_from_branch;
 /// Cause is intentionally excluded — a retraction means "this
 /// `(the, of, is)` should not appear", regardless of which causal
 /// history produced it in the source.
-type Tombstone = (Vec<u8>, Vec<u8>, u8, [u8; 32]);
+type Tombstone = SortKey;
 
 /// The source a [`TransactionQuery`] reads from.
 ///
@@ -221,7 +220,9 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
                         format!("rule registration failed: {e}")
                     ))?;
                 }
-                tx.commit().await?;
+                tx.commit()
+            .apply()
+            .await?;
             }
 
             let trans_env = TransactionEnv {
@@ -277,8 +278,7 @@ where
         // (the user's most recent intent wins, even if they retracted
         // the same fact earlier in the transaction).
         let filtered_source = filter_by_tombstones(source_stream, self.tombstones.clone());
-        let pending_stream =
-            Provider::<Select<'a>>::execute(&self.pending_layer, input).await?;
+        let pending_stream = Provider::<Select<'a>>::execute(&self.pending_layer, input).await?;
         Ok(merge_grouped(vec![filtered_source, pending_stream]))
     }
 }
@@ -292,8 +292,7 @@ impl<Env: ConditionalSync> Provider<SelectRules> for TransactionEnv<'_, Env> {
             Source::Branch(_) => ConceptRules::new(&input),
             Source::Volatile(l) => Provider::<SelectRules>::execute(*l, input.clone()).await?,
         };
-        let pending_rules =
-            Provider::<SelectRules>::execute(&self.pending_layer, input).await?;
+        let pending_rules = Provider::<SelectRules>::execute(&self.pending_layer, input).await?;
         acquired.extend(&pending_rules);
         Ok(acquired)
     }
@@ -309,7 +308,7 @@ fn filter_by_tombstones<'a>(
         return inner;
     }
     Box::pin(stream::unfold(
-        (Pin::from(inner), tombstones),
+        (inner, tombstones),
         |(mut inner, tombstones)| async move {
             loop {
                 match inner.next().await {
@@ -408,11 +407,9 @@ mod tests {
             .await?;
 
         // Open a new transaction that retracts Alice's name.
-        let tx = branch.transaction().retract(
-            the!("test/name")
-                .of(alice.clone())
-                .is("Alice".to_string()),
-        );
+        let tx = branch
+            .transaction()
+            .retract(the!("test/name").of(alice.clone()).is("Alice".to_string()));
 
         let names: Vec<String> = tx
             .query()
@@ -479,15 +476,10 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let stmt = the!("test/name")
-            .of(alice.clone())
-            .is("Alice".to_string());
+        let stmt = the!("test/name").of(alice.clone()).is("Alice".to_string());
         // Retract Alice then re-assert: the net pending effect is that
         // Alice should be visible.
-        let tx = branch
-            .transaction()
-            .retract(stmt.clone())
-            .assert(stmt);
+        let tx = branch.transaction().retract(stmt.clone()).assert(stmt);
 
         let names: Vec<String> = tx
             .query()
@@ -525,6 +517,7 @@ mod tests {
                 name: people::Name("Alice".into()),
             })
             .commit()
+            .apply()
             .await?;
 
         let bob: Entity = "id:bob".parse()?;
@@ -535,11 +528,7 @@ mod tests {
                 this: bob.clone(),
                 name: people::Name("Bob".into()),
             })
-            .retract(
-                the!("test/name")
-                    .of(alice.clone())
-                    .is("Alice".to_string()),
-            );
+            .retract(the!("test/name").of(alice.clone()).is("Alice".to_string()));
 
         let mut names: Vec<String> = tx
             .query()

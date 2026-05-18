@@ -167,7 +167,11 @@ mod tests {
         let mut b = ConceptRules::new(&descriptor);
         b.install(rule.clone());
         a.extend(&b);
-        assert_eq!(a.installed().len(), 1, "duplicate rule must not be added twice");
+        assert_eq!(
+            a.installed().len(),
+            1,
+            "duplicate rule must not be added twice"
+        );
     }
 
     #[dialog_common::test]

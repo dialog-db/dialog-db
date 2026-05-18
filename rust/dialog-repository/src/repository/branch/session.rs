@@ -214,13 +214,9 @@ where
     let select = branch.claims().select(input);
 
     let remote = match branch.upstream() {
-        Some(Upstream::Remote { remote: name, .. }) => branch
-            .subject()
-            .remote(name)
-            .load()
-            .perform(env)
-            .await
-            .ok(),
+        Some(Upstream::Remote { remote: name, .. }) => {
+            branch.subject().remote(name).load().perform(env).await.ok()
+        }
         _ => None,
     };
 

@@ -1038,6 +1038,7 @@ mod tests {
                     name: branch_meta::Name("main".into()),
                 })
                 .commit()
+                .apply()
                 .await?;
 
             let results: Vec<BranchMeta> = branch
@@ -1075,6 +1076,7 @@ mod tests {
                 .assert(asserted.clone())
                 .retract(asserted)
                 .commit()
+                .apply()
                 .await?;
 
             let results: Vec<BranchMeta> = branch
@@ -1233,6 +1235,7 @@ mod tests {
                     role: employee::Role("Bot".into()),
                 })
                 .commit()
+                .apply()
                 .await?;
             let mut names: Vec<String> = scratch
                 .query()
@@ -1250,10 +1253,7 @@ mod tests {
                 .map(|e| e.name.0)
                 .collect();
             names.sort();
-            assert_eq!(
-                names,
-                vec!["Alice".to_string(), "Synthetic".to_string()]
-            );
+            assert_eq!(names, vec!["Alice".to_string(), "Synthetic".to_string()]);
             Ok(())
         }
 
@@ -1286,6 +1286,7 @@ mod tests {
                     name: branch_meta::Name("main".into()),
                 })
                 .commit()
+                .apply()
                 .await?;
             let names: Vec<BranchMeta> = branch
                 .query()
@@ -1433,6 +1434,7 @@ mod tests {
                     role: employee::Role("Bot".into()),
                 })
                 .commit()
+                .apply()
                 .await?;
 
             let session = feature.query().with(&main).with(synthetic);
@@ -1592,6 +1594,7 @@ mod tests {
                 .transaction()
                 .install(employee_from_stuff)?
                 .commit()
+                .apply()
                 .await?;
             let derived: Vec<Employee> = branch
                 .query()

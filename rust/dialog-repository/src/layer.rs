@@ -34,6 +34,7 @@
 //!     .assert(Employee { this: id, name: Name("Alice".into()) })
 //!     .register(my_rule)?
 //!     .commit()
+//!     .apply()
 //!     .await?;
 //!
 //! let env = Union::new(branch_env, layer);
@@ -70,6 +71,8 @@ use futures_util::stream;
 use parking_lot::Mutex;
 
 use crate::LocalIndex;
+use crate::repository::branch::QuerySession;
+use crate::transaction_query::TransactionQuery;
 
 /// The canonical group key for artifacts traveling through a query stream.
 ///
@@ -98,7 +101,9 @@ pub fn group_key(artifact: &Artifact) -> (Vec<u8>, Vec<u8>) {
 /// would get by merging every source layer into a single physical tree
 /// and scanning it — "as-if merged" semantics rather than "interleaved
 /// by stream index".
-pub(crate) fn sort_key(artifact: &Artifact) -> (Vec<u8>, Vec<u8>, u8, [u8; 32]) {
+pub(crate) type SortKey = (Vec<u8>, Vec<u8>, u8, [u8; 32]);
+
+pub(crate) fn sort_key(artifact: &Artifact) -> SortKey {
     (
         artifact.the.key_bytes().to_vec(),
         artifact.of.key_bytes().to_vec(),
@@ -196,7 +201,7 @@ pub fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStream<'a>
 
         loop {
             let mut min_idx: Option<usize> = None;
-            let mut min_sort: Option<(Vec<u8>, Vec<u8>, u8, [u8; 32])> = None;
+            let mut min_sort: Option<SortKey> = None;
             for (i, s) in peekable.iter_mut().enumerate() {
                 match Pin::new(s).peek().await {
                     None => continue,
@@ -334,8 +339,8 @@ impl VolatileLayer {
     /// Cloning a `VolatileLayer` is cheap (the internal `Volatile`
     /// storage and tree-state are `Arc`-backed); the session owns its
     /// own clone so the original handle stays usable.
-    pub fn query(&self) -> crate::repository::branch::QuerySession<'static> {
-        crate::repository::branch::QuerySession::from_volatile_layer(self.clone())
+    pub fn query(&self) -> QuerySession<'static> {
+        QuerySession::from_volatile_layer(self.clone())
     }
 
     /// Snapshot of the layer's rule registry.
@@ -449,23 +454,58 @@ impl<'a> VolatileTransaction<'a> {
     /// tombstone matching facts in the layer's stream. Pending rules
     /// (from [`install`](Self::install) / [`register`](Self::register))
     /// merge with the layer's rules per concept.
-    pub fn query(&self) -> crate::transaction_query::TransactionQuery<'_> {
-        crate::transaction_query::TransactionQuery::for_volatile(
-            self.layer,
-            &self.changes,
-            &self.pending_rules,
-        )
+    pub fn query(&self) -> TransactionQuery<'_> {
+        TransactionQuery::for_volatile(self.layer, &self.changes, &self.pending_rules)
     }
 
-    /// Commit all accumulated changes and rule registrations to the
-    /// underlying layer. The layer's tree advances to a new root and
-    /// installed rules become visible to subsequent queries.
-    pub async fn commit(self) -> Result<(), DialogArtifactsError> {
+    /// Finalize this transaction into a commit command that mirrors
+    /// [`Transaction::commit`](crate::repository::branch::Transaction::commit)'s
+    /// shape: returns a [`VolatileCommit`] you `.perform(&env).await` to
+    /// apply the changes. The env is unused — a volatile layer's
+    /// storage is entirely in-process — but accepting one keeps the
+    /// call site identical to a branch transaction so generic code
+    /// (helpers, tests, downstream traits) can treat both uniformly:
+    ///
+    /// ```ignore
+    /// // Same shape for either:
+    /// branch.transaction().assert(x).commit().perform(&env).await?;
+    /// layer.transaction().assert(x).commit().perform(&env).await?;
+    /// ```
+    pub fn commit(self) -> VolatileCommit<'a> {
+        VolatileCommit { tx: self }
+    }
+}
+
+/// Commit command for a [`VolatileTransaction`].
+///
+/// Mirrors [`Commit`](crate::repository::branch::Commit) so the same
+/// `.commit().perform(&env).await` flow works for both branch and
+/// volatile transactions. The env argument is accepted but ignored —
+/// volatile layers have no out-of-process storage to coordinate with.
+pub struct VolatileCommit<'a> {
+    tx: VolatileTransaction<'a>,
+}
+
+impl VolatileCommit<'_> {
+    /// Apply the accumulated changes and rule registrations to the
+    /// underlying layer. The `env` argument is unused; it exists for
+    /// signature parity with [`Commit::perform`](crate::repository::branch::Commit::perform).
+    pub async fn perform<Env>(self, _env: &Env) -> Result<(), DialogArtifactsError> {
+        self.apply().await
+    }
+
+    /// Apply the changes without going through an env.
+    ///
+    /// Useful for internal call sites — like
+    /// [`branch_metadata`](crate::repository::branch_metadata) — that
+    /// have no operator handy and don't want the dummy `&()` dance.
+    /// Equivalent to `.perform(&()).await`.
+    pub async fn apply(self) -> Result<(), DialogArtifactsError> {
         let VolatileTransaction {
             layer,
             changes,
             pending_rules,
-        } = self;
+        } = self.tx;
 
         if !changes.is_empty() {
             let base = layer.state.lock().tree;
@@ -481,9 +521,6 @@ impl<'a> VolatileTransaction<'a> {
         if !pending_rules.is_empty() {
             let mut state = layer.state.lock();
             for rule in pending_rules {
-                // Already validated in `register`; unwrap-mapping here
-                // is purely so the error type matches the function
-                // signature if a future invariant trips.
                 state.rules.register(rule).map_err(|e| {
                     DialogArtifactsError::Storage(format!("rule registration failed: {e}"))
                 })?;
@@ -608,6 +645,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
+            .apply()
             .await?;
 
         let selector = ArtifactSelector::new().the("person/name".parse()?);
@@ -636,6 +674,7 @@ mod tests {
             .assert(stmt.clone())
             .retract(stmt)
             .commit()
+            .apply()
             .await?;
 
         let selector = ArtifactSelector::new().the("person/name".parse()?);
@@ -665,7 +704,7 @@ mod tests {
             alice.clone(),
             Value::String("Alicia".into()),
         );
-        tx.commit().await?;
+        tx.commit().apply().await?;
 
         let selector = ArtifactSelector::new().of(alice);
         let stream = Provider::<Select<'_>>::execute(&layer, selector).await?;
@@ -680,16 +719,16 @@ mod tests {
     }
 
     /// Test-only helper: build a committed `VolatileLayer` from a slice
-    /// of statements. Eliminates the `VolatileLayer::new() + transaction()
-    /// + .assert(..)+ + commit().await?` boilerplate that would otherwise
-    /// appear in every union test below.
+    /// of statements. Eliminates the
+    /// `VolatileLayer::new() + transaction() + .assert(..)+ + commit().await?`
+    /// boilerplate that would otherwise appear in every union test below.
     async fn layer_with<S: Statement + Clone>(stmts: &[S]) -> anyhow::Result<VolatileLayer> {
         let layer = VolatileLayer::new();
         let mut tx = layer.transaction();
         for s in stmts {
             tx = tx.assert(s.clone());
         }
-        tx.commit().await?;
+        tx.commit().apply().await?;
         Ok(layer)
     }
 
@@ -701,10 +740,8 @@ mod tests {
             .of(alice.clone())
             .is("Alice".to_string())])
         .await?;
-        let secondary = layer_with(&[the!("person/name")
-            .of(bob.clone())
-            .is("Bob".to_string())])
-        .await?;
+        let secondary =
+            layer_with(&[the!("person/name").of(bob.clone()).is("Bob".to_string())]).await?;
 
         let combined = Union::new(primary, secondary);
         let selector = ArtifactSelector::new().the("person/name".parse()?);
@@ -770,7 +807,7 @@ mod tests {
                     Value::String("X".into()),
                 );
             }
-            tx.commit().await?;
+            tx.commit().apply().await?;
             anyhow::Ok(layer)
         };
 
@@ -807,12 +844,8 @@ mod tests {
     async fn union_dedupes_in_eav_mode() -> anyhow::Result<()> {
         // selector constrains entity → tree scan uses EAV. Expect
         // alice's two facts (alice/name, alice/role), deduplicated to 2.
-        union_dedupes_for_selector(
-            |alice| ArtifactSelector::new().of(alice.clone()),
-            2,
-            "EAV",
-        )
-        .await
+        union_dedupes_for_selector(|alice| ArtifactSelector::new().of(alice.clone()), 2, "EAV")
+            .await
     }
 
     #[dialog_common::test]
@@ -849,8 +882,9 @@ mod tests {
         let stmt = the!("person/name")
             .of(alice.clone())
             .is("Alice".to_string());
-        let primary = layer_with(&[stmt.clone()]).await?;
-        let secondary = layer_with(&[stmt]).await?;
+        use std::slice;
+        let primary = layer_with(slice::from_ref(&stmt)).await?;
+        let secondary = layer_with(slice::from_ref(&stmt)).await?;
 
         let combined = Union::new(primary, secondary);
         let selector = ArtifactSelector::new().the("person/name".parse()?);
@@ -1012,8 +1046,7 @@ mod tests {
     async fn merge_grouped_single_stream_passes_through() -> anyhow::Result<()> {
         use futures_util::stream;
         let one = artifact("id:alice", "person/name", "Alice");
-        let s: ArtifactStream<'_> =
-            Box::pin(stream::iter(vec![one.clone()].into_iter().map(Ok)));
+        let s: ArtifactStream<'_> = Box::pin(stream::iter(vec![one.clone()].into_iter().map(Ok)));
         let merged = merge_grouped(vec![s]);
         let results: Vec<Artifact> = merged
             .collect::<Vec<_>>()
@@ -1034,15 +1067,13 @@ mod tests {
         selector: ArtifactSelector<Constrained>,
         label: &str,
     ) -> anyhow::Result<()> {
-        async fn to_layer(
-            facts: Vec<(Entity, &str, Value)>,
-        ) -> anyhow::Result<VolatileLayer> {
+        async fn to_layer(facts: Vec<(Entity, &str, Value)>) -> anyhow::Result<VolatileLayer> {
             let layer = VolatileLayer::new();
             let mut tx = layer.transaction();
             for (entity, attribute, value) in facts {
                 Update::associate(&mut tx, attribute.parse()?, entity, value);
             }
-            tx.commit().await?;
+            tx.commit().apply().await?;
             Ok(layer)
         }
 
@@ -1263,6 +1294,7 @@ mod tests {
                 label: attrs::Label("primary".into()),
             })
             .commit()
+            .apply()
             .await?;
 
         let results: Vec<Tagged> = layer

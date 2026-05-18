@@ -58,12 +58,8 @@ where
                 let datum = Datum::from(artifact);
                 tree.set(entity_key.into_key(), State::Added(datum.clone()), store)
                     .await?;
-                tree.set(
-                    attribute_key.into_key(),
-                    State::Added(datum.clone()),
-                    store,
-                )
-                .await?;
+                tree.set(attribute_key.into_key(), State::Added(datum.clone()), store)
+                    .await?;
                 tree.set(value_key.into_key(), State::Added(datum), store)
                     .await?;
             }
@@ -118,12 +114,8 @@ where
                 let datum = Datum::from(artifact);
                 tree.set(entity_key.into_key(), State::Added(datum.clone()), store)
                     .await?;
-                tree.set(
-                    attribute_key.into_key(),
-                    State::Added(datum.clone()),
-                    store,
-                )
-                .await?;
+                tree.set(attribute_key.into_key(), State::Added(datum.clone()), store)
+                    .await?;
                 tree.set(value_key.into_key(), State::Added(datum), store)
                     .await?;
             }
@@ -132,10 +124,12 @@ where
                 let value_key = ValueKey::from_key(&entity_key);
                 let attribute_key = AttributeKey::from_key(&entity_key);
 
-                tree.set(entity_key.into_key(), State::Removed, store).await?;
+                tree.set(entity_key.into_key(), State::Removed, store)
+                    .await?;
                 tree.set(attribute_key.into_key(), State::Removed, store)
                     .await?;
-                tree.set(value_key.into_key(), State::Removed, store).await?;
+                tree.set(value_key.into_key(), State::Removed, store)
+                    .await?;
             }
         }
     }

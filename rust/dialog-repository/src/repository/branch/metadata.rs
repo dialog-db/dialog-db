@@ -129,6 +129,6 @@ pub async fn branch_metadata(branch: &Branch) -> Result<VolatileLayer, DialogArt
         }
     }
 
-    tx.commit().await?;
+    tx.commit().apply().await?;
     Ok(layer)
 }

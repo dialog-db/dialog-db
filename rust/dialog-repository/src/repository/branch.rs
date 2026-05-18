@@ -48,8 +48,8 @@ mod select;
 pub use select::*;
 
 mod session;
-pub use session::*;
 pub(crate) use session::select_from_branch;
+pub use session::*;
 
 mod set_upstream;
 pub use set_upstream::*;
