@@ -1113,6 +1113,7 @@ dependencies = [
  "dialog-capability",
  "dialog-common",
  "dialog-effects",
+ "dialog-remote-fs",
  "dialog-remote-s3",
  "dialog-remote-ucan-s3",
  "serde",
@@ -1183,6 +1184,25 @@ dependencies = [
  "tokio",
  "tokio-test",
  "wasm-bindgen-futures",
+ "wasm-bindgen-test",
+]
+
+[[package]]
+name = "dialog-remote-fs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base58",
+ "blake3",
+ "dialog-capability",
+ "dialog-common",
+ "dialog-effects",
+ "getrandom 0.2.16",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
  "wasm-bindgen-test",
 ]
 
