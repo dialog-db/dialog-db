@@ -6,7 +6,12 @@ use crate::rule::deductive::DeductiveRule;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-/// Thread-safe registry of deductive rules, keyed by the conclusion entity.
+/// Thread-safe registry of *deductive* rules, keyed by the
+/// conclusion entity. Inductive rules
+/// ([`InductiveRule`](crate::rule::InductiveRule)) have a
+/// different lifecycle — they participate in transactions rather
+/// than queries, and will be installed via a separate path in the
+/// future.
 ///
 /// Both [`Session`](super::Session) and [`QuerySession`](super::QuerySession)
 /// hold a `RuleRegistry`. When a concept query needs rules, the registry

@@ -7,8 +7,9 @@ use crate::negation::Negation;
 pub use crate::planner::Plan;
 pub use crate::planner::{Conjunction, Planner};
 pub use crate::premise::Premise;
+use crate::rule::{Compile, fmt_rule_schema};
 pub use crate::{Attribute, Cardinality, Parameters, Proposition, Requirement, Value};
-use crate::{Environment, Term, Type};
+use crate::{Environment, Term};
 use descriptor::DeductiveRuleDescriptor;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -24,35 +25,19 @@ pub struct DeductiveRule {
     /// evaluation. Produced by [`Planner::plan`] during compilation.
     join: Conjunction,
 }
+impl Compile for DeductiveRule {
+    fn from_parts(conclusion: ConceptDescriptor, join: Conjunction) -> Self {
+        DeductiveRule { conclusion, join }
+    }
+}
+
 impl DeductiveRule {
     /// Compile a rule from a conclusion and premises.
     ///
     /// Plans the optimal premise execution order and validates that every
     /// conclusion variable is grounded by at least one positive premise.
     pub fn new(conclusion: ConceptDescriptor, premises: Vec<Premise>) -> Result<Self, TypeError> {
-        // Plan the order of premises in a scope where none of the rule
-        // parameters are bound to find the optimal execution order, or to
-        // discover unsatisfiable premises (e.g. a formula whose required
-        // cell is never derived by another premise).
-        let join = Planner::from(premises).plan(&Environment::new())?;
-        let rule = DeductiveRule { conclusion, join };
-
-        // Verify that every conclusion parameter is derived by one of the
-        // premises; otherwise the rule could never fully bind its output.
-        let unbound = rule
-            .conclusion
-            .operands()
-            .find(|name| !rule.join.binds.contains(name))
-            .map(String::from);
-
-        if let Some(variable) = unbound {
-            return Err(TypeError::UnboundVariable {
-                rule: Box::new(rule),
-                variable,
-            });
-        }
-
-        Ok(rule)
+        <Self as Compile>::compile(conclusion, premises)
     }
 
     /// Returns the conclusion predicate for this rule.
@@ -122,15 +107,7 @@ impl<'de> Deserialize<'de> for DeductiveRule {
 
 impl Display for DeductiveRule {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "{} {{", self.conclusion.this())?;
-        write!(f, "this: {},", Type::Entity)?;
-        for (name, attribute) in self.conclusion.with().iter() {
-            match attribute.content_type() {
-                Some(ty) => write!(f, "{}: {},", name, ty)?,
-                None => write!(f, "{}: Any,", name)?,
-            }
-        }
-        write!(f, "}}")
+        fmt_rule_schema(&self.conclusion, f)
     }
 }
 

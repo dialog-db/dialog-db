@@ -638,7 +638,7 @@ mod tests {
         let rule = DeductiveRule::from(&predicate);
 
         let analyzer_error = AnalyzerError::UnusedParameter {
-            rule: rule.clone(),
+            rule: Box::new(rule.clone().into()),
             parameter: "test_param".to_string(),
         };
 
