@@ -98,7 +98,7 @@ pub fn group_key(artifact: &Artifact) -> (Vec<u8>, Vec<u8>) {
 /// would get by merging every source layer into a single physical tree
 /// and scanning it — "as-if merged" semantics rather than "interleaved
 /// by stream index".
-fn sort_key(artifact: &Artifact) -> (Vec<u8>, Vec<u8>, u8, [u8; 32]) {
+pub(crate) fn sort_key(artifact: &Artifact) -> (Vec<u8>, Vec<u8>, u8, [u8; 32]) {
     (
         artifact.the.key_bytes().to_vec(),
         artifact.of.key_bytes().to_vec(),
@@ -425,6 +425,22 @@ impl<'a> VolatileTransaction<'a> {
                 message: e.to_string(),
             })?;
         self.register(rule)
+    }
+
+    /// Run queries against this transaction's "as-if committed" view of
+    /// the layer.
+    ///
+    /// Pending asserts/replaces materialize into a scratch volatile
+    /// layer that unions with the underlying layer; pending retracts
+    /// tombstone matching facts in the layer's stream. Pending rules
+    /// (from [`install`](Self::install) / [`register`](Self::register))
+    /// merge with the layer's rules per concept.
+    pub fn query(&self) -> crate::transaction_query::TransactionQuery<'_> {
+        crate::transaction_query::TransactionQuery::for_volatile(
+            self.layer,
+            &self.changes,
+            &self.pending_rules,
+        )
     }
 
     /// Commit all accumulated changes and rule registrations to the

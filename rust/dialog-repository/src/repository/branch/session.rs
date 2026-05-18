@@ -175,7 +175,16 @@ impl<Env> Clone for QueryEnv<'_, Env> {
     }
 }
 
-impl<'a, Env> QueryEnv<'a, Env>
+/// Execute a select against a single branch, transparently routing through
+/// the branch's remote upstream when configured. Extracted as a freestanding
+/// helper so both [`QueryEnv`] and the transaction-time
+/// [`TransactionEnv`](crate::transaction_query::TransactionEnv) share the
+/// exact same branch-read path.
+pub(crate) async fn select_from_branch<'a, Env>(
+    branch: &'a Branch,
+    env: &'a Env,
+    input: ArtifactSelector<Constrained>,
+) -> Result<ArtifactStream<'a>, DialogArtifactsError>
 where
     Env: Provider<Get>
         + Provider<Put>
@@ -185,28 +194,22 @@ where
         + ConditionalSync
         + 'static,
 {
-    async fn select_branch(
-        branch: &'a Branch,
-        env: &'a Env,
-        input: ArtifactSelector<Constrained>,
-    ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
-        let select = branch.claims().select(input);
+    let select = branch.claims().select(input);
 
-        let remote = match branch.upstream() {
-            Some(Upstream::Remote { remote: name, .. }) => branch
-                .subject()
-                .remote(name)
-                .load()
-                .perform(env)
-                .await
-                .ok(),
-            _ => None,
-        };
+    let remote = match branch.upstream() {
+        Some(Upstream::Remote { remote: name, .. }) => branch
+            .subject()
+            .remote(name)
+            .load()
+            .perform(env)
+            .await
+            .ok(),
+        _ => None,
+    };
 
-        let store = NetworkedIndex::new(env, select.catalog(), remote);
-        let stream = select.execute(store).await?;
-        Ok(Box::pin(stream))
-    }
+    let store = NetworkedIndex::new(env, select.catalog(), remote);
+    let stream = select.execute(store).await?;
+    Ok(Box::pin(stream))
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -232,9 +235,9 @@ where
         // sliding window in `only.rs` depends on.
         let mut streams: Vec<ArtifactStream<'a>> =
             Vec::with_capacity(1 + self.branches.len() + self.layers.len());
-        streams.push(Self::select_branch(self.primary, self.env, input.clone()).await?);
+        streams.push(select_from_branch(self.primary, self.env, input.clone()).await?);
         for branch in &self.branches {
-            streams.push(Self::select_branch(branch, self.env, input.clone()).await?);
+            streams.push(select_from_branch(branch, self.env, input.clone()).await?);
         }
         for layer in &self.layers {
             streams.push(Provider::<Select<'a>>::execute(layer, input.clone()).await?);

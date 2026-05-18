@@ -49,6 +49,7 @@ pub use select::*;
 
 mod session;
 pub use session::*;
+pub(crate) use session::select_from_branch;
 
 mod set_upstream;
 pub use set_upstream::*;

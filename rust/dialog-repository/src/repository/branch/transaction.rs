@@ -1,3 +1,4 @@
+use crate::transaction_query::TransactionQuery;
 use crate::{Branch, Commit};
 use dialog_artifacts::{ChangeStream, Changes, Statement};
 
@@ -21,6 +22,18 @@ impl<'a> Transaction<'a> {
     pub fn retract<C: Statement>(mut self, claim: C) -> Self {
         self.changes.retract(claim);
         self
+    }
+
+    /// Run queries against this transaction's "as-if committed" view of
+    /// the branch.
+    ///
+    /// Pending asserts and retracts are surfaced through a
+    /// [`TransactionQuery`] handle — assertions show up alongside the
+    /// branch's stored facts; retractions tombstone matching facts in
+    /// the branch's stream before the merge. The transaction itself
+    /// stays open and committable.
+    pub fn query(&self) -> TransactionQuery<'_> {
+        TransactionQuery::for_branch(self.branch, &self.changes)
     }
 
     /// Finalize the transaction into a commit command.

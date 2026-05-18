@@ -16,7 +16,7 @@ use dialog_varsig::Principal;
 mod archive;
 pub use archive::*;
 
-mod branch;
+pub(crate) mod branch;
 pub use branch::*;
 
 mod create;
