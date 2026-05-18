@@ -28,6 +28,7 @@
 mod error;
 pub mod fs;
 mod handle;
+mod lock;
 pub mod registry;
 pub mod request;
 
