@@ -542,6 +542,122 @@ mod tests {
         Ok(())
     }
 
+    /// Two layers each holding the same set of facts. Run the same dedup
+    /// expectation through all three scan modes (EAV / AEV / VAE) by
+    /// varying which selector field is constrained, and check that the
+    /// duplicates collapse to exactly the expected unique count in every
+    /// mode.
+    ///
+    /// The reason every mode works: the per-group HashSet in
+    /// `merge_grouped` resets when `group_key = (the, of)` advances,
+    /// which is correct only if every input stream is sorted by
+    /// `group_key`. That holds because:
+    ///
+    /// - EAV scan with `.of()`: entity fixed → effective order is
+    ///   `(attribute, value)`, group_key `(attribute, fixed_entity)`
+    ///   sorts monotonically by attribute.
+    /// - AEV scan with `.the()`: attribute fixed → effective order
+    ///   `(entity, value)`, group_key `(fixed_attribute, entity)` sorts
+    ///   monotonically by entity.
+    /// - VAE scan with `.is()`: value fixed and the VAE key byte layout
+    ///   is `[TAG, VALUE_TYPE, VALUE_REF, ATTRIBUTE, ENTITY]` — so the
+    ///   effective order is `(attribute, entity)`, exactly equal to
+    ///   `group_key`. If the VAE key layout ever changes to put entity
+    ///   before attribute, the VAE assertion below will start failing
+    ///   loudly.
+    async fn union_dedupes_for_selector(
+        selector_for: impl Fn(&Entity) -> ArtifactSelector<Constrained>,
+        expected_unique: usize,
+        label: &str,
+    ) -> anyhow::Result<()> {
+        let alice: Entity = "id:alice".parse()?;
+        let bob: Entity = "id:bob".parse()?;
+        let facts = [
+            (alice.clone(), "person/name"),
+            (alice.clone(), "person/role"),
+            (bob.clone(), "person/name"),
+            (bob.clone(), "person/role"),
+        ];
+
+        let build = || -> anyhow::Result<Layer> {
+            let mut layer = Layer::new();
+            for (entity, attribute) in &facts {
+                Update::associate(
+                    &mut layer,
+                    attribute.parse()?,
+                    entity.clone(),
+                    Value::String("X".into()),
+                );
+            }
+            Ok(layer)
+        };
+
+        let combined = Union::new(build()?, build()?);
+        let stream = Provider::<Select<'_>>::execute(&combined, selector_for(&alice)).await?;
+        let results: Vec<Artifact> = stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_, _>>()?;
+
+        use std::collections::HashMap;
+        let mut counts: HashMap<Cause, usize> = HashMap::new();
+        for a in &results {
+            *counts.entry(Cause::from(a)).or_default() += 1;
+        }
+        for (fingerprint, count) in &counts {
+            assert_eq!(
+                *count, 1,
+                "[{label}] artifact with fingerprint {fingerprint} appeared {count} times \
+                 in the union output; expected exactly once. Full results: {results:?}"
+            );
+        }
+        assert_eq!(
+            counts.len(),
+            expected_unique,
+            "[{label}] expected {expected_unique} unique artifacts; got {} in {results:?}",
+            counts.len()
+        );
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn union_dedupes_in_eav_mode() -> anyhow::Result<()> {
+        // selector constrains entity → tree scan uses EAV. Expect
+        // alice's two facts (alice/name, alice/role), deduplicated to 2.
+        union_dedupes_for_selector(
+            |alice| ArtifactSelector::new().of(alice.clone()),
+            2,
+            "EAV",
+        )
+        .await
+    }
+
+    #[dialog_common::test]
+    async fn union_dedupes_in_aev_mode() -> anyhow::Result<()> {
+        // selector constrains attribute (no entity) → tree scan uses
+        // AEV. Expect (alice/name, bob/name), deduplicated to 2.
+        union_dedupes_for_selector(
+            |_| ArtifactSelector::new().the("person/name".parse().unwrap()),
+            2,
+            "AEV",
+        )
+        .await
+    }
+
+    #[dialog_common::test]
+    async fn union_dedupes_in_vae_mode() -> anyhow::Result<()> {
+        // selector constrains value only → tree scan uses VAE. Expect
+        // all four (alice/name, alice/role, bob/name, bob/role)
+        // collapsed across the two layers to 4 unique artifacts.
+        union_dedupes_for_selector(
+            |_| ArtifactSelector::new().is(Value::String("X".into())),
+            4,
+            "VAE",
+        )
+        .await
+    }
+
     #[dialog_common::test]
     async fn union_dedupes_identical_claims_from_two_layers() -> anyhow::Result<()> {
         // Two layers asserting the literally same (the, of, is, cause).
