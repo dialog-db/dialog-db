@@ -1002,7 +1002,7 @@ mod tests {
     mod layer {
         use super::query_engine::{Employee, employee};
         use crate::helpers::{test_operator_with_profile, test_repo};
-        use crate::layer::Layer;
+        use crate::layer::VolatileLayer;
         use dialog_query::query::Output;
         use dialog_query::{Concept, Entity, Query, Term, the};
 
@@ -1024,20 +1024,20 @@ mod tests {
 
         #[dialog_common::test]
         async fn layer_exposes_asserted_facts() -> anyhow::Result<()> {
-            // Build a Layer end-to-end, then attach via .with(...).
+            // Build a VolatileLayer end-to-end, then attach via .with(...).
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
             let synthetic: Entity = "id:branch".parse()?;
-            let layer = Layer::new().assert(BranchMeta {
+            let layer = VolatileLayer::new().assert(BranchMeta {
                 this: synthetic.clone(),
                 name: branch_meta::Name("main".into()),
             });
 
             let results: Vec<BranchMeta> = branch
                 .query()
-                .with(layer)?
+                .with(layer)
                 .select(Query::<BranchMeta> {
                     this: synthetic.clone().into(),
                     name: Term::var("name"),
@@ -1064,11 +1064,11 @@ mod tests {
                 this: synthetic.clone(),
                 name: branch_meta::Name("main".into()),
             };
-            let layer = Layer::new().assert(asserted.clone()).retract(asserted);
+            let layer = VolatileLayer::new().assert(asserted.clone()).retract(asserted);
 
             let results: Vec<BranchMeta> = branch
                 .query()
-                .with(layer)?
+                .with(layer)
                 .select(Query::<BranchMeta> {
                     this: synthetic.into(),
                     name: Term::var("name"),
@@ -1102,7 +1102,7 @@ mod tests {
             let synthetic: Entity = "id:branch".parse()?;
             let names: Vec<BranchMeta> = branch
                 .query()
-                .with(branch.metadata())?
+                .with(branch.metadata())
                 .select(Query::<BranchMeta> {
                     this: synthetic.clone().into(),
                     name: Term::var("name"),
@@ -1117,7 +1117,7 @@ mod tests {
             // The revision-hash fact should be present.
             let revision: Vec<branch_meta::RevisionHash> = branch
                 .query()
-                .with(branch.metadata())?
+                .with(branch.metadata())
                 .select(Query::<RevisionConcept> {
                     this: synthetic.clone().into(),
                     revision_hash: Term::var("hash"),
@@ -1176,7 +1176,7 @@ mod tests {
 
             let mut names: Vec<String> = feature
                 .query()
-                .with(&main)?
+                .with(&main)
                 .select(Query::<Employee> {
                     this: Term::var("this"),
                     name: Term::var("name"),
@@ -1195,7 +1195,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn layer_chains_branch_and_memory() -> anyhow::Result<()> {
-            // Same session can layer a branch *and* an in-memory Layer.
+            // Same session can layer a branch *and* an in-memory VolatileLayer.
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
             let main = repo.branch("main").open().perform(&operator).await?;
@@ -1213,15 +1213,15 @@ mod tests {
             let main = repo.branch("main").load().perform(&operator).await?;
             // `scratch` has no commits yet — `open()` is enough, the branch
             // simply selects against the empty tree.
-            let synthetic_layer = Layer::new().assert(Employee {
+            let synthetic_layer = VolatileLayer::new().assert(Employee {
                 this: Entity::new()?,
                 name: employee::Name("Synthetic".into()),
                 role: employee::Role("Bot".into()),
             });
             let mut names: Vec<String> = scratch
                 .query()
-                .with(&main)?
-                .with(synthetic_layer)?
+                .with(&main)
+                .with(synthetic_layer)
                 .select(Query::<Employee> {
                     this: Term::var("this"),
                     name: Term::var("name"),
@@ -1262,13 +1262,13 @@ mod tests {
                 .await?;
 
             let synthetic: Entity = "id:branch".parse()?;
-            let layer = Layer::new().assert(BranchMeta {
+            let layer = VolatileLayer::new().assert(BranchMeta {
                 this: synthetic,
                 name: branch_meta::Name("main".into()),
             });
             let names: Vec<BranchMeta> = branch
                 .query()
-                .with(layer)?
+                .with(layer)
                 .select(Query::<BranchMeta> {
                     this: Term::var("this"),
                     name: Term::var("name"),
@@ -1310,7 +1310,7 @@ mod tests {
             let repo_entity: Entity = "id:repository".parse()?;
             let results: Vec<RepoConcept> = branch
                 .query()
-                .with(branch.metadata())?
+                .with(branch.metadata())
                 .select(Query::<RepoConcept> {
                     this: repo_entity.into(),
                     did: Term::var("did"),
@@ -1354,7 +1354,7 @@ mod tests {
             let upstream_entity: Entity = "id:upstream".parse()?;
             let results: Vec<UpstreamConcept> = feature
                 .query()
-                .with(feature.metadata())?
+                .with(feature.metadata())
                 .select(Query::<UpstreamConcept> {
                     this: upstream_entity.into(),
                     kind: Term::var("kind"),
@@ -1380,7 +1380,7 @@ mod tests {
             let upstream_entity: Entity = "id:upstream".parse()?;
             let results: Vec<UpstreamConcept> = branch
                 .query()
-                .with(branch.metadata())?
+                .with(branch.metadata())
                 .select(Query::<UpstreamConcept> {
                     this: upstream_entity.into(),
                     kind: Term::var("kind"),
@@ -1403,13 +1403,13 @@ mod tests {
             let main = repo.branch("main").open().perform(&operator).await?;
             let feature = repo.branch("feature").open().perform(&operator).await?;
 
-            let synthetic = Layer::new().assert(Employee {
+            let synthetic = VolatileLayer::new().assert(Employee {
                 this: Entity::new()?,
                 name: employee::Name("Synth".into()),
                 role: employee::Role("Bot".into()),
             });
 
-            let session = feature.query().with(&main)?.with(synthetic)?;
+            let session = feature.query().with(&main).with(synthetic);
             assert_eq!(session.layered_branches().len(), 1);
             assert_eq!(session.layered_branches()[0].name(), "main");
             assert_eq!(session.layers().len(), 1);
@@ -1428,7 +1428,7 @@ mod tests {
             Ok(())
         }
 
-        // -- Layer::install end-to-end via a session ---------------------
+        // -- VolatileLayer::install end-to-end via a session ---------------------
 
         mod stuff_role {
             #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -1508,7 +1508,7 @@ mod tests {
 
             let results: Vec<WithNickname> = feature
                 .query()
-                .with(&main)?
+                .with(&main)
                 .select(Query::<WithNickname> {
                     this: Term::var("this"),
                     nickname: Term::var("nickname"),
@@ -1532,7 +1532,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn install_rule_on_layer_derives_facts_in_query() -> anyhow::Result<()> {
-            // End-to-end: rule installed on an Layer layer derives Employee
+            // End-to-end: rule installed on an VolatileLayer layer derives Employee
             // facts from Stuff facts stored on the branch.
             use dialog_query::rule::When;
 
@@ -1561,10 +1561,10 @@ mod tests {
                 .perform(&operator)
                 .await?;
 
-            let layer = Layer::new().install(employee_from_stuff)?;
+            let layer = VolatileLayer::new().install(employee_from_stuff)?;
             let derived: Vec<Employee> = branch
                 .query()
-                .with(layer)?
+                .with(layer)
                 .select(Query::<Employee> {
                     this: Term::var("this"),
                     name: Term::var("name"),

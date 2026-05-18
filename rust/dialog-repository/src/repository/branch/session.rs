@@ -10,7 +10,7 @@ use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output};
 use dialog_query::source::SelectRules;
 
-use crate::layer::{Layer, merge_grouped};
+use crate::layer::{VolatileLayer, merge_grouped};
 use crate::{Branch, NetworkedIndex, RemoteSite, RepositoryMemoryExt, Upstream};
 
 /// A query session on a branch.
@@ -20,56 +20,56 @@ use crate::{Branch, NetworkedIndex, RemoteSite, RepositoryMemoryExt, Upstream};
 /// `.with(layer)`, then runs queries with `.select(q).perform(&env)`.
 ///
 /// Each source — the primary branch, every additional `&Branch`, every
-/// [`Layer`] — is kept independent. At evaluation time their selects are
+/// [`VolatileLayer`] — is kept independent. At evaluation time their selects are
 /// unioned via [`merge_grouped`] and their rules merged per concept.
 /// Mutable state (synthetic facts, installed rules) lives on the
-/// `Layer`s the caller builds, not on the session itself.
+/// `VolatileLayer`s the caller builds, not on the session itself.
 ///
 /// ```ignore
 /// let metadata = branch.metadata();              // a pre-built layer
-/// let synthetic = Layer::new()
+/// let synthetic = VolatileLayer::new()
 ///     .assert(my_concept_instance)
 ///     .install(|q: Query<Derived>| (...,))?;
 ///
 /// branch.query()
-///     .with(&other_branch)?                      // union with another branch
-///     .with(metadata)?                           // union with branch metadata
-///     .with(synthetic)?                          // union with in-memory layer
+///     .with(&other_branch)                       // union with another branch
+///     .with(metadata)                            // union with branch metadata
+///     .with(synthetic)                           // union with in-memory layer
 ///     .select(query)
 ///     .perform(&env);
 /// ```
 ///
 /// No environment reference is captured on the session itself —
-/// `CompositeEnv` is built fresh at `.perform(env)`.
+/// `QueryEnv` is built fresh at `.perform(env)`.
 pub struct QuerySession<'a> {
     primary: &'a Branch,
     branches: Vec<&'a Branch>,
-    layers: Vec<Layer>,
+    layers: Vec<VolatileLayer>,
 }
 
 /// A source that can be layered onto a [`QuerySession`] via
 /// [`QuerySession::with`].
 ///
 /// Implemented for `&'a Branch` (adds another branch's facts to the
-/// union) and [`Layer`] (adds an in-memory fact + rule source).
+/// union) and [`VolatileLayer`] (adds an in-memory fact + rule source).
 /// Polymorphic without exposing how each layer is dispatched internally
 /// and without capturing the env.
 pub trait QueryLayer<'a> {
     /// Apply this layer to the given session.
-    fn apply(self, session: QuerySession<'a>) -> Result<QuerySession<'a>, EvaluationError>;
+    fn apply(self, session: QuerySession<'a>) -> QuerySession<'a>;
 }
 
 impl<'a> QueryLayer<'a> for &'a Branch {
-    fn apply(self, mut session: QuerySession<'a>) -> Result<QuerySession<'a>, EvaluationError> {
+    fn apply(self, mut session: QuerySession<'a>) -> QuerySession<'a> {
         session.branches.push(self);
-        Ok(session)
+        session
     }
 }
 
-impl<'a> QueryLayer<'a> for Layer {
-    fn apply(self, mut session: QuerySession<'a>) -> Result<QuerySession<'a>, EvaluationError> {
+impl<'a> QueryLayer<'a> for VolatileLayer {
+    fn apply(self, mut session: QuerySession<'a>) -> QuerySession<'a> {
         session.layers.push(self);
-        Ok(session)
+        session
     }
 }
 
@@ -77,9 +77,9 @@ impl<'a> QuerySession<'a> {
     /// Layer another source on top of this session.
     ///
     /// Accepts any [`QueryLayer`] — currently a `&Branch` (its data is
-    /// unioned at perform time) or a [`Layer`] (kept independent and
+    /// unioned at perform time) or a [`VolatileLayer`] (kept independent and
     /// unioned at perform time). Chainable.
-    pub fn with<L: QueryLayer<'a>>(self, layer: L) -> Result<Self, EvaluationError> {
+    pub fn with<L: QueryLayer<'a>>(self, layer: L) -> Self {
         layer.apply(self)
     }
 
@@ -89,7 +89,7 @@ impl<'a> QuerySession<'a> {
     }
 
     /// Borrow the layers (in `with`-call order) attached to this session.
-    pub fn layers(&self) -> &[Layer] {
+    pub fn layers(&self) -> &[VolatileLayer] {
         &self.layers
     }
 
@@ -108,7 +108,7 @@ impl<'a> QuerySession<'a> {
 pub struct SelectQuery<'a, Q> {
     primary: &'a Branch,
     branches: Vec<&'a Branch>,
-    layers: Vec<Layer>,
+    layers: Vec<VolatileLayer>,
     query: Q,
 }
 
@@ -135,7 +135,7 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
             + ConditionalSync
             + 'static,
     {
-        let composite = CompositeEnv {
+        let query_env = QueryEnv {
             primary: self.primary,
             branches: self.branches,
             layers: self.layers,
@@ -143,7 +143,7 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
         };
         let query = self.query;
         async_stream::try_stream! {
-            let results = Box::pin(query.perform(&composite));
+            let results = Box::pin(query.perform(&query_env));
             for await result in results {
                 yield result?;
             }
@@ -157,14 +157,14 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
 ///
 /// Built fresh on each `.perform(env)` so the environment reference is
 /// never captured on the session itself.
-pub(crate) struct CompositeEnv<'a, Env> {
+pub(crate) struct QueryEnv<'a, Env> {
     primary: &'a Branch,
     branches: Vec<&'a Branch>,
-    layers: Vec<Layer>,
+    layers: Vec<VolatileLayer>,
     env: &'a Env,
 }
 
-impl<Env> Clone for CompositeEnv<'_, Env> {
+impl<Env> Clone for QueryEnv<'_, Env> {
     fn clone(&self) -> Self {
         Self {
             primary: self.primary,
@@ -175,7 +175,7 @@ impl<Env> Clone for CompositeEnv<'_, Env> {
     }
 }
 
-impl<'a, Env> CompositeEnv<'a, Env>
+impl<'a, Env> QueryEnv<'a, Env>
 where
     Env: Provider<Get>
         + Provider<Put>
@@ -211,7 +211,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<'a, Env> Provider<Select<'a>> for CompositeEnv<'a, Env>
+impl<'a, Env> Provider<Select<'a>> for QueryEnv<'a, Env>
 where
     Env: Provider<Get>
         + Provider<Put>
@@ -245,7 +245,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Env: ConditionalSync> Provider<SelectRules> for CompositeEnv<'_, Env> {
+impl<Env: ConditionalSync> Provider<SelectRules> for QueryEnv<'_, Env> {
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
         // Branches don't currently carry rules of their own. Each layer's
         // rule registry contributes alternative deductive rules per
@@ -270,7 +270,7 @@ impl Branch {
     /// Open a query session on this branch.
     ///
     /// The session starts empty — no layered branches, no layers.
-    /// Use `.with(layer)` to attach a `&Branch` or a pre-built `Layer`
+    /// Use `.with(layer)` to attach a `&Branch` or a pre-built `VolatileLayer`
     /// (which is where you assert facts and install rules).
     pub fn query(&self) -> QuerySession<'_> {
         QuerySession {
@@ -284,9 +284,9 @@ impl Branch {
     /// (name, revision hash, upstream, hosting repository) under the
     /// `dialog.meta/*` attribute namespace.
     ///
-    /// Compose with `branch.query().with(branch.metadata())?` to make
+    /// Compose with `branch.query().with(branch.metadata())` to make
     /// branch internals queryable like any other fact.
-    pub fn metadata(&self) -> Layer {
+    pub fn metadata(&self) -> VolatileLayer {
         super::metadata::branch_metadata(self)
     }
 }

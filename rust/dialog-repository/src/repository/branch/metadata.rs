@@ -1,6 +1,6 @@
 //! Branch metadata layer.
 //!
-//! Builds an [`Layer`] populated with synthetic facts describing a
+//! Builds an [`VolatileLayer`] populated with synthetic facts describing a
 //! [`Branch`]: its name, current revision, hosting repository, and upstream
 //! tracking state — all exposed under the `dialog.meta/*` attribute
 //! namespace.
@@ -17,7 +17,7 @@
 
 use base58::ToBase58;
 use dialog_artifacts::Entity;
-use crate::layer::Layer;
+use crate::layer::VolatileLayer;
 use dialog_query::the;
 
 use crate::{Branch, Upstream};
@@ -38,11 +38,11 @@ fn upstream_entity() -> Entity {
 ///
 /// Always emits `dialog.meta/name` for the branch and `dialog.meta/did` for
 /// the repository. Adds revision and upstream facts when present.
-pub fn branch_metadata(branch: &Branch) -> Layer {
+pub fn branch_metadata(branch: &Branch) -> VolatileLayer {
     let branch_id = branch_entity();
     let repo_id = repository_entity();
 
-    let mut layer = Layer::new()
+    let mut layer = VolatileLayer::new()
         .assert(
             the!("dialog.meta/name")
                 .of(branch_id.clone())

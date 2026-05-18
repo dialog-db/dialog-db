@@ -6,7 +6,7 @@
 //! alongside the real artifact store, queried with the same
 //! [`Application`](dialog_query::query::Application) API.
 //!
-//! [`Layer`] is implemented on top of the same prolly tree the branch uses,
+//! [`VolatileLayer`] is implemented on top of the same prolly tree the branch uses,
 //! backed by a `dialog_storage::Volatile` provider through a [`LocalIndex`].
 //! That symmetry matters: a layer's `Provider<Select<'_>>` yields artifacts
 //! in exactly the same `(the, of)` order a branch does, so the
@@ -20,9 +20,9 @@
 //! streams (and rule sets) of alternative sources.
 //!
 //! ```ignore
-//! use dialog_repository::layer::{Layer, Union};
+//! use dialog_repository::layer::{VolatileLayer, Union};
 //!
-//! let layer = Layer::new()
+//! let layer = VolatileLayer::new()
 //!     .assert(Employee { this: id, name: Name("Alice".into()) })
 //!     .register(my_rule)?;
 //!
@@ -229,7 +229,7 @@ pub fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStream<'a>
     })
 }
 
-/// Internal mutable state of a [`Layer`]. Kept behind an Arc<Mutex<...>>
+/// Internal mutable state of a [`VolatileLayer`]. Kept behind an Arc<Mutex<...>>
 /// so the chained synchronous `assert`/`retract` API works on `Self` while
 /// `Provider<Select>::execute` (which only has `&self`) can still flush.
 struct State {
@@ -243,7 +243,7 @@ struct State {
 
 /// An in-memory layer carrying both synthetic facts and deductive rules.
 ///
-/// `Layer` is the bundle a [`QuerySession`](crate::session) wires onto a
+/// `VolatileLayer` is the bundle a [`QuerySession`](crate::session) wires onto a
 /// real fact source via [`Union`] (or, more commonly, via the
 /// `.with(layer)` chain on a session). Facts asserted here are unioned
 /// with the primary during evaluation; rules registered here merge with
@@ -257,20 +257,20 @@ struct State {
 /// layer. The tree itself lives entirely in a `Volatile` provider — no
 /// operator, profile, or persisted state.
 #[derive(Clone)]
-pub struct Layer {
+pub struct VolatileLayer {
     env: Volatile,
     catalog: Capability<Catalog>,
     state: Arc<Mutex<State>>,
     rules: RuleRegistry,
 }
 
-impl Default for Layer {
+impl Default for VolatileLayer {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Layer {
+impl VolatileLayer {
     /// Create an empty layer backed by a fresh in-memory store.
     pub fn new() -> Self {
         Self {
@@ -378,7 +378,7 @@ impl Layer {
     }
 }
 
-impl Update for Layer {
+impl Update for VolatileLayer {
     fn associate(&mut self, the: Attribute, of: Entity, is: Value) {
         self.state.lock().pending.associate(the, of, is);
     }
@@ -392,7 +392,7 @@ impl Update for Layer {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<'a> Provider<Select<'a>> for Layer {
+impl<'a> Provider<Select<'a>> for VolatileLayer {
     async fn execute(
         &self,
         input: ArtifactSelector<Constrained>,
@@ -421,7 +421,7 @@ impl<'a> Provider<Select<'a>> for Layer {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<SelectRules> for Layer {
+impl Provider<SelectRules> for VolatileLayer {
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
         self.rules.acquire(&input)
     }
@@ -520,7 +520,7 @@ mod tests {
     #[dialog_common::test]
     async fn layer_assert_then_select_round_trips() -> anyhow::Result<()> {
         let alice: Entity = "id:alice".parse()?;
-        let layer = Layer::new().assert(
+        let layer = VolatileLayer::new().assert(
             the!("person/name")
                 .of(alice.clone())
                 .is("Alice".to_string()),
@@ -546,7 +546,7 @@ mod tests {
         let stmt = the!("person/name")
             .of(alice.clone())
             .is("Alice".to_string());
-        let layer = Layer::new().assert(stmt.clone()).retract(stmt);
+        let layer = VolatileLayer::new().assert(stmt.clone()).retract(stmt);
 
         let selector = ArtifactSelector::new().the("person/name".parse()?);
         let stream = Provider::<Select<'_>>::execute(&layer, selector).await?;
@@ -560,7 +560,7 @@ mod tests {
         // Drive `associate_unique` (cardinality-one) directly so the tree
         // takes the Replace path: only the latest value should survive.
         let alice: Entity = "id:alice".parse()?;
-        let mut layer = Layer::new();
+        let mut layer = VolatileLayer::new();
         Update::associate_unique(
             &mut layer,
             "person/name".parse()?,
@@ -590,13 +590,13 @@ mod tests {
     async fn union_chains_select_streams_from_both_sides() -> anyhow::Result<()> {
         let alice: Entity = "id:alice".parse()?;
         let bob: Entity = "id:bob".parse()?;
-        let primary = Layer::new().assert(
+        let primary = VolatileLayer::new().assert(
             the!("person/name")
                 .of(alice.clone())
                 .is("Alice".to_string()),
         );
         let secondary =
-            Layer::new().assert(the!("person/name").of(bob.clone()).is("Bob".to_string()));
+            VolatileLayer::new().assert(the!("person/name").of(bob.clone()).is("Bob".to_string()));
 
         let combined = Union::new(primary, secondary);
         let selector = ArtifactSelector::new().the("person/name".parse()?);
@@ -651,8 +651,8 @@ mod tests {
             (bob.clone(), "person/role"),
         ];
 
-        let build = || -> anyhow::Result<Layer> {
-            let mut layer = Layer::new();
+        let build = || -> anyhow::Result<VolatileLayer> {
+            let mut layer = VolatileLayer::new();
             for (entity, attribute) in &facts {
                 Update::associate(
                     &mut layer,
@@ -736,12 +736,12 @@ mod tests {
         // The same fact existing in two places is still one fact — the
         // user should see one row, not two.
         let alice: Entity = "id:alice".parse()?;
-        let primary = Layer::new().assert(
+        let primary = VolatileLayer::new().assert(
             the!("person/name")
                 .of(alice.clone())
                 .is("Alice".to_string()),
         );
-        let secondary = Layer::new().assert(
+        let secondary = VolatileLayer::new().assert(
             the!("person/name")
                 .of(alice.clone())
                 .is("Alice".to_string()),
@@ -772,7 +772,7 @@ mod tests {
         // primary's scan order, so naive consecutive-only dedup would
         // miss it. We still expect two unique rows total.
         let alice: Entity = "id:alice".parse()?;
-        let primary = Layer::new()
+        let primary = VolatileLayer::new()
             .assert(
                 the!("person/name")
                     .of(alice.clone())
@@ -783,7 +783,7 @@ mod tests {
                     .of(alice.clone())
                     .is("AliceB".to_string()),
             );
-        let secondary = Layer::new().assert(
+        let secondary = VolatileLayer::new().assert(
             the!("person/name")
                 .of(alice.clone())
                 .is("AliceA".to_string()),
@@ -823,14 +823,14 @@ mod tests {
         let alice: Entity = "id:alice".parse()?;
         let bob: Entity = "id:bob".parse()?;
 
-        let primary = Layer::new()
+        let primary = VolatileLayer::new()
             .assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("AliceA".to_string()),
             )
             .assert(the!("person/name").of(bob.clone()).is("BobA".to_string()));
-        let secondary = Layer::new()
+        let secondary = VolatileLayer::new()
             .assert(
                 the!("person/name")
                     .of(alice.clone())
@@ -922,8 +922,8 @@ mod tests {
         Ok(())
     }
 
-    /// Build a single Layer holding the union of two fact sets, then a
-    /// `Union<Layer, Layer>` with the two halves. The merged-stream
+    /// Build a single VolatileLayer holding the union of two fact sets, then a
+    /// `Union<VolatileLayer, VolatileLayer>` with the two halves. The merged-stream
     /// output must match the single-layer baseline exactly under any
     /// scan mode — that is the "as-if merged into one tree" contract.
     async fn assert_union_matches_single_tree(
@@ -932,8 +932,8 @@ mod tests {
         selector: ArtifactSelector<Constrained>,
         label: &str,
     ) -> anyhow::Result<()> {
-        let to_layer = |facts: &[(Entity, &str, Value)]| -> anyhow::Result<Layer> {
-            let mut layer = Layer::new();
+        let to_layer = |facts: &[(Entity, &str, Value)]| -> anyhow::Result<VolatileLayer> {
+            let mut layer = VolatileLayer::new();
             for (entity, attribute, value) in facts {
                 Update::associate(
                     &mut layer,
@@ -956,10 +956,10 @@ mod tests {
                 .into_iter()
                 .collect::<Result<_, _>>()?;
 
-        // Baseline: a single Layer asserting every fact from both
+        // Baseline: a single VolatileLayer asserting every fact from both
         // halves (with later writes overriding earlier ones — same as
         // a single tree). For dedup, deduping at insert time
-        // (via the Layer's own tree commit) is equivalent to deduping
+        // (via the layer's own tree commit) is equivalent to deduping
         // at merge time.
         let mut all = primary_facts.to_vec();
         all.extend_from_slice(secondary_facts);
@@ -1130,8 +1130,8 @@ mod tests {
 
     #[dialog_common::test]
     async fn union_primary_and_secondary_accessors_borrow_underlying() {
-        let primary = Layer::new();
-        let secondary = Layer::new();
+        let primary = VolatileLayer::new();
+        let secondary = VolatileLayer::new();
         let combined = Union::new(primary, secondary);
         // Accessors compile-check return types; both Layers stay borrowable.
         let _ = combined.primary();
