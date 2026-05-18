@@ -1346,6 +1346,86 @@ mod tests {
             Ok(())
         }
 
+        #[dialog_common::test]
+        async fn branch_metadata_exposes_schema_branch_concept() -> anyhow::Result<()> {
+            // The metadata layer now also asserts a content-derived
+            // schema::Branch fact. Querying with the schema concept
+            // round-trips the branch name + the synthetic origin (the
+            // subject DID's entity).
+            use crate::schema;
+            use crate::schema::prelude::*;
+
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+            let subject_entity: Entity = branch.of().this();
+            let expected = schema::Branch::new(&subject_entity, "main");
+
+            let results: Vec<schema::Branch> = branch
+                .query()
+                .with(branch.metadata().await?)
+                .select(Query::<schema::Branch> {
+                    this: expected.this.clone().into(),
+                    name: Term::var("name"),
+                    origin: Term::var("origin"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+
+            assert_eq!(
+                results.len(),
+                1,
+                "schema::Branch must surface from metadata"
+            );
+            assert_eq!(results[0].this, expected.this);
+            assert_eq!(results[0].name.0, "main");
+            assert_eq!(results[0].origin.0, subject_entity);
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn branch_metadata_exposes_tracking_branch_for_local_upstream() -> anyhow::Result<()>
+        {
+            // For a local-upstream branch, the metadata layer asserts a
+            // schema::TrackingBranch linking the local branch entity to
+            // the upstream branch entity (both content-derived from the
+            // shared subject DID).
+            use crate::schema;
+            use crate::schema::prelude::*;
+
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let main = repo.branch("main").open().perform(&operator).await?;
+            let feature = repo.branch("feature").open().perform(&operator).await?;
+            feature.set_upstream(&main).perform(&operator).await?;
+
+            let subject_entity: Entity = feature.of().this();
+            let feature_concept = schema::Branch::new(&subject_entity, "feature");
+            let main_concept = schema::Branch::new(&subject_entity, "main");
+
+            let results: Vec<schema::TrackingBranch> = feature
+                .query()
+                .with(feature.metadata().await?)
+                .select(Query::<schema::TrackingBranch> {
+                    this: feature_concept.this.clone().into(),
+                    upstream: Term::var("upstream"),
+                    origin: Term::var("origin"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+
+            assert_eq!(results.len(), 1, "TrackingBranch must be present");
+            assert_eq!(results[0].this, feature_concept.this);
+            assert_eq!(
+                results[0].upstream.0, main_concept.this,
+                "upstream must point at the main branch entity",
+            );
+            assert_eq!(results[0].origin.0, subject_entity);
+            Ok(())
+        }
+
         mod upstream_meta {
             #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
             #[domain("dialog.meta")]

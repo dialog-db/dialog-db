@@ -38,6 +38,10 @@ pub use repository::*;
 /// In-memory layers and source-composition primitives for query evaluation.
 pub mod layer;
 
+/// Typed schema for facts a repository writes about its own structure
+/// (replicas, branches, remotes, tracking links).
+pub mod schema;
+
 /// Querying uncommitted writes inside an open transaction.
 pub mod transaction_query;
 

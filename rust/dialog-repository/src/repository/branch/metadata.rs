@@ -1,53 +1,87 @@
 //! Branch metadata layer.
 //!
-//! Builds a [`VolatileLayer`] populated with synthetic facts describing a
-//! [`Branch`]: its name, current revision, hosting repository, and upstream
-//! tracking state — all exposed under the `dialog.meta/*` attribute
-//! namespace.
+//! Builds a [`VolatileLayer`] populated with facts describing a
+//! [`Branch`]: a typed [`crate::schema::Branch`] concept (with
+//! content-derived entity), an optional
+//! [`crate::schema::TrackingBranch`] for local-upstream tracking,
+//! plus the legacy `dialog.meta/*` facts on synthetic
+//! [`id:branch`](branch_entity) / [`id:repository`](repository_entity) /
+//! [`id:upstream`](upstream_entity) entities.
 //!
-//! These facts let callers run normal [`Query`](dialog_query::Query)s against
-//! branch state without reaching for branch-specific accessors, mirroring how
-//! Datomic exposes its own metadata as queryable triples (`:db/ident` and
-//! friends).
-//!
-//! All synthetic entities live under the `id:` URI scheme:
-//! - `id:branch` — the branch handle
-//! - `id:repository` — the hosting repository
-//! - `id:upstream` — the tracked upstream (when configured)
+//! The schema-shaped facts are the recommended query target — they use
+//! the [`xyz.tonk.branch/*`](crate::schema::domain::branch) namespace
+//! and content-derived entities, so two devices opening the same branch
+//! converge on the same entity URIs. The `dialog.meta/*` facts remain
+//! for backward compatibility with existing query callers.
 
 use crate::layer::VolatileLayer;
 use base58::ToBase58;
 use dialog_artifacts::{DialogArtifactsError, Entity};
 use dialog_query::the;
 
+use crate::schema::Branch as BranchConcept;
+use crate::schema::prelude::*;
 use crate::{Branch, Upstream};
 
-fn branch_entity() -> Entity {
+/// The conventional synthetic entity for the branch handle itself
+/// in the legacy `dialog.meta/*` fact set. New code should query
+/// via [`crate::schema::Branch`] instead (which uses a
+/// content-derived entity).
+pub fn branch_entity() -> Entity {
     "id:branch".parse().expect("valid entity")
 }
 
-fn repository_entity() -> Entity {
+/// The conventional synthetic entity for the hosting repository in
+/// the legacy `dialog.meta/*` fact set.
+pub fn repository_entity() -> Entity {
     "id:repository".parse().expect("valid entity")
 }
 
-fn upstream_entity() -> Entity {
+/// The conventional synthetic entity for the tracked upstream in
+/// the legacy `dialog.meta/*` fact set. New code should query via
+/// [`crate::schema::TrackingBranch`] (for `Upstream::Local`) instead.
+pub fn upstream_entity() -> Entity {
     "id:upstream".parse().expect("valid entity")
 }
 
 /// Build the metadata layer for `branch`.
 ///
-/// Always emits `dialog.meta/name` for the branch and `dialog.meta/did` for
-/// the repository. Adds revision and upstream facts when present. Async
-/// because the underlying [`VolatileLayer`] requires an awaited
+/// Emits two parallel fact sets:
+///
+/// - **Schema-shaped** facts using [`crate::schema::Branch`] (with
+///   `origin = subject DID's entity`, `name = branch.name()`) and —
+///   when the branch has a `Upstream::Local` upstream —
+///   [`crate::schema::TrackingBranch`]. These are the recommended
+///   query target; the entities are content-derived so multiple
+///   replicas converge on the same URIs.
+///
+/// - **Legacy `dialog.meta/*`** facts on the synthetic
+///   [`branch_entity`] / [`repository_entity`] / [`upstream_entity`]
+///   URIs. Kept for compatibility with existing callers; new code
+///   should prefer the schema concepts.
+///
+/// Async because the underlying [`VolatileLayer`] requires an awaited
 /// [`VolatileTransaction::commit`](crate::layer::VolatileTransaction::commit)
 /// to materialize the facts into its prolly tree.
 pub async fn branch_metadata(branch: &Branch) -> Result<VolatileLayer, DialogArtifactsError> {
     let branch_id = branch_entity();
     let repo_id = repository_entity();
 
+    // Schema-shaped branch identity: origin = subject DID's entity.
+    // We don't have a profile DID at this layer (the Branch handle
+    // only carries subject + name), so subject stands in for the
+    // replica's origin. Two replicas of the same repository
+    // therefore produce the same schema::Branch entity, which is
+    // the right behavior for "same logical branch" queries.
+    let subject_entity: Entity = branch.of().this();
+    let branch_concept = BranchConcept::new(&subject_entity, branch.name());
+
     let layer = VolatileLayer::new();
     let mut tx = layer
         .transaction()
+        // Schema-shaped fact set.
+        .assert(branch_concept.clone())
+        // Legacy dialog.meta/* fact set on synthetic entities.
         .assert(
             the!("dialog.meta/name")
                 .of(branch_id.clone())
@@ -126,6 +160,16 @@ pub async fn branch_metadata(branch: &Branch) -> Result<VolatileLayer, DialogArt
                     .of(upstream_id)
                     .is(remote.clone()),
             );
+        }
+
+        // Schema-shaped tracking only works for local upstreams here:
+        // a remote upstream would need a schema::Remote entity, which
+        // depends on the remote's address — not available from just
+        // `&Branch`. Local upstreams share the same origin
+        // (subject DID), so the upstream branch entity is derivable.
+        if let Upstream::Local { branch: name, .. } = &upstream {
+            let upstream_concept = BranchConcept::new(&subject_entity, name.clone());
+            tx = tx.assert(branch_concept.set_upstream(&upstream_concept));
         }
     }
 
