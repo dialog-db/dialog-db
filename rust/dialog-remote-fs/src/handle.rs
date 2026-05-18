@@ -19,6 +19,8 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod native;
+#[cfg(target_arch = "wasm32")]
+pub(crate) mod web;
 
 use crate::FsError;
 use async_trait::async_trait;
@@ -71,7 +73,10 @@ pub(crate) trait FsHandle: Clone {
 /// The handle type selected for this build target.
 ///
 /// On native (`not(target_arch = "wasm32")`), this is
-/// [`native::NativeHandle`]. The WASM variant will be added in a follow-up
-/// commit.
+/// [`native::NativeHandle`] (backed by `tokio::fs`/`PathBuf`). On
+/// WebAssembly with browser hosts, this is [`web::WebHandle`] (backed by
+/// `web_sys::FileSystemDirectoryHandle`).
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) type Handle = native::NativeHandle;
+#[cfg(target_arch = "wasm32")]
+pub(crate) type Handle = web::WebHandle;
