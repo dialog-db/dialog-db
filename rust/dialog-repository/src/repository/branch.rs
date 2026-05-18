@@ -26,6 +26,8 @@ pub use import::*;
 mod load;
 pub use load::*;
 
+mod metadata;
+
 mod open;
 pub use open::*;
 
@@ -45,6 +47,7 @@ mod select;
 pub use select::*;
 
 mod session;
+pub(crate) use session::select_from_branch;
 pub use session::*;
 
 mod set_upstream;

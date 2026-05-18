@@ -38,6 +38,12 @@ where
         .map_err(|error| de::Error::custom(format!("{error:?}")))
 }
 
+impl AsRef<Entity> for Entity {
+    fn as_ref(&self) -> &Entity {
+        self
+    }
+}
+
 impl Deref for Entity {
     type Target = Uri;
 

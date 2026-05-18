@@ -1,19 +1,14 @@
 use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, AttributeKey, Datum, DialogArtifactsError, EntityKey, Key,
-    KeyViewConstruct, KeyViewMut, MatchCandidate, State, ValueKey,
-};
+use dialog_artifacts::tree::ArtifactTreeExt as _;
+use dialog_artifacts::{Artifact, ArtifactSelector, DialogArtifactsError};
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_effects::archive::{Catalog, Get, Put};
 use dialog_effects::memory::Resolve;
-use dialog_prolly_tree::{EMPT_TREE_HASH, Entry, Tree};
+use dialog_prolly_tree::{DialogProllyTreeError, EMPT_TREE_HASH, Tree};
 use dialog_storage::{Blake3Hash, ContentAddressedStorage, DialogStorageError};
 use futures_util::Stream;
-use std::ops::Range;
-
-use dialog_prolly_tree::DialogProllyTreeError;
 
 use crate::{
     Branch, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _, RepositoryMemoryExt,
@@ -109,64 +104,10 @@ impl Select<'_> {
         // remote-only, which is why this is async and fallible up front.
         let tree: Index = Tree::from_hash(&self.tree_hash(), &store).await?;
 
-        let selector = self.selector;
-
-        // The tree indexes every datum under three parallel keys:
-        // `entity/…`, `attribute/…`, and `value/…`. We pick the prefix
-        // that matches the most specific constraint on the selector so
-        // `stream_range` can narrow the scan to the minimum key range;
-        // any remaining constraints are checked per-entry via
-        // `matches_selector`.
-        Ok(async_stream::try_stream! {
-            if selector.entity().is_some() {
-                let start = <EntityKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
-                let end = <EntityKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
-                let stream = tree.stream_range(Range { start, end }, &store);
-                tokio::pin!(stream);
-                for await item in stream {
-                    let entry: Entry<Key, State<Datum>> = item?;
-                    // Filter out entries in the range that don't
-                    // satisfy the full selector, and skip retracted
-                    // entries (`State::Removed`) — only `Added` datums
-                    // surface as artifacts.
-                    if entry.matches_selector(&selector)
-                        && let Entry { value: State::Added(datum), .. } = entry
-                    {
-                        yield Artifact::try_from(datum)?;
-                    }
-                }
-            } else if selector.value().is_some() {
-                let start = <ValueKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
-                let end = <ValueKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
-                let stream = tree.stream_range(Range { start, end }, &store);
-                tokio::pin!(stream);
-                for await item in stream {
-                    let entry: Entry<Key, State<Datum>> = item?;
-                    if entry.matches_selector(&selector)
-                        && let Entry { value: State::Added(datum), .. } = entry
-                    {
-                        yield Artifact::try_from(datum)?;
-                    }
-                }
-            } else if selector.attribute().is_some() {
-                let start = <AttributeKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
-                let end = <AttributeKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
-                let stream = tree.stream_range(Range { start, end }, &store);
-                tokio::pin!(stream);
-                for await item in stream {
-                    let entry: Entry<Key, State<Datum>> = item?;
-                    if entry.matches_selector(&selector)
-                        && let Entry { value: State::Added(datum), .. } = entry
-                    {
-                        yield Artifact::try_from(datum)?;
-                    }
-                }
-            } else {
-                // `Constrained` is a type-state marker that guarantees
-                // the selector has at least one of entity/value/
-                // attribute set, so this branch is unreachable.
-                unreachable!("ArtifactSelector will always have at least one field specified")
-            };
-        })
+        // EAV/AEV/VAE dispatch + per-entry filtering lives in the shared
+        // `ArtifactTreeExt::scan` so branch scans and Changes-overlay
+        // scans agree on key order — that adjacency invariant is what
+        // the cardinality-one sliding window relies on.
+        Ok(tree.scan(store, self.selector))
     }
 }

@@ -373,7 +373,7 @@ where
             });
         }
 
-        try_join_all(writes.into_iter()).await?;
+        try_join_all(writes).await?;
 
         Ok(())
     }

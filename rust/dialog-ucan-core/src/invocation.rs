@@ -2007,8 +2007,6 @@ mod tests {
         Ok(())
     }
 
-    // --- Time bounds tests ---
-
     #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), tokio::test)]
     #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
     async fn chain_check_returns_unbounded_range_for_self_issued() -> TestResult {
