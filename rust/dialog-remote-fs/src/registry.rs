@@ -11,7 +11,6 @@
 //! registers its own unique id under its own tempdir.
 
 use crate::FsError;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::handle::Handle;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -22,19 +21,30 @@ thread_local! {
     static REGISTRY: RefCell<HashMap<String, Handle>> = RefCell::new(HashMap::new());
 }
 
-/// Register a directory handle under the given id.
+/// Register a local directory under the given id.
 ///
 /// Existing entries for the same id are replaced. The directory is *not*
 /// created — callers should ensure the path exists (or will be created on
 /// first write via [`crate::handle::FsHandle::write`], which `mkdir -p`s
 /// the parent).
-///
-/// On native, takes a [`PathBuf`]. The WASM variant (added in a follow-up)
-/// will take a `web_sys::FileSystemDirectoryHandle`.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn register_directory(id: impl Into<String>, path: PathBuf) {
     let handle = crate::handle::native::NativeHandle::new(path);
     REGISTRY.with(|r| r.borrow_mut().insert(id.into(), handle));
+}
+
+/// Register a File System Access API directory handle under the given id.
+///
+/// The host calls this before any invocation targeting the corresponding
+/// [`FsAddress`] is dispatched.
+#[cfg(target_arch = "wasm32")]
+pub fn register_directory(
+    id: impl Into<String>,
+    handle: web_sys::FileSystemDirectoryHandle,
+) {
+    let id = id.into();
+    let entry = crate::handle::web::WebHandle::new(id.clone(), handle);
+    REGISTRY.with(|r| r.borrow_mut().insert(id, entry));
 }
 
 /// Drop the entry for `id`. Returns whether an entry was present.

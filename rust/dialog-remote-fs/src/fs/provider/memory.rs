@@ -34,7 +34,6 @@ use dialog_effects::memory::{Edition, MemoryError, Publish, Resolve, Retract, Ve
 use crate::fs::provider::{navigate, split_target};
 use crate::fs::{Fs, FsInvocation};
 use crate::handle::FsHandle;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::lock::LockGuard;
 use crate::request::Precondition;
 
@@ -103,8 +102,7 @@ impl Provider<FsInvocation<Publish>> for Fs {
         // Hold the lock across the read-check-write critical section so a
         // concurrent writer (CLI or browser tab) can't slip an update
         // between our CAS check and our write.
-        #[cfg(not(target_arch = "wasm32"))]
-        let _guard = LockGuard::acquire(&target).map_err(MemoryError::from)?;
+        let _guard = LockGuard::acquire(&target).await.map_err(MemoryError::from)?;
 
         let current = target.read_optional().await?;
         let current_version =
@@ -157,8 +155,7 @@ impl Provider<FsInvocation<Retract>> for Fs {
             return Ok(());
         }
 
-        #[cfg(not(target_arch = "wasm32"))]
-        let _guard = LockGuard::acquire(&target).map_err(MemoryError::from)?;
+        let _guard = LockGuard::acquire(&target).await.map_err(MemoryError::from)?;
 
         let current = match target.read_optional().await? {
             Some(bytes) => bytes,
