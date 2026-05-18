@@ -1,6 +1,6 @@
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{ArtifactSelector, ArtifactStream, DialogArtifactsError, Select};
-use dialog_capability::{Fork, Provider};
+use dialog_capability::{Did, Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::memory::Resolve;
@@ -299,15 +299,22 @@ impl Branch {
         }
     }
 
-    /// The branch metadata layer — synthetic facts describing the branch
-    /// (name, revision hash, upstream, hosting repository) under the
-    /// `dialog.meta/*` attribute namespace.
+    /// Build the branch's metadata layer.
     ///
-    /// Compose with `branch.query().with(branch.metadata().await?)` to
-    /// make branch internals queryable like any other fact. Async because
-    /// committing the synthetic facts into the layer's prolly tree
-    /// requires an await.
-    pub async fn metadata(&self) -> Result<VolatileLayer, DialogArtifactsError> {
-        super::metadata::branch_metadata(self).await
+    /// `profile` is the profile DID that owns this replica of the
+    /// repository — it's required to derive the
+    /// `(profile, subject)`-based [`crate::schema::Replica`] entity
+    /// that anchors the schema-shaped facts ([`crate::schema::Branch`],
+    /// [`crate::schema::TrackingBranch`]).
+    ///
+    /// Returns a [`BranchMetadata`] command; call `.perform(&env).await`
+    /// to materialize the [`VolatileLayer`]. The env is what lets the
+    /// command resolve any remote-upstream address (so an
+    /// `Upstream::Remote` ends up with a schema::Remote-rooted
+    /// upstream branch entity in the tracking link).
+    ///
+    /// Compose with `branch.query().with(branch.metadata(profile).perform(&env).await?)`.
+    pub fn metadata(&self, profile: Did) -> super::metadata::BranchMetadata<'_> {
+        super::metadata::BranchMetadata::new(self, profile)
     }
 }

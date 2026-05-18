@@ -1115,7 +1115,7 @@ mod tests {
             let synthetic: Entity = "id:branch".parse()?;
             let names: Vec<BranchMeta> = branch
                 .query()
-                .with(branch.metadata().await?)
+                .with(branch.metadata(profile.did()).perform(&operator).await?)
                 .select(Query::<BranchMeta> {
                     this: synthetic.clone().into(),
                     name: Term::var("name"),
@@ -1130,7 +1130,7 @@ mod tests {
             // The revision-hash fact should be present.
             let revision: Vec<branch_meta::RevisionHash> = branch
                 .query()
-                .with(branch.metadata().await?)
+                .with(branch.metadata(profile.did()).perform(&operator).await?)
                 .select(Query::<RevisionConcept> {
                     this: synthetic.clone().into(),
                     revision_hash: Term::var("hash"),
@@ -1332,7 +1332,7 @@ mod tests {
             let repo_entity: Entity = "id:repository".parse()?;
             let results: Vec<RepoConcept> = branch
                 .query()
-                .with(branch.metadata().await?)
+                .with(branch.metadata(profile.did()).perform(&operator).await?)
                 .select(Query::<RepoConcept> {
                     this: repo_entity.into(),
                     did: Term::var("did"),
@@ -1348,22 +1348,20 @@ mod tests {
 
         #[dialog_common::test]
         async fn branch_metadata_exposes_schema_branch_concept() -> anyhow::Result<()> {
-            // The metadata layer now also asserts a content-derived
-            // schema::Branch fact. Querying with the schema concept
-            // round-trips the branch name + the synthetic origin (the
-            // subject DID's entity).
+            // The metadata layer asserts a content-derived
+            // schema::Branch whose `origin` is the replica entity
+            // built from `(profile, subject)`.
             use crate::schema;
-            use crate::schema::prelude::*;
 
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
-            let subject_entity: Entity = branch.of().this();
-            let expected = schema::Branch::new(&subject_entity, "main");
+            let replica = schema::Replica::new(profile.did(), branch.of().clone(), "");
+            let expected = schema::Branch::new(&replica, "main");
 
             let results: Vec<schema::Branch> = branch
                 .query()
-                .with(branch.metadata().await?)
+                .with(branch.metadata(profile.did()).perform(&operator).await?)
                 .select(Query::<schema::Branch> {
                     this: expected.this.clone().into(),
                     name: Term::var("name"),
@@ -1380,7 +1378,7 @@ mod tests {
             );
             assert_eq!(results[0].this, expected.this);
             assert_eq!(results[0].name.0, "main");
-            assert_eq!(results[0].origin.0, subject_entity);
+            assert_eq!(results[0].origin.0, replica.this);
             Ok(())
         }
 
@@ -1389,10 +1387,9 @@ mod tests {
         {
             // For a local-upstream branch, the metadata layer asserts a
             // schema::TrackingBranch linking the local branch entity to
-            // the upstream branch entity (both content-derived from the
-            // shared subject DID).
+            // the upstream branch entity. Both branches share the same
+            // replica origin since the upstream is local.
             use crate::schema;
-            use crate::schema::prelude::*;
 
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
@@ -1400,13 +1397,13 @@ mod tests {
             let feature = repo.branch("feature").open().perform(&operator).await?;
             feature.set_upstream(&main).perform(&operator).await?;
 
-            let subject_entity: Entity = feature.of().this();
-            let feature_concept = schema::Branch::new(&subject_entity, "feature");
-            let main_concept = schema::Branch::new(&subject_entity, "main");
+            let replica = schema::Replica::new(profile.did(), feature.of().clone(), "");
+            let feature_concept = schema::Branch::new(&replica, "feature");
+            let main_concept = schema::Branch::new(&replica, "main");
 
             let results: Vec<schema::TrackingBranch> = feature
                 .query()
-                .with(feature.metadata().await?)
+                .with(feature.metadata(profile.did()).perform(&operator).await?)
                 .select(Query::<schema::TrackingBranch> {
                     this: feature_concept.this.clone().into(),
                     upstream: Term::var("upstream"),
@@ -1422,7 +1419,81 @@ mod tests {
                 results[0].upstream.0, main_concept.this,
                 "upstream must point at the main branch entity",
             );
-            assert_eq!(results[0].origin.0, subject_entity);
+            assert_eq!(results[0].origin.0, replica.this);
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn branch_metadata_exposes_tracking_branch_for_remote_upstream() -> anyhow::Result<()>
+        {
+            // For an Upstream::Remote, the metadata layer loads the
+            // remote's address, constructs a schema::Remote, builds
+            // the upstream schema::Branch rooted at that Remote, and
+            // emits a TrackingBranch linking the local branch to it.
+            use crate::schema;
+            use crate::schema::domain::remote::Address as RemoteAddressAttr;
+            use dialog_remote_s3::Address;
+
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+
+            let site = Address::builder("https://s3.us-east-1.amazonaws.com")
+                .region("us-east-1")
+                .bucket("bucket")
+                .build()
+                .unwrap();
+            let origin = repo
+                .remote("origin")
+                .create(site.clone())
+                .perform(&operator)
+                .await?;
+            let remote_main = origin.branch("main").open().perform(&operator).await?;
+
+            let branch = repo.branch("main").open().perform(&operator).await?;
+            branch.set_upstream(&remote_main).perform(&operator).await?;
+
+            // Expected entities, derived the same way `BranchMetadata`
+            // does: replica from `(profile, subject)`, remote concept
+            // from `(replica, remote subject, address, name)`.
+            let replica = schema::Replica::new(profile.did(), branch.of().clone(), "");
+            let local_concept = schema::Branch::new(&replica, "main");
+            let remote_addr = repo
+                .remote("origin")
+                .load()
+                .perform(&operator)
+                .await?
+                .address();
+            let remote_concept = schema::Remote::new(
+                &replica,
+                remote_addr.subject.clone(),
+                RemoteAddressAttr::encode(&remote_addr.address),
+                "origin",
+            );
+            let expected_upstream = schema::Branch::new(&remote_concept, "main");
+
+            let results: Vec<schema::TrackingBranch> = branch
+                .query()
+                .with(branch.metadata(profile.did()).perform(&operator).await?)
+                .select(Query::<schema::TrackingBranch> {
+                    this: local_concept.this.clone().into(),
+                    upstream: Term::var("upstream"),
+                    origin: Term::var("origin"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+
+            assert_eq!(
+                results.len(),
+                1,
+                "TrackingBranch for remote upstream must be present"
+            );
+            assert_eq!(results[0].this, local_concept.this);
+            assert_eq!(
+                results[0].upstream.0, expected_upstream.this,
+                "upstream entity must match the schema::Remote-rooted branch",
+            );
+            assert_eq!(results[0].origin.0, replica.this);
             Ok(())
         }
 
@@ -1456,7 +1527,7 @@ mod tests {
             let upstream_entity: Entity = "id:upstream".parse()?;
             let results: Vec<UpstreamConcept> = feature
                 .query()
-                .with(feature.metadata().await?)
+                .with(feature.metadata(profile.did()).perform(&operator).await?)
                 .select(Query::<UpstreamConcept> {
                     this: upstream_entity.into(),
                     kind: Term::var("kind"),
@@ -1482,7 +1553,7 @@ mod tests {
             let upstream_entity: Entity = "id:upstream".parse()?;
             let results: Vec<UpstreamConcept> = branch
                 .query()
-                .with(branch.metadata().await?)
+                .with(branch.metadata(profile.did()).perform(&operator).await?)
                 .select(Query::<UpstreamConcept> {
                     this: upstream_entity.into(),
                     kind: Term::var("kind"),
