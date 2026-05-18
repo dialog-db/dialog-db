@@ -324,6 +324,20 @@ impl VolatileLayer {
         }
     }
 
+    /// Open a query session rooted at this volatile layer.
+    ///
+    /// Mirrors [`Branch::query`](crate::Branch::query) but starts from
+    /// this layer's snapshot instead of a persistent branch. Composes
+    /// with further sources via `.with(...)` and runs queries via
+    /// `.select(q).perform(&env)`.
+    ///
+    /// Cloning a `VolatileLayer` is cheap (the internal `Volatile`
+    /// storage and tree-state are `Arc`-backed); the session owns its
+    /// own clone so the original handle stays usable.
+    pub fn query(&self) -> crate::repository::branch::QuerySession<'static> {
+        crate::repository::branch::QuerySession::from_volatile_layer(self.clone())
+    }
+
     /// Snapshot of the layer's rule registry.
     ///
     /// Returned by clone so the caller can read without holding the
@@ -1212,6 +1226,57 @@ mod tests {
             "merge_grouped must emit cross-stream cardinality-many items in tree order \
              (sorted by value_reference), not in stream-index order"
         );
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn volatile_layer_query_mirrors_branch_query() -> anyhow::Result<()> {
+        // VolatileLayer::query() should expose the same QuerySession
+        // surface as Branch::query() — composable with .with(...) and
+        // runnable with .select(q).perform(env). This test commits a
+        // fact to the layer, then runs a query through .query().
+        use crate::helpers::test_operator_with_profile;
+        use dialog_query::Concept;
+        use dialog_query::Query;
+        use dialog_query::query::Output;
+
+        mod attrs {
+            #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+            #[domain("test")]
+            pub struct Label(pub String);
+        }
+
+        #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        pub struct Tagged {
+            this: Entity,
+            label: attrs::Label,
+        }
+
+        let (operator, _profile) = test_operator_with_profile().await;
+        let alice: Entity = "id:alice".parse()?;
+
+        let layer = VolatileLayer::new();
+        layer
+            .transaction()
+            .assert(Tagged {
+                this: alice.clone(),
+                label: attrs::Label("primary".into()),
+            })
+            .commit()
+            .await?;
+
+        let results: Vec<Tagged> = layer
+            .query()
+            .select(Query::<Tagged> {
+                this: alice.clone().into(),
+                label: dialog_query::Term::var("label"),
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].label.0, "primary");
         Ok(())
     }
 

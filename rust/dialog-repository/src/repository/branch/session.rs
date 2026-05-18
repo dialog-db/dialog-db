@@ -42,7 +42,12 @@ use crate::{Branch, NetworkedIndex, RemoteSite, RepositoryMemoryExt, Upstream};
 /// No environment reference is captured on the session itself —
 /// `QueryEnv` is built fresh at `.perform(env)`.
 pub struct QuerySession<'a> {
-    primary: &'a Branch,
+    /// The primary branch the session starts from, when entered via
+    /// [`Branch::query`]. `None` when the session is opened from a
+    /// [`VolatileLayer`] (in which case the volatile layer occupies
+    /// the first slot of `layers` instead). Additional sources go into
+    /// `branches` / `layers` regardless.
+    primary: Option<&'a Branch>,
     branches: Vec<&'a Branch>,
     layers: Vec<VolatileLayer>,
 }
@@ -74,6 +79,17 @@ impl<'a> QueryLayer<'a> for VolatileLayer {
 }
 
 impl<'a> QuerySession<'a> {
+    /// Open a session whose only initial source is the given volatile
+    /// layer. Used by [`VolatileLayer::query`] to mirror
+    /// [`Branch::query`] without requiring a branch.
+    pub(crate) fn from_volatile_layer(layer: VolatileLayer) -> Self {
+        Self {
+            primary: None,
+            branches: Vec::new(),
+            layers: vec![layer],
+        }
+    }
+
     /// Layer another source on top of this session.
     ///
     /// Accepts any [`QueryLayer`] — currently a `&Branch` (its data is
@@ -106,7 +122,7 @@ impl<'a> QuerySession<'a> {
 
 /// A query command ready to be performed against an environment.
 pub struct SelectQuery<'a, Q> {
-    primary: &'a Branch,
+    primary: Option<&'a Branch>,
     branches: Vec<&'a Branch>,
     layers: Vec<VolatileLayer>,
     query: Q,
@@ -115,7 +131,7 @@ pub struct SelectQuery<'a, Q> {
 impl<'a, Q> SelectQuery<'a, Q> {
     pub(crate) fn new(branch: &'a Branch, query: Q) -> Self {
         Self {
-            primary: branch,
+            primary: Some(branch),
             branches: Vec::new(),
             layers: Vec::new(),
             query,
@@ -158,7 +174,8 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
 /// Built fresh on each `.perform(env)` so the environment reference is
 /// never captured on the session itself.
 pub(crate) struct QueryEnv<'a, Env> {
-    primary: &'a Branch,
+    /// See [`QuerySession::primary`].
+    primary: Option<&'a Branch>,
     branches: Vec<&'a Branch>,
     layers: Vec<VolatileLayer>,
     env: &'a Env,
@@ -233,9 +250,12 @@ where
         // scan). `merge_grouped` interleaves them so cross-source items
         // sharing a key stay adjacent — the invariant the cardinality-one
         // sliding window in `only.rs` depends on.
-        let mut streams: Vec<ArtifactStream<'a>> =
-            Vec::with_capacity(1 + self.branches.len() + self.layers.len());
-        streams.push(select_from_branch(self.primary, self.env, input.clone()).await?);
+        let mut streams: Vec<ArtifactStream<'a>> = Vec::with_capacity(
+            self.primary.is_some() as usize + self.branches.len() + self.layers.len(),
+        );
+        if let Some(branch) = self.primary {
+            streams.push(select_from_branch(branch, self.env, input.clone()).await?);
+        }
         for branch in &self.branches {
             streams.push(select_from_branch(branch, self.env, input.clone()).await?);
         }
@@ -277,7 +297,7 @@ impl Branch {
     /// (which is where you assert facts and install rules).
     pub fn query(&self) -> QuerySession<'_> {
         QuerySession {
-            primary: self,
+            primary: Some(self),
             branches: Vec::new(),
             layers: Vec::new(),
         }
