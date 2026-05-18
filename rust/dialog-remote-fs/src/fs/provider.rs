@@ -33,10 +33,7 @@ pub(crate) async fn split_target<'p>(
 /// Navigate the request's path under the registered handle and return the
 /// resolved leaf handle. Used by Get and Resolve where we don't need the
 /// parent separately.
-pub(crate) async fn navigate(
-    handle_id: &str,
-    path: &[String],
-) -> Result<Handle, FsError> {
+pub(crate) async fn navigate(handle_id: &str, path: &[String]) -> Result<Handle, FsError> {
     let mut current = registry::lookup(handle_id)?;
     for segment in path {
         current = current.resolve(segment).await?;

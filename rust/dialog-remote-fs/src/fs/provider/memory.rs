@@ -102,11 +102,14 @@ impl Provider<FsInvocation<Publish>> for Fs {
         // Hold the lock across the read-check-write critical section so a
         // concurrent writer (CLI or browser tab) can't slip an update
         // between our CAS check and our write.
-        let _guard = LockGuard::acquire(&target).await.map_err(MemoryError::from)?;
+        let _guard = LockGuard::acquire(&target)
+            .await
+            .map_err(MemoryError::from)?;
 
         let current = target.read_optional().await?;
-        let current_version =
-            current.as_deref().map(|bytes| Version::from(Blake3Hash::hash(bytes).as_bytes()));
+        let current_version = current
+            .as_deref()
+            .map(|bytes| Version::from(Blake3Hash::hash(bytes).as_bytes()));
 
         // Same-content shortcut: idempotent if the cell already holds
         // exactly what we're trying to publish.
@@ -155,7 +158,9 @@ impl Provider<FsInvocation<Retract>> for Fs {
             return Ok(());
         }
 
-        let _guard = LockGuard::acquire(&target).await.map_err(MemoryError::from)?;
+        let _guard = LockGuard::acquire(&target)
+            .await
+            .map_err(MemoryError::from)?;
 
         let current = match target.read_optional().await? {
             Some(bytes) => bytes,
@@ -172,10 +177,7 @@ impl Provider<FsInvocation<Retract>> for Fs {
 
 /// Validate the captured precondition against the cell's current version.
 /// Returns `Err(VersionMismatch)` on failure.
-fn check_cas(
-    precondition: &Precondition,
-    current: Option<&Version>,
-) -> Result<(), MemoryError> {
+fn check_cas(precondition: &Precondition, current: Option<&Version>) -> Result<(), MemoryError> {
     match (precondition, current) {
         (Precondition::None, _) => Ok(()),
         (Precondition::IfNoneMatch, None) => Ok(()),
