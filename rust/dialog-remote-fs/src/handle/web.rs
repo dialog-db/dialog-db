@@ -176,9 +176,7 @@ impl FsHandle for WebHandle {
             return Ok(None);
         };
         let Some(name) = self.file_name() else {
-            return Err(FsError::Io(
-                "cannot read root directory as a file".into(),
-            ));
+            return Err(FsError::Io("cannot read root directory as a file".into()));
         };
         let Some(file_handle) = get_file_handle(&parent, name, false).await? else {
             return Ok(None);
@@ -263,9 +261,7 @@ impl FsHandle for WebHandle {
         // current providers exercise this; landing the iterator wiring
         // alongside the first consumer will get it right faster than
         // building it blind.
-        Err(FsError::Io(
-            "WebHandle::list is not yet implemented".into(),
-        ))
+        Err(FsError::Io("WebHandle::list is not yet implemented".into()))
     }
 
     async fn exists(&self) -> bool {
