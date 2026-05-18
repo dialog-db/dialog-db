@@ -69,7 +69,7 @@ use crate::LocalIndex;
 /// assume that artifacts sharing the same `(the, of)` pair arrive
 /// consecutively. Anything that unions facts from multiple sources must
 /// preserve that invariant; this helper produces the comparable key used
-/// when merging.
+/// when grouping.
 pub fn group_key(artifact: &Artifact) -> (Vec<u8>, Vec<u8>) {
     (
         artifact.the.key_bytes().to_vec(),
@@ -77,24 +77,91 @@ pub fn group_key(artifact: &Artifact) -> (Vec<u8>, Vec<u8>) {
     )
 }
 
-/// Merge already-grouped sorted streams into one stream that preserves
-/// `(the, of)` grouping across all sources, deduplicating identical
-/// claims that appear in more than one source.
+/// A total order on artifacts that matches the prolly tree's own
+/// per-key sort.
 ///
-/// Each input is assumed sorted by [`group_key`] (true of branch selects
-/// and of layer selects, by construction). The output stream interleaves
-/// all sources by the same key so cross-source items with the same
-/// `(the, of)` become consecutive. Implemented as a streaming k-way merge
-/// with peekable inputs.
+/// The full sort key is `(the, of, value_type, value_reference)` —
+/// exactly the discriminators the tree uses to order entries (the
+/// tree key stores `value_reference = blake3(value.to_bytes())`, so
+/// sorting by `value_reference` here matches lexicographic byte order
+/// on the tree key). Using this as the k-way merge tiebreaker means
+/// `merge_grouped`'s output for any selector reproduces the order you
+/// would get by merging every source layer into a single physical tree
+/// and scanning it — "as-if merged" semantics rather than "interleaved
+/// by stream index".
+fn sort_key(artifact: &Artifact) -> (Vec<u8>, Vec<u8>, u8, [u8; 32]) {
+    (
+        artifact.the.key_bytes().to_vec(),
+        artifact.of.key_bytes().to_vec(),
+        artifact.is.data_type().into(),
+        artifact.is.to_reference(),
+    )
+}
+
+/// Merge sorted artifact streams into one stream whose order matches
+/// what a single physical prolly tree containing every input would
+/// produce, deduplicating identical claims that appear in more than one
+/// source.
 ///
-/// "The same claim from two sources is still one claim." When the same
-/// `(the, of, is, cause)` artifact appears in multiple inputs, only the
-/// first occurrence within a `(the, of)` run is yielded. Dedup uses
-/// [`Cause::from(&artifact)`] (a hash over all four fields) so it is
-/// position-independent: duplicates that don't end up adjacent — e.g.
-/// stream A: `[X, Y]`, stream B: `[X]` — are still collapsed because we
-/// track the set of fingerprints seen for the current `(the, of)` group
-/// and reset it when the group key advances.
+/// Each input is assumed sorted by [`sort_key`] — true of branch and
+/// layer selects by construction because the artifact tree itself
+/// stores entries in `sort_key` order. Implemented as a streaming
+/// k-way merge with peekable inputs.
+///
+/// # Order: "as-if merged into one tree"
+///
+/// The k-way merge picks the minimum head by [`sort_key`], not by
+/// [`group_key`]. That distinction matters: within a `(the, of)` group
+/// with cardinality > 1, two items from different streams sharing the
+/// same `(the, of)` but different values would otherwise come out in
+/// arbitrary (stream-index) order — concretely, two layers each holding
+/// `(alice, name, "Bob")` and `(alice, name, "Alice")` would yield
+/// `["Bob", "Alice"]` if the merge tiebroke on stream index, but a
+/// single physical tree containing both layers' facts would yield
+/// `["Alice", "Bob"]` (sorted by `value_reference`). Using
+/// `sort_key = (the, of, value_type, value_reference)` as the merge
+/// comparator preserves the as-if-merged order in all three scan modes.
+///
+/// # Dedup: "same claim from two sources is still one claim"
+///
+/// When the same `(the, of, is, cause)` artifact appears in multiple
+/// inputs, only the first occurrence within a `(the, of)` run is
+/// yielded. The dedup region is the `(the, of)` group, tracked via
+/// [`group_key`]; the fingerprint is [`Cause::from(&artifact)`] which
+/// hashes all four fields so position-independent duplicates collapse.
+///
+/// # Precondition: input streams must be sorted by `sort_key`
+///
+/// Because `sort_key` extends `group_key`, the `group_key`-prefix is
+/// also monotonic — so the per-group `HashSet` reset on `group_key`
+/// change is sound. Tree scans satisfy this in all three modes:
+///
+/// - **EAV** scan with `.of(entity)`: entity is fixed, tree order is
+///   `(attribute, value_type, value_reference)`. `sort_key` after the
+///   fixed-entity prefix matches.
+/// - **AEV** scan with `.the(attribute)`: attribute fixed, tree order
+///   `(entity, value_type, value_reference)`. Matches.
+/// - **VAE** scan with `.is(value)`: full VAE key is
+///   `(value_type, value_reference, attribute, entity)`.
+///   `.is(specific_value)` pins **both** `value_type` and
+///   `value_reference`, so the effective order is `(attribute, entity)`
+///   and within a `(the, of)` group every item has the identical
+///   `(value_type, value_reference)`, making `sort_key` trivially
+///   consistent with the stream.
+///
+/// The VAE case is load-bearing: any future selector mode that
+/// produces a VAE-style scan **must pin both `value_type` and
+/// `value_reference`**. A hypothetical `.is_typed(String)` that pinned
+/// only `value_type` would yield items sorted by
+/// `(value_reference, attribute, entity)`, breaking the `group_key`
+/// prefix monotonicity and allowing duplicates that fall on opposite
+/// sides of an intervening `value_reference` to escape the HashSet
+/// reset. If such a selector is ever added, either:
+///
+/// 1. Extend `group_key` to include value bytes (preserves streaming
+///    memory profile but only collapses full `(the, of, is)` matches), or
+/// 2. Replace the per-group HashSet with a global HashSet (robust to
+///    any stream order, memory cost grows with unique result count).
 pub fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStream<'a> {
     use std::collections::HashSet;
     use std::pin::Pin;
@@ -120,7 +187,7 @@ pub fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStream<'a>
 
         loop {
             let mut min_idx: Option<usize> = None;
-            let mut min_key: Option<(Vec<u8>, Vec<u8>)> = None;
+            let mut min_sort: Option<(Vec<u8>, Vec<u8>, u8, [u8; 32])> = None;
             for (i, s) in peekable.iter_mut().enumerate() {
                 match Pin::new(s).peek().await {
                     None => continue,
@@ -129,9 +196,14 @@ pub fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStream<'a>
                         break;
                     }
                     Some(Ok(head)) => {
-                        let key = group_key(head);
-                        if min_key.as_ref().is_none_or(|cur| &key < cur) {
-                            min_key = Some(key);
+                        // Compare on the full tree-equivalent sort key
+                        // — `(the, of, value_type, value_reference)` —
+                        // so the merged output matches the order a
+                        // single prolly tree containing all sources
+                        // would produce, not stream-index order.
+                        let sk = sort_key(head);
+                        if min_sort.as_ref().is_none_or(|cur| &sk < cur) {
+                            min_sort = Some(sk);
                             min_idx = Some(i);
                         }
                     }
@@ -847,6 +919,212 @@ mod tests {
             .into_iter()
             .collect::<Result<_, _>>()?;
         assert_eq!(results, vec![one]);
+        Ok(())
+    }
+
+    /// Build a single Layer holding the union of two fact sets, then a
+    /// `Union<Layer, Layer>` with the two halves. The merged-stream
+    /// output must match the single-layer baseline exactly under any
+    /// scan mode — that is the "as-if merged into one tree" contract.
+    async fn assert_union_matches_single_tree(
+        primary_facts: &[(Entity, &str, Value)],
+        secondary_facts: &[(Entity, &str, Value)],
+        selector: ArtifactSelector<Constrained>,
+        label: &str,
+    ) -> anyhow::Result<()> {
+        let to_layer = |facts: &[(Entity, &str, Value)]| -> anyhow::Result<Layer> {
+            let mut layer = Layer::new();
+            for (entity, attribute, value) in facts {
+                Update::associate(
+                    &mut layer,
+                    attribute.parse()?,
+                    entity.clone(),
+                    value.clone(),
+                );
+            }
+            Ok(layer)
+        };
+
+        let primary = to_layer(primary_facts)?;
+        let secondary = to_layer(secondary_facts)?;
+        let union = Union::new(primary, secondary);
+        let mut union_out: Vec<Artifact> =
+            Provider::<Select<'_>>::execute(&union, selector.clone())
+                .await?
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<Result<_, _>>()?;
+
+        // Baseline: a single Layer asserting every fact from both
+        // halves (with later writes overriding earlier ones — same as
+        // a single tree). For dedup, deduping at insert time
+        // (via the Layer's own tree commit) is equivalent to deduping
+        // at merge time.
+        let mut all = primary_facts.to_vec();
+        all.extend_from_slice(secondary_facts);
+        let baseline = to_layer(&all)?;
+        let baseline_out: Vec<Artifact> = Provider::<Select<'_>>::execute(&baseline, selector)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_, _>>()?;
+
+        // We don't require the *full* artifact streams to be identical
+        // — Union preserves provenance (`cause`) per source whereas a
+        // single tree would just keep the latest write. But the
+        // sort_key projection (`(the, of, value_type, value_ref)`) must
+        // line up exactly, with no extra and no missing entries.
+        let proj = |a: &Artifact| sort_key(a);
+        let union_keys: Vec<_> = union_out.iter_mut().map(|a| proj(a)).collect();
+        let baseline_keys: Vec<_> = baseline_out.iter().map(proj).collect();
+        assert_eq!(
+            union_keys, baseline_keys,
+            "[{label}] union output order differs from single-tree baseline.\n  \
+             union:    {union_keys:?}\n  baseline: {baseline_keys:?}"
+        );
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn union_order_matches_single_tree_in_eav_mode() -> anyhow::Result<()> {
+        // Two layers each contributing different values for the same
+        // (alice, name). Tree-canonical order sorts those values by
+        // value_reference (= blake3(value)). Stream-index tiebreak
+        // would interleave them by source, not by value.
+        //
+        // Pre-computed: blake3("Alice") < blake3("Bob"), so the
+        // tree-canonical order is ["Alice", "Bob"]. We put "Bob" in
+        // *primary* so a stream-index tiebreak would yield
+        // ["Bob", "Alice"] — opposite of the tree order — and the
+        // baseline assertion fails. Swapping values here without
+        // updating the comment would make the test pass for the
+        // wrong reason.
+        let alice: Entity = "id:alice".parse()?;
+        let primary = vec![(alice.clone(), "person/name", Value::String("Bob".into()))];
+        let secondary = vec![(alice.clone(), "person/name", Value::String("Alice".into()))];
+        assert_union_matches_single_tree(
+            &primary,
+            &secondary,
+            ArtifactSelector::new().of(alice),
+            "EAV cardinality-many cross-stream",
+        )
+        .await
+    }
+
+    #[dialog_common::test]
+    async fn union_order_matches_single_tree_in_aev_mode() -> anyhow::Result<()> {
+        // Two layers each with the same attribute on different
+        // entities AND interleaved values. Without tree-key tiebreak
+        // the per-group cross-stream items would come out in arbitrary
+        // order within (name, alice) and within (name, bob).
+        let alice: Entity = "id:alice".parse()?;
+        let bob: Entity = "id:bob".parse()?;
+        let primary = vec![
+            (alice.clone(), "person/name", Value::String("Zoe".into())),
+            (bob.clone(), "person/name", Value::String("Bea".into())),
+        ];
+        let secondary = vec![
+            (alice.clone(), "person/name", Value::String("Ann".into())),
+            (bob.clone(), "person/name", Value::String("Cal".into())),
+        ];
+        assert_union_matches_single_tree(
+            &primary,
+            &secondary,
+            ArtifactSelector::new().the("person/name".parse()?),
+            "AEV interleaved values",
+        )
+        .await
+    }
+
+    #[dialog_common::test]
+    async fn union_order_matches_single_tree_in_vae_mode() -> anyhow::Result<()> {
+        // VAE constrains value, so within a (the, of) group every
+        // matched item has identical (value_type, value_reference) —
+        // the order is fully determined by (attribute, entity).
+        // Verify the union output matches the single-tree output for
+        // this fully-determined case too.
+        let alice: Entity = "id:alice".parse()?;
+        let bob: Entity = "id:bob".parse()?;
+        let primary = vec![
+            (alice.clone(), "person/name", Value::String("X".into())),
+            (bob.clone(), "person/role", Value::String("X".into())),
+        ];
+        let secondary = vec![
+            (alice.clone(), "person/role", Value::String("X".into())),
+            (bob.clone(), "person/name", Value::String("X".into())),
+        ];
+        assert_union_matches_single_tree(
+            &primary,
+            &secondary,
+            ArtifactSelector::new().is(Value::String("X".into())),
+            "VAE cross-entity-attribute",
+        )
+        .await
+    }
+
+    #[dialog_common::test]
+    async fn merge_grouped_tiebreaks_by_value_reference_not_stream_index() -> anyhow::Result<()> {
+        // A deterministic regression test for the tiebreaker fix that
+        // does NOT depend on blake3 ordering of names happening to
+        // align with stream order. We construct two raw streams, each
+        // with one item, where the items share `(the, of)` but differ
+        // in value. The test asserts that the merge output is sorted
+        // by `value_reference` (= blake3(value.to_bytes())), not by
+        // which stream the item came from.
+        use futures_util::stream;
+
+        let alice: Entity = "id:alice".parse()?;
+        let a = Artifact {
+            the: "person/name".parse()?,
+            of: alice.clone(),
+            is: Value::String("A".into()),
+            cause: None,
+        };
+        let b = Artifact {
+            the: "person/name".parse()?,
+            of: alice.clone(),
+            is: Value::String("B".into()),
+            cause: None,
+        };
+
+        // Determine the canonical (tree) order of A and B by their
+        // value_reference, then feed them into merge_grouped in the
+        // *opposite* of canonical order. The merge must still emit
+        // them in canonical order if the tiebreaker is correct.
+        let canonical: Vec<Artifact> = {
+            let mut both = vec![a.clone(), b.clone()];
+            both.sort_by_key(sort_key);
+            both
+        };
+
+        // Find the artifact that sorts LAST and put it on the primary
+        // stream; the FIRST-sorting one goes on the secondary stream.
+        // With stream-index tiebreak the primary's item would come
+        // out first → wrong. With value_reference tiebreak the
+        // secondary's item comes out first → matches canonical.
+        let (first, second) = (canonical[0].clone(), canonical[1].clone());
+        let primary_first = second.clone();
+        let secondary_first = first.clone();
+
+        let primary: ArtifactStream<'_> = Box::pin(stream::iter(vec![Ok(primary_first)]));
+        let secondary: ArtifactStream<'_> = Box::pin(stream::iter(vec![Ok(secondary_first)]));
+
+        let merged = merge_grouped(vec![primary, secondary]);
+        let out: Vec<Artifact> = merged
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_, _>>()?;
+
+        let out_keys: Vec<_> = out.iter().map(sort_key).collect();
+        let canonical_keys: Vec<_> = canonical.iter().map(sort_key).collect();
+        assert_eq!(
+            out_keys, canonical_keys,
+            "merge_grouped must emit cross-stream cardinality-many items in tree order \
+             (sorted by value_reference), not in stream-index order"
+        );
         Ok(())
     }
 
