@@ -33,36 +33,27 @@ mod native {
     impl LockGuard {
         pub(crate) async fn acquire(target: &Handle) -> Result<Self, FsError> {
             let path = target.path().with_extension("lock");
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| FsError::Io(e.to_string()))?;
-            }
-            // pidlock panics if the lock path is a directory — fail fast.
-            if path.exists() && !path.is_file() {
-                return Err(FsError::Lock(format!(
-                    "Lock path is not a regular file: {}",
-                    path.display()
-                )));
-            }
 
-            let path_str = path
-                .to_str()
-                .ok_or_else(|| FsError::Lock("Lock path is not valid UTF-8".into()))?;
-            let mut lock = pidlock::Pidlock::new(path_str);
+            // pidlock 0.2's acquire() handles stale-lock cleanup internally
+            // (atomic create_new + dead-PID check) and never panics on I/O
+            // errors. new_validated also creates the parent directory and
+            // rejects malformed paths up front.
+            let mut lock = pidlock::Pidlock::new_validated(&path)
+                .map_err(|e| FsError::Lock(format!("Invalid lock path: {e:?}")))?;
             match lock.acquire() {
                 Ok(()) => Ok(Self { inner: lock }),
                 Err(pidlock::PidlockError::LockExists) => {
-                    // `get_owner()` checks whether the PID in the lock file
-                    // is still alive; if not, it removes the stale file so
-                    // a retry can succeed.
-                    match lock.get_owner() {
-                        Some(pid) => Err(FsError::Lock(format!(
-                            "Concurrent write in progress (lock held by pid {pid})",
-                        ))),
-                        None => lock
-                            .acquire()
-                            .map(|()| Self { inner: lock })
-                            .map_err(|e| FsError::Lock(format!("Failed to acquire lock: {e:?}"))),
-                    }
+                    // Holder is alive. Look up its PID for diagnostics; an
+                    // error reading the file just means we can't include it.
+                    let holder = lock
+                        .get_owner()
+                        .ok()
+                        .flatten()
+                        .map(|pid| pid.to_string())
+                        .unwrap_or_else(|| "<unknown>".into());
+                    Err(FsError::Lock(format!(
+                        "Concurrent write in progress (lock held by pid {holder})",
+                    )))
                 }
                 Err(e) => Err(FsError::Lock(format!("Failed to acquire lock: {e:?}"))),
             }
@@ -71,6 +62,8 @@ mod native {
 
     impl Drop for LockGuard {
         fn drop(&mut self) {
+            // 0.2's release returns Result instead of panicking; pidlock's
+            // own Drop also cleans up on a best-effort basis.
             let _ = self.inner.release();
         }
     }
