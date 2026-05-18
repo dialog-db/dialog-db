@@ -48,7 +48,7 @@ pub trait Statement: Sized {
 }
 
 /// A batch of pending writes, organized by entity and attribute.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Changes(HashMap<Entity, HashMap<Attribute, Vec<Change>>>);
 
 impl Changes {

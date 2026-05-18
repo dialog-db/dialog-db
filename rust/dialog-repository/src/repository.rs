@@ -1030,10 +1030,15 @@ mod tests {
             let branch = repo.branch("main").open().perform(&operator).await?;
 
             let synthetic: Entity = "id:branch".parse()?;
-            let layer = VolatileLayer::new().assert(BranchMeta {
-                this: synthetic.clone(),
-                name: branch_meta::Name("main".into()),
-            });
+            let layer = VolatileLayer::new();
+            layer
+                .transaction()
+                .assert(BranchMeta {
+                    this: synthetic.clone(),
+                    name: branch_meta::Name("main".into()),
+                })
+                .commit()
+                .await?;
 
             let results: Vec<BranchMeta> = branch
                 .query()
@@ -1064,7 +1069,13 @@ mod tests {
                 this: synthetic.clone(),
                 name: branch_meta::Name("main".into()),
             };
-            let layer = VolatileLayer::new().assert(asserted.clone()).retract(asserted);
+            let layer = VolatileLayer::new();
+            layer
+                .transaction()
+                .assert(asserted.clone())
+                .retract(asserted)
+                .commit()
+                .await?;
 
             let results: Vec<BranchMeta> = branch
                 .query()
@@ -1102,7 +1113,7 @@ mod tests {
             let synthetic: Entity = "id:branch".parse()?;
             let names: Vec<BranchMeta> = branch
                 .query()
-                .with(branch.metadata())
+                .with(branch.metadata().await?)
                 .select(Query::<BranchMeta> {
                     this: synthetic.clone().into(),
                     name: Term::var("name"),
@@ -1117,7 +1128,7 @@ mod tests {
             // The revision-hash fact should be present.
             let revision: Vec<branch_meta::RevisionHash> = branch
                 .query()
-                .with(branch.metadata())
+                .with(branch.metadata().await?)
                 .select(Query::<RevisionConcept> {
                     this: synthetic.clone().into(),
                     revision_hash: Term::var("hash"),
@@ -1213,11 +1224,16 @@ mod tests {
             let main = repo.branch("main").load().perform(&operator).await?;
             // `scratch` has no commits yet — `open()` is enough, the branch
             // simply selects against the empty tree.
-            let synthetic_layer = VolatileLayer::new().assert(Employee {
-                this: Entity::new()?,
-                name: employee::Name("Synthetic".into()),
-                role: employee::Role("Bot".into()),
-            });
+            let synthetic_layer = VolatileLayer::new();
+            synthetic_layer
+                .transaction()
+                .assert(Employee {
+                    this: Entity::new()?,
+                    name: employee::Name("Synthetic".into()),
+                    role: employee::Role("Bot".into()),
+                })
+                .commit()
+                .await?;
             let mut names: Vec<String> = scratch
                 .query()
                 .with(&main)
@@ -1262,10 +1278,15 @@ mod tests {
                 .await?;
 
             let synthetic: Entity = "id:branch".parse()?;
-            let layer = VolatileLayer::new().assert(BranchMeta {
-                this: synthetic,
-                name: branch_meta::Name("main".into()),
-            });
+            let layer = VolatileLayer::new();
+            layer
+                .transaction()
+                .assert(BranchMeta {
+                    this: synthetic,
+                    name: branch_meta::Name("main".into()),
+                })
+                .commit()
+                .await?;
             let names: Vec<BranchMeta> = branch
                 .query()
                 .with(layer)
@@ -1310,7 +1331,7 @@ mod tests {
             let repo_entity: Entity = "id:repository".parse()?;
             let results: Vec<RepoConcept> = branch
                 .query()
-                .with(branch.metadata())
+                .with(branch.metadata().await?)
                 .select(Query::<RepoConcept> {
                     this: repo_entity.into(),
                     did: Term::var("did"),
@@ -1354,7 +1375,7 @@ mod tests {
             let upstream_entity: Entity = "id:upstream".parse()?;
             let results: Vec<UpstreamConcept> = feature
                 .query()
-                .with(feature.metadata())
+                .with(feature.metadata().await?)
                 .select(Query::<UpstreamConcept> {
                     this: upstream_entity.into(),
                     kind: Term::var("kind"),
@@ -1380,7 +1401,7 @@ mod tests {
             let upstream_entity: Entity = "id:upstream".parse()?;
             let results: Vec<UpstreamConcept> = branch
                 .query()
-                .with(branch.metadata())
+                .with(branch.metadata().await?)
                 .select(Query::<UpstreamConcept> {
                     this: upstream_entity.into(),
                     kind: Term::var("kind"),
@@ -1403,11 +1424,16 @@ mod tests {
             let main = repo.branch("main").open().perform(&operator).await?;
             let feature = repo.branch("feature").open().perform(&operator).await?;
 
-            let synthetic = VolatileLayer::new().assert(Employee {
-                this: Entity::new()?,
-                name: employee::Name("Synth".into()),
-                role: employee::Role("Bot".into()),
-            });
+            let synthetic = VolatileLayer::new();
+            synthetic
+                .transaction()
+                .assert(Employee {
+                    this: Entity::new()?,
+                    name: employee::Name("Synth".into()),
+                    role: employee::Role("Bot".into()),
+                })
+                .commit()
+                .await?;
 
             let session = feature.query().with(&main).with(synthetic);
             assert_eq!(session.layered_branches().len(), 1);
@@ -1561,7 +1587,12 @@ mod tests {
                 .perform(&operator)
                 .await?;
 
-            let layer = VolatileLayer::new().install(employee_from_stuff)?;
+            let layer = VolatileLayer::new();
+            layer
+                .transaction()
+                .install(employee_from_stuff)?
+                .commit()
+                .await?;
             let derived: Vec<Employee> = branch
                 .query()
                 .with(layer)

@@ -1,6 +1,6 @@
 //! Branch metadata layer.
 //!
-//! Builds an [`VolatileLayer`] populated with synthetic facts describing a
+//! Builds a [`VolatileLayer`] populated with synthetic facts describing a
 //! [`Branch`]: its name, current revision, hosting repository, and upstream
 //! tracking state — all exposed under the `dialog.meta/*` attribute
 //! namespace.
@@ -15,9 +15,9 @@
 //! - `id:repository` — the hosting repository
 //! - `id:upstream` — the tracked upstream (when configured)
 
-use base58::ToBase58;
-use dialog_artifacts::Entity;
 use crate::layer::VolatileLayer;
+use base58::ToBase58;
+use dialog_artifacts::{DialogArtifactsError, Entity};
 use dialog_query::the;
 
 use crate::{Branch, Upstream};
@@ -37,12 +37,17 @@ fn upstream_entity() -> Entity {
 /// Build the metadata layer for `branch`.
 ///
 /// Always emits `dialog.meta/name` for the branch and `dialog.meta/did` for
-/// the repository. Adds revision and upstream facts when present.
-pub fn branch_metadata(branch: &Branch) -> VolatileLayer {
+/// the repository. Adds revision and upstream facts when present. Async
+/// because the underlying [`VolatileLayer`] requires an awaited
+/// [`VolatileTransaction::commit`](crate::layer::VolatileTransaction::commit)
+/// to materialize the facts into its prolly tree.
+pub async fn branch_metadata(branch: &Branch) -> Result<VolatileLayer, DialogArtifactsError> {
     let branch_id = branch_entity();
     let repo_id = repository_entity();
 
-    let mut layer = VolatileLayer::new()
+    let layer = VolatileLayer::new();
+    let mut tx = layer
+        .transaction()
         .assert(
             the!("dialog.meta/name")
                 .of(branch_id.clone())
@@ -63,7 +68,7 @@ pub fn branch_metadata(branch: &Branch) -> VolatileLayer {
         let hash_bytes: &[u8] = revision.tree.hash();
         let hash_b58 = ToBase58::to_base58(hash_bytes);
 
-        layer = layer
+        tx = tx
             .assert(
                 the!("dialog.meta/revision-hash")
                     .of(branch_id.clone())
@@ -93,7 +98,7 @@ pub fn branch_metadata(branch: &Branch) -> VolatileLayer {
 
     if let Some(upstream) = branch.upstream() {
         let upstream_id = upstream_entity();
-        layer = layer.assert(
+        tx = tx.assert(
             the!("dialog.meta/upstream")
                 .of(branch_id.clone())
                 .is(upstream_id.clone()),
@@ -103,7 +108,7 @@ pub fn branch_metadata(branch: &Branch) -> VolatileLayer {
             Upstream::Local { .. } => "local",
             Upstream::Remote { .. } => "remote",
         };
-        layer = layer
+        tx = tx
             .assert(
                 the!("dialog.meta/kind")
                     .of(upstream_id.clone())
@@ -116,7 +121,7 @@ pub fn branch_metadata(branch: &Branch) -> VolatileLayer {
             );
 
         if let Upstream::Remote { remote, .. } = &upstream {
-            layer = layer.assert(
+            tx = tx.assert(
                 the!("dialog.meta/remote")
                     .of(upstream_id)
                     .is(remote.clone()),
@@ -124,5 +129,6 @@ pub fn branch_metadata(branch: &Branch) -> VolatileLayer {
         }
     }
 
-    layer
+    tx.commit().await?;
+    Ok(layer)
 }

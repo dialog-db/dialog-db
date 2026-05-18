@@ -6,13 +6,20 @@
 //! alongside the real artifact store, queried with the same
 //! [`Application`](dialog_query::query::Application) API.
 //!
-//! [`VolatileLayer`] is implemented on top of the same prolly tree the branch uses,
-//! backed by a `dialog_storage::Volatile` provider through a [`LocalIndex`].
-//! That symmetry matters: a layer's `Provider<Select<'_>>` yields artifacts
-//! in exactly the same `(the, of)` order a branch does, so the
-//! cardinality-one sliding window in
-//! [`AttributeQueryOnly`](dialog_query::attribute::query::AttributeQuery)
+//! [`VolatileLayer`] is the volatile counterpart of [`Branch`]: same prolly
+//! tree, same `(the, of)` scan order, same `.query()` / `.transaction()`
+//! surface — only it lives in a `dialog_storage::Volatile` provider so
+//! nothing persists. That symmetry matters: a layer's
+//! `Provider<Select<'_>>` yields artifacts in exactly the same
+//! `(the, of)` order a branch does, so the cardinality-one sliding window
+//! in [`AttributeQueryOnly`](dialog_query::attribute::query::AttributeQuery)
 //! sees correctly grouped streams when [`Union`] merges them.
+//!
+//! Mutations always go through a [`VolatileTransaction`] obtained from
+//! [`VolatileLayer::transaction`]: accumulate writes with
+//! `.assert(...)` / `.retract(...)`, then `.commit().await` to apply them
+//! to the layer's tree. The layer itself is a snapshot — `Provider<Select>`
+//! reads the tree at its current root, never flushes implicitly.
 //!
 //! [`Union<P, O>`] is the data-source counterpart to the planner's
 //! [`Disjunction`](dialog_query::planner::Disjunction): where `Disjunction`
@@ -22,9 +29,12 @@
 //! ```ignore
 //! use dialog_repository::layer::{VolatileLayer, Union};
 //!
-//! let layer = VolatileLayer::new()
+//! let layer = VolatileLayer::new();
+//! layer.transaction()
 //!     .assert(Employee { this: id, name: Name("Alice".into()) })
-//!     .register(my_rule)?;
+//!     .register(my_rule)?
+//!     .commit()
+//!     .await?;
 //!
 //! let env = Union::new(branch_env, layer);
 //! let results = my_query.perform(&env).try_vec().await?;
@@ -58,7 +68,6 @@ use dialog_varsig::did;
 use futures_util::StreamExt;
 use futures_util::stream;
 use parking_lot::Mutex;
-use std::mem;
 
 use crate::LocalIndex;
 
@@ -229,39 +238,51 @@ pub fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStream<'a>
     })
 }
 
-/// Internal mutable state of a [`VolatileLayer`]. Kept behind an Arc<Mutex<...>>
-/// so the chained synchronous `assert`/`retract` API works on `Self` while
-/// `Provider<Select>::execute` (which only has `&self`) can still flush.
+/// Internal mutable state of a [`VolatileLayer`]. Kept behind an
+/// `Arc<Mutex<...>>` so commits from a [`VolatileTransaction`] (which
+/// only has `&VolatileLayer`) can update the snapshot atomically.
+///
+/// Unlike the previous design there is no `pending` buffer here: all
+/// pending writes live on the transaction. `Provider<Select>::execute`
+/// reads `tree` directly with no flush.
 struct State {
-    /// Current root of the layer's prolly tree, or `EMPT_TREE_HASH` when
-    /// the layer has only ever held unflushed changes.
+    /// Current root of the layer's prolly tree.
     tree: Blake3Hash,
-    /// Synchronously accumulated writes that have not yet been folded
-    /// into the tree. Flushed on first select.
-    pending: Changes,
+    /// Rules registered on this layer. Mutated by transaction commit.
+    rules: RuleRegistry,
 }
 
-/// An in-memory layer carrying both synthetic facts and deductive rules.
+/// An in-memory snapshot of facts + rules, queryable like a [`Branch`].
 ///
-/// `VolatileLayer` is the bundle a [`QuerySession`](crate::session) wires onto a
-/// real fact source via [`Union`] (or, more commonly, via the
-/// `.with(layer)` chain on a session). Facts asserted here are unioned
-/// with the primary during evaluation; rules registered here merge with
-/// the primary's rules per concept.
+/// `VolatileLayer` mirrors the [`Branch`](crate::Branch) shape but lives
+/// entirely in a `Volatile` provider: same prolly tree, same `(the, of)`
+/// scan order, same [`query`](Self::query) and [`transaction`](Self::transaction)
+/// methods — only nothing persists, and `commit` is purely in-process so
+/// it doesn't need an environment.
 ///
-/// The fact-mutation surface mirrors
-/// [`Transaction`](crate::repository::branch::Transaction): use
-/// [`assert`](Self::assert) / [`retract`](Self::retract) with any
-/// [`Statement`]. Mutations are buffered in a [`Changes`] and flushed into
-/// the underlying prolly tree the first time a select reads from the
-/// layer. The tree itself lives entirely in a `Volatile` provider — no
-/// operator, profile, or persisted state.
+/// Mutations always go through [`VolatileTransaction`]:
+///
+/// ```ignore
+/// let layer = VolatileLayer::new();
+/// layer.transaction()
+///     .assert(some_concept)
+///     .install(|q: Query<Derived>| (...,))?
+///     .commit()
+///     .await?;
+///
+/// // Queries see the committed snapshot.
+/// let results = layer.query().select(q).perform(&env).try_vec().await?;
+/// ```
+///
+/// The layer's `Provider<Select>` returns the tree at its current root —
+/// no implicit flush. Pending writes from a transaction are only visible
+/// after `.commit().await` returns, or through that transaction's own
+/// [`query`](VolatileTransaction::query).
 #[derive(Clone)]
 pub struct VolatileLayer {
     env: Volatile,
     catalog: Capability<Catalog>,
     state: Arc<Mutex<State>>,
-    rules: RuleRegistry,
 }
 
 impl Default for VolatileLayer {
@@ -283,110 +304,32 @@ impl VolatileLayer {
                 .catalog("index"),
             state: Arc::new(Mutex::new(State {
                 tree: EMPT_TREE_HASH,
-                pending: Changes::new(),
+                rules: RuleRegistry::new(),
             })),
-            rules: RuleRegistry::new(),
         }
     }
 
-    /// Assert a [`Statement`] into the layer — the same surface as
-    /// [`Transaction::assert`](crate::repository::branch::Transaction::assert).
+    /// Open a transaction on this layer.
     ///
-    /// Changes are buffered; the underlying tree is materialized the
-    /// first time the layer is read from.
-    pub fn assert<S: Statement>(self, statement: S) -> Self {
-        {
-            let mut state = self.state.lock();
-            statement.assert(&mut state.pending);
+    /// Mirrors [`Branch::transaction`](crate::Branch::transaction):
+    /// accumulate writes with [`assert`](VolatileTransaction::assert) /
+    /// [`retract`](VolatileTransaction::retract) / rule installation,
+    /// then [`commit`](VolatileTransaction::commit) to fold them into
+    /// the layer's snapshot.
+    pub fn transaction(&self) -> VolatileTransaction<'_> {
+        VolatileTransaction {
+            layer: self,
+            changes: Changes::new(),
+            pending_rules: Vec::new(),
         }
-        self
     }
 
-    /// Retract a [`Statement`] from the layer.
-    pub fn retract<S: Statement>(self, statement: S) -> Self {
-        {
-            let mut state = self.state.lock();
-            statement.retract(&mut state.pending);
-        }
-        self
-    }
-
-    /// Register a pre-built deductive rule on this layer.
-    pub fn register(mut self, rule: DeductiveRule) -> Result<Self, EvaluationError> {
-        self.rules.register(rule)?;
-        Ok(self)
-    }
-
-    /// Install a deductive rule from a closure that builds its body from a
-    /// fresh query of the conclusion concept.
+    /// Snapshot of the layer's rule registry.
     ///
-    /// The closure receives a default-constructed `Query<M>`; whatever
-    /// premises it returns become the rule body.
-    pub fn install<M, W>(self, rule: impl Fn(M) -> W) -> Result<Self, EvaluationError>
-    where
-        M: Application + Default + Into<ConceptDescriptor>,
-        W: When,
-    {
-        let query = M::default();
-        let concept: ConceptDescriptor = query.clone().into();
-        let when = rule(query).into_premises();
-        let premises = when.into_vec();
-        let rule =
-            DeductiveRule::new(concept, premises).map_err(|e| EvaluationError::Planning {
-                message: e.to_string(),
-            })?;
-        self.register(rule)
-    }
-
-    /// Borrow the underlying rule registry.
-    pub fn rules(&self) -> &RuleRegistry {
-        &self.rules
-    }
-
-    /// Mutably borrow the rule registry.
-    pub fn rules_mut(&mut self) -> &mut RuleRegistry {
-        &mut self.rules
-    }
-
-    /// Flush any buffered changes into the prolly tree, returning the
-    /// resulting root hash.
-    async fn flush(&self) -> Result<Blake3Hash, DialogArtifactsError> {
-        // Snapshot under the lock, then release: tree work happens off-lock
-        // so other `Self`-holding tasks (clones) can still queue writes.
-        let (base, pending) = {
-            let mut state = self.state.lock();
-            let pending = mem::take(&mut state.pending);
-            (state.tree, pending)
-        };
-
-        if pending.is_empty() {
-            return Ok(base);
-        }
-
-        let mut store = LocalIndex::new(&self.env, self.catalog.clone());
-        let mut tree: artifact_tree::ArtifactTree = Tree::from_hash(&base, &store)
-            .await
-            .map_err(DialogArtifactsError::from)?;
-        artifact_tree::apply(&mut tree, &mut store, pending.into_stream()).await?;
-
-        let new_hash = tree.hash().copied().unwrap_or(EMPT_TREE_HASH);
-        {
-            let mut state = self.state.lock();
-            state.tree = new_hash;
-        }
-        Ok(new_hash)
-    }
-}
-
-impl Update for VolatileLayer {
-    fn associate(&mut self, the: Attribute, of: Entity, is: Value) {
-        self.state.lock().pending.associate(the, of, is);
-    }
-    fn associate_unique(&mut self, the: Attribute, of: Entity, is: Value) {
-        self.state.lock().pending.associate_unique(the, of, is);
-    }
-    fn dissociate(&mut self, the: Attribute, of: Entity, is: Value) {
-        self.state.lock().pending.dissociate(the, of, is);
+    /// Returned by clone so the caller can read without holding the
+    /// internal lock; the registry itself is cheap to clone.
+    pub fn rules(&self) -> RuleRegistry {
+        self.state.lock().rules.clone()
     }
 }
 
@@ -397,12 +340,10 @@ impl<'a> Provider<Select<'a>> for VolatileLayer {
         &self,
         input: ArtifactSelector<Constrained>,
     ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
-        // Materialize pending writes up front so the lock is released
-        // before the returned stream is polled. Then clone the env and
-        // catalog into the stream so the resulting `ArtifactStream<'a>`
-        // doesn't borrow from `&self` — Volatile is Arc-backed so the
-        // clone is cheap.
-        let tree_hash = self.flush().await?;
+        // Snapshot the current tree root, then read off-lock. The Volatile
+        // env and catalog are cheap to clone (Arc-backed) and let the
+        // returned stream outlive `&self`.
+        let tree_hash = self.state.lock().tree;
         let env = self.env.clone();
         let catalog = self.catalog.clone();
         Ok(Box::pin(async_stream::try_stream! {
@@ -423,7 +364,115 @@ impl<'a> Provider<Select<'a>> for VolatileLayer {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<SelectRules> for VolatileLayer {
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
-        self.rules.acquire(&input)
+        self.state.lock().rules.acquire(&input)
+    }
+}
+
+/// An open transaction on a [`VolatileLayer`].
+///
+/// Mirrors [`Transaction`](crate::repository::branch::Transaction) on a
+/// branch: accumulate writes with [`assert`](Self::assert) /
+/// [`retract`](Self::retract), install rules with
+/// [`install`](Self::install) / [`register`](Self::register), then
+/// [`commit`](Self::commit) to apply them to the layer's snapshot. Unlike
+/// a branch commit this doesn't need an environment — everything stays
+/// in the layer's `Volatile` storage.
+pub struct VolatileTransaction<'a> {
+    layer: &'a VolatileLayer,
+    changes: Changes,
+    pending_rules: Vec<DeductiveRule>,
+}
+
+impl<'a> VolatileTransaction<'a> {
+    /// Assert a [`Statement`] into this transaction.
+    pub fn assert<S: Statement>(mut self, statement: S) -> Self {
+        statement.assert(&mut self.changes);
+        self
+    }
+
+    /// Retract a [`Statement`] from this transaction.
+    pub fn retract<S: Statement>(mut self, statement: S) -> Self {
+        statement.retract(&mut self.changes);
+        self
+    }
+
+    /// Register a pre-built deductive rule. Validated immediately; the
+    /// rule is only added to the layer on [`commit`](Self::commit).
+    pub fn register(mut self, rule: DeductiveRule) -> Result<Self, EvaluationError> {
+        // Round-trip through a scratch registry to surface any validation
+        // errors at registration time, matching the previous semantics
+        // of `VolatileLayer::register`.
+        let mut scratch = RuleRegistry::new();
+        scratch.register(rule.clone())?;
+        self.pending_rules.push(rule);
+        Ok(self)
+    }
+
+    /// Install a deductive rule built from a closure that names the
+    /// conclusion concept and returns its body. Same shape as
+    /// [`Overlay::install`](dialog_query::overlay::Overlay::install).
+    pub fn install<M, W>(self, rule: impl Fn(M) -> W) -> Result<Self, EvaluationError>
+    where
+        M: Application + Default + Into<ConceptDescriptor>,
+        W: When,
+    {
+        let query = M::default();
+        let concept: ConceptDescriptor = query.clone().into();
+        let when = rule(query).into_premises();
+        let premises = when.into_vec();
+        let rule =
+            DeductiveRule::new(concept, premises).map_err(|e| EvaluationError::Planning {
+                message: e.to_string(),
+            })?;
+        self.register(rule)
+    }
+
+    /// Commit all accumulated changes and rule registrations to the
+    /// underlying layer. The layer's tree advances to a new root and
+    /// installed rules become visible to subsequent queries.
+    pub async fn commit(self) -> Result<(), DialogArtifactsError> {
+        let VolatileTransaction {
+            layer,
+            changes,
+            pending_rules,
+        } = self;
+
+        if !changes.is_empty() {
+            let base = layer.state.lock().tree;
+            let mut store = LocalIndex::new(&layer.env, layer.catalog.clone());
+            let mut tree: artifact_tree::ArtifactTree = Tree::from_hash(&base, &store)
+                .await
+                .map_err(DialogArtifactsError::from)?;
+            artifact_tree::apply(&mut tree, &mut store, changes.into_stream()).await?;
+            let new_hash = tree.hash().copied().unwrap_or(EMPT_TREE_HASH);
+            layer.state.lock().tree = new_hash;
+        }
+
+        if !pending_rules.is_empty() {
+            let mut state = layer.state.lock();
+            for rule in pending_rules {
+                // Already validated in `register`; unwrap-mapping here
+                // is purely so the error type matches the function
+                // signature if a future invariant trips.
+                state.rules.register(rule).map_err(|e| {
+                    DialogArtifactsError::Storage(format!("rule registration failed: {e}"))
+                })?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl Update for VolatileTransaction<'_> {
+    fn associate(&mut self, the: Attribute, of: Entity, is: Value) {
+        self.changes.associate(the, of, is);
+    }
+    fn associate_unique(&mut self, the: Attribute, of: Entity, is: Value) {
+        self.changes.associate_unique(the, of, is);
+    }
+    fn dissociate(&mut self, the: Attribute, of: Entity, is: Value) {
+        self.changes.dissociate(the, of, is);
     }
 }
 
@@ -520,11 +569,16 @@ mod tests {
     #[dialog_common::test]
     async fn layer_assert_then_select_round_trips() -> anyhow::Result<()> {
         let alice: Entity = "id:alice".parse()?;
-        let layer = VolatileLayer::new().assert(
-            the!("person/name")
-                .of(alice.clone())
-                .is("Alice".to_string()),
-        );
+        let layer = VolatileLayer::new();
+        layer
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .await?;
 
         let selector = ArtifactSelector::new().the("person/name".parse()?);
         let stream = Provider::<Select<'_>>::execute(&layer, selector).await?;
@@ -546,7 +600,13 @@ mod tests {
         let stmt = the!("person/name")
             .of(alice.clone())
             .is("Alice".to_string());
-        let layer = VolatileLayer::new().assert(stmt.clone()).retract(stmt);
+        let layer = VolatileLayer::new();
+        layer
+            .transaction()
+            .assert(stmt.clone())
+            .retract(stmt)
+            .commit()
+            .await?;
 
         let selector = ArtifactSelector::new().the("person/name".parse()?);
         let stream = Provider::<Select<'_>>::execute(&layer, selector).await?;
@@ -557,22 +617,25 @@ mod tests {
 
     #[dialog_common::test]
     async fn layer_cardinality_one_replace_supersedes() -> anyhow::Result<()> {
-        // Drive `associate_unique` (cardinality-one) directly so the tree
-        // takes the Replace path: only the latest value should survive.
+        // Drive `associate_unique` (cardinality-one) directly through the
+        // transaction so the tree takes the Replace path: only the latest
+        // value should survive.
         let alice: Entity = "id:alice".parse()?;
-        let mut layer = VolatileLayer::new();
+        let layer = VolatileLayer::new();
+        let mut tx = layer.transaction();
         Update::associate_unique(
-            &mut layer,
+            &mut tx,
             "person/name".parse()?,
             alice.clone(),
             Value::String("Alice".into()),
         );
         Update::associate_unique(
-            &mut layer,
+            &mut tx,
             "person/name".parse()?,
             alice.clone(),
             Value::String("Alicia".into()),
         );
+        tx.commit().await?;
 
         let selector = ArtifactSelector::new().of(alice);
         let stream = Provider::<Select<'_>>::execute(&layer, selector).await?;
@@ -586,17 +649,32 @@ mod tests {
         Ok(())
     }
 
+    /// Test-only helper: build a committed `VolatileLayer` from a slice
+    /// of statements. Eliminates the `VolatileLayer::new() + transaction()
+    /// + .assert(..)+ + commit().await?` boilerplate that would otherwise
+    /// appear in every union test below.
+    async fn layer_with<S: Statement + Clone>(stmts: &[S]) -> anyhow::Result<VolatileLayer> {
+        let layer = VolatileLayer::new();
+        let mut tx = layer.transaction();
+        for s in stmts {
+            tx = tx.assert(s.clone());
+        }
+        tx.commit().await?;
+        Ok(layer)
+    }
+
     #[dialog_common::test]
     async fn union_chains_select_streams_from_both_sides() -> anyhow::Result<()> {
         let alice: Entity = "id:alice".parse()?;
         let bob: Entity = "id:bob".parse()?;
-        let primary = VolatileLayer::new().assert(
-            the!("person/name")
-                .of(alice.clone())
-                .is("Alice".to_string()),
-        );
-        let secondary =
-            VolatileLayer::new().assert(the!("person/name").of(bob.clone()).is("Bob".to_string()));
+        let primary = layer_with(&[the!("person/name")
+            .of(alice.clone())
+            .is("Alice".to_string())])
+        .await?;
+        let secondary = layer_with(&[the!("person/name")
+            .of(bob.clone())
+            .is("Bob".to_string())])
+        .await?;
 
         let combined = Union::new(primary, secondary);
         let selector = ArtifactSelector::new().the("person/name".parse()?);
@@ -651,20 +729,22 @@ mod tests {
             (bob.clone(), "person/role"),
         ];
 
-        let build = || -> anyhow::Result<VolatileLayer> {
-            let mut layer = VolatileLayer::new();
+        let build = || async {
+            let layer = VolatileLayer::new();
+            let mut tx = layer.transaction();
             for (entity, attribute) in &facts {
                 Update::associate(
-                    &mut layer,
+                    &mut tx,
                     attribute.parse()?,
                     entity.clone(),
                     Value::String("X".into()),
                 );
             }
-            Ok(layer)
+            tx.commit().await?;
+            anyhow::Ok(layer)
         };
 
-        let combined = Union::new(build()?, build()?);
+        let combined = Union::new(build().await?, build().await?);
         let stream = Provider::<Select<'_>>::execute(&combined, selector_for(&alice)).await?;
         let results: Vec<Artifact> = stream
             .collect::<Vec<_>>()
@@ -736,16 +816,11 @@ mod tests {
         // The same fact existing in two places is still one fact — the
         // user should see one row, not two.
         let alice: Entity = "id:alice".parse()?;
-        let primary = VolatileLayer::new().assert(
-            the!("person/name")
-                .of(alice.clone())
-                .is("Alice".to_string()),
-        );
-        let secondary = VolatileLayer::new().assert(
-            the!("person/name")
-                .of(alice.clone())
-                .is("Alice".to_string()),
-        );
+        let stmt = the!("person/name")
+            .of(alice.clone())
+            .is("Alice".to_string());
+        let primary = layer_with(&[stmt.clone()]).await?;
+        let secondary = layer_with(&[stmt]).await?;
 
         let combined = Union::new(primary, secondary);
         let selector = ArtifactSelector::new().the("person/name".parse()?);
@@ -772,22 +847,19 @@ mod tests {
         // primary's scan order, so naive consecutive-only dedup would
         // miss it. We still expect two unique rows total.
         let alice: Entity = "id:alice".parse()?;
-        let primary = VolatileLayer::new()
-            .assert(
-                the!("person/name")
-                    .of(alice.clone())
-                    .is("AliceA".to_string()),
-            )
-            .assert(
-                the!("person/name")
-                    .of(alice.clone())
-                    .is("AliceB".to_string()),
-            );
-        let secondary = VolatileLayer::new().assert(
+        let primary = layer_with(&[
             the!("person/name")
                 .of(alice.clone())
                 .is("AliceA".to_string()),
-        );
+            the!("person/name")
+                .of(alice.clone())
+                .is("AliceB".to_string()),
+        ])
+        .await?;
+        let secondary = layer_with(&[the!("person/name")
+            .of(alice.clone())
+            .is("AliceA".to_string())])
+        .await?;
 
         let combined = Union::new(primary, secondary);
         let selector = ArtifactSelector::new().the("person/name".parse()?);
@@ -823,20 +895,20 @@ mod tests {
         let alice: Entity = "id:alice".parse()?;
         let bob: Entity = "id:bob".parse()?;
 
-        let primary = VolatileLayer::new()
-            .assert(
-                the!("person/name")
-                    .of(alice.clone())
-                    .is("AliceA".to_string()),
-            )
-            .assert(the!("person/name").of(bob.clone()).is("BobA".to_string()));
-        let secondary = VolatileLayer::new()
-            .assert(
-                the!("person/name")
-                    .of(alice.clone())
-                    .is("AliceB".to_string()),
-            )
-            .assert(the!("person/name").of(bob.clone()).is("BobB".to_string()));
+        let primary = layer_with(&[
+            the!("person/name")
+                .of(alice.clone())
+                .is("AliceA".to_string()),
+            the!("person/name").of(bob.clone()).is("BobA".to_string()),
+        ])
+        .await?;
+        let secondary = layer_with(&[
+            the!("person/name")
+                .of(alice.clone())
+                .is("AliceB".to_string()),
+            the!("person/name").of(bob.clone()).is("BobB".to_string()),
+        ])
+        .await?;
 
         let env = Union::new(primary, secondary);
         let results = the!("person/name")
@@ -932,21 +1004,20 @@ mod tests {
         selector: ArtifactSelector<Constrained>,
         label: &str,
     ) -> anyhow::Result<()> {
-        let to_layer = |facts: &[(Entity, &str, Value)]| -> anyhow::Result<VolatileLayer> {
-            let mut layer = VolatileLayer::new();
+        async fn to_layer(
+            facts: Vec<(Entity, &str, Value)>,
+        ) -> anyhow::Result<VolatileLayer> {
+            let layer = VolatileLayer::new();
+            let mut tx = layer.transaction();
             for (entity, attribute, value) in facts {
-                Update::associate(
-                    &mut layer,
-                    attribute.parse()?,
-                    entity.clone(),
-                    value.clone(),
-                );
+                Update::associate(&mut tx, attribute.parse()?, entity, value);
             }
+            tx.commit().await?;
             Ok(layer)
-        };
+        }
 
-        let primary = to_layer(primary_facts)?;
-        let secondary = to_layer(secondary_facts)?;
+        let primary = to_layer(primary_facts.to_vec()).await?;
+        let secondary = to_layer(secondary_facts.to_vec()).await?;
         let union = Union::new(primary, secondary);
         let mut union_out: Vec<Artifact> =
             Provider::<Select<'_>>::execute(&union, selector.clone())
@@ -963,7 +1034,7 @@ mod tests {
         // at merge time.
         let mut all = primary_facts.to_vec();
         all.extend_from_slice(secondary_facts);
-        let baseline = to_layer(&all)?;
+        let baseline = to_layer(all).await?;
         let baseline_out: Vec<Artifact> = Provider::<Select<'_>>::execute(&baseline, selector)
             .await?
             .collect::<Vec<_>>()

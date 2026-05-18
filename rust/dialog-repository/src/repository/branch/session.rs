@@ -284,9 +284,11 @@ impl Branch {
     /// (name, revision hash, upstream, hosting repository) under the
     /// `dialog.meta/*` attribute namespace.
     ///
-    /// Compose with `branch.query().with(branch.metadata())` to make
-    /// branch internals queryable like any other fact.
-    pub fn metadata(&self) -> VolatileLayer {
-        super::metadata::branch_metadata(self)
+    /// Compose with `branch.query().with(branch.metadata().await?)` to
+    /// make branch internals queryable like any other fact. Async because
+    /// committing the synthetic facts into the layer's prolly tree
+    /// requires an await.
+    pub async fn metadata(&self) -> Result<VolatileLayer, DialogArtifactsError> {
+        super::metadata::branch_metadata(self).await
     }
 }
