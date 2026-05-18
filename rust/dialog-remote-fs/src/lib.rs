@@ -27,6 +27,8 @@
 
 mod error;
 pub mod fs;
+mod handle;
+pub mod registry;
 pub mod request;
 
 pub use error::FsError;
