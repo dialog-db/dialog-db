@@ -22,7 +22,11 @@ use dialog_storage::{unique_did, unique_name};
 use tempfile::TempDir;
 
 /// Build a `Capability<Get>` for the given catalog + digest under a subject.
-fn build_get(subject: Subject, catalog: &str, digest: Blake3Hash) -> dialog_capability::Capability<Get> {
+fn build_get(
+    subject: Subject,
+    catalog: &str,
+    digest: Blake3Hash,
+) -> dialog_capability::Capability<Get> {
     subject
         .attenuate(Archive)
         .attenuate(Catalog::new(catalog))
@@ -94,11 +98,7 @@ async fn it_writes_and_reads_back_a_blob() -> Result<()> {
     let content = b"hello fs-remote".to_vec();
     let digest = Blake3Hash::hash(&content);
 
-    execute_put(
-        &id,
-        build_put(did.clone().into(), "index", content.clone()),
-    )
-    .await?;
+    execute_put(&id, build_put(did.clone().into(), "index", content.clone())).await?;
 
     let result = execute_get(&id, build_get(did.into(), "index", digest)).await?;
     assert_eq!(result, Some(content));
@@ -115,11 +115,7 @@ async fn it_writes_byte_compatibly_with_native_space() -> Result<()> {
     let content = b"compat: fs-remote -> NativeSpace".to_vec();
     let digest = Blake3Hash::hash(&content);
 
-    execute_put(
-        &id,
-        build_put(did.clone().into(), "index", content.clone()),
-    )
-    .await?;
+    execute_put(&id, build_put(did.clone().into(), "index", content.clone())).await?;
 
     // The expected layout on disk:
     let expected_path = tmp
@@ -176,16 +172,8 @@ async fn it_is_idempotent_for_repeated_puts() -> Result<()> {
     let content = b"idempotent".to_vec();
     let digest = Blake3Hash::hash(&content);
 
-    execute_put(
-        &id,
-        build_put(did.clone().into(), "index", content.clone()),
-    )
-    .await?;
-    execute_put(
-        &id,
-        build_put(did.clone().into(), "index", content.clone()),
-    )
-    .await?;
+    execute_put(&id, build_put(did.clone().into(), "index", content.clone())).await?;
+    execute_put(&id, build_put(did.clone().into(), "index", content.clone())).await?;
 
     let result = execute_get(&id, build_get(did.into(), "index", digest)).await?;
     assert_eq!(result, Some(content));

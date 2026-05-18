@@ -18,8 +18,8 @@ use dialog_common::Blake3Hash;
 use dialog_effects::archive::prelude::PutExt;
 use dialog_effects::archive::*;
 
-use crate::fs::{Fs, FsInvocation};
 use crate::fs::provider::{navigate, split_target};
+use crate::fs::{Fs, FsInvocation};
 use crate::handle::FsHandle;
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]

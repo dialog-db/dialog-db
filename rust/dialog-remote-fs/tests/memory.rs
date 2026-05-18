@@ -162,7 +162,13 @@ async fn it_updates_with_correct_ifmatch_version() -> Result<()> {
 
     let v2 = execute_publish(
         &id,
-        build_publish(did.clone().into(), "local", "head", second.clone(), Some(v1)),
+        build_publish(
+            did.clone().into(),
+            "local",
+            "head",
+            second.clone(),
+            Some(v1),
+        ),
     )
     .await?;
 
@@ -259,7 +265,11 @@ async fn it_retracts_with_correct_version() -> Result<()> {
     )
     .await?;
 
-    execute_retract(&id, build_retract(did.clone().into(), "local", "head", version)).await?;
+    execute_retract(
+        &id,
+        build_retract(did.clone().into(), "local", "head", version),
+    )
+    .await?;
 
     let resolved = execute_resolve(&id, build_resolve(did.into(), "local", "head")).await?;
     assert!(resolved.is_none());
@@ -279,8 +289,11 @@ async fn it_rejects_retract_with_wrong_version() -> Result<()> {
     )
     .await?;
 
-    let result =
-        execute_retract(&id, build_retract(did.into(), "local", "head", bogus_version)).await;
+    let result = execute_retract(
+        &id,
+        build_retract(did.into(), "local", "head", bogus_version),
+    )
+    .await;
     assert!(matches!(result, Err(MemoryError::VersionMismatch { .. })));
     Ok(())
 }
@@ -293,7 +306,11 @@ async fn it_retract_on_missing_cell_is_noop() -> Result<()> {
 
     // Retracting a non-existent cell is a no-op (returns Ok) regardless
     // of the version expected. Matches dialog-storage native FS provider.
-    execute_retract(&id, build_retract(did.into(), "local", "head", bogus_version)).await?;
+    execute_retract(
+        &id,
+        build_retract(did.into(), "local", "head", bogus_version),
+    )
+    .await?;
     Ok(())
 }
 
