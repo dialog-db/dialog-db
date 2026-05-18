@@ -129,13 +129,13 @@ mod tests {
         .expect("alt rule compiles")
     }
 
-    #[test]
+    #[dialog_common::test]
     fn installed_returns_empty_for_fresh_concept_rules() {
         let rules = ConceptRules::new(&person_concept());
         assert!(rules.installed().is_empty());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn installed_lists_registered_rules_in_order() {
         let descriptor = person_concept();
         let mut rules = ConceptRules::new(&descriptor);
@@ -144,7 +144,7 @@ mod tests {
         assert_eq!(rules.installed(), &[a]);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn extend_merges_installed_rules_from_other() {
         let descriptor = person_concept();
         let mut a = ConceptRules::new(&descriptor);
@@ -158,7 +158,7 @@ mod tests {
         assert_eq!(a.installed()[0], rule);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn extend_dedups_against_existing_installed() {
         let descriptor = person_concept();
         let rule = alt_rule(&descriptor);
@@ -170,7 +170,7 @@ mod tests {
         assert_eq!(a.installed().len(), 1, "duplicate rule must not be added twice");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn extend_invalidates_plan_cache_when_rules_change() {
         let descriptor = person_concept();
         let mut rules = ConceptRules::new(&descriptor);
@@ -193,7 +193,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn extend_keeps_plan_cache_when_nothing_new() {
         let descriptor = person_concept();
         let rules = ConceptRules::new(&descriptor);
