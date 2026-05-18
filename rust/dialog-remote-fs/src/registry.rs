@@ -38,10 +38,7 @@ pub fn register_directory(id: impl Into<String>, path: PathBuf) {
 /// The host calls this before any invocation targeting the corresponding
 /// [`FsAddress`] is dispatched.
 #[cfg(target_arch = "wasm32")]
-pub fn register_directory(
-    id: impl Into<String>,
-    handle: web_sys::FileSystemDirectoryHandle,
-) {
+pub fn register_directory(id: impl Into<String>, handle: web_sys::FileSystemDirectoryHandle) {
     let id = id.into();
     let entry = crate::handle::web::WebHandle::new(id.clone(), handle);
     REGISTRY.with(|r| r.borrow_mut().insert(id, entry));
@@ -75,9 +72,6 @@ mod tests {
         let handle = lookup(&id).unwrap();
         assert_eq!(handle.path(), tmp.path());
         assert!(unregister_directory(&id));
-        assert!(matches!(
-            lookup(&id),
-            Err(FsError::UnregisteredHandle(_))
-        ));
+        assert!(matches!(lookup(&id), Err(FsError::UnregisteredHandle(_))));
     }
 }
