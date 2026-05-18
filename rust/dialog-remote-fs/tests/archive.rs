@@ -22,7 +22,11 @@ use dialog_storage::{unique_did, unique_name};
 use tempfile::TempDir;
 
 /// Build a `Capability<Get>` for the given catalog + digest under a subject.
-fn build_get(subject: Subject, catalog: &str, digest: Blake3Hash) -> dialog_capability::Capability<Get> {
+fn build_get(
+    subject: Subject,
+    catalog: &str,
+    digest: Blake3Hash,
+) -> dialog_capability::Capability<Get> {
     subject
         .attenuate(Archive)
         .attenuate(Catalog::new(catalog))
@@ -175,11 +179,7 @@ async fn it_rejects_digest_mismatch() -> Result<()> {
     let content = b"declared content".to_vec();
     let wrong_digest = Blake3Hash::hash(b"actually-different");
 
-    let result = execute_put(
-        &id,
-        build_put(did.into(), "index", wrong_digest, content),
-    )
-    .await;
+    let result = execute_put(&id, build_put(did.into(), "index", wrong_digest, content)).await;
     assert!(matches!(result, Err(ArchiveError::DigestMismatch { .. })));
     Ok(())
 }
