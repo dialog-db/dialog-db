@@ -1,8 +1,12 @@
 //! Per-concept rule management with adornment-keyed plan caching.
 //!
-//! Each `ConceptRules` owns the rules for a single concept entity and caches
-//! execution plans keyed by adornment (binding pattern). This is the per-concept
-//! counterpart to the registry-level indexing in `RuleRegistry`.
+//! Each `ConceptRules` owns the *deductive* rules for a single
+//! concept entity and caches execution plans keyed by adornment
+//! (binding pattern). This is the per-concept counterpart to the
+//! registry-level indexing in `RuleRegistry`. Inductive rules
+//! ([`InductiveRule`](crate::rule::InductiveRule)) participate in
+//! transactions rather than queries and will be installed via a
+//! separate path in the future.
 
 use std::iter;
 
