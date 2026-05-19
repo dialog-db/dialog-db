@@ -1,0 +1,65 @@
+[package]
+name = "dialog-remote-fs"
+description = "Local-filesystem remote backend for dialog-db (FS Access API in browser, std::fs on native)"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+default = []
+helpers = ["dialog-common/helpers", "dep:anyhow"]
+integration-tests = ["helpers", "dialog-common/integration-tests"]
+web-integration-tests = ["dialog-common/web-integration-tests"]
+
+[dependencies]
+async-trait = { workspace = true }
+base58 = { workspace = true }
+blake3 = { workspace = true }
+dialog-capability = { workspace = true }
+dialog-common = { workspace = true }
+dialog-effects = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+anyhow = { workspace = true, optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["fs", "rt", "macros"] }
+pidlock = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { workspace = true, features = ["js"] }
+js-sys = { workspace = true }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+web-sys = { workspace = true, features = [
+    "Blob",
+    "File",
+    "FileSystemCreateWritableOptions",
+    "FileSystemDirectoryHandle",
+    "FileSystemFileHandle",
+    "FileSystemGetDirectoryOptions",
+    "FileSystemGetFileOptions",
+    "FileSystemHandle",
+    "FileSystemRemoveOptions",
+    "FileSystemWritableFileStream",
+    "LockManager",
+] }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+dialog-common = { workspace = true, features = ["helpers"] }
+dialog-credentials = { workspace = true }
+dialog-storage = { workspace = true, features = ["helpers"] }
+dialog-varsig = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
+wasm-bindgen-test = { workspace = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+  "cfg(feature, values(\"web-integration-tests\", \"helpers\"))",
+  "cfg(dialog_test_wasm_integration)",
+] }
