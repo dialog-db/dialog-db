@@ -221,7 +221,7 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
                     ))?;
                 }
                 tx.commit()
-            .apply()
+            .perform(&())
             .await?;
             }
 
@@ -517,7 +517,7 @@ mod tests {
                 name: people::Name("Alice".into()),
             })
             .commit()
-            .apply()
+            .perform(&())
             .await?;
 
         let bob: Entity = "id:bob".parse()?;

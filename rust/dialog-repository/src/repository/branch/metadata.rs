@@ -60,6 +60,6 @@ pub(crate) async fn synthesize(
         });
     }
 
-    tx.commit().apply().await?;
+    tx.commit().perform(&()).await?;
     Ok(layer)
 }

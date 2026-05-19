@@ -34,7 +34,7 @@
 //!     .assert(Employee { this: id, name: Name("Alice".into()) })
 //!     .register(my_rule)?
 //!     .commit()
-//!     .apply()
+//!     .perform(&())
 //!     .await?;
 //!
 //! let env = Union::new(branch_env, layer);
@@ -461,15 +461,18 @@ impl<'a> VolatileTransaction<'a> {
     /// Finalize this transaction into a commit command that mirrors
     /// [`Transaction::commit`](crate::repository::branch::Transaction::commit)'s
     /// shape: returns a [`VolatileCommit`] you `.perform(&env).await` to
-    /// apply the changes. The env is unused — a volatile layer's
-    /// storage is entirely in-process — but accepting one keeps the
-    /// call site identical to a branch transaction so generic code
-    /// (helpers, tests, downstream traits) can treat both uniformly:
+    /// apply the changes. A volatile layer's storage is entirely
+    /// in-process, so the env argument is accepted but never read —
+    /// callers without an operator can pass `&()`. The shape parity
+    /// keeps generic code (helpers, tests, downstream traits) working
+    /// uniformly across branch and volatile transactions:
     ///
     /// ```ignore
     /// // Same shape for either:
     /// branch.transaction().assert(x).commit().perform(&env).await?;
     /// layer.transaction().assert(x).commit().perform(&env).await?;
+    /// // Internal call sites without an env:
+    /// layer.transaction().assert(x).commit().perform(&()).await?;
     /// ```
     pub fn commit(self) -> VolatileCommit<'a> {
         VolatileCommit { tx: self }
@@ -480,27 +483,22 @@ impl<'a> VolatileTransaction<'a> {
 ///
 /// Mirrors [`Commit`](crate::repository::branch::Commit) so the same
 /// `.commit().perform(&env).await` flow works for both branch and
-/// volatile transactions. The env argument is accepted but ignored —
-/// volatile layers have no out-of-process storage to coordinate with.
+/// volatile transactions. The env argument is accepted but never
+/// read — volatile layers have no out-of-process storage to
+/// coordinate with, so callers without an operator can pass `&()`.
 pub struct VolatileCommit<'a> {
     tx: VolatileTransaction<'a>,
 }
 
 impl VolatileCommit<'_> {
     /// Apply the accumulated changes and rule registrations to the
-    /// underlying layer. The `env` argument is unused; it exists for
-    /// signature parity with [`Commit::perform`](crate::repository::branch::Commit::perform).
-    pub async fn perform<Env>(self, _env: &Env) -> Result<(), DialogArtifactsError> {
-        self.apply().await
-    }
-
-    /// Apply the changes without going through an env.
+    /// underlying layer.
     ///
-    /// Useful for internal call sites — like
-    /// [`branch_metadata`](crate::repository::branch_metadata) — that
-    /// have no operator handy and don't want the dummy `&()` dance.
-    /// Equivalent to `.perform(&()).await`.
-    pub async fn apply(self) -> Result<(), DialogArtifactsError> {
+    /// The `env` argument is unused — its only purpose is signature
+    /// parity with [`Commit::perform`](crate::repository::branch::Commit::perform).
+    /// Generic and bound-free so any reference type satisfies it
+    /// (including `&()` for callers without an operator).
+    pub async fn perform<Env: ?Sized>(self, _env: &Env) -> Result<(), DialogArtifactsError> {
         let VolatileTransaction {
             layer,
             changes,
@@ -645,7 +643,7 @@ mod tests {
                     .is("Alice".to_string()),
             )
             .commit()
-            .apply()
+            .perform(&())
             .await?;
 
         let selector = ArtifactSelector::new().the("person/name".parse()?);
@@ -674,7 +672,7 @@ mod tests {
             .assert(stmt.clone())
             .retract(stmt)
             .commit()
-            .apply()
+            .perform(&())
             .await?;
 
         let selector = ArtifactSelector::new().the("person/name".parse()?);
@@ -704,7 +702,7 @@ mod tests {
             alice.clone(),
             Value::String("Alicia".into()),
         );
-        tx.commit().apply().await?;
+        tx.commit().perform(&()).await?;
 
         let selector = ArtifactSelector::new().of(alice);
         let stream = Provider::<Select<'_>>::execute(&layer, selector).await?;
@@ -728,7 +726,7 @@ mod tests {
         for s in stmts {
             tx = tx.assert(s.clone());
         }
-        tx.commit().apply().await?;
+        tx.commit().perform(&()).await?;
         Ok(layer)
     }
 
@@ -807,7 +805,7 @@ mod tests {
                     Value::String("X".into()),
                 );
             }
-            tx.commit().apply().await?;
+            tx.commit().perform(&()).await?;
             anyhow::Ok(layer)
         };
 
@@ -1073,7 +1071,7 @@ mod tests {
             for (entity, attribute, value) in facts {
                 Update::associate(&mut tx, attribute.parse()?, entity, value);
             }
-            tx.commit().apply().await?;
+            tx.commit().perform(&()).await?;
             Ok(layer)
         }
 
@@ -1294,7 +1292,7 @@ mod tests {
                 label: attrs::Label("primary".into()),
             })
             .commit()
-            .apply()
+            .perform(&())
             .await?;
 
         let results: Vec<Tagged> = layer
