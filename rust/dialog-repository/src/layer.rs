@@ -1261,7 +1261,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn volatile_layer_query_mirrors_branch_query() -> anyhow::Result<()> {
+    async fn it_opens_a_query_session_from_a_volatile_layer() -> anyhow::Result<()> {
         // VolatileLayer::query() should expose the same QuerySession
         // surface as Branch::query() — composable with .with(...) and
         // runnable with .select(q).perform(env). This test commits a
@@ -1313,7 +1313,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn union_primary_and_secondary_accessors_borrow_underlying() {
+    fn it_exposes_primary_and_secondary_accessors_on_union() {
         let primary = VolatileLayer::new();
         let secondary = VolatileLayer::new();
         let combined = Union::new(primary, secondary);

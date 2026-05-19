@@ -368,18 +368,13 @@ where
                         }
                     }
                     Change::Remove(entry) => {
-                        // Check if key exists
-                        match self.get(&entry.key, storage).await? {
-                            None => {
-                                // Key doesn't exist - no-op (already removed)
-                            }
-                            Some(existing_value) => {
-                                if existing_value == entry.value {
-                                    // Same value - remove it
-                                    self.delete(&entry.key, storage).await?;
-                                }
-                                // Else: different value - no-op (concurrent update)
-                            }
+                        // Remove only if the current value matches —
+                        // a different value means a concurrent update,
+                        // a missing key means already-removed.
+                        if let Some(existing_value) = self.get(&entry.key, storage).await?
+                            && existing_value == entry.value
+                        {
+                            self.delete(&entry.key, storage).await?;
                         }
                     }
                 }

@@ -1250,7 +1250,7 @@ mod tests {
         // -- Auto-injected schema metadata ---------------------------------
 
         #[dialog_common::test]
-        async fn branch_query_auto_includes_schema_branch() -> anyhow::Result<()> {
+        async fn it_auto_includes_schema_branch_in_metadata() -> anyhow::Result<()> {
             // branch.query() should expose schema::Branch facts without
             // any manual .with(...) overlay. The branch entity is
             // content-derived from (profile, subject, name).
@@ -1281,12 +1281,12 @@ mod tests {
         }
 
         #[dialog_common::test]
-        async fn branch_query_auto_includes_origin() -> anyhow::Result<()> {
+        async fn it_auto_includes_origin_in_metadata() -> anyhow::Result<()> {
             // branch.query() should also auto-surface the schema::Origin
             // anchoring the branch — entity is (profile, subject)-derived
             // and carries the two DIDs as attributes.
             use crate::schema;
-            use crate::schema::prelude::*;
+            use crate::schema::DidExt as _;
 
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
@@ -1312,7 +1312,7 @@ mod tests {
         }
 
         #[dialog_common::test]
-        async fn branch_query_auto_includes_branch_revision_after_commit() -> anyhow::Result<()> {
+        async fn it_auto_includes_branch_revision_after_commit() -> anyhow::Result<()> {
             // After a commit the branch has a revision, so the metadata
             // overlay includes a BranchRevision fact carrying the tree
             // hash + clock components.
@@ -1354,7 +1354,7 @@ mod tests {
         }
 
         #[dialog_common::test]
-        async fn branch_query_omits_branch_revision_before_any_commit() -> anyhow::Result<()> {
+        async fn it_omits_branch_revision_before_any_commit() -> anyhow::Result<()> {
             // A freshly-opened branch with no commits has no revision —
             // so no BranchRevision fact should appear.
             use crate::schema;
@@ -1385,7 +1385,7 @@ mod tests {
         }
 
         #[dialog_common::test]
-        async fn metadata_facts_are_not_in_branch_tree() -> anyhow::Result<()> {
+        async fn it_keeps_metadata_facts_out_of_branch_tree() -> anyhow::Result<()> {
             // The schema-shaped metadata is synthesized at query time
             // into a per-query overlay; nothing is written to the
             // branch's tree. Reading the branch's claims directly

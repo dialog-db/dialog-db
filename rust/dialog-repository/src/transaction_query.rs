@@ -351,7 +351,7 @@ mod tests {
 
     /// `tx.query()` surfaces pending asserts as if they were committed.
     #[dialog_common::test]
-    async fn branch_transaction_query_sees_pending_asserts() -> anyhow::Result<()> {
+    async fn it_surfaces_pending_asserts_through_branch_transaction_query() -> anyhow::Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -383,7 +383,7 @@ mod tests {
     /// facts disappear from the result — even though they're still in
     /// the branch's persistent tree.
     #[dialog_common::test]
-    async fn branch_transaction_query_tombstones_pending_retracts() -> anyhow::Result<()> {
+    async fn it_tombstones_pending_retracts_in_branch_transaction_query() -> anyhow::Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -459,7 +459,7 @@ mod tests {
     /// any X in the branch is tombstoned but the layer's X passes the
     /// filter (tombstones only apply to the source stream).
     #[dialog_common::test]
-    async fn branch_transaction_query_retract_then_assert_keeps_value() -> anyhow::Result<()> {
+    async fn it_keeps_value_when_retract_is_followed_by_assert() -> anyhow::Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -504,7 +504,7 @@ mod tests {
 
     /// `volatile_layer.transaction().query()` works on volatile sources too.
     #[dialog_common::test]
-    async fn volatile_transaction_query_sees_pending_state() -> anyhow::Result<()> {
+    async fn it_surfaces_pending_state_in_volatile_transaction_query() -> anyhow::Result<()> {
         let (operator, _profile) = test_operator_with_profile().await;
 
         let layer = VolatileLayer::new();

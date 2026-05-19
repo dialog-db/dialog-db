@@ -23,7 +23,7 @@ use crate::layer::VolatileLayer;
 use crate::schema::Branch as BranchConcept;
 use crate::schema::BranchRevision;
 use crate::schema::Origin;
-use crate::schema::domain::branch::{Moment, Period, Tree};
+use crate::schema::branch::{Moment, Period, Tree};
 
 /// Build the metadata [`VolatileLayer`] for a single branch under a
 /// given profile.
