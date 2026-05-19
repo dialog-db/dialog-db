@@ -79,10 +79,9 @@ where
 
         let mut tree: Index = Tree::from_hash(&base_tree_hash, &store).await?;
 
-        // Drain the change stream into the tree. All EAV/AEV/VAE writes,
-        // cardinality-one supersession, and retraction live in the shared
-        // helper so branch commits and in-memory layers agree exactly on
-        // key layout.
+        // Drain the change stream into the tree. EAV/AEV/VAE writes,
+        // cardinality-one supersession, and retraction live in the
+        // shared `tree::apply` helper so the key layout stays uniform.
         tree::apply(&mut tree, &mut store, changes).await?;
 
         // `tree.hash()` returns `None` only when the tree is empty, which

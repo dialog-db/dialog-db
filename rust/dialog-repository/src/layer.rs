@@ -18,7 +18,7 @@
 
 use std::collections::HashSet;
 
-use dialog_artifacts::{Artifact, ArtifactStream, Cause, Changes, Instruction, SortKey, sort_key};
+use dialog_artifacts::{Artifact, ArtifactStream, Cause, Changes, SortKey, sort_key};
 use futures_util::{StreamExt, stream};
 
 /// The canonical group key for artifacts traveling through a query stream.
@@ -29,7 +29,7 @@ use futures_util::{StreamExt, stream};
 /// consecutively. Anything that unions facts from multiple sources must
 /// preserve that invariant; this helper produces the comparable key used
 /// when grouping.
-pub fn group_key(artifact: &Artifact) -> (Vec<u8>, Vec<u8>) {
+pub(crate) fn group_key(artifact: &Artifact) -> (Vec<u8>, Vec<u8>) {
     (
         artifact.the.key_bytes().to_vec(),
         artifact.of.key_bytes().to_vec(),
@@ -69,7 +69,7 @@ pub fn group_key(artifact: &Artifact) -> (Vec<u8>, Vec<u8>) {
 /// yielded. The dedup region is the `(the, of)` group, tracked via
 /// [`group_key`]; the fingerprint is `Cause::from(&artifact)` which
 /// hashes all four fields so position-independent duplicates collapse.
-pub fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStream<'a> {
+pub(crate) fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStream<'a> {
     use std::pin::Pin;
 
     if streams.is_empty() {
@@ -137,10 +137,16 @@ pub fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStream<'a>
 /// Asserts and Replaces are ignored; only Retracts contribute. Used
 /// at query time to filter matching source facts out of branch
 /// streams before they reach the merge.
-pub fn tombstones_from(changes: &Changes) -> HashSet<SortKey> {
+pub(crate) fn tombstones_from(changes: &Changes) -> HashSet<SortKey> {
     let mut tombstones = HashSet::new();
-    for instruction in changes.clone().into_instructions() {
-        if let Instruction::Retract(artifact) = instruction {
+    for (entity, attribute, change) in changes.iter() {
+        if let dialog_artifacts::Change::Retract(value) = change {
+            let artifact = Artifact {
+                the: attribute.clone(),
+                of: entity.clone(),
+                is: value.clone(),
+                cause: None,
+            };
             tombstones.insert(sort_key(&artifact));
         }
     }
@@ -149,7 +155,7 @@ pub fn tombstones_from(changes: &Changes) -> HashSet<SortKey> {
 
 /// Wrap an artifact stream in a filter that drops any item whose
 /// [`sort_key`] is in `tombstones`. No-op when the set is empty.
-pub fn filter_tombstones<'a>(
+pub(crate) fn filter_tombstones<'a>(
     inner: ArtifactStream<'a>,
     tombstones: HashSet<SortKey>,
 ) -> ArtifactStream<'a> {
@@ -181,11 +187,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use dialog_artifacts::selector::Constrained;
-    use dialog_artifacts::{
-        ArtifactSelector, DialogArtifactsError, Entity, Select, Update as _, Value,
-    };
-    use dialog_capability::Provider;
+    use dialog_artifacts::{DialogArtifactsError, Entity, Update as _, Value};
 
     fn artifact(of: &str, the: &str, is: &str) -> Artifact {
         Artifact {
@@ -289,23 +291,5 @@ mod tests {
         let items = collect(filtered).await?;
         assert_eq!(items, vec![a, b]);
         Ok(())
-    }
-
-    // Pull in the ArtifactSelector type to keep the imports honest
-    // — it's the input shape every Provider<Select> impl uses.
-    #[allow(dead_code)]
-    fn _selector() -> ArtifactSelector<Constrained> {
-        ArtifactSelector::new().the("test/name".parse().unwrap())
-    }
-
-    // Pull `Provider<Select>` into scope so the cross-crate impl on
-    // `Changes` participates in compile-time checking when this file
-    // is built.
-    #[allow(dead_code)]
-    async fn _ensure_changes_select<'a>(
-        c: &Changes,
-        s: ArtifactSelector<Constrained>,
-    ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
-        Provider::<Select<'a>>::execute(c, s).await
     }
 }

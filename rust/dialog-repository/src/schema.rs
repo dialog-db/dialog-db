@@ -289,16 +289,6 @@ impl Origin {
             profile: origin::Profile(profile.this()),
         }
     }
-
-    /// The origin's entity.
-    pub fn this(&self) -> &Entity {
-        &self.this
-    }
-
-    /// Create a [`Branch`] concept rooted at this origin.
-    pub fn branch(&self, name: impl Into<branch::Name>) -> Branch {
-        Branch::new(self, name)
-    }
 }
 
 impl AsRef<Entity> for Origin {

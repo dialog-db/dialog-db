@@ -105,7 +105,7 @@ impl Select<'_> {
         let tree: Index = Tree::from_hash(&self.tree_hash(), &store).await?;
 
         // EAV/AEV/VAE dispatch + per-entry filtering lives in the shared
-        // helper so branch scans and in-memory layer scans agree on key
+        // helper so branch scans and Changes-overlay scans agree on key
         // order — that adjacency invariant is what the cardinality-one
         // sliding window relies on.
         Ok(artifact_tree::scan(tree, store, self.selector))

@@ -17,7 +17,7 @@
 //! [`Provider<Select> for Changes`](dialog_artifacts::Changes).
 
 use base58::ToBase58;
-use dialog_artifacts::{Changes, DialogArtifactsError};
+use dialog_artifacts::Changes;
 use dialog_capability::Did;
 use dialog_query::the;
 
@@ -47,7 +47,7 @@ pub(crate) fn synthesize(
     branches: &[&Branch],
     profile: &Did,
     operator: &Did,
-) -> Result<Changes, DialogArtifactsError> {
+) -> Changes {
     let mut changes = Changes::new();
     let session_entity = Session::entity();
     let mut branch_entities = Vec::new();
@@ -94,5 +94,5 @@ pub(crate) fn synthesize(
         );
     }
 
-    Ok(changes)
+    changes
 }

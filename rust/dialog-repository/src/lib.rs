@@ -35,15 +35,16 @@
 mod repository;
 pub use repository::*;
 
-/// In-memory layers and source-composition primitives for query evaluation.
-pub mod layer;
+/// Streaming-merge and tombstone helpers used by the query-session
+/// composition layer.
+pub(crate) mod layer;
 
-/// Typed schema for facts a repository writes about its own structure
-/// (replicas, branches, remotes, tracking links).
+/// Typed schema for query-time facts about a repository's structure
+/// (origins, branches, branch revisions, sessions).
 pub mod schema;
 
-/// Querying uncommitted writes inside an open transaction.
-pub mod transaction_query;
+mod transaction_query;
+pub use transaction_query::{TransactionQuery, TransactionSelectQuery};
 
 pub use dialog_artifacts::{Exporter, Importer};
 

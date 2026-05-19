@@ -126,16 +126,6 @@ pub struct QuerySession<'a> {
 }
 
 impl<'a> QuerySession<'a> {
-    /// Open a session whose only initial source is the given changes
-    /// batch (no primary branch). Used by ad-hoc query callers that
-    /// only have an in-memory `Changes` to query.
-    pub fn from_changes(changes: Changes) -> Self {
-        Self {
-            primary: None,
-            layer: QueryLayer::from(changes),
-        }
-    }
-
     /// Assert a [`Statement`] into the session's overlay changes.
     /// Chainable.
     pub fn with<S: Statement>(mut self, statement: S) -> Self {
@@ -148,11 +138,6 @@ impl<'a> QuerySession<'a> {
     pub fn join(mut self, other: impl Into<QueryLayer<'a>>) -> Self {
         self.layer = self.layer.join(other);
         self
-    }
-
-    /// The session's primary branch, if any.
-    pub fn primary(&self) -> Option<&'a Branch> {
-        self.primary
     }
 
     /// The overlay layered on top of the primary.
@@ -230,7 +215,7 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
                 layer.branches(),
                 &profile,
                 &operator_did,
-            )?;
+            );
             layer.changes.clone().assert(&mut combined_changes);
             let tombstones = tombstones_from(&combined_changes);
 
@@ -355,9 +340,8 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<Env: ConditionalSync> Provider<SelectRules> for QueryEnv<'_, Env> {
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
-        // No user-installable rules in this design — the overlay only
-        // carries facts. Rules come from the implicit rule each
-        // `ConceptDescriptor` carries.
+        // Surfaces only the implicit per-descriptor rule each
+        // `ConceptDescriptor` carries — the overlay holds facts only.
         Ok(ConceptRules::new(&input))
     }
 }

@@ -179,9 +179,8 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Env: ConditionalSync> Provider<SelectRules> for TransactionEnv<'_, Env> {
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
-        // No user-installable rules in this design — only the
-        // implicit per-descriptor rule each `ConceptDescriptor`
-        // carries.
+        // Surfaces only the implicit per-descriptor rule each
+        // `ConceptDescriptor` carries.
         Ok(ConceptRules::new(&input))
     }
 }

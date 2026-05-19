@@ -999,7 +999,7 @@ mod tests {
         }
     }
 
-    mod layer {
+    mod query_session {
         use super::query_engine::{Employee, employee};
         use crate::helpers::{test_operator_with_profile, test_repo};
         use dialog_query::query::Output;
@@ -1426,6 +1426,67 @@ mod tests {
         }
 
         #[dialog_common::test]
+        async fn it_lets_a_user_query_branch_origin_and_session_in_one_session()
+        -> anyhow::Result<()> {
+            // End-to-end use case: given a branch handle and an
+            // operator, a user can query for "what branch am I on /
+            // what's my origin / what's my session" through the same
+            // `branch.query()` session — no manual overlay needed.
+            // Demonstrates the full auto-injection contract.
+            use crate::schema;
+            use crate::schema::DidExt as _;
+
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            // (1) Which branch am I on?
+            let branches: Vec<schema::Branch> = branch
+                .query()
+                .select(Query::<schema::Branch> {
+                    this: Term::var("this"),
+                    name: Term::var("name"),
+                    origin: Term::var("origin"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert_eq!(branches.len(), 1);
+            assert_eq!(branches[0].name.0, "main");
+
+            // (2) What's my origin (subject, profile)?
+            let origins: Vec<schema::Origin> = branch
+                .query()
+                .select(Query::<schema::Origin> {
+                    this: branches[0].origin.0.clone().into(),
+                    subject: Term::var("subject"),
+                    profile: Term::var("profile"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert_eq!(origins.len(), 1);
+            assert_eq!(origins[0].subject.0, branch.of().this());
+            assert_eq!(origins[0].profile.0, profile.did().this());
+
+            // (3) What's my session (profile + operator DIDs)?
+            let sessions: Vec<schema::Session> = branch
+                .query()
+                .select(Query::<schema::Session> {
+                    this: schema::Session::entity().into(),
+                    profile: Term::var("profile"),
+                    operator: Term::var("operator"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert_eq!(sessions.len(), 1);
+            assert_eq!(sessions[0].profile.0, profile.did().this());
+
+            Ok(())
+        }
+
+        #[dialog_common::test]
         async fn it_auto_includes_session_branch_attribute_per_branch_in_scope()
         -> anyhow::Result<()> {
             // `dialog.session/branch` is cardinality-many — one per
@@ -1434,7 +1495,6 @@ mod tests {
             // search.
             use crate::schema;
             use crate::schema::session;
-            use dialog_artifacts::ArtifactSelector;
 
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
@@ -1489,17 +1549,6 @@ mod tests {
             let mut got: Vec<Entity> = rows.into_iter().map(|r| r.branch.0).collect();
             got.sort();
             assert_eq!(got, expected_branches);
-
-            // Belt-and-suspenders: ensure the attribute name is right
-            // by also scanning the underlying selector directly through
-            // the session's overlay (this proves there's no path
-            // collision with other dialog.session attrs).
-            let selector = ArtifactSelector::new()
-                .the("dialog.session/branch".parse()?)
-                .of(session_entity.clone());
-            // Just compile-checks the selector path; the actual
-            // assertion above already verified the per-branch entries.
-            let _ = selector;
             Ok(())
         }
 
@@ -1581,24 +1630,7 @@ mod tests {
             Ok(())
         }
 
-        // -- VolatileLayer::install end-to-end via a session ---------------------
-
-        mod stuff_role {
-            #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
-            #[domain("stuff")]
-            pub struct Name(pub String);
-
-            #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
-            #[domain("stuff")]
-            pub struct Role(pub String);
-        }
-
-        #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-        pub struct Stuff {
-            pub this: Entity,
-            pub name: stuff_role::Name,
-            pub role: stuff_role::Role,
-        }
+        // -- Cross-branch merge invariants ---------------------------------
 
         mod cardinality_one_attr {
             #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -1683,12 +1715,159 @@ mod tests {
             Ok(())
         }
 
-        // User-installable derivation rules (the old
-        // `VolatileLayer::install(rule_fn)` flow) are not supported
-        // in the changes-only overlay design. Queries against
-        // `branch.query()` still get the implicit per-`ConceptDescriptor`
-        // rule; truly custom rules would need a separate composition
-        // surface that's out of scope for this PR.
+        // -- Cross-source ordering invariant -------------------------------
+
+        #[dialog_common::test]
+        async fn it_orders_changes_consistently_with_branch_scans_in_every_mode()
+        -> anyhow::Result<()> {
+            // Load-bearing invariant for `merge_grouped`: `Provider<Select>
+            // for Changes` must yield artifacts in the same order the tree
+            // would for the same selector. If it doesn't, cross-source
+            // unions interleave incorrectly within a `(the, of)` group.
+            //
+            // For each scan mode we commit the same facts to a real
+            // branch and stage them in a Changes overlay, then compare
+            // the ordered `sort_key` sequence. `Cause` differs (real
+            // commit vs `None`) so we don't compare full artifacts.
+            use dialog_artifacts::selector::Constrained;
+            use dialog_artifacts::{
+                ArtifactSelector, ArtifactStream, Changes, DialogArtifactsError, Select, SortKey,
+                Update as _, Value, sort_key,
+            };
+            use dialog_capability::Provider;
+            use futures_util::StreamExt as _;
+
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let alice: Entity = "id:alice".parse()?;
+            let bob: Entity = "id:bob".parse()?;
+            let charlie: Entity = "id:charlie".parse()?;
+            let name_attr = "test/name".parse::<dialog_artifacts::Attribute>()?;
+            let role_attr = "test/role".parse::<dialog_artifacts::Attribute>()?;
+
+            // Mix of:
+            //   - same entity, multiple attrs
+            //   - same entity, same attr, multiple values (cardinality-many)
+            //   - the "Shared" value asserted under DIFFERENT attributes
+            //     on entities whose sort order DISAGREES with the
+            //     attribute order: (charlie, name) and (alice, role).
+            //     entity order is alice < charlie; attribute order is
+            //     name < role. So the VAE residual order — which is
+            //     (attribute, entity) — must put (charlie, name) before
+            //     (alice, role). If `sort_key` mistakenly ordered VAE
+            //     output by entity it would flip these two, and this
+            //     test would catch it.
+            let facts: Vec<(Entity, dialog_artifacts::Attribute, Value)> = vec![
+                (
+                    alice.clone(),
+                    name_attr.clone(),
+                    Value::String("Alice".into()),
+                ),
+                (
+                    alice.clone(),
+                    name_attr.clone(),
+                    Value::String("Aly".into()),
+                ),
+                (
+                    alice.clone(),
+                    role_attr.clone(),
+                    Value::String("Engineer".into()),
+                ),
+                (bob.clone(), name_attr.clone(), Value::String("Bob".into())),
+                (
+                    bob.clone(),
+                    role_attr.clone(),
+                    Value::String("Engineer".into()),
+                ),
+                (
+                    charlie.clone(),
+                    name_attr.clone(),
+                    Value::String("Charlie".into()),
+                ),
+                // VAE probe: same value, different attributes,
+                // entity-order opposite to attribute-order.
+                (
+                    charlie.clone(),
+                    name_attr.clone(),
+                    Value::String("Shared".into()),
+                ),
+                (
+                    alice.clone(),
+                    role_attr.clone(),
+                    Value::String("Shared".into()),
+                ),
+            ];
+
+            // Build a single Changes batch with all facts, then drive
+            // both the branch commit and the overlay query from clones.
+            let mut changes = Changes::new();
+            for (e, a, v) in &facts {
+                changes.associate(a.clone(), e.clone(), v.clone());
+            }
+
+            // Commit a clone to the branch (Changes itself is a Statement now).
+            branch
+                .transaction()
+                .assert(changes.clone())
+                .commit()
+                .perform(&operator)
+                .await?;
+            let branch = repo.branch("main").load().perform(&operator).await?;
+
+            // Compare per scan mode: collect sort_keys from a raw
+            // branch scan and from the Changes overlay; they must
+            // match exactly. (Full Artifact equality would fail
+            // because cause is None on the overlay and Some on the
+            // committed branch entry.)
+            async fn keys_from_stream(s: ArtifactStream<'_>) -> anyhow::Result<Vec<SortKey>> {
+                let items: Vec<_> = s
+                    .collect::<Vec<_>>()
+                    .await
+                    .into_iter()
+                    .collect::<Result<Vec<_>, DialogArtifactsError>>()?;
+                Ok(items.iter().map(sort_key).collect())
+            }
+
+            let scan_modes: &[(&str, ArtifactSelector<Constrained>)] = &[
+                ("EAV (.of)", ArtifactSelector::new().of(alice.clone())),
+                ("AEV (.the)", ArtifactSelector::new().the(name_attr.clone())),
+                // VAE: "Shared" lives under two different attributes
+                // (name on charlie, role on alice) — exercises the
+                // (attribute, entity) residual ordering, not just
+                // (entity) within one attribute.
+                (
+                    "VAE (.is)",
+                    ArtifactSelector::new().is(Value::String("Shared".into())),
+                ),
+            ];
+
+            for (label, sel) in scan_modes {
+                // Raw branch scan — bypass the QuerySession overlay so
+                // we see tree-order output without auto-metadata noise.
+                // The branch's prolly tree is the order ground truth.
+                let select = branch.claims().select(sel.clone());
+                let store = crate::NetworkedIndex::new(&operator, select.catalog(), None);
+                let branch_stream: ArtifactStream<'_> = Box::pin(select.execute(store).await?);
+                let branch_order = keys_from_stream(branch_stream).await?;
+
+                // Changes overlay scan via Provider<Select>.
+                let changes_stream = Provider::<Select<'_>>::execute(&changes, sel.clone()).await?;
+                let changes_order = keys_from_stream(changes_stream).await?;
+
+                assert!(
+                    branch_order.len() >= 2,
+                    "{label}: scan must return >=2 items for the ordering check to be meaningful"
+                );
+                assert_eq!(
+                    branch_order, changes_order,
+                    "{label}: Changes-as-source order must match branch-tree scan order"
+                );
+            }
+
+            Ok(())
+        }
     }
 
     mod profile_as_repository {
