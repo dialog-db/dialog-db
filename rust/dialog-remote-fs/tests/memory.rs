@@ -349,6 +349,50 @@ async fn it_writes_byte_compatibly_with_native_space() -> Result<()> {
 }
 
 #[dialog_common::test]
+async fn it_writes_a_nested_cell_path() -> Result<()> {
+    // Dialog repository stores branch heads at `branch/{name}` under
+    // the space's `memory/` — so the cell name itself contains a `/`.
+    // Make sure the request translation splits on `/` and the
+    // handle creates the nested directories rather than rejecting
+    // the slash as a containment violation.
+    let (tmp, id) = setup();
+    let did = unique_did().await;
+    let content = b"branch head".to_vec();
+    let expected_version = Version::from(Blake3Hash::hash(&content).as_bytes());
+
+    let version = execute_publish(
+        &id,
+        build_publish(
+            did.clone().into(),
+            "local",
+            "branch/main",
+            content.clone(),
+            None,
+        ),
+    )
+    .await?;
+    assert_eq!(version, expected_version);
+
+    // The on-disk file should land at memory/local/branch/main.
+    let expected_path = tmp
+        .path()
+        .join("memory")
+        .join("local")
+        .join("branch")
+        .join("main");
+    assert!(
+        expected_path.is_file(),
+        "expected nested cell at {expected_path:?}",
+    );
+
+    let resolved = execute_resolve(&id, build_resolve(did.into(), "local", "branch/main")).await?;
+    let edition = resolved.expect("nested cell should resolve");
+    assert_eq!(edition.content, content);
+    assert_eq!(edition.version, expected_version);
+    Ok(())
+}
+
+#[dialog_common::test]
 async fn it_reads_byte_compatibly_from_native_space() -> Result<()> {
     let (tmp, id) = setup();
     let did = unique_did().await;
