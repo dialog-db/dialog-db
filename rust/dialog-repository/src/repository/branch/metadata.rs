@@ -1,65 +1,98 @@
-//! Branch metadata synthesis.
+//! Schema-metadata synthesis for a query session.
 //!
-//! Builds a [`VolatileLayer`] of schema-shaped facts describing one
-//! branch — [`Origin`], [`Branch`], optional [`BranchRevision`].
+//! `synthesize` builds the per-query overlay [`Changes`] from the
+//! operator's [`Identify`] result and the branches the session has in
+//! scope. Asserted facts:
 //!
-//! Called from [`SelectQuery::perform`](super::session::SelectQuery::perform)
-//! at the start of every query, once per primary/layered branch. The
-//! profile DID comes from [`Identify`](dialog_effects::authority::Identify),
-//! not from the caller — so the synthesized facts use the operator's
-//! actual identity and `Branch.origin.this` matches what a remote
-//! replica with the same profile would compute.
+//! - one [`Origin`] per branch (`(profile, branch.of)`-derived);
+//! - one [`Branch`](BranchConcept) per branch (`(origin, name)`-derived);
+//! - one [`BranchRevision`] per branch that has a committed revision;
+//! - one [`Session`] on the fixed `db:session` entity;
+//! - one [`session::Branch`] attribute on `db:session` per layered
+//!   branch (cardinality-many — separate from the `Session` concept).
 //!
-//! These facts live only in the per-query overlay; nothing here writes
-//! to the branch's tree, so [`Transaction`](crate::repository::branch::Transaction)
-//! has no way to assert or retract them.
+//! Called by `SelectQuery::perform` once at the start of each query.
+//! Nothing here writes to any branch's tree; the returned `Changes`
+//! is only used as an in-memory overlay via
+//! [`Provider<Select> for Changes`](dialog_artifacts::Changes).
 
 use base58::ToBase58;
-use dialog_artifacts::DialogArtifactsError;
+use dialog_artifacts::{Changes, DialogArtifactsError};
 use dialog_capability::Did;
+use dialog_query::the;
 
 use crate::Branch;
-use crate::layer::VolatileLayer;
 use crate::schema::Branch as BranchConcept;
 use crate::schema::BranchRevision;
+use crate::schema::DidExt as _;
 use crate::schema::Origin;
+use crate::schema::Session;
 use crate::schema::branch::{Moment, Period, Tree};
+use crate::schema::session;
 
-/// Build the metadata [`VolatileLayer`] for a single branch under a
-/// given profile.
+/// Build the metadata [`Changes`] overlay for a query session.
 ///
-/// Asserts:
-/// - one [`Origin`] for `(profile, branch.of())`,
-/// - one [`Branch`] for `(origin, branch.name())`,
-/// - one [`BranchRevision`] iff the branch has a revision.
+/// `primary` is the session's primary branch (the one
+/// [`Branch::query`](crate::Branch::query) was called on); `branches`
+/// are any additional branches joined via `.join(&b)`. `profile` and
+/// `operator` come from [`Identify`](dialog_effects::authority::Identify)
+/// on the perform-env.
 ///
-/// Async because the underlying [`VolatileLayer`] needs an awaited
-/// transaction commit to materialize the facts. Doesn't take an env
-/// — volatile storage is in-process.
-pub(crate) async fn synthesize(
-    branch: &Branch,
+/// Asserts schema-shaped facts for every branch (Origin / Branch /
+/// optional BranchRevision) and one `Session` describing the query's
+/// (profile, operator, branches) context. See the module docs for the
+/// full fact set.
+pub(crate) fn synthesize(
+    primary: Option<&Branch>,
+    branches: &[&Branch],
     profile: &Did,
-) -> Result<VolatileLayer, DialogArtifactsError> {
-    let origin = Origin::new(profile.clone(), branch.of().clone());
-    let branch_concept = BranchConcept::new(&origin, branch.name());
+    operator: &Did,
+) -> Result<Changes, DialogArtifactsError> {
+    let mut changes = Changes::new();
+    let session_entity = Session::entity();
+    let mut branch_entities = Vec::new();
 
-    let layer = VolatileLayer::new();
-    let mut tx = layer
-        .transaction()
-        .assert(origin)
-        .assert(branch_concept.clone());
-
-    if let Some(revision) = branch.revision() {
-        let tree_bytes: &[u8] = revision.tree.hash();
-        let tree_b58 = ToBase58::to_base58(tree_bytes);
-        tx = tx.assert(BranchRevision {
-            this: branch_concept.this.clone(),
-            tree: Tree(tree_b58),
-            period: Period(revision.period as u128),
-            moment: Moment(revision.moment as u128),
-        });
+    // Per-branch facts: Origin + Branch + optional BranchRevision.
+    let mut emit_branch = |b: &Branch| {
+        let origin = Origin::new(profile.clone(), b.of().clone());
+        let branch_concept = BranchConcept::new(&origin, b.name());
+        branch_entities.push(branch_concept.this.clone());
+        changes.assert(origin);
+        if let Some(revision) = b.revision() {
+            let tree_bytes: &[u8] = revision.tree.hash();
+            changes.assert(BranchRevision {
+                this: branch_concept.this.clone(),
+                tree: Tree(ToBase58::to_base58(tree_bytes)),
+                period: Period(revision.period as u128),
+                moment: Moment(revision.moment as u128),
+            });
+        }
+        changes.assert(branch_concept);
+    };
+    if let Some(b) = primary {
+        emit_branch(b);
+    }
+    for b in branches {
+        emit_branch(b);
     }
 
-    tx.commit().perform(&()).await?;
-    Ok(layer)
+    // Session — one fact set for the whole query.
+    changes.assert(Session {
+        this: session_entity.clone(),
+        profile: session::Profile(profile.this()),
+        operator: session::Operator(operator.this()),
+    });
+
+    // `dialog.session/branch` — cardinality-many, one per branch.
+    // Asserted as a free-standing attribute (not part of the Session
+    // concept, which only holds the cardinality-one fields).
+    for branch_entity in branch_entities {
+        changes.assert(
+            the!("dialog.session/branch")
+                .of(session_entity.clone())
+                .is(branch_entity),
+        );
+    }
+
+    Ok(changes)
 }

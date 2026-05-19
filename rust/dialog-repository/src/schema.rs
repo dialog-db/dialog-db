@@ -181,6 +181,47 @@ pub mod origin {
     );
 }
 
+/// Attribute newtypes for the [`Session`] concept.
+///
+/// `Profile` / `Operator` are cardinality-one (one per session); the
+/// `Branch` attribute is cardinality-many — asserted once per layered
+/// branch the session is reading from. `Branch` deliberately isn't a
+/// field on the [`Session`] concept (concept fields are cardinality-
+/// one); query it separately as a standalone attribute on `db:session`
+/// to enumerate the branches in scope.
+pub mod session {
+    use super::{Attribute, Entity};
+
+    /// `dialog.session/profile` — the profile DID, as Entity.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.session")]
+    pub struct Profile(
+        /// Profile entity (the operator's `Identify`d profile DID).
+        pub Entity,
+    );
+
+    /// `dialog.session/operator` — the operator DID, as Entity.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.session")]
+    pub struct Operator(
+        /// Operator entity (the operator's own DID — the
+        /// session/ephemeral key, not the profile).
+        pub Entity,
+    );
+
+    /// `dialog.session/branch` — cardinality-many; one assertion per
+    /// branch the session has in scope (primary + each `.join(&b)`-ed
+    /// branch).
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.session")]
+    #[cardinality(many)]
+    pub struct Branch(
+        /// The branch entity (the `Branch.this` for that branch under
+        /// the session's current origin).
+        pub Entity,
+    );
+}
+
 /// Hash input for [`Origin::this`].
 ///
 /// The single-variant enum shape tags the CBOR encoding with the
@@ -336,6 +377,44 @@ pub struct BranchRevision {
     pub period: branch::Period,
     /// Logical-clock moment component.
     pub moment: branch::Moment,
+}
+
+/// What this query session is reading from.
+///
+/// Asserted on the fixed `db:session` entity by the auto-injection
+/// path before every query. Carries the profile and operator DIDs
+/// (as Entities) so a query can ask "who am I, and which operator
+/// session am I in?" without reaching for env-specific accessors.
+///
+/// `Session` is cardinality-one on its three fields. The per-branch
+/// listing — which branches are in this session's scope — lives on
+/// the same entity as a cardinality-many [`session::Branch`]
+/// attribute, queried separately when you need it.
+///
+/// Across multiple branches in one session you can still have only
+/// one profile and one operator, so those go in the concept. Origin
+/// is per-branch (different branches may live on different repos), so
+/// it doesn't belong here — query the per-branch
+/// [`Branch.origin`](Branch) instead.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Session {
+    /// The fixed session entity: `db:session`.
+    pub this: Entity,
+    /// The profile DID, as Entity. From `Identify` on the operator.
+    pub profile: session::Profile,
+    /// The operator DID, as Entity. From `Identify` on the operator.
+    pub operator: session::Operator,
+}
+
+impl Session {
+    /// The conventional entity URI for the session concept.
+    /// Always `db:session` — sessions don't get distinct identities;
+    /// there's exactly one per query.
+    pub fn entity() -> Entity {
+        "db:session"
+            .parse()
+            .expect("db:session is a valid entity URI")
+    }
 }
 
 #[cfg(test)]

@@ -14,13 +14,16 @@ pub struct Transaction<'a> {
 impl<'a> Transaction<'a> {
     /// Assert a claim into this transaction.
     pub fn assert<C: Statement>(mut self, claim: C) -> Self {
-        self.changes.assert(claim);
+        // Disambiguate from `Statement::assert` (which Changes now
+        // implements) by calling the claim's own assert into our
+        // changes buffer directly.
+        claim.assert(&mut self.changes);
         self
     }
 
     /// Retract a claim from this transaction.
     pub fn retract<C: Statement>(mut self, claim: C) -> Self {
-        self.changes.retract(claim);
+        claim.retract(&mut self.changes);
         self
     }
 
@@ -33,7 +36,7 @@ impl<'a> Transaction<'a> {
     /// the branch's stream before the merge. The transaction itself
     /// stays open and committable.
     pub fn query(&self) -> TransactionQuery<'_> {
-        TransactionQuery::for_branch(self.branch, &self.changes)
+        TransactionQuery::new(self.branch, &self.changes)
     }
 
     /// Finalize the transaction into a commit command.

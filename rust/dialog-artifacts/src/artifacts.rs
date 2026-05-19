@@ -20,7 +20,7 @@ mod store;
 pub use store::*;
 
 mod update;
-pub use update::{Change, ChangeStream, Changes, Statement, Update};
+pub use update::{Change, ChangeStream, Changes, SortKey, Statement, Update, sort_key};
 
 mod attribute;
 pub use attribute::*;

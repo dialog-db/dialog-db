@@ -1,5 +1,9 @@
+use std::collections::HashSet;
+
 use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{ArtifactSelector, ArtifactStream, DialogArtifactsError, Select};
+use dialog_artifacts::{
+    ArtifactSelector, ArtifactStream, Changes, DialogArtifactsError, Select, SortKey, Statement,
+};
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
@@ -11,127 +15,156 @@ use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output};
 use dialog_query::source::SelectRules;
 
-use crate::layer::{VolatileLayer, merge_grouped};
+use crate::layer::{filter_tombstones, merge_grouped, tombstones_from};
 use crate::{Branch, NetworkedIndex, RemoteSite, RepositoryMemoryExt, Upstream};
 
-/// A query session on a branch.
+/// A composable overlay on top of a query session.
 ///
-/// Created by [`Branch::query`]. The session is a thin composition surface:
-/// it layers additional sources on top of the primary branch via
-/// `.with(layer)`, then runs queries with `.select(q).perform(&env)`.
+/// Carries the two things you can layer onto a session:
 ///
-/// Each source — the primary branch, every additional `&Branch`, every
-/// [`VolatileLayer`] — is kept independent. At evaluation time their selects are
-/// unioned via [`merge_grouped`] and their rules merged per concept.
-/// Mutable state (synthetic facts, installed rules) lives on the
-/// `VolatileLayer`s the caller builds, not on the session itself.
+/// - extra `&Branch` references — their facts get unioned into the
+///   merge alongside the primary branch's.
+/// - a [`Changes`] batch — in-memory facts (asserts/replaces) get
+///   surfaced via `Provider<Select> for Changes`; retracts are lifted
+///   into tombstones that filter matching source facts from every
+///   branch stream before the merge.
 ///
-/// # Auto-injected schema metadata
-///
-/// At `.perform(env)` time the session automatically materializes
-/// a small overlay of [`crate::schema`] facts for the primary branch
-/// (and any branches added via `.with(&branch)`): an [`Origin`] for
-/// `(profile, subject)`, a [`Branch`] for `(origin, name)`, and a
-/// [`BranchRevision`] when the branch has a commit. The profile DID
-/// comes from [`Identify`] on the env — callers don't pass it.
-/// These facts only exist in the per-query overlay, never in the
-/// branch's tree, so a [`Transaction`](super::Transaction) has no
-/// way to write or retract them.
-///
-/// [`Origin`]: crate::schema::Origin
-/// [`Branch`]: crate::schema::Branch
-/// [`BranchRevision`]: crate::schema::BranchRevision
-///
-/// ```ignore
-/// let synthetic = VolatileLayer::new();
-/// synthetic.transaction()
-///     .assert(my_concept_instance)
-///     .install(|q: Query<Derived>| (...,))?
-///     .commit().perform(&env).await?;
-///
-/// branch.query()
-///     .with(&other_branch)                       // union with another branch
-///     .with(synthetic)                           // union with in-memory layer
-///     .select(query)
-///     .perform(&env);                            // metadata auto-injected
-/// ```
-///
-/// No environment reference is captured on the session itself —
-/// `QueryEnv` is built fresh at `.perform(env)`.
-pub struct QuerySession<'a> {
-    /// The primary branch the session starts from, when entered via
-    /// [`Branch::query`]. `None` when the session is opened from a
-    /// [`VolatileLayer`] (in which case the volatile layer occupies
-    /// the first slot of `layers` instead). Additional sources go into
-    /// `branches` / `layers` regardless.
-    primary: Option<&'a Branch>,
+/// Construct from a `&Branch`, a `Changes`, or by `.with(stmt)`-ing
+/// any [`Statement`] into a fresh layer. Combine layers with
+/// [`join`](Self::join). The same shape lives on
+/// [`QuerySession::with`] / [`QuerySession::join`] for direct session
+/// composition.
+#[derive(Default, Clone)]
+pub struct QueryLayer<'a> {
     branches: Vec<&'a Branch>,
-    layers: Vec<VolatileLayer>,
+    changes: Changes,
 }
 
-/// A source that can be layered onto a [`QuerySession`] via
-/// [`QuerySession::with`].
-///
-/// Implemented for `&'a Branch` (adds another branch's facts to the
-/// union) and [`VolatileLayer`] (adds an in-memory fact + rule source).
-/// Polymorphic without exposing how each layer is dispatched internally
-/// and without capturing the env.
-pub trait QueryLayer<'a> {
-    /// Apply this layer to the given session.
-    fn apply(self, session: QuerySession<'a>) -> QuerySession<'a>;
-}
-
-impl<'a> QueryLayer<'a> for &'a Branch {
-    fn apply(self, mut session: QuerySession<'a>) -> QuerySession<'a> {
-        session.branches.push(self);
-        session
-    }
-}
-
-impl<'a> QueryLayer<'a> for VolatileLayer {
-    fn apply(self, mut session: QuerySession<'a>) -> QuerySession<'a> {
-        session.layers.push(self);
-        session
-    }
-}
-
-impl<'a> QuerySession<'a> {
-    /// Open a session whose only initial source is the given volatile
-    /// layer. Used by [`VolatileLayer::query`] to mirror
-    /// [`Branch::query`] without requiring a branch.
-    pub(crate) fn from_volatile_layer(layer: VolatileLayer) -> Self {
-        Self {
-            primary: None,
-            branches: Vec::new(),
-            layers: vec![layer],
-        }
+impl<'a> QueryLayer<'a> {
+    /// An empty layer.
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Layer another source on top of this session.
+    /// Assert a [`Statement`] into this layer's changes.
     ///
-    /// Accepts any [`QueryLayer`] — currently a `&Branch` (its data is
-    /// unioned at perform time) or a [`VolatileLayer`] (kept independent and
-    /// unioned at perform time). Chainable.
-    pub fn with<L: QueryLayer<'a>>(self, layer: L) -> Self {
-        layer.apply(self)
+    /// `Changes` itself implements `Statement`, so `.with(changes)`
+    /// folds an existing batch in. Any concept instance, attribute
+    /// expression, or other `Statement` works too.
+    pub fn with<S: Statement>(mut self, statement: S) -> Self {
+        statement.assert(&mut self.changes);
+        self
     }
 
-    /// Borrow the extra branches layered on this session.
-    pub fn layered_branches(&self) -> &[&'a Branch] {
+    /// Merge another layer in: union the branches, fold the other
+    /// layer's changes via its `Statement` impl.
+    pub fn join(mut self, other: impl Into<QueryLayer<'a>>) -> Self {
+        let other = other.into();
+        self.branches.extend(other.branches);
+        other.changes.assert(&mut self.changes);
+        self
+    }
+
+    /// The branches layered onto this overlay.
+    pub fn branches(&self) -> &[&'a Branch] {
         &self.branches
     }
 
-    /// Borrow the layers (in `with`-call order) attached to this session.
-    pub fn layers(&self) -> &[VolatileLayer] {
-        &self.layers
+    /// The pending changes on this overlay.
+    pub fn changes(&self) -> &Changes {
+        &self.changes
+    }
+}
+
+impl<'a> From<&'a Branch> for QueryLayer<'a> {
+    fn from(branch: &'a Branch) -> Self {
+        Self {
+            branches: vec![branch],
+            changes: Changes::new(),
+        }
+    }
+}
+
+impl<'a> From<Changes> for QueryLayer<'a> {
+    fn from(changes: Changes) -> Self {
+        Self {
+            branches: Vec::new(),
+            changes,
+        }
+    }
+}
+
+/// A query session on a branch.
+///
+/// Created by [`Branch::query`]. Composes the primary branch with an
+/// optional [`QueryLayer`] overlay (extra branches + in-memory
+/// changes), then evaluates queries via `.select(q).perform(&env)`.
+///
+/// # Auto-injected schema metadata
+///
+/// At `.perform(env)` time the session resolves the operator's
+/// identity via [`Identify`] and synthesizes a [`Changes`] overlay of
+/// [`schema`](crate::schema) facts: one [`Origin`](crate::schema::Origin)
+/// per branch in scope, one [`Branch`](crate::schema::Branch) per
+/// branch, [`BranchRevision`](crate::schema::BranchRevision) when
+/// committed, plus one [`Session`](crate::schema::Session) for the
+/// whole query (with a cardinality-many `dialog.session/branch`
+/// attribute listing the branches). Callers don't pass the profile
+/// or operator DID; nothing is written to any branch's tree.
+///
+/// ```ignore
+/// branch.query()
+///     .join(&other_branch)                // extra branch in the overlay
+///     .with(custom_concept_instance)      // user-asserted facts
+///     .select(query)
+///     .perform(&env);                     // metadata auto-injected
+/// ```
+#[derive(Clone)]
+pub struct QuerySession<'a> {
+    primary: Option<&'a Branch>,
+    layer: QueryLayer<'a>,
+}
+
+impl<'a> QuerySession<'a> {
+    /// Open a session whose only initial source is the given changes
+    /// batch (no primary branch). Used by ad-hoc query callers that
+    /// only have an in-memory `Changes` to query.
+    pub fn from_changes(changes: Changes) -> Self {
+        Self {
+            primary: None,
+            layer: QueryLayer::from(changes),
+        }
+    }
+
+    /// Assert a [`Statement`] into the session's overlay changes.
+    /// Chainable.
+    pub fn with<S: Statement>(mut self, statement: S) -> Self {
+        self.layer = self.layer.with(statement);
+        self
+    }
+
+    /// Join another [`QueryLayer`] (or anything convertible into one
+    /// — `&Branch`, `Changes`) into the session's overlay.
+    pub fn join(mut self, other: impl Into<QueryLayer<'a>>) -> Self {
+        self.layer = self.layer.join(other);
+        self
+    }
+
+    /// The session's primary branch, if any.
+    pub fn primary(&self) -> Option<&'a Branch> {
+        self.primary
+    }
+
+    /// The overlay layered on top of the primary.
+    pub fn layer(&self) -> &QueryLayer<'a> {
+        &self.layer
     }
 
     /// Select with a query application. Call `.perform(&operator)` to execute.
     pub fn select<Q: Application>(&self, query: Q) -> SelectQuery<'_, Q> {
         SelectQuery {
             primary: self.primary,
-            branches: self.branches.clone(),
-            layers: self.layers.clone(),
+            layer: self.layer.clone(),
             query,
         }
     }
@@ -140,8 +173,7 @@ impl<'a> QuerySession<'a> {
 /// A query command ready to be performed against an environment.
 pub struct SelectQuery<'a, Q> {
     primary: Option<&'a Branch>,
-    branches: Vec<&'a Branch>,
-    layers: Vec<VolatileLayer>,
+    layer: QueryLayer<'a>,
     query: Q,
 }
 
@@ -149,8 +181,7 @@ impl<'a, Q> SelectQuery<'a, Q> {
     pub(crate) fn new(branch: &'a Branch, query: Q) -> Self {
         Self {
             primary: Some(branch),
-            branches: Vec::new(),
-            layers: Vec::new(),
+            layer: QueryLayer::new(),
             query,
         }
     }
@@ -159,14 +190,14 @@ impl<'a, Q> SelectQuery<'a, Q> {
 impl<'a, Q: Application> SelectQuery<'a, Q> {
     /// Execute the query, returning a stream of results.
     ///
-    /// Before evaluating, this resolves the operator's profile DID via
-    /// [`Identify`] and synthesizes a per-branch metadata overlay
-    /// ([`schema::Origin`](crate::schema::Origin),
-    /// [`schema::Branch`](crate::schema::Branch),
-    /// [`schema::BranchRevision`](crate::schema::BranchRevision) when
-    /// present) for the primary plus every layered `&Branch`. The
-    /// overlay is unioned into the query env at the same level as the
-    /// caller's layers; nothing is written to any branch's tree.
+    /// Before evaluating, this resolves the operator's profile +
+    /// operator DIDs via [`Identify`] and synthesizes the
+    /// [`schema`](crate::schema) metadata overlay (Origin / Branch /
+    /// BranchRevision per branch + a single Session). The metadata
+    /// changes are merged with the session's own overlay changes;
+    /// any retracts in the combined batch are lifted into tombstones
+    /// that filter matching facts out of each branch's stream before
+    /// the union.
     pub fn perform<Env>(self, env: &'a Env) -> impl Output<Q::Conclusion> + 'a
     where
         Env: Provider<Get>
@@ -180,32 +211,34 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
     {
         let SelectQuery {
             primary,
-            branches,
-            layers,
+            layer,
             query,
         } = self;
         async_stream::try_stream! {
-            // Resolve the operator's profile DID up-front, then build
-            // one metadata layer per primary/layered branch.
+            // Resolve identity once for the whole query.
             let operator = Identify
                 .perform(env)
                 .await
                 .map_err(|e| DialogArtifactsError::Storage(format!("identify: {e}")))?;
             let profile = operator.profile().clone();
+            let operator_did = operator.did();
 
-            let mut metadata_layers: Vec<VolatileLayer> = Vec::new();
-            if let Some(branch) = primary {
-                metadata_layers.push(super::metadata::synthesize(branch, &profile).await?);
-            }
-            for branch in &branches {
-                metadata_layers.push(super::metadata::synthesize(branch, &profile).await?);
-            }
+            // Build the metadata overlay and merge it with the
+            // caller-supplied layer's changes.
+            let mut combined_changes = super::metadata::synthesize(
+                primary,
+                layer.branches(),
+                &profile,
+                &operator_did,
+            )?;
+            layer.changes.clone().assert(&mut combined_changes);
+            let tombstones = tombstones_from(&combined_changes);
 
             let query_env = QueryEnv {
                 primary,
-                branches,
-                layers,
-                metadata_layers,
+                branches: layer.branches,
+                changes: combined_changes,
+                tombstones,
                 env,
             };
             let results = Box::pin(query.perform(&query_env));
@@ -216,23 +249,22 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
     }
 }
 
-/// The runtime environment that bridges a primary branch plus any
-/// layered branches and in-memory layers into the query engine's
-/// Provider bounds.
+/// The runtime environment that bridges a primary branch, any
+/// joined branches, and the per-query overlay changes into the
+/// query engine's Provider bounds.
 ///
-/// Built fresh on each `.perform(env)` so the environment reference is
-/// never captured on the session itself.
+/// Built fresh on each `.perform(env)`; the environment reference
+/// is never captured on the session itself.
 pub(crate) struct QueryEnv<'a, Env> {
-    /// See [`QuerySession::primary`].
     primary: Option<&'a Branch>,
     branches: Vec<&'a Branch>,
-    layers: Vec<VolatileLayer>,
-    /// Auto-synthesized [`crate::schema`] facts — one layer per
-    /// primary/layered branch, materialized once at the start of
-    /// [`SelectQuery::perform`]. Unioned into the merge alongside
-    /// `layers` but separate so callers' `.with(volatile)` chains
-    /// don't get confused with the auto-injected facts.
-    metadata_layers: Vec<VolatileLayer>,
+    /// All overlay facts — user-asserted + auto-injected metadata —
+    /// merged into one batch. Queried via [`Provider<Select> for Changes`](dialog_artifacts::Changes).
+    changes: Changes,
+    /// `sort_key`s of every retracted fact in `changes`. Each branch
+    /// stream is filtered against these before the merge so retracts
+    /// in the overlay suppress matching facts in the source.
+    tombstones: HashSet<SortKey>,
     env: &'a Env,
 }
 
@@ -241,8 +273,8 @@ impl<Env> Clone for QueryEnv<'_, Env> {
         Self {
             primary: self.primary,
             branches: self.branches.clone(),
-            layers: self.layers.clone(),
-            metadata_layers: self.metadata_layers.clone(),
+            changes: self.changes.clone(),
+            tombstones: self.tombstones.clone(),
             env: self.env,
         }
     }
@@ -297,29 +329,24 @@ where
         &self,
         input: ArtifactSelector<Constrained>,
     ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
-        // Every source independently yields artifacts with same-`(the, of)`
-        // consecutive (branches by tree key, layers by their own tree
-        // scan). `merge_grouped` interleaves them so cross-source items
-        // sharing a key stay adjacent — the invariant the cardinality-one
-        // sliding window in `only.rs` depends on.
-        let mut streams: Vec<ArtifactStream<'a>> = Vec::with_capacity(
-            self.primary.is_some() as usize
-                + self.branches.len()
-                + self.layers.len()
-                + self.metadata_layers.len(),
-        );
+        let mut streams: Vec<ArtifactStream<'a>> =
+            Vec::with_capacity(self.primary.is_some() as usize + self.branches.len() + 1);
+
+        // Branch streams — filtered by tombstones from the overlay's
+        // retracts so a `tx.retract(x)` (or any user-asserted retract
+        // in `with(...)`) suppresses matching source facts.
         if let Some(branch) = self.primary {
-            streams.push(select_from_branch(branch, self.env, input.clone()).await?);
+            let raw = select_from_branch(branch, self.env, input.clone()).await?;
+            streams.push(filter_tombstones(raw, self.tombstones.clone()));
         }
         for branch in &self.branches {
-            streams.push(select_from_branch(branch, self.env, input.clone()).await?);
+            let raw = select_from_branch(branch, self.env, input.clone()).await?;
+            streams.push(filter_tombstones(raw, self.tombstones.clone()));
         }
-        for layer in &self.layers {
-            streams.push(Provider::<Select<'a>>::execute(layer, input.clone()).await?);
-        }
-        for layer in &self.metadata_layers {
-            streams.push(Provider::<Select<'a>>::execute(layer, input.clone()).await?);
-        }
+
+        // Overlay stream — Changes itself is a Provider<Select>.
+        streams.push(Provider::<Select<'a>>::execute(&self.changes, input).await?);
+
         Ok(merge_grouped(streams))
     }
 }
@@ -328,41 +355,39 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<Env: ConditionalSync> Provider<SelectRules> for QueryEnv<'_, Env> {
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
-        // Branches don't currently carry rules of their own. Each layer's
-        // rule registry contributes alternative deductive rules per
-        // concept; we acquire from each and merge installed rules
-        // together. The implicit rule (auto-derived from the concept
-        // descriptor) is the same across registries, so dedup happens
-        // naturally via `ConceptRules::extend`.
-        let mut iter = self.layers.iter();
-        let mut acquired = match iter.next() {
-            Some(layer) => layer.rules().acquire(&input)?,
-            None => ConceptRules::new(&input),
-        };
-        for layer in iter {
-            let more = layer.rules().acquire(&input)?;
-            acquired.extend(&more);
-        }
-        Ok(acquired)
+        // No user-installable rules in this design — the overlay only
+        // carries facts. Rules come from the implicit rule each
+        // `ConceptDescriptor` carries.
+        Ok(ConceptRules::new(&input))
     }
 }
 
 impl Branch {
     /// Open a query session on this branch.
     ///
-    /// The session starts empty — no layered branches, no extra
-    /// layers. Use `.with(layer)` to attach a `&Branch` or a pre-built
-    /// `VolatileLayer` (which is where you assert facts and install
-    /// rules). At `.perform(env)` time the branch's schema metadata
-    /// ([`Origin`](crate::schema::Origin),
-    /// [`Branch`](crate::schema::Branch),
-    /// [`BranchRevision`](crate::schema::BranchRevision)) is
-    /// auto-injected — no manual overlay needed.
+    /// The session starts with no overlay — pure branch query. Use
+    /// [`with`](QuerySession::with) to fold in a [`Statement`]'s
+    /// changes, or [`join`](QuerySession::join) to add another branch
+    /// or a [`Changes`] / [`QueryLayer`]. At `.perform(env)` time the
+    /// branch's schema metadata is auto-injected — no manual overlay
+    /// needed.
     pub fn query(&self) -> QuerySession<'_> {
         QuerySession {
             primary: Some(self),
-            branches: Vec::new(),
-            layers: Vec::new(),
+            layer: QueryLayer::new(),
         }
+    }
+
+    /// Open a query session and immediately fold the given statement
+    /// into its overlay.
+    ///
+    /// Shorthand for `self.query().with(stmt)`. Lets callers compose
+    /// in one step:
+    ///
+    /// ```ignore
+    /// branch.with(my_synthetic_facts).select(q).perform(&env);
+    /// ```
+    pub fn with<S: Statement>(&self, statement: S) -> QuerySession<'_> {
+        self.query().with(statement)
     }
 }

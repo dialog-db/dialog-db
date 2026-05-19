@@ -1,78 +1,25 @@
-//! In-memory layers and source composition for query evaluation.
+//! Streaming merge + tombstone helpers for query-time source composition.
 //!
-//! A *layer* is an auxiliary fact + rule source that gets unioned with a
-//! primary source during query evaluation. Layers expose synthetic,
-//! in-memory information — branch metadata, system state, derived views —
-//! alongside the real artifact store, queried with the same
-//! [`Application`](dialog_query::query::Application) API.
+//! Everything here works on `Stream<Item = Result<Artifact, _>>` —
+//! [`ArtifactStream`]s — and is agnostic to where the streams came
+//! from (a branch's tree scan, a [`Changes`] overlay, anything else
+//! that implements `Provider<Select>`).
 //!
-//! [`VolatileLayer`] is the volatile counterpart of [`Branch`]: same prolly
-//! tree, same `(the, of)` scan order, same `.query()` / `.transaction()`
-//! surface — only it lives in a `dialog_storage::Volatile` provider so
-//! nothing persists. That symmetry matters: a layer's
-//! `Provider<Select<'_>>` yields artifacts in exactly the same
-//! `(the, of)` order a branch does, so the cardinality-one sliding window
-//! in [`AttributeQueryOnly`](dialog_query::attribute::query::AttributeQuery)
-//! sees correctly grouped streams when [`Union`] merges them.
-//!
-//! Mutations always go through a [`VolatileTransaction`] obtained from
-//! [`VolatileLayer::transaction`]: accumulate writes with
-//! `.assert(...)` / `.retract(...)`, then `.commit().await` to apply them
-//! to the layer's tree. The layer itself is a snapshot — `Provider<Select>`
-//! reads the tree at its current root, never flushes implicitly.
-//!
-//! [`Union<P, O>`] is the data-source counterpart to the planner's
-//! [`Disjunction`](dialog_query::planner::Disjunction): where `Disjunction`
-//! unions the result streams of alternative plans, `Union` unions the fact
-//! streams (and rule sets) of alternative sources.
-//!
-//! ```ignore
-//! use dialog_repository::layer::{VolatileLayer, Union};
-//!
-//! let layer = VolatileLayer::new();
-//! layer.transaction()
-//!     .assert(Employee { this: id, name: Name("Alice".into()) })
-//!     .register(my_rule)?
-//!     .commit()
-//!     .perform(&())
-//!     .await?;
-//!
-//! let env = Union::new(branch_env, layer);
-//! let results = my_query.perform(&env).try_vec().await?;
-//! ```
+//! - [`merge_grouped`] is the k-way merge that backs query-time
+//!   union of multiple sources. It preserves the "as-if merged into a
+//!   single physical tree" order via [`sort_key`](dialog_artifacts::sort_key)
+//!   and dedupes identical `(the, of, is, cause)` artifacts within
+//!   each `(the, of)` run.
+//! - [`tombstones_from`] + [`filter_tombstones`] lift retract
+//!   instructions out of a [`Changes`] overlay and apply them to a
+//!   source stream as a filter — the mechanism that lets a
+//!   [`Transaction::retract`](crate::repository::branch::Transaction::retract)
+//!   suppress facts in the underlying branch view.
 
-use std::sync::Arc;
+use std::collections::HashSet;
 
-use async_trait::async_trait;
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::tree as artifact_tree;
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStream, Attribute, Cause, Changes, DialogArtifactsError,
-    Entity, Select, Statement, Update, Value,
-};
-use dialog_capability::{Capability, Provider, Subject};
-use dialog_common::ConditionalSync;
-use dialog_effects::archive::Catalog;
-use dialog_effects::archive::prelude::{ArchiveExt as _, ArchiveSubjectExt as _};
-use dialog_prolly_tree::{EMPT_TREE_HASH, Tree};
-use dialog_query::concept::descriptor::ConceptDescriptor;
-use dialog_query::concept::query::ConceptRules;
-use dialog_query::error::EvaluationError;
-use dialog_query::query::Application;
-use dialog_query::rule::When;
-use dialog_query::rule::deductive::DeductiveRule;
-use dialog_query::session::RuleRegistry;
-use dialog_query::source::SelectRules;
-use dialog_storage::Blake3Hash;
-use dialog_storage::provider::Volatile;
-use dialog_varsig::did;
-use futures_util::StreamExt;
-use futures_util::stream;
-use parking_lot::Mutex;
-
-use crate::LocalIndex;
-use crate::repository::branch::QuerySession;
-use crate::transaction_query::TransactionQuery;
+use dialog_artifacts::{Artifact, ArtifactStream, Cause, Changes, Instruction, SortKey, sort_key};
+use futures_util::{StreamExt, stream};
 
 /// The canonical group key for artifacts traveling through a query stream.
 ///
@@ -89,38 +36,16 @@ pub fn group_key(artifact: &Artifact) -> (Vec<u8>, Vec<u8>) {
     )
 }
 
-/// A total order on artifacts that matches the prolly tree's own
-/// per-key sort.
-///
-/// The full sort key is `(the, of, value_type, value_reference)` —
-/// exactly the discriminators the tree uses to order entries (the
-/// tree key stores `value_reference = blake3(value.to_bytes())`, so
-/// sorting by `value_reference` here matches lexicographic byte order
-/// on the tree key). Using this as the k-way merge tiebreaker means
-/// `merge_grouped`'s output for any selector reproduces the order you
-/// would get by merging every source layer into a single physical tree
-/// and scanning it — "as-if merged" semantics rather than "interleaved
-/// by stream index".
-pub(crate) type SortKey = (Vec<u8>, Vec<u8>, u8, [u8; 32]);
-
-pub(crate) fn sort_key(artifact: &Artifact) -> SortKey {
-    (
-        artifact.the.key_bytes().to_vec(),
-        artifact.of.key_bytes().to_vec(),
-        artifact.is.data_type().into(),
-        artifact.is.to_reference(),
-    )
-}
-
 /// Merge sorted artifact streams into one stream whose order matches
 /// what a single physical prolly tree containing every input would
 /// produce, deduplicating identical claims that appear in more than one
 /// source.
 ///
-/// Each input is assumed sorted by [`sort_key`] — true of branch and
-/// layer selects by construction because the artifact tree itself
-/// stores entries in `sort_key` order. Implemented as a streaming
-/// k-way merge with peekable inputs.
+/// Each input is assumed sorted by [`sort_key`] — true of branch
+/// scans by construction (the prolly tree stores entries in that
+/// order) and true of [`Provider<Select> for Changes`] by
+/// construction (we sort the materialized vec). Implemented as a
+/// streaming k-way merge with peekable inputs.
 ///
 /// # Order: "as-if merged into one tree"
 ///
@@ -128,56 +53,23 @@ pub(crate) fn sort_key(artifact: &Artifact) -> SortKey {
 /// [`group_key`]. That distinction matters: within a `(the, of)` group
 /// with cardinality > 1, two items from different streams sharing the
 /// same `(the, of)` but different values would otherwise come out in
-/// arbitrary (stream-index) order — concretely, two layers each holding
-/// `(alice, name, "Bob")` and `(alice, name, "Alice")` would yield
-/// `["Bob", "Alice"]` if the merge tiebroke on stream index, but a
-/// single physical tree containing both layers' facts would yield
-/// `["Alice", "Bob"]` (sorted by `value_reference`). Using
+/// arbitrary (stream-index) order — concretely, two sources each
+/// holding `(alice, name, "Bob")` and `(alice, name, "Alice")` would
+/// yield `["Bob", "Alice"]` if the merge tiebroke on stream index,
+/// but a single physical tree would yield `["Alice", "Bob"]` (sorted
+/// by `value_reference`). Using
 /// `sort_key = (the, of, value_type, value_reference)` as the merge
-/// comparator preserves the as-if-merged order in all three scan modes.
+/// comparator preserves the as-if-merged order in all three scan
+/// modes.
 ///
 /// # Dedup: "same claim from two sources is still one claim"
 ///
 /// When the same `(the, of, is, cause)` artifact appears in multiple
 /// inputs, only the first occurrence within a `(the, of)` run is
 /// yielded. The dedup region is the `(the, of)` group, tracked via
-/// [`group_key`]; the fingerprint is [`Cause::from(&artifact)`] which
+/// [`group_key`]; the fingerprint is `Cause::from(&artifact)` which
 /// hashes all four fields so position-independent duplicates collapse.
-///
-/// # Precondition: input streams must be sorted by `sort_key`
-///
-/// Because `sort_key` extends `group_key`, the `group_key`-prefix is
-/// also monotonic — so the per-group `HashSet` reset on `group_key`
-/// change is sound. Tree scans satisfy this in all three modes:
-///
-/// - **EAV** scan with `.of(entity)`: entity is fixed, tree order is
-///   `(attribute, value_type, value_reference)`. `sort_key` after the
-///   fixed-entity prefix matches.
-/// - **AEV** scan with `.the(attribute)`: attribute fixed, tree order
-///   `(entity, value_type, value_reference)`. Matches.
-/// - **VAE** scan with `.is(value)`: full VAE key is
-///   `(value_type, value_reference, attribute, entity)`.
-///   `.is(specific_value)` pins **both** `value_type` and
-///   `value_reference`, so the effective order is `(attribute, entity)`
-///   and within a `(the, of)` group every item has the identical
-///   `(value_type, value_reference)`, making `sort_key` trivially
-///   consistent with the stream.
-///
-/// The VAE case is load-bearing: any future selector mode that
-/// produces a VAE-style scan **must pin both `value_type` and
-/// `value_reference`**. A hypothetical `.is_typed(String)` that pinned
-/// only `value_type` would yield items sorted by
-/// `(value_reference, attribute, entity)`, breaking the `group_key`
-/// prefix monotonicity and allowing duplicates that fall on opposite
-/// sides of an intervening `value_reference` to escape the HashSet
-/// reset. If such a selector is ever added, either:
-///
-/// 1. Extend `group_key` to include value bytes (preserves streaming
-///    memory profile but only collapses full `(the, of, is)` matches), or
-/// 2. Replace the per-group HashSet with a global HashSet (robust to
-///    any stream order, memory cost grows with unique result count).
 pub fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStream<'a> {
-    use std::collections::HashSet;
     use std::pin::Pin;
 
     if streams.is_empty() {
@@ -186,8 +78,8 @@ pub fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStream<'a>
     if streams.len() == 1 {
         // A single-stream merge can still surface duplicates if the
         // caller passes an already-unioned stream, but for branch /
-        // layer scans every key is unique within a single stream so the
-        // dedup pass would be pure overhead. Pass through unchanged.
+        // overlay scans every key is unique within a single stream so
+        // the dedup pass would be pure overhead. Pass through unchanged.
         return streams.into_iter().next().expect("len == 1");
     }
 
@@ -210,11 +102,6 @@ pub fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStream<'a>
                         break;
                     }
                     Some(Ok(head)) => {
-                        // Compare on the full tree-equivalent sort key
-                        // — `(the, of, value_type, value_reference)` —
-                        // so the merged output matches the order a
-                        // single prolly tree containing all sources
-                        // would produce, not stream-index order.
                         let sk = sort_key(head);
                         if min_sort.as_ref().is_none_or(|cur| &sk < cur) {
                             min_sort = Some(sk);
@@ -235,7 +122,8 @@ pub fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStream<'a>
                 seen.clear();
             }
             // `Cause::from(&Artifact)` hashes (the, of, is, cause) — two
-            // artifacts with identical fields produce identical fingerprints.
+            // artifacts with identical fields produce identical
+            // fingerprints.
             if seen.insert(Cause::from(&item)) {
                 yield item;
             }
@@ -243,373 +131,48 @@ pub fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStream<'a>
     })
 }
 
-/// Internal mutable state of a [`VolatileLayer`]. Kept behind an
-/// `Arc<Mutex<...>>` so commits from a [`VolatileTransaction`] (which
-/// only has `&VolatileLayer`) can update the snapshot atomically.
+/// Extract a tombstone set from a [`Changes`] overlay — one
+/// [`SortKey`] per retracted artifact.
 ///
-/// Unlike the previous design there is no `pending` buffer here: all
-/// pending writes live on the transaction. `Provider<Select>::execute`
-/// reads `tree` directly with no flush.
-struct State {
-    /// Current root of the layer's prolly tree.
-    tree: Blake3Hash,
-    /// Rules registered on this layer. Mutated by transaction commit.
-    rules: RuleRegistry,
-}
-
-/// An in-memory snapshot of facts + rules, queryable like a [`Branch`].
-///
-/// `VolatileLayer` mirrors the [`Branch`](crate::Branch) shape but lives
-/// entirely in a `Volatile` provider: same prolly tree, same `(the, of)`
-/// scan order, same [`query`](Self::query) and [`transaction`](Self::transaction)
-/// methods — only nothing persists, and `commit` is purely in-process so
-/// it doesn't need an environment.
-///
-/// Mutations always go through [`VolatileTransaction`]:
-///
-/// ```ignore
-/// let layer = VolatileLayer::new();
-/// layer.transaction()
-///     .assert(some_concept)
-///     .install(|q: Query<Derived>| (...,))?
-///     .commit()
-///     .await?;
-///
-/// // Queries see the committed snapshot.
-/// let results = layer.query().select(q).perform(&env).try_vec().await?;
-/// ```
-///
-/// The layer's `Provider<Select>` returns the tree at its current root —
-/// no implicit flush. Pending writes from a transaction are only visible
-/// after `.commit().await` returns, or through that transaction's own
-/// [`query`](VolatileTransaction::query).
-#[derive(Clone)]
-pub struct VolatileLayer {
-    env: Volatile,
-    catalog: Capability<Catalog>,
-    state: Arc<Mutex<State>>,
-}
-
-impl Default for VolatileLayer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl VolatileLayer {
-    /// Create an empty layer backed by a fresh in-memory store.
-    pub fn new() -> Self {
-        Self {
-            env: Volatile::new(),
-            // The catalog is scoped to a fixed synthetic DID; isolation
-            // between layers comes from each one owning its own Volatile,
-            // not from the DID.
-            catalog: Subject::from(did!("key:zDialogLayer"))
-                .archive()
-                .catalog("index"),
-            state: Arc::new(Mutex::new(State {
-                tree: EMPT_TREE_HASH,
-                rules: RuleRegistry::new(),
-            })),
+/// Asserts and Replaces are ignored; only Retracts contribute. Used
+/// at query time to filter matching source facts out of branch
+/// streams before they reach the merge.
+pub fn tombstones_from(changes: &Changes) -> HashSet<SortKey> {
+    let mut tombstones = HashSet::new();
+    for instruction in changes.clone().into_instructions() {
+        if let Instruction::Retract(artifact) = instruction {
+            tombstones.insert(sort_key(&artifact));
         }
     }
-
-    /// Open a transaction on this layer.
-    ///
-    /// Mirrors [`Branch::transaction`](crate::Branch::transaction):
-    /// accumulate writes with [`assert`](VolatileTransaction::assert) /
-    /// [`retract`](VolatileTransaction::retract) / rule installation,
-    /// then [`commit`](VolatileTransaction::commit) to fold them into
-    /// the layer's snapshot.
-    pub fn transaction(&self) -> VolatileTransaction<'_> {
-        VolatileTransaction {
-            layer: self,
-            changes: Changes::new(),
-            pending_rules: Vec::new(),
-        }
-    }
-
-    /// Open a query session rooted at this volatile layer.
-    ///
-    /// Mirrors [`Branch::query`](crate::Branch::query) but starts from
-    /// this layer's snapshot instead of a persistent branch. Composes
-    /// with further sources via `.with(...)` and runs queries via
-    /// `.select(q).perform(&env)`.
-    ///
-    /// Cloning a `VolatileLayer` is cheap (the internal `Volatile`
-    /// storage and tree-state are `Arc`-backed); the session owns its
-    /// own clone so the original handle stays usable.
-    pub fn query(&self) -> QuerySession<'static> {
-        QuerySession::from_volatile_layer(self.clone())
-    }
-
-    /// Snapshot of the layer's rule registry.
-    ///
-    /// Returned by clone so the caller can read without holding the
-    /// internal lock; the registry itself is cheap to clone.
-    pub fn rules(&self) -> RuleRegistry {
-        self.state.lock().rules.clone()
-    }
+    tombstones
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<'a> Provider<Select<'a>> for VolatileLayer {
-    async fn execute(
-        &self,
-        input: ArtifactSelector<Constrained>,
-    ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
-        // Snapshot the current tree root, then read off-lock. The Volatile
-        // env and catalog are cheap to clone (Arc-backed) and let the
-        // returned stream outlive `&self`.
-        let tree_hash = self.state.lock().tree;
-        let env = self.env.clone();
-        let catalog = self.catalog.clone();
-        Ok(Box::pin(async_stream::try_stream! {
-            let store = LocalIndex::new(&env, catalog);
-            let tree: artifact_tree::ArtifactTree = Tree::from_hash(&tree_hash, &store)
-                .await
-                .map_err(DialogArtifactsError::from)?;
-            let stream = artifact_tree::scan(tree, store, input);
-            tokio::pin!(stream);
-            while let Some(item) = stream.next().await {
-                yield item?;
+/// Wrap an artifact stream in a filter that drops any item whose
+/// [`sort_key`] is in `tombstones`. No-op when the set is empty.
+pub fn filter_tombstones<'a>(
+    inner: ArtifactStream<'a>,
+    tombstones: HashSet<SortKey>,
+) -> ArtifactStream<'a> {
+    if tombstones.is_empty() {
+        return inner;
+    }
+    Box::pin(stream::unfold(
+        (inner, tombstones),
+        |(mut inner, tombstones)| async move {
+            loop {
+                match inner.next().await {
+                    None => return None,
+                    Some(Err(e)) => return Some((Err::<Artifact, _>(e), (inner, tombstones))),
+                    Some(Ok(artifact)) => {
+                        if tombstones.contains(&sort_key(&artifact)) {
+                            continue;
+                        }
+                        return Some((Ok(artifact), (inner, tombstones)));
+                    }
+                }
             }
-        }))
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<SelectRules> for VolatileLayer {
-    async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
-        self.state.lock().rules.acquire(&input)
-    }
-}
-
-/// An open transaction on a [`VolatileLayer`].
-///
-/// Mirrors [`Transaction`](crate::repository::branch::Transaction) on a
-/// branch: accumulate writes with [`assert`](Self::assert) /
-/// [`retract`](Self::retract), install rules with
-/// [`install`](Self::install) / [`register`](Self::register), then
-/// [`commit`](Self::commit) to apply them to the layer's snapshot. Unlike
-/// a branch commit this doesn't need an environment — everything stays
-/// in the layer's `Volatile` storage.
-pub struct VolatileTransaction<'a> {
-    layer: &'a VolatileLayer,
-    changes: Changes,
-    pending_rules: Vec<DeductiveRule>,
-}
-
-impl<'a> VolatileTransaction<'a> {
-    /// Assert a [`Statement`] into this transaction.
-    pub fn assert<S: Statement>(mut self, statement: S) -> Self {
-        statement.assert(&mut self.changes);
-        self
-    }
-
-    /// Retract a [`Statement`] from this transaction.
-    pub fn retract<S: Statement>(mut self, statement: S) -> Self {
-        statement.retract(&mut self.changes);
-        self
-    }
-
-    /// Register a pre-built deductive rule. Validated immediately; the
-    /// rule is only added to the layer on [`commit`](Self::commit).
-    pub fn register(mut self, rule: DeductiveRule) -> Result<Self, EvaluationError> {
-        // Round-trip through a scratch registry to surface any validation
-        // errors at registration time, matching the previous semantics
-        // of `VolatileLayer::register`.
-        let mut scratch = RuleRegistry::new();
-        scratch.register(rule.clone())?;
-        self.pending_rules.push(rule);
-        Ok(self)
-    }
-
-    /// Install a deductive rule built from a closure that names the
-    /// conclusion concept and returns its body. Same shape as
-    /// [`Overlay::install`](dialog_query::overlay::Overlay::install).
-    pub fn install<M, W>(self, rule: impl Fn(M) -> W) -> Result<Self, EvaluationError>
-    where
-        M: Application + Default + Into<ConceptDescriptor>,
-        W: When,
-    {
-        let query = M::default();
-        let concept: ConceptDescriptor = query.clone().into();
-        let when = rule(query).into_premises();
-        let premises = when.into_vec();
-        let rule =
-            DeductiveRule::new(concept, premises).map_err(|e| EvaluationError::Planning {
-                message: e.to_string(),
-            })?;
-        self.register(rule)
-    }
-
-    /// Run queries against this transaction's "as-if committed" view of
-    /// the layer.
-    ///
-    /// Pending asserts/replaces materialize into a scratch volatile
-    /// layer that unions with the underlying layer; pending retracts
-    /// tombstone matching facts in the layer's stream. Pending rules
-    /// (from [`install`](Self::install) / [`register`](Self::register))
-    /// merge with the layer's rules per concept.
-    pub fn query(&self) -> TransactionQuery<'_> {
-        TransactionQuery::for_volatile(self.layer, &self.changes, &self.pending_rules)
-    }
-
-    /// Finalize this transaction into a commit command that mirrors
-    /// [`Transaction::commit`](crate::repository::branch::Transaction::commit)'s
-    /// shape: returns a [`VolatileCommit`] you `.perform(&env).await` to
-    /// apply the changes. A volatile layer's storage is entirely
-    /// in-process, so the env argument is accepted but never read —
-    /// callers without an operator can pass `&()`. The shape parity
-    /// keeps generic code (helpers, tests, downstream traits) working
-    /// uniformly across branch and volatile transactions:
-    ///
-    /// ```ignore
-    /// // Same shape for either:
-    /// branch.transaction().assert(x).commit().perform(&env).await?;
-    /// layer.transaction().assert(x).commit().perform(&env).await?;
-    /// // Internal call sites without an env:
-    /// layer.transaction().assert(x).commit().perform(&()).await?;
-    /// ```
-    pub fn commit(self) -> VolatileCommit<'a> {
-        VolatileCommit { tx: self }
-    }
-}
-
-/// Commit command for a [`VolatileTransaction`].
-///
-/// Mirrors [`Commit`](crate::repository::branch::Commit) so the same
-/// `.commit().perform(&env).await` flow works for both branch and
-/// volatile transactions. The env argument is accepted but never
-/// read — volatile layers have no out-of-process storage to
-/// coordinate with, so callers without an operator can pass `&()`.
-pub struct VolatileCommit<'a> {
-    tx: VolatileTransaction<'a>,
-}
-
-impl VolatileCommit<'_> {
-    /// Apply the accumulated changes and rule registrations to the
-    /// underlying layer.
-    ///
-    /// The `env` argument is unused — its only purpose is signature
-    /// parity with [`Commit::perform`](crate::repository::branch::Commit::perform).
-    /// Generic and bound-free so any reference type satisfies it
-    /// (including `&()` for callers without an operator).
-    pub async fn perform<Env: ?Sized>(self, _env: &Env) -> Result<(), DialogArtifactsError> {
-        let VolatileTransaction {
-            layer,
-            changes,
-            pending_rules,
-        } = self.tx;
-
-        if !changes.is_empty() {
-            let base = layer.state.lock().tree;
-            let mut store = LocalIndex::new(&layer.env, layer.catalog.clone());
-            let mut tree: artifact_tree::ArtifactTree = Tree::from_hash(&base, &store)
-                .await
-                .map_err(DialogArtifactsError::from)?;
-            artifact_tree::apply(&mut tree, &mut store, changes.into_stream()).await?;
-            let new_hash = tree.hash().copied().unwrap_or(EMPT_TREE_HASH);
-            layer.state.lock().tree = new_hash;
-        }
-
-        if !pending_rules.is_empty() {
-            let mut state = layer.state.lock();
-            for rule in pending_rules {
-                state.rules.register(rule).map_err(|e| {
-                    DialogArtifactsError::Storage(format!("rule registration failed: {e}"))
-                })?;
-            }
-        }
-
-        Ok(())
-    }
-}
-
-impl Update for VolatileTransaction<'_> {
-    fn associate(&mut self, the: Attribute, of: Entity, is: Value) {
-        self.changes.associate(the, of, is);
-    }
-    fn associate_unique(&mut self, the: Attribute, of: Entity, is: Value) {
-        self.changes.associate_unique(the, of, is);
-    }
-    fn dissociate(&mut self, the: Attribute, of: Entity, is: Value) {
-        self.changes.dissociate(the, of, is);
-    }
-}
-
-/// A query environment that unions two sources during evaluation.
-///
-/// `Union` is the data-source counterpart to the planner's
-/// [`Disjunction`](dialog_query::planner::Disjunction): where
-/// `Disjunction` unions the result streams of alternative plans, `Union`
-/// unions the fact streams (and rule sets) of alternative sources. The
-/// query sees artifacts from both sides at once, with rules merged per
-/// concept so every installed rule contributes to planning.
-pub struct Union<P, O> {
-    primary: P,
-    secondary: O,
-}
-
-impl<P, O> Union<P, O> {
-    /// Union a primary source with a secondary one.
-    pub fn new(primary: P, secondary: O) -> Self {
-        Self { primary, secondary }
-    }
-
-    /// Borrow the primary source.
-    pub fn primary(&self) -> &P {
-        &self.primary
-    }
-
-    /// Borrow the secondary source.
-    pub fn secondary(&self) -> &O {
-        &self.secondary
-    }
-}
-
-impl<P: Clone, O: Clone> Clone for Union<P, O> {
-    fn clone(&self) -> Self {
-        Self {
-            primary: self.primary.clone(),
-            secondary: self.secondary.clone(),
-        }
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<'a, P, O> Provider<Select<'a>> for Union<P, O>
-where
-    P: Provider<Select<'a>> + ConditionalSync,
-    O: Provider<Select<'a>> + ConditionalSync,
-{
-    async fn execute(
-        &self,
-        input: ArtifactSelector<Constrained>,
-    ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
-        let primary = self.primary.execute(input.clone()).await?;
-        let secondary = self.secondary.execute(input).await?;
-        Ok(merge_grouped(vec![primary, secondary]))
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<P, O> Provider<SelectRules> for Union<P, O>
-where
-    P: Provider<SelectRules> + ConditionalSync,
-    O: Provider<SelectRules> + ConditionalSync,
-{
-    async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
-        let mut primary = self.primary.execute(input.clone()).await?;
-        let secondary = self.secondary.execute(input).await?;
-        primary.extend(&secondary);
-        Ok(primary)
-    }
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -618,705 +181,131 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use dialog_artifacts::Artifact;
-    use dialog_query::the;
-    use futures_util::StreamExt;
+    use dialog_artifacts::selector::Constrained;
+    use dialog_artifacts::{
+        ArtifactSelector, DialogArtifactsError, Entity, Select, Update as _, Value,
+    };
+    use dialog_capability::Provider;
 
     fn artifact(of: &str, the: &str, is: &str) -> Artifact {
         Artifact {
-            the: the.parse().unwrap(),
-            of: of.parse().unwrap(),
+            the: the.parse().expect("attribute"),
+            of: of.parse().expect("entity"),
             is: Value::String(is.into()),
             cause: None,
         }
     }
 
-    #[dialog_common::test]
-    async fn layer_assert_then_select_round_trips() -> anyhow::Result<()> {
-        let alice: Entity = "id:alice".parse()?;
-        let layer = VolatileLayer::new();
-        layer
-            .transaction()
-            .assert(
-                the!("person/name")
-                    .of(alice.clone())
-                    .is("Alice".to_string()),
-            )
-            .commit()
-            .perform(&())
-            .await?;
+    fn stream_of(items: Vec<Artifact>) -> ArtifactStream<'static> {
+        Box::pin(stream::iter(
+            items.into_iter().map(Ok::<_, DialogArtifactsError>),
+        ))
+    }
 
-        let selector = ArtifactSelector::new().the("person/name".parse()?);
-        let stream = Provider::<Select<'_>>::execute(&layer, selector).await?;
-        let results: Vec<_> = stream
-            .collect::<Vec<_>>()
+    async fn collect(s: ArtifactStream<'_>) -> anyhow::Result<Vec<Artifact>> {
+        Ok(s.collect::<Vec<_>>()
             .await
             .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<_, _>>()?)
+    }
 
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].of, alice);
-        assert_eq!(results[0].is, Value::String("Alice".into()));
+    // -- merge_grouped --------------------------------------------------
+
+    #[dialog_common::test]
+    async fn it_yields_empty_stream_when_no_inputs() -> anyhow::Result<()> {
+        let merged = merge_grouped(vec![]);
+        let items = collect(merged).await?;
+        assert!(items.is_empty());
         Ok(())
     }
 
     #[dialog_common::test]
-    async fn layer_retract_undoes_assert() -> anyhow::Result<()> {
-        let alice: Entity = "id:alice".parse()?;
-        let stmt = the!("person/name")
-            .of(alice.clone())
-            .is("Alice".to_string());
-        let layer = VolatileLayer::new();
-        layer
-            .transaction()
-            .assert(stmt.clone())
-            .retract(stmt)
-            .commit()
-            .perform(&())
-            .await?;
-
-        let selector = ArtifactSelector::new().the("person/name".parse()?);
-        let stream = Provider::<Select<'_>>::execute(&layer, selector).await?;
-        let results: Vec<_> = stream.collect::<Vec<_>>().await;
-        assert!(results.is_empty());
+    async fn it_passes_single_stream_through_without_dedup() -> anyhow::Result<()> {
+        // A single input is returned as-is — even if it has duplicates,
+        // since branch / overlay scans are duplicate-free by
+        // construction.
+        let a = artifact("id:a", "test/name", "Alice");
+        let merged = merge_grouped(vec![stream_of(vec![a.clone(), a.clone()])]);
+        let items = collect(merged).await?;
+        assert_eq!(items.len(), 2);
         Ok(())
     }
 
     #[dialog_common::test]
-    async fn layer_cardinality_one_replace_supersedes() -> anyhow::Result<()> {
-        // Drive `associate_unique` (cardinality-one) directly through the
-        // transaction so the tree takes the Replace path: only the latest
-        // value should survive.
+    async fn it_dedupes_identical_artifacts_across_streams() -> anyhow::Result<()> {
+        // Same artifact from two streams collapses to one in the
+        // merged output.
+        let a = artifact("id:a", "test/name", "Alice");
+        let merged = merge_grouped(vec![stream_of(vec![a.clone()]), stream_of(vec![a.clone()])]);
+        let items = collect(merged).await?;
+        assert_eq!(items.len(), 1);
+        Ok(())
+    }
+
+    // -- tombstones -----------------------------------------------------
+
+    #[dialog_common::test]
+    fn it_extracts_tombstones_from_retracts_only() -> anyhow::Result<()> {
+        let mut changes = Changes::new();
         let alice: Entity = "id:alice".parse()?;
-        let layer = VolatileLayer::new();
-        let mut tx = layer.transaction();
-        Update::associate_unique(
-            &mut tx,
-            "person/name".parse()?,
+        let bob: Entity = "id:bob".parse()?;
+        changes.associate(
+            "test/name".parse()?,
             alice.clone(),
             Value::String("Alice".into()),
         );
-        Update::associate_unique(
-            &mut tx,
-            "person/name".parse()?,
-            alice.clone(),
-            Value::String("Alicia".into()),
+        changes.dissociate(
+            "test/name".parse()?,
+            bob.clone(),
+            Value::String("Bob".into()),
         );
-        tx.commit().perform(&()).await?;
 
-        let selector = ArtifactSelector::new().of(alice);
-        let stream = Provider::<Select<'_>>::execute(&layer, selector).await?;
-        let results: Vec<Artifact> = stream
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<_, _>>()?;
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].is, Value::String("Alicia".into()));
-        Ok(())
-    }
-
-    /// Test-only helper: build a committed `VolatileLayer` from a slice
-    /// of statements. Eliminates the
-    /// `VolatileLayer::new() + transaction() + .assert(..)+ + commit().await?`
-    /// boilerplate that would otherwise appear in every union test below.
-    async fn layer_with<S: Statement + Clone>(stmts: &[S]) -> anyhow::Result<VolatileLayer> {
-        let layer = VolatileLayer::new();
-        let mut tx = layer.transaction();
-        for s in stmts {
-            tx = tx.assert(s.clone());
-        }
-        tx.commit().perform(&()).await?;
-        Ok(layer)
-    }
-
-    #[dialog_common::test]
-    async fn union_chains_select_streams_from_both_sides() -> anyhow::Result<()> {
-        let alice: Entity = "id:alice".parse()?;
-        let bob: Entity = "id:bob".parse()?;
-        let primary = layer_with(&[the!("person/name")
-            .of(alice.clone())
-            .is("Alice".to_string())])
-        .await?;
-        let secondary =
-            layer_with(&[the!("person/name").of(bob.clone()).is("Bob".to_string())]).await?;
-
-        let combined = Union::new(primary, secondary);
-        let selector = ArtifactSelector::new().the("person/name".parse()?);
-        let stream = Provider::<Select<'_>>::execute(&combined, selector).await?;
-        let results: Vec<Artifact> = stream
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<_, _>>()?;
-
-        assert_eq!(results.len(), 2);
-        let entities: Vec<_> = results.into_iter().map(|a| a.of).collect();
-        assert!(entities.contains(&alice));
-        assert!(entities.contains(&bob));
-        Ok(())
-    }
-
-    /// Two layers each holding the same set of facts. Run the same dedup
-    /// expectation through all three scan modes (EAV / AEV / VAE) by
-    /// varying which selector field is constrained, and check that the
-    /// duplicates collapse to exactly the expected unique count in every
-    /// mode.
-    ///
-    /// The reason every mode works: the per-group HashSet in
-    /// `merge_grouped` resets when `group_key = (the, of)` advances,
-    /// which is correct only if every input stream is sorted by
-    /// `group_key`. That holds because:
-    ///
-    /// - EAV scan with `.of()`: entity fixed → effective order is
-    ///   `(attribute, value)`, group_key `(attribute, fixed_entity)`
-    ///   sorts monotonically by attribute.
-    /// - AEV scan with `.the()`: attribute fixed → effective order
-    ///   `(entity, value)`, group_key `(fixed_attribute, entity)` sorts
-    ///   monotonically by entity.
-    /// - VAE scan with `.is()`: value fixed and the VAE key byte layout
-    ///   is `[TAG, VALUE_TYPE, VALUE_REF, ATTRIBUTE, ENTITY]` — so the
-    ///   effective order is `(attribute, entity)`, exactly equal to
-    ///   `group_key`. If the VAE key layout ever changes to put entity
-    ///   before attribute, the VAE assertion below will start failing
-    ///   loudly.
-    async fn union_dedupes_for_selector(
-        selector_for: impl Fn(&Entity) -> ArtifactSelector<Constrained>,
-        expected_unique: usize,
-        label: &str,
-    ) -> anyhow::Result<()> {
-        let alice: Entity = "id:alice".parse()?;
-        let bob: Entity = "id:bob".parse()?;
-        let facts = [
-            (alice.clone(), "person/name"),
-            (alice.clone(), "person/role"),
-            (bob.clone(), "person/name"),
-            (bob.clone(), "person/role"),
-        ];
-
-        let build = || async {
-            let layer = VolatileLayer::new();
-            let mut tx = layer.transaction();
-            for (entity, attribute) in &facts {
-                Update::associate(
-                    &mut tx,
-                    attribute.parse()?,
-                    entity.clone(),
-                    Value::String("X".into()),
-                );
-            }
-            tx.commit().perform(&()).await?;
-            anyhow::Ok(layer)
-        };
-
-        let combined = Union::new(build().await?, build().await?);
-        let stream = Provider::<Select<'_>>::execute(&combined, selector_for(&alice)).await?;
-        let results: Vec<Artifact> = stream
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<_, _>>()?;
-
-        use std::collections::HashMap;
-        let mut counts: HashMap<Cause, usize> = HashMap::new();
-        for a in &results {
-            *counts.entry(Cause::from(a)).or_default() += 1;
-        }
-        for (fingerprint, count) in &counts {
-            assert_eq!(
-                *count, 1,
-                "[{label}] artifact with fingerprint {fingerprint} appeared {count} times \
-                 in the union output; expected exactly once. Full results: {results:?}"
-            );
-        }
-        assert_eq!(
-            counts.len(),
-            expected_unique,
-            "[{label}] expected {expected_unique} unique artifacts; got {} in {results:?}",
-            counts.len()
-        );
+        let tombstones = tombstones_from(&changes);
+        assert_eq!(tombstones.len(), 1, "only the retract contributes");
+        // The lone tombstone matches the retracted artifact.
+        let retracted = artifact("id:bob", "test/name", "Bob");
+        assert!(tombstones.contains(&sort_key(&retracted)));
         Ok(())
     }
 
     #[dialog_common::test]
-    async fn union_dedupes_in_eav_mode() -> anyhow::Result<()> {
-        // selector constrains entity → tree scan uses EAV. Expect
-        // alice's two facts (alice/name, alice/role), deduplicated to 2.
-        union_dedupes_for_selector(|alice| ArtifactSelector::new().of(alice.clone()), 2, "EAV")
-            .await
-    }
+    async fn it_filters_matching_artifacts_via_tombstones() -> anyhow::Result<()> {
+        let keep = artifact("id:a", "test/name", "Keep");
+        let drop = artifact("id:b", "test/name", "Drop");
+        let mut tombstones = HashSet::new();
+        tombstones.insert(sort_key(&drop));
 
-    #[dialog_common::test]
-    async fn union_dedupes_in_aev_mode() -> anyhow::Result<()> {
-        // selector constrains attribute (no entity) → tree scan uses
-        // AEV. Expect (alice/name, bob/name), deduplicated to 2.
-        union_dedupes_for_selector(
-            |_| ArtifactSelector::new().the("person/name".parse().unwrap()),
-            2,
-            "AEV",
-        )
-        .await
-    }
-
-    #[dialog_common::test]
-    async fn union_dedupes_in_vae_mode() -> anyhow::Result<()> {
-        // selector constrains value only → tree scan uses VAE. Expect
-        // all four (alice/name, alice/role, bob/name, bob/role)
-        // collapsed across the two layers to 4 unique artifacts.
-        union_dedupes_for_selector(
-            |_| ArtifactSelector::new().is(Value::String("X".into())),
-            4,
-            "VAE",
-        )
-        .await
-    }
-
-    #[dialog_common::test]
-    async fn union_dedupes_identical_claims_from_two_layers() -> anyhow::Result<()> {
-        // Two layers asserting the literally same (the, of, is, cause).
-        // The same fact existing in two places is still one fact — the
-        // user should see one row, not two.
-        let alice: Entity = "id:alice".parse()?;
-        let stmt = the!("person/name")
-            .of(alice.clone())
-            .is("Alice".to_string());
-        use std::slice;
-        let primary = layer_with(slice::from_ref(&stmt)).await?;
-        let secondary = layer_with(slice::from_ref(&stmt)).await?;
-
-        let combined = Union::new(primary, secondary);
-        let selector = ArtifactSelector::new().the("person/name".parse()?);
-        let stream = Provider::<Select<'_>>::execute(&combined, selector).await?;
-        let results: Vec<Artifact> = stream
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<_, _>>()?;
-
-        assert_eq!(
-            results.len(),
-            1,
-            "identical claims from two layers must be deduplicated; got {results:?}"
-        );
+        let filtered = filter_tombstones(stream_of(vec![keep.clone(), drop]), tombstones);
+        let items = collect(filtered).await?;
+        assert_eq!(items, vec![keep]);
         Ok(())
     }
 
     #[dialog_common::test]
-    async fn union_dedupes_when_duplicate_interleaves_with_distinct_value() -> anyhow::Result<()> {
-        // Primary asserts both (alice, AliceA) and (alice, AliceB);
-        // secondary asserts just (alice, AliceA). The duplicate AliceA
-        // sits across streams with a distinct AliceB in between in
-        // primary's scan order, so naive consecutive-only dedup would
-        // miss it. We still expect two unique rows total.
-        let alice: Entity = "id:alice".parse()?;
-        let primary = layer_with(&[
-            the!("person/name")
-                .of(alice.clone())
-                .is("AliceA".to_string()),
-            the!("person/name")
-                .of(alice.clone())
-                .is("AliceB".to_string()),
-        ])
-        .await?;
-        let secondary = layer_with(&[the!("person/name")
-            .of(alice.clone())
-            .is("AliceA".to_string())])
-        .await?;
-
-        let combined = Union::new(primary, secondary);
-        let selector = ArtifactSelector::new().the("person/name".parse()?);
-        let stream = Provider::<Select<'_>>::execute(&combined, selector).await?;
-        let results: Vec<Artifact> = stream
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<_, _>>()?;
-
-        let mut values: Vec<_> = results.iter().map(|a| a.is.clone()).collect();
-        values.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
-        assert_eq!(
-            values,
-            vec![
-                Value::String("AliceA".into()),
-                Value::String("AliceB".into())
-            ],
-            "duplicate (alice, AliceA) across layers must dedupe to one row; got {results:?}"
-        );
+    async fn it_passes_stream_through_when_tombstones_are_empty() -> anyhow::Result<()> {
+        let a = artifact("id:a", "test/name", "Alice");
+        let b = artifact("id:b", "test/name", "Bob");
+        let filtered = filter_tombstones(stream_of(vec![a.clone(), b.clone()]), HashSet::new());
+        let items = collect(filtered).await?;
+        assert_eq!(items, vec![a, b]);
         Ok(())
     }
 
-    #[dialog_common::test]
-    async fn union_preserves_cardinality_one_grouping_across_layers() -> anyhow::Result<()> {
-        // Two layers each holding a fact for `(alice, name)` and
-        // `(bob, name)`. `merge_grouped` inside Union must keep
-        // same-(the, of) items consecutive so the cardinality-one
-        // sliding window in only.rs yields one winner per entity.
-        use dialog_query::query::Output;
-        use dialog_query::{Cardinality, Term};
-
-        let alice: Entity = "id:alice".parse()?;
-        let bob: Entity = "id:bob".parse()?;
-
-        let primary = layer_with(&[
-            the!("person/name")
-                .of(alice.clone())
-                .is("AliceA".to_string()),
-            the!("person/name").of(bob.clone()).is("BobA".to_string()),
-        ])
-        .await?;
-        let secondary = layer_with(&[
-            the!("person/name")
-                .of(alice.clone())
-                .is("AliceB".to_string()),
-            the!("person/name").of(bob.clone()).is("BobB".to_string()),
-        ])
-        .await?;
-
-        let env = Union::new(primary, secondary);
-        let results = the!("person/name")
-            .of(Term::<Entity>::var("person"))
-            .is(Term::<String>::var("name"))
-            .cardinality(Cardinality::One)
-            .perform(&env)
-            .try_vec()
-            .await?;
-        assert_eq!(
-            results.len(),
-            2,
-            "cardinality-one must yield exactly one row per entity \
-             when the same (the, of) appears across union members"
-        );
-        Ok(())
+    // Pull in the ArtifactSelector type to keep the imports honest
+    // — it's the input shape every Provider<Select> impl uses.
+    #[allow(dead_code)]
+    fn _selector() -> ArtifactSelector<Constrained> {
+        ArtifactSelector::new().the("test/name".parse().unwrap())
     }
 
-    #[dialog_common::test]
-    async fn merge_grouped_interleaves_by_group_key() -> anyhow::Result<()> {
-        use futures_util::stream;
-
-        // Pre-sorted by (the, of); merge_grouped should still produce a
-        // single stream where same-(the, of) items are consecutive.
-        let alice_a = artifact("id:alice", "person/name", "AliceA");
-        let bob_a = artifact("id:bob", "person/name", "BobA");
-        let alice_b = artifact("id:alice", "person/name", "AliceB");
-        let bob_b = artifact("id:bob", "person/name", "BobB");
-
-        let mut a = vec![alice_a.clone(), bob_a.clone()];
-        a.sort_by_key(group_key);
-        let mut b = vec![alice_b.clone(), bob_b.clone()];
-        b.sort_by_key(group_key);
-
-        let s_a: ArtifactStream<'_> = Box::pin(stream::iter(a.into_iter().map(Ok)));
-        let s_b: ArtifactStream<'_> = Box::pin(stream::iter(b.into_iter().map(Ok)));
-        let merged = merge_grouped(vec![s_a, s_b]);
-        let results: Vec<Artifact> = merged
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<_, _>>()?;
-
-        assert_eq!(results.len(), 4);
-        // Every group key appears in at most one contiguous run.
-        use std::collections::HashSet;
-        let mut seen = HashSet::new();
-        let mut current: Option<(Vec<u8>, Vec<u8>)> = None;
-        for r in &results {
-            let key = group_key(r);
-            if current.as_ref() != Some(&key) {
-                assert!(
-                    seen.insert(key.clone()),
-                    "merge_grouped lost (the, of) grouping"
-                );
-                current = Some(key);
-            }
-        }
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    async fn merge_grouped_empty_inputs_yield_empty_stream() -> anyhow::Result<()> {
-        let merged: ArtifactStream<'static> = merge_grouped(Vec::new());
-        let results: Vec<_> = merged.collect::<Vec<_>>().await;
-        assert!(results.is_empty());
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    async fn merge_grouped_single_stream_passes_through() -> anyhow::Result<()> {
-        use futures_util::stream;
-        let one = artifact("id:alice", "person/name", "Alice");
-        let s: ArtifactStream<'_> = Box::pin(stream::iter(vec![one.clone()].into_iter().map(Ok)));
-        let merged = merge_grouped(vec![s]);
-        let results: Vec<Artifact> = merged
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<_, _>>()?;
-        assert_eq!(results, vec![one]);
-        Ok(())
-    }
-
-    /// Build a single VolatileLayer holding the union of two fact sets, then a
-    /// `Union<VolatileLayer, VolatileLayer>` with the two halves. The merged-stream
-    /// output must match the single-layer baseline exactly under any
-    /// scan mode — that is the "as-if merged into one tree" contract.
-    async fn assert_union_matches_single_tree(
-        primary_facts: &[(Entity, &str, Value)],
-        secondary_facts: &[(Entity, &str, Value)],
-        selector: ArtifactSelector<Constrained>,
-        label: &str,
-    ) -> anyhow::Result<()> {
-        async fn to_layer(facts: Vec<(Entity, &str, Value)>) -> anyhow::Result<VolatileLayer> {
-            let layer = VolatileLayer::new();
-            let mut tx = layer.transaction();
-            for (entity, attribute, value) in facts {
-                Update::associate(&mut tx, attribute.parse()?, entity, value);
-            }
-            tx.commit().perform(&()).await?;
-            Ok(layer)
-        }
-
-        let primary = to_layer(primary_facts.to_vec()).await?;
-        let secondary = to_layer(secondary_facts.to_vec()).await?;
-        let union = Union::new(primary, secondary);
-        let mut union_out: Vec<Artifact> =
-            Provider::<Select<'_>>::execute(&union, selector.clone())
-                .await?
-                .collect::<Vec<_>>()
-                .await
-                .into_iter()
-                .collect::<Result<_, _>>()?;
-
-        // Baseline: a single VolatileLayer asserting every fact from both
-        // halves (with later writes overriding earlier ones — same as
-        // a single tree). For dedup, deduping at insert time
-        // (via the layer's own tree commit) is equivalent to deduping
-        // at merge time.
-        let mut all = primary_facts.to_vec();
-        all.extend_from_slice(secondary_facts);
-        let baseline = to_layer(all).await?;
-        let baseline_out: Vec<Artifact> = Provider::<Select<'_>>::execute(&baseline, selector)
-            .await?
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<_, _>>()?;
-
-        // We don't require the *full* artifact streams to be identical
-        // — Union preserves provenance (`cause`) per source whereas a
-        // single tree would just keep the latest write. But the
-        // sort_key projection (`(the, of, value_type, value_ref)`) must
-        // line up exactly, with no extra and no missing entries.
-        let proj = |a: &Artifact| sort_key(a);
-        let union_keys: Vec<_> = union_out.iter_mut().map(|a| proj(a)).collect();
-        let baseline_keys: Vec<_> = baseline_out.iter().map(proj).collect();
-        assert_eq!(
-            union_keys, baseline_keys,
-            "[{label}] union output order differs from single-tree baseline.\n  \
-             union:    {union_keys:?}\n  baseline: {baseline_keys:?}"
-        );
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    async fn union_order_matches_single_tree_in_eav_mode() -> anyhow::Result<()> {
-        // Two layers each contributing different values for the same
-        // (alice, name). Tree-canonical order sorts those values by
-        // value_reference (= blake3(value)). Stream-index tiebreak
-        // would interleave them by source, not by value.
-        //
-        // Pre-computed: blake3("Alice") < blake3("Bob"), so the
-        // tree-canonical order is ["Alice", "Bob"]. We put "Bob" in
-        // *primary* so a stream-index tiebreak would yield
-        // ["Bob", "Alice"] — opposite of the tree order — and the
-        // baseline assertion fails. Swapping values here without
-        // updating the comment would make the test pass for the
-        // wrong reason.
-        let alice: Entity = "id:alice".parse()?;
-        let primary = vec![(alice.clone(), "person/name", Value::String("Bob".into()))];
-        let secondary = vec![(alice.clone(), "person/name", Value::String("Alice".into()))];
-        assert_union_matches_single_tree(
-            &primary,
-            &secondary,
-            ArtifactSelector::new().of(alice),
-            "EAV cardinality-many cross-stream",
-        )
-        .await
-    }
-
-    #[dialog_common::test]
-    async fn union_order_matches_single_tree_in_aev_mode() -> anyhow::Result<()> {
-        // Two layers each with the same attribute on different
-        // entities AND interleaved values. Without tree-key tiebreak
-        // the per-group cross-stream items would come out in arbitrary
-        // order within (name, alice) and within (name, bob).
-        let alice: Entity = "id:alice".parse()?;
-        let bob: Entity = "id:bob".parse()?;
-        let primary = vec![
-            (alice.clone(), "person/name", Value::String("Zoe".into())),
-            (bob.clone(), "person/name", Value::String("Bea".into())),
-        ];
-        let secondary = vec![
-            (alice.clone(), "person/name", Value::String("Ann".into())),
-            (bob.clone(), "person/name", Value::String("Cal".into())),
-        ];
-        assert_union_matches_single_tree(
-            &primary,
-            &secondary,
-            ArtifactSelector::new().the("person/name".parse()?),
-            "AEV interleaved values",
-        )
-        .await
-    }
-
-    #[dialog_common::test]
-    async fn union_order_matches_single_tree_in_vae_mode() -> anyhow::Result<()> {
-        // VAE constrains value, so within a (the, of) group every
-        // matched item has identical (value_type, value_reference) —
-        // the order is fully determined by (attribute, entity).
-        // Verify the union output matches the single-tree output for
-        // this fully-determined case too.
-        let alice: Entity = "id:alice".parse()?;
-        let bob: Entity = "id:bob".parse()?;
-        let primary = vec![
-            (alice.clone(), "person/name", Value::String("X".into())),
-            (bob.clone(), "person/role", Value::String("X".into())),
-        ];
-        let secondary = vec![
-            (alice.clone(), "person/role", Value::String("X".into())),
-            (bob.clone(), "person/name", Value::String("X".into())),
-        ];
-        assert_union_matches_single_tree(
-            &primary,
-            &secondary,
-            ArtifactSelector::new().is(Value::String("X".into())),
-            "VAE cross-entity-attribute",
-        )
-        .await
-    }
-
-    #[dialog_common::test]
-    async fn merge_grouped_tiebreaks_by_value_reference_not_stream_index() -> anyhow::Result<()> {
-        // A deterministic regression test for the tiebreaker fix that
-        // does NOT depend on blake3 ordering of names happening to
-        // align with stream order. We construct two raw streams, each
-        // with one item, where the items share `(the, of)` but differ
-        // in value. The test asserts that the merge output is sorted
-        // by `value_reference` (= blake3(value.to_bytes())), not by
-        // which stream the item came from.
-        use futures_util::stream;
-
-        let alice: Entity = "id:alice".parse()?;
-        let a = Artifact {
-            the: "person/name".parse()?,
-            of: alice.clone(),
-            is: Value::String("A".into()),
-            cause: None,
-        };
-        let b = Artifact {
-            the: "person/name".parse()?,
-            of: alice.clone(),
-            is: Value::String("B".into()),
-            cause: None,
-        };
-
-        // Determine the canonical (tree) order of A and B by their
-        // value_reference, then feed them into merge_grouped in the
-        // *opposite* of canonical order. The merge must still emit
-        // them in canonical order if the tiebreaker is correct.
-        let canonical: Vec<Artifact> = {
-            let mut both = vec![a.clone(), b.clone()];
-            both.sort_by_key(sort_key);
-            both
-        };
-
-        // Find the artifact that sorts LAST and put it on the primary
-        // stream; the FIRST-sorting one goes on the secondary stream.
-        // With stream-index tiebreak the primary's item would come
-        // out first → wrong. With value_reference tiebreak the
-        // secondary's item comes out first → matches canonical.
-        let (first, second) = (canonical[0].clone(), canonical[1].clone());
-        let primary_first = second.clone();
-        let secondary_first = first.clone();
-
-        let primary: ArtifactStream<'_> = Box::pin(stream::iter(vec![Ok(primary_first)]));
-        let secondary: ArtifactStream<'_> = Box::pin(stream::iter(vec![Ok(secondary_first)]));
-
-        let merged = merge_grouped(vec![primary, secondary]);
-        let out: Vec<Artifact> = merged
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<_, _>>()?;
-
-        let out_keys: Vec<_> = out.iter().map(sort_key).collect();
-        let canonical_keys: Vec<_> = canonical.iter().map(sort_key).collect();
-        assert_eq!(
-            out_keys, canonical_keys,
-            "merge_grouped must emit cross-stream cardinality-many items in tree order \
-             (sorted by value_reference), not in stream-index order"
-        );
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    async fn it_opens_a_query_session_from_a_volatile_layer() -> anyhow::Result<()> {
-        // VolatileLayer::query() should expose the same QuerySession
-        // surface as Branch::query() — composable with .with(...) and
-        // runnable with .select(q).perform(env). This test commits a
-        // fact to the layer, then runs a query through .query().
-        use crate::helpers::test_operator_with_profile;
-        use dialog_query::Concept;
-        use dialog_query::Query;
-        use dialog_query::query::Output;
-
-        mod attrs {
-            #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
-            #[domain("test")]
-            pub struct Label(pub String);
-        }
-
-        #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-        pub struct Tagged {
-            this: Entity,
-            label: attrs::Label,
-        }
-
-        let (operator, _profile) = test_operator_with_profile().await;
-        let alice: Entity = "id:alice".parse()?;
-
-        let layer = VolatileLayer::new();
-        layer
-            .transaction()
-            .assert(Tagged {
-                this: alice.clone(),
-                label: attrs::Label("primary".into()),
-            })
-            .commit()
-            .perform(&())
-            .await?;
-
-        let results: Vec<Tagged> = layer
-            .query()
-            .select(Query::<Tagged> {
-                this: alice.clone().into(),
-                label: dialog_query::Term::var("label"),
-            })
-            .perform(&operator)
-            .try_vec()
-            .await?;
-
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].label.0, "primary");
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    fn it_exposes_primary_and_secondary_accessors_on_union() {
-        let primary = VolatileLayer::new();
-        let secondary = VolatileLayer::new();
-        let combined = Union::new(primary, secondary);
-        // Accessors compile-check return types; both Layers stay borrowable.
-        let _ = combined.primary();
-        let _ = combined.secondary();
+    // Pull `Provider<Select>` into scope so the cross-crate impl on
+    // `Changes` participates in compile-time checking when this file
+    // is built.
+    #[allow(dead_code)]
+    async fn _ensure_changes_select<'a>(
+        c: &Changes,
+        s: ArtifactSelector<Constrained>,
+    ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
+        Provider::<Select<'a>>::execute(c, s).await
     }
 }

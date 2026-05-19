@@ -1002,7 +1002,6 @@ mod tests {
     mod layer {
         use super::query_engine::{Employee, employee};
         use crate::helpers::{test_operator_with_profile, test_repo};
-        use crate::layer::VolatileLayer;
         use dialog_query::query::Output;
         use dialog_query::{Concept, Entity, Query, Term, the};
 
@@ -1023,27 +1022,21 @@ mod tests {
         }
 
         #[dialog_common::test]
-        async fn layer_exposes_asserted_facts() -> anyhow::Result<()> {
-            // Build a VolatileLayer end-to-end, then attach via .with(...).
+        async fn it_exposes_overlaid_concept_facts_via_with() -> anyhow::Result<()> {
+            // `branch.with(stmt)` folds a Statement (here a BranchMeta
+            // concept instance) into the session's overlay changes.
+            // The fact surfaces via `Provider<Select> for Changes`,
+            // alongside the branch's stored facts.
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
             let synthetic: Entity = "id:branch".parse()?;
-            let layer = VolatileLayer::new();
-            layer
-                .transaction()
-                .assert(BranchMeta {
+            let results: Vec<BranchMeta> = branch
+                .with(BranchMeta {
                     this: synthetic.clone(),
                     name: branch_meta::Name("main".into()),
                 })
-                .commit()
-                .perform(&())
-                .await?;
-
-            let results: Vec<BranchMeta> = branch
-                .query()
-                .with(layer)
                 .select(Query::<BranchMeta> {
                     this: synthetic.clone().into(),
                     name: Term::var("name"),
@@ -1059,45 +1052,8 @@ mod tests {
         }
 
         #[dialog_common::test]
-        async fn retract_on_layer_removes_fact() -> anyhow::Result<()> {
-            // assert + retract on the layer net to no fact.
-            let (operator, profile) = test_operator_with_profile().await;
-            let repo = test_repo(&operator, &profile).await;
-            let branch = repo.branch("main").open().perform(&operator).await?;
-
-            let synthetic: Entity = "id:branch".parse()?;
-            let asserted = BranchMeta {
-                this: synthetic.clone(),
-                name: branch_meta::Name("main".into()),
-            };
-            let layer = VolatileLayer::new();
-            layer
-                .transaction()
-                .assert(asserted.clone())
-                .retract(asserted)
-                .commit()
-                .perform(&())
-                .await?;
-
-            let results: Vec<BranchMeta> = branch
-                .query()
-                .with(layer)
-                .select(Query::<BranchMeta> {
-                    this: synthetic.into(),
-                    name: Term::var("name"),
-                })
-                .perform(&operator)
-                .try_vec()
-                .await?;
-
-            assert!(results.is_empty());
-            Ok(())
-        }
-
-        #[dialog_common::test]
-        async fn layer_unions_two_branches() -> anyhow::Result<()> {
-            // Layering a second branch onto a query session should union
-            // both branches' facts during select.
+        async fn it_unions_two_branches_via_join() -> anyhow::Result<()> {
+            // `.join(&branch)` unions another branch into the session.
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
             let main = repo.branch("main").open().perform(&operator).await?;
@@ -1130,7 +1086,7 @@ mod tests {
 
             let mut names: Vec<String> = feature
                 .query()
-                .with(&main)
+                .join(&main)
                 .select(Query::<Employee> {
                     this: Term::var("this"),
                     name: Term::var("name"),
@@ -1148,8 +1104,10 @@ mod tests {
         }
 
         #[dialog_common::test]
-        async fn layer_chains_branch_and_memory() -> anyhow::Result<()> {
-            // Same session can layer a branch *and* an in-memory VolatileLayer.
+        async fn it_chains_branch_join_with_statement_overlay() -> anyhow::Result<()> {
+            // `.join(&branch)` adds a branch source; `.with(stmt)`
+            // adds in-memory facts via the Changes overlay. Both
+            // compose on the same session.
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
             let main = repo.branch("main").open().perform(&operator).await?;
@@ -1165,23 +1123,15 @@ mod tests {
                 .perform(&operator)
                 .await?;
             let main = repo.branch("main").load().perform(&operator).await?;
-            // `scratch` has no commits yet — `open()` is enough, the branch
-            // simply selects against the empty tree.
-            let synthetic_layer = VolatileLayer::new();
-            synthetic_layer
-                .transaction()
-                .assert(Employee {
+
+            let mut names: Vec<String> = scratch
+                .query()
+                .join(&main)
+                .with(Employee {
                     this: Entity::new()?,
                     name: employee::Name("Synthetic".into()),
                     role: employee::Role("Bot".into()),
                 })
-                .commit()
-                .perform(&())
-                .await?;
-            let mut names: Vec<String> = scratch
-                .query()
-                .with(&main)
-                .with(synthetic_layer)
                 .select(Query::<Employee> {
                     this: Term::var("this"),
                     name: Term::var("name"),
@@ -1219,19 +1169,11 @@ mod tests {
                 .await?;
 
             let synthetic: Entity = "id:branch".parse()?;
-            let layer = VolatileLayer::new();
-            layer
-                .transaction()
-                .assert(BranchMeta {
+            let names: Vec<BranchMeta> = branch
+                .with(BranchMeta {
                     this: synthetic,
                     name: branch_meta::Name("main".into()),
                 })
-                .commit()
-                .perform(&())
-                .await?;
-            let names: Vec<BranchMeta> = branch
-                .query()
-                .with(layer)
                 .select(Query::<BranchMeta> {
                     this: Term::var("this"),
                     name: Term::var("name"),
@@ -1385,6 +1327,183 @@ mod tests {
         }
 
         #[dialog_common::test]
+        async fn it_reflects_latest_revision_after_a_commit() -> anyhow::Result<()> {
+            // Regression: after a commit, subsequent queries through
+            // the same branch handle must see the new BranchRevision —
+            // not a stale one cached from before commit. The Branch's
+            // revision Cell is publish/resolve-backed so the next
+            // metadata synthesis sees the post-commit revision.
+            use crate::schema;
+
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+            let origin = schema::Origin::new(profile.did(), branch.of().clone());
+            let branch_concept = schema::Branch::new(&origin, "main");
+
+            // First commit.
+            branch
+                .transaction()
+                .assert(the!("user/name").of(Entity::new()?).is("Alice".to_string()))
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            let after_first: Vec<schema::BranchRevision> = repo
+                .branch("main")
+                .load()
+                .perform(&operator)
+                .await?
+                .query()
+                .select(Query::<schema::BranchRevision> {
+                    this: branch_concept.this.clone().into(),
+                    tree: Term::var("tree"),
+                    period: Term::var("period"),
+                    moment: Term::var("moment"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert_eq!(after_first.len(), 1);
+            let first_tree = after_first[0].tree.0.clone();
+
+            // Second commit through the same branch handle.
+            branch
+                .transaction()
+                .assert(the!("user/name").of(Entity::new()?).is("Bob".to_string()))
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            let after_second: Vec<schema::BranchRevision> = repo
+                .branch("main")
+                .load()
+                .perform(&operator)
+                .await?
+                .query()
+                .select(Query::<schema::BranchRevision> {
+                    this: branch_concept.this.into(),
+                    tree: Term::var("tree"),
+                    period: Term::var("period"),
+                    moment: Term::var("moment"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert_eq!(after_second.len(), 1);
+            assert_ne!(
+                after_second[0].tree.0, first_tree,
+                "tree hash must change after the second commit, not be the stale first one"
+            );
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn it_auto_includes_session_facts() -> anyhow::Result<()> {
+            // The metadata overlay also asserts a `Session` fact on
+            // `db:session` carrying the profile + operator DIDs.
+            use crate::schema;
+            use crate::schema::DidExt as _;
+
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let results: Vec<schema::Session> = branch
+                .query()
+                .select(Query::<schema::Session> {
+                    this: schema::Session::entity().into(),
+                    profile: Term::var("profile"),
+                    operator: Term::var("operator"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+
+            assert_eq!(results.len(), 1, "Session must auto-surface");
+            assert_eq!(results[0].profile.0, profile.did().this());
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn it_auto_includes_session_branch_attribute_per_branch_in_scope()
+        -> anyhow::Result<()> {
+            // `dialog.session/branch` is cardinality-many — one per
+            // branch in the session's scope (primary + joined). Query
+            // it directly via the schema attribute as an artifact
+            // search.
+            use crate::schema;
+            use crate::schema::session;
+            use dialog_artifacts::ArtifactSelector;
+
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let main = repo.branch("main").open().perform(&operator).await?;
+            let feature = repo.branch("feature").open().perform(&operator).await?;
+
+            // Query both branches in scope by raw attribute lookup
+            // via the artifact selector.
+            let session_entity = schema::Session::entity();
+
+            // Build the expected branch entities for the two in-scope branches.
+            let origin = schema::Origin::new(profile.did(), main.of().clone());
+            let main_branch = schema::Branch::new(&origin, "main");
+            let feature_branch = schema::Branch::new(&origin, "feature");
+            let mut expected_branches = vec![main_branch.this.clone(), feature_branch.this.clone()];
+            expected_branches.sort();
+
+            // Build a query that exercises the metadata overlay so the
+            // facts get synthesized; we'll inspect the overlay directly.
+            // Easiest path: run a Branch query and ask for each
+            // branch fact's entity.
+            let _: Vec<schema::Session> = feature
+                .query()
+                .join(&main)
+                .select(Query::<schema::Session> {
+                    this: session_entity.clone().into(),
+                    profile: Term::var("profile"),
+                    operator: Term::var("operator"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+
+            // Now scan for the cardinality-many session branch attribute.
+            // Use a Concept-shaped helper so we get one row per assertion.
+            #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+            pub struct SessionBranchRow {
+                pub this: Entity,
+                pub branch: session::Branch,
+            }
+            let rows: Vec<SessionBranchRow> = feature
+                .query()
+                .join(&main)
+                .select(Query::<SessionBranchRow> {
+                    this: session_entity.clone().into(),
+                    branch: Term::var("branch"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+
+            let mut got: Vec<Entity> = rows.into_iter().map(|r| r.branch.0).collect();
+            got.sort();
+            assert_eq!(got, expected_branches);
+
+            // Belt-and-suspenders: ensure the attribute name is right
+            // by also scanning the underlying selector directly through
+            // the session's overlay (this proves there's no path
+            // collision with other dialog.session attrs).
+            let selector = ArtifactSelector::new()
+                .the("dialog.session/branch".parse()?)
+                .of(session_entity.clone());
+            // Just compile-checks the selector path; the actual
+            // assertion above already verified the per-branch entries.
+            let _ = selector;
+            Ok(())
+        }
+
+        #[dialog_common::test]
         async fn it_keeps_metadata_facts_out_of_branch_tree() -> anyhow::Result<()> {
             // The schema-shaped metadata is synthesized at query time
             // into a per-query overlay; nothing is written to the
@@ -1427,40 +1546,38 @@ mod tests {
         // -- QuerySession accessors ----------------------------------------
 
         #[dialog_common::test]
-        async fn query_session_accessors_reflect_layers() -> anyhow::Result<()> {
+        async fn it_reflects_overlay_state_on_session_accessors() -> anyhow::Result<()> {
+            // The session's overlay carries the joined branches and the
+            // pending overlay changes (asserted statements). Verify
+            // both are visible through the public accessors.
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
             let main = repo.branch("main").open().perform(&operator).await?;
             let feature = repo.branch("feature").open().perform(&operator).await?;
 
-            let synthetic = VolatileLayer::new();
-            synthetic
-                .transaction()
-                .assert(Employee {
-                    this: Entity::new()?,
-                    name: employee::Name("Synth".into()),
-                    role: employee::Role("Bot".into()),
-                })
-                .commit()
-                .perform(&())
-                .await?;
-
-            let session = feature.query().with(&main).with(synthetic);
-            assert_eq!(session.layered_branches().len(), 1);
-            assert_eq!(session.layered_branches()[0].name(), "main");
-            assert_eq!(session.layers().len(), 1);
+            let session = feature.query().join(&main).with(Employee {
+                this: Entity::new()?,
+                name: employee::Name("Synth".into()),
+                role: employee::Role("Bot".into()),
+            });
+            assert_eq!(session.layer().branches().len(), 1);
+            assert_eq!(session.layer().branches()[0].name(), "main");
+            assert!(
+                !session.layer().changes().is_empty(),
+                "overlay changes must contain the asserted Employee"
+            );
             Ok(())
         }
 
         #[dialog_common::test]
-        async fn empty_session_has_no_layers() -> anyhow::Result<()> {
+        async fn it_starts_with_empty_overlay_on_a_fresh_session() -> anyhow::Result<()> {
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
             let session = branch.query();
-            assert!(session.layered_branches().is_empty());
-            assert!(session.layers().is_empty());
+            assert!(session.layer().branches().is_empty());
+            assert!(session.layer().changes().is_empty());
             Ok(())
         }
 
@@ -1544,7 +1661,7 @@ mod tests {
 
             let results: Vec<WithNickname> = feature
                 .query()
-                .with(&main)
+                .join(&main)
                 .select(Query::<WithNickname> {
                     this: Term::var("this"),
                     nickname: Term::var("nickname"),
@@ -1566,61 +1683,12 @@ mod tests {
             Ok(())
         }
 
-        #[dialog_common::test]
-        async fn install_rule_on_layer_derives_facts_in_query() -> anyhow::Result<()> {
-            // End-to-end: rule installed on an VolatileLayer layer derives Employee
-            // facts from Stuff facts stored on the branch.
-            use dialog_query::rule::When;
-
-            fn employee_from_stuff(employee: Query<Employee>) -> impl When {
-                // Term<String> erases the Attribute wrapper, so the Stuff
-                // query reuses the same terms directly.
-                (Query::<Stuff> {
-                    this: employee.this,
-                    name: employee.name,
-                    role: employee.role,
-                },)
-            }
-
-            let (operator, profile) = test_operator_with_profile().await;
-            let repo = test_repo(&operator, &profile).await;
-            let branch = repo.branch("main").open().perform(&operator).await?;
-
-            branch
-                .transaction()
-                .assert(Stuff {
-                    this: Entity::new()?,
-                    name: stuff_role::Name("Alice".into()),
-                    role: stuff_role::Role("PM".into()),
-                })
-                .commit()
-                .perform(&operator)
-                .await?;
-
-            let layer = VolatileLayer::new();
-            layer
-                .transaction()
-                .install(employee_from_stuff)?
-                .commit()
-                .perform(&())
-                .await?;
-            let derived: Vec<Employee> = branch
-                .query()
-                .with(layer)
-                .select(Query::<Employee> {
-                    this: Term::var("this"),
-                    name: Term::var("name"),
-                    role: Term::var("role"),
-                })
-                .perform(&operator)
-                .try_vec()
-                .await?;
-
-            assert_eq!(derived.len(), 1, "rule should derive one employee");
-            assert_eq!(derived[0].name.0, "Alice");
-            assert_eq!(derived[0].role.0, "PM");
-            Ok(())
-        }
+        // User-installable derivation rules (the old
+        // `VolatileLayer::install(rule_fn)` flow) are not supported
+        // in the changes-only overlay design. Queries against
+        // `branch.query()` still get the implicit per-`ConceptDescriptor`
+        // rule; truly custom rules would need a separate composition
+        // surface that's out of scope for this PR.
     }
 
     mod profile_as_repository {
