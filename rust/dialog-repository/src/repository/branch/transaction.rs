@@ -2,7 +2,7 @@ mod query;
 pub use query::{TransactionQuery, TransactionSelectQuery};
 
 use crate::{Branch, Commit};
-use dialog_artifacts::{ChangeStream, Changes, Statement};
+use dialog_artifacts::{ChangeStream, Changes, Instruction, Statement, Update};
 
 /// A transaction on a branch.
 ///
@@ -26,6 +26,31 @@ impl<'a> Transaction<'a> {
     /// Retract a claim from this transaction.
     pub fn retract<C: Statement>(mut self, claim: C) -> Self {
         claim.retract(&mut self.changes);
+        self
+    }
+
+    /// Integrate an external [`Changes`] batch into this transaction.
+    ///
+    /// Each instruction is replayed as if it had been asserted or
+    /// retracted on the transaction directly — `Assert`/`Replace`
+    /// become additive entries, `Retract` becomes a retraction entry.
+    /// Useful for callers that build a [`Changes`] independently
+    /// (e.g. a reactor accumulating effect outputs across rounds) and
+    /// need to merge it into a running transaction.
+    pub fn integrate(mut self, changes: Changes) -> Self {
+        for instruction in changes.into_instructions() {
+            match instruction {
+                Instruction::Assert(a) => {
+                    Update::associate(&mut self.changes, a.the, a.of, a.is);
+                }
+                Instruction::Replace(a) => {
+                    Update::associate_unique(&mut self.changes, a.the, a.of, a.is);
+                }
+                Instruction::Retract(a) => {
+                    Update::dissociate(&mut self.changes, a.the, a.of, a.is);
+                }
+            }
+        }
         self
     }
 
