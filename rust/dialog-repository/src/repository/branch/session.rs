@@ -1,8 +1,9 @@
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{ArtifactSelector, ArtifactStream, DialogArtifactsError, Select};
-use dialog_capability::{Did, Fork, Provider};
+use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
+use dialog_effects::authority::{Identify, OperatorExt as _};
 use dialog_effects::memory::Resolve;
 use dialog_query::concept::descriptor::ConceptDescriptor;
 use dialog_query::concept::query::ConceptRules;
@@ -25,18 +26,34 @@ use crate::{Branch, NetworkedIndex, RemoteSite, RepositoryMemoryExt, Upstream};
 /// Mutable state (synthetic facts, installed rules) lives on the
 /// `VolatileLayer`s the caller builds, not on the session itself.
 ///
+/// # Auto-injected schema metadata
+///
+/// At `.perform(env)` time the session automatically materializes
+/// a small overlay of [`crate::schema`] facts for the primary branch
+/// (and any branches added via `.with(&branch)`): an [`Origin`] for
+/// `(profile, subject)`, a [`Branch`] for `(origin, name)`, and a
+/// [`BranchRevision`] when the branch has a commit. The profile DID
+/// comes from [`Identify`] on the env — callers don't pass it.
+/// These facts only exist in the per-query overlay, never in the
+/// branch's tree, so a [`Transaction`](super::Transaction) has no
+/// way to write or retract them.
+///
+/// [`Origin`]: crate::schema::Origin
+/// [`Branch`]: crate::schema::Branch
+/// [`BranchRevision`]: crate::schema::BranchRevision
+///
 /// ```ignore
-/// let metadata = branch.metadata();              // a pre-built layer
-/// let synthetic = VolatileLayer::new()
+/// let synthetic = VolatileLayer::new();
+/// synthetic.transaction()
 ///     .assert(my_concept_instance)
-///     .install(|q: Query<Derived>| (...,))?;
+///     .install(|q: Query<Derived>| (...,))?
+///     .commit().perform(&env).await?;
 ///
 /// branch.query()
 ///     .with(&other_branch)                       // union with another branch
-///     .with(metadata)                            // union with branch metadata
 ///     .with(synthetic)                           // union with in-memory layer
 ///     .select(query)
-///     .perform(&env);
+///     .perform(&env);                            // metadata auto-injected
 /// ```
 ///
 /// No environment reference is captured on the session itself —
@@ -141,24 +158,56 @@ impl<'a, Q> SelectQuery<'a, Q> {
 
 impl<'a, Q: Application> SelectQuery<'a, Q> {
     /// Execute the query, returning a stream of results.
+    ///
+    /// Before evaluating, this resolves the operator's profile DID via
+    /// [`Identify`] and synthesizes a per-branch metadata overlay
+    /// ([`schema::Origin`](crate::schema::Origin),
+    /// [`schema::Branch`](crate::schema::Branch),
+    /// [`schema::BranchRevision`](crate::schema::BranchRevision) when
+    /// present) for the primary plus every layered `&Branch`. The
+    /// overlay is unioned into the query env at the same level as the
+    /// caller's layers; nothing is written to any branch's tree.
     pub fn perform<Env>(self, env: &'a Env) -> impl Output<Q::Conclusion> + 'a
     where
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
+            + Provider<Identify>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
             + 'static,
     {
-        let query_env = QueryEnv {
-            primary: self.primary,
-            branches: self.branches,
-            layers: self.layers,
-            env,
-        };
-        let query = self.query;
+        let SelectQuery {
+            primary,
+            branches,
+            layers,
+            query,
+        } = self;
         async_stream::try_stream! {
+            // Resolve the operator's profile DID up-front, then build
+            // one metadata layer per primary/layered branch.
+            let operator = Identify
+                .perform(env)
+                .await
+                .map_err(|e| DialogArtifactsError::Storage(format!("identify: {e}")))?;
+            let profile = operator.profile().clone();
+
+            let mut metadata_layers: Vec<VolatileLayer> = Vec::new();
+            if let Some(branch) = primary {
+                metadata_layers.push(super::metadata::synthesize(branch, &profile).await?);
+            }
+            for branch in &branches {
+                metadata_layers.push(super::metadata::synthesize(branch, &profile).await?);
+            }
+
+            let query_env = QueryEnv {
+                primary,
+                branches,
+                layers,
+                metadata_layers,
+                env,
+            };
             let results = Box::pin(query.perform(&query_env));
             for await result in results {
                 yield result?;
@@ -178,6 +227,12 @@ pub(crate) struct QueryEnv<'a, Env> {
     primary: Option<&'a Branch>,
     branches: Vec<&'a Branch>,
     layers: Vec<VolatileLayer>,
+    /// Auto-synthesized [`crate::schema`] facts — one layer per
+    /// primary/layered branch, materialized once at the start of
+    /// [`SelectQuery::perform`]. Unioned into the merge alongside
+    /// `layers` but separate so callers' `.with(volatile)` chains
+    /// don't get confused with the auto-injected facts.
+    metadata_layers: Vec<VolatileLayer>,
     env: &'a Env,
 }
 
@@ -187,6 +242,7 @@ impl<Env> Clone for QueryEnv<'_, Env> {
             primary: self.primary,
             branches: self.branches.clone(),
             layers: self.layers.clone(),
+            metadata_layers: self.metadata_layers.clone(),
             env: self.env,
         }
     }
@@ -247,7 +303,10 @@ where
         // sharing a key stay adjacent — the invariant the cardinality-one
         // sliding window in `only.rs` depends on.
         let mut streams: Vec<ArtifactStream<'a>> = Vec::with_capacity(
-            self.primary.is_some() as usize + self.branches.len() + self.layers.len(),
+            self.primary.is_some() as usize
+                + self.branches.len()
+                + self.layers.len()
+                + self.metadata_layers.len(),
         );
         if let Some(branch) = self.primary {
             streams.push(select_from_branch(branch, self.env, input.clone()).await?);
@@ -256,6 +315,9 @@ where
             streams.push(select_from_branch(branch, self.env, input.clone()).await?);
         }
         for layer in &self.layers {
+            streams.push(Provider::<Select<'a>>::execute(layer, input.clone()).await?);
+        }
+        for layer in &self.metadata_layers {
             streams.push(Provider::<Select<'a>>::execute(layer, input.clone()).await?);
         }
         Ok(merge_grouped(streams))
@@ -288,33 +350,19 @@ impl<Env: ConditionalSync> Provider<SelectRules> for QueryEnv<'_, Env> {
 impl Branch {
     /// Open a query session on this branch.
     ///
-    /// The session starts empty — no layered branches, no layers.
-    /// Use `.with(layer)` to attach a `&Branch` or a pre-built `VolatileLayer`
-    /// (which is where you assert facts and install rules).
+    /// The session starts empty — no layered branches, no extra
+    /// layers. Use `.with(layer)` to attach a `&Branch` or a pre-built
+    /// `VolatileLayer` (which is where you assert facts and install
+    /// rules). At `.perform(env)` time the branch's schema metadata
+    /// ([`Origin`](crate::schema::Origin),
+    /// [`Branch`](crate::schema::Branch),
+    /// [`BranchRevision`](crate::schema::BranchRevision)) is
+    /// auto-injected — no manual overlay needed.
     pub fn query(&self) -> QuerySession<'_> {
         QuerySession {
             primary: Some(self),
             branches: Vec::new(),
             layers: Vec::new(),
         }
-    }
-
-    /// Build the branch's metadata layer.
-    ///
-    /// `profile` is the profile DID that owns this replica of the
-    /// repository — it's required to derive the
-    /// `(profile, subject)`-based [`crate::schema::Replica`] entity
-    /// that anchors the schema-shaped facts ([`crate::schema::Branch`],
-    /// [`crate::schema::TrackingBranch`]).
-    ///
-    /// Returns a [`BranchMetadata`] command; call `.perform(&env).await`
-    /// to materialize the [`VolatileLayer`]. The env is what lets the
-    /// command resolve any remote-upstream address (so an
-    /// `Upstream::Remote` ends up with a schema::Remote-rooted
-    /// upstream branch entity in the tracking link).
-    ///
-    /// Compose with `branch.query().with(branch.metadata(profile).perform(&env).await?)`.
-    pub fn metadata(&self, profile: Did) -> super::metadata::BranchMetadata<'_> {
-        super::metadata::BranchMetadata::new(self, profile)
     }
 }

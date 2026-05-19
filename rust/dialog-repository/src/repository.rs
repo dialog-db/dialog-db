@@ -1095,65 +1095,6 @@ mod tests {
         }
 
         #[dialog_common::test]
-        async fn branch_metadata_layer_exposes_branch_internals() -> anyhow::Result<()> {
-            // The built-in branch metadata layer should make the branch
-            // name and revision queryable as ordinary facts.
-            let (operator, profile) = test_operator_with_profile().await;
-            let repo = test_repo(&operator, &profile).await;
-            let branch = repo.branch("main").open().perform(&operator).await?;
-
-            // Commit something so the branch has a revision to expose.
-            branch
-                .transaction()
-                .assert(the!("user/name").of(Entity::new()?).is("Alice".to_string()))
-                .commit()
-                .perform(&operator)
-                .await?;
-            // Reload the branch so its revision cell reflects the commit.
-            let branch = repo.branch("main").load().perform(&operator).await?;
-
-            let synthetic: Entity = "id:branch".parse()?;
-            let names: Vec<BranchMeta> = branch
-                .query()
-                .with(branch.metadata(profile.did()).perform(&operator).await?)
-                .select(Query::<BranchMeta> {
-                    this: synthetic.clone().into(),
-                    name: Term::var("name"),
-                })
-                .perform(&operator)
-                .try_vec()
-                .await?;
-
-            assert_eq!(names.len(), 1);
-            assert_eq!(names[0].name.0, "main");
-
-            // The revision-hash fact should be present.
-            let revision: Vec<branch_meta::RevisionHash> = branch
-                .query()
-                .with(branch.metadata(profile.did()).perform(&operator).await?)
-                .select(Query::<RevisionConcept> {
-                    this: synthetic.clone().into(),
-                    revision_hash: Term::var("hash"),
-                })
-                .perform(&operator)
-                .try_vec()
-                .await?
-                .into_iter()
-                .map(|c| c.revision_hash)
-                .collect();
-
-            assert_eq!(revision.len(), 1);
-            assert!(!revision[0].0.is_empty(), "tree hash should be non-empty");
-            Ok(())
-        }
-
-        #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-        pub struct RevisionConcept {
-            pub this: Entity,
-            pub revision_hash: branch_meta::RevisionHash,
-        }
-
-        #[dialog_common::test]
         async fn layer_unions_two_branches() -> anyhow::Result<()> {
             // Layering a second branch onto a query session should union
             // both branches' facts during select.
@@ -1306,62 +1247,23 @@ mod tests {
             Ok(())
         }
 
-        // -- Branch::metadata coverage -------------------------------------
-
-        mod repo_meta {
-            #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
-            #[domain("dialog.meta")]
-            pub struct Did(pub String);
-        }
-
-        #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-        pub struct RepoConcept {
-            pub this: Entity,
-            pub did: repo_meta::Did,
-        }
+        // -- Auto-injected schema metadata ---------------------------------
 
         #[dialog_common::test]
-        async fn branch_metadata_exposes_repository_did() -> anyhow::Result<()> {
-            // dialog.meta/did on the synthetic `id:repository` entity should
-            // match the branch's host DID.
-            let (operator, profile) = test_operator_with_profile().await;
-            let repo = test_repo(&operator, &profile).await;
-            let branch = repo.branch("main").open().perform(&operator).await?;
-            let expected_did = branch.of().to_string();
-
-            let repo_entity: Entity = "id:repository".parse()?;
-            let results: Vec<RepoConcept> = branch
-                .query()
-                .with(branch.metadata(profile.did()).perform(&operator).await?)
-                .select(Query::<RepoConcept> {
-                    this: repo_entity.into(),
-                    did: Term::var("did"),
-                })
-                .perform(&operator)
-                .try_vec()
-                .await?;
-
-            assert_eq!(results.len(), 1, "repository DID fact must be present");
-            assert_eq!(results[0].did.0, expected_did);
-            Ok(())
-        }
-
-        #[dialog_common::test]
-        async fn branch_metadata_exposes_schema_branch_concept() -> anyhow::Result<()> {
-            // The metadata layer asserts a content-derived
-            // schema::Branch whose `origin` is the replica entity
-            // built from `(profile, subject)`.
+        async fn branch_query_auto_includes_schema_branch() -> anyhow::Result<()> {
+            // branch.query() should expose schema::Branch facts without
+            // any manual .with(...) overlay. The branch entity is
+            // content-derived from (profile, subject, name).
             use crate::schema;
 
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
-            let replica = schema::Replica::new(profile.did(), branch.of().clone(), "");
-            let expected = schema::Branch::new(&replica, "main");
+            let origin = schema::Origin::new(profile.did(), branch.of().clone());
+            let expected = schema::Branch::new(&origin, "main");
 
             let results: Vec<schema::Branch> = branch
                 .query()
-                .with(branch.metadata(profile.did()).perform(&operator).await?)
                 .select(Query::<schema::Branch> {
                     this: expected.this.clone().into(),
                     name: Term::var("name"),
@@ -1371,199 +1273,154 @@ mod tests {
                 .try_vec()
                 .await?;
 
-            assert_eq!(
-                results.len(),
-                1,
-                "schema::Branch must surface from metadata"
-            );
+            assert_eq!(results.len(), 1, "schema::Branch must auto-surface");
             assert_eq!(results[0].this, expected.this);
             assert_eq!(results[0].name.0, "main");
-            assert_eq!(results[0].origin.0, replica.this);
+            assert_eq!(results[0].origin.0, origin.this);
             Ok(())
         }
 
         #[dialog_common::test]
-        async fn branch_metadata_exposes_tracking_branch_for_local_upstream() -> anyhow::Result<()>
-        {
-            // For a local-upstream branch, the metadata layer asserts a
-            // schema::TrackingBranch linking the local branch entity to
-            // the upstream branch entity. Both branches share the same
-            // replica origin since the upstream is local.
+        async fn branch_query_auto_includes_origin() -> anyhow::Result<()> {
+            // branch.query() should also auto-surface the schema::Origin
+            // anchoring the branch — entity is (profile, subject)-derived
+            // and carries the two DIDs as attributes.
+            use crate::schema;
+            use crate::schema::prelude::*;
+
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+            let expected = schema::Origin::new(profile.did(), branch.of().clone());
+
+            let results: Vec<schema::Origin> = branch
+                .query()
+                .select(Query::<schema::Origin> {
+                    this: expected.this.clone().into(),
+                    subject: Term::var("subject"),
+                    profile: Term::var("profile"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+
+            assert_eq!(results.len(), 1, "schema::Origin must auto-surface");
+            assert_eq!(results[0].this, expected.this);
+            assert_eq!(results[0].subject.0, branch.of().this());
+            assert_eq!(results[0].profile.0, profile.did().this());
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn branch_query_auto_includes_branch_revision_after_commit() -> anyhow::Result<()> {
+            // After a commit the branch has a revision, so the metadata
+            // overlay includes a BranchRevision fact carrying the tree
+            // hash + clock components.
             use crate::schema;
 
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
-            let main = repo.branch("main").open().perform(&operator).await?;
-            let feature = repo.branch("feature").open().perform(&operator).await?;
-            feature.set_upstream(&main).perform(&operator).await?;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+            branch
+                .transaction()
+                .assert(the!("user/name").of(Entity::new()?).is("Alice".to_string()))
+                .commit()
+                .perform(&operator)
+                .await?;
+            // Reload so the revision cell reflects the commit.
+            let branch = repo.branch("main").load().perform(&operator).await?;
+            let origin = schema::Origin::new(profile.did(), branch.of().clone());
+            let branch_concept = schema::Branch::new(&origin, "main");
 
-            let replica = schema::Replica::new(profile.did(), feature.of().clone(), "");
-            let feature_concept = schema::Branch::new(&replica, "feature");
-            let main_concept = schema::Branch::new(&replica, "main");
-
-            let results: Vec<schema::TrackingBranch> = feature
+            let results: Vec<schema::BranchRevision> = branch
                 .query()
-                .with(feature.metadata(profile.did()).perform(&operator).await?)
-                .select(Query::<schema::TrackingBranch> {
-                    this: feature_concept.this.clone().into(),
-                    upstream: Term::var("upstream"),
-                    origin: Term::var("origin"),
+                .select(Query::<schema::BranchRevision> {
+                    this: branch_concept.this.clone().into(),
+                    tree: Term::var("tree"),
+                    period: Term::var("period"),
+                    moment: Term::var("moment"),
                 })
                 .perform(&operator)
                 .try_vec()
                 .await?;
 
-            assert_eq!(results.len(), 1, "TrackingBranch must be present");
-            assert_eq!(results[0].this, feature_concept.this);
-            assert_eq!(
-                results[0].upstream.0, main_concept.this,
-                "upstream must point at the main branch entity",
+            assert_eq!(results.len(), 1, "BranchRevision must surface after commit");
+            assert_eq!(results[0].this, branch_concept.this);
+            assert!(
+                !results[0].tree.0.is_empty(),
+                "tree hash should be non-empty"
             );
-            assert_eq!(results[0].origin.0, replica.this);
             Ok(())
         }
 
         #[dialog_common::test]
-        async fn branch_metadata_exposes_tracking_branch_for_remote_upstream() -> anyhow::Result<()>
-        {
-            // For an Upstream::Remote, the metadata layer loads the
-            // remote's address, constructs a schema::Remote, builds
-            // the upstream schema::Branch rooted at that Remote, and
-            // emits a TrackingBranch linking the local branch to it.
+        async fn branch_query_omits_branch_revision_before_any_commit() -> anyhow::Result<()> {
+            // A freshly-opened branch with no commits has no revision —
+            // so no BranchRevision fact should appear.
             use crate::schema;
-            use crate::schema::domain::remote::Address as RemoteAddressAttr;
-            use dialog_remote_s3::Address;
 
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
-
-            let site = Address::builder("https://s3.us-east-1.amazonaws.com")
-                .region("us-east-1")
-                .bucket("bucket")
-                .build()
-                .unwrap();
-            let origin = repo
-                .remote("origin")
-                .create(site.clone())
-                .perform(&operator)
-                .await?;
-            let remote_main = origin.branch("main").open().perform(&operator).await?;
-
             let branch = repo.branch("main").open().perform(&operator).await?;
-            branch.set_upstream(&remote_main).perform(&operator).await?;
+            let origin = schema::Origin::new(profile.did(), branch.of().clone());
+            let branch_concept = schema::Branch::new(&origin, "main");
 
-            // Expected entities, derived the same way `BranchMetadata`
-            // does: replica from `(profile, subject)`, remote concept
-            // from `(replica, remote subject, address, name)`.
-            let replica = schema::Replica::new(profile.did(), branch.of().clone(), "");
-            let local_concept = schema::Branch::new(&replica, "main");
-            let remote_addr = repo
-                .remote("origin")
-                .load()
-                .perform(&operator)
-                .await?
-                .address();
-            let remote_concept = schema::Remote::new(
-                &replica,
-                remote_addr.subject.clone(),
-                RemoteAddressAttr::encode(&remote_addr.address),
-                "origin",
-            );
-            let expected_upstream = schema::Branch::new(&remote_concept, "main");
-
-            let results: Vec<schema::TrackingBranch> = branch
+            let results: Vec<schema::BranchRevision> = branch
                 .query()
-                .with(branch.metadata(profile.did()).perform(&operator).await?)
-                .select(Query::<schema::TrackingBranch> {
-                    this: local_concept.this.clone().into(),
-                    upstream: Term::var("upstream"),
-                    origin: Term::var("origin"),
+                .select(Query::<schema::BranchRevision> {
+                    this: branch_concept.this.into(),
+                    tree: Term::var("tree"),
+                    period: Term::var("period"),
+                    moment: Term::var("moment"),
                 })
                 .perform(&operator)
                 .try_vec()
                 .await?;
 
-            assert_eq!(
-                results.len(),
-                1,
-                "TrackingBranch for remote upstream must be present"
+            assert!(
+                results.is_empty(),
+                "no BranchRevision should surface for a fresh branch"
             );
-            assert_eq!(results[0].this, local_concept.this);
-            assert_eq!(
-                results[0].upstream.0, expected_upstream.this,
-                "upstream entity must match the schema::Remote-rooted branch",
-            );
-            assert_eq!(results[0].origin.0, replica.this);
-            Ok(())
-        }
-
-        mod upstream_meta {
-            #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
-            #[domain("dialog.meta")]
-            pub struct Kind(pub String);
-
-            #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
-            #[domain("dialog.meta")]
-            pub struct Branch(pub String);
-        }
-
-        #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-        pub struct UpstreamConcept {
-            pub this: Entity,
-            pub kind: upstream_meta::Kind,
-            pub branch: upstream_meta::Branch,
-        }
-
-        #[dialog_common::test]
-        async fn branch_metadata_exposes_upstream_when_configured() -> anyhow::Result<()> {
-            // After set_upstream, the metadata layer should report kind=local
-            // and the upstream branch name on the `id:upstream` entity.
-            let (operator, profile) = test_operator_with_profile().await;
-            let repo = test_repo(&operator, &profile).await;
-            let main = repo.branch("main").open().perform(&operator).await?;
-            let feature = repo.branch("feature").open().perform(&operator).await?;
-            feature.set_upstream(&main).perform(&operator).await?;
-
-            let upstream_entity: Entity = "id:upstream".parse()?;
-            let results: Vec<UpstreamConcept> = feature
-                .query()
-                .with(feature.metadata(profile.did()).perform(&operator).await?)
-                .select(Query::<UpstreamConcept> {
-                    this: upstream_entity.into(),
-                    kind: Term::var("kind"),
-                    branch: Term::var("branch"),
-                })
-                .perform(&operator)
-                .try_vec()
-                .await?;
-
-            assert_eq!(results.len(), 1);
-            assert_eq!(results[0].kind.0, "local");
-            assert_eq!(results[0].branch.0, "main");
             Ok(())
         }
 
         #[dialog_common::test]
-        async fn branch_metadata_omits_upstream_facts_when_none() -> anyhow::Result<()> {
-            // Without an upstream configured, no UpstreamConcept should match.
+        async fn metadata_facts_are_not_in_branch_tree() -> anyhow::Result<()> {
+            // The schema-shaped metadata is synthesized at query time
+            // into a per-query overlay; nothing is written to the
+            // branch's tree. Reading the branch's claims directly
+            // (bypassing the QuerySession overlay) should return no
+            // dialog.branch/* artifacts.
+            use dialog_artifacts::ArtifactSelector;
+            use futures_util::StreamExt as _;
+
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
-
-            let upstream_entity: Entity = "id:upstream".parse()?;
-            let results: Vec<UpstreamConcept> = branch
-                .query()
-                .with(branch.metadata(profile.did()).perform(&operator).await?)
-                .select(Query::<UpstreamConcept> {
-                    this: upstream_entity.into(),
-                    kind: Term::var("kind"),
-                    branch: Term::var("branch"),
-                })
+            // Commit something so the branch has a tree to scan.
+            branch
+                .transaction()
+                .assert(the!("user/name").of(Entity::new()?).is("Alice".to_string()))
+                .commit()
                 .perform(&operator)
-                .try_vec()
                 .await?;
+            let branch = repo.branch("main").load().perform(&operator).await?;
 
-            assert!(results.is_empty());
+            // Scan the branch's underlying claims directly for the
+            // dialog.branch/name attribute — bypasses the QuerySession
+            // overlay so any hit would mean facts leaked into the tree.
+            let select = branch
+                .claims()
+                .select(ArtifactSelector::new().the("dialog.branch/name".parse()?));
+            let store = crate::NetworkedIndex::new(&operator, select.catalog(), None);
+            let stream = select.execute(store).await?;
+            let leaked: Vec<_> = stream.collect::<Vec<_>>().await;
+
+            assert!(
+                leaked.is_empty(),
+                "schema metadata must not leak into the branch tree; found {} artifact(s)",
+                leaked.len()
+            );
             Ok(())
         }
 

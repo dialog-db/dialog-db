@@ -27,7 +27,6 @@ mod load;
 pub use load::*;
 
 mod metadata;
-pub use metadata::*;
 
 mod open;
 pub use open::*;
