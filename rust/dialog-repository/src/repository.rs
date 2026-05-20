@@ -1596,9 +1596,9 @@ mod tests {
 
         #[dialog_common::test]
         async fn it_reflects_overlay_state_on_session_accessors() -> anyhow::Result<()> {
-            // The session's overlay carries the joined branches and the
-            // pending overlay changes (asserted statements). Verify
-            // both are visible through the public accessors.
+            // A QueryLayer carries every branch (the one `query()` was
+            // called on plus any `.join`-ed) and the pending overlay
+            // changes. Verify both are visible through the accessors.
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
             let main = repo.branch("main").open().perform(&operator).await?;
@@ -1609,24 +1609,29 @@ mod tests {
                 name: employee::Name("Synth".into()),
                 role: employee::Role("Bot".into()),
             });
-            assert_eq!(session.layer().branches().len(), 1);
-            assert_eq!(session.layer().branches()[0].name(), "main");
+            // `feature.query()` seeds `feature`; `.join(&main)` adds main.
+            assert_eq!(session.branches().len(), 2);
+            assert_eq!(session.branches()[0].name(), "feature");
+            assert_eq!(session.branches()[1].name(), "main");
             assert!(
-                !session.layer().changes().is_empty(),
+                !session.changes().is_empty(),
                 "overlay changes must contain the asserted Employee"
             );
             Ok(())
         }
 
         #[dialog_common::test]
-        async fn it_starts_with_empty_overlay_on_a_fresh_session() -> anyhow::Result<()> {
+        async fn it_starts_with_only_its_branch_and_empty_overlay() -> anyhow::Result<()> {
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
+            // A fresh `query()` holds exactly its own branch and no
+            // caller-supplied overlay changes.
             let session = branch.query();
-            assert!(session.layer().branches().is_empty());
-            assert!(session.layer().changes().is_empty());
+            assert_eq!(session.branches().len(), 1);
+            assert_eq!(session.branches()[0].name(), "main");
+            assert!(session.changes().is_empty());
             Ok(())
         }
 

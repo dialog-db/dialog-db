@@ -16,10 +16,10 @@
 //! orphan rule rules out inherent methods — the operations are exposed as
 //! an extension trait instead.
 
-use std::future::Future;
 use std::ops::Range;
 
 use async_stream::try_stream;
+use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_prolly_tree::{Entry, GeometricDistribution, Tree};
 use dialog_storage::{Blake3Hash, ContentAddressedStorage, DialogStorageError};
@@ -38,7 +38,12 @@ pub type ArtifactTree = Tree<GeometricDistribution, Key, State<Datum>, Blake3Has
 ///
 /// An extension trait rather than inherent methods because
 /// `ArtifactTree` aliases a foreign `dialog_prolly_tree::Tree` — the
-/// orphan rule forbids `impl ArtifactTree { .. }`.
+/// orphan rule forbids `impl ArtifactTree { .. }`. Uses
+/// `#[async_trait]` (matching [`ArtifactStore`](crate::ArtifactStore))
+/// so the async `apply` desugars to a boxed future rather than a
+/// bound-less native `async fn`.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait ArtifactTreeExt {
     /// Drain a stream of [`Instruction`]s into the tree, applying the
     /// same key writes that a branch commit or `Artifacts::commit`
@@ -52,11 +57,11 @@ pub trait ArtifactTreeExt {
     ///
     /// Callers own everything else: building the change stream,
     /// choosing a base tree root, persisting a `Revision`, etc.
-    fn apply<S, I>(
+    async fn apply<S, I>(
         &mut self,
         store: &mut S,
         instructions: I,
-    ) -> impl Future<Output = Result<(), DialogArtifactsError>> + ConditionalSend
+    ) -> Result<(), DialogArtifactsError>
     where
         S: ContentAddressedStorage<Hash = Blake3Hash, Error = DialogStorageError> + ConditionalSync,
         I: Stream<Item = Instruction> + ConditionalSend;
@@ -86,115 +91,106 @@ pub trait ArtifactTreeExt {
             + 's;
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl ArtifactTreeExt for ArtifactTree {
-    fn apply<S, I>(
+    async fn apply<S, I>(
         &mut self,
         store: &mut S,
         instructions: I,
-    ) -> impl Future<Output = Result<(), DialogArtifactsError>> + ConditionalSend
+    ) -> Result<(), DialogArtifactsError>
     where
         S: ContentAddressedStorage<Hash = Blake3Hash, Error = DialogStorageError> + ConditionalSync,
         I: Stream<Item = Instruction> + ConditionalSend,
     {
-        async move {
-            tokio::pin!(instructions);
-            while let Some(instruction) = instructions.next().await {
-                match instruction {
-                    Instruction::Assert(artifact) => {
-                        let entity_key = EntityKey::from(&artifact);
-                        let value_key = ValueKey::from_key(&entity_key);
-                        let attribute_key = AttributeKey::from_key(&entity_key);
+        tokio::pin!(instructions);
+        while let Some(instruction) = instructions.next().await {
+            match instruction {
+                Instruction::Assert(artifact) => {
+                    let entity_key = EntityKey::from(&artifact);
+                    let value_key = ValueKey::from_key(&entity_key);
+                    let attribute_key = AttributeKey::from_key(&entity_key);
 
-                        let datum = Datum::from(artifact);
-                        self.set(entity_key.into_key(), State::Added(datum.clone()), store)
-                            .await?;
-                        self.set(
-                            attribute_key.into_key(),
-                            State::Added(datum.clone()),
-                            store,
-                        )
+                    let datum = Datum::from(artifact);
+                    self.set(entity_key.into_key(), State::Added(datum.clone()), store)
                         .await?;
-                        self.set(value_key.into_key(), State::Added(datum), store)
-                            .await?;
-                    }
-                    Instruction::Replace(artifact) => {
-                        let entity_key = EntityKey::from(&artifact);
+                    self.set(attribute_key.into_key(), State::Added(datum.clone()), store)
+                        .await?;
+                    self.set(value_key.into_key(), State::Added(datum), store)
+                        .await?;
+                }
+                Instruction::Replace(artifact) => {
+                    let entity_key = EntityKey::from(&artifact);
 
-                        // Scan priors at this (entity, attribute).
-                        // Same-valued priors already represent the
-                        // desired state; only different-valued ones
-                        // need superseding.
-                        let mut superseded_keys: Vec<Key> = Vec::new();
-                        let mut found_same_value = false;
-                        {
-                            let search_start = <EntityKey<Key> as KeyViewConstruct>::min()
-                                .set_entity(entity_key.entity())
-                                .set_attribute(entity_key.attribute())
-                                .into_key();
-                            let search_end = <EntityKey<Key> as KeyViewConstruct>::max()
-                                .set_entity(entity_key.entity())
-                                .set_attribute(entity_key.attribute())
-                                .into_key();
-                            let search_stream =
-                                self.stream_range(search_start..search_end, store);
-                            tokio::pin!(search_stream);
-                            while let Some(candidate) = search_stream.try_next().await? {
-                                if let State::Added(current_element) = candidate.value {
-                                    let current = Artifact::try_from(current_element)?;
-                                    if current.is == artifact.is {
-                                        found_same_value = true;
-                                    } else {
-                                        superseded_keys.push(candidate.key);
-                                    }
+                    // Scan priors at this (entity, attribute).
+                    // Same-valued priors already represent the
+                    // desired state; only different-valued ones
+                    // need superseding.
+                    let mut superseded_keys: Vec<Key> = Vec::new();
+                    let mut found_same_value = false;
+                    {
+                        let search_start = <EntityKey<Key> as KeyViewConstruct>::min()
+                            .set_entity(entity_key.entity())
+                            .set_attribute(entity_key.attribute())
+                            .into_key();
+                        let search_end = <EntityKey<Key> as KeyViewConstruct>::max()
+                            .set_entity(entity_key.entity())
+                            .set_attribute(entity_key.attribute())
+                            .into_key();
+                        let search_stream = self.stream_range(search_start..search_end, store);
+                        tokio::pin!(search_stream);
+                        while let Some(candidate) = search_stream.try_next().await? {
+                            if let State::Added(current_element) = candidate.value {
+                                let current = Artifact::try_from(current_element)?;
+                                if current.is == artifact.is {
+                                    found_same_value = true;
+                                } else {
+                                    superseded_keys.push(candidate.key);
                                 }
                             }
                         }
+                    }
 
-                        for key in superseded_keys {
-                            let entity_key = EntityKey(key);
-                            let value_key = ValueKey::from_key(&entity_key);
-                            let attribute_key = AttributeKey::from_key(&entity_key);
-
-                            self.delete(&entity_key.into_key(), store).await?;
-                            self.delete(&value_key.into_key(), store).await?;
-                            self.delete(&attribute_key.into_key(), store).await?;
-                        }
-
-                        if found_same_value {
-                            continue;
-                        }
-
-                        let entity_key = EntityKey::from(&artifact);
+                    for key in superseded_keys {
+                        let entity_key = EntityKey(key);
                         let value_key = ValueKey::from_key(&entity_key);
                         let attribute_key = AttributeKey::from_key(&entity_key);
-                        let datum = Datum::from(artifact);
-                        self.set(entity_key.into_key(), State::Added(datum.clone()), store)
-                            .await?;
-                        self.set(
-                            attribute_key.into_key(),
-                            State::Added(datum.clone()),
-                            store,
-                        )
+
+                        self.delete(&entity_key.into_key(), store).await?;
+                        self.delete(&value_key.into_key(), store).await?;
+                        self.delete(&attribute_key.into_key(), store).await?;
+                    }
+
+                    if found_same_value {
+                        continue;
+                    }
+
+                    let entity_key = EntityKey::from(&artifact);
+                    let value_key = ValueKey::from_key(&entity_key);
+                    let attribute_key = AttributeKey::from_key(&entity_key);
+                    let datum = Datum::from(artifact);
+                    self.set(entity_key.into_key(), State::Added(datum.clone()), store)
                         .await?;
-                        self.set(value_key.into_key(), State::Added(datum), store)
-                            .await?;
-                    }
-                    Instruction::Retract(artifact) => {
-                        let entity_key = EntityKey::from(&artifact);
-                        let value_key = ValueKey::from_key(&entity_key);
-                        let attribute_key = AttributeKey::from_key(&entity_key);
+                    self.set(attribute_key.into_key(), State::Added(datum.clone()), store)
+                        .await?;
+                    self.set(value_key.into_key(), State::Added(datum), store)
+                        .await?;
+                }
+                Instruction::Retract(artifact) => {
+                    let entity_key = EntityKey::from(&artifact);
+                    let value_key = ValueKey::from_key(&entity_key);
+                    let attribute_key = AttributeKey::from_key(&entity_key);
 
-                        self.set(entity_key.into_key(), State::Removed, store)
-                            .await?;
-                        self.set(attribute_key.into_key(), State::Removed, store)
-                            .await?;
-                        self.set(value_key.into_key(), State::Removed, store)
-                            .await?;
-                    }
+                    self.set(entity_key.into_key(), State::Removed, store)
+                        .await?;
+                    self.set(attribute_key.into_key(), State::Removed, store)
+                        .await?;
+                    self.set(value_key.into_key(), State::Removed, store)
+                        .await?;
                 }
             }
-            Ok(())
         }
+        Ok(())
     }
 
     fn scan<'s, S>(

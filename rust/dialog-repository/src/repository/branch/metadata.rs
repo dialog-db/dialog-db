@@ -1,98 +1,90 @@
-//! Schema-metadata synthesis for a query session.
+//! Branch metadata concepts.
 //!
-//! `synthesize` builds the per-query overlay [`Changes`] from the
-//! operator's [`Identify`] result and the branches the session has in
-//! scope. Asserted facts:
+//! [`Branch::metadata`] turns a branch handle + the operator's
+//! identity into a typed [`BranchMetadata`] — the [`Origin`], the
+//! [`Branch`](BranchConcept) concept, and a [`BranchRevision`] when
+//! the branch has a commit. `BranchMetadata` implements [`Statement`],
+//! so it folds straight into a [`Changes`](dialog_artifacts::Changes)
+//! batch.
 //!
-//! - one [`Origin`] per branch (`(profile, branch.of)`-derived);
-//! - one [`Branch`](BranchConcept) per branch (`(origin, name)`-derived);
-//! - one [`BranchRevision`] per branch that has a committed revision;
-//! - one [`Session`] on the fixed `db:session` entity;
-//! - one [`session::Branch`] attribute on `db:session` per layered
-//!   branch (cardinality-many — separate from the `Session` concept).
-//!
-//! Called by `SelectQuery::perform` once at the start of each query.
-//! Nothing here writes to any branch's tree; the returned `Changes`
-//! is only used as an in-memory overlay via
-//! [`Provider<Select> for Changes`](dialog_artifacts::Changes).
+//! The query layer composes these per-branch bundles (plus a
+//! [`Session`](crate::schema::Session)) into the overlay every
+//! `branch.query()` is evaluated against — see
+//! [`QueryLayer::metadata`](super::session::QueryLayer::metadata).
 
 use base58::ToBase58;
-use dialog_artifacts::Changes;
-use dialog_capability::Did;
-use dialog_query::the;
+use dialog_artifacts::{Statement, Update};
+use dialog_capability::Capability;
+use dialog_effects::authority::{Operator, OperatorExt as _};
 
 use crate::Branch;
 use crate::schema::Branch as BranchConcept;
-use crate::schema::BranchRevision;
-use crate::schema::DidExt as _;
-use crate::schema::Origin;
-use crate::schema::Session;
 use crate::schema::branch::{Moment, Period, Tree};
-use crate::schema::session;
+use crate::schema::{BranchRevision, Origin};
 
-/// Build the metadata [`Changes`] overlay for a query session.
+/// The schema-shaped metadata for a single branch.
 ///
-/// `primary` is the session's primary branch (the one
-/// [`Branch::query`](crate::Branch::query) was called on); `branches`
-/// are any additional branches joined via `.join(&b)`. `profile` and
-/// `operator` come from [`Identify`](dialog_effects::authority::Identify)
-/// on the perform-env.
+/// Bundles the [`Origin`] (`(profile, subject)`-derived), the
+/// [`Branch`](BranchConcept) concept (`(origin, name)`-derived), and
+/// the [`BranchRevision`] when the branch has a committed revision.
 ///
-/// Asserts schema-shaped facts for every branch (Origin / Branch /
-/// optional BranchRevision) and one `Session` describing the query's
-/// (profile, operator, branches) context. See the module docs for the
-/// full fact set.
-pub(crate) fn synthesize(
-    primary: Option<&Branch>,
-    branches: &[&Branch],
-    profile: &Did,
-    operator: &Did,
-) -> Changes {
-    let mut changes = Changes::new();
-    let session_entity = Session::entity();
-    let mut branch_entities = Vec::new();
+/// Implements [`Statement`]: asserting a `BranchMetadata` asserts all
+/// three (origin, branch, optional revision) into the target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchMetadata {
+    /// This device's view of the repository the branch lives in.
+    pub origin: Origin,
+    /// The branch concept — name + origin, content-derived entity.
+    pub branch: BranchConcept,
+    /// The current revision, present once the branch has a commit.
+    pub revision: Option<BranchRevision>,
+}
 
-    // Per-branch facts: Origin + Branch + optional BranchRevision.
-    let mut emit_branch = |b: &Branch| {
-        let origin = Origin::new(profile.clone(), b.of().clone());
-        let branch_concept = BranchConcept::new(&origin, b.name());
-        branch_entities.push(branch_concept.this.clone());
-        changes.assert(origin);
-        if let Some(revision) = b.revision() {
+impl Statement for BranchMetadata {
+    fn assert(self, update: &mut impl Update) {
+        self.origin.assert(update);
+        self.branch.assert(update);
+        if let Some(revision) = self.revision {
+            revision.assert(update);
+        }
+    }
+
+    fn retract(self, update: &mut impl Update) {
+        self.origin.retract(update);
+        self.branch.retract(update);
+        if let Some(revision) = self.revision {
+            revision.retract(update);
+        }
+    }
+}
+
+impl Branch {
+    /// The schema [`BranchMetadata`] for this branch under `operator`'s
+    /// identity.
+    ///
+    /// `operator` supplies the profile DID: [`Origin`] is
+    /// `(profile, subject)`-derived — and the [`Branch`](BranchConcept)
+    /// and [`BranchRevision`] entities inherit that derivation — but a
+    /// branch handle carries only its subject, not a profile. The
+    /// `Capability<Operator>` (from
+    /// [`Identify`](dialog_effects::authority::Identify)) carries both
+    /// the profile and operator DIDs.
+    pub fn metadata(&self, operator: &Capability<Operator>) -> BranchMetadata {
+        let origin = Origin::new(operator.profile().clone(), self.of().clone());
+        let branch = BranchConcept::new(&origin, self.name());
+        let revision = self.revision().map(|revision| {
             let tree_bytes: &[u8] = revision.tree.hash();
-            changes.assert(BranchRevision {
-                this: branch_concept.this.clone(),
+            BranchRevision {
+                this: branch.this.clone(),
                 tree: Tree(ToBase58::to_base58(tree_bytes)),
                 period: Period(revision.period as u128),
                 moment: Moment(revision.moment as u128),
-            });
+            }
+        });
+        BranchMetadata {
+            origin,
+            branch,
+            revision,
         }
-        changes.assert(branch_concept);
-    };
-    if let Some(b) = primary {
-        emit_branch(b);
     }
-    for b in branches {
-        emit_branch(b);
-    }
-
-    // Session — one fact set for the whole query.
-    changes.assert(Session {
-        this: session_entity.clone(),
-        profile: session::Profile(profile.this()),
-        operator: session::Operator(operator.this()),
-    });
-
-    // `dialog.session/branch` — cardinality-many, one per branch.
-    // Asserted as a free-standing attribute (not part of the Session
-    // concept, which only holds the cardinality-one fields).
-    for branch_entity in branch_entities {
-        changes.assert(
-            the!("dialog.session/branch")
-                .of(session_entity.clone())
-                .is(branch_entity),
-        );
-    }
-
-    changes
 }
