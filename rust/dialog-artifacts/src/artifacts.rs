@@ -20,7 +20,7 @@ mod store;
 pub use store::*;
 
 mod update;
-pub use update::{Change, ChangeStream, Changes, Statement, Update};
+pub use update::{Change, ChangeStream, Changes, SortKey, Statement, Update, sort_key};
 
 mod attribute;
 pub use attribute::*;
@@ -48,8 +48,8 @@ pub use dialog_storage::{
     Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder, HashType,
     MemoryStorageBackend, Storage, StorageBackend,
 };
-use futures_util::{Stream, StreamExt};
-use std::{ops::Range, sync::Arc};
+use futures_util::Stream;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[cfg(feature = "csv")]
@@ -61,10 +61,9 @@ use async_stream::stream;
 #[cfg(feature = "csv")]
 use tokio::io::{AsyncRead, AsyncWrite};
 
+use crate::tree::ArtifactTreeExt;
 use crate::{
-    AttributeKey, DialogArtifactsError, EntityKey, FromKey, HASH_SIZE, Key, KeyView,
-    KeyViewConstruct, KeyViewMut, State, ValueKey, artifacts::selector::Constrained,
-    make_reference,
+    DialogArtifactsError, HASH_SIZE, Key, State, artifacts::selector::Constrained, make_reference,
 };
 
 /// An alias type that describes the [`Tree`]-based prolly tree that is
@@ -349,63 +348,15 @@ where
         let storage = self.storage.clone();
 
         try_stream! {
-            // We clone to "pin" the indexes at a version for the lifetime of the stream
-            let index = index.read().await.clone();
-
-            if selector.entity().is_some() {
-                let start = <EntityKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
-                let end = <EntityKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
-
-                let stream = index.stream_range(Range { start, end }, &storage);
-
-                tokio::pin!(stream);
-
-                for await item in stream {
-                    let entry = item?;
-
-                    if entry.matches_selector(&selector)
-                        && let Entry { value: State::Added(datum), .. } = entry
-                    {
-                        yield Artifact::try_from(datum)?;
-                    }
-                }
-            } else if selector.value().is_some() {
-                let start = <ValueKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
-                let end = <ValueKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
-
-                let stream = index.stream_range(Range { start, end }, &storage);
-
-                tokio::pin!(stream);
-
-                for await item in stream {
-                    let entry = item?;
-
-                    if entry.matches_selector(&selector)
-                        && let Entry { value: State::Added(datum), .. } = entry
-                    {
-                        yield Artifact::try_from(datum)?;
-                    }
-                }
-            } else if selector.attribute().is_some() {
-                let start = <AttributeKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
-                let end = <AttributeKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
-
-                let stream = index.stream_range(Range { start, end }, &storage);
-
-                tokio::pin!(stream);
-
-                for await item in stream {
-                    let entry = item?;
-
-                    if entry.matches_selector(&selector)
-                        && let Entry { value: State::Added(datum), .. } = entry
-                    {
-                        yield Artifact::try_from(datum)?;
-                    }
-                }
-            } else {
-                unreachable!("ArtifactSelector will always have at least one field specified")
-            };
+            // Clone the tree under the read lock to "pin" it at a
+            // version for the stream's lifetime, then hand off to the
+            // shared `ArtifactTreeExt::scan` for EAV/AEV/VAE dispatch.
+            let tree = index.read().await.clone();
+            let scanned = tree.scan(storage, selector);
+            tokio::pin!(scanned);
+            for await artifact in scanned {
+                yield artifact?;
+            }
         }
     }
 }
@@ -430,132 +381,13 @@ where
         let transaction_result = async {
             let mut index = self.index.write().await;
 
-            tokio::pin!(instructions);
-
-            while let Some(instruction) = instructions.next().await {
-                match instruction {
-                    Instruction::Assert(artifact) => {
-                        let entity_key = EntityKey::from(&artifact);
-                        let value_key = ValueKey::from_key(&entity_key);
-                        let attribute_key = AttributeKey::from_key(&entity_key);
-
-                        let datum = Datum::from(artifact);
-
-                        // TODO: Make it concurrent / parallel
-                        index
-                            .set(
-                                entity_key.into_key(),
-                                State::Added(datum.clone()),
-                                &mut self.storage,
-                            )
-                            .await?;
-                        index
-                            .set(
-                                attribute_key.into_key(),
-                                State::Added(datum.clone()),
-                                &mut self.storage,
-                            )
-                            .await?;
-                        index
-                            .set(value_key.into_key(), State::Added(datum), &mut self.storage)
-                            .await?;
-                    }
-                    Instruction::Replace(artifact) => {
-                        let entity_key = EntityKey::from(&artifact);
-
-                        // Scan priors at this (entity, attribute). Same-valued
-                        // priors already represent the desired state; only
-                        // different-valued ones need superseding.
-                        let mut superseded_keys: Vec<Key> = Vec::new();
-                        let mut found_same_value = false;
-                        {
-                            let search_start = <EntityKey<Key> as KeyViewConstruct>::min()
-                                .set_entity(entity_key.entity())
-                                .set_attribute(entity_key.attribute())
-                                .into_key();
-                            let search_end = <EntityKey<Key> as KeyViewConstruct>::max()
-                                .set_entity(entity_key.entity())
-                                .set_attribute(entity_key.attribute())
-                                .into_key();
-
-                            let search_stream =
-                                index.stream_range(search_start..search_end, &self.storage);
-                            tokio::pin!(search_stream);
-
-                            while let Some(candidate) = search_stream.try_next().await? {
-                                if let State::Added(current_element) = candidate.value {
-                                    let current = Artifact::try_from(current_element)?;
-                                    if current.is == artifact.is {
-                                        found_same_value = true;
-                                    } else {
-                                        superseded_keys.push(candidate.key);
-                                    }
-                                }
-                            }
-                        }
-
-                        for key in superseded_keys {
-                            let entity_key = EntityKey(key);
-                            let value_key = ValueKey::from_key(&entity_key);
-                            let attribute_key = AttributeKey::from_key(&entity_key);
-
-                            index
-                                .delete(&entity_key.into_key(), &mut self.storage)
-                                .await?;
-                            index
-                                .delete(&value_key.into_key(), &mut self.storage)
-                                .await?;
-                            index
-                                .delete(&attribute_key.into_key(), &mut self.storage)
-                                .await?;
-                        }
-
-                        // Skip insert if a same-value prior is already in place.
-                        if found_same_value {
-                            continue;
-                        }
-
-                        let entity_key = EntityKey::from(&artifact);
-                        let value_key = ValueKey::from_key(&entity_key);
-                        let attribute_key = AttributeKey::from_key(&entity_key);
-                        let datum = Datum::from(artifact);
-
-                        index
-                            .set(
-                                entity_key.into_key(),
-                                State::Added(datum.clone()),
-                                &mut self.storage,
-                            )
-                            .await?;
-                        index
-                            .set(
-                                attribute_key.into_key(),
-                                State::Added(datum.clone()),
-                                &mut self.storage,
-                            )
-                            .await?;
-                        index
-                            .set(value_key.into_key(), State::Added(datum), &mut self.storage)
-                            .await?;
-                    }
-                    Instruction::Retract(fact) => {
-                        let entity_key = EntityKey::from(&fact);
-                        let value_key = ValueKey::from_key(&entity_key);
-                        let attribute_key = AttributeKey::from_key(&entity_key);
-
-                        // TODO: Make it concurrent / parallel
-                        index
-                            .set(entity_key.into_key(), State::Removed, &mut self.storage)
-                            .await?;
-                        index
-                            .set(attribute_key.into_key(), State::Removed, &mut self.storage)
-                            .await?;
-                        index
-                            .set(value_key.into_key(), State::Removed, &mut self.storage)
-                            .await?;
-                    }
-                }
-            }
+            // The per-instruction EAV/AEV/VAE key writes (and
+            // cardinality-one supersession) are the shared
+            // `ArtifactTreeExt::apply`. `commit` adds only the
+            // surrounding transaction bookkeeping — base-revision
+            // capture, revision persistence, pointer advance, and the
+            // rollback below.
+            index.apply(&mut self.storage, instructions).await?;
 
             let next_revision = index.hash().map(Revision::new);
 
