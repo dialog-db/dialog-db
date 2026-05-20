@@ -323,23 +323,23 @@ impl<'a> Provider<Select<'a>> for Changes {
         let of = input.entity();
         let is = input.value();
 
-        // O(1) HashMap lookups when the corresponding dimension is
-        // bound; fall through to iteration when it isn't. Critical for
-        // the per-candidate hot path — the query engine calls this
-        // once per upstream binding, so a linear scan over every entity
-        // in the overlay scales poorly.
+        // Linear filter over the batch. A `Changes` overlay is small
+        // by construction — a few auto-injected metadata facts plus
+        // whatever the caller asserted via `.with(...)` — so scanning
+        // it per query is negligible and not worth indexing.
         let mut matched: Vec<Artifact> = Vec::new();
-        let entity_chunks: Box<dyn Iterator<Item = (&Entity, &HashMap<Attribute, Vec<Change>>)>> =
-            match of {
-                Some(of_target) => Box::new(self.0.get_key_value(of_target).into_iter()),
-                None => Box::new(self.0.iter()),
-            };
-        for (entity, attrs) in entity_chunks {
-            let attr_chunks: Box<dyn Iterator<Item = (&Attribute, &Vec<Change>)>> = match the {
-                Some(the_target) => Box::new(attrs.get_key_value(the_target).into_iter()),
-                None => Box::new(attrs.iter()),
-            };
-            for (attribute, changes) in attr_chunks {
+        for (entity, attrs) in &self.0 {
+            if let Some(of_target) = of
+                && entity != of_target
+            {
+                continue;
+            }
+            for (attribute, changes) in attrs {
+                if let Some(the_target) = the
+                    && attribute != the_target
+                {
+                    continue;
+                }
                 for change in changes {
                     let value = match change {
                         Change::Assert(v) | Change::Replace(v) => v,
