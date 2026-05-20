@@ -215,8 +215,6 @@ mod tests {
             .collect::<Result<_, _>>()?)
     }
 
-    // -- merge_grouped --------------------------------------------------
-
     #[dialog_common::test]
     async fn it_yields_empty_stream_when_no_inputs() -> anyhow::Result<()> {
         let merged = merge_grouped(vec![]);
@@ -247,8 +245,6 @@ mod tests {
         assert_eq!(items.len(), 1);
         Ok(())
     }
-
-    // -- tombstones -----------------------------------------------------
 
     #[dialog_common::test]
     fn it_extracts_tombstones_from_retracts_only() -> anyhow::Result<()> {

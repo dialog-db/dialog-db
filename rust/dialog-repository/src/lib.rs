@@ -43,9 +43,6 @@ pub(crate) mod layer;
 /// (origins, branches, branch revisions, sessions).
 pub mod schema;
 
-mod transaction_query;
-pub use transaction_query::{TransactionQuery, TransactionSelectQuery};
-
 pub use dialog_artifacts::{Exporter, Importer};
 
 /// Test helpers for setting up profiles, operators, repositories, and test data.

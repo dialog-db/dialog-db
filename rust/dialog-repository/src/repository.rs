@@ -1189,8 +1189,6 @@ mod tests {
             Ok(())
         }
 
-        // -- Auto-injected schema metadata ---------------------------------
-
         #[dialog_common::test]
         async fn it_auto_includes_schema_branch_in_metadata() -> anyhow::Result<()> {
             // branch.query() should expose schema::Branch facts without
@@ -1570,8 +1568,6 @@ mod tests {
             Ok(())
         }
 
-        // -- QuerySession accessors ----------------------------------------
-
         #[dialog_common::test]
         async fn it_reflects_overlay_state_on_session_accessors() -> anyhow::Result<()> {
             // A QueryLayer carries every branch (the one `query()` was
@@ -1612,8 +1608,6 @@ mod tests {
             assert!(session.changes().is_empty());
             Ok(())
         }
-
-        // -- Cross-branch merge invariants ---------------------------------
 
         mod cardinality_one_attr {
             #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -1697,8 +1691,6 @@ mod tests {
             assert_eq!(entities, expected);
             Ok(())
         }
-
-        // -- Cross-source ordering invariant -------------------------------
 
         #[dialog_common::test]
         async fn it_orders_changes_consistently_with_branch_scans_in_every_mode()

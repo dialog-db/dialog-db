@@ -1,4 +1,6 @@
-use crate::transaction_query::TransactionQuery;
+mod query;
+pub use query::{TransactionQuery, TransactionSelectQuery};
+
 use crate::{Branch, Commit};
 use dialog_artifacts::{ChangeStream, Changes, Statement};
 

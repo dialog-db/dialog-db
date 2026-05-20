@@ -257,9 +257,8 @@ impl<Env> Clone for QueryEnv<'_, Env> {
 
 /// Execute a select against a single branch, transparently routing through
 /// the branch's remote upstream when configured. Extracted as a freestanding
-/// helper so both [`QueryEnv`] and the transaction-time
-/// [`TransactionEnv`](crate::transaction_query::TransactionEnv) share the
-/// exact same branch-read path.
+/// helper so both [`QueryEnv`] and the transaction-time `TransactionEnv`
+/// share the exact same branch-read path.
 pub(crate) async fn select_from_branch<'a, Env>(
     branch: &'a Branch,
     env: &'a Env,

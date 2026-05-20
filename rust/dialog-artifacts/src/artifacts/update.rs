@@ -391,8 +391,6 @@ mod tests {
         "test/role".parse().expect("valid attribute")
     }
 
-    // -- Statement for Changes ----------------------------------------
-
     #[dialog_common::test]
     fn it_replays_changes_into_a_target_via_statement_assert() {
         let mut source = Changes::new();
@@ -429,8 +427,6 @@ mod tests {
         assert_eq!(instructions.len(), 1);
         assert!(matches!(instructions[0], Instruction::Retract(_)));
     }
-
-    // -- Provider<Select> for Changes ----------------------------------
 
     async fn artifacts(
         changes: &Changes,

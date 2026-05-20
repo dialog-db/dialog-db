@@ -433,8 +433,6 @@ mod tests {
     use super::*;
     use dialog_varsig::did;
 
-    // -- EntityExt / DidExt -------------------------------------------
-
     #[dialog_common::test]
     fn it_derives_same_entity_for_same_value() {
         assert_eq!(Entity::of(&"hello"), Entity::of(&"hello"));
@@ -456,8 +454,6 @@ mod tests {
         let d = did!("key:z6MkTestEntity");
         assert_eq!(d.this().to_string(), d.as_str());
     }
-
-    // -- Origin --------------------------------------------------------
 
     #[dialog_common::test]
     fn it_derives_same_origin_for_same_profile_and_subject() {
@@ -488,8 +484,6 @@ mod tests {
         assert_eq!(origin.profile.0.to_string(), profile.as_str());
         assert_eq!(origin.subject.0.to_string(), subject.as_str());
     }
-
-    // -- Branch --------------------------------------------------------
 
     #[dialog_common::test]
     fn it_derives_same_branch_for_same_origin_and_name() {
