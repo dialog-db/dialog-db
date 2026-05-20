@@ -43,24 +43,28 @@ pub(crate) fn group_key(artifact: &Artifact) -> (Vec<u8>, Vec<u8>) {
 ///
 /// Each input is assumed sorted by [`sort_key`] — true of branch
 /// scans by construction (the prolly tree stores entries in that
-/// order) and true of [`Provider<Select> for Changes`] by
-/// construction (we sort the materialized vec). Implemented as a
-/// streaming k-way merge with peekable inputs.
+/// order) and true of `Provider<Select> for Changes` by construction
+/// (it sorts its materialized vec). Implemented as a streaming k-way
+/// merge with peekable inputs.
 ///
 /// # Order: "as-if merged into one tree"
 ///
 /// The k-way merge picks the minimum head by [`sort_key`], not by
-/// [`group_key`]. That distinction matters: within a `(the, of)` group
-/// with cardinality > 1, two items from different streams sharing the
+/// [`group_key`]. That distinction matters within a `(the, of)` group
+/// with cardinality > 1: two items from different streams sharing the
 /// same `(the, of)` but different values would otherwise come out in
-/// arbitrary (stream-index) order — concretely, two sources each
+/// arbitrary (stream-index) order. Concretely, two sources each
 /// holding `(alice, name, "Bob")` and `(alice, name, "Alice")` would
 /// yield `["Bob", "Alice"]` if the merge tiebroke on stream index,
-/// but a single physical tree would yield `["Alice", "Bob"]` (sorted
-/// by `value_reference`). Using
-/// `sort_key = (the, of, value_type, value_reference)` as the merge
-/// comparator preserves the as-if-merged order in all three scan
-/// modes.
+/// but a single physical tree yields `["Alice", "Bob"]` (sorted by
+/// `value_reference`).
+///
+/// `sort_key` works as the comparator here *for any selector* because
+/// it is the one total order consistent with all three tree index
+/// layouts — see the [`SortKey`](dialog_artifacts::SortKey) docs for
+/// the full why. Every stream reaching this merge was produced by the
+/// same selector, so they're all already in `sort_key` order; the
+/// merge just interleaves them.
 ///
 /// # Dedup: "same claim from two sources is still one claim"
 ///

@@ -190,26 +190,72 @@ impl Stream for ChangeStream {
     }
 }
 
-/// The full sort key for an [`Artifact`] — matches the prolly tree's
-/// per-key ordering.
+/// The full sort key for an [`Artifact`] — `(the, of, value_type,
+/// value_reference)`.
 ///
-/// Tuple of `(the_bytes, of_bytes, value_type, value_reference)`:
-///
-/// - `the_bytes` / `of_bytes` — raw attribute / entity key bytes.
+/// - `the` / `of` — raw attribute / entity key bytes (fixed length,
+///   so tuple comparison equals lexicographic byte comparison of the
+///   concatenation).
 /// - `value_type` — the `ValueDataType` discriminant byte.
-/// - `value_reference` — `blake3(value.to_bytes())`, the same hash the
-///   tree key carries.
+/// - `value_reference` — `blake3(value.to_bytes())`, the same hash
+///   the tree keys carry.
 ///
-/// Using this as a comparator means a streaming k-way merge over
-/// multiple sorted sources produces the exact same order a single
-/// physical tree containing all of them would. The four-component
-/// extension over the bare `(the, of)` group key matters within a
-/// cardinality-many group: same-`(the, of)` items from different
-/// streams interleave by `value_reference` instead of stream index.
+/// # Why this exact component order
+///
+/// The artifact prolly tree keeps three indexes, each a fixed-layout
+/// byte key (see `dialog_artifacts::key`):
+///
+/// ```text
+///   EAV:  tag | entity    | attribute | value_type | value_reference
+///   AEV:  tag | attribute | entity    | value_type | value_reference
+///   VAE:  tag | value_type | value_reference | attribute | entity
+/// ```
+///
+/// A query scan pins whichever dimension the selector constrains and
+/// streams the rest in that index's byte order. The pinned dimension
+/// is constant across the whole scan, so it drops out of the
+/// comparison — what's left is the index's *residual* order:
+///
+/// ```text
+///   .of(entity)    → EAV → residual (attribute, value_type, value_reference)
+///   .the(attr)     → AEV → residual (entity,    value_type, value_reference)
+///   .is(value)     → VAE → residual (attribute, entity)
+/// ```
+///
+/// `SortKey = (attribute, entity, value_type, value_reference)` is the
+/// **unique** total order whose restriction (delete the pinned
+/// component) reproduces every one of those residuals:
+///
+/// - lock `entity`  → `attribute` is the next live component ✓ (EAV)
+/// - lock `value`   → `value_type`+`value_reference` drop out,
+///   `attribute` is next ✓ (VAE)
+/// - lock `attribute` → `attribute` itself drops out, `entity` is
+///   next ✓ (AEV)
+///
+/// In every mode the next live component after the pinned one is
+/// exactly the dimension that index sorts by next. So sorting any
+/// source's output by `SortKey` yields the same order the tree's
+/// scan would for that selector — which is what lets the query
+/// layer's k-way merge interleave a branch scan and a `Changes`
+/// overlay (or two branches) into the order a single physical tree
+/// containing all of them would produce. It also holds for
+/// multi-constraint selectors:
+/// pinning two dimensions just removes both from the comparison.
+///
+/// The four-component key (vs. the bare `(the, of)` group key) also
+/// fixes interleaving *within* a cardinality-many group: same-`(the,
+/// of)` items from different streams order by `value_reference`
+/// rather than by stream index.
 pub type SortKey = (Vec<u8>, Vec<u8>, u8, [u8; 32]);
 
-/// Compute the [`SortKey`] for an artifact. See [`SortKey`] docs for
-/// why all four components matter.
+/// Compute the [`SortKey`] for an artifact.
+///
+/// Uses the same `key_bytes()` / `data_type()` / `to_reference()`
+/// the tree's own index keys are built from
+/// (`EntityKey::from(&Artifact)` and friends), so a `SortKey` sort
+/// reproduces the tree's byte order exactly — not just an
+/// approximation of it. See [`SortKey`] for why the component order
+/// is correct across all three scan modes.
 pub fn sort_key(artifact: &Artifact) -> SortKey {
     (
         artifact.the.key_bytes().to_vec(),
@@ -315,6 +361,10 @@ impl<'a> Provider<Select<'a>> for Changes {
                 }
             }
         }
+        // Sort by `sort_key` so this overlay's output is in the same
+        // order the prolly tree would scan for this selector — see
+        // `SortKey` docs. That's the precondition `merge_grouped`
+        // relies on when it unions this stream with a branch scan.
         matched.sort_by_key(sort_key);
         Ok(Box::pin(stream::iter(matched.into_iter().map(Ok))))
     }
