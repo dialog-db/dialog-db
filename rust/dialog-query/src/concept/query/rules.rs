@@ -130,13 +130,13 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn installed_returns_empty_for_fresh_concept_rules() {
+    fn it_returns_empty_installed_list_for_fresh_concept_rules() {
         let rules = ConceptRules::new(&person_concept());
         assert!(rules.installed().is_empty());
     }
 
     #[dialog_common::test]
-    fn installed_lists_registered_rules_in_order() {
+    fn it_lists_registered_rules_in_install_order() {
         let descriptor = person_concept();
         let mut rules = ConceptRules::new(&descriptor);
         let a = alt_rule(&descriptor);
@@ -145,7 +145,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn extend_merges_installed_rules_from_other() {
+    fn it_merges_installed_rules_from_another_registry() {
         let descriptor = person_concept();
         let mut a = ConceptRules::new(&descriptor);
         let mut b = ConceptRules::new(&descriptor);
@@ -159,7 +159,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn extend_dedups_against_existing_installed() {
+    fn it_dedups_extended_rules_against_existing_installed() {
         let descriptor = person_concept();
         let rule = alt_rule(&descriptor);
         let mut a = ConceptRules::new(&descriptor);
@@ -175,7 +175,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn extend_invalidates_plan_cache_when_rules_change() {
+    fn it_invalidates_plan_cache_when_extend_adds_rules() {
         let descriptor = person_concept();
         let mut rules = ConceptRules::new(&descriptor);
 
@@ -198,7 +198,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn extend_keeps_plan_cache_when_nothing_new() {
+    fn it_keeps_plan_cache_when_extend_adds_nothing() {
         let descriptor = person_concept();
         let rules = ConceptRules::new(&descriptor);
 

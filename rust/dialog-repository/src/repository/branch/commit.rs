@@ -2,7 +2,8 @@ use crate::{
     Branch, CommitError, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _,
     RepositoryMemoryExt, Revision, TreeReference, Upstream,
 };
-use dialog_artifacts::{Instruction, tree};
+use dialog_artifacts::Instruction;
+use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive::{Get, Put};
@@ -81,8 +82,8 @@ where
 
         // Drain the change stream into the tree. EAV/AEV/VAE writes,
         // cardinality-one supersession, and retraction live in the
-        // shared `tree::apply` helper so the key layout stays uniform.
-        tree::apply(&mut tree, &mut store, changes).await?;
+        // shared `ArtifactTreeExt::apply` so the key layout stays uniform.
+        tree.apply(&mut store, changes).await?;
 
         // `tree.hash()` returns `None` only when the tree is empty, which
         // we represent as the canonical empty-tree hash.

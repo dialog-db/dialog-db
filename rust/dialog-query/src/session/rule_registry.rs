@@ -115,7 +115,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn select_rules_provider_returns_implicit_rules_for_unseen_concept() {
+    async fn it_returns_implicit_rules_for_an_unseen_concept() {
         let registry = RuleRegistry::new();
         let descriptor = person_concept();
         let rules = Provider::<SelectRules>::execute(&registry, descriptor)
@@ -128,7 +128,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn select_rules_provider_surfaces_registered_rule() {
+    async fn it_surfaces_a_registered_rule_through_the_provider() {
         let mut registry = RuleRegistry::new();
         let descriptor = person_concept();
         let rule = DeductiveRule::from(&descriptor);
@@ -142,7 +142,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn extend_copies_entries_for_unseen_concepts() {
+    async fn it_copies_entries_for_unseen_concepts_on_extend() {
         let descriptor = person_concept();
         let rule = DeductiveRule::from(&descriptor);
         let mut src = RuleRegistry::new();
@@ -154,7 +154,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn extend_merges_installed_rules_for_shared_concept() {
+    async fn it_merges_installed_rules_for_a_shared_concept_on_extend() {
         // Two registries with different rules for the same concept; extend
         // should produce a registry where both rules are installed.
         use crate::Term;
