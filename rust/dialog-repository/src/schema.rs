@@ -407,6 +407,24 @@ impl Session {
     }
 }
 
+/// One `(session, branch)` membership fact — the cardinality-many
+/// counterpart to [`Session`].
+///
+/// [`Session`] holds the cardinality-one identity (`profile`,
+/// `operator`); the set of branches in scope is cardinality-many, so
+/// it can't be a `Session` field. `SessionBranch` carries one branch
+/// entity per instance, all sharing `this == Session::entity()`.
+/// Asserting N of them records N branches; a `Query<SessionBranch>`
+/// yields one row per branch.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SessionBranch {
+    /// The session entity — always `db:session`, same as
+    /// [`Session::this`].
+    pub this: Entity,
+    /// One branch in the session's scope.
+    pub branch: session::Branch,
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(target_arch = "wasm32")]

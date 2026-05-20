@@ -1494,7 +1494,6 @@ mod tests {
             // it directly via the schema attribute as an artifact
             // search.
             use crate::schema;
-            use crate::schema::session;
 
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
@@ -1512,33 +1511,12 @@ mod tests {
             let mut expected_branches = vec![main_branch.this.clone(), feature_branch.this.clone()];
             expected_branches.sort();
 
-            // Build a query that exercises the metadata overlay so the
-            // facts get synthesized; we'll inspect the overlay directly.
-            // Easiest path: run a Branch query and ask for each
-            // branch fact's entity.
-            let _: Vec<schema::Session> = feature
+            // `dialog.session/branch` is cardinality-many, so a
+            // `Query<SessionBranch>` yields one row per branch in scope.
+            let rows: Vec<schema::SessionBranch> = feature
                 .query()
                 .join(&main)
-                .select(Query::<schema::Session> {
-                    this: session_entity.clone().into(),
-                    profile: Term::var("profile"),
-                    operator: Term::var("operator"),
-                })
-                .perform(&operator)
-                .try_vec()
-                .await?;
-
-            // Now scan for the cardinality-many session branch attribute.
-            // Use a Concept-shaped helper so we get one row per assertion.
-            #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-            pub struct SessionBranchRow {
-                pub this: Entity,
-                pub branch: session::Branch,
-            }
-            let rows: Vec<SessionBranchRow> = feature
-                .query()
-                .join(&main)
-                .select(Query::<SessionBranchRow> {
+                .select(Query::<schema::SessionBranch> {
                     this: session_entity.clone().into(),
                     branch: Term::var("branch"),
                 })

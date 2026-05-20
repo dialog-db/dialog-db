@@ -14,10 +14,9 @@ use dialog_query::concept::query::ConceptRules;
 use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output};
 use dialog_query::source::SelectRules;
-use dialog_query::the;
 
 use crate::layer::{filter_tombstones, merge_grouped, tombstones_from};
-use crate::schema::{DidExt as _, Session, session};
+use crate::schema::{DidExt as _, Session, SessionBranch, session};
 use crate::{Branch, NetworkedIndex, RemoteSite, RepositoryMemoryExt, Upstream};
 
 /// A composable query over one or more branches plus an in-memory
@@ -120,12 +119,14 @@ impl<'a> QueryLayer<'a> {
             operator: session::Operator(operator.did().this()),
         }
         .assert(&mut changes);
-        // `dialog.session/branch` is cardinality-many — one per branch.
+        // One `SessionBranch` per branch — `dialog.session/branch` is
+        // cardinality-many, so the entries accumulate on `db:session`.
         for branch_entity in branch_entities {
-            the!("dialog.session/branch")
-                .of(session_entity.clone())
-                .is(branch_entity)
-                .assert(&mut changes);
+            SessionBranch {
+                this: session_entity.clone(),
+                branch: session::Branch(branch_entity),
+            }
+            .assert(&mut changes);
         }
 
         changes
