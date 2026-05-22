@@ -73,6 +73,23 @@ impl ConceptDescriptor {
         self.description.as_deref()
     }
 
+    /// Returns this descriptor with `description` set.
+    ///
+    /// The `From<[..]>` / `From<Vec<..>>` constructors only carry
+    /// the attribute map and leave `description` as `None`; this
+    /// is the builder-style way to attach one. An empty string is
+    /// treated as absent (`description` stays `None`) so a concept
+    /// with no doc comment doesn't serialize a blank field.
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        let description = description.into();
+        self.description = if description.is_empty() {
+            None
+        } else {
+            Some(description)
+        };
+        self
+    }
+
     /// Returns a reference to the named attributes.
     pub fn with(&self) -> &NamedAttributes {
         &self.with
@@ -1351,5 +1368,99 @@ mod tests {
             serde_json::from_str(json).expect("Should accept empty 'maybe'");
 
         assert_eq!(concept.maybe, None, "Empty 'maybe' should become None");
+    }
+
+    #[dialog_common::test]
+    fn it_carries_the_concept_doc_comment_into_the_descriptor() {
+        use crate::{Attribute, Concept, Entity};
+
+        // The `#[derive(Concept)]` macro captures the struct doc
+        // comment for the `Concept::description` trait method. The
+        // `From`-built descriptor must carry the same text: a
+        // `concept:` query reads the descriptor, so without this
+        // the description never reaches a consumer.
+
+        #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        #[domain("dialog.test")]
+        pub struct Title(pub String);
+
+        /// A cooking recipe.
+        #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        pub struct Recipe {
+            pub this: Entity,
+            /// The recipe's title.
+            pub title: Title,
+        }
+
+        let descriptor: ConceptDescriptor =
+            <Recipe as crate::Predicate>::Application::default().into();
+
+        assert_eq!(
+            descriptor.description(),
+            Some("A cooking recipe."),
+            "the descriptor must carry the struct doc comment",
+        );
+        // The trait method and the descriptor are two paths off
+        // the same doc comment; they must agree.
+        assert_eq!(descriptor.description(), Some(Recipe::description()));
+
+        // The description has to survive the JSON round-trip a
+        // `concept:` query serializes the descriptor through.
+        let json = serde_json::to_value(&descriptor).expect("serialize");
+        assert_eq!(json["description"], serde_json::json!("A cooking recipe."));
+        let round_tripped: ConceptDescriptor = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(round_tripped.description(), descriptor.description());
+    }
+
+    #[dialog_common::test]
+    fn it_leaves_description_none_for_an_undocumented_concept() {
+        use crate::{Attribute, Concept, Entity};
+
+        // A struct with no doc comment yields an empty
+        // description; `with_description` treats that as absent so
+        // no blank `description` field is serialized.
+
+        #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        #[domain("dialog.test")]
+        pub struct Title(pub String);
+
+        #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        pub struct Recipe {
+            pub this: Entity,
+            /// The recipe's title.
+            pub title: Title,
+        }
+
+        let descriptor: ConceptDescriptor =
+            <Recipe as crate::Predicate>::Application::default().into();
+
+        assert_eq!(descriptor.description(), None);
+        let json = serde_json::to_value(&descriptor).expect("serialize");
+        assert!(
+            json.get("description").is_none(),
+            "an empty description must not serialize a blank field",
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_sets_the_description_via_with_description() {
+        let descriptor = ConceptDescriptor::from([(
+            "name",
+            AttributeDescriptor::new(
+                the!("user/name"),
+                "User's name",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
+
+        // `From<[..]>` leaves `description` as `None`.
+        assert_eq!(descriptor.description(), None);
+
+        let described = descriptor.clone().with_description("A user account.");
+        assert_eq!(described.description(), Some("A user account."));
+
+        // An empty string is treated as absent.
+        assert_eq!(described.with_description("").description(), None);
     }
 }
