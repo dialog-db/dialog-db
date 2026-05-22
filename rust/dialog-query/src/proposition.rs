@@ -1,7 +1,6 @@
 use std::fmt;
 
 use crate::attribute::query::AttributeQuery;
-use crate::concept::descriptor::ConceptDescriptor;
 pub use crate::concept::query::ConceptQuery;
 use crate::constraint::Constraint;
 pub use crate::error::AnalyzerError;
@@ -18,7 +17,6 @@ use dialog_common::ConditionalSync;
 use futures_util::future::Either;
 use serde::de;
 use serde::ser;
-use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use std::fmt::Display;
 
@@ -140,12 +138,7 @@ impl From<Constraint> for Proposition {
 impl Serialize for Proposition {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
-            Proposition::Concept(cq) => {
-                let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("assert", &cq.predicate)?;
-                map.serialize_entry("where", &cq.terms)?;
-                map.end()
-            }
+            Proposition::Concept(cq) => cq.serialize(serializer),
             Proposition::Formula(fq) => fq.serialize(serializer),
             Proposition::Constraint(c) => c.serialize(serializer),
             Proposition::Attribute(_) => Err(ser::Error::custom(
@@ -165,15 +158,10 @@ impl<'de> Deserialize<'de> for Proposition {
             .ok_or_else(|| de::Error::missing_field("assert"))?;
 
         match assert_val {
-            // Object → concept descriptor
+            // Object → concept query
             serde_json::Value::Object(_) => {
-                let predicate: ConceptDescriptor =
-                    serde_json::from_value(assert_val.clone()).map_err(de::Error::custom)?;
-                let terms: Parameters = raw
-                    .get("where")
-                    .ok_or_else(|| de::Error::missing_field("where"))
-                    .and_then(|v| serde_json::from_value(v.clone()).map_err(de::Error::custom))?;
-                Ok(Proposition::Concept(ConceptQuery { predicate, terms }))
+                let cq: ConceptQuery = serde_json::from_value(raw).map_err(de::Error::custom)?;
+                Ok(Proposition::Concept(cq))
             }
             // String → Constraint or FormulaQuery. Try Constraint
             // first because its variants are named ("==", "coalesce",

@@ -1,14 +1,33 @@
-//! Rule-based deduction system
+//! Rule-based deduction and induction system.
 //!
-//! This module implements the core rule system for dialog-query, allowing
-//! declarative specification of derived facts through logical rules.
+//! Two rule kinds share the same analysis pipeline and differ only at
+//! evaluation time:
 //!
-//! The design follows the patterns described in notes/rules.md.
+//! - [`DeductiveRule`] derives new facts on demand when its body is
+//!   queried. Standard Datalog semantics.
+//! - [`InductiveRule`] (a.k.a. *effect*) asserts its head facts when
+//!   its body matches during commit-time evaluation. Fires the
+//!   reactor's fixpoint loop; trigger facts on `effect:system` are
+//!   ephemeral.
+//!
+//! The [`Rule`] enum carries either variant and is what compile-time
+//! analysis errors (in [`TypeError`](crate::TypeError) and
+//! [`AnalyzerError`](crate::AnalyzerError)) reference, so error
+//! reporting is uniform across both kinds.
+
+use crate::concept::descriptor::ConceptDescriptor;
+use crate::error::TypeError;
+use crate::planner::{Conjunction, Planner};
+use crate::premise::Premise;
+use crate::{Environment, Type};
+use std::fmt::{Display, Formatter, Result as FmtResult};
 
 /// Rule analysis — inference and dependency graph over premises.
 pub mod analyzer;
 /// Deductive rule definitions for deriving new facts.
 pub mod deductive;
+/// Inductive rule definitions (a.k.a. effects).
+pub mod inductive;
 /// Premises collection type.
 pub mod premises;
 /// Type inference over a rule's premises.
@@ -19,9 +38,140 @@ pub mod when;
 pub use analyzer::{AnalyzedRule, analyze};
 pub use deductive::DeductiveRule;
 pub use deductive::descriptor::DeductiveRuleDescriptor;
+pub use inductive::InductiveRule;
+pub use inductive::descriptor::InductiveRuleDescriptor;
 pub use premises::*;
 pub use types::TypeEnv;
 pub use when::*;
+
+/// A compiled rule — either deductive or inductive.
+///
+/// Both variants share the same head ([`ConceptDescriptor`]) and
+/// body ([`Conjunction`]); they differ in what the evaluator does
+/// with a matching body. Errors raised during compile-time analysis
+/// reference the in-progress rule via this enum so the same error
+/// type works for both kinds.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Rule {
+    /// A deductive rule — yields tuples on query.
+    Deductive(DeductiveRule),
+    /// An inductive rule — asserts head facts on commit.
+    Inductive(InductiveRule),
+}
+
+impl Rule {
+    /// The conclusion (head) of this rule.
+    pub fn conclusion(&self) -> &ConceptDescriptor {
+        match self {
+            Rule::Deductive(r) => r.conclusion(),
+            Rule::Inductive(r) => r.conclusion(),
+        }
+    }
+}
+
+impl Display for Rule {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Rule::Deductive(r) => Display::fmt(r, f),
+            Rule::Inductive(r) => Display::fmt(r, f),
+        }
+    }
+}
+
+impl From<DeductiveRule> for Rule {
+    fn from(r: DeductiveRule) -> Self {
+        Rule::Deductive(r)
+    }
+}
+
+impl From<InductiveRule> for Rule {
+    fn from(r: InductiveRule) -> Self {
+        Rule::Inductive(r)
+    }
+}
+
+/// Common construction surface for both rule kinds.
+///
+/// Implementors are constructible from a head + planned body via
+/// [`from_parts`](Compile::from_parts), and convertible into a
+/// [`Rule`] so analysis errors can refer to the in-progress rule
+/// uniformly. The default [`compile`](Compile::compile) runs the
+/// shared analysis pipeline (planner + unbound-variable check).
+pub trait Compile: Sized + Into<Rule> {
+    /// Build the rule from its compiled parts. Called by
+    /// [`compile`](Self::compile) once analysis passes.
+    fn from_parts(conclusion: ConceptDescriptor, join: Conjunction) -> Self;
+
+    /// Plan the premises, run rule-level type analysis, and verify
+    /// every head variable is bound. Default impl is identical for
+    /// deductive and inductive rules; the only difference between
+    /// the kinds lives at evaluation time, not compile time.
+    fn compile(conclusion: ConceptDescriptor, premises: Vec<Premise>) -> Result<Self, TypeError> {
+        // Plan the order of premises in a scope where none of the
+        // rule parameters are bound to find the optimal execution
+        // order, or to discover unsatisfiable premises (e.g. a
+        // formula whose required cell is never derived by another
+        // premise).
+        let join = Planner::from(premises).plan(&Environment::new())?;
+
+        // Run rule-level type analysis: inference + required-head
+        // check + Coalesce contract validation. Failures wrap into
+        // the corresponding `TypeError::*` variants so the user
+        // sees the in-progress rule embedded in the error.
+        if let Err(err) = analyzer::analyze(conclusion.clone(), &join.steps) {
+            let in_progress = Self::from_parts(conclusion, join);
+            return Err(match err {
+                analyzer::AnalysisError::Inference { reason } => {
+                    TypeError::TypeInference { reason }
+                }
+                analyzer::AnalysisError::RequiredHeadFromOptional { variable } => {
+                    TypeError::RequiredHeadFromOptional {
+                        rule: Box::new(in_progress.into()),
+                        variable,
+                    }
+                }
+                analyzer::AnalysisError::CoalesceTypeMismatch { reason } => {
+                    TypeError::CoalesceTypeMismatch {
+                        rule: Box::new(in_progress.into()),
+                        reason,
+                    }
+                }
+            });
+        }
+
+        // Verify that every conclusion parameter is derived by one
+        // of the premises; otherwise the rule could never fully
+        // bind its output. Build `Self` only when needed for the
+        // error path so the happy path doesn't allocate twice.
+        let unbound = conclusion
+            .operands()
+            .find(|name| !join.binds.contains(name))
+            .map(String::from);
+        if let Some(variable) = unbound {
+            let in_progress = Self::from_parts(conclusion, join);
+            return Err(TypeError::UnboundVariable {
+                rule: Box::new(in_progress.into()),
+                variable,
+            });
+        }
+
+        Ok(Self::from_parts(conclusion, join))
+    }
+}
+
+/// Helper for the [`Display`] impls on [`DeductiveRule`] and
+/// [`InductiveRule`] — both render their schema the same way.
+pub(crate) fn fmt_rule_schema(conclusion: &ConceptDescriptor, f: &mut Formatter<'_>) -> FmtResult {
+    write!(f, "{} {{", conclusion.this())?;
+    write!(f, "this: {},", Type::Entity)?;
+    for (name, attribute) in conclusion.with().iter() {
+        match attribute.content_type() {
+            Some(ty) => write!(f, "{}: {},", name, ty)?,
+            None => write!(f, "{}: Any,", name)?,
+        }
+    }
+    write!(f, "}}")
+}
 
 /// Macro for creating When collections with clean array-like syntax
 ///
@@ -467,7 +617,7 @@ mod tests {
         let concept: ConceptDescriptor = default.into();
         let with: Vec<_> = concept.with().iter().collect();
         assert_eq!(with.len(), 1);
-        assert_eq!(with[0].0, "given_name");
+        assert_eq!(with[0].0, "given-name");
 
         let maybe = concept.maybe().expect("concept has maybe attributes");
         let maybe: Vec<_> = maybe.iter().collect();
@@ -529,7 +679,7 @@ mod tests {
         let concept: ConceptDescriptor = Query::<AliasedConcept>::default().into();
         let with: Vec<_> = concept.with().iter().collect();
         assert_eq!(with.len(), 1);
-        assert_eq!(with[0].0, "given_name");
+        assert_eq!(with[0].0, "given-name");
 
         let maybe = concept
             .maybe()

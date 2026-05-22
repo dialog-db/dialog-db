@@ -1,8 +1,12 @@
 //! Per-concept rule management with adornment-keyed plan caching.
 //!
-//! Each `ConceptRules` owns the rules for a single concept entity and caches
-//! execution plans keyed by adornment (binding pattern). This is the per-concept
-//! counterpart to the registry-level indexing in `RuleRegistry`.
+//! Each `ConceptRules` owns the *deductive* rules for a single
+//! concept entity and caches execution plans keyed by adornment
+//! (binding pattern). This is the per-concept counterpart to the
+//! registry-level indexing in `RuleRegistry`. Inductive rules
+//! ([`InductiveRule`](crate::rule::InductiveRule)) participate in
+//! transactions rather than queries and will be installed via a
+//! separate path in the future.
 
 use std::iter;
 
@@ -47,6 +51,23 @@ impl ConceptRules {
         }
     }
 
+    /// The explicitly installed rules (does not include the implicit rule).
+    pub fn installed(&self) -> &[DeductiveRule] {
+        &self.installed
+    }
+
+    /// Install every rule from `other` into this `ConceptRules`.
+    ///
+    /// Used when combining two rule sources (e.g. a primary registry and an
+    /// overlay) so all installed rules contribute to planning. The implicit
+    /// rule is the same in both — it is derived from the concept descriptor —
+    /// so only the `installed` set is merged.
+    pub fn extend(&mut self, other: &ConceptRules) {
+        for rule in &other.installed {
+            self.install(rule.clone());
+        }
+    }
+
     /// Get or compute a cached plan for the given binding pattern.
     pub fn plan(&self, terms: &Parameters, matched: &Match) -> Arc<Disjunction> {
         let adornment = Adornment::derive(terms, matched);
@@ -64,5 +85,141 @@ impl ConceptRules {
         let fork = Arc::new(plan);
         self.plans.write().unwrap().insert(adornment, fork.clone());
         fork
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::*;
+    use crate::Term;
+    use crate::attribute::query::AttributeQuery;
+    use crate::attribute::{AttributeDescriptor, Cardinality, Type};
+    use crate::the;
+
+    fn person_concept() -> ConceptDescriptor {
+        ConceptDescriptor::from([(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "person name",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )])
+    }
+
+    fn alt_rule(descriptor: &ConceptDescriptor) -> DeductiveRule {
+        // Distinct rule body so install does not dedup against the implicit.
+        DeductiveRule::new(
+            descriptor.clone(),
+            vec![
+                AttributeQuery::new(
+                    Term::from(the!("person/name")),
+                    Term::var("this"),
+                    Term::var("name"),
+                    Term::blank(),
+                    None,
+                )
+                .into(),
+            ],
+        )
+        .expect("alt rule compiles")
+    }
+
+    #[dialog_common::test]
+    fn it_returns_empty_installed_list_for_fresh_concept_rules() {
+        let rules = ConceptRules::new(&person_concept());
+        assert!(rules.installed().is_empty());
+    }
+
+    #[dialog_common::test]
+    fn it_lists_registered_rules_in_install_order() {
+        let descriptor = person_concept();
+        let mut rules = ConceptRules::new(&descriptor);
+        let a = alt_rule(&descriptor);
+        rules.install(a.clone());
+        assert_eq!(rules.installed(), &[a]);
+    }
+
+    #[dialog_common::test]
+    fn it_merges_installed_rules_from_another_registry() {
+        let descriptor = person_concept();
+        let mut a = ConceptRules::new(&descriptor);
+        let mut b = ConceptRules::new(&descriptor);
+
+        let rule = alt_rule(&descriptor);
+        b.install(rule.clone());
+        a.extend(&b);
+
+        assert_eq!(a.installed().len(), 1);
+        assert_eq!(a.installed()[0], rule);
+    }
+
+    #[dialog_common::test]
+    fn it_dedups_extended_rules_against_existing_installed() {
+        let descriptor = person_concept();
+        let rule = alt_rule(&descriptor);
+        let mut a = ConceptRules::new(&descriptor);
+        a.install(rule.clone());
+        let mut b = ConceptRules::new(&descriptor);
+        b.install(rule.clone());
+        a.extend(&b);
+        assert_eq!(
+            a.installed().len(),
+            1,
+            "duplicate rule must not be added twice"
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_invalidates_plan_cache_when_extend_adds_rules() {
+        let descriptor = person_concept();
+        let mut rules = ConceptRules::new(&descriptor);
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("e"));
+        terms.insert("name".into(), Term::var("n"));
+
+        let candidate = Match::new();
+        let plan_before = rules.plan(&terms, &candidate);
+
+        let mut other = ConceptRules::new(&descriptor);
+        other.install(alt_rule(&descriptor));
+        rules.extend(&other);
+
+        let plan_after = rules.plan(&terms, &candidate);
+        assert!(
+            !Arc::ptr_eq(&plan_before, &plan_after),
+            "extend that adds a new rule must invalidate the plan cache"
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_keeps_plan_cache_when_extend_adds_nothing() {
+        let descriptor = person_concept();
+        let rules = ConceptRules::new(&descriptor);
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("e"));
+        terms.insert("name".into(), Term::var("n"));
+
+        let candidate = Match::new();
+        let plan_before = rules.plan(&terms, &candidate);
+
+        // Extend with an empty other: no new installed rules, cache preserved.
+        let empty = ConceptRules::new(&descriptor);
+        let mut rules_clone = rules.clone();
+        rules_clone.extend(&empty);
+
+        // The clone shares the plan cache Arc with the original; planning the
+        // same adornment hits the cache.
+        let plan_after = rules_clone.plan(&terms, &candidate);
+        assert!(
+            Arc::ptr_eq(&plan_before, &plan_after),
+            "no-op extend must not clear cached plans"
+        );
     }
 }

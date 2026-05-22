@@ -9,12 +9,12 @@ use crate::negation::Negation;
 pub use crate::planner::Plan;
 pub use crate::planner::{Conjunction, Planner};
 pub use crate::premise::Premise;
-use crate::rule::analyzer::{self, AnalysisError};
+use crate::rule::{Compile, fmt_rule_schema};
 use crate::type_system::Primitive;
 use crate::type_system::Type as Kind;
 use crate::types::Any;
 pub use crate::{Attribute, Cardinality, Parameters, Proposition, Requirement, Value};
-use crate::{Environment, Term, Type};
+use crate::{Environment, Term};
 use descriptor::DeductiveRuleDescriptor;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -30,6 +30,12 @@ pub struct DeductiveRule {
     /// evaluation. Produced by [`Planner::plan`] during compilation.
     join: Conjunction,
 }
+impl Compile for DeductiveRule {
+    fn from_parts(conclusion: ConceptDescriptor, join: Conjunction) -> Self {
+        DeductiveRule { conclusion, join }
+    }
+}
+
 impl DeductiveRule {
     /// Compile a rule from a conclusion and premises.
     ///
@@ -38,50 +44,7 @@ impl DeductiveRule {
     /// and runs the type-inference check that required head variables
     /// are not bound only by optional (set-widened) sources.
     pub fn new(conclusion: ConceptDescriptor, premises: Vec<Premise>) -> Result<Self, TypeError> {
-        // Plan first so analysis can read the optimized step order.
-        let join = Planner::from(premises).plan(&Environment::new())?;
-
-        // Run rule-level type analysis: inference + required-head
-        // check + Coalesce contract validation. Failures here are
-        // wrapped into the corresponding `TypeError::*` variants so
-        // the user sees the rule embedded in the error.
-        if let Err(err) = analyzer::analyze(conclusion.clone(), &join.steps) {
-            let rule = DeductiveRule { conclusion, join };
-            return Err(match err {
-                AnalysisError::Inference { reason } => TypeError::TypeInference { reason },
-                AnalysisError::RequiredHeadFromOptional { variable } => {
-                    TypeError::RequiredHeadFromOptional {
-                        rule: Box::new(rule),
-                        variable,
-                    }
-                }
-                AnalysisError::CoalesceTypeMismatch { reason } => TypeError::CoalesceTypeMismatch {
-                    rule: Box::new(rule),
-                    reason,
-                },
-            });
-        }
-
-        let rule = DeductiveRule { conclusion, join };
-
-        // Verify that every conclusion parameter is derived by one of the
-        // premises; otherwise the rule could never fully bind its output.
-        // This check depends on the planner's `binds` set, so it lives
-        // here rather than in analysis.
-        let unbound = rule
-            .conclusion
-            .operands()
-            .find(|name| !rule.join.binds.contains(name))
-            .map(String::from);
-
-        if let Some(variable) = unbound {
-            return Err(TypeError::UnboundVariable {
-                rule: Box::new(rule),
-                variable,
-            });
-        }
-
-        Ok(rule)
+        <Self as Compile>::compile(conclusion, premises)
     }
 
     /// Returns the conclusion predicate for this rule.
@@ -151,15 +114,7 @@ impl<'de> Deserialize<'de> for DeductiveRule {
 
 impl Display for DeductiveRule {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "{} {{", self.conclusion.this())?;
-        write!(f, "this: {},", Type::Entity)?;
-        for (name, attribute) in self.conclusion.with().iter() {
-            match attribute.content_type() {
-                Some(ty) => write!(f, "{}: {},", name, ty)?,
-                None => write!(f, "{}: Any,", name)?,
-            }
-        }
-        write!(f, "}}")
+        fmt_rule_schema(&self.conclusion, f)
     }
 }
 

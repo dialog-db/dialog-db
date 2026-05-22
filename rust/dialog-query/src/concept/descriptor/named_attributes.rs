@@ -7,7 +7,7 @@ use std::collections::HashMap;
 /// This is a transparent wrapper around `Vec<(String, AttributeDescriptor)>` that
 /// enforces non-emptiness — you cannot create a `NamedAttributes` with zero entries.
 ///
-/// Serializes as a JSON map: `{ "fieldName": { "the": "domain/name", ... } }`
+/// Serializes as a JSON map: `{ "field-name": { "the": "domain/name", ... } }`
 #[repr(transparent)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct NamedAttributes(Vec<(String, AttributeDescriptor)>);

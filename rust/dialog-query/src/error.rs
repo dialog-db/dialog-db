@@ -7,6 +7,7 @@ use std::fmt;
 use crate::artifact::{ArtifactTypeError, DialogArtifactsError, Type, Value};
 pub use crate::environment::Environment;
 pub use crate::proposition::Proposition;
+pub use crate::rule::Rule;
 pub use crate::rule::deductive::DeductiveRule;
 use crate::term::Term;
 use crate::types::Any;
@@ -49,7 +50,7 @@ pub enum TypeError {
     #[error("Rule {rule} does not use parameter \"{parameter}\"")]
     UnusedParameter {
         /// The rule containing the unused parameter.
-        rule: Box<DeductiveRule>,
+        rule: Box<Rule>,
         /// Name of the unused parameter.
         parameter: String,
     },
@@ -58,7 +59,7 @@ pub enum TypeError {
     #[error("Rule {rule} does not bind variable \"{variable}\"")]
     UnboundVariable {
         /// The rule with the unbound variable.
-        rule: Box<DeductiveRule>,
+        rule: Box<Rule>,
         /// Name of the unbound variable.
         variable: String,
     },
@@ -75,7 +76,7 @@ pub enum TypeError {
     )]
     RequiredHeadFromOptional {
         /// The offending rule.
-        rule: Box<DeductiveRule>,
+        rule: Box<Rule>,
         /// Name of the optionally-bound head variable.
         variable: String,
     },
@@ -86,7 +87,7 @@ pub enum TypeError {
     #[error("Rule {rule} has an invalid Coalesce constraint: {reason}")]
     CoalesceTypeMismatch {
         /// The offending rule.
-        rule: Box<DeductiveRule>,
+        rule: Box<Rule>,
         /// Human-readable reason for the mismatch.
         reason: String,
     },
@@ -106,7 +107,7 @@ pub enum TypeError {
     #[error("Rule {rule} application omits required parameter \"{parameter}\"")]
     OmittedParameter {
         /// The rule missing the parameter.
-        rule: Box<DeductiveRule>,
+        rule: Box<Rule>,
         /// Name of the omitted parameter.
         parameter: String,
     },
@@ -115,7 +116,7 @@ pub enum TypeError {
     #[error("Rule {rule} uses local {variable} that no premise can provide")]
     RequiredLocalVariable {
         /// The rule with the unprovided local variable.
-        rule: Box<DeductiveRule>,
+        rule: Box<Rule>,
         /// Name of the local variable.
         variable: String,
     },
@@ -124,7 +125,7 @@ pub enum TypeError {
     #[error("Rule {rule} passes unbound {term} into required parameter \"{parameter}\"")]
     UnboundRuleParameter {
         /// The rule with the unbound parameter.
-        rule: Box<DeductiveRule>,
+        rule: Box<Rule>,
         /// Name of the required parameter.
         parameter: String,
         /// The unbound term.
@@ -204,26 +205,20 @@ pub enum TypeError {
 impl From<AnalyzerError> for TypeError {
     fn from(error: AnalyzerError) -> Self {
         match error {
-            AnalyzerError::UnusedParameter { rule, parameter } => TypeError::UnusedParameter {
-                rule: Box::new(rule),
-                parameter,
-            },
-            AnalyzerError::UnboundVariable { rule, variable } => TypeError::UnboundVariable {
-                rule: Box::new(rule),
-                variable,
-            },
-            AnalyzerError::RequiredParameter { rule, parameter } => TypeError::OmittedParameter {
-                rule: Box::new(rule),
-                parameter,
-            },
+            AnalyzerError::UnusedParameter { rule, parameter } => {
+                TypeError::UnusedParameter { rule, parameter }
+            }
+            AnalyzerError::UnboundVariable { rule, variable } => {
+                TypeError::UnboundVariable { rule, variable }
+            }
+            AnalyzerError::RequiredParameter { rule, parameter } => {
+                TypeError::OmittedParameter { rule, parameter }
+            }
             AnalyzerError::OmitsRequiredCell { formula, cell } => {
                 TypeError::OmittedCell { formula, cell }
             }
             AnalyzerError::RequiredLocalVariable { rule, variable } => {
-                TypeError::RequiredLocalVariable {
-                    rule: Box::new(rule),
-                    variable,
-                }
+                TypeError::RequiredLocalVariable { rule, variable }
             }
         }
     }
@@ -424,7 +419,7 @@ pub enum AnalyzerError {
     #[error("Rule {rule} does not makes use of the \"{parameter}\" parameter")]
     UnusedParameter {
         /// The rule containing the unused parameter.
-        rule: DeductiveRule,
+        rule: Box<Rule>,
         /// Name of the unused parameter.
         parameter: String,
     },
@@ -432,7 +427,7 @@ pub enum AnalyzerError {
     #[error("Rule {rule} application omits required parameter \"{parameter}\"")]
     RequiredParameter {
         /// The rule missing the parameter.
-        rule: DeductiveRule,
+        rule: Box<Rule>,
         /// Name of the required parameter.
         parameter: String,
     },
@@ -448,7 +443,7 @@ pub enum AnalyzerError {
     #[error("Rule {rule} makes use of local {variable} that no premise can provide")]
     RequiredLocalVariable {
         /// The rule with the unprovided local variable.
-        rule: DeductiveRule,
+        rule: Box<Rule>,
         /// Name of the local variable.
         variable: String,
     },
@@ -456,7 +451,7 @@ pub enum AnalyzerError {
     #[error("Rule {rule} does not bind a variable \"{variable}\"")]
     UnboundVariable {
         /// The rule with the unbound variable.
-        rule: DeductiveRule,
+        rule: Box<Rule>,
         /// Name of the unbound variable.
         variable: String,
     },

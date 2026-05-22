@@ -71,8 +71,10 @@
 //! // PersonQuery → Parameters, Premise, Proposition, ConceptQuery
 //! ```
 
+use convert_case::{Case, Casing};
 use proc_macro::TokenStream;
 use quote::quote;
+use syn::ext::IdentExt;
 use syn::{Data, DeriveInput, Fields, parse_macro_input};
 
 use super::helpers::extract_doc_comments;
@@ -155,9 +157,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
     for field in fields {
         let field_name = field.ident.as_ref().unwrap();
-        let field_name_str = field_name.to_string();
+        // The Rust field name is normalized for the descriptor / query
+        // surface: `unraw()` drops any `r#` raw-identifier prefix, then
+        // `to_case(Case::Kebab)` matches the formal-notation convention
+        // used by attribute names elsewhere.
+        let raw_field_name = field_name.unraw().to_string();
+        let field_name_str = raw_field_name.to_case(Case::Kebab);
 
-        if field_name_str == "this" {
+        // Skip the 'this' field - it's handled specially
+        if raw_field_name == "this" {
             continue;
         }
 
@@ -398,16 +406,20 @@ pub fn derive(input: TokenStream) -> TokenStream {
         // Implement From<StructName> for ConceptDescriptor.
         //
         // Each field is routed into `with` or `maybe` at runtime
-        // based on its `<F as ConceptField>::RESOLUTION` const —
-        // `Required` fields populate `with`, `Optional` fields
-        // populate `maybe`. The two slots are independent, and a
-        // concept may have either or both.
+        // based on its `<F as ConceptField>::OPTIONAL` const —
+        // required fields populate `with`, optional fields populate
+        // `maybe`. The two slots are independent, and a concept may
+        // have either or both. The struct's doc comment carries
+        // through as the descriptor's `description` so a `concept:`
+        // query surfaces it (the field list alone leaves it `None`).
         impl From<#struct_name> for dialog_query::ConceptDescriptor {
             fn from(_: #struct_name) -> Self {
                 let mut __with: Vec<(&str, dialog_query::AttributeDescriptor)> = Vec::new();
                 let mut __maybe: Vec<(&str, dialog_query::AttributeDescriptor)> = Vec::new();
                 #(#descriptor_pair_pushes)*
-                dialog_query::ConceptDescriptor::from(__with).with_maybe(__maybe)
+                dialog_query::ConceptDescriptor::from(__with)
+                    .with_maybe(__maybe)
+                    .with_description(#concept_description_lit)
             }
         }
 
@@ -417,7 +429,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 let mut __with: Vec<(&str, dialog_query::AttributeDescriptor)> = Vec::new();
                 let mut __maybe: Vec<(&str, dialog_query::AttributeDescriptor)> = Vec::new();
                 #(#descriptor_pair_pushes)*
-                dialog_query::ConceptDescriptor::from(__with).with_maybe(__maybe)
+                dialog_query::ConceptDescriptor::from(__with)
+                    .with_maybe(__maybe)
+                    .with_description(#concept_description_lit)
             }
         }
 

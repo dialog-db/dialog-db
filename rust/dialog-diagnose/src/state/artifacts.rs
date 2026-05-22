@@ -94,19 +94,17 @@ impl ArtifactsCursor {
                 None => Box::pin(tree.stream(&storage)),
             };
 
-            loop {
-                let Some(element) = stream.try_next().await? else {
-                    break;
-                };
-
+            while let Some(element) = stream.try_next().await? {
                 state.last_key = Some(element.key);
 
-                match tx.send(WorkerMessage::Fact {
-                    index: state.next_index,
-                    data: element.value,
-                }) {
-                    Ok(_) => (),
-                    Err(_) => break,
+                if tx
+                    .send(WorkerMessage::Fact {
+                        index: state.next_index,
+                        data: element.value,
+                    })
+                    .is_err()
+                {
+                    break;
                 }
 
                 state.next_index += 1;

@@ -29,6 +29,7 @@ dialog-effects = { workspace = true }
 futures-util = { workspace = true }
 futures-core = { workspace = true }
 async-stream = { workspace = true }
+async-trait = { workspace = true }
 
 # Macro utilities
 dialog-macros = { workspace = true }
@@ -53,7 +54,6 @@ anyhow = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "rt"] }
 futures-util = { workspace = true }
 wasm-bindgen-test = { workspace = true }
-async-trait = { workspace = true }
 
 [features]
 default = []

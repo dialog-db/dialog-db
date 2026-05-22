@@ -35,6 +35,14 @@
 mod repository;
 pub use repository::*;
 
+/// Streaming-merge and tombstone helpers used by the query-session
+/// composition layer.
+pub(crate) mod layer;
+
+/// Typed schema for query-time facts about a repository's structure
+/// (origins, branches, branch revisions, sessions).
+pub mod schema;
+
 pub use dialog_artifacts::{Exporter, Importer};
 
 /// Test helpers for setting up profiles, operators, repositories, and test data.
