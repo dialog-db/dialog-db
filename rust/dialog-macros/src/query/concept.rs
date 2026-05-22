@@ -349,7 +349,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         }
 
-        // Implement From<StructName> for ConceptDescriptor
+        // Implement From<StructName> for ConceptDescriptor.
+        // The struct's doc comment carries through as the
+        // descriptor's `description` so a `concept:` query
+        // surfaces it (the field list alone leaves it `None`).
         impl From<#struct_name> for dialog_query::ConceptDescriptor {
             fn from(_: #struct_name) -> Self {
                 dialog_query::ConceptDescriptor::from(vec![
@@ -357,6 +360,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                         (#field_name_lits, <#field_types as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().clone())
                     ),*
                 ])
+                .with_description(#concept_description_lit)
             }
         }
 
@@ -368,6 +372,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                         (#field_name_lits, <#field_types as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().clone())
                     ),*
                 ])
+                .with_description(#concept_description_lit)
             }
         }
 
