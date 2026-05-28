@@ -24,6 +24,17 @@
 //! the branch's `X`, if any, is tombstoned but the overlay's `X`
 //! passes through unmodified.
 //!
+//! # Auto-injected schema metadata
+//!
+//! `Transaction::query` resolves the operator's identity at
+//! `.perform(env)` time and folds in the same schema-metadata overlay
+//! that [`Branch::query`](crate::Branch::query) does (see
+//! [`QueryLayer::overlay`](crate::QueryLayer::overlay)). So
+//! [`Session`](crate::schema::Session) /
+//! [`SessionBranch`](crate::schema::SessionBranch) / per-branch
+//! [`BranchMetadata`](super::super::metadata::BranchMetadata) are
+//! visible mid-transaction exactly the way they are post-commit.
+//!
 //! # Non-composable
 //!
 //! [`TransactionQuery`] intentionally has no `.with(...)` chain — a
@@ -43,6 +54,7 @@ use dialog_artifacts::{
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
+use dialog_effects::authority::Identify;
 use dialog_effects::memory::Resolve;
 use dialog_query::concept::descriptor::ConceptDescriptor;
 use dialog_query::concept::query::ConceptRules;
@@ -53,6 +65,7 @@ use dialog_query::source::SelectRules;
 use crate::Branch;
 use crate::RemoteSite;
 use crate::layer::{filter_tombstones, merge_grouped, tombstones_from};
+use crate::repository::branch::QueryLayer;
 use crate::repository::branch::select_from_branch;
 
 /// A non-composable query handle returned by
@@ -66,7 +79,6 @@ use crate::repository::branch::select_from_branch;
 pub struct TransactionQuery<'a> {
     branch: &'a Branch,
     changes: Changes,
-    tombstones: HashSet<SortKey>,
 }
 
 impl<'a> TransactionQuery<'a> {
@@ -74,7 +86,6 @@ impl<'a> TransactionQuery<'a> {
         Self {
             branch,
             changes: changes.clone(),
-            tombstones: tombstones_from(changes),
         }
     }
 
@@ -84,7 +95,6 @@ impl<'a> TransactionQuery<'a> {
         TransactionSelectQuery {
             branch: self.branch,
             changes: self.changes,
-            tombstones: self.tombstones,
             query,
         }
     }
@@ -94,18 +104,27 @@ impl<'a> TransactionQuery<'a> {
 pub struct TransactionSelectQuery<'a, Q> {
     branch: &'a Branch,
     changes: Changes,
-    tombstones: HashSet<SortKey>,
     query: Q,
 }
 
 impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
-    /// Execute the query against an env that unions the branch
-    /// (tombstone-filtered) with the transaction's pending changes.
+    /// Execute the query, returning a stream of results.
+    ///
+    /// Mirrors [`SelectQuery::perform`](crate::SelectQuery::perform):
+    /// resolves the operator's identity via [`Identify`], builds the
+    /// per-query overlay (pending transaction changes + auto-injected
+    /// schema metadata) through
+    /// [`QueryLayer::overlay`](crate::QueryLayer::overlay), lifts any
+    /// retracts in it into tombstones, and unions the branch stream
+    /// (tombstone-filtered) with the overlay. The schema-metadata
+    /// pass is what keeps `Session` / `SessionBranch` /
+    /// `BranchMetadata` visible mid-transaction.
     pub fn perform<Env>(self, env: &'a Env) -> impl Output<Q::Conclusion> + 'a
     where
         Env: Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
+            + Provider<Identify>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
@@ -114,13 +133,29 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
         let TransactionSelectQuery {
             branch,
             changes,
-            tombstones,
             query,
         } = self;
         async_stream::try_stream! {
+            let operator = Identify
+                .perform(env)
+                .await
+                .map_err(|e| DialogArtifactsError::Storage(format!("identify: {e}")))?;
+
+            // Route through the same QueryLayer overlay path
+            // Branch::query() uses, so schema-injected metadata
+            // (Session, SessionBranch, per-branch BranchMetadata)
+            // surfaces alongside the transaction's pending changes.
+            // `with(changes)` preserves Assert/Replace/Retract
+            // polarity via `Statement for Changes`, so the user's
+            // retracts stay retracts and lift into tombstones below.
+            let overlay = QueryLayer::from(branch)
+                .with(changes)
+                .overlay(&operator);
+            let tombstones = tombstones_from(&overlay);
+
             let trans_env = TransactionEnv {
                 branch,
-                changes,
+                changes: overlay,
                 tombstones,
                 env,
             };
@@ -191,6 +226,8 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use crate::helpers::{test_operator_with_profile, test_repo};
+    use crate::schema;
+    use crate::schema::DidExt as _;
     use dialog_artifacts::Entity;
     use dialog_query::query::Output;
     use dialog_query::{Concept, Query, Term, the};
@@ -317,6 +354,143 @@ mod tests {
             .map(|p| p.name.0)
             .collect();
         assert_eq!(names, vec!["Alice".to_string()]);
+        Ok(())
+    }
+
+    /// `Transaction::query()` must surface the same auto-injected
+    /// session metadata that `Branch::query()` does. The txn view is
+    /// "branch + pending changes" — schema-shaped facts the branch
+    /// auto-materializes (`Session`, `SessionBranch`, …) must pass
+    /// through unchanged, even when the transaction is empty.
+    ///
+    /// Counterpart to `repository::tests::it_auto_includes_session_facts`.
+    #[dialog_common::test]
+    async fn it_auto_includes_session_facts_in_transaction_query() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let from_branch: Vec<schema::Session> = branch
+            .query()
+            .select(Query::<schema::Session> {
+                this: schema::Session::entity().into(),
+                profile: Term::var("profile"),
+                operator: Term::var("operator"),
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(from_branch.len(), 1, "Branch::query() must see the Session");
+
+        let from_txn: Vec<schema::Session> = branch
+            .transaction()
+            .query()
+            .select(Query::<schema::Session> {
+                this: schema::Session::entity().into(),
+                profile: Term::var("profile"),
+                operator: Term::var("operator"),
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(
+            from_txn, from_branch,
+            "Transaction::query() must see the same Session row as Branch::query()"
+        );
+        assert_eq!(from_txn[0].profile.0, profile.did().this());
+        Ok(())
+    }
+
+    /// The schema-metadata overlay used by `Transaction::query()`
+    /// must stay isolated to the query path: it must never leak into
+    /// the transaction's committable `Changes`. So a transaction that
+    /// only queries (no `.assert` / `.retract`) and then commits must
+    /// land zero metadata facts on the branch tree.
+    #[dialog_common::test]
+    async fn it_does_not_leak_session_metadata_into_commits() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // Run a query that sees Session via the txn-query overlay,
+        // then commit the (otherwise empty) transaction.
+        let tx = branch.transaction();
+        let seen: Vec<schema::Session> = tx
+            .query()
+            .select(Query::<schema::Session> {
+                this: schema::Session::entity().into(),
+                profile: Term::var("profile"),
+                operator: Term::var("operator"),
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(seen.len(), 1, "txn-query must see Session");
+        tx.commit().perform(&operator).await?;
+
+        // After commit, the branch tree must not contain any
+        // `dialog.session/*` facts — those are auto-materialized at
+        // query time, not persisted. Confirm by raw attribute lookup
+        // through the branch's underlying claim stream.
+        use dialog_query::AttributeQuery;
+        use dialog_query::attribute::The;
+        let profile_facts: Vec<dialog_query::Claim> = branch
+            .query()
+            .select(AttributeQuery::from(
+                Term::<The>::from(the!("dialog.session/profile"))
+                    .of(Term::<Entity>::var("e"))
+                    .is(Term::<Entity>::var("v")),
+            ))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        // `branch.query()` re-injects metadata at query time, so this
+        // returns one row — but it's coming from the *overlay*, not
+        // the persisted tree. Persisted metadata would mean two rows
+        // (one from tree, one from overlay) post commit, since the
+        // overlay isn't deduplicated against the tree.
+        assert_eq!(
+            profile_facts.len(),
+            1,
+            "metadata must come from the query-time overlay only, \
+             not be persisted into the branch tree on commit; \
+             saw {profile_facts:?}"
+        );
+        Ok(())
+    }
+
+    /// `dialog.session/branch` is cardinality-many and one row per
+    /// branch in scope is asserted by the metadata pass. The
+    /// transaction-query path must reproduce the full set.
+    ///
+    /// Counterpart to
+    /// `repository::tests::it_auto_includes_session_branch_attribute_per_branch_in_scope`.
+    #[dialog_common::test]
+    async fn it_auto_includes_session_branch_in_transaction_query() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let main = repo.branch("main").open().perform(&operator).await?;
+
+        let origin = schema::Origin::new(profile.did(), main.of().clone());
+        let main_branch = schema::Branch::new(&origin, "main");
+
+        let session_entity = schema::Session::entity();
+        let rows: Vec<schema::SessionBranch> = main
+            .transaction()
+            .query()
+            .select(Query::<schema::SessionBranch> {
+                this: session_entity.into(),
+                branch: Term::var("branch"),
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        let got: Vec<Entity> = rows.into_iter().map(|r| r.branch.0).collect();
+        assert_eq!(
+            got,
+            vec![main_branch.this],
+            "Transaction::query() must see the SessionBranch row for every in-scope branch"
+        );
         Ok(())
     }
 }
