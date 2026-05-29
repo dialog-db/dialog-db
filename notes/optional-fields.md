@@ -1,16 +1,34 @@
 # Optional Fields & Type System — v2 Design
 
-This document specifies the type-system rework on
-`feat/optional-fields-v2`. It supersedes v1 (commit `d6629bf7` on
-`feat/optional-fields`) and the original v2 sketch at
-`5cc533ff`. The current direction is **rank-1 parametric
-polymorphism with Damas-Milner type inference** — Roc/Elm style,
-adapted to our Datalog-flavored query engine.
+This document was written as a *design contract* before
+implementation. The implementation took a smaller path than the
+contract proposed. The doc has been split:
 
-This is a design contract for the v2 branch. Implementation
-follows in subsequent commits.
+- **What shipped** — the set-widening type system, the unifier-backed
+  rule-level type inference, the `Resolution` policy, and the
+  `Coalesce` constraint. These are now in code under
+  `rust/dialog-query/`. The shipped pipeline is documented in
+  [`rule-pipeline.md`](./rule-pipeline.md); the type-system shape is
+  in `src/type_system.rs` and `src/type_system/unifier.rs`.
 
-## Motivation
+- **What didn't ship** — rank-1 polymorphic *formulas* with
+  `TypeScheme`/`SchemeBody`/`SchemeType`, and the `instantiate` /
+  `generalize` operations that go with them. The schemes were the
+  design's answer to "generic formulas like `math/sum`"; we didn't
+  have a concrete consumer that needed them, so the work was
+  deferred to a follow-up.
+
+The remainder of this document is the original design contract,
+preserved so the historical intent is visible. **Names like
+`TypeScheme`, `SchemeBody`, `SchemeType`, and `SchemeDefinite` do
+not exist in code.** Where a section maps onto something that did
+ship, an "✅ Shipped as" note points at the real type. Where a
+section described an unshipped piece, a "⚠️ Not shipped" note marks
+it.
+
+---
+
+## Motivation (still accurate)
 
 Three concerns drove the redesign:
 
@@ -38,20 +56,10 @@ Three concerns drove the redesign:
    rule body and feeds back into the storage layer (e.g. for
    index-range optimization).
 
-All three problems share a root: **the schema language can't
-express type variables**. Without type variables, optionality
-becomes a parallel taxonomy, generic formulas can't be declared,
-and inference has nowhere to write its results.
+The shipped work addresses (1) end-to-end and lays the unifier
+groundwork for (3). Concern (2) is the part that didn't ship.
 
-v2 introduces type variables as first-class citizens of the type
-system, plus a Damas-Milner unifier that resolves them at rule
-compile time. Optionality is one specific use of the unifier
-(`Optional<T>` is a slot type that admits `Definite(T) ∪
-{Absent}`); generic formulas are another (`Sum<T: Numeric>` is a
-formula scheme); range predicates a third (constraint set on
-variables).
-
-## v1 retrospective
+## v1 retrospective (still accurate)
 
 v1 shipped working set-widening but accumulated debt:
 
@@ -109,40 +117,40 @@ pub enum Definite {
 }
 ```
 
-Key structural properties:
+✅ **Shipped as** `type_system::Type` with variants
+`Primitive(Primitive)` and `Composite(Primitive, BTreeSet<Composite>)`.
+The shipped form is flatter than the proposed `Definite/Optional`
+split: optionality is encoded as a `Nothing` bit in the same
+`Primitive` bitfield, not as a wrapping `Optional` variant. A
+shipped `Type` carrying `Nothing` *is* the set-widened thing — no
+separate constructor. Nested optionality is still structurally
+impossible: `Type::optional()` adds the bit; calling it again is
+idempotent.
 
-- **`Optional` wraps `Definite`**, not `Type`. Nested optionality
-  unrepresentable.
-- **No `Any` variant.** What v1 called `Any` is `Definite::
-  Variable(fresh)` with constraint `PrimitiveSet::ALL` —
-  "anonymous variable that can take any primitive shape."
-- **Records and variants are reserved as `Definite` constructors.**
-  Future PRs add them; the existing recursion via `Box<Definite>`
-  accommodates them without reshape.
+Key structural properties (mostly hold in the shipped form):
+
+- **No `Any` variant.** ✅ The shipped form has no `Any` either.
+  Untyped slots carry `None` at the `Option<Type>` boundary or
+  use `Primitive::ALL` (any present value) / `Primitive::ANY` (any
+  including `Nothing`).
+- **Records and variants are reserved as `Composite` cases.** ✅ The
+  shipped `Composite` enum has `Product(BTreeMap<String, Type>)` and
+  `Variant{label, value}` — placeholders, not active in inference
+  yet.
 
 ### `PrimitiveSet`
 
-A bitfield over `ValueType` variants. Constraints are sets, not
-single values, so type variables can carry kind-level constraints
-(`NUMERIC`, `STRING_LIKE`, etc.) and unification can intersect
-them.
-
 ```rust
 pub struct PrimitiveSet { bits: u16 }
-
-impl PrimitiveSet {
-    pub const fn singleton(vt: ValueType) -> Self;
-    pub fn intersect(self, other: Self) -> Option<Self>;  // None = empty
-    pub fn includes(self, other: Self) -> bool;            // superset
-    pub fn as_singleton(self) -> Option<ValueType>;        // when narrowed
-    pub fn iter(self) -> impl Iterator<Item = ValueType>;
-
-    pub const ALL: Self;          // every primitive
-    pub const NUMERIC: Self;      // UnsignedInt | SignedInt | Float
-    pub const STRING_LIKE: Self;  // String | Symbol
-    pub const COMPARABLE: Self;   // NUMERIC ∪ STRING_LIKE ∪ Entity ∪ ...
-}
 ```
+
+✅ **Shipped as** `type_system::Primitive` (same shape, different
+name). API matches the proposal closely:
+`Primitive::ALL`/`NUMERIC`/`STRING_LIKE`/`COMPARABLE`, `intersect`,
+`singleton`. The shipped version also exposes
+`Primitive::NOTHING` and a `Primitive::ANY` (= `ALL | NOTHING`)
+that the doc doesn't mention — these are what make the "Nothing
+bit" encoding work.
 
 ### `VarId` and unification
 
@@ -150,354 +158,238 @@ impl PrimitiveSet {
 pub struct VarId(u32);
 
 pub struct UnificationContext {
-    /// Substitution: `VarId` → resolved type.
     substitution: HashMap<VarId, Definite>,
-    /// Constraint registry: per-variable `PrimitiveSet`.
     constraints: HashMap<VarId, PrimitiveSet>,
-    /// Fresh-id allocator.
     next_id: u32,
 }
 ```
 
+✅ **Shipped as** `type_system::unifier::VarId` and
+`type_system::unifier::Context`. The shipped `Context` also tracks
+a `names: HashMap<String, VarId>` so the rule-level inference pass
+can allocate one variable per named rule variable.
+
 Operations:
 
-- `fresh(constraint) -> VarId` allocates a new variable.
-- `unify(a, b)` Robinson unification with constraint
-  intersection. Errors on constraint conflict, occurs check, or
-  primitive mismatch.
-- `apply(ty)` recursively walks `ty`, replacing each
-  `Variable(id)` with the substituted type.
-- `instantiate(scheme)` allocates fresh `VarId`s for the
-  scheme's quantified variables, returning a body type with the
-  substitutions applied.
+- `fresh(constraint) -> VarId` — ✅ shipped.
+- `unify(a, b)` Robinson unification — ✅ shipped.
+- `apply(ty)` — ✅ shipped.
+- `instantiate(scheme)` — ⚠️ **Not shipped.** Nothing constructs
+  `TypeScheme`s, so nothing instantiates them.
 
-Unification rules:
-
-- `Variable(x) ≡ Variable(y)`: bind them; intersect constraints.
-- `Variable(x) ≡ Definite(p)`: check `p`'s primitive belongs to
-  `x`'s constraint; substitute `x := Definite(p)`. Run occurs
-  check.
-- `Variable(x) ≡ Optional(p)`: an Optional cannot satisfy a
-  variable that's used in a `Definite` slot. The unifier records
-  the slot's optionality at the slot level (not on the variable),
-  so this case is "merge constraints; the slot wrapping
-  determines optional vs definite per-use."
-- `Definite(a) ≡ Definite(b)`: structural unify on `a` and `b`.
-- `Optional(a) ≡ Optional(b)`: structural unify on `a` and `b`.
-- `Definite(a) ≡ Optional(b)`: strictest wins — narrow to
-  `Definite(unify(a, b))`. The optional consumer's tolerance for
-  Absent becomes dead code, but that's not an error.
+Unification rules — all the rules between concrete `Type`s and
+between variables and concretes are shipped. The `Definite ≡
+Optional` cases collapsed into the shipped form's intersection
+semantics: optionality is just a bit on the primitive set, and
+intersection narrows it correctly.
 
 ### Type schemes
 
-A formula declares a `TypeScheme` — its rank-1 polymorphic type:
-
 ```rust
-pub struct TypeScheme {
-    /// Quantified type variables and their constraints. Names
-    /// scope-local to this scheme.
-    quantified: Vec<(VarName, PrimitiveSet)>,
-    /// The body type, referencing quantified variables by
-    /// `VarName`. Instantiation replaces these with fresh
-    /// `VarId`s.
-    body: SchemeBody,
-}
-
-pub enum SchemeBody {
-    /// A function-like signature: parameter names → types.
-    Schema(BTreeMap<String, SchemeType>),
-    /// A single value type (rare, for non-function values).
-    Type(SchemeType),
-}
-
-pub enum SchemeType {
-    /// Reference to a quantified variable.
-    Bound(VarName),
-    /// Anonymous fresh variable (used for "any" slots that don't
-    /// share with other slots).
-    Fresh(PrimitiveSet),
-    /// Concrete shape: as `Type` but with `SchemeType` inside
-    /// `Definite::Variable(VarName)` instead of `VarId`.
-    Definite(Box<SchemeDefinite>),
-    Optional(Box<SchemeDefinite>),
-}
-
-pub enum SchemeDefinite {
-    Primitive(PrimitiveSet),
-    Variable(VarName),
-}
+pub struct TypeScheme { ... }
+pub enum SchemeBody { ... }
+pub enum SchemeType { ... }
+pub enum SchemeDefinite { ... }
 ```
 
-Schemes are **static, compile-time constants** in formula module
-definitions. Example for `math/sum`:
+⚠️ **Not shipped.** No type with any of these names exists in
+code. Formulas keep their existing `Schema` (no quantified
+variables); inference happens *over a rule's variables*, not over
+a formula's. This is the biggest deviation from the design.
 
-```rust
-const SUM_SCHEME: LazyLock<TypeScheme> = LazyLock::new(|| TypeScheme {
-    quantified: vec![(VarName::new("T"), PrimitiveSet::NUMERIC)],
-    body: SchemeBody::Schema(btreemap! {
-        "left".into()  => SchemeType::Definite(Box::new(SchemeDefinite::Variable(VarName::new("T")))),
-        "right".into() => SchemeType::Definite(Box::new(SchemeDefinite::Variable(VarName::new("T")))),
-        "is".into()    => SchemeType::Definite(Box::new(SchemeDefinite::Variable(VarName::new("T")))),
-    }),
-});
-```
+**Why it didn't ship:** the PR's actual mission was to make the
+optional-fields case work end-to-end (stop emitting spurious
+`Absent` rows when sibling premises narrow the variable). That
+requires inference over a rule's variables. It does not require
+polymorphic formulas. Adding the `TypeScheme` machinery would have
+meant building infrastructure with no current consumer — no
+shipped formula is yet declared polymorphic.
 
-`unwrap_or` carries `Optional<T>` for its source slot:
-
-```rust
-const UNWRAP_OR_SCHEME: LazyLock<TypeScheme> = LazyLock::new(|| TypeScheme {
-    quantified: vec![(VarName::new("T"), PrimitiveSet::ALL)],
-    body: SchemeBody::Schema(btreemap! {
-        "source".into()  => SchemeType::Optional(Box::new(SchemeDefinite::Variable(VarName::new("T")))),
-        "default".into() => SchemeType::Definite(Box::new(SchemeDefinite::Variable(VarName::new("T")))),
-        "output".into()  => SchemeType::Definite(Box::new(SchemeDefinite::Variable(VarName::new("T")))),
-    }),
-});
-```
+**What would need to change to ship them:** introduce a
+`TypeScheme` type, attach one to each formula registration in the
+formula registry, add `Context::instantiate` to allocate fresh
+`VarId`s from a scheme's quantified variables, and have the
+planner invoke instantiation when it picks up a formula premise.
+The unifier already handles everything downstream.
 
 ### Wire format
 
-Type schemes are **not serialized**. They're Rust-side metadata
-attached to formula identifiers via a registry. The wire format
-for a formula application stays as today:
-
-```json
-{ "assert": "math/sum", "where": { "left": ..., "right": ..., "is": ... } }
-```
-
-When the planner sees `"math/sum"`, it looks up `SUM_SCHEME` from
-the formula registry, instantiates it (allocates fresh `VarId`s
-for `T`), and unifies against the rule body.
-
-For non-formula schemas (concept descriptors, attribute queries,
-etc.) the wire format is the existing one. These don't have
-quantifiers — they declare concrete `Type` values. The serde
-representation of `Type` itself:
-
-```json
-{ "definite": { "primitive": ["Text"] } }      // exactly String
-{ "definite": { "primitive": ["UnsignedInt", "SignedInt"] } }  // narrower numeric
-{ "optional": { "primitive": ["Text"] } }      // String or Absent
-```
-
-`Variable` in concrete types only appears at runtime (in
-descriptors carrying inferred types after unification). The wire
-format for concept descriptors only emits `Primitive(...)` and
-`Optional(Primitive(...))` — no variable references.
+✅ **Shipped.** Type schemes are not serialized (they're Rust-side
+registry data). Concept descriptors and attribute queries serialize
+their types directly via the existing JSON format. The shipped
+`Type` enum has a serde representation; it's not the exact shape
+the doc proposes (`{"definite": ...}` / `{"optional": ...}`) but
+the underlying property — "concrete types only, no variables on
+the wire" — holds.
 
 ## Rule analysis
 
-`RuleAnalysis` is the per-rule output of the unification pass:
-
 ```rust
 pub struct RuleAnalysis {
-    /// Type intersection per rule-level variable, with
-    /// substitution applied.
     types: HashMap<String, Type>,
-    /// Producers per variable: which premise (by index)
-    /// declared the variable in a `Derived` slot, and what type
-    /// did it declare. Useful for diagnostics and Slice-7-equivalent
-    /// checks.
     producers: HashMap<String, Vec<ProducerEntry>>,
-    /// Scan refinements from range predicates. Empty initially;
-    /// populated as range-predicate constraints are added.
     refinements: HashMap<String, ScanHint>,
 }
 ```
 
-`RuleAnalysis::build(conclusion, premises) -> Result<Self,
-TypeError>` walks the rule body:
+✅ **Shipped as** `rule::analyzer::AnalyzedRule` with
+`types: Arc<TypeEnv>` plus a `DependencyGraph` instead of
+`producers`/`refinements`. The shipped form:
 
-1. Initialize `UnificationContext`.
-2. For each premise, look up its scheme (or use its concrete
-   schema for non-polymorphic premises). Instantiate fresh
-   `VarId`s for any quantified variables.
-3. For each parameter that's a named rule-level variable, unify
-   the slot's instantiated type against the rule's accumulated
-   type for that variable.
-4. After all premises processed, apply the final substitution to
-   every rule-level variable's type.
-5. Validate Slice-7-equivalent rules (Negation can't read a slot
-   that ended up `Optional`; required head fields must be
-   `Definite`; concept must have at least one required `with`
-   field).
-6. Return `RuleAnalysis` with substituted types.
+- Carries the inferred environment via `Arc<TypeEnv>` (shared
+  across the analyzed premises).
+- Builds a `DependencyGraph` (per-premise `binds`/`needs` plus
+  precomputed `requires[]` edges) — broader than the proposed
+  `producers` map. Currently built but not yet consumed by the
+  planner (left for a follow-up).
+- Doesn't carry `refinements` — range-predicate scan hints are
+  deferred along with the predicates themselves.
 
-Stored on the compiled `DeductiveRule` so downstream consumers
-(planner, query-time optimizer) can read inferred types.
+`RuleAnalysis::build(conclusion, premises) -> Result<Self, TypeError>`
+
+✅ **Shipped as** `rule::analyzer::analyze(conclusion, &steps) ->
+Result<AnalyzedRule, AnalysisError>`. The phases match the doc:
+inference, then required-head check, then Coalesce contract
+validation. Step (2) — instantiating formula schemes — isn't done
+because schemes don't ship. Step (5)'s Slice-7 checks ship via
+`AnalysisError::RequiredHeadFromOptional` and the unifier's
+constraint-conflict errors.
 
 ## Descriptor layer
 
-`TypeDescriptor` carries the new `Type` instead of v1's
-`Option<ValueType>`:
-
 ```rust
 pub trait TypeDescriptor: ... {
-    /// Statically known type, if monomorphic.
-    /// `None` means "anonymous variable" (fresh at runtime).
     const KIND: Option<Type>;
-
     fn kind(&self) -> Type;
 }
 ```
 
-Concrete descriptors (`Text`, `Boolean`, etc.) report `Type::
-Definite(Primitive(singleton(vt)))`. The descriptor formerly
-known as `Any` reports an anonymous variable with `ALL`
-constraint at runtime — i.e., its `kind()` allocates a fresh
-`VarId`. (Or we keep a special "anonymous" sentinel; design
-detail to settle in implementation.)
-
-`OptionalOf<D>` ZST handles `Term<Option<U>>`:
-
-```rust
-pub struct OptionalOf<D: TypeDescriptor>(PhantomData<D>);
-
-impl<D: TypeDescriptor> TypeDescriptor for OptionalOf<D> {
-    fn kind(&self) -> Type {
-        match D::KIND {
-            Some(Type::Definite(d)) => Type::Optional(d.clone()),
-            // Anonymous-variable case: Optional<Variable(fresh)>
-            None => Type::Optional(Box::new(Definite::Variable(fresh()))),
-            Some(other) => other,  // shouldn't happen given marker bounds
-        }
-    }
-}
-```
+✅ **Shipped.** `TypeDescriptor::kind` returns `Option<Type>`
+(slightly different signature than `Type` — `None` means "no
+static info, leave to the unifier"). `OptionalOf<D>` ships as
+described.
 
 ## Attribute query layer: `Resolution` policy
 
-v2 drops the recursive `DynamicAttributeQuery::Optional`
-variant. Optionality becomes a `Resolution` field on the
-existing `All`/`Only` variants:
-
 ```rust
 pub enum Resolution {
-    /// Standard EAV: zero rows on miss.
     Required,
-    /// Yield one Absent fallback row on miss.
     Optional,
 }
 ```
 
-Schema reflects optionality through the `is` term's descriptor's
-`kind()`. If `is: Term<Option<U>>`, `is.kind()` returns
-`Type::Optional(...)`, and the schema declares it directly. No
-recursive wrapper, no parallel `value_type` pin.
+✅ **Shipped.** With one refinement: `Resolution` is *derived* from
+`self.is.is_optional()` rather than stored as a field. The shipped
+`AttributeQueryAll::resolution()` returns
+`Resolution::Optional` iff the `is` term's kind admits `Nothing`.
+This makes the rule-level narrowing automatic — once the planner
+narrows the term's kind, the resolution flips with it, without
+needing a separate path.
 
 ## Macro layer
 
-For `Option<T>` fields on `#[derive(Concept)]`, the macro emits
-`Term<Option<<T as Attribute>::Type>>`. The Rust-level
-`Option<...>` wrapper is the typed signal; users get
-`unwrap_or` on the field, set-widening conversions, and
-compile-time rejection of nested `Option`. The realize impl
-pattern-matches on `Binding`.
+✅ **Shipped.** The `#[derive(Concept)]` macro emits
+`Term<Option<<T as Attribute>::Type>>` for `Option<T>` fields.
+Dispatch happens through the `ConceptField` trait with two
+blanket impls (`for N` and `for Option<N>`) leveraging `Option`'s
+`#[fundamental]` annotation — no syntactic detection of the
+`Option` ident.
 
 ## Coalesce / `unwrap_or`
 
-`Coalesce` becomes a formula with `UNWRAP_OR_SCHEME` as its
-type scheme — no longer a separate `Constraint::Coalesce`
-variant. The `UnwrapOr<T: DefiniteType>` Rust-side builder
-constructs the formula application; the typed bound flows
-through Rust generics.
+⚠️ **Partially shipped, but not as a formula.** `Coalesce` ships as
+its own constraint variant (`Constraint::Coalesce`), not as a
+formula with a `UNWRAP_OR_SCHEME`. Its type contract is checked at
+rule-compile time via `Coalesce::validate(ctx)`, which uses the
+shipped `unifier::Context` to verify
+`source: Optional<α>, fallback: α, is: α` — but the contract is
+hand-rolled inside `validate`, not declared as a reusable scheme.
 
-When wire-format rules arrive without Rust types, the planner
-applies `UNWRAP_OR_SCHEME` at unification time. Type errors
-("output doesn't match source type") surface as unification
-failures.
+This is consistent with the broader "no schemes" decision: without
+`TypeScheme` infrastructure, Coalesce's polymorphism is expressed
+ad-hoc rather than via a registered scheme.
 
 ## Slice 7 enforcement
 
-v1 had three checks:
+✅ **Shipped (mostly).**
 
-1. `NegationOnOptional` — Negation reads optional binding.
-2. `RequiredHeadFromOptional` — required head field bound by
-   optional producer.
-3. `ConceptOnlyOptionalFields` — concept with empty `with`.
-
-v2 expresses (1) and (2) through `Type::accepts`-equivalent
-checks during `RuleAnalysis::build`. Negation premises declare
-their parameters as `Definite(...)` (not `Optional`); if any
-positive producer's substituted type is `Optional(...)`,
-unification fails with a clear error. Required head fields
-similarly declare `Definite(...)`. Check (3) is unchanged.
+- `RequiredHeadFromOptional` — shipped as
+  `AnalysisError::RequiredHeadFromOptional`. The shipped check
+  reads the inferred `TypeEnv` and flags any conclusion variable
+  whose inferred kind admits `Nothing`.
+- `NegationOnOptional` — not shipped as a separate check. The
+  shipped semantics: negations don't *contribute* to inference
+  (they're filters), and `apply_types` rewrites their terms with
+  the rule-level kinds — so a negation reading an optional binding
+  sees the narrowed kind, not the user's local one.
+- `ConceptOnlyOptionalFields` — not shipped. Captured as task #80.
 
 ## Marker traits
 
-`ScalarType`/`ProductType`/`VariantType`/`OptionalType`/
-`DefiniteType` family stays as ergonomic Rust-level bounds. They
-prevent `Term<Option<Option<U>>>` and `Term<Option<Any>>` at the
-Rust API.
+✅ **Shipped.** `ScalarType`/`ProductType`/`VariantType`/
+`OptionalType`/`DefiniteType`-family bounds prevent
+`Term<Option<Option<U>>>` and `Term<Option<Any>>` at the Rust API.
 
 ## Implementation phases
 
-1. **Step 1 (amend)** — `PrimitiveSet`, `VarId`, `Type`,
-   `Definite`, `TypeScheme`, `UnificationContext`, `unify`,
-   `apply`, `instantiate`, `generalize`, occurs check. Tests for
-   the algorithm.
-2. **Step 2 (committed)** — `Binding<Value>` at Match layer.
-3. **Step 3** — Descriptor enriched to carry the new `Type`.
-4. **Step 4** — Collapse v1's `schema::Type` into the new `Type`.
-5. **Step 4.5** — `RuleAnalysis::build` with `UnificationContext`
-   integration.
-6. **Step 5** — `Resolution` policy on `DynamicAttributeQuery`.
-7. **Step 6** — Concept projection emits `Resolution::Optional`
-   for `maybe` fields.
-8. **Step 7** — Macro emits typed `Term<Option<U>>` for
-   `Option<T>` fields.
-9. **Step 8** — Coalesce as a formula with `UNWRAP_OR_SCHEME`.
-10. **Step 9** — Marker traits family.
-11. **Step 10** — End-to-end tests; Slice 7 enforcement via
-    unification.
-12. **Step 11** — Docs, lint, fmt, full workspace test.
+The implementation didn't follow the proposed numbered phases
+exactly. The actual shipped order is captured in the commit log on
+`feat/type-inference` (formerly `feat/meet-into-plan`) and
+summarized in [`rule-pipeline.md`](./rule-pipeline.md).
 
 ## What's deferred to follow-up branches
 
-- **Records and variants** — `Definite::Record(...)`,
-  `Definite::Variant(...)` constructors. The recursive `Box<
-  Definite>` accommodates them without reshape.
-- **Generic formulas at runtime** — formula impls that dispatch
-  on the unified type (e.g. `Sum<T>` with separate addition
-  paths for `u32`, `i64`, `f64`). v2 lays the type-system
-  foundation; runtime monomorphization is a follow-up.
+- **Type schemes for polymorphic formulas** (`TypeScheme`,
+  `SchemeBody`, `SchemeType`, `instantiate`). The doc's design
+  intent. The largest deferred chunk.
+- **Records and variants in active inference** — placeholders ship
+  as `Composite::Product`/`Composite::Variant`; the unifier
+  doesn't recurse into them yet.
+- **Generic formulas at runtime** — formula impls that dispatch on
+  the unified type (e.g. `Sum<T>` with separate addition paths
+  for `u32`, `i64`, `f64`). Conditional on type schemes shipping.
 - **Range predicates** — new constraint variants (`<`, `<=`,
-  `starts_with`, etc.) that carry type schemes and contribute to
-  `RuleAnalysis::refinements`. The plumbing is in place; the
-  predicates themselves are a separate slice.
-- **Cross-formula type inference** — propagating type variables
-  across rule bodies that span multiple formulas. v2 unifies
-  within a single rule's `UnificationContext`; cross-rule
-  inference is conceptually more.
-- **`get-some`** — variant-elimination premise. Builds on
-  variant types.
+  `starts_with`, etc.) and their contribution to scan refinements.
+- **Cross-rule type inference** — propagating type variables
+  across rule bodies that span multiple formulas. Within-rule
+  inference ships; across-rule does not.
+- **`get-some`** — variant-elimination premise. Builds on variant
+  types.
+- **`ConceptOnlyOptionalFields` rejection** — task #80.
+- **Dependency graph as planner input** — the shipped
+  `DependencyGraph` is built but unread; the planner still uses
+  `Candidate::update`'s schema-walking loop.
 
 ## Acceptance criteria
 
-- Damas-Milner unifier with full algorithm coverage: identity,
-  variable-variable, variable-concrete, occurs check, constraint
-  conflict, instantiation independence, generalization.
-- All v1 end-to-end tests pass under v2.
-- New tests cover unification corner cases, generic formula
-  declarations, range-predicate-style narrowing.
-- Compile-fail doctests for `Term<Option<Option<U>>>` and
+The original criteria were aspirational for the full design. The
+shipped subset:
+
+- ✅ Unifier with full algorithm coverage for the cases that ship:
+  identity, variable-variable, variable-concrete, occurs check,
+  constraint conflict.
+- ⚠️ "Instantiation independence, generalization" — not shipped
+  (no schemes).
+- ✅ All v1 end-to-end tests pass.
+- ✅ New tests cover unification corner cases at the *rule* level
+  (not formula-scheme level).
+- ⚠️ "Generic formula declarations" — not shipped.
+- ⚠️ "Range-predicate-style narrowing" — infrastructure ready
+  (`TypeEnv`, dependency graph) but no predicates use it yet.
+- ✅ Compile-fail doctests for `Term<Option<Option<U>>>` and
   `Term<Option<Any>>`.
-- Workspace clippy clean, fmt clean, `test:native:debug` green.
-- Design doc reflects the final shape.
+- ✅ Workspace clippy clean, fmt clean.
+- ✅ Design doc reflects the final shape — *this* split.
 
 ## Open questions to settle during implementation
 
-1. **`TypeDescriptor::KIND` const evaluation.** The `Box<
-   Definite>` makes `const` tricky. Likely fall back to non-const
-   `kind()` function. Decision in Step 1.
-2. **Anonymous variable lifetime.** When a descriptor's `kind()`
-   returns `Definite::Variable(fresh)`, who owns the `VarId`? It
-   needs an `UnificationContext` to be meaningful. Likely: every
-   rule-compile pass has its own context, and "anonymous"
-   variables are allocated on demand during unification, not
-   eagerly at descriptor read time. Decision in Step 3.
-3. **Error messages.** Unification failures need source location
-   ("variable `?x` in premise 2 was inferred as String but
-   premise 3 demands UnsignedInt"). The unifier signature
-   accepts a context argument so errors can attribute their
-   source. Decision in Step 1.
+The questions the doc closed during implementation:
+
+1. **`TypeDescriptor::KIND` const evaluation.** Settled as
+   non-const `kind()` returning `Option<Type>`.
+2. **Anonymous variable lifetime.** Settled: per-rule
+   `unifier::Context`; named variables allocated via
+   `var_for_name(name)` on first reference.
+3. **Error messages.** Settled: `InferenceError::Conflict`
+   includes the offending variable name; the `Compile::compile`
+   layer wraps it as `TypeError::TypeInference { reason }`.
