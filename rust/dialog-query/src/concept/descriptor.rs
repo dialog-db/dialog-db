@@ -1,6 +1,6 @@
 /// Named attribute collections for concept descriptors.
 mod named_attributes;
-pub use named_attributes::NamedAttributes;
+pub use named_attributes::{ConceptFieldDescriptor, NamedAttributes};
 
 use std::iter;
 
@@ -50,26 +50,17 @@ use std::ops::Not;
 pub struct ConceptDescriptor {
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
-    with: NamedAttributes,
-    /// Optional (set-widened) attributes.
-    ///
-    /// Each `maybe` attribute is emitted into the rule body as an
-    /// `AttributeQuery` with `Resolution::Optional`: an entity that
-    /// lacks the fact still produces a row, with the slot bound to
+    /// All of the concept's attributes, required and optional alike.
+    /// Optionality is carried per-attribute by
+    /// [`AttributeDescriptor::is_optional`] (serialized as
+    /// `"optional": true` on the wire), so there is no separate
+    /// `maybe` block. An optional attribute is emitted into the rule
+    /// body as a set-widened `AttributeQuery`: a missing fact yields
+    /// a fallback row with the slot bound to
     /// [`Binding::Absent`](crate::Binding) rather than dropping the
-    /// row. Absence is row-level; no `Nothing` value is ever stored.
-    ///
-    /// Skipped during serialization when empty (`None`); an empty
-    /// map deserializes to `None` (treated as absent). Optional
-    /// attributes do **not** count toward the concept's required-
-    /// attribute minimum — a concept must still declare at least one
-    /// `with` attribute (see [`Self::validate`]).
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_maybe"
-    )]
-    maybe: Option<NamedAttributes>,
+    /// row. A concept must still declare at least one *required*
+    /// attribute.
+    with: NamedAttributes,
 }
 
 impl ConceptDescriptor {
@@ -95,45 +86,18 @@ impl ConceptDescriptor {
         self
     }
 
-    /// Returns a reference to the required (`with`) attributes.
+    /// Returns a reference to this concept's attributes (required
+    /// and optional alike). Use [`AttributeDescriptor::is_optional`]
+    /// to tell them apart.
     pub fn with(&self) -> &NamedAttributes {
         &self.with
     }
 
-    /// Returns a reference to the optional (`maybe`) attributes,
-    /// if any are declared. Optional fields are emitted into the
-    /// rule body as `AttributeQuery` premises with
-    /// `Resolution::Optional`, so that a missing fact yields a
-    /// fallback row with the slot bound to `Binding::Absent`
-    /// rather than dropping the row entirely.
-    pub fn maybe(&self) -> Option<&NamedAttributes> {
-        self.maybe.as_ref()
-    }
-
-    /// Returns a copy of this descriptor with the given optional
-    /// attributes installed in the `maybe` slot. Empty input
-    /// becomes `None` (no `maybe` block).
-    pub fn with_maybe<I, K>(mut self, maybe: I) -> Self
-    where
-        I: IntoIterator<Item = (K, AttributeDescriptor)>,
-        K: Into<String>,
-    {
-        let map: Vec<(String, AttributeDescriptor)> =
-            maybe.into_iter().map(|(k, v)| (k.into(), v)).collect();
-        self.maybe = if map.is_empty() {
-            None
-        } else {
-            // Non-empty by the guard above; `maybe` carries no
-            // minimum-count invariant of its own.
-            Some(NamedAttributes::from_pairs(map))
-        };
-        self
-    }
-
     /// Validates the provided parameters against the schema of the attributes.
     pub fn conform(&self, parameters: Parameters) -> Result<Parameters, TypeError> {
-        for (name, attribute) in self.with().iter() {
-            attribute
+        for (name, field) in self.with().iter() {
+            field
+                .descriptor()
                 .conform(parameters.get(name))
                 .map_err(|e| e.at(name.into()))?;
         }
@@ -141,9 +105,21 @@ impl ConceptDescriptor {
         Ok(parameters)
     }
 
-    /// Returns an iterator over operand names, starting with "this" followed by attribute keys.
+    /// Returns an iterator over the concept's *required* operand
+    /// names, starting with `"this"` followed by the required
+    /// attribute keys.
+    ///
+    /// Optional attributes are excluded: they may resolve to
+    /// `Absent`, so they are not subject to the required-head
+    /// grounding check. Use [`Self::with`] to enumerate every
+    /// attribute including optional ones.
     pub fn operands(&self) -> impl Iterator<Item = &str> {
-        iter::once("this").chain(self.with().keys())
+        iter::once("this").chain(
+            self.with()
+                .iter()
+                .filter(|(_, attribute)| !attribute.is_optional())
+                .map(|(name, _)| name),
+        )
     }
 
     /// Derives a `Schema` from this descriptor's attributes.
@@ -153,21 +129,41 @@ impl ConceptDescriptor {
 
     /// Encode this concept as CBOR for hashing.
     ///
-    /// Creates a CBOR-encoded representation as a map where:
-    /// - Keys are attribute URIs (the:{hash}) in sorted order
-    /// - Values are empty objects {}
+    /// Creates a CBOR-encoded map where:
+    /// - Keys are attribute URIs (`the:{hash}`) in sorted order.
+    /// - The value for a **required** attribute is an empty map `{}`.
+    /// - The value for an **optional** attribute is `{ "optional":
+    ///   true }`.
+    ///
+    /// A concept with no optional attributes therefore hashes
+    /// exactly as it did before optionality existed (every value is
+    /// `{}`), so existing concept identities are preserved. Marking
+    /// an attribute optional changes its value object, and thus the
+    /// concept's identity.
     pub fn to_cbor_bytes(&self) -> Vec<u8> {
         use serde::Serialize;
         use std::collections::BTreeMap;
 
+        /// Per-attribute hash value: `{}` for required,
+        /// `{ "optional": true }` for optional. `optional` is omitted
+        /// when false, so a required attribute encodes as an empty
+        /// map — byte-identical to the pre-optionality encoding.
         #[derive(Serialize)]
-        struct EmptyObject {}
+        struct AttributeIdentity {
+            #[serde(skip_serializing_if = "std::ops::Not::not")]
+            optional: bool,
+        }
 
-        let mut attr_map: BTreeMap<String, EmptyObject> = BTreeMap::new();
+        let mut attr_map: BTreeMap<String, AttributeIdentity> = BTreeMap::new();
 
         for (_name, schema) in self.with().iter() {
             let uri = schema.to_uri();
-            attr_map.insert(uri, EmptyObject {});
+            attr_map.insert(
+                uri,
+                AttributeIdentity {
+                    optional: schema.is_optional(),
+                },
+            );
         }
 
         serde_ipld_dagcbor::to_vec(&attr_map).expect("CBOR encoding should not fail")
@@ -201,13 +197,14 @@ impl ConceptDescriptor {
     /// Validates a model against this descriptor's schema and creates an instance.
     fn conform_model(&self, model: Model) -> Result<ConceptStatement, TypeError> {
         let mut relations = vec![];
-        for (name, attribute) in self.with().iter() {
+        for (name, field) in self.with().iter() {
             if let Some(value) = model.attributes.get(name) {
-                let relation = attribute
+                let relation = field
+                    .descriptor()
                     .resolve(value.clone())
                     .map_err(|e| e.at(name.to_string()))?;
                 relations.push(relation);
-            } else {
+            } else if !field.is_optional() {
                 return Err(TypeError::OmittedRequirement {
                     binding: name.into(),
                 });
@@ -230,23 +227,37 @@ impl ConceptDescriptor {
     }
 }
 
-/// Build a [`ConceptDescriptor`] from a validated, non-empty
-/// [`NamedAttributes`] required set. Private: the only way to obtain
-/// a `NamedAttributes` is through its own (fallible) constructors,
-/// so reaching here means the non-empty invariant already holds.
+/// Build a [`ConceptDescriptor`] from a validated [`NamedAttributes`]
+/// set. Private: the only way to obtain a `NamedAttributes` is
+/// through its own (fallible) constructors, which guarantee at least
+/// one required attribute, so reaching here means the invariant
+/// already holds.
 fn descriptor_from_with(with: NamedAttributes) -> ConceptDescriptor {
     ConceptDescriptor {
         description: None,
-        maybe: None,
         with,
     }
+}
+
+/// Wrap a `(name, AttributeDescriptor)` pair as a *required* concept
+/// field. The collection `TryFrom` impls accept bare attribute
+/// descriptors for ergonomics — a hand-written
+/// `ConceptDescriptor::try_from([("name", AttributeDescriptor::new(..))])`
+/// means "this attribute is required." Optional fields are built via
+/// [`ConceptFieldDescriptor::optional`] and the
+/// `ConceptFieldDescriptor`-keyed `TryFrom` impls.
+fn required_field<K: Into<String>>(
+    (name, attr): (K, AttributeDescriptor),
+) -> (String, ConceptFieldDescriptor) {
+    (name.into(), ConceptFieldDescriptor::required(attr))
 }
 
 impl<const N: usize> TryFrom<[(&str, AttributeDescriptor); N]> for ConceptDescriptor {
     type Error = TypeError;
 
     fn try_from(arr: [(&str, AttributeDescriptor); N]) -> Result<Self, Self::Error> {
-        Ok(descriptor_from_with(NamedAttributes::try_from(arr)?))
+        let pairs: Vec<_> = arr.into_iter().map(required_field).collect();
+        Ok(descriptor_from_with(NamedAttributes::try_from(pairs)?))
     }
 }
 
@@ -254,7 +265,8 @@ impl<const N: usize> TryFrom<[(String, AttributeDescriptor); N]> for ConceptDesc
     type Error = TypeError;
 
     fn try_from(arr: [(String, AttributeDescriptor); N]) -> Result<Self, Self::Error> {
-        Ok(descriptor_from_with(NamedAttributes::try_from(arr)?))
+        let pairs: Vec<_> = arr.into_iter().map(required_field).collect();
+        Ok(descriptor_from_with(NamedAttributes::try_from(pairs)?))
     }
 }
 
@@ -262,7 +274,8 @@ impl TryFrom<Vec<(&str, AttributeDescriptor)>> for ConceptDescriptor {
     type Error = TypeError;
 
     fn try_from(vec: Vec<(&str, AttributeDescriptor)>) -> Result<Self, Self::Error> {
-        Ok(descriptor_from_with(NamedAttributes::try_from(vec)?))
+        let pairs: Vec<_> = vec.into_iter().map(required_field).collect();
+        Ok(descriptor_from_with(NamedAttributes::try_from(pairs)?))
     }
 }
 
@@ -270,7 +283,8 @@ impl TryFrom<Vec<(String, AttributeDescriptor)>> for ConceptDescriptor {
     type Error = TypeError;
 
     fn try_from(vec: Vec<(String, AttributeDescriptor)>) -> Result<Self, Self::Error> {
-        Ok(descriptor_from_with(NamedAttributes::try_from(vec)?))
+        let pairs: Vec<_> = vec.into_iter().map(required_field).collect();
+        Ok(descriptor_from_with(NamedAttributes::try_from(pairs)?))
     }
 }
 
@@ -278,7 +292,19 @@ impl TryFrom<HashMap<String, AttributeDescriptor>> for ConceptDescriptor {
     type Error = TypeError;
 
     fn try_from(map: HashMap<String, AttributeDescriptor>) -> Result<Self, Self::Error> {
-        Ok(descriptor_from_with(NamedAttributes::try_from(map)?))
+        let pairs: Vec<_> = map.into_iter().map(required_field).collect();
+        Ok(descriptor_from_with(NamedAttributes::try_from(pairs)?))
+    }
+}
+
+/// Build a descriptor directly from already-wrapped concept fields
+/// (required and/or optional). Used by the `#[derive(Concept)]`
+/// macro path, which tags each field's optionality before building.
+impl TryFrom<Vec<(String, ConceptFieldDescriptor)>> for ConceptDescriptor {
+    type Error = TypeError;
+
+    fn try_from(fields: Vec<(String, ConceptFieldDescriptor)>) -> Result<Self, Self::Error> {
+        Ok(descriptor_from_with(NamedAttributes::try_from(fields)?))
     }
 }
 
@@ -286,14 +312,21 @@ impl From<&ConceptDescriptor> for Schema {
     fn from(predicate: &ConceptDescriptor) -> Self {
         use crate::type_system::Type as Kind;
         let mut schema = Schema::new();
-        for (name, attribute) in predicate.with().iter() {
+        for (name, field) in predicate.with().iter() {
             schema.insert(
                 name.into(),
                 Field {
-                    description: attribute.description().into(),
-                    content_type: attribute.content_type().map(Kind::primitive),
+                    description: field.description().into(),
+                    content_type: field.content_type().map(Kind::primitive),
+                    // Every concept slot is `Optional` at the schema
+                    // layer: a `concept:` query *produces* its fields
+                    // rather than requiring the caller to supply them.
+                    // This is orthogonal to a field's `is_optional()`
+                    // (set-widened / Absent-on-miss) concept-membership
+                    // flag, which is carried into the rule body via the
+                    // `is` term's kind, not the schema requirement.
                     requirement: Requirement::Optional,
-                    cardinality: attribute.cardinality(),
+                    cardinality: field.cardinality(),
                 },
             );
         }
@@ -311,21 +344,6 @@ impl From<&ConceptDescriptor> for Schema {
         }
 
         schema
-    }
-}
-
-/// Deserializes an optional `NamedAttributes` map, treating an empty map as `None`.
-fn deserialize_maybe<'de, D>(deserializer: D) -> Result<Option<NamedAttributes>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let map = HashMap::<String, AttributeDescriptor>::deserialize(deserializer)?;
-    if map.is_empty() {
-        Ok(None)
-    } else {
-        // Non-empty by the guard above; the `maybe` slot has no
-        // minimum-count invariant, so build directly.
-        Ok(Some(NamedAttributes::from_pairs(map.into_iter().collect())))
     }
 }
 
@@ -957,7 +975,7 @@ mod tests {
     /// - Top-level object
     /// - "with" key is required, maps field names to Attribute objects
     /// - "description" key is optional string
-    /// - Each Attribute has "the" (required), optional "description", "cardinality", "as"
+    /// - Each Attribute has "the" (required), optional "description", "cardinality", "as", "optional"
     /// - No unexpected top-level keys (only "description", "with")
     #[dialog_common::test]
     fn it_conforms_to_json_schema() {
@@ -987,10 +1005,10 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should parse");
         let obj = parsed.as_object().expect("Top-level must be object");
 
-        // Only allowed top-level keys per schema: "description", "with", "maybe"
+        // Only allowed top-level keys per schema: "description", "with"
         for key in obj.keys() {
             assert!(
-                ["description", "with", "maybe"].contains(&key.as_str()),
+                ["description", "with"].contains(&key.as_str()),
                 "Unexpected top-level key: {key}"
             );
         }
@@ -1031,7 +1049,7 @@ mod tests {
             // Only allowed attribute keys per schema
             for key in attr.keys() {
                 assert!(
-                    ["the", "description", "cardinality", "as"].contains(&key.as_str()),
+                    ["the", "description", "cardinality", "as", "optional"].contains(&key.as_str()),
                     "Unexpected key '{key}' in attribute '{field_name}'"
                 );
             }
@@ -1256,64 +1274,78 @@ mod tests {
         );
     }
 
-    /// A concept with only optional (`maybe`) attributes and an empty
-    /// `with` is just as degenerate: with no required attribute, the
-    /// rule body binds nothing that constrains the entity, so every
-    /// entity matches. Rejected at the parse layer.
+    /// A concept whose every attribute is optional is just as
+    /// degenerate: with no required attribute, the rule body binds
+    /// nothing that constrains the entity, so every entity matches.
+    /// Rejected at the parse layer.
     #[dialog_common::test]
     fn it_rejects_all_optional_concept_at_parse() {
         let json = r#"{
-            "with": {},
-            "maybe": {
-                "bio": { "the": "user/bio", "as": "Text" }
+            "with": {
+                "bio": { "the": "user/bio", "as": "Text", "optional": true }
             }
         }"#;
 
         let result = serde_json::from_str::<ConceptDescriptor>(json);
         assert!(
             result.is_err(),
-            "Should reject a concept with no required attributes (empty `with`), \
-             even when `maybe` attributes are present"
+            "Should reject a concept with no required attributes \
+             (every `with` entry flagged optional)"
         );
     }
 
     #[dialog_common::test]
-    fn it_accepts_maybe_field() {
+    fn it_accepts_optional_field() {
         let json = r#"{
             "with": {
-                "name": { "the": "user/name", "as": "Text" }
-            },
-            "maybe": {
-                "bio": { "the": "user/bio", "as": "Text" }
+                "name": { "the": "user/name", "as": "Text" },
+                "bio": { "the": "user/bio", "as": "Text", "optional": true }
             }
         }"#;
 
         let concept: ConceptDescriptor =
-            serde_json::from_str(json).expect("Should accept 'maybe' field");
+            serde_json::from_str(json).expect("Should accept an optional field");
 
-        assert_eq!(concept.with().iter().count(), 1);
+        assert_eq!(concept.with().iter().count(), 2);
+
+        let bio = concept
+            .with()
+            .iter()
+            .find(|(name, _)| *name == "bio")
+            .map(|(_, field)| field)
+            .expect("bio field present");
+        assert!(bio.is_optional(), "bio must be optional");
+
+        let name = concept
+            .with()
+            .iter()
+            .find(|(name, _)| *name == "name")
+            .map(|(_, field)| field)
+            .expect("name field present");
+        assert!(!name.is_optional(), "name must be required");
     }
 
     #[dialog_common::test]
-    fn it_validates_maybe_on_parse() {
+    fn it_validates_optional_field_on_parse() {
         let json = r#"{
             "with": {
-                "name": { "the": "user/name", "as": "Text" }
-            },
-            "maybe": {
-                "bio": { "the": "invalid" }
+                "name": { "the": "user/name", "as": "Text" },
+                "bio": { "the": "invalid", "optional": true }
             }
         }"#;
 
         let result = serde_json::from_str::<ConceptDescriptor>(json);
         assert!(
             result.is_err(),
-            "Should validate 'maybe' attributes even though they are not yet supported"
+            "Should validate optional attributes the same as required ones"
         );
     }
 
+    /// A required-only concept must serialize with no `optional`
+    /// keys anywhere, byte-compatible with the pre-optionality
+    /// encoding. There is no separate top-level `maybe` block either.
     #[dialog_common::test]
-    fn it_omits_maybe_in_serialization() {
+    fn it_omits_optional_flag_for_required_fields() {
         let concept = ConceptDescriptor::try_from([(
             "name",
             AttributeDescriptor::new(
@@ -1330,8 +1362,72 @@ mod tests {
 
         assert!(
             parsed.get("maybe").is_none(),
-            "Should not serialize 'maybe' when absent"
+            "There is no top-level 'maybe' block"
         );
+
+        let with = parsed["with"].as_object().expect("Should have 'with'");
+        for (field_name, attr) in with {
+            assert!(
+                attr.as_object()
+                    .expect("attribute is an object")
+                    .get("optional")
+                    .is_none(),
+                "Required field '{field_name}' must omit the 'optional' key"
+            );
+        }
+    }
+
+    /// An optional field round-trips, carrying `"optional": true` on
+    /// the wire and parsing back as optional.
+    #[dialog_common::test]
+    fn it_round_trips_an_optional_field() {
+        let concept = ConceptDescriptor::try_from(vec![
+            (
+                "name".to_string(),
+                ConceptFieldDescriptor::required(AttributeDescriptor::new(
+                    the!("user/name"),
+                    "User's name",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
+            ),
+            (
+                "bio".to_string(),
+                ConceptFieldDescriptor::optional(AttributeDescriptor::new(
+                    the!("user/bio"),
+                    "User's bio",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
+            ),
+        ])
+        .unwrap();
+
+        let json = serde_json::to_string(&concept).expect("Should serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should parse");
+
+        let with = parsed["with"].as_object().expect("Should have 'with'");
+        assert_eq!(
+            with["bio"]["optional"],
+            serde_json::json!(true),
+            "Optional field must carry 'optional': true"
+        );
+        assert!(
+            with["name"].as_object().unwrap().get("optional").is_none(),
+            "Required field must omit 'optional'"
+        );
+
+        let round_tripped: ConceptDescriptor =
+            serde_json::from_str(&json).expect("Should deserialize");
+        assert_eq!(round_tripped.this(), concept.this());
+
+        let bio = round_tripped
+            .with()
+            .iter()
+            .find(|(name, _)| *name == "bio")
+            .map(|(_, field)| field)
+            .expect("bio present");
+        assert!(bio.is_optional());
     }
 
     #[dialog_common::test]
@@ -1444,19 +1540,73 @@ mod tests {
         );
     }
 
+    /// Marking a field optional changes the concept's identity, but a
+    /// required-only concept hashes exactly as it would have before
+    /// optionality existed: building the same attribute as required
+    /// yields the same `this`/`hash`, while flipping it to optional
+    /// changes both.
     #[dialog_common::test]
-    fn it_deserializes_empty_maybe_as_none() {
-        let json = r#"{
-            "with": {
-                "name": { "the": "user/name", "as": "Text" }
-            },
-            "maybe": {}
-        }"#;
+    fn it_hashes_optionality_into_identity() {
+        let name_attr = || {
+            AttributeDescriptor::new(
+                the!("user/name"),
+                "User's name",
+                Cardinality::One,
+                Some(Type::String),
+            )
+        };
+        let bio_attr = || {
+            AttributeDescriptor::new(
+                the!("user/bio"),
+                "User's bio",
+                Cardinality::One,
+                Some(Type::String),
+            )
+        };
 
-        let concept: ConceptDescriptor =
-            serde_json::from_str(json).expect("Should accept empty 'maybe'");
+        // Two required-only concepts built from the same attributes
+        // are identical, regardless of construction path.
+        let required_array =
+            ConceptDescriptor::try_from([("name", name_attr()), ("bio", bio_attr())]).unwrap();
+        let required_fields = ConceptDescriptor::try_from(vec![
+            (
+                "name".to_string(),
+                ConceptFieldDescriptor::required(name_attr()),
+            ),
+            (
+                "bio".to_string(),
+                ConceptFieldDescriptor::required(bio_attr()),
+            ),
+        ])
+        .unwrap();
+        assert_eq!(
+            required_array.hash(),
+            required_fields.hash(),
+            "required-only concept identity is independent of construction path"
+        );
 
-        assert_eq!(concept.maybe, None, "Empty 'maybe' should become None");
+        // Flipping `bio` to optional changes the identity.
+        let with_optional = ConceptDescriptor::try_from(vec![
+            (
+                "name".to_string(),
+                ConceptFieldDescriptor::required(name_attr()),
+            ),
+            (
+                "bio".to_string(),
+                ConceptFieldDescriptor::optional(bio_attr()),
+            ),
+        ])
+        .unwrap();
+        assert_ne!(
+            required_array.hash(),
+            with_optional.hash(),
+            "marking a field optional must change the concept's hash"
+        );
+        assert_ne!(
+            required_array.this(),
+            with_optional.this(),
+            "marking a field optional must change the concept's URI"
+        );
     }
 
     /// `From<&ConceptDescriptor> for Schema` lifts a typed

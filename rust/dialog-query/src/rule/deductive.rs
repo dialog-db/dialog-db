@@ -124,42 +124,32 @@ impl From<&ConceptDescriptor> for DeductiveRule {
 
         let this = Term::<Entity>::var("this");
 
-        // Required (`with`) attributes — standard EAV semantics.
-        // A missing fact filters the row out entirely.
-        for (name, attribute) in concept.with().iter() {
-            premises.push(
-                AttributeQuery::new(
-                    Term::Constant(Value::from(attribute.the().clone())),
-                    this.clone(),
-                    Term::var(name),
-                    Term::blank(),
-                    Some(attribute.cardinality()),
-                )
-                .into(),
-            );
-        }
-
-        // Optional (`maybe`) attributes — a missing fact yields a
-        // fallback row with the slot bound to `Binding::Absent`.
-        // We encode this by typing the `is` term as optional;
-        // `AttributeQuery` derives its resolution from that kind.
-        if let Some(maybe) = concept.maybe() {
-            for (name, attribute) in maybe.iter() {
-                let kind = match attribute.content_type() {
+        for (name, field) in concept.with().iter() {
+            // Required field: standard EAV semantics — a missing fact
+            // filters the row out. Optional field: the `is` term is
+            // typed set-widened, so `AttributeQuery` runs with
+            // `Resolution::Optional` and a missing fact yields a
+            // fallback row with the slot bound to `Binding::Absent`.
+            let value = if field.is_optional() {
+                let kind = match field.content_type() {
                     Some(ty) => Kind::primitive(ty).optional(),
                     None => Kind::primitive_set(Primitive::ALL).optional(),
                 };
-                premises.push(
-                    AttributeQuery::new(
-                        Term::Constant(Value::from(attribute.the().clone())),
-                        this.clone(),
-                        Term::<Any>::typed_var(name, kind),
-                        Term::blank(),
-                        Some(attribute.cardinality()),
-                    )
-                    .into(),
-                );
-            }
+                Term::<Any>::typed_var(name, kind)
+            } else {
+                Term::var(name)
+            };
+
+            premises.push(
+                AttributeQuery::new(
+                    Term::Constant(Value::from(field.the().clone())),
+                    this.clone(),
+                    value,
+                    Term::blank(),
+                    Some(field.cardinality()),
+                )
+                .into(),
+            );
         }
 
         DeductiveRule::new(concept.clone(), premises).expect("Concept should compile")
@@ -563,33 +553,36 @@ mod tests {
         assert_eq!(optional, 0, "expected no optional premises");
     }
 
-    /// Concept projection emits one premise per `with` attribute
-    /// (Required) and one per `maybe` attribute (Optional).
+    /// Concept projection emits one premise per required attribute
+    /// (Required) and one per optional attribute (Optional).
     #[dialog_common::test]
-    fn from_concept_with_maybe_emits_optional_resolver() {
+    fn from_concept_with_optional_field_emits_optional_resolver() {
+        use crate::ConceptFieldDescriptor;
         use crate::Premise;
         use crate::attribute::query::Resolution;
         use crate::proposition::Proposition;
 
-        let concept = ConceptDescriptor::try_from(vec![(
-            "name",
-            AttributeDescriptor::new(
-                the!("person/name"),
-                "",
-                Cardinality::One,
-                Some(Type::String),
+        let concept = ConceptDescriptor::try_from(vec![
+            (
+                "name".to_string(),
+                ConceptFieldDescriptor::required(AttributeDescriptor::new(
+                    the!("person/name"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
             ),
-        )])
-        .unwrap()
-        .with_maybe(vec![(
-            "nickname",
-            AttributeDescriptor::new(
-                the!("person/nickname"),
-                "",
-                Cardinality::One,
-                Some(Type::String),
+            (
+                "nickname".to_string(),
+                ConceptFieldDescriptor::optional(AttributeDescriptor::new(
+                    the!("person/nickname"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
             ),
-        )]);
+        ])
+        .unwrap();
 
         let rule = DeductiveRule::from(&concept);
 
@@ -617,7 +610,7 @@ mod tests {
     /// *unconstructable*: `ConceptDescriptor::try_from` of an empty
     /// required set returns [`TypeError::EmptyConcept`], so the
     /// degenerate concept can never reach the rule compiler at all.
-    /// `maybe` attributes do not change this — only `with` counts.
+    /// Optional fields do not change this — only required ones count.
     ///
     /// (A required head bound *only* by an optional premise — the
     /// distinct shape where a `with` field exists but is fed from an
@@ -634,10 +627,12 @@ mod tests {
         }
     }
 
-    /// `with_maybe` builder installs the maybe attributes; an
-    /// empty input clears the maybe slot.
+    /// A required-only concept carries no optional fields; building
+    /// with an optional field flags exactly that field optional.
     #[dialog_common::test]
-    fn with_maybe_installs_and_clears() {
+    fn optional_field_is_flagged_optional() {
+        use crate::ConceptFieldDescriptor;
+
         let concept = ConceptDescriptor::try_from(vec![(
             "name",
             AttributeDescriptor::new(
@@ -648,23 +643,40 @@ mod tests {
             ),
         )])
         .unwrap();
-        assert!(concept.maybe().is_none(), "no maybe by default");
+        assert!(
+            concept.with().iter().all(|(_, field)| !field.is_optional()),
+            "no optional fields by default"
+        );
 
-        let with_maybe = concept.clone().with_maybe(vec![(
-            "nickname",
-            AttributeDescriptor::new(
-                the!("person/nickname"),
-                "",
-                Cardinality::One,
-                Some(Type::String),
+        let with_optional = ConceptDescriptor::try_from(vec![
+            (
+                "name".to_string(),
+                ConceptFieldDescriptor::required(AttributeDescriptor::new(
+                    the!("person/name"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
             ),
-        )]);
-        assert!(with_maybe.maybe().is_some(), "maybe installed");
-        assert_eq!(with_maybe.maybe().unwrap().iter().count(), 1);
+            (
+                "nickname".to_string(),
+                ConceptFieldDescriptor::optional(AttributeDescriptor::new(
+                    the!("person/nickname"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
+            ),
+        ])
+        .unwrap();
 
-        let empty: Vec<(&str, AttributeDescriptor)> = Vec::new();
-        let cleared = with_maybe.with_maybe(empty);
-        assert!(cleared.maybe().is_none(), "empty input clears maybe");
+        let optional: Vec<&str> = with_optional
+            .with()
+            .iter()
+            .filter(|(_, field)| field.is_optional())
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(optional, vec!["nickname"], "one optional field installed");
     }
 
     /// A conclusion variable bound only by an optional attribute

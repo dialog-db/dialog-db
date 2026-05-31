@@ -227,20 +227,19 @@ pub fn derive(input: TokenStream) -> TokenStream {
         // whether the field is `N` or `Option<N>`, the
         // `<F as ConceptField>::Attribute` projection lifts to `N`,
         // which is the type that carries the AttributeDescriptor.
-        // Routing into `with` vs `maybe` is decided at runtime via
-        // the OPTIONAL const.
+        // Each field becomes a `ConceptFieldDescriptor`; optionality
+        // is tagged at runtime from the `OPTIONAL` const (never by
+        // syntactic `Option<_>` inspection).
         descriptor_pair_pushes.push(quote! {
             {
-                let __pair = (
-                    #field_name_lit.to_string(),
-                    <<#field_type as dialog_query::ConceptField>::Attribute
-                        as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().clone(),
-                );
-                if <#field_type as dialog_query::ConceptField>::OPTIONAL {
-                    __maybe.push(__pair);
+                let __descriptor = <<#field_type as dialog_query::ConceptField>::Attribute
+                    as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().clone();
+                let __field = if <#field_type as dialog_query::ConceptField>::OPTIONAL {
+                    dialog_query::ConceptFieldDescriptor::optional(__descriptor)
                 } else {
-                    __with.push(__pair);
-                }
+                    dialog_query::ConceptFieldDescriptor::required(__descriptor)
+                };
+                __fields.push((#field_name_lit.to_string(), __field));
             }
         });
 
@@ -448,14 +447,13 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 static DESCRIPTOR: std::sync::OnceLock<dialog_query::ConceptDescriptor> =
                     std::sync::OnceLock::new();
                 DESCRIPTOR.get_or_init(|| {
-                    let mut __with: Vec<(String, dialog_query::AttributeDescriptor)> = Vec::new();
-                    let mut __maybe: Vec<(String, dialog_query::AttributeDescriptor)> = Vec::new();
+                    let mut __fields: Vec<(String, dialog_query::ConceptFieldDescriptor)> =
+                        Vec::new();
                     #(#descriptor_pair_pushes)*
-                    dialog_query::ConceptDescriptor::try_from(__with)
+                    dialog_query::ConceptDescriptor::try_from(__fields)
                         .expect(
                             "derive(Concept) guarantees at least one required field at compile time",
                         )
-                        .with_maybe(__maybe)
                         .with_description(#concept_description_lit)
                 })
             }

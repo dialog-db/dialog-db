@@ -7,8 +7,7 @@ pub use rules::ConceptRules;
 
 use std::fmt;
 
-use crate::attribute::AttributeDescriptor;
-use crate::concept::descriptor::ConceptDescriptor;
+use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::planner::Disjunction;
 use crate::schema::CONCEPT_OVERHEAD;
 use crate::selection::Selection;
@@ -152,10 +151,10 @@ impl ConceptQuery {
             Some(total)
         } else {
             // Entity is not bound - categorize attributes to find best execution strategy
-            let mut bound_one: Option<&AttributeDescriptor> = None;
-            let mut bound_many: Option<&AttributeDescriptor> = None;
-            let mut unbound_one: Option<&AttributeDescriptor> = None;
-            let mut unbound_many: Option<&AttributeDescriptor> = None;
+            let mut bound_one: Option<&ConceptFieldDescriptor> = None;
+            let mut bound_many: Option<&ConceptFieldDescriptor> = None;
+            let mut unbound_one: Option<&ConceptFieldDescriptor> = None;
+            let mut unbound_many: Option<&ConceptFieldDescriptor> = None;
 
             for (name, attribute) in self.predicate.with().iter() {
                 if let Some(param) = self.terms.get(name) {
@@ -471,25 +470,27 @@ mod tests {
 
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
-        let concept = ConceptDescriptor::try_from(vec![(
-            "name",
-            AttributeDescriptor::new(
-                the!("person/name"),
-                "",
-                Cardinality::One,
-                Some(Type::String),
+        let concept = ConceptDescriptor::try_from(vec![
+            (
+                "name".to_string(),
+                ConceptFieldDescriptor::required(AttributeDescriptor::new(
+                    the!("person/name"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
             ),
-        )])
-        .unwrap()
-        .with_maybe(vec![(
-            "nickname",
-            AttributeDescriptor::new(
-                the!("person/nickname"),
-                "",
-                Cardinality::One,
-                Some(Type::String),
+            (
+                "nickname".to_string(),
+                ConceptFieldDescriptor::optional(AttributeDescriptor::new(
+                    the!("person/nickname"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
             ),
-        )]);
+        ])
+        .unwrap();
 
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::var("person"));

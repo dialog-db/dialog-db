@@ -80,7 +80,7 @@ pub use artifact::*;
 pub use attribute::query::{AttributeQuery, DynamicAttributeQuery};
 pub use attribute::*;
 pub use claim::Claim;
-pub use concept::descriptor::{ConceptConclusion, ConceptDescriptor};
+pub use concept::descriptor::{ConceptConclusion, ConceptDescriptor, ConceptFieldDescriptor};
 pub use concept::query::{ConceptQuery, ConceptRules};
 pub use concept::{Concept, ConceptField, Conclusion};
 pub use constraint::Constraint;

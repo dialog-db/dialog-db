@@ -317,20 +317,31 @@ mod tests {
             "Operator should be a concept URI"
         );
 
-        // Test the attributes() method
+        // Test the attributes() method. `with()` iterates sorted by
+        // field name (BTreeMap), so look fields up by name rather
+        // than positionally.
         let attrs = concept.with().iter().collect::<Vec<_>>();
-
         assert_eq!(attrs.len(), 2);
-        assert_eq!(attrs[0].0, "name");
-        assert_eq!(attrs[0].1.domain(), "macro-person");
-        assert_eq!(attrs[0].1.name(), "name");
-        assert_eq!(attrs[0].1.description(), "Name of the person");
-        assert_eq!(attrs[0].1.content_type(), Some(Type::String));
-        assert_eq!(attrs[1].0, "birthday");
-        assert_eq!(attrs[1].1.domain(), "macro-person");
-        assert_eq!(attrs[1].1.name(), "birthday");
-        assert_eq!(attrs[1].1.description(), "Birthday of the person");
-        assert_eq!(attrs[1].1.content_type(), Some(Type::UnsignedInt));
+
+        let name = attrs
+            .iter()
+            .find(|(field, _)| *field == "name")
+            .map(|(_, f)| f)
+            .expect("name field present");
+        assert_eq!(name.domain(), "macro-person");
+        assert_eq!(name.name(), "name");
+        assert_eq!(name.description(), "Name of the person");
+        assert_eq!(name.content_type(), Some(Type::String));
+
+        let birthday = attrs
+            .iter()
+            .find(|(field, _)| *field == "birthday")
+            .map(|(_, f)| f)
+            .expect("birthday field present");
+        assert_eq!(birthday.domain(), "macro-person");
+        assert_eq!(birthday.name(), "birthday");
+        assert_eq!(birthday.description(), "Birthday of the person");
+        assert_eq!(birthday.content_type(), Some(Type::UnsignedInt));
 
         // Test that MacroPerson implements Rule
         let test_match = Query::<MacroPerson> {
@@ -372,8 +383,8 @@ mod tests {
 
     /// Concept with both required and optional fields. Exercises the
     /// `Option<T>` branch of the `#[derive(Concept)]` macro: typed
-    /// `Term<Option<U>>` query field, optional descriptor pair into
-    /// `with_maybe`, and optional realize via `Binding`.
+    /// `Term<Option<U>>` query field, optional field flagged in the
+    /// unified `with` map, and optional realize via `Binding`.
     #[derive(crate::Concept, Debug, Clone)]
     pub struct MacroEmployee {
         /// Employee entity
@@ -406,18 +417,29 @@ mod tests {
         assert!(matches!(default.nickname, Term::Variable { .. }));
         assert!(matches!(default.age, Term::Variable { .. }));
 
-        // Concept descriptor: required field flows into `with`,
-        // optional fields flow into `maybe`.
+        // Concept descriptor: all fields live in a single `with`
+        // map, with optionality carried per-field. The required
+        // field is flagged required; the optional ones are flagged
+        // optional. Iteration is sorted by field name.
         let concept: ConceptDescriptor = MacroEmployee::descriptor().clone();
-        let with: Vec<_> = concept.with().iter().collect();
-        assert_eq!(with.len(), 1);
-        assert_eq!(with[0].0, "given-name");
+        assert_eq!(concept.with().iter().count(), 3);
 
-        let maybe = concept.maybe().expect("concept has maybe attributes");
-        let maybe: Vec<_> = maybe.iter().collect();
-        assert_eq!(maybe.len(), 2);
-        assert_eq!(maybe[0].0, "nickname");
-        assert_eq!(maybe[1].0, "age");
+        let required: Vec<&str> = concept
+            .with()
+            .iter()
+            .filter(|(_, field)| !field.is_optional())
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(required, vec!["given-name"]);
+
+        let optional: Vec<&str> = concept
+            .with()
+            .iter()
+            .filter(|(_, field)| field.is_optional())
+            .map(|(name, _)| name)
+            .collect();
+        // Sorted by name: "age" < "nickname".
+        assert_eq!(optional, vec!["age", "nickname"]);
 
         // Rule body emits one attribute query per field (required
         // *and* optional), with the resolution chosen by each
@@ -466,20 +488,27 @@ mod tests {
             pub nickname: Maybe<macro_employee::Nickname>,
         }
 
-        // Concept descriptor must route `nickname` into `maybe`,
-        // not `with`. If the macro were doing syntactic Option
-        // detection by ident name, `Maybe` would not match and
-        // `nickname` would land in `with` — wrong.
+        // Concept descriptor must flag `nickname` optional in the
+        // unified `with` map. If the macro were doing syntactic
+        // Option detection by ident name, `Maybe` would not match
+        // and `nickname` would land as required — wrong.
         let concept: ConceptDescriptor = AliasedConcept::descriptor().clone();
-        let with: Vec<_> = concept.with().iter().collect();
-        assert_eq!(with.len(), 1);
-        assert_eq!(with[0].0, "given-name");
+        assert_eq!(concept.with().iter().count(), 2);
 
-        let maybe = concept
-            .maybe()
-            .expect("AliasedConcept must have a `maybe` slot");
-        let maybe_entries: Vec<_> = maybe.iter().collect();
-        assert_eq!(maybe_entries.len(), 1);
-        assert_eq!(maybe_entries[0].0, "nickname");
+        let required: Vec<&str> = concept
+            .with()
+            .iter()
+            .filter(|(_, field)| !field.is_optional())
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(required, vec!["given-name"]);
+
+        let optional: Vec<&str> = concept
+            .with()
+            .iter()
+            .filter(|(_, field)| field.is_optional())
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(optional, vec!["nickname"]);
     }
 }
