@@ -120,7 +120,7 @@ pub trait ConceptField: Sized + Clone {
 }
 
 // Required path: any `N` that satisfies the attribute bounds gets
-// the `ConceptField` impl with `RESOLUTION = Required` and
+// the `ConceptField` impl with `OPTIONAL = false` and
 // `TermType = N::Type`. This is the "bare attribute" case in a
 // concept field — `pub name: GivenName` and similar.
 //
@@ -176,7 +176,7 @@ where
 }
 
 // Optional path: `Option<N>` (where `N: Attribute`) gets the
-// `ConceptField` impl with `RESOLUTION = Optional` and
+// `ConceptField` impl with `OPTIONAL = true` and
 // `TermType = Option<N::Type>`. This is the "set-widened" case in
 // a concept field — `pub nickname: Option<Nickname>` and similar.
 // `realize` maps `Binding::Absent` to `None`; `push_statements`

@@ -442,8 +442,8 @@ mod tests {
         assert_eq!(optional, vec!["age", "nickname"]);
 
         // Rule body emits one attribute query per field (required
-        // *and* optional), with the resolution chosen by each
-        // field's `<F as ConceptField>::RESOLUTION` const. For
+        // *and* optional), with the resolution derived from each
+        // field's `<F as ConceptField>::OPTIONAL` const. For
         // MacroEmployee (1 required + 2 optional fields), `when()`
         // returns 3 attribute queries.
         let when_result = MacroEmployee::when(Query::<MacroEmployee>::default());

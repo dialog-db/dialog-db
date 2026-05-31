@@ -417,20 +417,21 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         }
 
-        // Implement From<StructName> for ConceptDescriptor.
+        // The concept's runtime schema (`ConceptDescriptor`), cached.
+        // This is the single construction site for the descriptor;
+        // the `From<#query_name>` conversions below delegate here.
         //
-        // Each field is routed into `with` or `maybe` at runtime
-        // based on its `<F as ConceptField>::OPTIONAL` const —
-        // required fields populate `with`, optional fields populate
-        // `maybe`. The two slots are independent, and a concept may
-        // have either or both. The struct's doc comment carries
-        // through as the descriptor's `description` so a `concept:`
-        // query surfaces it (the field list alone leaves it `None`).
-        // The concept's runtime schema, cached. This is the single
-        // construction site for the descriptor; both `From` impls
-        // below delegate here. Building goes through the fallible
-        // `ConceptDescriptor::try_from`, which only rejects an empty
-        // required (`with`) set — ruled out at compile time by the
+        // Each field becomes a `ConceptFieldDescriptor` via
+        // `ConceptField::field_descriptor`, which carries the field's
+        // optionality (from the `OPTIONAL` const). All fields live in
+        // the descriptor's single `with` map; optionality is a
+        // per-field flag. The struct's doc comment carries through as
+        // the descriptor's `description` so a `concept:` query
+        // surfaces it (the field list alone leaves it `None`).
+        //
+        // Building goes through the fallible
+        // `ConceptDescriptor::try_from`, which only rejects a set
+        // with no required field — ruled out at compile time by the
         // required-field assertion above, so the `expect` is
         // statically unreachable (it documents the invariant rather
         // than handling a real failure).
