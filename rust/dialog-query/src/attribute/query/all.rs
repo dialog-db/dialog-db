@@ -82,12 +82,16 @@ impl AttributeQueryAll {
         &self.is
     }
 
-    /// Return a copy of this query with the `is` term replaced.
-    /// Internal hook used by the planner to stamp rule-inferred
-    /// kinds onto the term before evaluation. Not for external
-    /// callers — user-supplied queries should construct fresh
-    /// instances via [`new`](Self::new).
-    pub(crate) fn with_is(self, is: Term<Any>) -> Self {
+    /// Return a copy of this query with the `is` term's type
+    /// narrowed to `kind`. The planner uses this to stamp the
+    /// rule-inferred kind onto the value variable before evaluation;
+    /// `the`/`of`/`cause` are fixed. A non-variable `is` (a constant)
+    /// is left unchanged.
+    pub(crate) fn with_type(self, kind: Kind) -> Self {
+        let is = match self.is.name() {
+            Some(name) => Term::<Any>::typed_var(name.to_string(), kind),
+            None => self.is,
+        };
         Self { is, ..self }
     }
 

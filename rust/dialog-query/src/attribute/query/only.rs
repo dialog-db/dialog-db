@@ -9,6 +9,7 @@ use crate::query::Output;
 use crate::schema::Cardinality;
 use crate::selection::{Match, Selection};
 use crate::source::SelectRules;
+use crate::type_system::Type as Kind;
 use crate::types::{Any, Record};
 use crate::{Entity, EvaluationError, Parameters, Schema, Term, try_stream};
 use dialog_artifacts::{Artifact, Cause, Select};
@@ -131,11 +132,11 @@ impl AttributeQueryOnly {
         self.query.is()
     }
 
-    /// Return a copy with the `is` term replaced. Internal hook;
-    /// see [`AttributeQueryAll::with_is`].
-    pub(crate) fn with_is(self, is: Term<Any>) -> Self {
+    /// Return a copy with the `is` term's type narrowed to `kind`.
+    /// See [`AttributeQueryAll::with_type`].
+    pub(crate) fn with_type(self, kind: Kind) -> Self {
         Self {
-            query: self.query.with_is(is),
+            query: self.query.with_type(kind),
         }
     }
 

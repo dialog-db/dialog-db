@@ -1,11 +1,9 @@
-use crate::Term;
 use crate::attribute::query::AttributeQuery;
 use crate::negation::Negation;
 use crate::proposition::Proposition;
 use crate::rule::types::TypeEnv;
 use crate::selection::Selection;
 use crate::source::SelectRules;
-use crate::types::Any;
 use crate::{Environment, Premise};
 use dialog_artifacts::Select;
 use dialog_capability::Provider;
@@ -101,15 +99,13 @@ fn apply_types_to_proposition(proposition: Proposition, types: &TypeEnv) -> Prop
 }
 
 fn narrow_attribute(query: AttributeQuery, types: &TypeEnv) -> AttributeQuery {
-    let is_term = query.is().clone();
-    let Some(name) = is_term.name() else {
+    let Some(name) = query.is().name() else {
         return query;
     };
     let Some(kind) = types.get(name) else {
         return query;
     };
-    let narrowed = Term::<Any>::typed_var(name.to_string(), kind.clone());
-    query.with_is(narrowed)
+    query.with_type(kind.clone())
 }
 
 #[cfg(test)]
@@ -121,6 +117,7 @@ mod tests {
     use crate::artifact::Entity;
     use crate::planner::Planner;
     use crate::the;
+    use crate::types::Any;
     use crate::{Cardinality, Term};
 
     /// A rule where one premise binds `?name` optionally (so its

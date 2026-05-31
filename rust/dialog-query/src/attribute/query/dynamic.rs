@@ -10,6 +10,7 @@ use crate::query::Application;
 use crate::query::Output;
 use crate::selection::{Match, Selection};
 use crate::source::SelectRules;
+use crate::type_system::Type as Kind;
 use crate::types::{Any, Record};
 use crate::{Entity, EvaluationError, Parameters, Premise, Schema, Term};
 use dialog_artifacts::{Cause, Select};
@@ -96,12 +97,12 @@ impl DynamicAttributeQuery {
         }
     }
 
-    /// Return a copy with the `is` term replaced. Internal hook;
-    /// see [`AttributeQueryAll::with_is`].
-    pub(crate) fn with_is(self, is: Term<Any>) -> Self {
+    /// Return a copy with the `is` term's type narrowed to `kind`.
+    /// See [`AttributeQueryAll::with_type`].
+    pub(crate) fn with_type(self, kind: Kind) -> Self {
         match self {
-            DynamicAttributeQuery::All(q) => DynamicAttributeQuery::All(q.with_is(is)),
-            DynamicAttributeQuery::Only(q) => DynamicAttributeQuery::Only(q.with_is(is)),
+            DynamicAttributeQuery::All(q) => DynamicAttributeQuery::All(q.with_type(kind)),
+            DynamicAttributeQuery::Only(q) => DynamicAttributeQuery::Only(q.with_type(kind)),
         }
     }
 
