@@ -61,7 +61,7 @@ mod tests {
         }
         let session = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
-        let person = ConceptDescriptor::from([
+        let person = ConceptDescriptor::try_from([
             (
                 "name",
                 AttributeDescriptor::new(
@@ -80,7 +80,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         let name_param = Term::var("name");
         let age_param = Term::var("age");
@@ -102,8 +103,8 @@ mod tests {
         let mut found_bob = false;
 
         for match_result in selection.iter() {
-            let person_name = match_result.lookup(&name_param)?;
-            let person_age = match_result.lookup(&age_param)?;
+            let person_name = match_result.lookup(&name_param)?.content()?;
+            let person_age = match_result.lookup(&age_param)?.content()?;
 
             match person_name {
                 Value::String(name_str) if name_str == "Alice" => {
@@ -147,7 +148,7 @@ mod tests {
             ),
         );
 
-        let person = ConceptDescriptor::from(attributes);
+        let person = ConceptDescriptor::try_from(attributes).unwrap();
 
         // Mixed case - valid parameters with some matching attributes (should succeed)
         let mut mixed_params = Parameters::new();
@@ -165,7 +166,7 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
-        let person = ConceptDescriptor::from([
+        let person = ConceptDescriptor::try_from([
             (
                 "name",
                 AttributeDescriptor::new(
@@ -184,7 +185,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         let alice = person
             .create()
@@ -227,8 +229,8 @@ mod tests {
         let mut found_bob = false;
 
         for match_result in selection.iter() {
-            let person_name = match_result.lookup(&name_param)?;
-            let person_age = match_result.lookup(&age_param)?;
+            let person_name = match_result.lookup(&name_param)?.content()?;
+            let person_age = match_result.lookup(&age_param)?.content()?;
 
             match person_name {
                 Value::String(name_str) if name_str == "Alice" => {
@@ -291,7 +293,7 @@ mod tests {
         }
 
         // employee can be derived from the stuff concept
-        let employee_predicate: ConceptDescriptor = Query::<Employee>::default().into();
+        let employee_predicate: ConceptDescriptor = Employee::descriptor().clone();
         let employee_from_stuff = DeductiveRule::new(
             employee_predicate,
             vec![
@@ -320,7 +322,7 @@ mod tests {
         let mut rules = RuleRegistry::new();
         rules.register(employee_from_stuff)?;
 
-        let stuff_predicate: ConceptDescriptor = Query::<Stuff>::default().into();
+        let stuff_predicate: ConceptDescriptor = Stuff::descriptor().clone();
         let alice = stuff_predicate
             .create()
             .with("name", "Alice".to_string())
@@ -443,7 +445,7 @@ mod tests {
 
         // Replicate Session::install logic for RuleRegistry
         let query = Query::<Employee>::default();
-        let concept: ConceptDescriptor = query.clone().into();
+        let concept: ConceptDescriptor = Employee::descriptor().clone();
         let when = employee_from_stuff(query).into_premises();
         let premises = when.into_vec();
         let install_rule =
@@ -454,7 +456,7 @@ mod tests {
         rules.register(install_rule)?;
 
         // Create test data as Stuff
-        let stuff_predicate: ConceptDescriptor = Query::<Stuff>::default().into();
+        let stuff_predicate: ConceptDescriptor = Stuff::descriptor().clone();
         let alice = stuff_predicate
             .create()
             .with("name", "Alice".to_string())
@@ -533,7 +535,7 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let _branch = repo.branch("main").open().perform(&operator).await?;
 
-        let adult_conclusion = ConceptDescriptor::from(vec![
+        let adult_conclusion = ConceptDescriptor::try_from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -552,7 +554,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         let rule = DeductiveRule::from(&adult_conclusion);
 
@@ -577,7 +580,7 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
-        let concept = ConceptDescriptor::from([(
+        let concept = ConceptDescriptor::try_from([(
             "name",
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -585,7 +588,8 @@ mod tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
         let rule = DeductiveRule::from(&concept);
 
         // Test with RuleRegistry + TestEnv
@@ -605,7 +609,7 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let _branch = repo.branch("main").open().perform(&operator).await?;
 
-        let adult_concept = ConceptDescriptor::from([(
+        let adult_concept = ConceptDescriptor::try_from([(
             "name".to_string(),
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -613,7 +617,8 @@ mod tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
 
         let adult_rule = DeductiveRule::from(&adult_concept);
 
@@ -684,7 +689,7 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let query_m = Query::<MatchingNote>::default();
-        let concept_m: ConceptDescriptor = query_m.clone().into();
+        let concept_m: ConceptDescriptor = MatchingNote::descriptor().clone();
         let when_m = matching_notes(query_m).into_premises();
         let rule_m = DeductiveRule::new(concept_m, when_m.into_vec()).map_err(|e| {
             EvaluationError::Planning {
@@ -783,7 +788,7 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let query_n = Query::<NonDraftNote>::default();
-        let concept_n: ConceptDescriptor = query_n.clone().into();
+        let concept_n: ConceptDescriptor = NonDraftNote::descriptor().clone();
         let when_n = non_draft_notes(query_n).into_premises();
         let rule_n = DeductiveRule::new(concept_n, when_n.into_vec()).map_err(|e| {
             EvaluationError::Planning {
@@ -889,7 +894,7 @@ mod tests {
         // Install the rule using the clean API - no turbofish needed!
         // The type inference works: Employee is inferred from the function parameter
         let query_e = Query::<Employee>::default();
-        let concept_e: ConceptDescriptor = query_e.clone().into();
+        let concept_e: ConceptDescriptor = Employee::descriptor().clone();
         let when_e = employee_with_implicit_title(query_e).into_premises();
         let rule_e = DeductiveRule::new(concept_e, when_e.into_vec()).map_err(|e| {
             EvaluationError::Planning {
@@ -956,7 +961,7 @@ mod tests {
 
     /// Helper: build a person concept predicate with name and age attributes.
     fn person_concept() -> ConceptDescriptor {
-        ConceptDescriptor::from([
+        ConceptDescriptor::try_from([
             (
                 "name",
                 AttributeDescriptor::new(
@@ -976,6 +981,7 @@ mod tests {
                 ),
             ),
         ])
+        .unwrap()
     }
 
     #[dialog_common::test]
@@ -1066,10 +1072,11 @@ mod tests {
         let plan_before = person_rules.plan(&terms, &candidate);
 
         // Install a rule for a DIFFERENT concept entity
-        let unrelated = ConceptDescriptor::from([(
+        let unrelated = ConceptDescriptor::try_from([(
             "title",
             AttributeDescriptor::new(the!("book/title"), "", Cardinality::One, Some(Type::String)),
-        )]);
+        )])
+        .unwrap();
         let rule = DeductiveRule::from(&unrelated);
         registry.register(rule).unwrap();
 
@@ -1294,12 +1301,12 @@ mod tests {
 
         assert_eq!(results.len(), 1, "Should find exactly one person (Alice)");
         assert_eq!(
-            results[0].lookup(&name_param)?,
+            results[0].lookup(&name_param)?.content()?,
             Value::String("Alice".into()),
             "Should resolve to Alice"
         );
         assert_eq!(
-            results[0].lookup(&age_param)?,
+            results[0].lookup(&age_param)?.content()?,
             Value::UnsignedInt(30),
             "Should have Alice's age"
         );

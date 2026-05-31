@@ -2,11 +2,13 @@ use crate::Cardinality;
 use crate::Claim;
 use crate::artifact::{ArtifactSelector, ArtifactsAttribute, Constrained};
 use crate::attribute::The;
+use crate::attribute::query::Resolution;
 use crate::environment::Environment;
 use crate::query::Application;
 use crate::query::Output;
 use crate::selection::{Match, Selection};
 use crate::source::SelectRules;
+use crate::type_system::Type as Kind;
 use crate::types::{Any, Record};
 use crate::{
     Entity, EvaluationError, Field, Parameters, Requirement, Schema, Term, Type, Value, try_stream,
@@ -39,7 +41,11 @@ pub struct AttributeQueryAll {
 }
 
 impl AttributeQueryAll {
-    /// Create a new attribute query that yields all matches.
+    /// Create a new attribute query. The resolution policy is
+    /// derived from `is`'s kind: a set-widened (`Nothing`-bit-set)
+    /// kind yields [`Resolution::Optional`] — one Absent fallback
+    /// row on miss; otherwise [`Resolution::Required`] — zero rows
+    /// on miss.
     pub fn new(the: Term<The>, of: Term<Entity>, is: Term<Any>, cause: Term<Cause>) -> Self {
         Self {
             the,
@@ -47,6 +53,17 @@ impl AttributeQueryAll {
             is,
             cause,
             source: Term::<Record>::unique(),
+        }
+    }
+
+    /// Resolution policy derived from `is`'s kind. A set-widened
+    /// `is` (admits `Nothing`) is [`Resolution::Optional`];
+    /// otherwise [`Resolution::Required`].
+    pub fn resolution(&self) -> Resolution {
+        if self.is.is_optional() {
+            Resolution::Optional
+        } else {
+            Resolution::Required
         }
     }
 
@@ -63,6 +80,15 @@ impl AttributeQueryAll {
     /// Get the 'is' (value) parameter.
     pub fn is(&self) -> &Term<Any> {
         &self.is
+    }
+
+    /// Return a copy of this query with the `is` term replaced.
+    /// Internal hook used by the planner to stamp rule-inferred
+    /// kinds onto the term before evaluation. Not for external
+    /// callers — user-supplied queries should construct fresh
+    /// instances via [`new`](Self::new).
+    pub(crate) fn with_is(self, is: Term<Any>) -> Self {
+        Self { is, ..self }
     }
 
     /// Get the 'cause' term.
@@ -108,11 +134,13 @@ impl AttributeQueryAll {
         Ok(())
     }
 
-    /// Resolves variables from the given match.
+    /// Resolves variables from the given match. `Absent` bindings
+    /// leave the term unchanged (same as unbound) — only Present
+    /// bindings substitute.
     pub fn resolve(&self, source: &Match) -> Self {
         let the = self.the.resolve(source);
         let of = self.of.resolve(source);
-        let is = match source.lookup(&self.is) {
+        let is = match source.lookup(&self.is).and_then(|b| b.content()) {
             Ok(value) => Term::Constant(value),
             Err(_) => self.is.clone(),
         };
@@ -136,7 +164,7 @@ impl AttributeQueryAll {
             "the".to_string(),
             Field {
                 description: "The relation identifier".to_string(),
-                content_type: Some(Type::Symbol),
+                content_type: Some(Kind::primitive(Type::Symbol)),
                 requirement: requirement.required(),
                 cardinality: Cardinality::One,
             },
@@ -146,17 +174,38 @@ impl AttributeQueryAll {
             "of".to_string(),
             Field {
                 description: "Entity of the relation".to_string(),
-                content_type: Some(Type::Entity),
+                content_type: Some(Kind::primitive(Type::Entity)),
                 requirement: requirement.required(),
                 cardinality: Cardinality::One,
             },
         );
 
+        // The `is` term's kind already encodes optionality via the
+        // `Nothing` atom. `None` means "no static info" — the
+        // unifier resolves at rule-compile time.
         schema.insert(
             "is".to_string(),
             Field {
                 description: "Value of the relation".to_string(),
-                content_type: None,
+                content_type: self.is.kind(),
+                requirement: requirement.required(),
+                cardinality: Cardinality::One,
+            },
+        );
+
+        // The `cause` slot is bound by the merge step on every
+        // Present row; when the query is optional the fallback
+        // row binds it to `Absent`, so the slot is set-widened.
+        let cause_content = if self.is.is_optional() {
+            Kind::primitive(Type::Bytes).optional()
+        } else {
+            Kind::primitive(Type::Bytes)
+        };
+        schema.insert(
+            "cause".to_string(),
+            Field {
+                description: "Causal stamp of the relation".to_string(),
+                content_type: Some(cause_content),
                 requirement: requirement.required(),
                 cardinality: Cardinality::One,
             },
@@ -181,10 +230,21 @@ impl AttributeQueryAll {
         params.insert("the".to_string(), Term::<Any>::from(&self.the));
         params.insert("of".to_string(), Term::<Any>::from(&self.of));
         params.insert("is".to_string(), self.is.clone());
+        params.insert("cause".to_string(), Term::<Any>::from(&self.cause));
         params
     }
 
     /// Evaluate yielding all matching artifacts.
+    ///
+    /// With [`Resolution::Required`] (the default), zero rows are
+    /// yielded for an input when no fact matches the lookup —
+    /// standard EAV semantics.
+    ///
+    /// With [`Resolution::Optional`], if no fact matches for an
+    /// input row, a single fallback row is yielded with the `is`
+    /// slot (and the `cause` slot, if a named variable) bound to
+    /// [`Binding::Absent`](crate::Binding::Absent). This is the
+    /// row-layer signal for "we looked, no fact found."
     pub fn evaluate<'a, Env, M: Selection + 'a>(
         self,
         env: &'a Env,
@@ -199,12 +259,47 @@ impl AttributeQueryAll {
                 let base = candidate?;
                 let selection = selector.resolve(&base);
 
+                // The entity must be determined for the Absent
+                // fallback to mean anything: "this entity has no such
+                // fact." An unbound entity would manufacture a phantom
+                // Absent row not tied to any concrete entity.
+                let entity_known = selection.of().is_constant();
+
+                let mut produced = false;
                 let stream = Provider::<Select<'_>>::execute(env, (&selection).try_into()?).await?;
                 for await artifact in stream {
                     let artifact = artifact?;
                     let mut extension = base.clone();
                     selector.merge(&mut extension, &artifact)?;
+                    produced = true;
                     yield extension;
+                }
+
+                // Optional fallback: yield one Absent row only when
+                // the attribute is genuinely absent for a known
+                // entity. Guards:
+                //   - `!produced`: no fact row covered this input.
+                //   - `selector.is.is_optional()`: the slot admits
+                //     absence.
+                //   - `entity_known`: absence is about a concrete
+                //     entity, not an unbound scan.
+                //   - `!base.is_present(&selector.is)`: the value
+                //     wasn't already pinned to a Present binding. When
+                //     it was, an empty scan is a value *mismatch*
+                //     (the value-keyed scan found nothing equal to the
+                //     pinned value), not absence — and binding that
+                //     Present variable to Absent would error and abort
+                //     the stream.
+                if !produced
+                    && selector.is.is_optional()
+                    && entity_known
+                    && !base.is_present(&selector.is)
+                {
+                    let mut fallback = base;
+                    fallback.bind_absent(&selector.is)?;
+                    let cause_term: Term<Any> = Term::<Any>::from(&selector.cause);
+                    fallback.bind_absent(&cause_term)?;
+                    yield fallback;
                 }
             }
         }
@@ -339,6 +434,61 @@ mod tests {
         Ok(())
     }
 
+    /// An *optional* `is` whose variable was pre-bound to a value the
+    /// entity does not have must not emit an Absent fallback. The
+    /// value-keyed scan finds nothing equal to the pinned value, but
+    /// that is a value *mismatch*, not absence — the attribute exists
+    /// with a different value. Before the fix, the fallback fired and
+    /// tried to bind the already-Present `is` variable to Absent,
+    /// which errors and aborts the stream.
+    #[dialog_common::test]
+    async fn it_does_not_emit_absent_on_optional_value_mismatch() -> anyhow::Result<()> {
+        use crate::selection::Match;
+        use crate::types::Any;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let bob = Entity::new()?;
+
+        // Bob HAS a nickname, but it is "Bobby".
+        branch
+            .transaction()
+            .assert(
+                the!("person/nickname")
+                    .of(bob.clone())
+                    .is("Bobby".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let optional_is: Term<Any> = Term::<Option<String>>::var("nickname").into();
+        let query = AttributeQueryAll::new(
+            Term::from(the!("person/nickname")),
+            Term::from(bob.clone()),
+            optional_is.clone(),
+            Term::var("cause"),
+        );
+
+        // An earlier premise pinned ?nickname to "Ali" — not Bob's.
+        let mut seed = Match::new();
+        seed.bind(&optional_is, Value::from("Ali".to_string()))?;
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let results =
+            Selection::try_vec(Application::evaluate(query, seed.seed(), &source)).await?;
+
+        assert_eq!(
+            results.len(),
+            0,
+            "a value mismatch on an optional field is not absence — no Absent fallback"
+        );
+
+        Ok(())
+    }
+
     #[dialog_common::test]
     async fn it_scans_with_constant_entity() -> anyhow::Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
@@ -464,5 +614,58 @@ mod tests {
         assert_eq!(results[0].is(), &Value::String("Alice".to_string()));
 
         Ok(())
+    }
+
+    /// `AttributeQueryAll::schema()` declares the `the` slot as
+    /// a singleton primitive over `Symbol`.
+    #[dialog_common::test]
+    fn schema_the_slot_is_primitive_symbol() {
+        let query = AttributeQueryAll::new(
+            Term::var("the"),
+            Term::var("of"),
+            Term::var("is"),
+            Term::var("cause"),
+        );
+        let schema = query.schema();
+        let the = schema.get("the").expect("the field present");
+        let content = the.content_type().expect("symbol kind present");
+        assert!(!content.is_optional());
+        assert_eq!(content.as_value_type(), Some(Type::Symbol));
+        assert!(matches!(content, Kind::Primitive(_)));
+    }
+
+    /// `AttributeQueryAll::schema()` declares the `of` slot as
+    /// a singleton primitive over `Entity`.
+    #[dialog_common::test]
+    fn schema_of_slot_is_primitive_entity() {
+        let query = AttributeQueryAll::new(
+            Term::var("the"),
+            Term::var("of"),
+            Term::var("is"),
+            Term::var("cause"),
+        );
+        let schema = query.schema();
+        let of = schema.get("of").expect("of field present");
+        let content = of.content_type().expect("entity kind present");
+        assert_eq!(content.as_value_type(), Some(Type::Entity));
+    }
+
+    /// `AttributeQueryAll::schema()` declares the `is` slot as
+    /// `None` (unknown) when the term carries no static info —
+    /// the unifier narrows at rule-compile time.
+    #[dialog_common::test]
+    fn schema_is_slot_is_unknown_when_untyped() {
+        let query = AttributeQueryAll::new(
+            Term::var("the"),
+            Term::var("of"),
+            Term::var("is"),
+            Term::var("cause"),
+        );
+        let schema = query.schema();
+        let is = schema.get("is").expect("is field present");
+        assert!(
+            is.content_type().is_none(),
+            "untyped `is` term should yield unknown content_type"
+        );
     }
 }

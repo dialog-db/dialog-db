@@ -6,8 +6,16 @@ pub mod query;
 pub use descriptor::ConceptDescriptor;
 pub use query::ConceptQuery;
 
+use crate::artifact::Type as ValueType;
+use crate::attribute::{Attribute, AttributeDescriptor, AttributeStatement};
+use crate::descriptor::Descriptor;
+use crate::error::EvaluationError;
 pub use crate::predicate::Predicate;
-use crate::{Entity, Parameters};
+use crate::selection::Binding;
+use crate::term::Term;
+use crate::type_system::{Primitive, Type as Kind};
+use crate::types::{Any, TypeDescriptor, Typed};
+use crate::{Entity, Parameters, Value};
 use dialog_common::ConditionalSend;
 use std::fmt::Debug;
 
@@ -38,6 +46,193 @@ where
 
     /// Content-addressed identity for this concept.
     fn this(&self) -> Entity;
+}
+
+/// Field-level abstraction used by `#[derive(Concept)]` to dispatch
+/// between required (`N: Attribute`) and optional (`Option<N>`)
+/// concept fields without doing syntactic type matching in the
+/// proc macro.
+///
+/// Two blanket impls cover the two cases:
+///
+/// - `impl<N: Attribute> ConceptField for N` — required path.
+/// - `impl<N: Attribute> ConceptField for Option<N>` — optional path.
+///
+/// These don't overlap because `Option` is `#[fundamental]`: Rust's
+/// trait coherence treats `Option<T>` as structurally distinct from
+/// a bare type parameter `T`. The Concept derive refers to
+/// `<F as ConceptField>::TermType` etc. without inspecting `F`'s
+/// syntactic shape — Rust resolves the right impl at type-check
+/// time. Aliases, prelude paths, and renamed imports all work.
+pub trait ConceptField: Sized + Clone {
+    /// The underlying attribute newtype. For both required `N` and
+    /// optional `Option<N>`, this is `N`.
+    type Attribute: Attribute
+        + Descriptor<AttributeDescriptor>
+        + From<<Self::Attribute as Attribute>::Type>;
+
+    /// The type wrapping the attribute's scalar at the term layer.
+    /// - Required (`N`): `<N as Attribute>::Type`.
+    /// - Optional (`Option<N>`): `Option<<N as Attribute>::Type>`.
+    type TermType: Typed + Clone + Debug + ConditionalSend + 'static;
+
+    /// `true` if this field is set-widened (the `Option<N>` impl),
+    /// `false` for the bare-attribute (`N`) impl. Used by the
+    /// `#[derive(Concept)]` macro to route the field's descriptor
+    /// into either the `with` (required) or `maybe` (optional)
+    /// section of the generated `ConceptDescriptor`.
+    const OPTIONAL: bool;
+
+    /// Build the `is` slot term for this field's attribute query.
+    /// Required fields pass the user's `value_param` through
+    /// unchanged. Optional fields return an optional-typed term
+    /// so the `AttributeQuery` evaluates with Absent-fallback
+    /// semantics (resolution is derived from the term's kind).
+    fn term(value_param: Term<Any>) -> Term<Any>;
+
+    /// Realize a value of `Self` from the row binding for this slot.
+    ///
+    /// - Required: the binding must be `Present`; the inner scalar
+    ///   is unwrapped via `TryFrom<Value>` and wrapped in `N`.
+    /// - Optional: `Present(v)` becomes `Some(N(v))`, `Absent`
+    ///   becomes `None`.
+    fn realize(binding: Binding) -> Result<Self, EvaluationError>;
+
+    /// Push the attribute statement(s) for this field into `buf`.
+    ///
+    /// - Required: always one statement.
+    /// - Optional: one if `Some`, none if `None`.
+    fn push_statements(&self, this: Entity, buf: &mut Vec<AttributeStatement>);
+}
+
+// Required path: any `N` that satisfies the attribute bounds gets
+// the `ConceptField` impl with `RESOLUTION = Required` and
+// `TermType = N::Type`. This is the "bare attribute" case in a
+// concept field — `pub name: GivenName` and similar.
+//
+// Coherence note: this blanket and the next one (`for Option<N>`)
+// are non-overlapping because `Option` is `#[fundamental]`. The
+// `#[fundamental]` annotation on std's `Option` tells the trait
+// checker to treat `Option<T>` as structurally distinct from a
+// bare type parameter `T`, so `impl<N> Trait for N` and
+// `impl<N> Trait for Option<N>` are allowed to coexist.
+//
+// Other `#[fundamental]` types where this same pattern would work
+// include `Box<T>`, `&T`, `&mut T`, and `Pin<T>`.
+impl<N> ConceptField for N
+where
+    N: Attribute + Descriptor<AttributeDescriptor> + Clone + From<<N as Attribute>::Type>,
+    <N as Attribute>::Type: Into<Value>,
+{
+    type Attribute = N;
+    type TermType = <N as Attribute>::Type;
+    const OPTIONAL: bool = false;
+
+    fn term(value_param: Term<Any>) -> Term<Any> {
+        // Required: pass the user's term through as-is; its kind
+        // (if any) is not optional, so the query stays required.
+        value_param
+    }
+
+    fn realize(binding: Binding) -> Result<Self, EvaluationError> {
+        let value = binding.content()?;
+        let inner = <<N as Attribute>::Type>::try_from(value).map_err(|_| {
+            EvaluationError::TypeMismatch {
+                expected: <<<N as Attribute>::Type as Typed>::Descriptor as TypeDescriptor>::TYPE
+                    .unwrap_or(ValueType::Symbol),
+                actual: ValueType::Symbol,
+            }
+        })?;
+        Ok(N::from(inner))
+    }
+
+    fn push_statements(&self, this: Entity, buf: &mut Vec<AttributeStatement>) {
+        let descriptor = <Self as Descriptor<AttributeDescriptor>>::descriptor();
+        let expr = AttributeStatement {
+            the: descriptor.the().clone(),
+            of: this,
+            is: <<N as Attribute>::Type as Into<Value>>::into(
+                <Self as Attribute>::value(self).clone(),
+            ),
+            cause: None,
+            cardinality: Some(descriptor.cardinality()),
+        };
+        buf.push(expr);
+    }
+}
+
+// Optional path: `Option<N>` (where `N: Attribute`) gets the
+// `ConceptField` impl with `RESOLUTION = Optional` and
+// `TermType = Option<N::Type>`. This is the "set-widened" case in
+// a concept field — `pub nickname: Option<Nickname>` and similar.
+// `realize` maps `Binding::Absent` to `None`; `push_statements`
+// emits zero records when the value is `None` (absence is never
+// persisted).
+//
+// Resolution at the call site is purely type-system driven —
+// `<Option<N> as ConceptField>` resolves to *this* impl by virtue
+// of the structural `Option<N>` shape. Aliased imports
+// (`use core::option::Option as Maybe`, etc.) resolve identically
+// at the type level even though the surface syntax differs, which
+// is why no proc-macro syntactic detection is needed.
+impl<N> ConceptField for Option<N>
+where
+    N: Attribute + Descriptor<AttributeDescriptor> + Clone + From<<N as Attribute>::Type>,
+    <N as Attribute>::Type: Into<Value>,
+{
+    type Attribute = N;
+    type TermType = Option<<N as Attribute>::Type>;
+    const OPTIONAL: bool = true;
+
+    fn term(value_param: Term<Any>) -> Term<Any> {
+        // Optional: return an optional-typed term. The underlying
+        // kind (if any) is wrapped via `Type::optional`; an untyped
+        // term becomes "any primitive, optional." The
+        // `AttributeQuery` reads `is.is_optional()` and switches to
+        // the Absent-fallback evaluation path.
+        let name = match value_param.name() {
+            Some(n) => n.to_string(),
+            None => return value_param,
+        };
+        let kind = match value_param.kind() {
+            Some(k) => k.optional(),
+            None => Kind::primitive_set(Primitive::ALL).optional(),
+        };
+        Term::<Any>::typed_var(name, kind)
+    }
+
+    fn realize(binding: Binding) -> Result<Self, EvaluationError> {
+        match binding {
+            Binding::Present(value) => {
+                let inner = <<N as Attribute>::Type>::try_from(value).map_err(|_| {
+                    EvaluationError::TypeMismatch {
+                        expected:
+                            <<<N as Attribute>::Type as Typed>::Descriptor as TypeDescriptor>::TYPE
+                                .unwrap_or(ValueType::Symbol),
+                        actual: ValueType::Symbol,
+                    }
+                })?;
+                Ok(Some(N::from(inner)))
+            }
+            Binding::Absent => Ok(None),
+        }
+    }
+
+    fn push_statements(&self, this: Entity, buf: &mut Vec<AttributeStatement>) {
+        if let Some(inner) = self.as_ref() {
+            let descriptor = <N as Descriptor<AttributeDescriptor>>::descriptor();
+            let expr = AttributeStatement {
+                the: descriptor.the().clone(),
+                of: this,
+                is: <<N as Attribute>::Type as Into<Value>>::into(
+                    <N as Attribute>::value(inner).clone(),
+                ),
+                cause: None,
+                cardinality: Some(descriptor.cardinality()),
+            };
+            buf.push(expr);
+        }
+    }
 }
 
 // Blanket impl for &T -> Parameters that uses the generated From<T> impl
@@ -96,6 +291,41 @@ where
 ///     pub name: attrs::Name,
 /// }
 /// ```
+///
+/// A concept must declare at least one *required* attribute. A
+/// struct whose only attribute fields are `Option<_>` constrains
+/// nothing (every entity matches), so the derive rejects it at
+/// compile time via a const assertion over
+/// [`ConceptField::OPTIONAL`].
+///
+/// ```compile_fail
+/// use dialog_query::{Concept, Entity};
+///
+/// mod attrs {
+///     #[derive(dialog_macros::Attribute, Clone, PartialEq)]
+///     pub struct Nickname(pub String);
+/// }
+///
+/// /// Only an optional attribute — should fail to compile.
+/// #[derive(Concept, Debug, Clone)]
+/// pub struct AllOptional {
+///     pub this: Entity,
+///     pub nickname: Option<attrs::Nickname>,
+/// }
+/// ```
+///
+/// A concept with no attribute fields at all (only `this`) is
+/// likewise rejected — it would match every entity.
+///
+/// ```compile_fail
+/// use dialog_query::{Concept, Entity};
+///
+/// /// No attributes — should fail to compile.
+/// #[derive(Concept, Debug, Clone)]
+/// pub struct NoAttributes {
+///     pub this: Entity,
+/// }
+/// ```
 pub trait Conclusion: ConditionalSend {
     /// Each instance has a corresponding entity and this method
     /// returns a reference to it.
@@ -107,235 +337,51 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use std::result;
-    use std::vec;
-
     use super::*;
     use crate::AttributeStatement;
     use crate::Query;
-    use crate::artifact::{ArtifactSelector, ArtifactsAttribute, Select, Type, Value};
-    use crate::attribute::{Attribute as _, AttributeDescriptor};
-    use crate::error::EvaluationError;
-    use crate::query::Application;
+    use crate::artifact::{ArtifactSelector, ArtifactsAttribute, Value};
     use crate::query::Output;
-    use crate::selection::Selection;
 
+    use crate::Concept;
     use crate::attribute::query::AttributeQuery;
     use crate::session::RuleRegistry;
-    use crate::source::SelectRules;
     use crate::source::test::TestEnv;
     use crate::term::Term;
     use crate::the;
-    use crate::types::Any;
-    use crate::{Cardinality, Concept, Match, Statement};
     use anyhow::Result;
-    use dialog_capability::Provider;
-    use dialog_common::ConditionalSync;
     use dialog_repository::helpers::{test_operator_with_profile, test_repo};
 
-    // Define a Person concept for testing using raw concept API
-    // This mirrors what the #[derive(Concept)] macro generates
-    #[derive(Debug, Clone)]
-    struct Person {
+    // Define a Person concept for testing via `#[derive(Concept)]`.
+    // The newtypes live in a module named `person` so the attribute
+    // domain defaults to `person`, yielding `person/name` and
+    // `person/age` to match the stored facts the tests assert against.
+    mod person {
+        use crate::Attribute;
+
+        /// Name of the person.
+        #[derive(Attribute, Clone, PartialEq)]
+        pub struct Name(pub String);
+
+        /// Age of the person.
+        #[derive(Attribute, Clone, PartialEq)]
+        pub struct Age(pub u32);
+    }
+
+    /// A person concept used across the scaffold tests below.
+    #[derive(Concept, Debug, Clone)]
+    pub struct Person {
         pub this: Entity,
-        pub name: String,
-        pub age: u32,
-    }
-
-    // PersonQuery for querying — contains Term-wrapped fields
-    // The derive macro generates typed Terms (Term<String>, Term<u32>) not Term<Value>
-    #[derive(Debug, Clone)]
-    struct PersonQuery {
-        pub this: Term<Entity>,
-        pub name: Term<String>,
-        pub age: Term<u32>,
-    }
-
-    impl Default for PersonQuery {
-        fn default() -> Self {
-            Self {
-                this: Term::var("this"),
-                name: Term::var("name"),
-                age: Term::var("age"),
-            }
-        }
-    }
-
-    struct PersonTerms;
-
-    impl PersonTerms {
-        pub fn this() -> Term<Entity> {
-            Term::<Entity>::var("this")
-        }
-        pub fn name() -> Term<String> {
-            Term::<String>::var("name")
-        }
-        pub fn age() -> Term<u32> {
-            Term::<u32>::var("age")
-        }
-    }
-
-    fn person_predicate() -> ConceptDescriptor {
-        ConceptDescriptor::from(vec![
-            (
-                "name",
-                AttributeDescriptor::new(
-                    the!("person/name"),
-                    "Name of the person",
-                    Cardinality::One,
-                    Some(Type::String),
-                ),
-            ),
-            (
-                "age",
-                AttributeDescriptor::new(
-                    the!("person/age"),
-                    "Age of the person",
-                    Cardinality::One,
-                    Some(Type::UnsignedInt),
-                ),
-            ),
-        ])
-    }
-
-    impl From<Person> for ConceptDescriptor {
-        fn from(_: Person) -> Self {
-            person_predicate()
-        }
-    }
-
-    impl From<PersonQuery> for ConceptDescriptor {
-        fn from(_: PersonQuery) -> Self {
-            person_predicate()
-        }
-    }
-
-    // Implement Concept for Person
-    impl Concept for Person {
-        type Term = PersonTerms;
-
-        fn this(&self) -> Entity {
-            let predicate: ConceptDescriptor = self.clone().into();
-            predicate.this()
-        }
-    }
-
-    impl IntoIterator for Person {
-        type Item = AttributeStatement;
-        type IntoIter = vec::IntoIter<AttributeStatement>;
-
-        fn into_iter(self) -> Self::IntoIter {
-            vec![
-                the!("person/name")
-                    .of(self.this.clone())
-                    .is(self.name.clone())
-                    .into(),
-                the!("person/age").of(self.this.clone()).is(self.age).into(),
-            ]
-            .into_iter()
-        }
-    }
-
-    impl Statement for Person {
-        fn assert(self, update: &mut impl dialog_artifacts::Update) {
-            let name_the = the!("person/name");
-            let age_the = the!("person/age");
-
-            update.associate(name_the.into(), self.this.clone(), Value::from(self.name));
-            update.associate(age_the.into(), self.this.clone(), Value::from(self.age));
-        }
-
-        fn retract(self, update: &mut impl dialog_artifacts::Update) {
-            let name_the = the!("person/name");
-            let age_the = the!("person/age");
-
-            update.dissociate(name_the.into(), self.this.clone(), Value::from(self.name));
-            update.dissociate(age_the.into(), self.this.clone(), Value::from(self.age));
-        }
-    }
-
-    impl Predicate for Person {
-        type Conclusion = Person;
-        type Application = PersonQuery;
-        type Descriptor = ConceptDescriptor;
-    }
-
-    // Implement TryFrom<selection::Match> for Person
-    // This extracts values from the match by field name
-    impl TryFrom<Match> for Person {
-        type Error = EvaluationError;
-
-        fn try_from(input: Match) -> Result<Self, Self::Error> {
-            Ok(Person {
-                this: Entity::try_from(
-                    input.lookup(&Term::from(&<Self as Concept>::Term::this()))?,
-                )?,
-                name: String::try_from(
-                    input.lookup(&Term::from(&<Self as Concept>::Term::name()))?,
-                )?,
-                age: u32::try_from(input.lookup(&Term::from(&<Self as Concept>::Term::age()))?)?,
-            })
-        }
-    }
-
-    // Implement Instance for Person
-    impl Conclusion for Person {
-        fn this(&self) -> &Entity {
-            &self.this
-        }
-    }
-
-    // Implement From<PersonQuery> for Parameters
-    impl From<PersonQuery> for Parameters {
-        fn from(source: PersonQuery) -> Self {
-            let mut terms = Self::new();
-            terms.insert("this".into(), Term::<Any>::from(source.this));
-            terms.insert("name".into(), Term::<Any>::from(source.name));
-            terms.insert("age".into(), Term::<Any>::from(source.age));
-            terms
-        }
-    }
-
-    // Implement From<PersonQuery> for ConceptQuery
-    impl From<PersonQuery> for ConceptQuery {
-        fn from(source: PersonQuery) -> Self {
-            let predicate: ConceptDescriptor = source.clone().into();
-            ConceptQuery {
-                terms: source.into(),
-                predicate,
-            }
-        }
-    }
-
-    // Implement Application for PersonQuery
-    impl Application for PersonQuery {
-        type Conclusion = Person;
-
-        fn evaluate<'a, Env, M: Selection + 'a>(
-            self,
-            selection: M,
-            env: &'a Env,
-        ) -> impl Selection + 'a
-        where
-            Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
-        {
-            let application: ConceptQuery = self.into();
-            application.evaluate(selection, env)
-        }
-
-        fn realize(&self, source: Match) -> result::Result<Self::Conclusion, EvaluationError> {
-            Ok(Person {
-                this: Entity::try_from(source.lookup(&Term::from(&self.this))?)?,
-                name: String::try_from(source.lookup(&Term::from(&self.name))?)?,
-                age: u32::try_from(source.lookup(&Term::from(&self.age))?)?,
-            })
-        }
+        /// Person's name (`person/name`).
+        pub name: person::Name,
+        /// Person's age (`person/age`).
+        pub age: person::Age,
     }
 
     #[dialog_common::test]
     fn it_creates_person_concept() {
         // Test that the Person concept has the expected properties
-        let concept = person_predicate();
+        let concept = Person::descriptor().clone();
         // Operator is now a URI based on the hash of the concept's attributes
         assert!(
             concept.this().to_string().starts_with("concept:"),
@@ -355,10 +401,10 @@ mod tests {
     fn it_creates_person_match() {
         // Test creating a PersonQuery for querying
         let entity_var = Term::var("person_entity");
-        let name_var = Term::var("person_name");
-        let age_var = Term::var("person_age");
+        let name_var: Term<String> = Term::var("person_name");
+        let age_var: Term<u32> = Term::var("person_age");
 
-        let person_match = PersonQuery {
+        let person_match = Query::<Person> {
             this: entity_var.clone(),
             name: name_var.clone(),
             age: age_var.clone(),
@@ -377,7 +423,7 @@ mod tests {
         let name_const = Term::from("Alice".to_string());
         let age_const = Term::from(30u32);
 
-        let person_match = PersonQuery {
+        let person_match = Query::<Person> {
             this: entity_var.clone(),
             name: name_const.clone(),
             age: age_const.clone(),
@@ -397,9 +443,9 @@ mod tests {
         // Test mixing variables and constants in a match pattern
         let entity_var = Term::var("person_entity");
         let name_const = Term::from("Bob".to_string());
-        let age_var = Term::var("any_age");
+        let age_var: Term<u32> = Term::var("any_age");
 
-        let person_match = PersonQuery {
+        let person_match = Query::<Person> {
             this: entity_var.clone(),
             name: name_const.clone(),
             age: age_var.clone(),
@@ -417,8 +463,8 @@ mod tests {
         let entity = Entity::new().unwrap();
         let person = Person {
             this: entity.clone(),
-            name: "Charlie".to_string(),
-            age: 25,
+            name: person::Name("Charlie".to_string()),
+            age: person::Age(25),
         };
 
         // Test Instance trait - should return the same entity
@@ -428,7 +474,7 @@ mod tests {
     #[dialog_common::test]
     fn it_maintains_concept_name_consistency() {
         // Test that concept identifier is consistent across different access patterns
-        let concept = person_predicate();
+        let concept = Person::descriptor().clone();
         // Operator is now a URI based on the hash of the concept's attributes
         assert!(
             concept.this().to_string().starts_with("concept:"),
@@ -438,8 +484,8 @@ mod tests {
         // The concept should have consistent naming
         let _person = Person {
             this: Entity::new().unwrap(),
-            name: "Test".to_string(),
-            age: 1,
+            name: person::Name("Test".to_string()),
+            age: person::Age(1),
         };
 
         // Instance should have the same concept identifier
@@ -455,10 +501,10 @@ mod tests {
     fn it_exposes_match_fields() {
         // Test that PersonQuery has the expected fields
         let entity_var = Term::var("entity");
-        let name_var = Term::var("name");
-        let age_var = Term::var("age");
+        let name_var: Term<String> = Term::var("name");
+        let age_var: Term<u32> = Term::var("age");
 
-        let person_match = PersonQuery {
+        let person_match = Query::<Person> {
             this: entity_var.clone(),
             name: name_var.clone(),
             age: age_var.clone(),
@@ -475,8 +521,8 @@ mod tests {
         // Test that our derived Debug implementations work
         let person = Person {
             this: Entity::new().unwrap(),
-            name: "Debug Test".to_string(),
-            age: 42,
+            name: person::Name("Debug Test".to_string()),
+            age: person::Age(42),
         };
 
         let debug_output = format!("{:?}", person);
@@ -491,8 +537,8 @@ mod tests {
         let entity = Entity::new().unwrap();
         let person1 = Person {
             this: entity.clone(),
-            name: "Original".to_string(),
-            age: 35,
+            name: person::Name("Original".to_string()),
+            age: person::Age(35),
         };
 
         let person2 = person1.clone();
@@ -502,7 +548,7 @@ mod tests {
 
         // Test PersonQuery clone
         let entity_var = Term::var("entity");
-        let match1 = PersonQuery {
+        let match1 = Query::<Person> {
             this: entity_var.clone(),
             name: Term::var("name"),
             age: Term::var("age"),
@@ -522,7 +568,7 @@ mod tests {
         let alice = Entity::new()?;
 
         // Test 1: Create a PersonQuery with mixed terms
-        let person_match = PersonQuery {
+        let person_match = Query::<Person> {
             this: Term::from(alice.clone()),
             name: Term::from("Alice".to_string()),
             age: Term::var("age"),
@@ -535,7 +581,7 @@ mod tests {
         assert!(params.get("age").is_some());
 
         // Test 2: Verify concept attributes are accessible
-        let concept = person_predicate();
+        let concept = Person::descriptor().clone();
         assert_eq!(concept.with().iter().count(), 2); // name and age
 
         // Verify we can find specific attributes

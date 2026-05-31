@@ -141,7 +141,7 @@ mod tests {
 
     /// Build the head: a counter row with a `count` field.
     fn counter_head() -> ConceptDescriptor {
-        ConceptDescriptor::from(vec![(
+        ConceptDescriptor::try_from(vec![(
             "count",
             AttributeDescriptor::new(
                 the!("counter/count"),
@@ -150,6 +150,7 @@ mod tests {
                 Some(Type::UnsignedInt),
             ),
         )])
+        .unwrap()
     }
 
     /// Body premises:
@@ -185,7 +186,7 @@ mod tests {
     #[dialog_common::test]
     fn it_rejects_unbound_head_variable() {
         // Head adds a `name` field that no premise binds.
-        let head = ConceptDescriptor::from(vec![
+        let head = ConceptDescriptor::try_from(vec![
             (
                 "count",
                 AttributeDescriptor::new(
@@ -204,7 +205,8 @@ mod tests {
                     Some(Type::String),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
         let result = InductiveRule::new(head, increment_body());
         assert!(matches!(result, Err(TypeError::UnboundVariable { .. })));
         if let Err(TypeError::UnboundVariable { variable, .. }) = result {

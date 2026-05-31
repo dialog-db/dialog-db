@@ -39,7 +39,9 @@ impl Conjunction {
     /// Converts the steps back into planner candidates and re-orders them
     /// for optimal execution given the new bindings. This is used when a
     /// rule's premises need to be re-evaluated with different known bindings
-    /// (e.g. adornment-based optimization in concepts).
+    /// (e.g. adornment-based optimization in concepts). Type inference
+    /// runs again on the fresh order — its output is stable across
+    /// reorderings, so this is cheap and idempotent.
     pub fn plan(&self, scope: &Environment) -> Result<Self, TypeError> {
         let premises: Vec<_> = self.steps.iter().map(|step| step.premise.clone()).collect();
         Planner::from(premises).plan(scope)

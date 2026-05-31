@@ -103,7 +103,7 @@ mod tests {
     use crate::the;
 
     fn person_concept() -> ConceptDescriptor {
-        ConceptDescriptor::from([(
+        ConceptDescriptor::try_from([(
             "name",
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -112,6 +112,7 @@ mod tests {
                 Some(Type::String),
             ),
         )])
+        .unwrap()
     }
 
     #[dialog_common::test]

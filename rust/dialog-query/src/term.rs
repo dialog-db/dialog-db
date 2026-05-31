@@ -18,10 +18,11 @@ use crate::Environment;
 use crate::Premise;
 use crate::artifact::{ArtifactsAttribute, Entity, Type, Value};
 use crate::attribute::The;
-use crate::constraint::{Constraint, Equality};
+use crate::constraint::{Coalesce, Constraint, Equality};
 use crate::error::{FieldTypeError, TypeError};
 use crate::proposition::Proposition;
 use crate::selection;
+use crate::type_system;
 use crate::types::{Any, Scalar, TypeDescriptor, Typed};
 use serde::de::Error as DeserializeError;
 use std::hash::Hash;
@@ -104,12 +105,13 @@ where
         }
     }
 
-    /// Resolve this term against a match. If the term is a variable
-    /// bound in the match, returns a constant term with the bound value.
-    /// Otherwise returns the term unchanged.
+    /// Resolve this term against a match. If the term is a
+    /// variable bound to a [`Binding::Present`](crate::Binding::Present)
+    /// value, returns a constant term with the bound value.
+    /// Otherwise (unbound or `Absent`) returns the term unchanged.
     pub fn resolve(&self, source: &selection::Match) -> Self {
         let term: Term<Any> = self.clone().into();
-        match source.lookup(&term) {
+        match source.lookup(&term).and_then(|b| b.content()) {
             Ok(value) => {
                 if let Ok(converted) = T::try_from(value) {
                     Term::Constant(converted.into())
@@ -181,19 +183,30 @@ impl<T: Typed> Term<T> {
         }
     }
 
-    /// Get the content type for this term.
+    /// Get the unified type kind for this term.
     ///
-    /// For variables: returns the type from the descriptor. For concrete
-    /// typed terms this is always `Some(Type::...)`. For `Any` it
-    /// depends on the runtime tag.
-    ///
-    /// For constants: inspects the stored `Value` to determine the type.
-    pub fn content_type(&self) -> Option<Type> {
+    /// For variables: delegates to the descriptor's `kind()`.
+    /// For constants: lifts the stored value's type into a
+    /// singleton [`type_system::Type::Primitive`].
+    pub fn kind(&self) -> Option<type_system::Type> {
         match self {
-            Term::Variable { descriptor, .. } => <<T as Typed>::Descriptor as TypeDescriptor>::TYPE
-                .or_else(|| descriptor.content_type()),
-            Term::Constant(value) => Some(Type::from(value)),
+            Term::Variable { descriptor, .. } => descriptor.kind(),
+            Term::Constant(value) => Some(type_system::Type::primitive(Type::from(value))),
         }
+    }
+
+    /// Legacy storage-codec view: collapse the unified kind to its
+    /// singleton primitive. Returns `None` for unknown or
+    /// non-singleton shapes.
+    pub fn content_type(&self) -> Option<Type> {
+        self.kind().and_then(|k| k.as_value_type())
+    }
+
+    /// Returns `true` iff this term's kind admits the `Nothing`
+    /// atom — i.e. the slot is set-widened. Untyped terms (no
+    /// kind) return `false`.
+    pub fn is_optional(&self) -> bool {
+        self.kind().is_some_and(|k| k.is_optional())
     }
 
     /// Get the constant value if this term is a constant.
@@ -259,9 +272,7 @@ where
                 name: Some(name),
                 descriptor,
             } => {
-                if let Some(data_type) = <<T as Typed>::Descriptor as TypeDescriptor>::TYPE
-                    .or_else(|| descriptor.content_type())
-                {
+                if let Some(data_type) = descriptor.kind().and_then(|k| k.as_value_type()) {
                     write!(f, "?{}<{:?}>", name, data_type)
                 } else {
                     write!(f, "?{}<Value>", name)
@@ -408,7 +419,7 @@ impl<T: Scalar> From<Term<T>> for Term<Any> {
         match term {
             Term::Variable { name, .. } => Term::Variable {
                 name,
-                descriptor: Any(<<T as Typed>::Descriptor as TypeDescriptor>::TYPE),
+                descriptor: Any(<<T as Typed>::Descriptor>::default().kind()),
             },
             Term::Constant(value) => Term::Constant(value),
         }
@@ -422,17 +433,93 @@ impl<T: Scalar> From<&Term<T>> for Term<Any> {
     }
 }
 
+/// Type-erase a `Term<Option<U>>` to `Term<Any>`. The descriptor
+/// is widened to carry the `Nothing` bit so that downstream
+/// type-checking (e.g. `Coalesce::validate`) can recognize the
+/// term as set-widened. At evaluation time the value flows
+/// through the same `Term<Any>` path as any other term, with the
+/// row-layer [`Binding::Absent`](crate::Binding::Absent) carrying
+/// the absence signal at runtime.
+impl<U: Scalar> From<Term<Option<U>>> for Term<Any> {
+    fn from(term: Term<Option<U>>) -> Self {
+        match term {
+            Term::Variable { name, .. } => Term::Variable {
+                name,
+                descriptor: Any(<<U as Typed>::Descriptor>::default()
+                    .kind()
+                    .map(|k| k.optional())),
+            },
+            Term::Constant(value) => Term::Constant(value),
+        }
+    }
+}
+
+/// Borrow form of the optional-to-Any erasure.
+impl<U: Scalar> From<&Term<Option<U>>> for Term<Any> {
+    fn from(term: &Term<Option<U>>) -> Self {
+        Term::<Any>::from(term.clone())
+    }
+}
+
+/// Builder for a [`Coalesce`](crate::constraint::Coalesce)
+/// constraint. Produced by
+/// [`Term::<Option<U>>::unwrap_or`](Term::unwrap_or); finalized
+/// by [`UnwrapOr::is`].
+///
+/// The type parameter `U` is the inner scalar type — the source
+/// term has kind `Option<U>` and the fallback has kind `U`. The
+/// final output term passed to `is` must also have kind `U`,
+/// guaranteed by the `impl Into<Term<U>>` bound.
+pub struct UnwrapOr<U: Scalar> {
+    source: Term<Option<U>>,
+    fallback: Term<U>,
+}
+
+impl<U: Scalar> Term<Option<U>> {
+    /// Begin building a `Coalesce` constraint. Returns a builder
+    /// that completes when `.is(output)` is called.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use dialog_query::Term;
+    /// let nickname: Term<Option<String>> = Term::var("nickname");
+    /// let display_name: Term<String> = Term::var("display_name");
+    /// let premise = nickname.unwrap_or("Anon").is(display_name);
+    /// ```
+    pub fn unwrap_or<F: Into<Term<U>>>(self, fallback: F) -> UnwrapOr<U> {
+        UnwrapOr {
+            source: self,
+            fallback: fallback.into(),
+        }
+    }
+}
+
+impl<U: Scalar> UnwrapOr<U> {
+    /// Bind the output term, producing a finished
+    /// [`Coalesce`](crate::constraint::Coalesce) constraint
+    /// wrapped in a [`Premise`] ready to drop into a rule body.
+    pub fn is<O: Into<Term<U>>>(self, output: O) -> Premise {
+        let source: Term<Any> = self.source.into();
+        let fallback: Term<Any> = self.fallback.into();
+        let is: Term<Any> = output.into().into();
+        Premise::Assert(Proposition::Constraint(Constraint::Coalesce(
+            Coalesce::new(source, fallback, is),
+        )))
+    }
+}
+
 /// Methods specific to `Term<Any>` — the dynamically-typed term.
 impl Term<Any> {
-    /// Create a named variable with a specific type constraint.
+    /// Create a named variable with a specific type kind.
     ///
-    /// Use `Term::<Any>::var("x")` for an untyped variable (inherited from
-    /// `impl<T: Typed> Term<T>`). Use this method when you need a runtime
-    /// type tag.
-    pub fn typed_var(name: impl Into<String>, typ: Option<Type>) -> Self {
+    /// Use `Term::<Any>::var("x")` for an untyped variable
+    /// (inherited from `impl<T: Typed> Term<T>`). Use this method
+    /// when you need a runtime type kind.
+    pub fn typed_var(name: impl Into<String>, kind: type_system::Type) -> Self {
         Term::Variable {
             name: Some(name.into()),
-            descriptor: Any(typ),
+            descriptor: Any(Some(kind)),
         }
     }
 
@@ -451,10 +538,9 @@ impl Term<Any> {
 
     /// Narrow a `Term<Any>` to a concrete `Term<T>`.
     ///
-    /// Both variables and constants are validated: if the term carries a known
-    /// type (via the `Any` descriptor or the constant's value) and `T` has a
-    /// statically known type, they must match. Returns
-    /// [`FieldTypeError::TypeMismatch`] on incompatible types.
+    /// Both variables and constants are validated: if the term
+    /// carries a known type and `T` has a statically known type,
+    /// they must match.
     pub fn narrow<T: Typed>(self) -> Result<Term<T>, FieldTypeError> {
         let target = <<T as Typed>::Descriptor as TypeDescriptor>::TYPE;
         let source = self.content_type();
@@ -496,7 +582,7 @@ impl From<Term<Value>> for Term<Any> {
         match term {
             Term::Variable { name, .. } => Term::Variable {
                 name,
-                descriptor: Any(<<Value as Typed>::Descriptor as TypeDescriptor>::TYPE),
+                descriptor: Any(<<Value as Typed>::Descriptor>::default().kind()),
             },
             Term::Constant(value) => Term::Constant(value),
         }
@@ -533,13 +619,17 @@ impl<T: Scalar> From<Term<T>> for Term<Value> {
     }
 }
 
-/// Serde helper for the variable inner object: `{"name": "x", "type": "Text"}`.
+/// Serde helper for the variable inner object: `{"name": "x", "type": <type_system::Type>}`.
+///
+/// The `type` field carries the full unified [`type_system::Type`]
+/// rather than a legacy [`ValueType`](Type) — `None` denotes an
+/// "untyped" variable.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct VarInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
-    content_type: Option<Type>,
+    content_type: Option<type_system::Type>,
 }
 
 /// Serde helper enum for `Term<T>`.
@@ -562,16 +652,12 @@ impl<T: Typed> serde::Serialize for Term<T> {
         let repr = match self {
             Term::Variable {
                 name, descriptor, ..
-            } => {
-                let content_type = <<T as Typed>::Descriptor as TypeDescriptor>::TYPE
-                    .or_else(|| descriptor.content_type());
-                TermRepr::Variable {
-                    var: VarInfo {
-                        name: name.clone(),
-                        content_type,
-                    },
-                }
-            }
+            } => TermRepr::Variable {
+                var: VarInfo {
+                    name: name.clone(),
+                    content_type: descriptor.kind(),
+                },
+            },
             Term::Constant(value) => TermRepr::Constant(value.clone()),
         };
         repr.serialize(serializer)
@@ -590,7 +676,7 @@ impl<'de, T: Typed> serde::Deserialize<'de> for Term<T> {
                     serde_json::from_value(map["?"].clone()).map_err(DeserializeError::custom)?;
                 Ok(Term::Variable {
                     name: var.name,
-                    descriptor: <T as Typed>::Descriptor::from_content_type(var.content_type),
+                    descriptor: <T as Typed>::Descriptor::from_kind(var.content_type),
                 })
             }
             serde_json::Value::Number(n) => {
@@ -616,6 +702,102 @@ impl<'de, T: Typed> serde::Deserialize<'de> for Term<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash as HashTrait, Hasher};
+
+    fn hash_of<T: HashTrait>(t: &T) -> u64 {
+        let mut h = DefaultHasher::new();
+        t.hash(&mut h);
+        h.finish()
+    }
+
+    /// Two `Term<Any>` values constructed with the same name in
+    /// independent calls hash to the same value. This is the
+    /// stability guarantee that container caches (planner plans,
+    /// rule registries) depend on.
+    #[dialog_common::test]
+    fn it_hashes_equivalent_terms_to_same_value() {
+        let a: Term<Any> = Term::var("x");
+        let b: Term<Any> = Term::var("x");
+        assert_eq!(a, b, "structurally equivalent terms must compare equal");
+        assert_eq!(
+            hash_of(&a),
+            hash_of(&b),
+            "structurally equivalent terms must hash to the same value"
+        );
+
+        let c: Term<Any> = Term::Variable {
+            name: Some("x".into()),
+            descriptor: Some(Type::String).into(),
+        };
+        let d: Term<Any> = Term::Variable {
+            name: Some("x".into()),
+            descriptor: Some(Type::String).into(),
+        };
+        assert_eq!(c, d);
+        assert_eq!(hash_of(&c), hash_of(&d));
+    }
+
+    /// The `unwrap_or(...).is(...)` builder yields a Premise
+    /// containing a `Constraint::Coalesce` with the three slots
+    /// wired correctly. `U`'s static type enforces the source's
+    /// inner type, the fallback's type, and the output's type
+    /// must all match — call sites with type mismatches fail to
+    /// compile.
+    #[dialog_common::test]
+    fn it_builds_coalesce_via_unwrap_or() {
+        let nickname: Term<Option<String>> = Term::var("nickname");
+        let display: Term<String> = Term::var("display");
+        let premise = nickname.unwrap_or("Anon").is(display);
+
+        match premise {
+            Premise::Assert(Proposition::Constraint(Constraint::Coalesce(c))) => {
+                assert_eq!(c.source.name(), Some("nickname"));
+                assert_eq!(c.is.name(), Some("display"));
+                match &c.fallback {
+                    Term::Constant(Value::String(s)) => assert_eq!(s, "Anon"),
+                    other => panic!("expected fallback constant, got {:?}", other),
+                }
+                // The source's erased kind must preserve the
+                // Nothing bit so downstream type-checking can
+                // recognize it as set-widened. Without this,
+                // Coalesce::validate would reject the builder's
+                // own output with `SourceNotOptional`.
+                let source_kind = c.source.kind().expect("erased source has a kind");
+                assert!(
+                    source_kind.is_optional(),
+                    "Term<Option<String>>::into::<Term<Any>>() must preserve Nothing"
+                );
+            }
+            other => panic!(
+                "expected Premise::Assert(Constraint::Coalesce), got {:?}",
+                other
+            ),
+        }
+    }
+
+    /// The erased Coalesce from the typed builder passes
+    /// `Coalesce::validate` against a fresh unifier context.
+    /// This is the regression test for the bug where the
+    /// `Term<Option<U>> -> Term<Any>` conversion stripped the
+    /// Nothing bit.
+    #[dialog_common::test]
+    fn it_validates_builder_coalesce_end_to_end() {
+        use crate::type_system::unifier::Context;
+
+        let nickname: Term<Option<String>> = Term::var("nickname");
+        let display: Term<String> = Term::var("display");
+        let premise = nickname.unwrap_or("Anon").is(display);
+
+        match premise {
+            Premise::Assert(Proposition::Constraint(Constraint::Coalesce(c))) => {
+                let mut ctx = Context::new();
+                c.validate(&mut ctx)
+                    .expect("builder-produced Coalesce must validate");
+            }
+            other => panic!("expected Constraint::Coalesce, got {:?}", other),
+        }
+    }
 
     #[dialog_common::test]
     fn it_serializes_and_deserializes() {
@@ -802,7 +984,7 @@ mod tests {
             param,
             Term::Variable {
                 name: Some("name".into()),
-                descriptor: Any(Some(Type::String))
+                descriptor: Some(Type::String).into(),
             }
         );
     }
@@ -815,7 +997,7 @@ mod tests {
             param,
             Term::Variable {
                 name: None,
-                descriptor: Any(Some(Type::String))
+                descriptor: Some(Type::String).into(),
             }
         );
     }
@@ -835,7 +1017,7 @@ mod tests {
             param,
             Term::Variable {
                 name: Some("entity".into()),
-                descriptor: Any(Some(Type::Entity))
+                descriptor: Some(Type::Entity).into(),
             }
         );
     }
@@ -851,12 +1033,16 @@ mod tests {
     fn it_serializes_any_with_type() {
         let param: Term<Any> = Term::Variable {
             name: Some("x".into()),
-            descriptor: Any(Some(Type::String)),
+            descriptor: Some(Type::String).into(),
         };
         let json = serde_json::to_value(&param).unwrap();
+        // The wire format now carries the full unified type;
+        // a singleton String primitive serializes as the bitfield.
+        let expected_type = serde_json::to_value(type_system::Type::primitive(Type::String))
+            .expect("type serializes");
         assert_eq!(
             json,
-            serde_json::json!({"?": {"name": "x", "type": "Text"}})
+            serde_json::json!({"?": {"name": "x", "type": expected_type}})
         );
     }
 
@@ -886,9 +1072,12 @@ mod tests {
 
     #[dialog_common::test]
     fn it_deserializes_any_with_type() {
-        let json = serde_json::json!({"?": {"name": "x", "type": "Text"}});
+        let type_value = serde_json::to_value(type_system::Type::primitive(Type::String))
+            .expect("type serializes");
+        let json = serde_json::json!({"?": {"name": "x", "type": type_value}});
         let param: Term<Any> = serde_json::from_value(json).unwrap();
         assert_eq!(param.name(), Some("x"));
+        assert_eq!(param.content_type(), Some(Type::String));
     }
 
     #[dialog_common::test]
@@ -962,7 +1151,7 @@ mod tests {
     fn it_displays_any_correctly() {
         assert_eq!(Term::<Any>::blank().to_string(), "_");
         assert_eq!(
-            Term::<Any>::typed_var("x", Some(Type::String)).to_string(),
+            Term::<Any>::typed_var("x", type_system::Type::primitive(Type::String)).to_string(),
             "?x<String>"
         );
         assert_eq!(Term::<Any>::var("y").to_string(), "?y<Value>");
@@ -979,7 +1168,7 @@ mod tests {
 
         let variable: Term<Any> = Term::Variable {
             name: Some("x".into()),
-            descriptor: Any(Some(Type::String)),
+            descriptor: Some(Type::String).into(),
         };
         assert!(!variable.is_blank());
         assert!(!variable.is_constant());

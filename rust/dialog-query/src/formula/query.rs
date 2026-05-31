@@ -155,6 +155,7 @@ mod tests {
     use super::*;
     use crate::Proposition;
     use crate::constraint::Constraint;
+    use crate::constraint::coalesce::Coalesce;
     use crate::constraint::equality::Equality;
     use crate::term::Term;
     use crate::types::Any;
@@ -457,6 +458,32 @@ mod tests {
                 assert_eq!(eq.is, Term::<Any>::var("y"));
             }
             other => panic!("Expected Constraint(Equality), got {:?}", other),
+        }
+    }
+
+    /// Coalesce round-trips through Proposition. Regression for
+    /// the bug where Proposition::deserialize matched only "==" as
+    /// a constraint and routed every other string to FormulaQuery.
+    #[dialog_common::test]
+    fn it_round_trips_coalesce_as_proposition() {
+        let coalesce = Coalesce::new(
+            Term::<Any>::var("source"),
+            Term::<Any>::var("fallback"),
+            Term::<Any>::var("is"),
+        );
+        let prop = Proposition::Constraint(Constraint::Coalesce(coalesce));
+
+        let json = serde_json::to_value(&prop).unwrap();
+        assert_eq!(json["assert"], "coalesce");
+
+        let deserialized: Proposition = serde_json::from_value(json).unwrap();
+        match &deserialized {
+            Proposition::Constraint(Constraint::Coalesce(c)) => {
+                assert_eq!(c.source.name(), Some("source"));
+                assert_eq!(c.fallback.name(), Some("fallback"));
+                assert_eq!(c.is.name(), Some("is"));
+            }
+            other => panic!("Expected Constraint(Coalesce), got {:?}", other),
         }
     }
 

@@ -259,7 +259,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         .iter()
         .map(|(name, ty, _, _, _)| {
             quote! {
-                #name: #ty::try_from(source.lookup(&dialog_query::Term::from(&self.#name))?)?
+                #name: #ty::try_from(source.lookup(&dialog_query::Term::from(&self.#name))?.content()?)?
             }
         })
         .collect();

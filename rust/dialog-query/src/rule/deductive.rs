@@ -1,6 +1,8 @@
 /// Serializable rule descriptor matching the formal notation.
 pub mod descriptor;
 
+use crate::artifact::Entity;
+use crate::attribute::query::AttributeQuery;
 pub use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::TypeError;
 use crate::negation::Negation;
@@ -8,6 +10,9 @@ pub use crate::planner::Plan;
 pub use crate::planner::{Conjunction, Planner};
 pub use crate::premise::Premise;
 use crate::rule::{Compile, fmt_rule_schema};
+use crate::type_system::Primitive;
+use crate::type_system::Type as Kind;
+use crate::types::Any;
 pub use crate::{Attribute, Cardinality, Parameters, Proposition, Requirement, Value};
 use crate::{Environment, Term};
 use descriptor::DeductiveRuleDescriptor;
@@ -34,8 +39,10 @@ impl Compile for DeductiveRule {
 impl DeductiveRule {
     /// Compile a rule from a conclusion and premises.
     ///
-    /// Plans the optimal premise execution order and validates that every
-    /// conclusion variable is grounded by at least one positive premise.
+    /// Plans the optimal premise execution order, validates that every
+    /// conclusion variable is grounded by at least one positive premise,
+    /// and runs the type-inference check that required head variables
+    /// are not bound only by optional (set-widened) sources.
     pub fn new(conclusion: ConceptDescriptor, premises: Vec<Premise>) -> Result<Self, TypeError> {
         <Self as Compile>::compile(conclusion, premises)
     }
@@ -113,12 +120,12 @@ impl Display for DeductiveRule {
 
 impl From<&ConceptDescriptor> for DeductiveRule {
     fn from(concept: &ConceptDescriptor) -> Self {
-        use crate::artifact::Entity;
-        use crate::attribute::query::AttributeQuery;
-
         let mut premises = Vec::new();
 
         let this = Term::<Entity>::var("this");
+
+        // Required (`with`) attributes — standard EAV semantics.
+        // A missing fact filters the row out entirely.
         for (name, attribute) in concept.with().iter() {
             premises.push(
                 AttributeQuery::new(
@@ -132,6 +139,29 @@ impl From<&ConceptDescriptor> for DeductiveRule {
             );
         }
 
+        // Optional (`maybe`) attributes — a missing fact yields a
+        // fallback row with the slot bound to `Binding::Absent`.
+        // We encode this by typing the `is` term as optional;
+        // `AttributeQuery` derives its resolution from that kind.
+        if let Some(maybe) = concept.maybe() {
+            for (name, attribute) in maybe.iter() {
+                let kind = match attribute.content_type() {
+                    Some(ty) => Kind::primitive(ty).optional(),
+                    None => Kind::primitive_set(Primitive::ALL).optional(),
+                };
+                premises.push(
+                    AttributeQuery::new(
+                        Term::Constant(Value::from(attribute.the().clone())),
+                        this.clone(),
+                        Term::<Any>::typed_var(name, kind),
+                        Term::blank(),
+                        Some(attribute.cardinality()),
+                    )
+                    .into(),
+                );
+            }
+        }
+
         DeductiveRule::new(concept.clone(), premises).expect("Concept should compile")
     }
 }
@@ -139,14 +169,26 @@ impl From<&ConceptDescriptor> for DeductiveRule {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::artifact::{Entity, Type};
+    use crate::artifact::{Cause, Entity, Type};
     use crate::attribute::AttributeDescriptor;
     use crate::attribute::query::AttributeQuery;
     use crate::the;
+    use crate::types::Any;
+
+    /// Helper: produce an optional `Term<Any>` — this is how an
+    /// AttributeQuery is told to run with optional resolution, since
+    /// resolution is derived from `is.is_optional()`.
+    fn optional_term(name: &str, inner: Option<Type>) -> Term<Any> {
+        let kind = match inner {
+            Some(ty) => Kind::primitive(ty).optional(),
+            None => Kind::primitive_set(Primitive::ALL).optional(),
+        };
+        Term::<Any>::typed_var(name, kind)
+    }
 
     #[dialog_common::test]
     fn it_compiles_with_valid_premises() {
-        let conclusion = ConceptDescriptor::from(vec![
+        let conclusion = ConceptDescriptor::try_from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -165,7 +207,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
         let this = Term::<Entity>::var("this");
         let premises = vec![
             AttributeQuery::new(
@@ -191,7 +234,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_rejects_unconstrained_fact() {
-        let conclusion = ConceptDescriptor::from(vec![
+        let conclusion = ConceptDescriptor::try_from(vec![
             (
                 "key",
                 AttributeDescriptor::new(
@@ -210,7 +253,8 @@ mod tests {
                     Some(Type::String),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
         let premises = vec![
             AttributeQuery::new(
                 Term::var("the"),
@@ -226,7 +270,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_rejects_unconstrained_relation() {
-        let conclusion = ConceptDescriptor::from(vec![
+        let conclusion = ConceptDescriptor::try_from(vec![
             (
                 "key",
                 AttributeDescriptor::new(
@@ -245,7 +289,8 @@ mod tests {
                     Some(Type::String),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         // All terms are variables — no constants at all.
         // The planner should reject this at install time.
@@ -269,7 +314,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_rejects_unused_parameter() {
-        let conclusion = ConceptDescriptor::from(vec![
+        let conclusion = ConceptDescriptor::try_from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -288,7 +333,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
         let premises = vec![
             AttributeQuery::new(
                 Term::from(the!("user/name")),
@@ -308,7 +354,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_rejects_empty_premises() {
-        let conclusion = ConceptDescriptor::from(vec![
+        let conclusion = ConceptDescriptor::try_from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -327,13 +373,14 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
         assert!(DeductiveRule::new(conclusion, vec![]).is_err());
     }
 
     #[dialog_common::test]
     fn it_compiles_with_chained_dependencies() {
-        let conclusion = ConceptDescriptor::from(vec![
+        let conclusion = ConceptDescriptor::try_from(vec![
             (
                 "key",
                 AttributeDescriptor::new(
@@ -352,7 +399,8 @@ mod tests {
                     Some(Type::String),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
         let this = Term::<Entity>::var("this");
         let premises = vec![
             AttributeQuery::new(
@@ -381,10 +429,11 @@ mod tests {
 
     #[dialog_common::test]
     fn it_rejects_mismatched_parameter_name() {
-        let conclusion = ConceptDescriptor::from(vec![(
+        let conclusion = ConceptDescriptor::try_from(vec![(
             "key",
             AttributeDescriptor::new(the!("result/key"), "", Cardinality::One, Some(Type::String)),
-        )]);
+        )])
+        .unwrap();
 
         let premises = vec![
             AttributeQuery::new(
@@ -409,9 +458,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_rejects_negated_constraint_with_unbound_variable() {
-        use crate::attribute::query::AttributeQuery;
-
-        let conclusion = ConceptDescriptor::from(vec![(
+        let conclusion = ConceptDescriptor::try_from(vec![(
             "name",
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -419,7 +466,8 @@ mod tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
 
         let name = Term::<String>::var("name");
         let z = Term::<String>::var("z");
@@ -445,9 +493,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_rejects_negated_constraint_with_unbound_variable_on_left() {
-        use crate::attribute::query::AttributeQuery;
-
-        let conclusion = ConceptDescriptor::from(vec![(
+        let conclusion = ConceptDescriptor::try_from(vec![(
             "name",
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -455,7 +501,8 @@ mod tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
 
         let name = Term::<String>::var("name");
         let z = Term::<String>::var("z");
@@ -477,5 +524,376 @@ mod tests {
             result.is_err(),
             "Should reject rule with negated constraint referencing unbound variable ?z (flipped)"
         );
+    }
+
+    /// Concept projection emits one premise per `with` attribute,
+    /// each with `Resolution::Required` (the default). A concept
+    /// with no `maybe` attributes produces only required
+    /// premises.
+    #[dialog_common::test]
+    fn from_concept_with_only_required_emits_required_premises() {
+        use crate::Premise;
+        use crate::attribute::query::Resolution;
+        use crate::proposition::Proposition;
+
+        let concept = ConceptDescriptor::try_from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )])
+        .unwrap();
+
+        let rule = DeductiveRule::from(&concept);
+
+        let mut required = 0;
+        let mut optional = 0;
+        for step in rule.join.steps.iter() {
+            if let Premise::Assert(Proposition::Attribute(query)) = &step.premise {
+                match query.resolution() {
+                    Resolution::Required => required += 1,
+                    Resolution::Optional => optional += 1,
+                }
+            }
+        }
+        assert_eq!(required, 1, "expected one required premise");
+        assert_eq!(optional, 0, "expected no optional premises");
+    }
+
+    /// Concept projection emits one premise per `with` attribute
+    /// (Required) and one per `maybe` attribute (Optional).
+    #[dialog_common::test]
+    fn from_concept_with_maybe_emits_optional_resolver() {
+        use crate::Premise;
+        use crate::attribute::query::Resolution;
+        use crate::proposition::Proposition;
+
+        let concept = ConceptDescriptor::try_from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )])
+        .unwrap()
+        .with_maybe(vec![(
+            "nickname",
+            AttributeDescriptor::new(
+                the!("person/nickname"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
+
+        let rule = DeductiveRule::from(&concept);
+
+        let mut required = 0;
+        let mut optional = 0;
+        for step in rule.join.steps.iter() {
+            if let Premise::Assert(Proposition::Attribute(query)) = &step.premise {
+                match query.resolution() {
+                    Resolution::Required => required += 1,
+                    Resolution::Optional => optional += 1,
+                }
+            }
+        }
+        assert_eq!(required, 1, "expected one required premise (name)");
+        assert_eq!(optional, 1, "expected one optional premise (nickname)");
+    }
+
+    /// The degenerate "rule body binds only optionals" shape, at the
+    /// concept layer — rejected by construction.
+    ///
+    /// A concept with zero required (`with`) attributes constrains
+    /// nothing, so every entity would match it; a rule built from it
+    /// would have a body of only optional premises (each yielding an
+    /// Absent fallback on miss). This is unsound, and it is now
+    /// *unconstructable*: `ConceptDescriptor::try_from` of an empty
+    /// required set returns [`TypeError::EmptyConcept`], so the
+    /// degenerate concept can never reach the rule compiler at all.
+    /// `maybe` attributes do not change this — only `with` counts.
+    ///
+    /// (A required head bound *only* by an optional premise — the
+    /// distinct shape where a `with` field exists but is fed from an
+    /// optional source — is caught separately by
+    /// `RequiredHeadFromOptional`; see
+    /// `it_rejects_required_head_from_optional_premise`.)
+    #[dialog_common::test]
+    fn it_rejects_concept_with_no_required_attributes_by_construction() {
+        // Empty required set: construction fails outright.
+        let empty: Vec<(&str, AttributeDescriptor)> = Vec::new();
+        match ConceptDescriptor::try_from(empty) {
+            Err(TypeError::EmptyConcept) => {}
+            other => panic!("expected EmptyConcept, got {other:?}"),
+        }
+    }
+
+    /// `with_maybe` builder installs the maybe attributes; an
+    /// empty input clears the maybe slot.
+    #[dialog_common::test]
+    fn with_maybe_installs_and_clears() {
+        let concept = ConceptDescriptor::try_from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )])
+        .unwrap();
+        assert!(concept.maybe().is_none(), "no maybe by default");
+
+        let with_maybe = concept.clone().with_maybe(vec![(
+            "nickname",
+            AttributeDescriptor::new(
+                the!("person/nickname"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
+        assert!(with_maybe.maybe().is_some(), "maybe installed");
+        assert_eq!(with_maybe.maybe().unwrap().iter().count(), 1);
+
+        let empty: Vec<(&str, AttributeDescriptor)> = Vec::new();
+        let cleared = with_maybe.with_maybe(empty);
+        assert!(cleared.maybe().is_none(), "empty input clears maybe");
+    }
+
+    /// A conclusion variable bound only by an optional attribute
+    /// query carries `Nothing` in its meet. Required heads cannot
+    /// accept that — the rule could produce an Absent value in a
+    /// required slot. Reject.
+    #[dialog_common::test]
+    fn it_rejects_required_head_from_optional_premise() {
+        let conclusion = ConceptDescriptor::try_from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )])
+        .unwrap();
+        let this = Term::<Entity>::var("this");
+        // Bind ?name with an optional `is` term — the meet for ?name
+        // includes Nothing.
+        let premises = vec![
+            AttributeQuery::new(
+                Term::from(the!("user/name")),
+                this,
+                optional_term("name", None),
+                Term::var("cause"),
+                Some(Cardinality::One),
+            )
+            .into(),
+        ];
+        let result = DeductiveRule::new(conclusion, premises);
+        match result {
+            Err(TypeError::RequiredHeadFromOptional { variable, .. }) => {
+                assert_eq!(variable, "name");
+            }
+            other => panic!("expected RequiredHeadFromOptional, got {other:?}"),
+        }
+    }
+
+    /// A conclusion variable bound by *both* an optional and a
+    /// required premise (with a typed `is` slot) has the Nothing
+    /// bit removed by the meet — at least one premise guarantees
+    /// Present. Accept.
+    #[dialog_common::test]
+    fn it_accepts_required_head_when_inference_strips_nothing() {
+        let conclusion = ConceptDescriptor::try_from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )])
+        .unwrap();
+        let this = Term::<Entity>::var("this");
+        // The `is` slot must carry a typed kind so the meet has
+        // information to combine. An untyped `Term::var` produces
+        // `None` content_type, which contributes nothing to the
+        // meet — the optional side then wins.
+        let typed_name: Term<Any> = Term::<String>::var("name").into();
+        let optional_name: Term<Any> = Term::<Option<String>>::var("name").into();
+
+        let premises = vec![
+            // Optional `is` term: contributes a slot type with Nothing.
+            AttributeQuery::new(
+                Term::from(the!("user/name")),
+                this.clone(),
+                optional_name,
+                Term::var("cause1"),
+                Some(Cardinality::One),
+            )
+            .into(),
+            // Required `is` term: contributes a slot type without Nothing.
+            AttributeQuery::new(
+                Term::from(the!("user/canonical-name")),
+                this,
+                typed_name,
+                Term::var("cause2"),
+                Some(Cardinality::One),
+            )
+            .into(),
+        ];
+        let result = DeductiveRule::new(conclusion, premises);
+        assert!(
+            result.is_ok(),
+            "meet of Required + Optional strips Nothing — should compile (got {:?})",
+            result.err()
+        );
+    }
+
+    /// Symmetric case: an *untyped* Required premise paired with a
+    /// typed Optional premise should also strip Nothing from the
+    /// meet. The untyped Required contribution is "any present
+    /// value" (`Primitive::ALL`), so intersected with
+    /// `Optional<String>` (i.e. `{String, Nothing}`) the meet
+    /// resolves to `{String}` — no Nothing. Rule compiles.
+    #[dialog_common::test]
+    fn it_accepts_untyped_required_paired_with_typed_optional() {
+        let conclusion = ConceptDescriptor::try_from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )])
+        .unwrap();
+        let this = Term::<Entity>::var("this");
+        let optional_name = optional_term("name", Some(Type::String));
+
+        let premises = vec![
+            // Optional `is` (typed): contributes `{String, Nothing}`.
+            AttributeQuery::new(
+                Term::from(the!("user/name")),
+                this.clone(),
+                optional_name,
+                Term::var("cause1"),
+                Some(Cardinality::One),
+            )
+            .into(),
+            // Required with *untyped* `is` (Term::var without a
+            // kind). Contributes "any present value" to the meet
+            // via the None-content_type branch.
+            AttributeQuery::new(
+                Term::from(the!("user/canonical-name")),
+                this,
+                Term::<Any>::var("name"),
+                Term::var("cause2"),
+                Some(Cardinality::One),
+            )
+            .into(),
+        ];
+        let result = DeductiveRule::new(conclusion, premises);
+        assert!(
+            result.is_ok(),
+            "untyped Required + typed Optional should compile (got {:?})",
+            result.err()
+        );
+    }
+
+    /// The `cause` slot of an Optional attribute query is set-
+    /// widened in the schema (since the fallback row binds it to
+    /// `Absent`). A rule where a required-head variable shares
+    /// its name with such a cause is therefore rejected by the
+    /// meet algebra.
+    #[dialog_common::test]
+    fn it_rejects_required_head_from_optional_cause() {
+        // Conclusion has a required `mark` field expecting a
+        // typed value (Bytes).
+        let conclusion = ConceptDescriptor::try_from(vec![(
+            "mark",
+            AttributeDescriptor::new(the!("person/mark"), "", Cardinality::One, Some(Type::Bytes)),
+        )])
+        .unwrap();
+        let this = Term::<Entity>::var("this");
+        // The optional attribute's cause slot shares the name
+        // `?mark` with the conclusion's required head — the
+        // meet's cause contribution carries Nothing, so the
+        // required head sees Optional.
+        let premises = vec![
+            AttributeQuery::new(
+                Term::from(the!("user/name")),
+                this,
+                optional_term("name", None),
+                Term::<Cause>::var("mark"),
+                Some(Cardinality::One),
+            )
+            .into(),
+        ];
+        let result = DeductiveRule::new(conclusion, premises);
+        match result {
+            Err(TypeError::RequiredHeadFromOptional { variable, .. }) => {
+                assert_eq!(variable, "mark");
+            }
+            other => panic!("expected RequiredHeadFromOptional, got {other:?}"),
+        }
+    }
+
+    /// A rule containing a malformed Coalesce (non-Optional source)
+    /// is rejected at compile time. This is the regression test for
+    /// validate-not-called: previously `Coalesce::validate` existed
+    /// but no production path invoked it, so wire-format or
+    /// raw-constructor mismatches silently passed.
+    #[dialog_common::test]
+    fn it_rejects_coalesce_with_non_optional_source() {
+        use crate::constraint::{Coalesce, Constraint};
+        use crate::premise::Premise;
+
+        let conclusion = ConceptDescriptor::try_from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )])
+        .unwrap();
+        let this = Term::<Entity>::var("this");
+        let typed_name: Term<Any> = Term::<String>::var("name").into();
+
+        // Source is a `Term<Any>` carrying `String` (not Optional<String>).
+        let bad_source: Term<Any> = Term::<String>::var("source").into();
+        let bad_coalesce = Coalesce::new(
+            bad_source,
+            Term::<Any>::constant("Anon".to_string()),
+            typed_name.clone(),
+        );
+
+        let premises = vec![
+            // Required premise so the rule has a chance of compiling
+            // up to the coalesce-validation step.
+            AttributeQuery::new(
+                Term::from(the!("user/name")),
+                this,
+                typed_name,
+                Term::var("cause"),
+                Some(Cardinality::One),
+            )
+            .into(),
+            Premise::Assert(Proposition::Constraint(Constraint::Coalesce(bad_coalesce))),
+        ];
+        let result = DeductiveRule::new(conclusion, premises);
+        match result {
+            Err(TypeError::CoalesceTypeMismatch { .. }) => {}
+            other => panic!("expected CoalesceTypeMismatch, got {other:?}"),
+        }
     }
 }
