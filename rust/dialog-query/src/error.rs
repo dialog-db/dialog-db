@@ -46,6 +46,15 @@ pub enum TypeError {
     #[error("Unconstrained fact selector")]
     UnconstrainedSelector,
 
+    /// A concept declares no required (`with`) attributes. Such a
+    /// concept constrains nothing about an entity, so every entity
+    /// trivially matches it — the same degenerate shape as a concept
+    /// with no attributes at all. Optional (`maybe`) attributes do
+    /// not count: they widen results rather than constrain them. A
+    /// concept must have at least one required attribute.
+    #[error("Concept declares no required attributes; at least one `with` attribute is required")]
+    EmptyConcept,
+
     /// A rule declares a parameter that none of its premises use.
     #[error("Rule {rule} does not use parameter \"{parameter}\"")]
     UnusedParameter {

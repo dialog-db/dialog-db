@@ -361,7 +361,7 @@ mod tests {
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         // Create a person concept
-        let concept = ConceptDescriptor::from(vec![
+        let concept = ConceptDescriptor::try_from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -380,7 +380,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::var("person"));
@@ -470,7 +471,7 @@ mod tests {
 
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
-        let concept = ConceptDescriptor::from(vec![(
+        let concept = ConceptDescriptor::try_from(vec![(
             "name",
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -479,6 +480,7 @@ mod tests {
                 Some(Type::String),
             ),
         )])
+        .unwrap()
         .with_maybe(vec![(
             "nickname",
             AttributeDescriptor::new(
@@ -664,7 +666,7 @@ mod tests {
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         // Create a person concept
-        let concept = ConceptDescriptor::from(vec![
+        let concept = ConceptDescriptor::try_from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -683,7 +685,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::var("person"));
@@ -711,7 +714,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_operates_on_concept_conclusion() {
-        let concept = ConceptDescriptor::from(vec![
+        let concept = ConceptDescriptor::try_from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -730,7 +733,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         // Test that attributes are present
         let param_names: Vec<&str> = concept.with().keys().collect();
@@ -742,7 +746,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_creates_concept_descriptor() {
-        let concept = ConceptDescriptor::from(vec![(
+        let concept = ConceptDescriptor::try_from(vec![(
             "name".to_string(),
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -750,7 +754,8 @@ mod tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
 
         // Operator is now a computed URI
         assert!(
@@ -763,7 +768,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_analyzes_concept_application() {
-        let concept = ConceptDescriptor::from(vec![
+        let concept = ConceptDescriptor::try_from(vec![
             (
                 "name".to_string(),
                 AttributeDescriptor::new(
@@ -782,7 +787,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         let mut terms = Parameters::new();
         terms.insert("name".to_string(), Term::var("person_name"));
@@ -808,7 +814,7 @@ mod tests {
     fn it_extracts_deductive_rule_parameters() {
         use std::collections::HashSet;
 
-        let predicate = ConceptDescriptor::from([
+        let predicate = ConceptDescriptor::try_from([
             (
                 "name".to_string(),
                 AttributeDescriptor::new(
@@ -827,7 +833,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
         let rule = DeductiveRule::from(&predicate);
 
         let params: HashSet<&str> = rule.parameters().collect();
@@ -862,10 +869,11 @@ mod tests {
         use crate::error::{AnalyzerError, TypeError};
 
         // Test AnalyzerError creation
-        let predicate = ConceptDescriptor::from(vec![(
+        let predicate = ConceptDescriptor::try_from(vec![(
             "name",
             AttributeDescriptor::new(the!("test/name"), "", Cardinality::One, Some(Type::String)),
-        )]);
+        )])
+        .unwrap();
         let rule = DeductiveRule::from(&predicate);
 
         let analyzer_error = AnalyzerError::UnusedParameter {
@@ -912,7 +920,7 @@ mod tests {
         terms.insert("test".to_string(), Term::var("test_var"));
         let concept_app = Proposition::Concept(ConceptQuery {
             terms,
-            predicate: ConceptDescriptor::from([(
+            predicate: ConceptDescriptor::try_from([(
                 "name",
                 AttributeDescriptor::new(
                     the!("test/name"),
@@ -920,7 +928,8 @@ mod tests {
                     Cardinality::One,
                     Some(Type::String),
                 ),
-            )]),
+            )])
+            .unwrap(),
         });
 
         match concept_app {
@@ -976,7 +985,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let concept = ConceptDescriptor::from(vec![(
+        let concept = ConceptDescriptor::try_from(vec![(
             "name",
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -984,7 +993,8 @@ mod tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
 
         // Query with constant entity - should only return Alice
         let mut terms = Parameters::new();
@@ -1043,7 +1053,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let concept = ConceptDescriptor::from(vec![
+        let concept = ConceptDescriptor::try_from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -1062,7 +1072,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         // Query with constant name value - should only return Bob
         let mut terms = Parameters::new();
@@ -1119,7 +1130,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let concept = ConceptDescriptor::from(vec![
+        let concept = ConceptDescriptor::try_from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -1138,7 +1149,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         // Query with both name and age constants - should only match Alice
         let mut terms = Parameters::new();
@@ -1172,7 +1184,7 @@ mod tests {
     /// Build a representative two-attribute Person concept query with mixed
     /// variable / constant bindings for the serde round-trip tests.
     fn sample_concept_query() -> ConceptQuery {
-        let predicate = ConceptDescriptor::from(vec![
+        let predicate = ConceptDescriptor::try_from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -1191,7 +1203,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::<Any>::var("entity"));

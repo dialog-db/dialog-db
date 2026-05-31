@@ -107,6 +107,12 @@ pub trait Compile: Sized + Into<Rule> {
     /// deductive and inductive rules; the only difference between
     /// the kinds lives at evaluation time, not compile time.
     fn compile(conclusion: ConceptDescriptor, premises: Vec<Premise>) -> Result<Self, TypeError> {
+        // A concept with no required (`with`) attributes is
+        // unconstructable (see `ConceptDescriptor`'s `TryFrom` /
+        // `Deserialize` and the `#[derive(Concept)]` compile-time
+        // assertion), so `conclusion` is guaranteed non-degenerate
+        // here — no explicit emptiness check is needed.
+
         // Plan the order of premises in a scope where none of the
         // rule parameters are bound to find the optimal execution
         // order, or to discover unsatisfiable premises (e.g. a
@@ -210,247 +216,37 @@ macro_rules! when {
 #[cfg(test)]
 mod tests {
     extern crate self as dialog_query;
-    use std::vec::IntoIter;
 
     use super::*;
     use crate::artifact::{Entity, Type};
-    use crate::attribute::{AttributeDescriptor, Cardinality};
     use crate::concept::descriptor::ConceptDescriptor;
-    use crate::concept::query::ConceptQuery;
-    use crate::concept::{Concept, Conclusion};
-    use crate::predicate::Predicate;
-    use crate::premise::Premise;
-    use crate::query::Application;
-    use crate::selection::Match;
-    use crate::selection::Selection;
-    use crate::source::SelectRules;
-    use crate::statement::Statement;
     use crate::term::Term;
-    use crate::the;
-    use crate::{AttributeStatement, EvaluationError, Parameters, Proposition, Query};
-    use dialog_artifacts::Select;
-    use dialog_capability::Provider;
-    use dialog_common::ConditionalSync;
+    use crate::{AttributeStatement, Query};
 
-    // Manual implementation of Person struct with Concept and Rule traits
-    // This serves as a template for what the derive macro should generate
-    #[derive(Debug, Clone)]
+    // Define a Person concept for testing via `#[derive(Concept)]`.
+    // The newtypes live in a module named `person` so the attribute
+    // domain defaults to `person`, yielding `person/name` and
+    // `person/age` to match the facts the scaffold previously asserted.
+    mod person {
+        use crate::Attribute;
+
+        /// Name of the person
+        #[derive(Attribute, Clone, PartialEq)]
+        pub struct Name(pub String);
+
+        /// Age of the person
+        #[derive(Attribute, Clone, PartialEq)]
+        pub struct Age(pub u32);
+    }
+
+    /// A person concept used by the rule scaffold tests below.
+    #[derive(crate::Concept, Debug, Clone)]
     pub struct Person {
         pub this: Entity,
-        /// Name of the person
-        pub name: String,
-        /// Age of the person
-        pub age: u32,
-    }
-
-    /// Query pattern for Person - has Term-wrapped fields for querying
-    #[derive(Debug, Clone)]
-    pub struct PersonQuery {
-        /// The entity being matched
-        pub this: Term<Entity>,
-        /// Name term - can be a variable or concrete value
-        pub name: Term<String>,
-        /// Age term - can be a variable or concrete value
-        pub age: Term<u32>,
-    }
-
-    impl Default for PersonQuery {
-        fn default() -> Self {
-            Self {
-                this: Term::var("this"),
-                name: Term::var("name"),
-                age: Term::var("age"),
-            }
-        }
-    }
-
-    /// Attributes pattern for Person - enables fluent query building
-    #[derive(Debug, Clone)]
-    pub struct PersonTerms;
-    impl PersonTerms {
-        pub fn this() -> Term<Entity> {
-            Term::var("this")
-        }
-        pub fn name() -> Term<String> {
-            Term::var("name")
-        }
-        pub fn age() -> Term<u32> {
-            Term::var("age")
-        }
-    }
-
-    fn person_predicate() -> ConceptDescriptor {
-        ConceptDescriptor::from(vec![
-            (
-                "name",
-                AttributeDescriptor::new(
-                    the!("person/name"),
-                    "Name of the person",
-                    Cardinality::One,
-                    Some(Type::String),
-                ),
-            ),
-            (
-                "age",
-                AttributeDescriptor::new(
-                    the!("person/age"),
-                    "Age of the person",
-                    Cardinality::One,
-                    Some(Type::UnsignedInt),
-                ),
-            ),
-        ])
-    }
-
-    impl From<Person> for ConceptDescriptor {
-        fn from(_: Person) -> Self {
-            person_predicate()
-        }
-    }
-
-    impl From<PersonQuery> for ConceptDescriptor {
-        fn from(_: PersonQuery) -> Self {
-            person_predicate()
-        }
-    }
-
-    impl Concept for Person {
-        type Term = PersonTerms;
-
-        fn this(&self) -> Entity {
-            let predicate: ConceptDescriptor = self.clone().into();
-            predicate.this()
-        }
-    }
-
-    impl IntoIterator for Person {
-        type Item = AttributeStatement;
-        type IntoIter = IntoIter<AttributeStatement>;
-
-        fn into_iter(self) -> Self::IntoIter {
-            vec![
-                the!("person/name")
-                    .of(self.this.clone())
-                    .is(self.name.clone())
-                    .into(),
-                the!("person/age").of(self.this.clone()).is(self.age).into(),
-            ]
-            .into_iter()
-        }
-    }
-
-    impl Statement for Person {
-        fn assert(self, update: &mut impl dialog_artifacts::Update) {
-            the!("person/name")
-                .of(self.this.clone())
-                .is(self.name.clone())
-                .assert(update);
-            the!("person/age")
-                .of(self.this.clone())
-                .is(self.age)
-                .assert(update);
-        }
-
-        fn retract(self, update: &mut impl dialog_artifacts::Update) {
-            the!("person/name")
-                .of(self.this.clone())
-                .is(self.name.clone())
-                .retract(update);
-            the!("person/age")
-                .of(self.this.clone())
-                .is(self.age)
-                .retract(update);
-        }
-    }
-
-    impl Predicate for Person {
-        type Conclusion = Person;
-        type Application = PersonQuery;
-        type Descriptor = ConceptDescriptor;
-    }
-
-    impl TryFrom<Match> for Person {
-        type Error = EvaluationError;
-
-        fn try_from(source: Match) -> Result<Self, Self::Error> {
-            Ok(Person {
-                this: Entity::try_from(
-                    source
-                        .lookup(&Term::from(&PersonTerms::this()))?
-                        .content()?,
-                )?,
-                name: String::try_from(
-                    source
-                        .lookup(&Term::from(&PersonTerms::name()))?
-                        .content()?,
-                )?,
-                age: u32::try_from(source.lookup(&Term::from(&PersonTerms::age()))?.content()?)?,
-            })
-        }
-    }
-
-    impl From<PersonQuery> for Parameters {
-        fn from(source: PersonQuery) -> Self {
-            let mut terms = Self::new();
-
-            terms.insert("this".into(), source.this.into());
-            terms.insert("name".into(), source.name.into());
-            terms.insert("age".into(), source.age.into());
-
-            terms
-        }
-    }
-
-    impl Application for PersonQuery {
-        type Conclusion = Person;
-
-        fn evaluate<'a, Env, M: Selection + 'a>(
-            self,
-            selection: M,
-            env: &'a Env,
-        ) -> impl Selection + 'a
-        where
-            Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
-        {
-            let application: ConceptQuery = self.into();
-            application.evaluate(selection, env)
-        }
-
-        fn realize(&self, source: Match) -> Result<Self::Conclusion, EvaluationError> {
-            Ok(Person {
-                this: Entity::try_from(source.lookup(&Term::from(&self.this))?.content()?)?,
-                name: String::try_from(source.lookup(&Term::from(&self.name))?.content()?)?,
-                age: u32::try_from(source.lookup(&Term::from(&self.age))?.content()?)?,
-            })
-        }
-    }
-
-    impl From<PersonQuery> for ConceptQuery {
-        fn from(source: PersonQuery) -> Self {
-            let predicate: ConceptDescriptor = source.clone().into();
-            ConceptQuery {
-                terms: source.into(),
-                predicate,
-            }
-        }
-    }
-
-    impl From<PersonQuery> for Proposition {
-        fn from(source: PersonQuery) -> Self {
-            Proposition::Concept(source.into())
-        }
-    }
-
-    impl From<PersonQuery> for Premise {
-        fn from(source: PersonQuery) -> Self {
-            Premise::Assert(source.into())
-        }
-    }
-
-    impl Conclusion for Person {
-        fn this(&self) -> &Entity {
-            panic!("Instance trait implementation requires an entity field")
-        }
+        /// Name of the person (`person/name`)
+        pub name: person::Name,
+        /// Age of the person (`person/age`)
+        pub age: person::Age,
     }
 
     #[dialog_common::test]
@@ -465,12 +261,10 @@ mod tests {
         }
 
         // Verify rule installs into registry
-        use crate::ConceptDescriptor;
         use crate::rule::deductive::DeductiveRule;
         use crate::session::RuleRegistry;
         let mut rules = RuleRegistry::new();
-        let person_query = Query::<Person>::default();
-        let concept: ConceptDescriptor = person_query.into();
+        let concept = Person::descriptor().clone();
         let premises = person_rule(Query::<Person>::default())
             .into_premises()
             .into_vec();
@@ -516,7 +310,7 @@ mod tests {
         };
 
         // Test that MacroPerson implements Concept
-        let concept: ConceptDescriptor = Query::<MacroPerson>::default().into();
+        let concept: ConceptDescriptor = MacroPerson::descriptor().clone();
         // Operator is now a computed URI
         assert!(
             concept.this().to_string().starts_with("concept:"),
@@ -614,7 +408,7 @@ mod tests {
 
         // Concept descriptor: required field flows into `with`,
         // optional fields flow into `maybe`.
-        let concept: ConceptDescriptor = default.into();
+        let concept: ConceptDescriptor = MacroEmployee::descriptor().clone();
         let with: Vec<_> = concept.with().iter().collect();
         assert_eq!(with.len(), 1);
         assert_eq!(with[0].0, "given-name");
@@ -676,7 +470,7 @@ mod tests {
         // not `with`. If the macro were doing syntactic Option
         // detection by ident name, `Maybe` would not match and
         // `nickname` would land in `with` — wrong.
-        let concept: ConceptDescriptor = Query::<AliasedConcept>::default().into();
+        let concept: ConceptDescriptor = AliasedConcept::descriptor().clone();
         let with: Vec<_> = concept.with().iter().collect();
         assert_eq!(with.len(), 1);
         assert_eq!(with[0].0, "given-name");

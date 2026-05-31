@@ -232,7 +232,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         descriptor_pair_pushes.push(quote! {
             {
                 let __pair = (
-                    #field_name_lit,
+                    #field_name_lit.to_string(),
                     <<#field_type as dialog_query::ConceptField>::Attribute
                         as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().clone(),
                 );
@@ -316,6 +316,29 @@ pub fn derive(input: TokenStream) -> TokenStream {
             fn #validate_fn_name() {
                 #(assert_implements_concept_field::<#validated_types>();)*
             }
+        };
+
+        // Compile-time validation that the concept declares at least
+        // one *required* attribute. A concept made only of optional
+        // (`Option<_>`) fields — or of no attribute fields at all —
+        // constrains nothing, so every entity would match it; that
+        // is rejected here.
+        //
+        // The required/optional split is read from the
+        // [`ConceptField::OPTIONAL`](dialog_query::ConceptField)
+        // associated const (a compile-time `bool` chosen by trait
+        // dispatch), never by syntactic inspection of `Option<_>`.
+        // Summing `!OPTIONAL` over the fields and asserting the total
+        // is non-zero gives a `const` check that fires at compile
+        // time with a clear message.
+        const _: () = {
+            let required_field_count: usize = 0
+                #( + (!<#field_types as dialog_query::ConceptField>::OPTIONAL as usize) )*;
+            assert!(
+                required_field_count >= 1,
+                "a Concept must declare at least one required (non-Option) attribute field; \
+                 a concept built only from optional fields constrains nothing and matches every entity"
+            );
         };
 
         #[doc = #query_struct_doc]
@@ -412,36 +435,48 @@ pub fn derive(input: TokenStream) -> TokenStream {
         // have either or both. The struct's doc comment carries
         // through as the descriptor's `description` so a `concept:`
         // query surfaces it (the field list alone leaves it `None`).
-        impl From<#struct_name> for dialog_query::ConceptDescriptor {
-            fn from(_: #struct_name) -> Self {
-                let mut __with: Vec<(&str, dialog_query::AttributeDescriptor)> = Vec::new();
-                let mut __maybe: Vec<(&str, dialog_query::AttributeDescriptor)> = Vec::new();
-                #(#descriptor_pair_pushes)*
-                dialog_query::ConceptDescriptor::from(__with)
-                    .with_maybe(__maybe)
-                    .with_description(#concept_description_lit)
+        // The concept's runtime schema, cached. This is the single
+        // construction site for the descriptor; both `From` impls
+        // below delegate here. Building goes through the fallible
+        // `ConceptDescriptor::try_from`, which only rejects an empty
+        // required (`with`) set — ruled out at compile time by the
+        // required-field assertion above, so the `expect` is
+        // statically unreachable (it documents the invariant rather
+        // than handling a real failure).
+        impl dialog_query::Descriptor<dialog_query::ConceptDescriptor> for #struct_name {
+            fn descriptor() -> &'static dialog_query::ConceptDescriptor {
+                static DESCRIPTOR: std::sync::OnceLock<dialog_query::ConceptDescriptor> =
+                    std::sync::OnceLock::new();
+                DESCRIPTOR.get_or_init(|| {
+                    let mut __with: Vec<(String, dialog_query::AttributeDescriptor)> = Vec::new();
+                    let mut __maybe: Vec<(String, dialog_query::AttributeDescriptor)> = Vec::new();
+                    #(#descriptor_pair_pushes)*
+                    dialog_query::ConceptDescriptor::try_from(__with)
+                        .expect(
+                            "derive(Concept) guarantees at least one required field at compile time",
+                        )
+                        .with_maybe(__maybe)
+                        .with_description(#concept_description_lit)
+                })
             }
         }
 
-        // Implement From<Query> for ConceptDescriptor
-        impl From<#query_name> for dialog_query::ConceptDescriptor {
-            fn from(_: #query_name) -> Self {
-                let mut __with: Vec<(&str, dialog_query::AttributeDescriptor)> = Vec::new();
-                let mut __maybe: Vec<(&str, dialog_query::AttributeDescriptor)> = Vec::new();
-                #(#descriptor_pair_pushes)*
-                dialog_query::ConceptDescriptor::from(__with)
-                    .with_maybe(__maybe)
-                    .with_description(#concept_description_lit)
-            }
-        }
+        // No `From<#struct_name>`/`From<#query_name> for ConceptDescriptor`:
+        // a concept type's descriptor is obtained through
+        // `Descriptor<ConceptDescriptor>` (or the inherent
+        // `#struct_name::descriptor()`), mirroring how attributes
+        // expose `Descriptor<AttributeDescriptor>`. The conversions
+        // below fill `ConceptQuery.predicate` from that single source.
 
         // Implement From<Query> for Premise
         impl From<#query_name> for dialog_query::Premise {
             fn from(source: #query_name) -> Self {
-                let predicate: dialog_query::ConceptDescriptor = source.clone().into();
                 let app = dialog_query::ConceptQuery {
                     terms: source.into(),
-                    predicate,
+                    predicate: <#struct_name as dialog_query::Descriptor<
+                        dialog_query::ConceptDescriptor,
+                    >>::descriptor()
+                    .clone(),
                 };
                 dialog_query::Premise::Assert(dialog_query::Proposition::Concept(app))
             }
@@ -450,10 +485,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
         // Implement From<Query> for Proposition
         impl From<#query_name> for dialog_query::Proposition {
             fn from(source: #query_name) -> Self {
-                let predicate: dialog_query::ConceptDescriptor = source.clone().into();
                 let app = dialog_query::ConceptQuery {
                     terms: source.into(),
-                    predicate,
+                    predicate: <#struct_name as dialog_query::Descriptor<
+                        dialog_query::ConceptDescriptor,
+                    >>::descriptor()
+                    .clone(),
                 };
                 dialog_query::Proposition::Concept(app)
             }
@@ -462,10 +499,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
         // Implement From<Query> for ConceptQuery
         impl From<#query_name> for dialog_query::ConceptQuery {
             fn from(source: #query_name) -> Self {
-                let predicate: dialog_query::ConceptDescriptor = source.clone().into();
                 dialog_query::ConceptQuery {
                     terms: source.into(),
-                    predicate,
+                    predicate: <#struct_name as dialog_query::Descriptor<
+                        dialog_query::ConceptDescriptor,
+                    >>::descriptor()
+                    .clone(),
                 }
             }
         }
@@ -473,10 +512,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
         // Implement From<&Query> for ConceptQuery
         impl From<&#query_name> for dialog_query::ConceptQuery {
             fn from(source: &#query_name) -> Self {
-                let predicate: dialog_query::ConceptDescriptor = source.clone().into();
                 dialog_query::ConceptQuery {
                     terms: source.into(),
-                    predicate,
+                    predicate: <#struct_name as dialog_query::Descriptor<
+                        dialog_query::ConceptDescriptor,
+                    >>::descriptor()
+                    .clone(),
                 }
             }
         }
@@ -497,8 +538,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
 
             fn this(&self) -> dialog_query::Entity {
-                let predicate: dialog_query::ConceptDescriptor = self.clone().into();
-                predicate.this()
+                <#struct_name as dialog_query::Descriptor<dialog_query::ConceptDescriptor>>::descriptor()
+                    .this()
             }
         }
 
@@ -562,6 +603,14 @@ pub fn derive(input: TokenStream) -> TokenStream {
         // with set-widened semantics (an Absent fallback row when
         // no fact matches).
         impl #struct_name {
+            /// Returns this concept's runtime descriptor (its schema:
+            /// attribute set, types, and content hash). Cached; the
+            /// canonical way to obtain the descriptor for a concept
+            /// type.
+            pub fn descriptor() -> &'static dialog_query::ConceptDescriptor {
+                <Self as dialog_query::Descriptor<dialog_query::ConceptDescriptor>>::descriptor()
+            }
+
             fn when(terms: dialog_query::Query<Self>) -> dialog_query::Premises {
                 let mut selectors: Vec<dialog_query::AttributeQuery> = Vec::new();
                 #(

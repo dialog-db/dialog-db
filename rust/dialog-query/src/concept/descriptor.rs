@@ -51,14 +51,19 @@ pub struct ConceptDescriptor {
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     with: NamedAttributes,
-    /// Optional attributes — not yet supported by the query engine.
+    /// Optional (set-widened) attributes.
     ///
-    /// Accepted during deserialization to ensure documents written against
-    /// the full schema are validated now rather than silently accepted and
-    /// broken later when `maybe` support lands.  Skipped during
-    /// serialization because the engine never produces them.
+    /// Each `maybe` attribute is emitted into the rule body as an
+    /// `AttributeQuery` with `Resolution::Optional`: an entity that
+    /// lacks the fact still produces a row, with the slot bound to
+    /// [`Binding::Absent`](crate::Binding) rather than dropping the
+    /// row. Absence is row-level; no `Nothing` value is ever stored.
     ///
-    /// An empty map deserializes to `None` (treated as absent).
+    /// Skipped during serialization when empty (`None`); an empty
+    /// map deserializes to `None` (treated as absent). Optional
+    /// attributes do **not** count toward the concept's required-
+    /// attribute minimum — a concept must still declare at least one
+    /// `with` attribute (see [`Self::validate`]).
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -118,7 +123,9 @@ impl ConceptDescriptor {
         self.maybe = if map.is_empty() {
             None
         } else {
-            Some(NamedAttributes::from(map))
+            // Non-empty by the guard above; `maybe` carries no
+            // minimum-count invariant of its own.
+            Some(NamedAttributes::from_pairs(map))
         };
         self
     }
@@ -223,53 +230,55 @@ impl ConceptDescriptor {
     }
 }
 
-impl<const N: usize> From<[(&str, AttributeDescriptor); N]> for ConceptDescriptor {
-    fn from(arr: [(&str, AttributeDescriptor); N]) -> Self {
-        ConceptDescriptor {
-            description: None,
-            maybe: None,
-            with: NamedAttributes::from(arr),
-        }
+/// Build a [`ConceptDescriptor`] from a validated, non-empty
+/// [`NamedAttributes`] required set. Private: the only way to obtain
+/// a `NamedAttributes` is through its own (fallible) constructors,
+/// so reaching here means the non-empty invariant already holds.
+fn descriptor_from_with(with: NamedAttributes) -> ConceptDescriptor {
+    ConceptDescriptor {
+        description: None,
+        maybe: None,
+        with,
     }
 }
 
-impl<const N: usize> From<[(String, AttributeDescriptor); N]> for ConceptDescriptor {
-    fn from(arr: [(String, AttributeDescriptor); N]) -> Self {
-        ConceptDescriptor {
-            description: None,
-            maybe: None,
-            with: NamedAttributes::from(arr),
-        }
+impl<const N: usize> TryFrom<[(&str, AttributeDescriptor); N]> for ConceptDescriptor {
+    type Error = TypeError;
+
+    fn try_from(arr: [(&str, AttributeDescriptor); N]) -> Result<Self, Self::Error> {
+        Ok(descriptor_from_with(NamedAttributes::try_from(arr)?))
     }
 }
 
-impl From<Vec<(&str, AttributeDescriptor)>> for ConceptDescriptor {
-    fn from(vec: Vec<(&str, AttributeDescriptor)>) -> Self {
-        ConceptDescriptor {
-            description: None,
-            maybe: None,
-            with: NamedAttributes::from(vec),
-        }
+impl<const N: usize> TryFrom<[(String, AttributeDescriptor); N]> for ConceptDescriptor {
+    type Error = TypeError;
+
+    fn try_from(arr: [(String, AttributeDescriptor); N]) -> Result<Self, Self::Error> {
+        Ok(descriptor_from_with(NamedAttributes::try_from(arr)?))
     }
 }
 
-impl From<Vec<(String, AttributeDescriptor)>> for ConceptDescriptor {
-    fn from(vec: Vec<(String, AttributeDescriptor)>) -> Self {
-        ConceptDescriptor {
-            description: None,
-            maybe: None,
-            with: NamedAttributes::from(vec),
-        }
+impl TryFrom<Vec<(&str, AttributeDescriptor)>> for ConceptDescriptor {
+    type Error = TypeError;
+
+    fn try_from(vec: Vec<(&str, AttributeDescriptor)>) -> Result<Self, Self::Error> {
+        Ok(descriptor_from_with(NamedAttributes::try_from(vec)?))
     }
 }
 
-impl From<HashMap<String, AttributeDescriptor>> for ConceptDescriptor {
-    fn from(map: HashMap<String, AttributeDescriptor>) -> Self {
-        ConceptDescriptor {
-            description: None,
-            maybe: None,
-            with: NamedAttributes::from(map),
-        }
+impl TryFrom<Vec<(String, AttributeDescriptor)>> for ConceptDescriptor {
+    type Error = TypeError;
+
+    fn try_from(vec: Vec<(String, AttributeDescriptor)>) -> Result<Self, Self::Error> {
+        Ok(descriptor_from_with(NamedAttributes::try_from(vec)?))
+    }
+}
+
+impl TryFrom<HashMap<String, AttributeDescriptor>> for ConceptDescriptor {
+    type Error = TypeError;
+
+    fn try_from(map: HashMap<String, AttributeDescriptor>) -> Result<Self, Self::Error> {
+        Ok(descriptor_from_with(NamedAttributes::try_from(map)?))
     }
 }
 
@@ -314,7 +323,9 @@ where
     if map.is_empty() {
         Ok(None)
     } else {
-        Ok(Some(NamedAttributes::from(map)))
+        // Non-empty by the guard above; the `maybe` slot has no
+        // minimum-count invariant, so build directly.
+        Ok(Some(NamedAttributes::from_pairs(map.into_iter().collect())))
     }
 }
 
@@ -556,7 +567,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_serializes_to_expected_json() {
-        let predicate = ConceptDescriptor::from([
+        let predicate = ConceptDescriptor::try_from([
             (
                 "name",
                 AttributeDescriptor::new(
@@ -575,7 +586,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         let json = serde_json::to_string(&predicate).expect("Should serialize");
 
@@ -670,7 +682,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_serializes_with_description() {
-        let mut predicate = ConceptDescriptor::from([(
+        let mut predicate = ConceptDescriptor::try_from([(
             "name",
             AttributeDescriptor::new(
                 the!("user/name"),
@@ -678,7 +690,8 @@ mod tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
         predicate.description = Some("A user profile".to_string());
 
         let json = serde_json::to_string(&predicate).expect("Should serialize");
@@ -690,7 +703,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_omits_null_description_in_json() {
-        let predicate = ConceptDescriptor::from([(
+        let predicate = ConceptDescriptor::try_from([(
             "name",
             AttributeDescriptor::new(
                 the!("user/name"),
@@ -698,7 +711,8 @@ mod tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
 
         let json = serde_json::to_string(&predicate).expect("Should serialize");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should parse");
@@ -709,7 +723,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_round_trips_through_json() {
-        let original = ConceptDescriptor::from([(
+        let original = ConceptDescriptor::try_from([(
             "score",
             AttributeDescriptor::new(
                 the!("game/score"),
@@ -717,7 +731,8 @@ mod tests {
                 Cardinality::One,
                 Some(Type::UnsignedInt),
             ),
-        )]);
+        )])
+        .unwrap();
 
         let json = serde_json::to_string(&original).expect("Should serialize");
         let deserialized: ConceptDescriptor =
@@ -749,7 +764,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_produces_expected_json_structure() {
-        let predicate = ConceptDescriptor::from(vec![(
+        let predicate = ConceptDescriptor::try_from(vec![(
             "id".to_string(),
             AttributeDescriptor::new(
                 the!("product/id"),
@@ -757,7 +772,8 @@ mod tests {
                 Cardinality::One,
                 Some(Type::UnsignedInt),
             ),
-        )]);
+        )])
+        .unwrap();
 
         let json = serde_json::to_string_pretty(&predicate).expect("Should serialize");
 
@@ -784,7 +800,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_ignores_field_names_in_hash() {
-        let pred1 = ConceptDescriptor::from(vec![
+        let pred1 = ConceptDescriptor::try_from(vec![
             (
                 "field_a".to_string(),
                 AttributeDescriptor::new(
@@ -803,9 +819,10 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
-        let pred2 = ConceptDescriptor::from(vec![
+        let pred2 = ConceptDescriptor::try_from(vec![
             (
                 "different_field_1".to_string(),
                 AttributeDescriptor::new(
@@ -824,7 +841,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         assert_eq!(
             pred1.hash(),
@@ -841,7 +859,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_ignores_attribute_order_in_hash() {
-        let pred1 = ConceptDescriptor::from(vec![
+        let pred1 = ConceptDescriptor::try_from(vec![
             (
                 "name".to_string(),
                 AttributeDescriptor::new(
@@ -860,9 +878,10 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
-        let pred2 = ConceptDescriptor::from(vec![
+        let pred2 = ConceptDescriptor::try_from(vec![
             (
                 "age".to_string(),
                 AttributeDescriptor::new(
@@ -881,7 +900,8 @@ mod tests {
                     Some(Type::String),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         assert_eq!(
             pred1.hash(),
@@ -898,7 +918,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_hashes_differently_for_different_attributes() {
-        let pred1 = ConceptDescriptor::from(vec![(
+        let pred1 = ConceptDescriptor::try_from(vec![(
             "name".to_string(),
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -906,9 +926,10 @@ mod tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
 
-        let pred2 = ConceptDescriptor::from(vec![(
+        let pred2 = ConceptDescriptor::try_from(vec![(
             "email".to_string(),
             AttributeDescriptor::new(
                 the!("person/email"),
@@ -916,7 +937,8 @@ mod tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
 
         assert_ne!(
             pred1.hash(),
@@ -939,7 +961,7 @@ mod tests {
     /// - No unexpected top-level keys (only "description", "with")
     #[dialog_common::test]
     fn it_conforms_to_json_schema() {
-        let predicate = ConceptDescriptor::from([
+        let predicate = ConceptDescriptor::try_from([
             (
                 "name",
                 AttributeDescriptor::new(
@@ -958,7 +980,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         let json = serde_json::to_string(&predicate).expect("Should serialize");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should parse");
@@ -1216,6 +1239,44 @@ mod tests {
         assert!(result.is_err(), "Should reject empty object");
     }
 
+    /// A concept must have at least one required (`with`) attribute.
+    /// An empty `with` map describes a concept every entity trivially
+    /// matches — the same degenerate shape as a concept with no
+    /// attributes at all — so the parse layer rejects it.
+    #[dialog_common::test]
+    fn it_rejects_empty_with_at_parse() {
+        let json = r#"{
+            "with": {}
+        }"#;
+
+        let result = serde_json::from_str::<ConceptDescriptor>(json);
+        assert!(
+            result.is_err(),
+            "Should reject a concept whose `with` map is empty"
+        );
+    }
+
+    /// A concept with only optional (`maybe`) attributes and an empty
+    /// `with` is just as degenerate: with no required attribute, the
+    /// rule body binds nothing that constrains the entity, so every
+    /// entity matches. Rejected at the parse layer.
+    #[dialog_common::test]
+    fn it_rejects_all_optional_concept_at_parse() {
+        let json = r#"{
+            "with": {},
+            "maybe": {
+                "bio": { "the": "user/bio", "as": "Text" }
+            }
+        }"#;
+
+        let result = serde_json::from_str::<ConceptDescriptor>(json);
+        assert!(
+            result.is_err(),
+            "Should reject a concept with no required attributes (empty `with`), \
+             even when `maybe` attributes are present"
+        );
+    }
+
     #[dialog_common::test]
     fn it_accepts_maybe_field() {
         let json = r#"{
@@ -1253,7 +1314,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_omits_maybe_in_serialization() {
-        let concept = ConceptDescriptor::from([(
+        let concept = ConceptDescriptor::try_from([(
             "name",
             AttributeDescriptor::new(
                 the!("user/name"),
@@ -1261,7 +1322,8 @@ mod tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
 
         let json = serde_json::to_string(&concept).expect("Should serialize");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should parse");
@@ -1290,8 +1352,7 @@ mod tests {
             pub r#type: TypeAttr,
         }
 
-        let descriptor: ConceptDescriptor =
-            <Sample as crate::Predicate>::Application::default().into();
+        let descriptor: ConceptDescriptor = Sample::descriptor().clone();
 
         // Round-trip the descriptor through JSON and assert the field
         // key in the `with` map is `type`, not `r#type`.
@@ -1356,8 +1417,7 @@ mod tests {
             pub email: D,
         }
 
-        let descriptor: ConceptDescriptor =
-            <Sample as crate::Predicate>::Application::default().into();
+        let descriptor: ConceptDescriptor = Sample::descriptor().clone();
 
         let json = serde_json::to_value(&descriptor).expect("serialize");
         let with = json["with"].as_object().expect("with map");
@@ -1403,7 +1463,7 @@ mod tests {
     /// attribute's content_type into the unified `type_system::Type`.
     #[dialog_common::test]
     fn schema_from_concept_uses_unified_type() {
-        let descriptor = ConceptDescriptor::from(vec![(
+        let descriptor = ConceptDescriptor::try_from(vec![(
             "name",
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -1411,7 +1471,8 @@ mod tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
         let schema = Schema::from(&descriptor);
         let name = schema.get("name").expect("name field present");
         let content = name.content_type().expect("content_type present");
@@ -1423,10 +1484,11 @@ mod tests {
     /// a Field with `None` content_type — unknown.
     #[dialog_common::test]
     fn schema_from_concept_untyped_attribute_produces_none() {
-        let descriptor = ConceptDescriptor::from(vec![(
+        let descriptor = ConceptDescriptor::try_from(vec![(
             "tag",
             AttributeDescriptor::new(the!("misc/tag"), "", Cardinality::One, None),
-        )]);
+        )])
+        .unwrap();
         let schema = Schema::from(&descriptor);
         let tag = schema.get("tag").expect("tag field present");
         assert!(tag.content_type().is_none());
@@ -1436,7 +1498,7 @@ mod tests {
     /// a singleton primitive over `Entity`.
     #[dialog_common::test]
     fn schema_from_concept_synthesizes_this_as_entity() {
-        let descriptor = ConceptDescriptor::from(vec![(
+        let descriptor = ConceptDescriptor::try_from(vec![(
             "name",
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -1444,7 +1506,8 @@ mod tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
         let schema = Schema::from(&descriptor);
         let this = schema.get("this").expect("this field present");
         let content = this.content_type().expect("entity kind present");
@@ -1473,8 +1536,7 @@ mod tests {
             pub title: Title,
         }
 
-        let descriptor: ConceptDescriptor =
-            <Recipe as crate::Predicate>::Application::default().into();
+        let descriptor: ConceptDescriptor = Recipe::descriptor().clone();
 
         assert_eq!(
             descriptor.description(),
@@ -1512,8 +1574,7 @@ mod tests {
             pub title: Title,
         }
 
-        let descriptor: ConceptDescriptor =
-            <Recipe as crate::Predicate>::Application::default().into();
+        let descriptor: ConceptDescriptor = Recipe::descriptor().clone();
 
         assert_eq!(descriptor.description(), None);
         let json = serde_json::to_value(&descriptor).expect("serialize");
@@ -1525,7 +1586,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_sets_the_description_via_with_description() {
-        let descriptor = ConceptDescriptor::from([(
+        let descriptor = ConceptDescriptor::try_from([(
             "name",
             AttributeDescriptor::new(
                 the!("user/name"),
@@ -1533,7 +1594,8 @@ mod tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
 
         // `From<[..]>` leaves `description` as `None`.
         assert_eq!(descriptor.description(), None);

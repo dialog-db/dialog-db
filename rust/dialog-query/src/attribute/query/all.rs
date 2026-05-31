@@ -259,6 +259,12 @@ impl AttributeQueryAll {
                 let base = candidate?;
                 let selection = selector.resolve(&base);
 
+                // The entity must be determined for the Absent
+                // fallback to mean anything: "this entity has no such
+                // fact." An unbound entity would manufacture a phantom
+                // Absent row not tied to any concrete entity.
+                let entity_known = selection.of().is_constant();
+
                 let mut produced = false;
                 let stream = Provider::<Select<'_>>::execute(env, (&selection).try_into()?).await?;
                 for await artifact in stream {
@@ -269,11 +275,26 @@ impl AttributeQueryAll {
                     yield extension;
                 }
 
-                // Optional fallback: if no rows were produced for
-                // this input and the resolution is Optional, yield
-                // one row with `is` (and named `cause`) bound to
-                // Absent.
-                if !produced && selector.is.is_optional() {
+                // Optional fallback: yield one Absent row only when
+                // the attribute is genuinely absent for a known
+                // entity. Guards:
+                //   - `!produced`: no fact row covered this input.
+                //   - `selector.is.is_optional()`: the slot admits
+                //     absence.
+                //   - `entity_known`: absence is about a concrete
+                //     entity, not an unbound scan.
+                //   - `!base.is_present(&selector.is)`: the value
+                //     wasn't already pinned to a Present binding. When
+                //     it was, an empty scan is a value *mismatch*
+                //     (the value-keyed scan found nothing equal to the
+                //     pinned value), not absence — and binding that
+                //     Present variable to Absent would error and abort
+                //     the stream.
+                if !produced
+                    && selector.is.is_optional()
+                    && entity_known
+                    && !base.is_present(&selector.is)
+                {
                     let mut fallback = base;
                     fallback.bind_absent(&selector.is)?;
                     let cause_term: Term<Any> = Term::<Any>::from(&selector.cause);
@@ -409,6 +430,61 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].of(), &alice);
         assert_eq!(results[0].is(), &Value::String("Alice".to_string()));
+
+        Ok(())
+    }
+
+    /// An *optional* `is` whose variable was pre-bound to a value the
+    /// entity does not have must not emit an Absent fallback. The
+    /// value-keyed scan finds nothing equal to the pinned value, but
+    /// that is a value *mismatch*, not absence — the attribute exists
+    /// with a different value. Before the fix, the fallback fired and
+    /// tried to bind the already-Present `is` variable to Absent,
+    /// which errors and aborts the stream.
+    #[dialog_common::test]
+    async fn it_does_not_emit_absent_on_optional_value_mismatch() -> anyhow::Result<()> {
+        use crate::selection::Match;
+        use crate::types::Any;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let bob = Entity::new()?;
+
+        // Bob HAS a nickname, but it is "Bobby".
+        branch
+            .transaction()
+            .assert(
+                the!("person/nickname")
+                    .of(bob.clone())
+                    .is("Bobby".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let optional_is: Term<Any> = Term::<Option<String>>::var("nickname").into();
+        let query = AttributeQueryAll::new(
+            Term::from(the!("person/nickname")),
+            Term::from(bob.clone()),
+            optional_is.clone(),
+            Term::var("cause"),
+        );
+
+        // An earlier premise pinned ?nickname to "Ali" — not Bob's.
+        let mut seed = Match::new();
+        seed.bind(&optional_is, Value::from("Ali".to_string()))?;
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let results =
+            Selection::try_vec(Application::evaluate(query, seed.seed(), &source)).await?;
+
+        assert_eq!(
+            results.len(),
+            0,
+            "a value mismatch on an optional field is not absence — no Absent fallback"
+        );
 
         Ok(())
     }

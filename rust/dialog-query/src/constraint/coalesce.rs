@@ -201,16 +201,39 @@ impl Coalesce {
                 // Resolve the fallback value: must be concrete to bind output.
                 let fallback_value = base.lookup(&fallback);
 
-                match source_binding {
-                    Ok(Binding::Present(value)) => {
-                        let mut extension = base.clone();
-                        extension.bind(&is, value)?;
-                        yield extension;
-                    }
-                    Ok(Binding::Absent) | Err(_) => {
-                        // Fallback must resolve to a Present value to bind output.
-                        // Absent or unbound fallback filters the row.
-                        if let Ok(Binding::Present(value)) = fallback_value {
+                // The value coalesce would bind into `is`: `source`
+                // when Present, else `fallback` if it resolves to a
+                // concrete value. `None` means there is nothing to
+                // produce (Absent/unbound source and Absent/unbound
+                // fallback) — the row is filtered.
+                let chosen = match source_binding {
+                    Ok(Binding::Present(value)) => Some(value),
+                    Ok(Binding::Absent) | Err(_) => match fallback_value {
+                        Ok(Binding::Present(value)) => Some(value),
+                        _ => None,
+                    },
+                };
+
+                if let Some(value) = chosen {
+                    // Reconcile against any existing binding of `is`
+                    // rather than binding unconditionally. An
+                    // unconditional `bind` would error — and the `?`
+                    // would abort the whole stream — when `is` is
+                    // already bound to a different value or to Absent.
+                    // Mirror Equality: a pre-bound `is` acts as a
+                    // filter.
+                    match base.lookup(&is) {
+                        // `is` already carries the same value: yield
+                        // unchanged (bind would be a no-op anyway).
+                        Ok(Binding::Present(existing)) if existing == value => {
+                            yield base;
+                        }
+                        // `is` already carries a different value, or
+                        // Absent: coalesce always yields a Present
+                        // value, which can never equal those — filter.
+                        Ok(Binding::Present(_)) | Ok(Binding::Absent) => {}
+                        // `is` is unbound: bind the chosen value.
+                        Err(_) => {
                             let mut extension = base.clone();
                             extension.bind(&is, value)?;
                             yield extension;
@@ -376,6 +399,83 @@ mod tests {
         assert_eq!(
             results[1].lookup(&Term::var("out"))?.content()?,
             Value::from("default".to_string())
+        );
+        Ok(())
+    }
+
+    /// A pre-bound `is` reconciles as a filter, not a stream abort.
+    /// When `is` is already bound to a *different* Present value, the
+    /// chosen coalesce value can't satisfy it, so the row is filtered
+    /// — exactly one row in, zero rows out, and crucially **no
+    /// error**. Binding `is` unconditionally would make `?` propagate
+    /// `EvaluationError::Assignment` out of the whole stream.
+    #[dialog_common::test]
+    async fn it_filters_when_is_prebound_to_different_value() -> Result<(), EvaluationError> {
+        let coalesce = Coalesce::new(
+            Term::var("source"),
+            Term::Constant(Value::from("default".to_string())),
+            Term::var("out"),
+        );
+
+        let mut candidate = Match::new();
+        candidate.bind(&Term::var("source"), Value::from("Alice".to_string()))?;
+        // `out` already carries a different value from an upstream premise.
+        candidate.bind(&Term::var("out"), Value::from("Bob".to_string()))?;
+
+        let results: Vec<Match> = coalesce.evaluate(candidate.seed()).try_collect().await?;
+
+        assert_eq!(
+            results.len(),
+            0,
+            "a pre-bound `is` that disagrees should filter the row, not abort the query"
+        );
+        Ok(())
+    }
+
+    /// A pre-bound `is` that *agrees* with the chosen value yields the
+    /// row unchanged.
+    #[dialog_common::test]
+    async fn it_yields_when_is_prebound_to_matching_value() -> Result<(), EvaluationError> {
+        let coalesce = Coalesce::new(
+            Term::var("source"),
+            Term::Constant(Value::from("default".to_string())),
+            Term::var("out"),
+        );
+
+        let mut candidate = Match::new();
+        candidate.bind(&Term::var("source"), Value::from("Alice".to_string()))?;
+        candidate.bind(&Term::var("out"), Value::from("Alice".to_string()))?;
+
+        let results: Vec<Match> = coalesce.evaluate(candidate.seed()).try_collect().await?;
+
+        assert_eq!(results.len(), 1, "a matching pre-bound `is` should yield");
+        assert_eq!(
+            results[0].lookup(&Term::var("out"))?.content()?,
+            Value::from("Alice".to_string())
+        );
+        Ok(())
+    }
+
+    /// A pre-bound *Absent* `is` filters: coalesce always produces a
+    /// Present value, which can never equal Absent.
+    #[dialog_common::test]
+    async fn it_filters_when_is_prebound_absent() -> Result<(), EvaluationError> {
+        let coalesce = Coalesce::new(
+            Term::var("source"),
+            Term::Constant(Value::from("default".to_string())),
+            Term::var("out"),
+        );
+
+        let mut candidate = Match::new();
+        candidate.bind_absent(&Term::var("source"))?;
+        candidate.bind_absent(&Term::var("out"))?;
+
+        let results: Vec<Match> = coalesce.evaluate(candidate.seed()).try_collect().await?;
+
+        assert_eq!(
+            results.len(),
+            0,
+            "a Present coalesce result can't reconcile with an Absent `is` — filter"
         );
         Ok(())
     }

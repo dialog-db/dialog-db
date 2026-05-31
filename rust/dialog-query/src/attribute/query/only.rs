@@ -212,6 +212,14 @@ impl AttributeQueryOnly {
                 let value_known = resolved.is().is_constant();
 
                 let mut produced = false;
+                // Tracks whether the lookup observed *any* fact for
+                // this (attribute, entity). Distinguishes genuine
+                // absence (no fact → Absent fallback is correct) from
+                // a value mismatch (a fact exists but the winner fails
+                // the resolved value constraint → not absence, so no
+                // fallback). Only meaningful on the sliding-window
+                // (entity-known) path.
+                let mut saw_fact = false;
                 if entity_known || (attribute_known && !value_known) {
                     // Sliding window path.
                     let value_constraint = resolved.is().as_constant().cloned();
@@ -228,6 +236,7 @@ impl AttributeQueryOnly {
                     let stream = Provider::<Select<'_>>::execute(env, (&scan).try_into()?).await?;
                     for await artifact in stream {
                         let artifact = artifact?;
+                        saw_fact = true;
 
                         candidate = Some(match candidate.take() {
                             Some(current) if current.the == artifact.the && current.of == artifact.of => {
@@ -268,11 +277,23 @@ impl AttributeQueryOnly {
                     }
                 }
 
-                // Optional fallback: if no rows were produced for
-                // this input and the resolution is Optional, yield
-                // one row with `is` (and named `cause`) bound to
-                // Absent.
-                if !produced && selector.is().is_optional() {
+                // Optional fallback: yield one Absent row only when
+                // the attribute is genuinely *absent* for a known
+                // entity — never when a fact exists but was filtered.
+                //
+                // Three guards, all required:
+                //   - `!produced`: no Present row already covered this
+                //     input.
+                //   - `selector.is().is_optional()`: the slot is
+                //     set-widened, so absence is a legal value.
+                //   - `entity_known && !saw_fact`: the entity is
+                //     determined and the lookup found no fact for it.
+                //     Without this, a value mismatch (`saw_fact` true)
+                //     would wrongly report the attribute as missing,
+                //     and an unbound entity (challenge / value-only
+                //     path) would manufacture a phantom Absent row for
+                //     no concrete entity.
+                if !produced && selector.is().is_optional() && entity_known && !saw_fact {
                     let mut fallback = base;
                     fallback.bind_absent(selector.is())?;
                     let cause_term: Term<Any> = Term::<Any>::from(selector.cause());
@@ -780,6 +801,64 @@ mod tests {
             Cause::from(&winner_ba),
             "Tiebreaker should be deterministic"
         );
+    }
+
+    /// An *optional* `is` whose variable an earlier premise bound to
+    /// a value the entity does NOT have must NOT emit an Absent
+    /// fallback. The fact exists (the entity has the attribute with a
+    /// different value); the miss is a value mismatch, not absence.
+    /// "Absent" means "no fact for this attribute," so a Required
+    /// field in the same situation yields zero rows — the optional
+    /// field must agree on the row count (zero), never assert the
+    /// attribute is missing when it is merely different.
+    ///
+    /// Before the fix, the sliding-window winner failed the resolved
+    /// value constraint, `produced` stayed false, and the fallback
+    /// fired on `is_optional()` alone — binding the already-Present
+    /// `is` variable to Absent, which errors and aborts the whole
+    /// stream.
+    #[dialog_common::test]
+    async fn it_does_not_emit_absent_on_optional_value_mismatch() -> anyhow::Result<()> {
+        use crate::selection::Match;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let bob = Entity::new()?;
+        let nickname_attr = the!("person/nickname");
+
+        // Bob HAS a nickname, but it is "Bobby".
+        assert_relation!(branch, &operator, nickname_attr, bob, "Bobby".to_string());
+
+        // Optional `is` (set-widened): a missing fact would normally
+        // yield one Absent fallback row.
+        let optional_is: Term<Any> = Term::<Option<String>>::var("nickname").into();
+        let query = AttributeQueryOnly::new(
+            Term::from(the!("person/nickname")),
+            Term::from(bob.clone()),
+            optional_is.clone(),
+            Term::var("cause"),
+        );
+
+        // An earlier premise constrained ?nickname to "Ali" — a value
+        // Bob does not have.
+        let mut seed = Match::new();
+        seed.bind(&optional_is, crate::Value::from("Ali".to_string()))?;
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let results =
+            Selection::try_vec(Application::evaluate(query, seed.seed(), &source)).await?;
+
+        assert_eq!(
+            results.len(),
+            0,
+            "a value mismatch on an optional field is NOT absence — \
+             the attribute exists with a different value, so no row \
+             (and certainly no Absent fallback) should be produced"
+        );
+
+        Ok(())
     }
 
     /// When entity is a variable that gets bound by an earlier premise in

@@ -188,7 +188,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_compiles_with_valid_premises() {
-        let conclusion = ConceptDescriptor::from(vec![
+        let conclusion = ConceptDescriptor::try_from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -207,7 +207,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
         let this = Term::<Entity>::var("this");
         let premises = vec![
             AttributeQuery::new(
@@ -233,7 +234,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_rejects_unconstrained_fact() {
-        let conclusion = ConceptDescriptor::from(vec![
+        let conclusion = ConceptDescriptor::try_from(vec![
             (
                 "key",
                 AttributeDescriptor::new(
@@ -252,7 +253,8 @@ mod tests {
                     Some(Type::String),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
         let premises = vec![
             AttributeQuery::new(
                 Term::var("the"),
@@ -268,7 +270,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_rejects_unconstrained_relation() {
-        let conclusion = ConceptDescriptor::from(vec![
+        let conclusion = ConceptDescriptor::try_from(vec![
             (
                 "key",
                 AttributeDescriptor::new(
@@ -287,7 +289,8 @@ mod tests {
                     Some(Type::String),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         // All terms are variables — no constants at all.
         // The planner should reject this at install time.
@@ -311,7 +314,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_rejects_unused_parameter() {
-        let conclusion = ConceptDescriptor::from(vec![
+        let conclusion = ConceptDescriptor::try_from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -330,7 +333,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
         let premises = vec![
             AttributeQuery::new(
                 Term::from(the!("user/name")),
@@ -350,7 +354,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_rejects_empty_premises() {
-        let conclusion = ConceptDescriptor::from(vec![
+        let conclusion = ConceptDescriptor::try_from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -369,13 +373,14 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
         assert!(DeductiveRule::new(conclusion, vec![]).is_err());
     }
 
     #[dialog_common::test]
     fn it_compiles_with_chained_dependencies() {
-        let conclusion = ConceptDescriptor::from(vec![
+        let conclusion = ConceptDescriptor::try_from(vec![
             (
                 "key",
                 AttributeDescriptor::new(
@@ -394,7 +399,8 @@ mod tests {
                     Some(Type::String),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
         let this = Term::<Entity>::var("this");
         let premises = vec![
             AttributeQuery::new(
@@ -423,10 +429,11 @@ mod tests {
 
     #[dialog_common::test]
     fn it_rejects_mismatched_parameter_name() {
-        let conclusion = ConceptDescriptor::from(vec![(
+        let conclusion = ConceptDescriptor::try_from(vec![(
             "key",
             AttributeDescriptor::new(the!("result/key"), "", Cardinality::One, Some(Type::String)),
-        )]);
+        )])
+        .unwrap();
 
         let premises = vec![
             AttributeQuery::new(
@@ -451,7 +458,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_rejects_negated_constraint_with_unbound_variable() {
-        let conclusion = ConceptDescriptor::from(vec![(
+        let conclusion = ConceptDescriptor::try_from(vec![(
             "name",
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -459,7 +466,8 @@ mod tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
 
         let name = Term::<String>::var("name");
         let z = Term::<String>::var("z");
@@ -485,7 +493,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_rejects_negated_constraint_with_unbound_variable_on_left() {
-        let conclusion = ConceptDescriptor::from(vec![(
+        let conclusion = ConceptDescriptor::try_from(vec![(
             "name",
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -493,7 +501,8 @@ mod tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
 
         let name = Term::<String>::var("name");
         let z = Term::<String>::var("z");
@@ -527,7 +536,7 @@ mod tests {
         use crate::attribute::query::Resolution;
         use crate::proposition::Proposition;
 
-        let concept = ConceptDescriptor::from(vec![(
+        let concept = ConceptDescriptor::try_from(vec![(
             "name",
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -535,7 +544,8 @@ mod tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
 
         let rule = DeductiveRule::from(&concept);
 
@@ -561,7 +571,7 @@ mod tests {
         use crate::attribute::query::Resolution;
         use crate::proposition::Proposition;
 
-        let concept = ConceptDescriptor::from(vec![(
+        let concept = ConceptDescriptor::try_from(vec![(
             "name",
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -570,6 +580,7 @@ mod tests {
                 Some(Type::String),
             ),
         )])
+        .unwrap()
         .with_maybe(vec![(
             "nickname",
             AttributeDescriptor::new(
@@ -596,11 +607,38 @@ mod tests {
         assert_eq!(optional, 1, "expected one optional premise (nickname)");
     }
 
+    /// The degenerate "rule body binds only optionals" shape, at the
+    /// concept layer — rejected by construction.
+    ///
+    /// A concept with zero required (`with`) attributes constrains
+    /// nothing, so every entity would match it; a rule built from it
+    /// would have a body of only optional premises (each yielding an
+    /// Absent fallback on miss). This is unsound, and it is now
+    /// *unconstructable*: `ConceptDescriptor::try_from` of an empty
+    /// required set returns [`TypeError::EmptyConcept`], so the
+    /// degenerate concept can never reach the rule compiler at all.
+    /// `maybe` attributes do not change this — only `with` counts.
+    ///
+    /// (A required head bound *only* by an optional premise — the
+    /// distinct shape where a `with` field exists but is fed from an
+    /// optional source — is caught separately by
+    /// `RequiredHeadFromOptional`; see
+    /// `it_rejects_required_head_from_optional_premise`.)
+    #[dialog_common::test]
+    fn it_rejects_concept_with_no_required_attributes_by_construction() {
+        // Empty required set: construction fails outright.
+        let empty: Vec<(&str, AttributeDescriptor)> = Vec::new();
+        match ConceptDescriptor::try_from(empty) {
+            Err(TypeError::EmptyConcept) => {}
+            other => panic!("expected EmptyConcept, got {other:?}"),
+        }
+    }
+
     /// `with_maybe` builder installs the maybe attributes; an
     /// empty input clears the maybe slot.
     #[dialog_common::test]
     fn with_maybe_installs_and_clears() {
-        let concept = ConceptDescriptor::from(vec![(
+        let concept = ConceptDescriptor::try_from(vec![(
             "name",
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -608,7 +646,8 @@ mod tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
         assert!(concept.maybe().is_none(), "no maybe by default");
 
         let with_maybe = concept.clone().with_maybe(vec![(
@@ -634,7 +673,7 @@ mod tests {
     /// required slot. Reject.
     #[dialog_common::test]
     fn it_rejects_required_head_from_optional_premise() {
-        let conclusion = ConceptDescriptor::from(vec![(
+        let conclusion = ConceptDescriptor::try_from(vec![(
             "name",
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -642,7 +681,8 @@ mod tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
         let this = Term::<Entity>::var("this");
         // Bind ?name with an optional `is` term — the meet for ?name
         // includes Nothing.
@@ -671,7 +711,7 @@ mod tests {
     /// Present. Accept.
     #[dialog_common::test]
     fn it_accepts_required_head_when_inference_strips_nothing() {
-        let conclusion = ConceptDescriptor::from(vec![(
+        let conclusion = ConceptDescriptor::try_from(vec![(
             "name",
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -679,7 +719,8 @@ mod tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
         let this = Term::<Entity>::var("this");
         // The `is` slot must carry a typed kind so the meet has
         // information to combine. An untyped `Term::var` produces
@@ -724,7 +765,7 @@ mod tests {
     /// resolves to `{String}` — no Nothing. Rule compiles.
     #[dialog_common::test]
     fn it_accepts_untyped_required_paired_with_typed_optional() {
-        let conclusion = ConceptDescriptor::from(vec![(
+        let conclusion = ConceptDescriptor::try_from(vec![(
             "name",
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -732,7 +773,8 @@ mod tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
         let this = Term::<Entity>::var("this");
         let optional_name = optional_term("name", Some(Type::String));
 
@@ -775,10 +817,11 @@ mod tests {
     fn it_rejects_required_head_from_optional_cause() {
         // Conclusion has a required `mark` field expecting a
         // typed value (Bytes).
-        let conclusion = ConceptDescriptor::from(vec![(
+        let conclusion = ConceptDescriptor::try_from(vec![(
             "mark",
             AttributeDescriptor::new(the!("person/mark"), "", Cardinality::One, Some(Type::Bytes)),
-        )]);
+        )])
+        .unwrap();
         let this = Term::<Entity>::var("this");
         // The optional attribute's cause slot shares the name
         // `?mark` with the conclusion's required head — the
@@ -813,7 +856,7 @@ mod tests {
         use crate::constraint::{Coalesce, Constraint};
         use crate::premise::Premise;
 
-        let conclusion = ConceptDescriptor::from(vec![(
+        let conclusion = ConceptDescriptor::try_from(vec![(
             "name",
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -821,7 +864,8 @@ mod tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
         let this = Term::<Entity>::var("this");
         let typed_name: Term<Any> = Term::<String>::var("name").into();
 

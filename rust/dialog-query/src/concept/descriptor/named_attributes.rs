@@ -1,11 +1,19 @@
 use crate::attribute::AttributeDescriptor;
+use crate::error::TypeError;
+use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// A non-empty collection of named attribute descriptors.
 ///
-/// This is a transparent wrapper around `Vec<(String, AttributeDescriptor)>` that
-/// enforces non-emptiness — you cannot create a `NamedAttributes` with zero entries.
+/// `NamedAttributes` is valid by construction: it cannot hold zero
+/// entries. Every public construction path is fallible
+/// ([`TryFrom`] for arrays / `Vec` / `HashMap`, and [`Deserialize`])
+/// and returns an error on an empty input. A concept's required
+/// (`with`) attribute set is a `NamedAttributes`, so this single
+/// chokepoint guarantees a concept always declares at least one
+/// required attribute — a concept with none would constrain nothing
+/// and match every entity.
 ///
 /// Serializes as a JSON map: `{ "field-name": { "the": "domain/name", ... } }`
 #[repr(transparent)]
@@ -21,6 +29,25 @@ impl NamedAttributes {
     /// Returns an iterator over attribute names.
     pub fn keys(&self) -> impl Iterator<Item = &str> + '_ {
         self.0.iter().map(|(k, _)| k.as_str())
+    }
+
+    /// Build from pairs whose non-emptiness the caller already
+    /// guarantees by other means — the `#[derive(Concept)]` macro
+    /// (which emits a compile-time assertion that at least one field
+    /// is required) and conversions from an already-validated
+    /// descriptor. Internal-only; public construction goes through
+    /// the fallible [`TryFrom`] impls.
+    pub(crate) fn from_pairs(pairs: Vec<(String, AttributeDescriptor)>) -> Self {
+        NamedAttributes(pairs)
+    }
+
+    /// Fallible builder shared by the [`TryFrom`] impls: rejects an
+    /// empty set with [`TypeError::EmptyConcept`].
+    fn try_new(pairs: Vec<(String, AttributeDescriptor)>) -> Result<Self, TypeError> {
+        if pairs.is_empty() {
+            return Err(TypeError::EmptyConcept);
+        }
+        Ok(NamedAttributes(pairs))
     }
 }
 
@@ -40,13 +67,21 @@ impl<'de> Deserialize<'de> for NamedAttributes {
         D: serde::Deserializer<'de>,
     {
         let map = HashMap::<String, AttributeDescriptor>::deserialize(deserializer)?;
-        Ok(NamedAttributes::from(map))
+        if map.is_empty() {
+            // Non-empty by construction: a concept's required (`with`)
+            // attribute set must have at least one entry, otherwise
+            // the concept constrains nothing and every entity matches.
+            return Err(D::Error::invalid_length(0, &"at least one attribute"));
+        }
+        Ok(NamedAttributes(map.into_iter().collect()))
     }
 }
 
-impl<const N: usize> From<[(&str, AttributeDescriptor); N]> for NamedAttributes {
-    fn from(arr: [(&str, AttributeDescriptor); N]) -> Self {
-        NamedAttributes(
+impl<const N: usize> TryFrom<[(&str, AttributeDescriptor); N]> for NamedAttributes {
+    type Error = TypeError;
+
+    fn try_from(arr: [(&str, AttributeDescriptor); N]) -> Result<Self, Self::Error> {
+        Self::try_new(
             arr.into_iter()
                 .map(|(name, attr)| (name.to_string(), attr))
                 .collect(),
@@ -54,15 +89,19 @@ impl<const N: usize> From<[(&str, AttributeDescriptor); N]> for NamedAttributes 
     }
 }
 
-impl<const N: usize> From<[(String, AttributeDescriptor); N]> for NamedAttributes {
-    fn from(arr: [(String, AttributeDescriptor); N]) -> Self {
-        NamedAttributes(arr.into_iter().collect())
+impl<const N: usize> TryFrom<[(String, AttributeDescriptor); N]> for NamedAttributes {
+    type Error = TypeError;
+
+    fn try_from(arr: [(String, AttributeDescriptor); N]) -> Result<Self, Self::Error> {
+        Self::try_new(arr.into_iter().collect())
     }
 }
 
-impl From<Vec<(&str, AttributeDescriptor)>> for NamedAttributes {
-    fn from(vec: Vec<(&str, AttributeDescriptor)>) -> Self {
-        NamedAttributes(
+impl TryFrom<Vec<(&str, AttributeDescriptor)>> for NamedAttributes {
+    type Error = TypeError;
+
+    fn try_from(vec: Vec<(&str, AttributeDescriptor)>) -> Result<Self, Self::Error> {
+        Self::try_new(
             vec.into_iter()
                 .map(|(name, attr)| (name.to_string(), attr))
                 .collect(),
@@ -70,14 +109,18 @@ impl From<Vec<(&str, AttributeDescriptor)>> for NamedAttributes {
     }
 }
 
-impl From<Vec<(String, AttributeDescriptor)>> for NamedAttributes {
-    fn from(vec: Vec<(String, AttributeDescriptor)>) -> Self {
-        NamedAttributes(vec)
+impl TryFrom<Vec<(String, AttributeDescriptor)>> for NamedAttributes {
+    type Error = TypeError;
+
+    fn try_from(vec: Vec<(String, AttributeDescriptor)>) -> Result<Self, Self::Error> {
+        Self::try_new(vec)
     }
 }
 
-impl From<HashMap<String, AttributeDescriptor>> for NamedAttributes {
-    fn from(map: HashMap<String, AttributeDescriptor>) -> Self {
-        NamedAttributes(map.into_iter().collect())
+impl TryFrom<HashMap<String, AttributeDescriptor>> for NamedAttributes {
+    type Error = TypeError;
+
+    fn try_from(map: HashMap<String, AttributeDescriptor>) -> Result<Self, Self::Error> {
+        Self::try_new(map.into_iter().collect())
     }
 }

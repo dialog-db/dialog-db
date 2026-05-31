@@ -292,7 +292,7 @@ mod tests {
     use crate::{Cardinality, Environment, Term};
 
     fn person_with_name() -> ConceptDescriptor {
-        ConceptDescriptor::from(vec![(
+        ConceptDescriptor::try_from(vec![(
             "name",
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -301,6 +301,7 @@ mod tests {
                 Some(ValueType::String),
             ),
         )])
+        .unwrap()
     }
 
     /// Analysis output carries the inferred type environment.

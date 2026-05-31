@@ -790,7 +790,7 @@ mod cost_model_tests {
             Some(Cardinality::One),
         );
 
-        let concept = ConceptDescriptor::from([(
+        let concept = ConceptDescriptor::try_from([(
             "name",
             AttributeDescriptor::new(
                 the!("user/name"),
@@ -798,7 +798,8 @@ mod cost_model_tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
 
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::var("entity"));
@@ -839,7 +840,7 @@ mod cost_model_tests {
             Some(Cardinality::One),
         );
 
-        let concept = ConceptDescriptor::from([(
+        let concept = ConceptDescriptor::try_from([(
             "name",
             AttributeDescriptor::new(
                 the!("user/name"),
@@ -847,7 +848,8 @@ mod cost_model_tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
 
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::var("entity"));
@@ -881,7 +883,7 @@ mod cost_model_tests {
             Some(Cardinality::One),
         );
 
-        let concept = ConceptDescriptor::from([(
+        let concept = ConceptDescriptor::try_from([(
             "name",
             AttributeDescriptor::new(
                 the!("user/name"),
@@ -889,7 +891,8 @@ mod cost_model_tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
 
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::var("entity"));
@@ -927,7 +930,7 @@ mod cost_model_tests {
             Some(Type::String),
         );
 
-        let concept = ConceptDescriptor::from([("tags", tag)]);
+        let concept = ConceptDescriptor::try_from([("tags", tag)]).unwrap();
 
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::var("entity"));
@@ -964,7 +967,7 @@ mod cost_model_tests {
             Some(Type::String),
         );
 
-        let concept = ConceptDescriptor::from([("tags", tag)]);
+        let concept = ConceptDescriptor::try_from([("tags", tag)]).unwrap();
 
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::var("entity"));
