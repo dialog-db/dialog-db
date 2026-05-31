@@ -223,24 +223,16 @@ pub fn derive(input: TokenStream) -> TokenStream {
             );
         });
 
-        // The descriptor for the attribute underlying this field —
-        // whether the field is `N` or `Option<N>`, the
-        // `<F as ConceptField>::Attribute` projection lifts to `N`,
-        // which is the type that carries the AttributeDescriptor.
-        // Each field becomes a `ConceptFieldDescriptor`; optionality
-        // is tagged at runtime from the `OPTIONAL` const (never by
-        // syntactic `Option<_>` inspection).
+        // Each field becomes a `ConceptFieldDescriptor` via
+        // `ConceptField::field_descriptor`, which wraps the
+        // attribute's descriptor with this field's optionality
+        // (tagged from the `OPTIONAL` const, never by syntactic
+        // `Option<_>` inspection).
         descriptor_pair_pushes.push(quote! {
-            {
-                let __descriptor = <<#field_type as dialog_query::ConceptField>::Attribute
-                    as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().clone();
-                let __field = if <#field_type as dialog_query::ConceptField>::OPTIONAL {
-                    dialog_query::ConceptFieldDescriptor::optional(__descriptor)
-                } else {
-                    dialog_query::ConceptFieldDescriptor::required(__descriptor)
-                };
-                __fields.push((#field_name_lit.to_string(), __field));
-            }
+            __fields.push((
+                #field_name_lit.to_string(),
+                <#field_type as dialog_query::ConceptField>::field_descriptor(),
+            ));
         });
 
         // Statement emission via the trait method. The concept's

@@ -3,7 +3,7 @@ pub mod descriptor;
 /// Concept application for querying entities that match a concept pattern.
 pub mod query;
 
-pub use descriptor::ConceptDescriptor;
+pub use descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 pub use query::ConceptQuery;
 
 use crate::artifact::Type as ValueType;
@@ -77,11 +77,25 @@ pub trait ConceptField: Sized + Clone {
     type TermType: Typed + Clone + Debug + ConditionalSend + 'static;
 
     /// `true` if this field is set-widened (the `Option<N>` impl),
-    /// `false` for the bare-attribute (`N`) impl. Used by the
-    /// `#[derive(Concept)]` macro to route the field's descriptor
-    /// into either the `with` (required) or `maybe` (optional)
-    /// section of the generated `ConceptDescriptor`.
+    /// `false` for the bare-attribute (`N`) impl. Drives
+    /// [`field_descriptor`](Self::field_descriptor) and the
+    /// `#[derive(Concept)]` compile-time "at least one required
+    /// field" assertion.
     const OPTIONAL: bool;
+
+    /// The [`ConceptFieldDescriptor`] for this field: the underlying
+    /// attribute's descriptor wrapped with this field's optionality.
+    /// Used by `#[derive(Concept)]` to build the concept's attribute
+    /// map without branching on [`OPTIONAL`](Self::OPTIONAL) in the
+    /// generated code.
+    fn field_descriptor() -> ConceptFieldDescriptor {
+        let descriptor = <Self::Attribute as Descriptor<AttributeDescriptor>>::descriptor().clone();
+        if Self::OPTIONAL {
+            ConceptFieldDescriptor::optional(descriptor)
+        } else {
+            ConceptFieldDescriptor::required(descriptor)
+        }
+    }
 
     /// Build the `is` slot term for this field's attribute query.
     /// Required fields pass the user's `value_param` through
