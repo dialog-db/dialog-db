@@ -111,22 +111,34 @@ source of binding info; this step only removes the redundant copy.
 number. `adorn(bound) -> Result<Binds, Infeasible>` answers can-it-run + what-it-binds + why-not; cost
 is asked only of feasible premises.
 
-**Scope.**
-- Per `Plan` variant: `adorn(&BTreeSet<String>) -> Result<Binds, Infeasible>` (the SIPS function `f`).
-  `Infeasible::{ NeedsAnyOf, NeedsAll }` (+ `NeedsKOf` reserved). For Scan this is the feasibility
-  column of the existing 16-arm table; for Constraint/Formula it is their input requirements.
-- `estimate` keeps cost only, called after `adorn` is `Ok`.
-- Planner uses `adorn` for viability + binds (replacing the graph's categorization with the per-premise
-  function — note: this *subsumes* step 3's graph categorization, so the graph becomes order+edges
-  only, feasibility comes from `adorn`). Step 3 and step 5 must be reconciled: step 3 wires the graph;
-  step 5 moves feasibility into `adorn` and the graph keeps the *order/edge* structure.
-- Required-bindings diagnostics now come from `Infeasible` (richer than today's `RequiredBindings`).
+`Requirement` is woven through ~72 sites in 12 files (schema, planner, every constraint/attribute leaf,
+the formula cell model). Replacing it wholesale would be a big-bang change against the always-green
+principle, so step 5 is itself a sub-series, each part shippable and green.
 
-**Done when.** Feasibility and cost are distinct methods; the `Candidate::from` slot-categorization is
-replaced by `adorn`; behavior-preserving on existing queries; new tests cover the `Infeasible` reasons.
+**Step 5a — introduce `adorn`, derived (DONE).** Add `Plan::adorn(&BTreeSet<String>) -> Result<Binds,
+Infeasible>` plus the `Binds` and `Infeasible` types, *derived from the existing `Requirement` schema* —
+the same two-pass categorization `Candidate::from` runs (constant/bound-satisfied choice groups, then
+slot classification), generalized to an arbitrary `bound` set. Purely additive: nothing changes
+behavior, `adorn` is a new tested view. `Infeasible::NeedsAll(set)` mirrors the planner's `requires`.
+A test pins `adorn` to the planner: for each planned step, `adorn(step.env())` is `Ok` and binds exactly
+`step.binds()`.
 
-**Risk.** Medium. This is where the per-slot `Requirement`/`Group` vocabulary is replaced. Equality's
-`AnyOf({a,b})` is the first non-Prefix case to validate.
+**Step 5b — planner consumes `adorn`.** `Candidate::from`/`update` source viability/binds from `adorn`
+instead of re-walking the schema inline. This is the dedup the dropped step 3 was reaching for, now
+done via the per-premise function rather than the post-plan graph. Behavior-preserving; pinned by the
+existing `cost_model_tests`.
+
+**Step 5c — enrich the vocabulary.** Only once `adorn` is the feasibility path, reconsider the
+`Requirement`/`Group` schema: introduce the richer `Infeasible` shapes (`NeedsAnyOf` for equality;
+`NeedsKOf` for genuinely atomic k-of-n) and the declarable per-premise `Feasibility` descriptor that
+replaces per-slot flags. `estimate` keeps cost only, called after `adorn` is `Ok`. Most multidirectional
+cases are instead handled by decomposition (step 6), so `KOf` stays rare.
+
+**Done when (5 overall).** Feasibility and cost are distinct; the planner's categorization goes through
+`adorn`; new tests cover the `Infeasible` reasons.
+
+**Risk.** Medium, but contained by the sub-series: 5a is additive, 5b is behavior-preserving dedup, 5c
+is where the vocabulary actually changes.
 
 ### Step 6 — Decompose multidirectional constraints into directional sub-premises
 

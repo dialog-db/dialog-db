@@ -6,6 +6,7 @@ use crate::negation::Negation;
 use crate::proposition::Proposition;
 use crate::query::Application;
 use crate::rule::types::TypeEnv;
+use crate::schema::Requirement;
 use crate::selection::Selection;
 use crate::source::SelectRules;
 use crate::try_stream;
@@ -16,6 +17,31 @@ use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use futures_util::TryStreamExt;
 use futures_util::future::Either;
+use std::collections::{BTreeSet, HashSet};
+
+/// The variables a step will bind once it runs under a given entry
+/// adornment.
+///
+/// This is the SIPS function `f` from the magic-sets literature
+/// (Balbin et al.): the set of variables a body literal passes onward
+/// once the literals before it have bound their inputs.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Binds(pub BTreeSet<String>);
+
+/// Why a step cannot run yet under the current bindings.
+///
+/// The feasibility verdict ([`Plan::adorn`]) returns this in the
+/// `Err` case so the planner — and later demand reification — knows
+/// *which* variables a step is still waiting on, not merely that it is
+/// blocked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Infeasible {
+    /// All of these still-unbound variables must be bound before the
+    /// step can run. Mirrors the planner's `requires` set: a choice
+    /// group already satisfied (by a constant or a bound variable)
+    /// contributes nothing here.
+    NeedsAll(BTreeSet<String>),
+}
 
 /// Planning metadata shared by every [`Plan`] variant.
 ///
@@ -114,6 +140,82 @@ impl Plan {
     /// Returns the parameter bindings for this step.
     pub fn parameters(&self) -> Parameters {
         self.as_premise().parameters()
+    }
+
+    /// Feasibility verdict for this step under the given set of
+    /// already-bound variable names.
+    ///
+    /// Returns `Ok(Binds)` — the variables the step will bind — when
+    /// every prerequisite is satisfied by `bound` (or by a constant /
+    /// blank / choice-group member), or `Err(Infeasible)` naming the
+    /// variables still required.
+    ///
+    /// This is the SIPS adornment function. It is currently *derived*
+    /// from the per-slot [`Requirement`] schema — the same
+    /// categorization the planner's `Candidate` performs — exposed as
+    /// a per-step function so the planner and demand analysis can share
+    /// one definition of feasibility.
+    pub fn adorn(&self, bound: &BTreeSet<String>) -> Result<Binds, Infeasible> {
+        let premise = self.as_premise();
+        let schema = premise.schema();
+        let params = premise.parameters();
+        let is_negation = matches!(self, Plan::Negate(..));
+
+        // A choice group is satisfied if any of its members is a
+        // constant or already bound. Identify those first.
+        let mut satisfied_groups = HashSet::new();
+        for (name, field) in schema.iter() {
+            let Some(param) = params.get(name) else {
+                continue;
+            };
+            if let Requirement::Required(Some(group)) = &field.requirement
+                && (param.is_constant() || param.name().is_some_and(|n| bound.contains(n)))
+            {
+                satisfied_groups.insert(*group);
+            }
+        }
+
+        let mut binds = BTreeSet::new();
+        let mut needs = BTreeSet::new();
+        for (name, field) in schema.iter() {
+            let Some(param) = params.get(name) else {
+                continue;
+            };
+            if param.is_constant() || param.is_blank() {
+                continue;
+            }
+            let Some(var) = param.name() else {
+                continue;
+            };
+            if bound.contains(var) {
+                continue;
+            }
+            match &field.requirement {
+                Requirement::Required(None) => {
+                    needs.insert(var.to_string());
+                }
+                Requirement::Required(Some(group)) => {
+                    if satisfied_groups.contains(group) {
+                        if !is_negation {
+                            binds.insert(var.to_string());
+                        }
+                    } else {
+                        needs.insert(var.to_string());
+                    }
+                }
+                Requirement::Optional => {
+                    if !is_negation {
+                        binds.insert(var.to_string());
+                    }
+                }
+            }
+        }
+
+        if needs.is_empty() {
+            Ok(Binds(binds))
+        } else {
+            Err(Infeasible::NeedsAll(needs))
+        }
     }
 
     /// Returns the estimated execution cost.
@@ -508,6 +610,88 @@ mod tests {
             let _ = Kind::primitive(ValueType::String);
         } else {
             panic!("expected negated attribute proposition");
+        }
+    }
+
+    /// `adorn` is a faithful per-step view of the planner's own
+    /// feasibility computation: for each planned step, adorning with
+    /// the variables bound when that step runs (`step.env()`) must be
+    /// `Ok` and bind exactly the step's `binds()` set. This pins the
+    /// derived SIPS function to the planner's behavior.
+    #[dialog_common::test]
+    fn it_adorns_consistently_with_planned_binds() {
+        let premises = vec![
+            AttributeQuery::new(
+                Term::from(the!("person/name")),
+                Term::<Entity>::var("this"),
+                Term::var("name"),
+                Term::var("cause"),
+                Some(Cardinality::One),
+            )
+            .into(),
+            AttributeQuery::new(
+                Term::from(the!("person/age")),
+                Term::<Entity>::var("this"),
+                Term::var("age"),
+                Term::var("cause"),
+                Some(Cardinality::One),
+            )
+            .into(),
+        ];
+        let plan = Planner::from(premises)
+            .plan(&crate::Environment::new())
+            .unwrap();
+
+        for step in &plan.steps {
+            let bound: BTreeSet<String> = step.env().iter().map(String::from).collect();
+            let expected: BTreeSet<String> = step.binds().iter().map(String::from).collect();
+            match step.adorn(&bound) {
+                Ok(Binds(binds)) => assert_eq!(
+                    binds, expected,
+                    "adorn must bind exactly the planner's binds for this step"
+                ),
+                Err(infeasible) => panic!(
+                    "planned step should be feasible at its own env, got {:?}",
+                    infeasible
+                ),
+            }
+        }
+    }
+
+    /// A premise whose required inputs are unbound is infeasible, and
+    /// the verdict names the variables still needed.
+    #[dialog_common::test]
+    fn it_reports_infeasible_with_needed_variables() {
+        use crate::formula::Formula;
+        use crate::formula::string::Length;
+
+        let mut params = crate::Parameters::new();
+        params.insert("of".to_string(), Term::var("text"));
+        params.insert("is".to_string(), Term::var("len"));
+        let premise = Premise::from(Length::apply(params).unwrap());
+        let plan = Plan::lower(
+            premise,
+            Header {
+                cost: 0,
+                binds: crate::Environment::new(),
+                env: crate::Environment::new(),
+            },
+        );
+
+        // `text` unbound → infeasible, naming `text`.
+        let empty = BTreeSet::new();
+        match plan.adorn(&empty) {
+            Err(Infeasible::NeedsAll(needs)) => {
+                assert!(needs.contains("text"), "should report `text` as needed");
+            }
+            other => panic!("expected NeedsAll(text), got {:?}", other),
+        }
+
+        // With `text` bound → feasible, binds `len`.
+        let bound: BTreeSet<String> = ["text".to_string()].into_iter().collect();
+        match plan.adorn(&bound) {
+            Ok(Binds(binds)) => assert!(binds.contains("len"), "should bind `len`"),
+            Err(infeasible) => panic!("should be feasible, got {:?}", infeasible),
         }
     }
 }
