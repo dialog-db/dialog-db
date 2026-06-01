@@ -354,7 +354,7 @@ mod tests {
     use super::*;
     use crate::AttributeStatement;
     use crate::Query;
-    use crate::artifact::{ArtifactSelector, ArtifactsAttribute, Value};
+    use crate::artifact::{ArtifactSelector, Symbol, Value};
     use crate::query::Output;
 
     use crate::Concept;
@@ -767,14 +767,16 @@ mod tests {
         // Verify Alice exists
         use futures_util::TryStreamExt;
 
-        let name_attr: ArtifactsAttribute = "person/name".parse()?;
-        let age_attr: ArtifactsAttribute = "person/age".parse()?;
+        let person_domain: Symbol = "person".parse()?;
+        let name_field: Symbol = "name".parse()?;
+        let age_field: Symbol = "age".parse()?;
 
         let name_facts: Vec<_> = branch
             .claims()
             .select(
                 ArtifactSelector::new()
-                    .the(name_attr.clone())
+                    .with_domain(person_domain.clone())
+                    .with_name(name_field.clone())
                     .of(alice.clone()),
             )
             .perform(&operator)
@@ -792,7 +794,8 @@ mod tests {
             .claims()
             .select(
                 ArtifactSelector::new()
-                    .the(age_attr.clone())
+                    .with_domain(person_domain.clone())
+                    .with_name(age_field.clone())
                     .of(alice.clone()),
             )
             .perform(&operator)
@@ -815,7 +818,8 @@ mod tests {
             .claims()
             .select(
                 ArtifactSelector::new()
-                    .the(name_attr.clone())
+                    .with_domain(person_domain.clone())
+                    .with_name(name_field)
                     .of(alice.clone()),
             )
             .perform(&operator)
@@ -832,7 +836,8 @@ mod tests {
             .claims()
             .select(
                 ArtifactSelector::new()
-                    .the(age_attr.clone())
+                    .with_domain(person_domain)
+                    .with_name(age_field)
                     .of(alice.clone()),
             )
             .perform(&operator)
@@ -856,6 +861,8 @@ mod tests {
 
         let alice = Entity::new()?;
         let name_attr = the!("user/name");
+        let user_domain: Symbol = "user".parse()?;
+        let name_field: Symbol = "name".parse()?;
 
         let name_relation: AttributeStatement = name_attr
             .clone()
@@ -877,7 +884,8 @@ mod tests {
             .claims()
             .select(
                 ArtifactSelector::new()
-                    .the(name_attr.clone().into())
+                    .with_domain(user_domain.clone())
+                    .with_name(name_field.clone())
                     .of(alice.clone()),
             )
             .perform(&operator)
@@ -899,7 +907,8 @@ mod tests {
             .claims()
             .select(
                 ArtifactSelector::new()
-                    .the(name_attr.clone().into())
+                    .with_domain(user_domain)
+                    .with_name(name_field)
                     .of(alice.clone()),
             )
             .perform(&operator)

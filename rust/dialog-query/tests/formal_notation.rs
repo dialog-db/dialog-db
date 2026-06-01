@@ -31,7 +31,7 @@ fn it_parses_attribute_formal_notation() {
     assert_eq!(attr.name(), "name");
     assert_eq!(attr.description(), "Name of the person");
     assert_eq!(
-        attr.content_type(),
+        attr.value_type(),
         Some(dialog_query::artifact::Type::String)
     );
     assert_eq!(attr.cardinality(), dialog_query::Cardinality::One);
@@ -63,7 +63,7 @@ fn it_parses_attribute_value_types() {
         let attr: dialog_query::AttributeDescriptor =
             serde_json::from_value(json).unwrap_or_else(|e| panic!("Failed for {type_str}: {e}"));
         assert_eq!(
-            attr.content_type(),
+            attr.value_type(),
             Some(expected_type),
             "Type mismatch for {type_str}"
         );

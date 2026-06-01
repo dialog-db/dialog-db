@@ -25,6 +25,9 @@ pub use update::{Change, ChangeStream, Changes, SortKey, Statement, Update, sort
 mod attribute;
 pub use attribute::*;
 
+mod symbol;
+pub use symbol::*;
+
 mod entity;
 pub use entity::*;
 
@@ -435,7 +438,8 @@ mod tests {
     use crate::helpers::generate_data;
     use crate::{
         Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMutExt, Artifacts, Attribute,
-        DialogArtifactsError, Entity, Instruction, NULL_REVISION_HASH, Value, make_reference,
+        DialogArtifactsError, Entity, Instruction, NULL_REVISION_HASH, Symbol, Value,
+        make_reference,
     };
 
     #[cfg(target_arch = "wasm32")]
@@ -471,8 +475,8 @@ mod tests {
             .commit(data.clone().into_iter().map(Instruction::Assert))
             .await?;
 
-        let fact_stream =
-            facts.select(ArtifactSelector::new().the(Attribute::from_str("profile/name")?));
+        let (d, n) = Attribute::from_str("profile/name")?.split();
+        let fact_stream = facts.select(ArtifactSelector::new().with_domain(d).with_name(n));
 
         let mut facts: Vec<Artifact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
         facts.sort_by(entity_order);
@@ -498,7 +502,8 @@ mod tests {
             .commit(data.into_iter().map(Instruction::Assert))
             .await?;
 
-        let stream = artifacts.select(ArtifactSelector::new().the("item/id".parse()?));
+        let (d, n) = "item/id".parse::<Attribute>()?.split();
+        let stream = artifacts.select(ArtifactSelector::new().with_domain(d).with_name(n));
 
         tokio::pin!(stream);
 
@@ -529,8 +534,9 @@ mod tests {
                 .commit(data.into_iter().map(Instruction::Assert))
                 .await?;
 
+            let (d, n) = Attribute::from_str("item/id")?.split();
             let ids = artifacts
-                .select(ArtifactSelector::new().the(Attribute::from_str("item/id")?))
+                .select(ArtifactSelector::new().with_domain(d).with_name(n))
                 .map(|result| result.unwrap())
                 .collect::<Vec<Artifact>>()
                 .await;
@@ -546,8 +552,9 @@ mod tests {
 
         artifacts.import(&mut BufReader::new(csv.as_ref())).await?;
 
+        let (d, n) = Attribute::from_str("item/id")?.split();
         let actual_ids = artifacts
-            .select(ArtifactSelector::new().the(Attribute::from_str("item/id")?))
+            .select(ArtifactSelector::new().with_domain(d).with_name(n))
             .map(|result| result.unwrap())
             .collect::<Vec<Artifact>>()
             .await;
@@ -638,9 +645,11 @@ mod tests {
             (storage_backend.reads(), storage_backend.writes())
         };
 
+        let (d, n) = attribute.split();
         let fact_stream = facts.select(
             ArtifactSelector::new()
-                .the(attribute.clone())
+                .with_domain(d)
+                .with_name(n)
                 .is(name.clone()),
         );
 
@@ -703,8 +712,8 @@ mod tests {
         assert_eq!(net_reads, 4);
         assert_eq!(net_writes, 0);
 
-        let fact_stream =
-            facts.select(ArtifactSelector::new().the(Attribute::from_str("item/id")?));
+        let (d, n) = Attribute::from_str("item/id")?.split();
+        let fact_stream = facts.select(ArtifactSelector::new().with_domain(d).with_name(n));
 
         let results: Vec<Artifact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
 
@@ -917,8 +926,9 @@ mod tests {
 
         artifacts.reset(Some(revision)).await?;
 
+        let (d, n) = "item/id".parse::<Attribute>()?.split();
         let results = artifacts
-            .select(ArtifactSelector::new().the("item/id".parse()?))
+            .select(ArtifactSelector::new().with_domain(d).with_name(n))
             .map(|result| result.unwrap())
             .collect::<Vec<Artifact>>()
             .await;
@@ -1013,8 +1023,9 @@ mod tests {
             .await?;
 
         // Verify the data exists
+        let (d, n) = attribute.split();
         let results = artifacts
-            .select(ArtifactSelector::new().the(attribute))
+            .select(ArtifactSelector::new().with_domain(d).with_name(n))
             .map(|r| r.unwrap())
             .collect::<Vec<_>>()
             .await;
@@ -1047,8 +1058,13 @@ mod tests {
             .await?;
 
         // Verify the data exists
+        let (d, n) = attribute.split();
         let results = artifacts
-            .select(ArtifactSelector::new().the(attribute.clone()))
+            .select(
+                ArtifactSelector::new()
+                    .with_domain(d.clone())
+                    .with_name(n.clone()),
+            )
             .map(|r| r.unwrap())
             .collect::<Vec<_>>()
             .await;
@@ -1059,7 +1075,7 @@ mod tests {
 
         // Verify data is gone (empty state)
         let results = artifacts
-            .select(ArtifactSelector::new().the(attribute))
+            .select(ArtifactSelector::new().with_domain(d).with_name(n))
             .map(|r| r.unwrap())
             .collect::<Vec<_>>()
             .await;
@@ -1128,8 +1144,9 @@ mod tests {
             .await?;
 
         // Query the data to verify it was stored
+        let (d, n) = attribute.split();
         let results = artifacts_mut
-            .select(ArtifactSelector::new().the(attribute))
+            .select(ArtifactSelector::new().with_domain(d).with_name(n))
             .map(|r| r.unwrap())
             .collect::<Vec<_>>()
             .await;
@@ -1191,6 +1208,101 @@ mod tests {
             before_value, after_value,
             "Storage value should not change when reset called with None"
         );
+
+        Ok(())
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_selects_by_domain_prefix() -> Result<()> {
+        // Three claims: two within the same domain, one in a different domain.
+        // Selecting by `within(domain)` should match only the first two.
+        let mut artifacts = Artifacts::anonymous(MemoryStorageBackend::default()).await?;
+        let entity = Entity::new()?;
+
+        let in_domain_1 = Artifact {
+            the: Attribute::from_str("dialog.concept.with/name")?,
+            of: entity.clone(),
+            is: Value::String("alpha".into()),
+            cause: None,
+        };
+        let in_domain_2 = Artifact {
+            the: Attribute::from_str("dialog.concept.with/age")?,
+            of: entity.clone(),
+            is: Value::UnsignedInt(42),
+            cause: None,
+        };
+        let out_of_domain = Artifact {
+            the: Attribute::from_str("dialog.other/name")?,
+            of: entity.clone(),
+            is: Value::String("beta".into()),
+            cause: None,
+        };
+
+        artifacts
+            .commit(vec![
+                Instruction::Assert(in_domain_1.clone()),
+                Instruction::Assert(in_domain_2.clone()),
+                Instruction::Assert(out_of_domain.clone()),
+            ])
+            .await?;
+
+        let namespace: Symbol = "dialog.concept.with".parse()?;
+        let mut hits: Vec<Artifact> = artifacts
+            .select(ArtifactSelector::new().with_domain(namespace))
+            .map(|r| r.unwrap())
+            .collect()
+            .await;
+        hits.sort_by(|a, b| a.the.cmp(&b.the));
+
+        assert_eq!(hits.len(), 2, "Domain prefix scan should match exactly two");
+        assert_eq!(hits[0].the, in_domain_2.the); // "age" sorts before "name"
+        assert_eq!(hits[1].the, in_domain_1.the);
+
+        Ok(())
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_does_not_match_unrelated_domain_with_overlapping_prefix() -> Result<()> {
+        // The trailing `/` in the prefix prevents `dialog.concept.with` from
+        // matching `dialog.concept.with-other/foo`.
+        let mut artifacts = Artifacts::anonymous(MemoryStorageBackend::default()).await?;
+        let entity = Entity::new()?;
+
+        let target = Artifact {
+            the: Attribute::from_str("dialog.concept.with/name")?,
+            of: entity.clone(),
+            is: Value::String("alpha".into()),
+            cause: None,
+        };
+        let lookalike = Artifact {
+            the: Attribute::from_str("dialog.concept.with-other/name")?,
+            of: entity.clone(),
+            is: Value::String("beta".into()),
+            cause: None,
+        };
+
+        artifacts
+            .commit(vec![
+                Instruction::Assert(target.clone()),
+                Instruction::Assert(lookalike.clone()),
+            ])
+            .await?;
+
+        let namespace: Symbol = "dialog.concept.with".parse()?;
+        let hits: Vec<Artifact> = artifacts
+            .select(ArtifactSelector::new().with_domain(namespace))
+            .map(|r| r.unwrap())
+            .collect()
+            .await;
+
+        assert_eq!(
+            hits.len(),
+            1,
+            "The `/` separator should isolate domains with shared prefixes"
+        );
+        assert_eq!(hits[0].the, target.the);
 
         Ok(())
     }

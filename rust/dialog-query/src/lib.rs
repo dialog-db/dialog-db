@@ -34,6 +34,9 @@ pub mod concept;
 pub mod constraint;
 /// Static descriptor trait for attribute and concept metadata.
 pub mod descriptor;
+/// [`Directory`] — Symbol-keyed collection used as a [`Scalar`]-of-many
+/// realization target.
+pub mod directory;
 /// Variable binding environment used during query planning.
 pub mod environment;
 /// Error types for the query engine.
@@ -85,6 +88,7 @@ pub use concept::query::{ConceptQuery, ConceptRules};
 pub use concept::{Concept, ConceptField, Conclusion};
 pub use constraint::Constraint;
 pub use descriptor::Descriptor;
+pub use directory::Directory;
 pub use environment::*;
 pub use error::*;
 pub use formula::*;

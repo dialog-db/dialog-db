@@ -2,6 +2,7 @@ use crate::Cardinality;
 use crate::artifact::Type;
 use crate::attribute::{AttributeDescriptor, The};
 use crate::error::TypeError;
+use crate::type_system::Type as Kind;
 use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -90,8 +91,13 @@ impl ConceptFieldDescriptor {
     }
 
     /// Convenience: the attribute's content type, if known.
-    pub fn content_type(&self) -> Option<Type> {
+    pub fn content_type(&self) -> Option<&Kind> {
         self.descriptor.content_type()
+    }
+
+    /// Convenience: the attribute's primitive value type, if known.
+    pub fn value_type(&self) -> Option<Type> {
+        self.descriptor.value_type()
     }
 
     /// Convenience: the attribute's cardinality.
