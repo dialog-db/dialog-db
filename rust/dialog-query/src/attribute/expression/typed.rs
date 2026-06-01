@@ -495,13 +495,12 @@ mod tests {
             .is(Term::<String>::var("name"))
             .into();
 
-        let prop = match premise {
-            Premise::Assert(prop) => prop,
-            _ => panic!("Expected Assert"),
-        };
+        let plan = crate::Planner::from(vec![premise])
+            .plan(&crate::Environment::new())
+            .expect("premise should plan");
 
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
-        let results = prop
+        let results = plan
             .evaluate(Match::new().seed(), &source)
             .try_collect::<Vec<_>>()
             .await?;

@@ -1,4 +1,4 @@
-use super::Plan;
+use super::{Header, Plan};
 use crate::error::TypeError;
 use crate::{Environment, Parameters, Premise, Requirement, Schema};
 use std::collections::HashSet;
@@ -340,28 +340,16 @@ impl From<Premise> for Candidate {
     }
 }
 
-impl From<Plan> for Candidate {
-    fn from(plan: Plan) -> Self {
-        Self::Viable {
-            schema: plan.premise.schema(),
-            params: plan.premise.parameters(),
-            premise: plan.premise,
-            cost: plan.cost,
-            binds: plan.binds,
-            env: plan.env,
-        }
-    }
-}
-
 impl From<&Plan> for Candidate {
     fn from(plan: &Plan) -> Self {
+        let header = plan.header();
         Self::Viable {
-            schema: plan.premise.schema(),
-            params: plan.premise.parameters(),
-            premise: plan.premise.clone(),
-            cost: plan.cost,
-            binds: plan.binds.clone(),
-            env: plan.env.clone(),
+            schema: header.premise.schema(),
+            params: header.premise.parameters(),
+            premise: header.premise.clone(),
+            cost: header.cost,
+            binds: header.binds.clone(),
+            env: header.env.clone(),
         }
     }
 }
@@ -379,13 +367,14 @@ impl TryFrom<Candidate> for Plan {
                 ..
             } => {
                 // Drop schema/params — they're only needed during
-                // planning, not at evaluation time.
-                Ok(Plan {
+                // planning, not at evaluation time. Lower the
+                // premise into its compiled `Plan` variant.
+                Ok(Plan::lower(Header {
                     premise,
                     cost,
                     binds,
                     env,
-                })
+                }))
             }
             Candidate::Blocked { requires, .. } => {
                 Err(TypeError::RequiredBindings { required: requires })

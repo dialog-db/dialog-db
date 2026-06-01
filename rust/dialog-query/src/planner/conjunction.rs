@@ -43,7 +43,11 @@ impl Conjunction {
     /// runs again on the fresh order — its output is stable across
     /// reorderings, so this is cheap and idempotent.
     pub fn plan(&self, scope: &Environment) -> Result<Self, TypeError> {
-        let premises: Vec<_> = self.steps.iter().map(|step| step.premise.clone()).collect();
+        let premises: Vec<_> = self
+            .steps
+            .iter()
+            .map(|step| step.premise().clone())
+            .collect();
         Planner::from(premises).plan(scope)
     }
 

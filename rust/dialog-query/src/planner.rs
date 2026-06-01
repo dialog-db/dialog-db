@@ -70,14 +70,15 @@ impl Planner {
         })?;
 
         // Rewrite each step's premise so its variable terms reflect
-        // the rule-level inferred kinds. Done once here, not on
-        // every evaluation. Standalone queries (empty env) skip the
-        // rewrite entirely.
+        // the rule-level inferred kinds, then re-lower it into the
+        // compiled `Plan`. Done once here, not on every evaluation.
+        // Standalone queries (empty env) skip the rewrite entirely.
         let steps: Vec<Plan> = steps
             .into_iter()
-            .map(|step| Plan {
-                premise: plan::apply_types(step.premise, &types),
-                ..step
+            .map(|step| {
+                let mut header = step.header().clone();
+                header.premise = plan::apply_types(header.premise, &types);
+                Plan::lower(header)
             })
             .collect();
 
@@ -399,7 +400,8 @@ mod tests {
 
         assert_eq!(plan.steps.len(), 1);
         assert_eq!(
-            plan.steps[0].cost, INDEX_SCAN_COST,
+            plan.steps[0].cost(),
+            INDEX_SCAN_COST,
             "With 1/3 constraints, cost should be INDEX_SCAN_COST"
         );
 
@@ -412,7 +414,8 @@ mod tests {
             .expect("Should replan with entity");
 
         assert_eq!(
-            replanned.steps[0].cost, RANGE_READ_COST,
+            replanned.steps[0].cost(),
+            RANGE_READ_COST,
             "With 2/3 constraints, cost should be READ"
         );
 
@@ -422,7 +425,8 @@ mod tests {
             .expect("Should replan back to empty");
 
         assert_eq!(
-            replanned_empty.steps[0].cost, INDEX_SCAN_COST,
+            replanned_empty.steps[0].cost(),
+            INDEX_SCAN_COST,
             "After replanning back to empty env, cost should return to FULL"
         );
     }

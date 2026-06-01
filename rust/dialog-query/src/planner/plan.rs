@@ -1,53 +1,134 @@
-use crate::attribute::query::AttributeQuery;
+use crate::attribute::query::{AttributeQuery, DynamicAttributeQuery};
+use crate::concept::query::ConceptQuery;
+use crate::constraint::Constraint;
+use crate::formula::query::FormulaQuery;
 use crate::negation::Negation;
 use crate::proposition::Proposition;
+use crate::query::Application;
 use crate::rule::types::TypeEnv;
 use crate::selection::Selection;
 use crate::source::SelectRules;
+use crate::try_stream;
 use crate::{Environment, Premise};
+use core::pin::Pin;
 use dialog_artifacts::Select;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
+use futures_util::TryStreamExt;
+use futures_util::future::Either;
 
-/// A finalized, ready-to-execute premise produced by the query planner.
+/// Planning metadata shared by every [`Plan`] variant.
 ///
-/// A `Plan` is the lightweight output of a successful [`Candidate`]. It carries
-/// only the information needed at execution time: the premise itself, its
-/// estimated cost, the variables it will bind, and the variables already
-/// bound in the environment. The cached schema and parameter data used during
-/// planning are dropped at this point.
+/// Carries what the planner needs to schedule and re-plan a step, kept
+/// alongside the lowered execution payload in each variant. The
+/// retained [`premise`](Header::premise) is the syntactic form the
+/// rule analyzer and type inference still consult; the variant payload
+/// is the compiled form [`Plan::evaluate`] runs.
 ///
 /// The premise has already been narrowed at plan time via
 /// [`apply_types`] — its variable terms reflect the rule-level
 /// inferred kinds, so evaluators don't need to consult any external
 /// type environment to know which slots are optional.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Plan {
-    /// The premise this plan will execute. Variable terms have
-    /// been narrowed to the rule-level inferred kinds.
+pub struct Header {
+    /// The syntactic premise this step was lowered from. Variable
+    /// terms have been narrowed to the rule-level inferred kinds.
     pub premise: Premise,
     /// Estimated execution cost.
     pub cost: usize,
-    /// Variables that this plan will bind upon execution.
+    /// Variables that this step will bind upon execution.
     pub binds: Environment,
-    /// Variables already bound in the environment when this plan runs.
+    /// Variables already bound in the environment when this step runs.
     pub env: Environment,
 }
 
+/// A finalized, ready-to-execute query step produced by the planner.
+///
+/// A `Plan` is the lightweight output of a successful [`Candidate`].
+/// It is both the compiled operator (the variant selects the kind of
+/// work and owns the lowered query) and the carrier of planning
+/// metadata (via [`Header`]). Lowering from the syntactic AST happens
+/// once, in [`Planner::plan`](crate::Planner), after type inference;
+/// `evaluate` then dispatches on the variant rather than walking the
+/// AST.
+///
+/// Leaf variants wrap the concrete query types that own the actual
+/// stream logic; [`Negate`](Plan::Negate) wraps a nested `Plan` so
+/// negation filters against the lowered inner step.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Plan {
+    /// Positive attribute lookup — an EAV/AEV/VAE scan with
+    /// cardinality-aware winner selection folded into the wrapped
+    /// query.
+    Scan(Header, Box<DynamicAttributeQuery>),
+    /// Pure computation that derives bindings without touching the
+    /// fact store.
+    Formula(Header, FormulaQuery),
+    /// Variable constraint (equality, coalesce) that filters or infers
+    /// bindings.
+    Constraint(Header, Constraint),
+    /// Concept realization. Lowering stops at the concept boundary:
+    /// the wrapped [`ConceptQuery`] owns its own planning and
+    /// evaluation of the underlying rule bodies.
+    Concept(Header, ConceptQuery),
+    /// Negation as a filter: a match passes only if evaluating the
+    /// inner plan against it produces no rows.
+    Negate(Header, Box<Plan>),
+}
+
 impl Plan {
+    /// Returns the planning metadata header for this step.
+    pub fn header(&self) -> &Header {
+        match self {
+            Plan::Scan(header, _) => header,
+            Plan::Formula(header, _) => header,
+            Plan::Constraint(header, _) => header,
+            Plan::Concept(header, _) => header,
+            Plan::Negate(header, _) => header,
+        }
+    }
+
+    /// Returns the syntactic premise this step was lowered from.
+    pub fn premise(&self) -> &Premise {
+        &self.header().premise
+    }
+
     /// Returns the estimated execution cost.
     pub fn cost(&self) -> usize {
-        self.cost
+        self.header().cost
     }
 
-    /// Returns the set of variables this plan will bind.
+    /// Returns the set of variables this step will bind.
     pub fn binds(&self) -> &Environment {
-        &self.binds
+        &self.header().binds
     }
 
-    /// Returns the environment of already-bound variables for this plan.
+    /// Returns the environment of already-bound variables for this step.
     pub fn env(&self) -> &Environment {
-        &self.env
+        &self.header().env
+    }
+
+    /// Lower a planning [`Header`] into the matching compiled `Plan`
+    /// variant, consuming the header's narrowed premise.
+    pub(crate) fn lower(header: Header) -> Self {
+        match header.premise.clone() {
+            Premise::Assert(proposition) => Self::lower_proposition(header, proposition),
+            Premise::Unless(Negation(proposition)) => {
+                // Lower the inner proposition under its own header so
+                // the negation filters against a compiled inner plan.
+                let inner = Self::lower_proposition(header.clone(), proposition);
+                Plan::Negate(header, Box::new(inner))
+            }
+        }
+    }
+
+    fn lower_proposition(header: Header, proposition: Proposition) -> Self {
+        match proposition {
+            Proposition::Attribute(query) => Plan::Scan(header, query),
+            Proposition::Concept(query) => Plan::Concept(header, query),
+            Proposition::Formula(query) => Plan::Formula(header, query),
+            Proposition::Constraint(constraint) => Plan::Constraint(header, constraint),
+        }
     }
 
     /// Evaluate this plan with the given selection and environment.
@@ -59,7 +140,50 @@ impl Plan {
     where
         Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
     {
-        self.premise.evaluate(selection, env)
+        match self {
+            Plan::Scan(_, query) => Either::Left(Either::Left(Either::Left(
+                Application::evaluate(*query, selection, env),
+            ))),
+            Plan::Concept(_, query) => {
+                Either::Left(Either::Left(Either::Right(query.evaluate(selection, env))))
+            }
+            Plan::Formula(_, query) => Either::Left(Either::Right(query.evaluate(selection))),
+            Plan::Constraint(_, constraint) => {
+                Either::Right(Either::Left(constraint.evaluate(selection)))
+            }
+            Plan::Negate(_, inner) => Either::Right(Either::Right(negate(*inner, selection, env))),
+        }
+    }
+}
+
+/// Filter a selection by a negated plan: keep each incoming match only
+/// when evaluating `inner` against it yields no rows.
+fn negate<'a, Env, M: Selection + 'a>(
+    inner: Plan,
+    selection: M,
+    env: &'a Env,
+) -> impl Selection + 'a
+where
+    Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+{
+    try_stream! {
+        for await candidate in selection {
+            let base = candidate?;
+            // Box the recursive evaluation: `Plan::Negate` calls back
+            // into `Plan::evaluate`, so the inner stream's type would
+            // otherwise be infinitely self-referential. Erasing it to
+            // a trait object breaks the recursion.
+            let output: Pin<Box<dyn Selection + 'a>> =
+                Box::pin(inner.clone().evaluate(base.clone().seed(), env));
+
+            tokio::pin!(output);
+
+            if let Ok(Some(_)) = output.try_next().await {
+                continue;
+            }
+
+            yield base;
+        }
     }
 }
 
@@ -157,7 +281,7 @@ mod tests {
         // user-supplied `is` was `Option<String>`; after planning
         // it should be `String` only.
         for step in plan.steps {
-            if let Premise::Assert(Proposition::Attribute(boxed)) = &step.premise {
+            if let Premise::Assert(Proposition::Attribute(boxed)) = step.premise() {
                 assert!(
                     !boxed.is().is_optional(),
                     "rule-level narrowing should leave `is` non-optional"
@@ -211,7 +335,7 @@ mod tests {
         // time, not deferred to evaluation.
         let mut narrowed_count = 0;
         for step in &plan.steps {
-            if let Premise::Assert(Proposition::Attribute(boxed)) = &step.premise
+            if let Premise::Assert(Proposition::Attribute(boxed)) = step.premise()
                 && boxed.is().name() == Some("nick")
             {
                 assert!(
@@ -248,7 +372,7 @@ mod tests {
             .plan(&crate::Environment::new())
             .unwrap();
 
-        if let Premise::Assert(Proposition::Attribute(boxed)) = &plan.steps[0].premise {
+        if let Premise::Assert(Proposition::Attribute(boxed)) = plan.steps[0].premise() {
             assert!(
                 boxed.is().is_optional(),
                 "single optional premise should keep its optional `is`"
@@ -294,7 +418,7 @@ mod tests {
 
         // The replanned steps still have the narrowed `is`.
         for step in &replanned.steps {
-            if let Premise::Assert(Proposition::Attribute(boxed)) = &step.premise
+            if let Premise::Assert(Proposition::Attribute(boxed)) = step.premise()
                 && boxed.is().name() == Some("nick")
             {
                 assert!(

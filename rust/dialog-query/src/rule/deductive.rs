@@ -84,7 +84,7 @@ impl DeductiveRule {
         let mut unless = Vec::new();
 
         for step in &self.join.steps {
-            match &step.premise {
+            match step.premise() {
                 Premise::Assert(proposition) => when.push(proposition.clone()),
                 Premise::Unless(Negation(proposition)) => unless.push(proposition.clone()),
             }
@@ -542,7 +542,7 @@ mod tests {
         let mut required = 0;
         let mut optional = 0;
         for step in rule.join.steps.iter() {
-            if let Premise::Assert(Proposition::Attribute(query)) = &step.premise {
+            if let Premise::Assert(Proposition::Attribute(query)) = step.premise() {
                 match query.resolution() {
                     Resolution::Required => required += 1,
                     Resolution::Optional => optional += 1,
@@ -589,7 +589,7 @@ mod tests {
         let mut required = 0;
         let mut optional = 0;
         for step in rule.join.steps.iter() {
-            if let Premise::Assert(Proposition::Attribute(query)) = &step.premise {
+            if let Premise::Assert(Proposition::Attribute(query)) = step.premise() {
                 match query.resolution() {
                     Resolution::Required => required += 1,
                     Resolution::Optional => optional += 1,

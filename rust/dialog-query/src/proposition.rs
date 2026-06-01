@@ -7,14 +7,7 @@ pub use crate::error::AnalyzerError;
 pub use crate::error::QueryResult;
 pub use crate::formula::query::FormulaQuery;
 pub use crate::premise::{Negation, Premise};
-use crate::query::Application;
-use crate::selection::Selection;
-use crate::source::SelectRules;
 pub use crate::{Environment, Parameters, Schema};
-use dialog_artifacts::Select;
-use dialog_capability::Provider;
-use dialog_common::ConditionalSync;
-use futures_util::future::Either;
 use serde::de;
 use serde::ser;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -54,29 +47,6 @@ impl Proposition {
             Proposition::Concept(application) => application.estimate(env),
             Proposition::Formula(application) => application.estimate(env),
             Proposition::Constraint(constraint) => constraint.estimate(env),
-        }
-    }
-
-    /// Evaluate this application against the given context, producing a selection stream
-    pub fn evaluate<'a, Env, M: Selection + 'a>(
-        self,
-        selection: M,
-        env: &'a Env,
-    ) -> impl Selection + 'a
-    where
-        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
-    {
-        match self {
-            Proposition::Attribute(query) => Either::Left(Either::Left(Either::Left(
-                Application::evaluate(*query, selection, env),
-            ))),
-            Proposition::Concept(application) => Either::Left(Either::Left(Either::Right(
-                application.evaluate(selection, env),
-            ))),
-            Proposition::Formula(application) => {
-                Either::Left(Either::Right(application.evaluate(selection)))
-            }
-            Proposition::Constraint(constraint) => Either::Right(constraint.evaluate(selection)),
         }
     }
 
