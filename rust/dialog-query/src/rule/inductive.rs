@@ -104,9 +104,9 @@ impl InductiveRule {
         let mut unless = Vec::new();
 
         for step in &self.join.steps {
-            match step.premise() {
-                Premise::Assert(proposition) => when.push(proposition.clone()),
-                Premise::Unless(Negation(proposition)) => unless.push(proposition.clone()),
+            match step.as_premise() {
+                Premise::Assert(proposition) => when.push(proposition),
+                Premise::Unless(Negation(proposition)) => unless.push(proposition),
             }
         }
 

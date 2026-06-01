@@ -76,9 +76,9 @@ impl Planner {
         let steps: Vec<Plan> = steps
             .into_iter()
             .map(|step| {
-                let mut header = step.header().clone();
-                header.premise = plan::apply_types(header.premise, &types);
-                Plan::lower(header)
+                let header = step.header().clone();
+                let premise = plan::apply_types(step.as_premise(), &types);
+                Plan::lower(premise, header)
             })
             .collect();
 

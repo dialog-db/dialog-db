@@ -77,11 +77,11 @@ impl TypeEnv {
         for step in steps {
             // Negation premises don't contribute — they filter on
             // bindings rather than introducing them.
-            let Premise::Assert(_) = step.premise() else {
+            let Premise::Assert(_) = step.as_premise() else {
                 continue;
             };
-            let schema = step.premise().schema();
-            let params = step.premise().parameters();
+            let schema = step.schema();
+            let params = step.parameters();
 
             for (slot_name, field) in schema.iter() {
                 let Some(param) = params.get(slot_name) else {

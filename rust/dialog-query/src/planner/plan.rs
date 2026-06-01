@@ -9,7 +9,7 @@ use crate::rule::types::TypeEnv;
 use crate::selection::Selection;
 use crate::source::SelectRules;
 use crate::try_stream;
-use crate::{Environment, Premise};
+use crate::{Environment, Parameters, Premise, Schema};
 use core::pin::Pin;
 use dialog_artifacts::Select;
 use dialog_capability::Provider;
@@ -21,19 +21,12 @@ use futures_util::future::Either;
 ///
 /// Carries what the planner needs to schedule and re-plan a step, kept
 /// alongside the lowered execution payload in each variant. The
-/// retained [`premise`](Header::premise) is the syntactic form the
-/// rule analyzer and type inference still consult; the variant payload
-/// is the compiled form [`Plan::evaluate`] runs.
-///
-/// The premise has already been narrowed at plan time via
-/// [`apply_types`] — its variable terms reflect the rule-level
-/// inferred kinds, so evaluators don't need to consult any external
-/// type environment to know which slots are optional.
+/// syntactic premise is *not* stored: it is reconstructed on demand
+/// from the variant payload via [`Plan::as_premise`], since the
+/// payload is the lowered (and already type-narrowed) form of the same
+/// query.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Header {
-    /// The syntactic premise this step was lowered from. Variable
-    /// terms have been narrowed to the rule-level inferred kinds.
-    pub premise: Premise,
     /// Estimated execution cost.
     pub cost: usize,
     /// Variables that this step will bind upon execution.
@@ -88,9 +81,39 @@ impl Plan {
         }
     }
 
-    /// Returns the syntactic premise this step was lowered from.
-    pub fn premise(&self) -> &Premise {
-        &self.header().premise
+    /// Reconstruct the syntactic premise this step was lowered from.
+    ///
+    /// The payload is the lowered, already type-narrowed form of the
+    /// query, so this is a faithful inverse of [`lower`](Plan::lower).
+    /// Consumers that analyze a step (rule analyzer, type inference,
+    /// descriptor construction) go through this rather than a stored
+    /// AST copy.
+    pub fn as_premise(&self) -> Premise {
+        match self {
+            Plan::Scan(_, query) => Premise::Assert(Proposition::Attribute(query.clone())),
+            Plan::Concept(_, query) => Premise::Assert(Proposition::Concept(query.clone())),
+            Plan::Formula(_, query) => Premise::Assert(Proposition::Formula(query.clone())),
+            Plan::Constraint(_, constraint) => {
+                Premise::Assert(Proposition::Constraint(constraint.clone()))
+            }
+            Plan::Negate(_, inner) => match inner.as_premise() {
+                Premise::Assert(proposition) => Premise::Unless(Negation(proposition)),
+                // The inner plan is always lowered from a positive
+                // proposition, so its reconstruction is never itself a
+                // negation.
+                Premise::Unless(negation) => Premise::Unless(negation),
+            },
+        }
+    }
+
+    /// Returns the schema describing this step's parameters.
+    pub fn schema(&self) -> Schema {
+        self.as_premise().schema()
+    }
+
+    /// Returns the parameter bindings for this step.
+    pub fn parameters(&self) -> Parameters {
+        self.as_premise().parameters()
     }
 
     /// Returns the estimated execution cost.
@@ -108,21 +131,21 @@ impl Plan {
         &self.header().env
     }
 
-    /// Lower a planning [`Header`] into the matching compiled `Plan`
-    /// variant, consuming the header's narrowed premise.
-    pub(crate) fn lower(header: Header) -> Self {
-        match header.premise.clone() {
-            Premise::Assert(proposition) => Self::lower_proposition(header, proposition),
+    /// Lower a syntactic premise into the matching compiled `Plan`
+    /// variant, attaching the planning metadata `header`.
+    pub(crate) fn lower(premise: Premise, header: Header) -> Self {
+        match premise {
+            Premise::Assert(proposition) => Self::lower_proposition(proposition, header),
             Premise::Unless(Negation(proposition)) => {
-                // Lower the inner proposition under its own header so
+                // Lower the inner proposition under the same metadata so
                 // the negation filters against a compiled inner plan.
-                let inner = Self::lower_proposition(header.clone(), proposition);
+                let inner = Self::lower_proposition(proposition, header.clone());
                 Plan::Negate(header, Box::new(inner))
             }
         }
     }
 
-    fn lower_proposition(header: Header, proposition: Proposition) -> Self {
+    fn lower_proposition(proposition: Proposition, header: Header) -> Self {
         match proposition {
             Proposition::Attribute(query) => Plan::Scan(header, query),
             Proposition::Concept(query) => Plan::Concept(header, query),
@@ -281,7 +304,7 @@ mod tests {
         // user-supplied `is` was `Option<String>`; after planning
         // it should be `String` only.
         for step in plan.steps {
-            if let Premise::Assert(Proposition::Attribute(boxed)) = step.premise() {
+            if let Premise::Assert(Proposition::Attribute(boxed)) = step.as_premise() {
                 assert!(
                     !boxed.is().is_optional(),
                     "rule-level narrowing should leave `is` non-optional"
@@ -335,7 +358,7 @@ mod tests {
         // time, not deferred to evaluation.
         let mut narrowed_count = 0;
         for step in &plan.steps {
-            if let Premise::Assert(Proposition::Attribute(boxed)) = step.premise()
+            if let Premise::Assert(Proposition::Attribute(boxed)) = step.as_premise()
                 && boxed.is().name() == Some("nick")
             {
                 assert!(
@@ -372,7 +395,7 @@ mod tests {
             .plan(&crate::Environment::new())
             .unwrap();
 
-        if let Premise::Assert(Proposition::Attribute(boxed)) = plan.steps[0].premise() {
+        if let Premise::Assert(Proposition::Attribute(boxed)) = plan.steps[0].as_premise() {
             assert!(
                 boxed.is().is_optional(),
                 "single optional premise should keep its optional `is`"
@@ -418,7 +441,7 @@ mod tests {
 
         // The replanned steps still have the narrowed `is`.
         for step in &replanned.steps {
-            if let Premise::Assert(Proposition::Attribute(boxed)) = step.premise()
+            if let Premise::Assert(Proposition::Attribute(boxed)) = step.as_premise()
                 && boxed.is().name() == Some("nick")
             {
                 assert!(

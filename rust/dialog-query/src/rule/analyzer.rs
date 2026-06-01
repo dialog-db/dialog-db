@@ -87,9 +87,9 @@ impl DependencyGraph {
         let mut usage = Vec::with_capacity(steps.len());
 
         for step in steps {
-            let is_negation = matches!(step.premise(), Premise::Unless(_));
-            let schema = step.premise().schema();
-            let params = step.premise().parameters();
+            let is_negation = matches!(step.as_premise(), Premise::Unless(_));
+            let schema = step.schema();
+            let params = step.parameters();
 
             // Identify choice groups satisfied by a constant in
             // this step's parameters.
@@ -255,7 +255,7 @@ pub fn analyze(
     // where the typed builder isn't the construction path.
     for step in steps {
         let Premise::Assert(Proposition::Constraint(Constraint::Coalesce(coalesce))) =
-            step.premise()
+            step.as_premise()
         else {
             continue;
         };
@@ -267,7 +267,7 @@ pub fn analyze(
         }
     }
 
-    let premises = steps.iter().map(|step| step.premise().clone()).collect();
+    let premises = steps.iter().map(|step| step.as_premise()).collect();
     let graph = DependencyGraph::from_steps(steps);
     Ok(AnalyzedRule {
         conclusion,

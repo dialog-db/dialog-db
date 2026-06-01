@@ -342,11 +342,12 @@ impl From<Premise> for Candidate {
 
 impl From<&Plan> for Candidate {
     fn from(plan: &Plan) -> Self {
+        let premise = plan.as_premise();
         let header = plan.header();
         Self::Viable {
-            schema: header.premise.schema(),
-            params: header.premise.parameters(),
-            premise: header.premise.clone(),
+            schema: premise.schema(),
+            params: premise.parameters(),
+            premise,
             cost: header.cost,
             binds: header.binds.clone(),
             env: header.env.clone(),
@@ -369,12 +370,7 @@ impl TryFrom<Candidate> for Plan {
                 // Drop schema/params — they're only needed during
                 // planning, not at evaluation time. Lower the
                 // premise into its compiled `Plan` variant.
-                Ok(Plan::lower(Header {
-                    premise,
-                    cost,
-                    binds,
-                    env,
-                }))
+                Ok(Plan::lower(premise, Header { cost, binds, env }))
             }
             Candidate::Blocked { requires, .. } => {
                 Err(TypeError::RequiredBindings { required: requires })
