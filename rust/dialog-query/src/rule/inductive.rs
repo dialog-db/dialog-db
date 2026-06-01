@@ -22,6 +22,7 @@ use crate::error::TypeError;
 use crate::negation::Negation;
 use crate::planner::Conjunction;
 use crate::premise::Premise;
+use crate::rule::analyzer::AnalyzedRule;
 use crate::rule::{Compile, fmt_rule_schema};
 use crate::{Environment, Parameters, Proposition};
 use descriptor::InductiveRuleDescriptor;
@@ -37,11 +38,23 @@ pub struct InductiveRule {
     conclusion: ConceptDescriptor,
     /// Planned execution order for the body's premises.
     join: Conjunction,
+    /// Retained analysis: the dependency graph (SIPS) and inferred
+    /// types computed during compilation. `None` only for partial
+    /// rules built on a compile-error path for display.
+    analysis: Option<AnalyzedRule>,
 }
 
 impl Compile for InductiveRule {
-    fn from_parts(conclusion: ConceptDescriptor, join: Conjunction) -> Self {
-        InductiveRule { conclusion, join }
+    fn from_parts(
+        conclusion: ConceptDescriptor,
+        join: Conjunction,
+        analysis: Option<AnalyzedRule>,
+    ) -> Self {
+        InductiveRule {
+            conclusion,
+            join,
+            analysis,
+        }
     }
 }
 
@@ -60,6 +73,12 @@ impl InductiveRule {
     /// The concept this rule asserts when its body matches.
     pub fn conclusion(&self) -> &ConceptDescriptor {
         &self.conclusion
+    }
+
+    /// Returns the retained analysis (dependency graph / SIPS and
+    /// inferred types) for this rule, if it compiled successfully.
+    pub fn analysis(&self) -> Option<&AnalyzedRule> {
+        self.analysis.as_ref()
     }
 
     /// Re-plan this rule's premises against a new scope; falls back

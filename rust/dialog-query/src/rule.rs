@@ -100,7 +100,17 @@ impl From<InductiveRule> for Rule {
 pub trait Compile: Sized + Into<Rule> {
     /// Build the rule from its compiled parts. Called by
     /// [`compile`](Self::compile) once analysis passes.
-    fn from_parts(conclusion: ConceptDescriptor, join: Conjunction) -> Self;
+    ///
+    /// `analysis` carries the retained [`AnalyzedRule`] (the
+    /// dependency graph / SIPS plus the inferred types) when
+    /// compilation succeeds. On the error paths — where a partial
+    /// rule is built only to embed in a [`TypeError`] for display —
+    /// it is `None`, because analysis did not produce a valid result.
+    fn from_parts(
+        conclusion: ConceptDescriptor,
+        join: Conjunction,
+        analysis: Option<AnalyzedRule>,
+    ) -> Self;
 
     /// Plan the premises, run rule-level type analysis, and verify
     /// every head variable is bound. Default impl is identical for
@@ -123,27 +133,33 @@ pub trait Compile: Sized + Into<Rule> {
         // Run rule-level type analysis: inference + required-head
         // check + Coalesce contract validation. Failures wrap into
         // the corresponding `TypeError::*` variants so the user
-        // sees the in-progress rule embedded in the error.
-        if let Err(err) = analyzer::analyze(conclusion.clone(), &join.steps) {
-            let in_progress = Self::from_parts(conclusion, join);
-            return Err(match err {
-                analyzer::AnalysisError::Inference { reason } => {
-                    TypeError::TypeInference { reason }
-                }
-                analyzer::AnalysisError::RequiredHeadFromOptional { variable } => {
-                    TypeError::RequiredHeadFromOptional {
-                        rule: Box::new(in_progress.into()),
-                        variable,
+        // sees the in-progress rule embedded in the error. On
+        // success the `AnalyzedRule` (dependency graph + inferred
+        // types) is retained and stored on the compiled rule rather
+        // than discarded.
+        let analysis = match analyzer::analyze(conclusion.clone(), &join.steps) {
+            Ok(analysis) => analysis,
+            Err(err) => {
+                let in_progress = Self::from_parts(conclusion, join, None);
+                return Err(match err {
+                    analyzer::AnalysisError::Inference { reason } => {
+                        TypeError::TypeInference { reason }
                     }
-                }
-                analyzer::AnalysisError::CoalesceTypeMismatch { reason } => {
-                    TypeError::CoalesceTypeMismatch {
-                        rule: Box::new(in_progress.into()),
-                        reason,
+                    analyzer::AnalysisError::RequiredHeadFromOptional { variable } => {
+                        TypeError::RequiredHeadFromOptional {
+                            rule: Box::new(in_progress.into()),
+                            variable,
+                        }
                     }
-                }
-            });
-        }
+                    analyzer::AnalysisError::CoalesceTypeMismatch { reason } => {
+                        TypeError::CoalesceTypeMismatch {
+                            rule: Box::new(in_progress.into()),
+                            reason,
+                        }
+                    }
+                });
+            }
+        };
 
         // Verify that every conclusion parameter is derived by one
         // of the premises; otherwise the rule could never fully
@@ -154,14 +170,14 @@ pub trait Compile: Sized + Into<Rule> {
             .find(|name| !join.binds.contains(name))
             .map(String::from);
         if let Some(variable) = unbound {
-            let in_progress = Self::from_parts(conclusion, join);
+            let in_progress = Self::from_parts(conclusion, join, None);
             return Err(TypeError::UnboundVariable {
                 rule: Box::new(in_progress.into()),
                 variable,
             });
         }
 
-        Ok(Self::from_parts(conclusion, join))
+        Ok(Self::from_parts(conclusion, join, Some(analysis)))
     }
 }
 

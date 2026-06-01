@@ -9,6 +9,7 @@ use crate::negation::Negation;
 pub use crate::planner::Plan;
 pub use crate::planner::{Conjunction, Planner};
 pub use crate::premise::Premise;
+use crate::rule::analyzer::AnalyzedRule;
 use crate::rule::{Compile, fmt_rule_schema};
 use crate::type_system::Primitive;
 use crate::type_system::Type as Kind;
@@ -29,10 +30,22 @@ pub struct DeductiveRule {
     /// Execution plan for the rule's premises, ordered for optimal
     /// evaluation. Produced by [`Planner::plan`] during compilation.
     join: Conjunction,
+    /// Retained analysis: the dependency graph (SIPS) and inferred
+    /// types computed during compilation. `None` only for partial
+    /// rules built on a compile-error path for display.
+    analysis: Option<AnalyzedRule>,
 }
 impl Compile for DeductiveRule {
-    fn from_parts(conclusion: ConceptDescriptor, join: Conjunction) -> Self {
-        DeductiveRule { conclusion, join }
+    fn from_parts(
+        conclusion: ConceptDescriptor,
+        join: Conjunction,
+        analysis: Option<AnalyzedRule>,
+    ) -> Self {
+        DeductiveRule {
+            conclusion,
+            join,
+            analysis,
+        }
     }
 }
 
@@ -50,6 +63,12 @@ impl DeductiveRule {
     /// Returns the conclusion predicate for this rule.
     pub fn conclusion(&self) -> &ConceptDescriptor {
         &self.conclusion
+    }
+
+    /// Returns the retained analysis (dependency graph / SIPS and
+    /// inferred types) for this rule, if it compiled successfully.
+    pub fn analysis(&self) -> Option<&AnalyzedRule> {
+        self.analysis.as_ref()
     }
 
     /// Re-plan this rule's premises against a new scope.
@@ -220,6 +239,67 @@ mod tests {
         ];
         let result = DeductiveRule::new(conclusion, premises);
         assert!(result.is_ok());
+    }
+
+    /// A successfully compiled rule retains its analysis (the
+    /// dependency graph / SIPS and inferred types) rather than
+    /// discarding it. The retained graph must match what the
+    /// planner's ordered steps yield, confirming the analysis phase
+    /// and the planned plan are consistent.
+    #[dialog_common::test]
+    fn it_retains_analysis_matching_planned_steps() {
+        use crate::rule::analyzer::DependencyGraph;
+
+        let conclusion = ConceptDescriptor::try_from(vec![
+            (
+                "name",
+                AttributeDescriptor::new(
+                    the!("person/name"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                ),
+            ),
+            (
+                "age",
+                AttributeDescriptor::new(
+                    the!("person/age"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::UnsignedInt),
+                ),
+            ),
+        ])
+        .unwrap();
+        let this = Term::<Entity>::var("this");
+        let premises = vec![
+            AttributeQuery::new(
+                Term::from(the!("user/name")),
+                this.clone(),
+                Term::var("name"),
+                Term::var("cause"),
+                Some(Cardinality::One),
+            )
+            .into(),
+            AttributeQuery::new(
+                Term::from(the!("user/age")),
+                this,
+                Term::var("age"),
+                Term::var("cause"),
+                Some(Cardinality::One),
+            )
+            .into(),
+        ];
+        let rule = DeductiveRule::new(conclusion, premises).expect("rule compiles");
+
+        let analysis = rule
+            .analysis()
+            .expect("a compiled rule retains its analysis");
+        assert_eq!(
+            analysis.graph,
+            DependencyGraph::from_steps(&rule.join.steps),
+            "retained graph must match the planned steps' dependency graph"
+        );
     }
 
     #[dialog_common::test]
