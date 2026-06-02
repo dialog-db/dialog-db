@@ -469,7 +469,6 @@ mod tests {
     /// `is` kinds.
     #[dialog_common::test]
     fn it_preserves_narrowing_across_replans() {
-        use crate::planner::Conjunction;
         let optional_name: Term<Any> = Term::<Option<String>>::var("nick").into();
         let typed_name: Term<Any> = Term::<String>::var("nick").into();
         let premises = vec![
@@ -490,14 +489,15 @@ mod tests {
             )
             .into(),
         ];
-        let plan = Planner::from(premises)
+        Planner::from(premises.clone())
             .plan(&crate::Environment::new())
             .unwrap();
 
-        // Replan against a new scope where `this` is bound.
+        // Replan against a new scope where `this` is bound — plan the
+        // same premises fresh, the production replan path.
         let mut scope = crate::Environment::new();
         scope.add("this");
-        let replanned: Conjunction = plan.plan(&scope).unwrap();
+        let replanned = Planner::from(premises).plan(&scope).unwrap();
 
         // The replanned steps still have the narrowed `is`.
         for step in &replanned.steps {

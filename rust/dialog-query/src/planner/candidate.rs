@@ -220,21 +220,6 @@ impl From<Premise> for Candidate {
     }
 }
 
-impl From<&Plan> for Candidate {
-    fn from(plan: &Plan) -> Self {
-        let premise = plan.as_premise();
-        let header = plan.header();
-        Self::Viable {
-            schema: premise.schema(),
-            params: premise.parameters(),
-            premise,
-            cost: header.cost,
-            binds: header.binds.clone(),
-            env: header.env.clone(),
-        }
-    }
-}
-
 impl TryFrom<Candidate> for Plan {
     type Error = TypeError;
 

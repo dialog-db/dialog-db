@@ -197,14 +197,6 @@ impl From<Vec<Premise>> for Planner {
     }
 }
 
-impl From<&Vec<Plan>> for Planner {
-    fn from(plans: &Vec<Plan>) -> Self {
-        Self::Active {
-            candidates: plans.iter().map(|plan| plan.into()).collect(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #[cfg(target_arch = "wasm32")]
@@ -401,7 +393,7 @@ mod tests {
         );
 
         let premises = vec![Premise::Assert(Proposition::Attribute(Box::new(hobby)))];
-        let plan = Planner::from(premises)
+        let plan = Planner::from(premises.clone())
             .plan(&Environment::new())
             .expect("Should compile");
 
@@ -416,7 +408,7 @@ mod tests {
         let mut env_with_entity = Environment::new();
         env_with_entity.add("entity");
 
-        let replanned = plan
+        let replanned = Planner::from(premises.clone())
             .plan(&env_with_entity)
             .expect("Should replan with entity");
 
@@ -427,7 +419,7 @@ mod tests {
         );
 
         // Replan back to empty → cost should return to original
-        let replanned_empty = plan
+        let replanned_empty = Planner::from(premises)
             .plan(&Environment::new())
             .expect("Should replan back to empty");
 
@@ -522,7 +514,9 @@ mod plan_ordering {
         let plan = Planner::from(name_age_premises())
             .plan(&Environment::new())
             .unwrap();
-        let replanned = plan.plan(&Environment::new()).unwrap();
+        let replanned = Planner::from(name_age_premises())
+            .plan(&Environment::new())
+            .unwrap();
 
         assert_eq!(
             signature(&plan),
@@ -547,7 +541,7 @@ mod plan_ordering {
 
         let mut bound = Environment::new();
         bound.add("person");
-        let grown = plan.plan(&bound).unwrap();
+        let grown = Planner::from(name_age_premises()).plan(&bound).unwrap();
         // With `person` bound, neither step needs to bind it, so the
         // grown plan's binds differ from the empty-scope plan.
         assert!(
@@ -555,7 +549,9 @@ mod plan_ordering {
             "binding a shared variable should not increase cost"
         );
 
-        let shrunk = grown.plan(&Environment::new()).unwrap();
+        let shrunk = Planner::from(name_age_premises())
+            .plan(&Environment::new())
+            .unwrap();
         assert_eq!(
             signature(&shrunk),
             original_sig,

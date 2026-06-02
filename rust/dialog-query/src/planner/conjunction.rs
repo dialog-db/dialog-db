@@ -1,6 +1,5 @@
-use super::{Plan, Planner};
+use super::Plan;
 use crate::Environment;
-use crate::error::TypeError;
 use crate::selection::Selection;
 use crate::source::SelectRules;
 use core::pin::Pin;
@@ -19,8 +18,9 @@ use dialog_common::ConditionalSync;
 /// The `cost` field is the sum of all step costs and is used when comparing
 /// alternative plans (e.g. across different rule bodies in a [`Disjunction`](super::Disjunction)).
 ///
-/// Create a `Conjunction` via [`Planner::plan`](super::Planner::plan) or
-/// [`Conjunction::plan`] to re-optimize with different bindings.
+/// Create a `Conjunction` via [`Planner::plan`](super::Planner::plan). To
+/// re-plan for a different scope, plan the rule's premises again — a
+/// `Conjunction` is a finalized plan, not a re-planner.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Conjunction {
     /// The ordered steps to execute
@@ -34,19 +34,6 @@ pub struct Conjunction {
 }
 
 impl Conjunction {
-    /// Re-plan this join against a new scope.
-    ///
-    /// Converts the steps back into planner candidates and re-orders them
-    /// for optimal execution given the new bindings. This is used when a
-    /// rule's premises need to be re-evaluated with different known bindings
-    /// (e.g. adornment-based optimization in concepts). Type inference
-    /// runs again on the fresh order — its output is stable across
-    /// reorderings, so this is cheap and idempotent.
-    pub fn plan(&self, scope: &Environment) -> Result<Self, TypeError> {
-        let premises: Vec<_> = self.steps.iter().map(|step| step.as_premise()).collect();
-        Planner::from(premises).plan(scope)
-    }
-
     /// Evaluate this conjunction by executing all steps in order.
     /// Each step feeds its output as input to the next, building up bindings.
     ///
