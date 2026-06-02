@@ -1,4 +1,4 @@
-use super::candidate::categorize;
+use super::feasibility::categorize;
 use crate::attribute::query::{AttributeQuery, DynamicAttributeQuery};
 use crate::concept::query::ConceptQuery;
 use crate::constraint::Constraint;

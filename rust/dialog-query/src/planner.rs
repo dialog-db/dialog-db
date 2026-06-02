@@ -1,68 +1,87 @@
-mod candidate;
 mod conjunction;
 mod disjunction;
+mod feasibility;
 mod plan;
 
-pub use candidate::*;
 pub use conjunction::*;
 pub use disjunction::*;
+pub(crate) use feasibility::categorize;
 pub use plan::*;
 
 use crate::error::TypeError;
 use crate::rule::types::TypeEnv;
 use crate::{Environment, Premise};
+use core::mem;
 
-/// State machine that greedily selects the cheapest viable premise at each
-/// step, building an ordered execution plan.
+/// Greedily orders a rule's premises into an execution plan.
 ///
-/// The planner starts in `Idle` with raw premises. On the first call to
-/// [`top`](Planner::top) it analyzes every premise against the current
-/// [`Environment`](crate::Environment), picks the viable one with the
-/// lowest cost, and transitions to `Active` with the remaining candidates
-/// cached as [`Candidate`] values. Subsequent calls incrementally update
-/// these candidates as new bindings arrive, potentially unblocking premises
-/// that were previously missing prerequisites.
-///
-/// The planner is consumed by [`Conjunction::try_from`](super::Conjunction) and
-/// [`Conjunction::plan`](super::Conjunction) which repeatedly call `top` until all
-/// premises have been planned or an error is raised.
-pub enum Planner {
-    /// Initial state with unprocessed premises.
-    Idle {
-        /// Premises waiting to be analyzed
-        premises: Vec<Premise>,
-    },
-    /// Processing state with cached candidates and current scope.
-    Active {
-        /// Candidates being evaluated for selection
-        candidates: Vec<Candidate>,
-    },
+/// Holds the rule's premises and, on [`plan`](Planner::plan), narrows
+/// them to their inferred kinds and repeatedly selects the cheapest
+/// premise that is *feasible* under the variables bound so far — its
+/// feasibility ([`adorn`](Plan::adorn) / [`feasibility::categorize`])
+/// reports the variables it binds, which extend the bound set for the
+/// next round. Cost comes from each premise's `estimate` at the current
+/// scope. The result is an ordered [`Conjunction`].
+pub struct Planner {
+    /// Premises waiting to be ordered.
+    premises: Vec<Premise>,
 }
 
 impl Planner {
     /// Produce an ordered execution plan ([`Conjunction`]) for the given scope.
     ///
-    /// Repeatedly selects the cheapest viable candidate until all premises
-    /// have been planned. Returns an error if any premise has unsatisfiable
-    /// prerequisites.
+    /// Repeatedly selects the cheapest feasible premise until all
+    /// premises have been ordered. Returns an error if some premise's
+    /// prerequisites can never be satisfied by the others.
     pub fn plan(mut self, scope: &Environment) -> Result<Conjunction, TypeError> {
         // Narrow the premises to their rule-level inferred kinds once,
         // up front, before ordering. Inference is order-independent
-        // (per-premise unification), so narrowing here yields the same
-        // result as narrowing the planned steps. The planner then only
-        // orders and lowers the already-narrowed premises.
+        // (per-premise unification).
         self.narrow()?;
 
         let env = scope.clone();
         let mut bound = scope.clone();
+        let mut remaining: Vec<Premise> = mem::take(&mut self.premises);
         let mut steps = vec![];
         let mut cost = 0;
 
-        while !self.done() {
-            let plan = self.top(&bound)?;
-            cost += plan.cost();
-            bound.extend(plan.binds());
-            steps.push(plan);
+        while !remaining.is_empty() {
+            // Pick the cheapest feasible premise under the current
+            // bound set. Feasibility (which vars it binds, or which it
+            // still needs) is the shared `categorize`; cost is the
+            // premise's own estimate over the bound variables.
+            let mut best: Option<(usize, usize, Environment)> = None;
+            for (index, premise) in remaining.iter().enumerate() {
+                let Ok(binds) = feasibility::feasible(premise, &bound) else {
+                    continue;
+                };
+                let cost = premise.estimate(&bound).unwrap_or(usize::MAX);
+                if best
+                    .as_ref()
+                    .is_none_or(|(best_cost, _, _)| cost < *best_cost)
+                {
+                    best = Some((cost, index, binds));
+                }
+            }
+
+            let Some((step_cost, index, binds)) = best else {
+                return Self::fail(&remaining, &bound);
+            };
+
+            let premise = remaining.remove(index);
+            // The variables already bound when this step runs, before
+            // it contributes its own binds.
+            let step_env = bound.clone();
+            cost += step_cost;
+            bound.extend(&binds);
+            steps.push(Plan::lower(
+                premise,
+                Header {
+                    cost: step_cost,
+                    binds,
+                    env: step_env,
+                },
+            ));
         }
 
         let mut binds = Environment::new();
@@ -80,120 +99,41 @@ impl Planner {
         })
     }
 
-    /// Narrow the planner's premises to their rule-level inferred
-    /// kinds, in place. A no-op for the `Active` state (its candidates
-    /// were already narrowed when first planned).
+    /// Narrow the planner's premises to their rule-level inferred kinds.
     fn narrow(&mut self) -> Result<(), TypeError> {
-        let Planner::Idle { premises } = self else {
-            return Ok(());
-        };
-        let types = TypeEnv::infer(premises).map_err(|err| TypeError::TypeInference {
+        let types = TypeEnv::infer(&self.premises).map_err(|err| TypeError::TypeInference {
             reason: err.to_string(),
         })?;
-        *premises = premises
+        self.premises = self
+            .premises
             .drain(..)
             .map(|premise| plan::apply_types(premise, &types))
             .collect();
         Ok(())
     }
 
-    /// Helper to create a planning error from failed candidates.
-    fn fail(candidates: &[Candidate]) -> Result<Plan, TypeError> {
-        if candidates.is_empty() {
-            return Err(TypeError::RequiredBindings {
-                required: Environment::new(),
-            });
-        }
-
-        for candidate in candidates {
-            if let Candidate::Blocked { requires, .. } = candidate
-                && !requires.is_empty()
+    /// Build a planning error when no remaining premise is feasible:
+    /// report the variables the still-blocked premises require.
+    fn fail(remaining: &[Premise], bound: &Environment) -> Result<Conjunction, TypeError> {
+        for premise in remaining {
+            if let Err(Infeasible::NeedsAll(needs)) = feasibility::feasible(premise, bound)
+                && !needs.is_empty()
             {
-                return Err(TypeError::RequiredBindings {
-                    required: requires.clone(),
-                });
+                let mut required = Environment::new();
+                for name in &needs {
+                    required.add(name.as_str());
+                }
+                return Err(TypeError::RequiredBindings { required });
             }
         }
 
-        unreachable!("Should have had at least one blocked candidate with requirements");
-    }
-
-    /// Checks if planning is complete (all premises have been planned).
-    fn done(&self) -> bool {
-        match self {
-            Self::Idle { .. } => false,
-            Self::Active { candidates } => candidates.is_empty(),
-        }
-    }
-
-    /// Selects and returns the best premise to execute next based on cost.
-    /// Updates the planner state by removing the selected premise from candidates.
-    fn top(&mut self, env: &Environment) -> Result<Plan, TypeError> {
-        match self {
-            Planner::Idle { premises } => {
-                let mut candidates = vec![];
-                let mut best: Option<(usize, usize)> = None;
-
-                for (index, premise) in premises.iter().enumerate() {
-                    let mut candidate = Candidate::from(premise.clone());
-                    candidate.update(env);
-
-                    if candidate.is_viable() {
-                        let cost = candidate.cost();
-
-                        if let Some((best_cost, _)) = &best {
-                            if cost < *best_cost {
-                                best = Some((cost, index));
-                            }
-                        } else {
-                            best = Some((cost, index));
-                        }
-                    }
-
-                    candidates.push(candidate);
-                }
-
-                if let Some((_, best_index)) = best {
-                    let candidate = candidates.remove(best_index);
-                    *self = Planner::Active { candidates };
-                    Plan::try_from(candidate)
-                } else {
-                    Self::fail(&candidates)
-                }
-            }
-            Planner::Active { candidates } => {
-                let mut best: Option<(usize, usize)> = None;
-
-                for (index, candidate) in candidates.iter_mut().enumerate() {
-                    candidate.update(env);
-
-                    if candidate.is_viable() {
-                        let cost = candidate.cost();
-
-                        if let Some((best_cost, _)) = &best {
-                            if cost < *best_cost {
-                                best = Some((cost, index));
-                            }
-                        } else {
-                            best = Some((cost, index));
-                        }
-                    }
-                }
-
-                if let Some((_, best_index)) = best {
-                    let candidate = candidates.remove(best_index);
-                    Plan::try_from(candidate)
-                } else {
-                    Self::fail(candidates)
-                }
-            }
-        }
+        unreachable!("a non-empty remaining set has at least one premise with requirements");
     }
 }
 
 impl From<Vec<Premise>> for Planner {
     fn from(premises: Vec<Premise>) -> Self {
-        Self::Idle { premises }
+        Planner { premises }
     }
 }
 
