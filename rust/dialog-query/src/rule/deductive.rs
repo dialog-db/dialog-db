@@ -295,10 +295,16 @@ mod tests {
         let analysis = rule
             .analysis()
             .expect("a compiled rule retains its analysis");
+        let premises: Vec<_> = rule
+            .join
+            .steps
+            .iter()
+            .map(|step| step.as_premise())
+            .collect();
         assert_eq!(
             analysis.graph,
-            DependencyGraph::from_steps(&rule.join.steps),
-            "retained graph must match the planned steps' dependency graph"
+            DependencyGraph::from_premises(&premises),
+            "retained graph must match the premises' dependency graph"
         );
     }
 

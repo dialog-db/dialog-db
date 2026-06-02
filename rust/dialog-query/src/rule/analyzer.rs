@@ -20,16 +20,15 @@
 //! scopes (the use case is concept-rule replanning when caller
 //! bindings change).
 
-use crate::Premise;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::constraint::Constraint;
-use crate::planner::Plan;
+use crate::planner::{Plan, categorize};
 use crate::proposition::Proposition;
 use crate::rule::types::TypeEnv;
-use crate::schema::Requirement;
 use crate::type_system::Type as Kind;
 use crate::type_system::unifier::Context;
-use std::collections::{BTreeSet, HashSet};
+use crate::{Environment, Premise};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// Variable-usage information for a single premise.
@@ -77,65 +76,34 @@ impl DependencyGraph {
         self.usage.len()
     }
 
-    /// Compute the dependency graph for a sequence of planned steps.
-    /// Walks each step's schema once: a non-blank named parameter
-    /// goes into `binds` if the schema field is `Optional` or part
-    /// of a satisfied choice group, otherwise into `needs`. Choice
-    /// groups satisfied by a constant or already-bound parameter
-    /// don't contribute to `needs`.
-    pub fn from_steps(steps: &[Plan]) -> Self {
-        let mut usage = Vec::with_capacity(steps.len());
-
-        for step in steps {
-            let is_negation = matches!(step.as_premise(), Premise::Unless(_));
-            let schema = step.schema();
-            let params = step.parameters();
-
-            // Identify choice groups satisfied by a constant in
-            // this step's parameters.
-            let mut satisfied_groups = HashSet::new();
-            for (slot_name, field) in schema.iter() {
-                if let Some(param) = params.get(slot_name)
-                    && let Requirement::Required(Some(group)) = &field.requirement
-                    && param.is_constant()
-                {
-                    satisfied_groups.insert(*group);
+    /// Compute the dependency graph for a rule's premises.
+    ///
+    /// The graph is order-independent — each premise's binds/needs come
+    /// from its own schema, and the `requires` edges from matching one
+    /// premise's needs to another's binds — so it is computed from the
+    /// premises directly, before any execution order is chosen. The
+    /// per-premise categorization reuses the planner's single
+    /// definition of feasibility ([`categorize`]) at empty scope: a
+    /// choice group is satisfied only by a constant member here, since
+    /// nothing is bound yet.
+    pub fn from_premises(premises: &[Premise]) -> Self {
+        let empty = Environment::new();
+        let usage: Vec<PremiseVars> = premises
+            .iter()
+            .map(|premise| {
+                let is_negation = matches!(premise, Premise::Unless(_));
+                let (binds, requires) = categorize(
+                    &premise.schema(),
+                    &premise.parameters(),
+                    is_negation,
+                    &empty,
+                );
+                PremiseVars {
+                    binds: binds.iter().map(String::from).collect(),
+                    needs: requires.iter().map(String::from).collect(),
                 }
-            }
-
-            let mut vars = PremiseVars::default();
-            for (slot_name, field) in schema.iter() {
-                let Some(param) = params.get(slot_name) else {
-                    continue;
-                };
-                if param.is_constant() || param.is_blank() {
-                    continue;
-                }
-                let Some(name) = param.name() else {
-                    continue;
-                };
-                match &field.requirement {
-                    Requirement::Required(None) => {
-                        vars.needs.insert(name.to_string());
-                    }
-                    Requirement::Required(Some(group)) => {
-                        if satisfied_groups.contains(group) {
-                            if !is_negation {
-                                vars.binds.insert(name.to_string());
-                            }
-                        } else {
-                            vars.needs.insert(name.to_string());
-                        }
-                    }
-                    Requirement::Optional => {
-                        if !is_negation {
-                            vars.binds.insert(name.to_string());
-                        }
-                    }
-                }
-            }
-            usage.push(vars);
-        }
+            })
+            .collect();
 
         // For each premise i, find every other premise j (j != i)
         // that binds something i needs.
@@ -267,8 +235,8 @@ pub fn analyze(
         }
     }
 
-    let premises = steps.iter().map(|step| step.as_premise()).collect();
-    let graph = DependencyGraph::from_steps(steps);
+    let premises: Vec<Premise> = steps.iter().map(|step| step.as_premise()).collect();
+    let graph = DependencyGraph::from_premises(&premises);
     Ok(AnalyzedRule {
         conclusion,
         premises,
