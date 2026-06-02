@@ -21,97 +21,92 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt::{Display, Formatter, Result as FmtResult};
 
-/// Represents a deductive rule that can be applied creating a premise.
+/// A deductive rule that has passed analysis: verified for every
+/// invariant and plannable by construction.
+///
+/// Holds the analysis — the narrowed premises, inferred types, and
+/// dependency graph — rather than a pre-baked plan. A concrete
+/// execution plan is produced per scope by [`plan`](Self::plan).
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeductiveRule {
-    /// Conclusion that this rule reaches if all premises hold. This is
-    /// typically what datalog calls rule head.
-    conclusion: ConceptDescriptor,
-    /// Execution plan for the rule's premises, ordered for optimal
-    /// evaluation. Produced by [`Planner::plan`] during compilation.
-    join: Conjunction,
-    /// Retained analysis: the dependency graph (SIPS) and inferred
-    /// types computed during compilation. `None` only for partial
-    /// rules built on a compile-error path for display.
-    analysis: Option<AnalyzedRule>,
+    /// The narrowed premises, inferred types, and dependency graph
+    /// produced by analysis.
+    analysis: AnalyzedRule,
 }
 impl Compile for DeductiveRule {
-    fn from_parts(
-        conclusion: ConceptDescriptor,
-        join: Conjunction,
-        analysis: Option<AnalyzedRule>,
-    ) -> Self {
+    fn from_analysis(analysis: AnalyzedRule) -> Self {
+        DeductiveRule { analysis }
+    }
+
+    fn in_progress(conclusion: ConceptDescriptor, premises: Vec<Premise>) -> Self {
         DeductiveRule {
-            conclusion,
-            join,
-            analysis,
+            analysis: AnalyzedRule::in_progress(conclusion, premises),
         }
     }
 }
 
 impl DeductiveRule {
-    /// Compile a rule from a conclusion and premises.
-    ///
-    /// Plans the optimal premise execution order, validates that every
-    /// conclusion variable is grounded by at least one positive premise,
-    /// and runs the type-inference check that required head variables
-    /// are not bound only by optional (set-widened) sources.
+    /// Analyze a rule from a conclusion and premises into a verified,
+    /// plannable rule. Runs type inference + narrowing, validates that
+    /// every conclusion variable is grounded by a positive premise and
+    /// that required head variables are not bound only by optional
+    /// (set-widened) sources, and confirms the body is plannable.
     pub fn new(conclusion: ConceptDescriptor, premises: Vec<Premise>) -> Result<Self, TypeError> {
         <Self as Compile>::compile(conclusion, premises)
     }
 
     /// Returns the conclusion predicate for this rule.
     pub fn conclusion(&self) -> &ConceptDescriptor {
-        &self.conclusion
+        &self.analysis.conclusion
     }
 
-    /// Returns the retained analysis (dependency graph / SIPS and
-    /// inferred types) for this rule, if it compiled successfully.
-    pub fn analysis(&self) -> Option<&AnalyzedRule> {
-        self.analysis.as_ref()
+    /// Returns this rule's analysis (narrowed premises, inferred
+    /// types, dependency graph).
+    pub fn analysis(&self) -> &AnalyzedRule {
+        &self.analysis
     }
 
-    /// Re-plan this rule's premises against a new scope.
-    ///
-    /// If replanning with the new bindings fails, falls back to the
-    /// original compiled join plan.
+    /// Plan this rule's premises against a scope, producing a concrete
+    /// execution plan ([`Conjunction`]) ordered for the given bindings.
     pub fn plan(&self, scope: &Environment) -> Conjunction {
-        self.join.plan(scope).unwrap_or_else(|_| self.join.clone())
+        Planner::from(self.analysis.premises.clone())
+            .plan(scope)
+            .expect("an analyzed rule is plannable by construction")
     }
 
     /// Returns an iterator over the operand names of this rule's conclusion.
     pub fn operands(&self) -> impl Iterator<Item = &str> {
-        self.conclusion.operands()
+        self.conclusion().operands()
     }
     /// Returns the names of the parameters for this rule.
     pub fn parameters(&self) -> impl Iterator<Item = &str> {
-        self.conclusion.operands()
+        self.conclusion().operands()
     }
 
     /// Creates a rule application by binding the provided terms to this rule's parameters.
     /// Validates that all required parameters are provided and returns an error if the
     /// application would be invalid.
     pub fn apply(&self, parameters: Parameters) -> Result<Proposition, TypeError> {
-        self.conclusion.apply(parameters)
+        self.conclusion().apply(parameters)
     }
 
     /// Converts this compiled rule back into a serializable [`DeductiveRuleDescriptor`].
     ///
-    /// Reconstructs the `when`/`unless` split from the compiled premises.
+    /// Reconstructs the `when`/`unless` split from the analyzed premises.
     pub fn descriptor(&self) -> DeductiveRuleDescriptor {
         let mut when = Vec::new();
         let mut unless = Vec::new();
 
-        for step in &self.join.steps {
-            match step.as_premise() {
-                Premise::Assert(proposition) => when.push(proposition),
-                Premise::Unless(Negation(proposition)) => unless.push(proposition),
+        for premise in &self.analysis.premises {
+            match premise {
+                Premise::Assert(proposition) => when.push(proposition.clone()),
+                Premise::Unless(Negation(proposition)) => unless.push(proposition.clone()),
             }
         }
 
         DeductiveRuleDescriptor {
             description: None,
-            deduce: self.conclusion.clone(),
+            deduce: self.conclusion().clone(),
             when,
             unless,
         }
@@ -133,7 +128,7 @@ impl<'de> Deserialize<'de> for DeductiveRule {
 
 impl Display for DeductiveRule {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        fmt_rule_schema(&self.conclusion, f)
+        fmt_rule_schema(self.conclusion(), f)
     }
 }
 
@@ -292,18 +287,10 @@ mod tests {
         ];
         let rule = DeductiveRule::new(conclusion, premises).expect("rule compiles");
 
-        let analysis = rule
-            .analysis()
-            .expect("a compiled rule retains its analysis");
-        let premises: Vec<_> = rule
-            .join
-            .steps
-            .iter()
-            .map(|step| step.as_premise())
-            .collect();
+        let analysis = rule.analysis();
         assert_eq!(
             analysis.graph,
-            DependencyGraph::from_premises(&premises),
+            DependencyGraph::from_premises(&analysis.premises),
             "retained graph must match the premises' dependency graph"
         );
     }
@@ -500,7 +487,7 @@ mod tests {
         ];
         let result = DeductiveRule::new(conclusion, premises);
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result.err());
-        assert_eq!(result.unwrap().join.steps.len(), 2);
+        assert_eq!(result.unwrap().analysis().premises.len(), 2);
     }
 
     #[dialog_common::test]
@@ -627,8 +614,8 @@ mod tests {
 
         let mut required = 0;
         let mut optional = 0;
-        for step in rule.join.steps.iter() {
-            if let Premise::Assert(Proposition::Attribute(query)) = step.as_premise() {
+        for premise in rule.analysis().premises.iter() {
+            if let Premise::Assert(Proposition::Attribute(query)) = premise {
                 match query.resolution() {
                     Resolution::Required => required += 1,
                     Resolution::Optional => optional += 1,
@@ -674,8 +661,8 @@ mod tests {
 
         let mut required = 0;
         let mut optional = 0;
-        for step in rule.join.steps.iter() {
-            if let Premise::Assert(Proposition::Attribute(query)) = step.as_premise() {
+        for premise in rule.analysis().premises.iter() {
+            if let Premise::Assert(Proposition::Attribute(query)) = premise {
                 match query.resolution() {
                     Resolution::Required => required += 1,
                     Resolution::Optional => optional += 1,

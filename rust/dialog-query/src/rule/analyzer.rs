@@ -175,6 +175,19 @@ pub struct AnalyzedRule {
 }
 
 impl AnalyzedRule {
+    /// Build a partial, *unanalyzed* rule for display only — used to
+    /// embed an in-progress rule in a compile error. Carries the
+    /// conclusion and premises but an empty type env and graph; such a
+    /// rule is never planned or evaluated.
+    pub fn in_progress(conclusion: ConceptDescriptor, premises: Vec<Premise>) -> Self {
+        AnalyzedRule {
+            conclusion,
+            premises,
+            types: Arc::new(TypeEnv::new()),
+            graph: DependencyGraph::default(),
+        }
+    }
+
     /// Iterate over the analyzed premises.
     pub fn premises(&self) -> impl Iterator<Item = &Premise> {
         self.premises.iter()

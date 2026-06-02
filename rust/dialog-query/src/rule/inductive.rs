@@ -20,7 +20,7 @@ pub mod descriptor;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::TypeError;
 use crate::negation::Negation;
-use crate::planner::Conjunction;
+use crate::planner::{Conjunction, Planner};
 use crate::premise::Premise;
 use crate::rule::analyzer::AnalyzedRule;
 use crate::rule::{Compile, fmt_rule_schema};
@@ -30,72 +30,66 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt::{Display, Formatter, Result as FmtResult};
 
-/// A compiled inductive rule. Assertion-shaped sibling of
-/// [`DeductiveRule`](crate::rule::DeductiveRule).
+/// An inductive rule that has passed analysis. Assertion-shaped
+/// sibling of [`DeductiveRule`](crate::rule::DeductiveRule); holds the
+/// analysis and plans per scope.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InductiveRule {
-    /// Concept this rule asserts when its body matches.
-    conclusion: ConceptDescriptor,
-    /// Planned execution order for the body's premises.
-    join: Conjunction,
-    /// Retained analysis: the dependency graph (SIPS) and inferred
-    /// types computed during compilation. `None` only for partial
-    /// rules built on a compile-error path for display.
-    analysis: Option<AnalyzedRule>,
+    /// The narrowed premises, inferred types, and dependency graph
+    /// produced by analysis.
+    analysis: AnalyzedRule,
 }
 
 impl Compile for InductiveRule {
-    fn from_parts(
-        conclusion: ConceptDescriptor,
-        join: Conjunction,
-        analysis: Option<AnalyzedRule>,
-    ) -> Self {
+    fn from_analysis(analysis: AnalyzedRule) -> Self {
+        InductiveRule { analysis }
+    }
+
+    fn in_progress(conclusion: ConceptDescriptor, premises: Vec<Premise>) -> Self {
         InductiveRule {
-            conclusion,
-            join,
-            analysis,
+            analysis: AnalyzedRule::in_progress(conclusion, premises),
         }
     }
 }
 
 impl InductiveRule {
-    /// Compile a rule from a head concept and body premises.
-    ///
-    /// Runs the shared analysis pipeline (planner + unbound-variable
-    /// check). The only semantic difference from
+    /// Analyze a rule from a head concept and body premises into a
+    /// verified, plannable rule. Runs the shared analysis pipeline; the
+    /// only difference from
     /// [`DeductiveRule::new`](crate::rule::DeductiveRule::new) is what
-    /// the evaluator does at runtime; compile-time checks are
-    /// identical today.
+    /// the evaluator does at runtime.
     pub fn new(conclusion: ConceptDescriptor, premises: Vec<Premise>) -> Result<Self, TypeError> {
         <Self as Compile>::compile(conclusion, premises)
     }
 
     /// The concept this rule asserts when its body matches.
     pub fn conclusion(&self) -> &ConceptDescriptor {
-        &self.conclusion
+        &self.analysis.conclusion
     }
 
-    /// Returns the retained analysis (dependency graph / SIPS and
-    /// inferred types) for this rule, if it compiled successfully.
-    pub fn analysis(&self) -> Option<&AnalyzedRule> {
-        self.analysis.as_ref()
+    /// Returns this rule's analysis (narrowed premises, inferred
+    /// types, dependency graph).
+    pub fn analysis(&self) -> &AnalyzedRule {
+        &self.analysis
     }
 
-    /// Re-plan this rule's premises against a new scope; falls back
-    /// to the original plan if replanning fails.
+    /// Plan this rule's premises against a scope, producing a concrete
+    /// execution plan ([`Conjunction`]) ordered for the given bindings.
     pub fn plan(&self, scope: &Environment) -> Conjunction {
-        self.join.plan(scope).unwrap_or_else(|_| self.join.clone())
+        Planner::from(self.analysis.premises.clone())
+            .plan(scope)
+            .expect("an analyzed rule is plannable by construction")
     }
 
     /// Operand names of the head.
     pub fn operands(&self) -> impl Iterator<Item = &str> {
-        self.conclusion.operands()
+        self.conclusion().operands()
     }
 
     /// Bind concrete parameters into the head and produce the
     /// resulting proposition.
     pub fn apply(&self, parameters: Parameters) -> Result<Proposition, TypeError> {
-        self.conclusion.apply(parameters)
+        self.conclusion().apply(parameters)
     }
 
     /// Round-trip this rule back to its serializable form.
@@ -103,16 +97,16 @@ impl InductiveRule {
         let mut when = Vec::new();
         let mut unless = Vec::new();
 
-        for step in &self.join.steps {
-            match step.as_premise() {
-                Premise::Assert(proposition) => when.push(proposition),
-                Premise::Unless(Negation(proposition)) => unless.push(proposition),
+        for premise in &self.analysis.premises {
+            match premise {
+                Premise::Assert(proposition) => when.push(proposition.clone()),
+                Premise::Unless(Negation(proposition)) => unless.push(proposition.clone()),
             }
         }
 
         InductiveRuleDescriptor {
             description: None,
-            assert: self.conclusion.clone(),
+            assert: self.conclusion().clone(),
             when,
             unless,
         }
@@ -134,7 +128,7 @@ impl<'de> Deserialize<'de> for InductiveRule {
 
 impl Display for InductiveRule {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        fmt_rule_schema(&self.conclusion, f)
+        fmt_rule_schema(self.conclusion(), f)
     }
 }
 
