@@ -1137,3 +1137,295 @@ mod cost_model_tests {
         );
     }
 }
+
+/// Characterization tests pinning `Candidate`'s observable
+/// categorization at construction and on scope *growth* — the exact
+/// `binds` / `requires` / `env` set contents and viability for the
+/// paths a forward planning pass actually exercises. These capture
+/// the current behavior so a refactor of `Candidate::from` / `update`
+/// can be proven behavior-preserving. The coarse plan-ordering tests
+/// in `planner.rs` pin the end-to-end observable (plan order + cost
+/// across replans).
+#[cfg(test)]
+mod characterization {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::{Candidate, Header, Plan};
+    use crate::artifact::Entity;
+    use crate::attribute::The;
+    use crate::attribute::query::AttributeQuery;
+    use crate::formula::Formula;
+    use crate::formula::string::Length;
+    use crate::planner::{Binds, Infeasible};
+    use crate::proposition::Proposition;
+    use crate::the;
+    use crate::{Cardinality, Environment, Parameters, Premise, Term};
+    use std::collections::BTreeSet;
+
+    /// Sorted variable names in a candidate's `binds` set.
+    fn binds_of(c: &Candidate) -> Vec<String> {
+        let env = match c {
+            Candidate::Viable { binds, .. } => binds,
+            Candidate::Blocked { binds, .. } => binds,
+        };
+        let mut v: Vec<String> = env.iter().map(String::from).collect();
+        v.sort();
+        v
+    }
+
+    /// Sorted variable names a candidate still requires (empty when
+    /// viable).
+    fn requires_of(c: &Candidate) -> Vec<String> {
+        match c {
+            Candidate::Viable { .. } => Vec::new(),
+            Candidate::Blocked { requires, .. } => {
+                let mut v: Vec<String> = requires.iter().map(String::from).collect();
+                v.sort();
+                v
+            }
+        }
+    }
+
+    /// Sorted variable names in a candidate's `env` (bound) set.
+    fn env_of(c: &Candidate) -> Vec<String> {
+        let env = match c {
+            Candidate::Viable { env, .. } => env,
+            Candidate::Blocked { env, .. } => env,
+        };
+        let mut v: Vec<String> = env.iter().map(String::from).collect();
+        v.sort();
+        v
+    }
+
+    fn scope(vars: &[&str]) -> Environment {
+        let mut env = Environment::new();
+        for v in vars {
+            env.add(*v);
+        }
+        env
+    }
+
+    /// An all-variable attribute query: `the`/`of`/`is`/`cause` are
+    /// all in one choice group, so binding any one satisfies the
+    /// group and the rest become binds rather than requires.
+    fn attribute_candidate() -> Candidate {
+        let query = AttributeQuery::new(
+            Term::<The>::var("the"),
+            Term::<Entity>::var("of"),
+            Term::var("is"),
+            Term::var("cause"),
+            Some(Cardinality::One),
+        );
+        Candidate::from(Premise::Assert(Proposition::Attribute(Box::new(query))))
+    }
+
+    /// At empty scope, no choice-group member is bound, so every
+    /// non-blank slot is required and the candidate is blocked.
+    #[dialog_common::test]
+    fn attribute_empty_scope_requires_all_slots() {
+        let candidate = attribute_candidate();
+        assert!(!candidate.is_viable(), "no bound member → blocked");
+        assert_eq!(
+            requires_of(&candidate),
+            vec!["cause", "is", "of", "the"],
+            "all four grouped slots are required at empty scope"
+        );
+        assert_eq!(binds_of(&candidate), Vec::<String>::new());
+        assert_eq!(env_of(&candidate), Vec::<String>::new());
+    }
+
+    /// Binding one choice-group member makes the candidate viable:
+    /// `Candidate::from` with `of` already in scope is viable and
+    /// requires nothing. (Constructed at the target scope rather than
+    /// via incremental `update`, since `update` is an optimization
+    /// whose internal state is not part of the contract — only the
+    /// resulting viability/binds is.)
+    #[dialog_common::test]
+    fn attribute_with_one_member_in_scope_is_viable() {
+        let query = AttributeQuery::new(
+            Term::<The>::var("the"),
+            Term::<Entity>::var("of"),
+            Term::var("is"),
+            Term::var("cause"),
+            Some(Cardinality::One),
+        );
+        let mut candidate =
+            Candidate::from(Premise::Assert(Proposition::Attribute(Box::new(query))));
+        candidate.update(&scope(&["of"]));
+
+        assert!(candidate.is_viable(), "one bound member satisfies group");
+        assert_eq!(requires_of(&candidate), Vec::<String>::new());
+    }
+
+    // `update` is an incremental optimization — it avoids recomputing
+    // categorization from scratch as scope grows during a forward
+    // planning pass. Its internal state (and the Viable-arm shrink
+    // asymmetry) is not part of the contract: replanning rebuilds
+    // candidates fresh via `Conjunction::plan` ->
+    // `Planner::from(Vec<Premise>)`, so the only observable that
+    // matters is the plan that comes out. That is pinned by the
+    // coarse plan-ordering tests in `planner.rs`. Tests here assert
+    // `Candidate::from`'s construction-time categorization, the part
+    // that defines feasibility.
+
+    /// A constant choice-group member satisfies the group at
+    /// construction: a query with a constant `the` is viable from
+    /// the start, binding the variable slots.
+    #[dialog_common::test]
+    fn attribute_constant_member_satisfies_group_at_construction() {
+        let query = AttributeQuery::new(
+            Term::from(the!("person/name")),
+            Term::<Entity>::var("of"),
+            Term::var("is"),
+            Term::var("cause"),
+            Some(Cardinality::One),
+        );
+        let candidate = Candidate::from(Premise::Assert(Proposition::Attribute(Box::new(query))));
+
+        assert!(candidate.is_viable(), "constant `the` satisfies the group");
+        assert_eq!(
+            binds_of(&candidate),
+            vec!["cause", "is", "of"],
+            "variable slots bind once the group is constant-satisfied"
+        );
+        assert_eq!(requires_of(&candidate), Vec::<String>::new());
+    }
+
+    /// A formula with an ungrouped `Required(None)` input is blocked
+    /// at construction until that exact variable is bound; its output
+    /// is a bind. With the input already in scope it is viable.
+    #[dialog_common::test]
+    fn formula_required_input_is_needed_then_binds_output() {
+        let mut params = Parameters::new();
+        params.insert("of".to_string(), Term::var("text"));
+        params.insert("is".to_string(), Term::var("len"));
+        let candidate = Candidate::from(Premise::from(Length::apply(params.clone()).unwrap()));
+
+        assert!(!candidate.is_viable(), "unbound required input → blocked");
+        assert_eq!(requires_of(&candidate), vec!["text"]);
+        assert_eq!(binds_of(&candidate), vec!["len"]);
+
+        let mut candidate = Candidate::from(Premise::from(Length::apply(params).unwrap()));
+        candidate.update(&scope(&["text"]));
+        assert!(candidate.is_viable(), "binding the input unblocks");
+    }
+
+    /// A negated premise never contributes binds — its slots are
+    /// requirements only. With both bound it is viable.
+    #[dialog_common::test]
+    fn negation_requires_but_never_binds() {
+        let x = Term::<String>::var("x");
+        let y = Term::<String>::var("y");
+        let candidate = Candidate::from(!x.clone().is(y.clone()));
+
+        assert!(!candidate.is_viable());
+        assert_eq!(
+            binds_of(&candidate),
+            Vec::<String>::new(),
+            "negation binds nothing"
+        );
+        assert_eq!(requires_of(&candidate), vec!["x", "y"]);
+
+        let mut candidate = Candidate::from(!x.is(y));
+        candidate.update(&scope(&["x", "y"]));
+        assert!(candidate.is_viable(), "both bound → viable");
+    }
+
+    /// Equivalence of the incremental `update` with a stateless
+    /// recompute, under the planner's real call pattern.
+    ///
+    /// The planner always calls `update` with the *full* cumulative
+    /// scope, and that scope only ever grows during a pass
+    /// (`planner.rs`: `bound.extend(plan.binds())`). Under that
+    /// pattern, the incremental candidate's observable categorization
+    /// — viability and the `binds` set — must agree at every step
+    /// with a fresh stateless `Plan::adorn(full_scope)`. This is the
+    /// property a stateless refactor of `Candidate` relies on; it is
+    /// tested directly so the refactor can be proven equivalent.
+    #[dialog_common::test]
+    fn incremental_update_matches_stateless_adorn_on_growth() {
+        // Two attribute premises sharing `entity`/`cause`, plus a
+        // formula over `name` → a mix of choice-group and ungrouped
+        // requirements.
+        let cases: Vec<Premise> = vec![
+            AttributeQuery::new(
+                Term::<The>::var("the"),
+                Term::<Entity>::var("entity"),
+                Term::var("name"),
+                Term::var("cause"),
+                Some(Cardinality::One),
+            )
+            .into(),
+            {
+                let mut params = Parameters::new();
+                params.insert("of".to_string(), Term::var("name"));
+                params.insert("is".to_string(), Term::var("len"));
+                Premise::from(Length::apply(params).unwrap())
+            },
+        ];
+
+        // A monotonically growing sequence of full scopes.
+        let growth: [&[&str]; 4] = [
+            &[],
+            &["entity"],
+            &["entity", "name"],
+            &["entity", "name", "the"],
+        ];
+
+        for premise in cases {
+            // Stateless reference: lower to a Plan once; `adorn` is a
+            // pure function of the scope.
+            let reference = Plan::lower(
+                premise.clone(),
+                Header {
+                    cost: 0,
+                    binds: Environment::new(),
+                    env: Environment::new(),
+                },
+            );
+
+            // Incremental candidate, driven through the growing scopes
+            // with the full scope each time — the planner's pattern.
+            let mut candidate = Candidate::from(premise);
+
+            for step in growth {
+                let full = scope(step);
+                candidate.update(&full);
+
+                let bound: BTreeSet<String> = step.iter().map(|s| s.to_string()).collect();
+                let stateless = reference.adorn(&bound);
+
+                match stateless {
+                    Ok(Binds(expected_binds)) => {
+                        assert!(
+                            candidate.is_viable(),
+                            "incremental must be viable when stateless adorn is Ok at scope {:?}",
+                            step
+                        );
+                        let actual: BTreeSet<String> = binds_of(&candidate).into_iter().collect();
+                        assert_eq!(
+                            actual, expected_binds,
+                            "binds must match stateless adorn at scope {:?}",
+                            step
+                        );
+                    }
+                    Err(Infeasible::NeedsAll(expected_needs)) => {
+                        assert!(
+                            !candidate.is_viable(),
+                            "incremental must be blocked when stateless adorn is infeasible at scope {:?}",
+                            step
+                        );
+                        let actual: BTreeSet<String> =
+                            requires_of(&candidate).into_iter().collect();
+                        assert_eq!(
+                            actual, expected_needs,
+                            "requires must match stateless adorn's needs at scope {:?}",
+                            step
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

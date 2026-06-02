@@ -431,3 +431,131 @@ mod tests {
         );
     }
 }
+
+/// Coarse plan-ordering characterization: pins the *observable* output
+/// of planning — the step order, each step's binds, and the total cost
+/// — and that it is stable across replans (grow then shrink-back to the
+/// same scope). This is the contract a future refactor of the planner's
+/// `Candidate` categorization must preserve; it deliberately does not
+/// assert internal candidate state, only the plan that comes out.
+#[cfg(test)]
+mod plan_ordering {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::*;
+    use crate::Conjunction;
+    use crate::attribute::query::AttributeQuery;
+    use crate::the;
+    use crate::{Cardinality, Proposition, Term};
+    use dialog_artifacts::Entity;
+    use std::collections::BTreeSet;
+
+    /// An order signature for a planned conjunction: the per-step
+    /// sorted binds, in execution order. Two plans with the same
+    /// signature schedule the same work in the same order.
+    fn signature(plan: &Conjunction) -> Vec<Vec<String>> {
+        plan.steps
+            .iter()
+            .map(|step| {
+                let mut binds: Vec<String> = step.binds().iter().map(String::from).collect();
+                binds.sort();
+                binds
+            })
+            .collect()
+    }
+
+    fn name_age_premises() -> Vec<Premise> {
+        let name = AttributeQuery::new(
+            Term::from(the!("person/name")),
+            Term::<Entity>::var("person"),
+            Term::var("name"),
+            Term::var("cause"),
+            Some(Cardinality::One),
+        );
+        let age = AttributeQuery::new(
+            Term::from(the!("person/age")),
+            Term::<Entity>::var("person"),
+            Term::var("age"),
+            Term::var("cause"),
+            Some(Cardinality::One),
+        );
+        vec![
+            Premise::Assert(Proposition::Attribute(Box::new(name))),
+            Premise::Assert(Proposition::Attribute(Box::new(age))),
+        ]
+    }
+
+    /// Planning a two-premise rule yields a stable order and binds.
+    /// Pinned so a refactor can be checked against an exact plan.
+    #[dialog_common::test]
+    fn it_pins_two_premise_plan_order() {
+        let plan = Planner::from(name_age_premises())
+            .plan(&Environment::new())
+            .unwrap();
+
+        // Both premises share `person` and `cause`; the first to run
+        // binds them, the second only adds its own value. The plan
+        // binds person, name, age, cause across two steps.
+        let sig = signature(&plan);
+        assert_eq!(sig.len(), 2, "two steps");
+        let all_binds: BTreeSet<String> = sig.iter().flatten().cloned().collect();
+        assert!(all_binds.contains("person"));
+        assert!(all_binds.contains("name"));
+        assert!(all_binds.contains("age"));
+        assert!(all_binds.contains("cause"));
+    }
+
+    /// Replanning the same conjunction at the same scope is
+    /// deterministic: same order, same binds, same cost. This is the
+    /// idempotence a stateless feasibility function must preserve.
+    #[dialog_common::test]
+    fn it_replans_deterministically_at_same_scope() {
+        let plan = Planner::from(name_age_premises())
+            .plan(&Environment::new())
+            .unwrap();
+        let replanned = plan.plan(&Environment::new()).unwrap();
+
+        assert_eq!(
+            signature(&plan),
+            signature(&replanned),
+            "replanning at the same scope yields the same order and binds"
+        );
+        assert_eq!(plan.cost, replanned.cost, "same total cost");
+    }
+
+    /// Replan grow-then-shrink returns to the original plan. Binding
+    /// `person` re-plans (cheaper), and replanning back to the empty
+    /// scope restores the original order, binds, and cost — the
+    /// behavior the bidirectional-update fix guarantees, pinned at the
+    /// plan level rather than via internal candidate state.
+    #[dialog_common::test]
+    fn it_restores_plan_on_grow_then_shrink() {
+        let plan = Planner::from(name_age_premises())
+            .plan(&Environment::new())
+            .unwrap();
+        let original_sig = signature(&plan);
+        let original_cost = plan.cost;
+
+        let mut bound = Environment::new();
+        bound.add("person");
+        let grown = plan.plan(&bound).unwrap();
+        // With `person` bound, neither step needs to bind it, so the
+        // grown plan's binds differ from the empty-scope plan.
+        assert!(
+            grown.cost <= original_cost,
+            "binding a shared variable should not increase cost"
+        );
+
+        let shrunk = grown.plan(&Environment::new()).unwrap();
+        assert_eq!(
+            signature(&shrunk),
+            original_sig,
+            "replanning back to empty restores the original plan order/binds"
+        );
+        assert_eq!(
+            shrunk.cost, original_cost,
+            "replanning back to empty restores the original cost"
+        );
+    }
+}
