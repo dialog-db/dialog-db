@@ -445,9 +445,10 @@ mod plan_ordering {
 
     use super::*;
     use crate::Conjunction;
+    use crate::attribute::The;
     use crate::attribute::query::AttributeQuery;
     use crate::the;
-    use crate::{Cardinality, Proposition, Term};
+    use crate::{Cardinality, Parameters, Proposition, Term};
     use dialog_artifacts::Entity;
     use std::collections::BTreeSet;
 
@@ -557,5 +558,266 @@ mod plan_ordering {
             shrunk.cost, original_cost,
             "replanning back to empty restores the original cost"
         );
+    }
+
+    // A discriminant tag per step, so order tests can assert the exact
+    // *kind* of each step in sequence (not just its binds).
+    fn kinds(plan: &Conjunction) -> Vec<&'static str> {
+        plan.steps
+            .iter()
+            .map(|step| match step {
+                Plan::Scan(..) => "scan",
+                Plan::Formula(..) => "formula",
+                Plan::Constraint(..) => "constraint",
+                Plan::Concept(..) => "concept",
+                Plan::Negate(..) => "negate",
+            })
+            .collect()
+    }
+
+    fn attribute(the: Term<The>, entity: &str, value: &str) -> Premise {
+        AttributeQuery::new(
+            the,
+            Term::<Entity>::var(entity),
+            Term::var(value),
+            Term::var("cause"),
+            Some(Cardinality::One),
+        )
+        .into()
+    }
+
+    fn length_formula(input: &str, output: &str) -> Premise {
+        use crate::formula::Formula;
+        use crate::formula::string::Length;
+        let mut params = Parameters::new();
+        params.insert("of".to_string(), Term::var(input));
+        params.insert("is".to_string(), Term::var(output));
+        Premise::from(Length::apply(params).unwrap())
+    }
+
+    /// A formula consuming an attribute's value must be scheduled
+    /// *after* the attribute that binds its input — a formula whose
+    /// required input is unbound is not viable, so the scan goes first.
+    #[dialog_common::test]
+    fn it_orders_formula_after_its_input_scan() {
+        let premises = vec![
+            // Formula listed first, but it needs `name` which only the
+            // scan binds.
+            length_formula("name", "len"),
+            attribute(Term::from(the!("person/name")), "person", "name"),
+        ];
+        let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
+
+        assert_eq!(
+            kinds(&plan),
+            vec!["scan", "formula"],
+            "the scan binding the formula's input must run first"
+        );
+    }
+
+    /// A negation only filters once its variables are bound, so a
+    /// negated constraint over a scan's output is scheduled after the
+    /// scan, never first.
+    #[dialog_common::test]
+    fn it_orders_negation_after_its_variables_are_bound() {
+        let x = Term::<String>::var("name");
+        let y = Term::<String>::var("forbidden");
+        let premises = vec![
+            // Negated equality needs both `name` and `forbidden`
+            // bound; the scans bind them.
+            !x.is(y),
+            attribute(Term::from(the!("person/name")), "person", "name"),
+            attribute(Term::from(the!("ban/name")), "ban", "forbidden"),
+        ];
+        let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
+
+        let order = kinds(&plan);
+        assert_eq!(order.len(), 3);
+        assert_eq!(
+            order[2], "negate",
+            "negation runs last, after its variables are bound by the scans"
+        );
+        assert_eq!(order[0], "scan");
+        assert_eq!(order[1], "scan");
+    }
+
+    /// The greedy planner orders the cheaper premise first: a scan with
+    /// a bound entity (LOOKUP) before a fully-unbound scan
+    /// (RANGE_SCAN). Pins the cost-driven choice.
+    #[dialog_common::test]
+    fn it_orders_cheaper_scan_first() {
+        // `a` shares `person` with `b`. At empty scope `a` (constant
+        // entity via the shared var path) and `b` differ in cost; the
+        // planner picks the one that constrains more first. Concretely:
+        // a scan that can bind `person` cheaply unlocks the other.
+        let alice = Entity::try_from("urn:alice".to_string()).unwrap();
+        let bound_entity: Premise = AttributeQuery::new(
+            Term::from(the!("person/name")),
+            Term::from(alice),
+            Term::var("name"),
+            Term::var("cause"),
+            Some(Cardinality::One),
+        )
+        .into();
+        let open: Premise = attribute(Term::from(the!("greeting/text")), "name", "greeting");
+
+        let plan = Planner::from(vec![open.clone(), bound_entity.clone()])
+            .plan(&Environment::new())
+            .unwrap();
+
+        // The entity-bound scan is cheaper (LOOKUP) and binds `name`,
+        // which the other scan needs as its entity — so it must run
+        // first regardless of input order.
+        assert_eq!(kinds(&plan), vec!["scan", "scan"]);
+        assert!(
+            plan.steps[0].binds().contains("name"),
+            "the cheaper, entity-bound scan runs first and binds `name`"
+        );
+
+        // Same result with the inputs reversed — ordering is by cost,
+        // not by position.
+        let reversed = Planner::from(vec![bound_entity, open])
+            .plan(&Environment::new())
+            .unwrap();
+        assert_eq!(signature(&plan), signature(&reversed));
+    }
+
+    /// A mixed body — scans, a formula, an equality constraint, and a
+    /// negation — plans into a deterministic order that is stable
+    /// across replans at the same scope. This is the broad guardrail
+    /// the stateless `Candidate` refactor must preserve.
+    #[dialog_common::test]
+    fn it_plans_mixed_body_deterministically() {
+        let x = Term::<String>::var("name");
+        let y = Term::<String>::var("nick");
+        let premises = vec![
+            attribute(Term::from(the!("person/name")), "person", "name"),
+            length_formula("name", "len"),
+            attribute(Term::from(the!("person/nick")), "person", "nick"),
+            // equality constraint between two bound values
+            x.is(y),
+        ];
+
+        let plan = Planner::from(premises.clone())
+            .plan(&Environment::new())
+            .unwrap();
+        let replanned = Planner::from(premises).plan(&Environment::new()).unwrap();
+
+        assert_eq!(
+            kinds(&plan),
+            kinds(&replanned),
+            "mixed-body plan kind-order is deterministic across replans"
+        );
+        assert_eq!(
+            signature(&plan),
+            signature(&replanned),
+            "mixed-body plan binds-order is deterministic across replans"
+        );
+        assert_eq!(plan.cost, replanned.cost, "mixed-body cost is stable");
+
+        // Every premise kind that can bind appears; the formula and
+        // constraint come after the scans that bind their inputs.
+        let order = kinds(&plan);
+        let first_scan = order.iter().position(|k| *k == "scan").unwrap();
+        let formula_pos = order.iter().position(|k| *k == "formula").unwrap();
+        assert!(
+            formula_pos > first_scan,
+            "formula is scheduled after the scan binding its input"
+        );
+    }
+
+    /// A concept premise lowers to a `Plan::Concept` step and plans in
+    /// a mixed body, scheduled after a scan that binds its `this`.
+    #[dialog_common::test]
+    fn it_plans_concept_premise() {
+        use crate::concept::query::ConceptQuery;
+        use crate::{AttributeDescriptor, ConceptDescriptor, Type};
+
+        let concept = ConceptDescriptor::try_from([(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "person name",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )])
+        .unwrap();
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::var("person"));
+        terms.insert("name".to_string(), Term::var("name"));
+        let concept_premise = Premise::Assert(Proposition::Concept(ConceptQuery {
+            terms,
+            predicate: concept,
+        }));
+
+        let premises = vec![
+            attribute(Term::from(the!("org/member")), "org", "person"),
+            concept_premise,
+        ];
+        let plan = Planner::from(premises.clone())
+            .plan(&Environment::new())
+            .unwrap();
+        let replanned = Planner::from(premises).plan(&Environment::new()).unwrap();
+
+        assert!(
+            kinds(&plan).contains(&"concept"),
+            "the concept premise lowers to a Plan::Concept step"
+        );
+        assert_eq!(
+            kinds(&plan),
+            kinds(&replanned),
+            "concept-in-body plan order is deterministic"
+        );
+        assert_eq!(plan.cost, replanned.cost);
+    }
+
+    /// A coalesce constraint (set-widening unwrap) lowers to a
+    /// `Plan::Constraint` step and plans alongside a scan. Because the
+    /// coalesce `source` is *optional* (set-widened), the constraint
+    /// does not require `nickname` bound to run — it can fall back —
+    /// so it is viable at empty scope and, being cheap (cost 1), the
+    /// greedy planner schedules it first. This pins the actual
+    /// behavior: an optional source makes coalesce orderable before
+    /// the scan that would bind it.
+    #[dialog_common::test]
+    fn it_plans_coalesce_constraint() {
+        let nickname: Term<Option<String>> = Term::var("nickname");
+        let display: Term<String> = Term::var("display");
+        let coalesce = nickname.unwrap_or("Anon".to_string()).is(display);
+
+        let nickname_scan = AttributeQuery::new(
+            Term::from(the!("person/nickname")),
+            Term::<Entity>::var("person"),
+            // optional source term so the scan yields Absent on miss
+            Term::<Option<String>>::var("nickname").into(),
+            Term::var("cause"),
+            Some(Cardinality::One),
+        );
+
+        let premises = vec![
+            coalesce,
+            Premise::Assert(Proposition::Attribute(Box::new(nickname_scan))),
+        ];
+        let plan = Planner::from(premises.clone())
+            .plan(&Environment::new())
+            .unwrap();
+
+        let order = kinds(&plan);
+        assert_eq!(order.len(), 2);
+        assert!(
+            order.contains(&"constraint"),
+            "coalesce lowers to Constraint"
+        );
+        assert!(order.contains(&"scan"));
+        assert_eq!(
+            order,
+            vec!["constraint", "scan"],
+            "an optional-source coalesce is viable immediately and, being cheap, runs first"
+        );
+
+        // Deterministic across replans.
+        let replanned = Planner::from(premises).plan(&Environment::new()).unwrap();
+        assert_eq!(kinds(&plan), kinds(&replanned));
     }
 }
