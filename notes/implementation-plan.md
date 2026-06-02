@@ -123,10 +123,19 @@ behavior, `adorn` is a new tested view. `Infeasible::NeedsAll(set)` mirrors the 
 A test pins `adorn` to the planner: for each planned step, `adorn(step.env())` is `Ok` and binds exactly
 `step.binds()`.
 
-**Step 5b — planner consumes `adorn`.** `Candidate::from`/`update` source viability/binds from `adorn`
-instead of re-walking the schema inline. This is the dedup the dropped step 3 was reaching for, now
-done via the per-premise function rather than the post-plan graph. Behavior-preserving; pinned by the
-existing `cost_model_tests`.
+**Step 5b — planner consumes `adorn`.** `Candidate::from` sources viability/binds from `adorn` instead
+of re-walking the schema inline. This is the dedup the dropped step 3 was reaching for, now done via the
+per-premise function.
+
+Key finding (characterization, committed first): `Candidate::update` is an *incremental optimization*,
+not part of the contract. Its internal state — including a Viable-arm stickiness asymmetry on scope
+shrink — is unreachable in real planning, because replanning rebuilds candidates fresh from premises
+(`Conjunction::plan` -> `Planner::from(Vec<Premise>)`) and a forward pass only grows scope. So `adorn`
+(a stateless recompute) need NOT match `update`'s internal state; it only needs to produce the same
+*output plan*. That observable — plan order + per-step binds + total cost across replans — is pinned by
+`mod plan_ordering` in `planner.rs`; `Candidate::from`'s construction categorization is pinned by `mod
+characterization` in `candidate.rs`. With those guardrails, 5b is free to replace `from`/`update` with
+`adorn`-based logic and prove equivalence at the plan level. Do not over-specify `update`'s internals.
 
 **Step 5c — enrich the vocabulary.** Only once `adorn` is the feasibility path, reconsider the
 `Requirement`/`Group` schema: introduce the richer `Infeasible` shapes (`NeedsAnyOf` for equality;
