@@ -1,3 +1,4 @@
+use super::candidate::categorize;
 use crate::attribute::query::{AttributeQuery, DynamicAttributeQuery};
 use crate::concept::query::ConceptQuery;
 use crate::constraint::Constraint;
@@ -6,7 +7,6 @@ use crate::negation::Negation;
 use crate::proposition::Proposition;
 use crate::query::Application;
 use crate::rule::types::TypeEnv;
-use crate::schema::Requirement;
 use crate::selection::Selection;
 use crate::source::SelectRules;
 use crate::try_stream;
@@ -17,7 +17,7 @@ use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use futures_util::TryStreamExt;
 use futures_util::future::Either;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 
 /// The variables a step will bind once it runs under a given entry
 /// adornment.
@@ -161,58 +161,16 @@ impl Plan {
         let params = premise.parameters();
         let is_negation = matches!(self, Plan::Negate(..));
 
-        // A choice group is satisfied if any of its members is a
-        // constant or already bound. Identify those first.
-        let mut satisfied_groups = HashSet::new();
-        for (name, field) in schema.iter() {
-            let Some(param) = params.get(name) else {
-                continue;
-            };
-            if let Requirement::Required(Some(group)) = &field.requirement
-                && (param.is_constant() || param.name().is_some_and(|n| bound.contains(n)))
-            {
-                satisfied_groups.insert(*group);
-            }
+        // Reuse the planner's single definition of feasibility.
+        let mut scope = Environment::new();
+        for var in bound {
+            scope.add(var.as_str());
         }
+        let (binds, requires) = categorize(&schema, &params, is_negation, &scope);
 
-        let mut binds = BTreeSet::new();
-        let mut needs = BTreeSet::new();
-        for (name, field) in schema.iter() {
-            let Some(param) = params.get(name) else {
-                continue;
-            };
-            if param.is_constant() || param.is_blank() {
-                continue;
-            }
-            let Some(var) = param.name() else {
-                continue;
-            };
-            if bound.contains(var) {
-                continue;
-            }
-            match &field.requirement {
-                Requirement::Required(None) => {
-                    needs.insert(var.to_string());
-                }
-                Requirement::Required(Some(group)) => {
-                    if satisfied_groups.contains(group) {
-                        if !is_negation {
-                            binds.insert(var.to_string());
-                        }
-                    } else {
-                        needs.insert(var.to_string());
-                    }
-                }
-                Requirement::Optional => {
-                    if !is_negation {
-                        binds.insert(var.to_string());
-                    }
-                }
-            }
-        }
-
+        let needs: BTreeSet<String> = requires.iter().map(String::from).collect();
         if needs.is_empty() {
-            Ok(Binds(binds))
+            Ok(Binds(binds.iter().map(String::from).collect()))
         } else {
             Err(Infeasible::NeedsAll(needs))
         }

@@ -8,8 +8,8 @@ use std::collections::HashSet;
 ///
 /// The planner examines each premise to determine whether it can execute
 /// given the current set of bound variables. A `Candidate` captures this
-/// determination along with cached schema and parameter data that allow
-/// efficient incremental re-evaluation as the environment grows.
+/// determination along with cached schema and parameter data so it can be
+/// re-evaluated against a new scope without re-deriving them.
 ///
 /// A `Candidate` starts in either `Viable` (all required variables are bound)
 /// or `Blocked` (some variables are still missing). As the planner selects
@@ -30,9 +30,9 @@ pub enum Candidate {
         binds: Environment,
         /// Variables already bound in the environment.
         env: Environment,
-        /// Cached schema for efficient incremental updates.
+        /// Cached schema, reused when re-evaluating against a new scope.
         schema: Schema,
-        /// Cached parameters for efficient incremental updates.
+        /// Cached parameters, reused when re-evaluating against a new scope.
         params: Parameters,
     },
     /// One or more prerequisites are unsatisfied — this premise cannot
@@ -48,11 +48,72 @@ pub enum Candidate {
         env: Environment,
         /// Variables that must be bound before this premise can execute.
         requires: Environment,
-        /// Cached schema for efficient incremental updates.
+        /// Cached schema, reused when re-evaluating against a new scope.
         schema: Schema,
-        /// Cached parameters for efficient incremental updates.
+        /// Cached parameters, reused when re-evaluating against a new scope.
         params: Parameters,
     },
+}
+
+/// Categorize a premise's parameters against a set of already-bound
+/// variables: which it will bind, and which it still requires.
+///
+/// This is the single definition of feasibility shared by the planner
+/// (`Candidate`) and the per-step SIPS function ([`Plan::adorn`]). For
+/// each non-constant, non-blank, not-yet-bound slot: a `Required(None)`
+/// slot is required; a `Required(Some(group))` slot is bound if its
+/// choice group is satisfied (by a constant or an already-bound
+/// member) and required otherwise; an `Optional` slot is bound. A
+/// negation never binds — its slots are requirements only.
+pub(crate) fn categorize(
+    schema: &Schema,
+    params: &Parameters,
+    is_negation: bool,
+    bound: &Environment,
+) -> (Environment, Environment) {
+    // A choice group is satisfied if any member is a constant or is
+    // already bound.
+    let mut satisfied_groups = HashSet::new();
+    for (name, field) in schema.iter() {
+        if let Some(param) = params.get(name)
+            && let Requirement::Required(Some(group)) = &field.requirement
+            && (param.is_constant() || param.is_bound(bound))
+        {
+            satisfied_groups.insert(*group);
+        }
+    }
+
+    let mut binds = Environment::new();
+    let mut requires = Environment::new();
+    for (name, field) in schema.iter() {
+        let Some(param) = params.get(name) else {
+            continue;
+        };
+        if param.is_constant() || param.is_blank() || param.is_bound(bound) {
+            continue;
+        }
+        match &field.requirement {
+            Requirement::Required(Some(group)) => {
+                if satisfied_groups.contains(group) {
+                    if !is_negation {
+                        param.bind(&mut binds);
+                    }
+                } else {
+                    param.bind(&mut requires);
+                }
+            }
+            Requirement::Required(None) => {
+                param.bind(&mut requires);
+            }
+            Requirement::Optional => {
+                if !is_negation {
+                    param.bind(&mut binds);
+                }
+            }
+        }
+    }
+
+    (binds, requires)
 }
 
 impl Candidate {
@@ -61,70 +122,30 @@ impl Candidate {
     pub fn from(premise: Premise) -> Self {
         let schema = premise.schema();
         let params = premise.parameters();
-        let env = Environment::new();
+        Self::build(premise, schema, params, &Environment::new())
+    }
 
-        // Negations never bind variables - they only filter
+    /// Build a candidate for a premise at the given scope. Shared by
+    /// [`from`](Self::from) (empty scope) and [`update`](Self::update)
+    /// (a new scope): feasibility comes from [`categorize`], cost from
+    /// the premise's estimate over the scope-bound variables.
+    fn build(premise: Premise, schema: Schema, params: Parameters, scope: &Environment) -> Self {
         let is_negation = matches!(premise, Premise::Unless(_));
 
-        // Use the premise's estimate() method to calculate cost
-        // If None, the premise is unbound and should use a high cost
-        let cost = premise.estimate(&env).unwrap_or(usize::MAX);
-        let mut binds = Environment::new();
-        let mut requires = Environment::new();
-
-        // Track which choice groups are satisfied by constants
-        let mut satisfied_groups = HashSet::new();
-
-        // First pass: identify requirement groups satisfied by constants
-        for (name, constraint) in schema.iter() {
+        // `env` is the subset of the scope this premise actually uses.
+        let mut env = Environment::new();
+        for (name, _) in schema.iter() {
             if let Some(param) = params.get(name)
-                && let Requirement::Required(Some(group)) = &constraint.requirement
-                && param.is_constant()
+                && let Some(var) = param.name()
+                && scope.contains(var)
             {
-                // If parameter is a constant, its group is satisfied
-                satisfied_groups.insert(*group);
+                env.add(var);
             }
         }
 
-        // Second pass: categorize all parameters based on their requirement types
-        for (name, constraint) in schema.iter() {
-            if let Some(param) = params.get(name) {
-                // Constants and variables already in env don't add cost - they're already satisfied
-                if param.is_constant() || param.is_bound(&env) {
-                    continue;
-                }
+        let (binds, requires) = categorize(&schema, &params, is_negation, scope);
+        let cost = premise.estimate(&env).unwrap_or(usize::MAX);
 
-                // Blank terms are wildcards - they match anything and don't need to be bound
-                if param.is_blank() {
-                    continue;
-                }
-
-                match &constraint.requirement {
-                    Requirement::Required(Some(group)) => {
-                        // If this group is satisfied, treat as desired (variable will be bound)
-                        if satisfied_groups.contains(group) {
-                            // Negations don't bind variables, so skip adding to binds
-                            if !is_negation {
-                                param.bind(&mut binds);
-                            }
-                        } else {
-                            param.bind(&mut requires);
-                        }
-                    }
-                    Requirement::Required(None) => {
-                        param.bind(&mut requires);
-                    }
-                    Requirement::Optional => {
-                        // Negations don't bind variables, so skip adding to binds
-                        if !is_negation {
-                            param.bind(&mut binds);
-                        }
-                    }
-                }
-            }
-        }
-
-        // If no requirements, create Viable candidate
         if requires.is_empty() {
             Candidate::Viable {
                 premise,
@@ -146,170 +167,29 @@ impl Candidate {
             }
         }
     }
+
     /// Synchronize this candidate with the given target scope.
     ///
-    /// Variables present in `target_scope` are moved from `binds` to `env`,
-    /// and variables absent from `target_scope` are moved from `env` back to
-    /// `binds`. This handles both incremental updates (scope grows) and
-    /// replanning scenarios (scope shrinks or differs).
-    ///
-    /// May transition from Blocked to Viable if requirements are satisfied.
+    /// Recomputes feasibility, binds, and cost for the new scope from
+    /// scratch (via [`categorize`]) — there is no incremental delta to
+    /// thread, because the planner always calls `update` with the full
+    /// cumulative scope. May transition between Blocked and Viable.
     pub fn update(&mut self, target_scope: &Environment) {
-        match self {
+        let (premise, schema, params) = match self {
             Candidate::Viable {
                 premise,
-                cost,
-                binds,
-                env,
                 schema,
                 params,
-            } => {
-                for (name, _constraint) in schema.iter() {
-                    if let Some(param) = params.get(name) {
-                        if param.is_constant() || param.is_blank() {
-                            continue;
-                        }
-
-                        let in_target = param.is_bound(target_scope);
-                        let in_env = param.is_bound(env);
-                        let in_binds = param.is_bound(binds);
-
-                        match (in_target, in_env, in_binds) {
-                            // Variable is in target but only in binds → move to env
-                            (true, false, true) => {
-                                param.bind(env);
-                                param.unbind(binds);
-                            }
-                            // Variable is in target but tracked nowhere → add to env
-                            (true, false, false) => {
-                                param.bind(env);
-                            }
-                            // Variable left target but is in env → move back to binds
-                            (false, true, false) => {
-                                param.unbind(env);
-                                param.bind(binds);
-                            }
-                            // Variable not in target and not tracked → add to binds
-                            (false, false, false) => {
-                                param.bind(binds);
-                            }
-                            // Already consistent: (true, true, _) or (false, false, true)
-                            _ => {}
-                        }
-                    }
-                }
-
-                // Re-estimate cost based on updated environment
-                *cost = premise.estimate(env).unwrap_or(usize::MAX);
+                ..
             }
-            Candidate::Blocked {
+            | Candidate::Blocked {
                 premise,
-                cost,
-                binds,
-                env,
-                requires,
                 schema,
                 params,
-            } => {
-                let is_negation = matches!(premise, Premise::Unless(_));
-
-                // Track which choice groups now have at least one bound parameter
-                let mut satisfied_groups = HashSet::new();
-
-                // First pass: synchronize each parameter with the target scope
-                for (name, constraint) in schema.iter() {
-                    if let Some(param) = params.get(name) {
-                        if param.is_constant() || param.is_blank() {
-                            continue;
-                        }
-
-                        let in_target = param.is_bound(target_scope);
-                        let in_env = param.is_bound(env);
-
-                        if in_target && !in_env {
-                            // Variable entered the scope → move from requires/binds to env
-                            let was_required = param.unbind(requires);
-                            let was_bound = param.unbind(binds);
-
-                            if was_required || was_bound {
-                                param.bind(env);
-
-                                if let Requirement::Required(Some(group)) = &constraint.requirement
-                                {
-                                    satisfied_groups.insert(*group);
-                                }
-                            }
-                        } else if !in_target && in_env {
-                            // Variable left the scope → move from env back to
-                            // requires or binds depending on its schema requirement
-                            param.unbind(env);
-
-                            match &constraint.requirement {
-                                Requirement::Required(Some(group)) => {
-                                    // Will be resolved in second pass once we
-                                    // know which groups are still satisfied
-                                    param.bind(requires);
-                                    // Check if the group might still be satisfied
-                                    // by another bound parameter
-                                    let group_still_satisfied =
-                                        schema.iter().any(|(other_name, other_constraint)| {
-                                            other_name != name
-                                                && matches!(
-                                                    &other_constraint.requirement,
-                                                    Requirement::Required(Some(g)) if *g == *group
-                                                )
-                                                && params.get(other_name).is_some_and(|p| {
-                                                    p.is_bound(env) || p.is_constant()
-                                                })
-                                        });
-                                    if group_still_satisfied {
-                                        satisfied_groups.insert(*group);
-                                    }
-                                }
-                                Requirement::Required(None) => {
-                                    param.bind(requires);
-                                }
-                                Requirement::Optional => {
-                                    if !is_negation {
-                                        param.bind(binds);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Second pass: for satisfied choice groups, convert required params to desired
-                if !satisfied_groups.is_empty() {
-                    for (name, constraint) in schema.iter() {
-                        if let Requirement::Required(Some(group)) = &constraint.requirement
-                            && satisfied_groups.contains(group)
-                            && let Some(param) = params.get(name)
-                            && param.unbind(requires)
-                            && !param.is_bound(env)
-                            && !is_negation
-                        {
-                            param.bind(binds);
-                        }
-                    }
-                }
-
-                // Re-estimate cost based on updated environment
-                *cost = premise.estimate(env).unwrap_or(usize::MAX);
-
-                // If no requirements remain, transition to Viable
-                if requires.is_empty() {
-                    *self = Candidate::Viable {
-                        premise: premise.clone(),
-                        cost: *cost,
-                        binds: binds.clone(),
-                        env: env.clone(),
-                        schema: schema.clone(),
-                        params: params.clone(),
-                    };
-                }
-            }
-        }
+                ..
+            } => (premise.clone(), schema.clone(), params.clone()),
+        };
+        *self = Self::build(premise, schema, params, target_scope);
     }
 
     /// Get the cost of this candidate (whether viable or blocked)
