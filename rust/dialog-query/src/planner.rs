@@ -46,6 +46,13 @@ impl Planner {
     /// have been planned. Returns an error if any premise has unsatisfiable
     /// prerequisites.
     pub fn plan(mut self, scope: &Environment) -> Result<Conjunction, TypeError> {
+        // Narrow the premises to their rule-level inferred kinds once,
+        // up front, before ordering. Inference is order-independent
+        // (per-premise unification), so narrowing here yields the same
+        // result as narrowing the planned steps. The planner then only
+        // orders and lowers the already-narrowed premises.
+        self.narrow()?;
+
         let env = scope.clone();
         let mut bound = scope.clone();
         let mut steps = vec![];
@@ -65,29 +72,29 @@ impl Planner {
             }
         }
 
-        let types = TypeEnv::infer(&steps).map_err(|err| TypeError::TypeInference {
-            reason: err.to_string(),
-        })?;
-
-        // Rewrite each step's premise so its variable terms reflect
-        // the rule-level inferred kinds, then re-lower it into the
-        // compiled `Plan`. Done once here, not on every evaluation.
-        // Standalone queries (empty env) skip the rewrite entirely.
-        let steps: Vec<Plan> = steps
-            .into_iter()
-            .map(|step| {
-                let header = step.header().clone();
-                let premise = plan::apply_types(step.as_premise(), &types);
-                Plan::lower(premise, header)
-            })
-            .collect();
-
         Ok(Conjunction {
             steps,
             cost,
             binds,
             env,
         })
+    }
+
+    /// Narrow the planner's premises to their rule-level inferred
+    /// kinds, in place. A no-op for the `Active` state (its candidates
+    /// were already narrowed when first planned).
+    fn narrow(&mut self) -> Result<(), TypeError> {
+        let Planner::Idle { premises } = self else {
+            return Ok(());
+        };
+        let types = TypeEnv::infer(premises).map_err(|err| TypeError::TypeInference {
+            reason: err.to_string(),
+        })?;
+        *premises = premises
+            .drain(..)
+            .map(|premise| plan::apply_types(premise, &types))
+            .collect();
+        Ok(())
     }
 
     /// Helper to create a planning error from failed candidates.

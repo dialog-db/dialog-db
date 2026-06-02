@@ -22,7 +22,7 @@
 
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::constraint::Constraint;
-use crate::planner::{Plan, categorize};
+use crate::planner::categorize;
 use crate::proposition::Proposition;
 use crate::rule::types::TypeEnv;
 use crate::type_system::Type as Kind;
@@ -200,10 +200,10 @@ impl AnalyzedRule {
 /// variants with the planned rule embedded for display.
 pub fn analyze(
     conclusion: ConceptDescriptor,
-    steps: &[Plan],
+    premises: Vec<Premise>,
 ) -> Result<AnalyzedRule, AnalysisError> {
     let types = Arc::new(
-        TypeEnv::infer(steps).map_err(|err| AnalysisError::Inference {
+        TypeEnv::infer(&premises).map_err(|err| AnalysisError::Inference {
             reason: err.to_string(),
         })?,
     );
@@ -221,9 +221,8 @@ pub fn analyze(
     // Each Coalesce constraint validates against a fresh unifier
     // context. Catches wire-format and raw-builder mismatches
     // where the typed builder isn't the construction path.
-    for step in steps {
-        let Premise::Assert(Proposition::Constraint(Constraint::Coalesce(coalesce))) =
-            step.as_premise()
+    for premise in &premises {
+        let Premise::Assert(Proposition::Constraint(Constraint::Coalesce(coalesce))) = premise
         else {
             continue;
         };
@@ -235,7 +234,6 @@ pub fn analyze(
         }
     }
 
-    let premises: Vec<Premise> = steps.iter().map(|step| step.as_premise()).collect();
     let graph = DependencyGraph::from_premises(&premises);
     Ok(AnalyzedRule {
         conclusion,
@@ -254,10 +252,9 @@ mod tests {
     use crate::artifact::{Entity, Type as ValueType};
     use crate::attribute::AttributeDescriptor;
     use crate::attribute::query::AttributeQuery;
-    use crate::planner::Planner;
     use crate::the;
     use crate::types::Any;
-    use crate::{Cardinality, Environment, Term};
+    use crate::{Cardinality, Term};
 
     fn person_with_name() -> ConceptDescriptor {
         ConceptDescriptor::try_from(vec![(
@@ -286,8 +283,7 @@ mod tests {
             )
             .into(),
         ];
-        let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
-        let analyzed = analyze(person_with_name(), &plan.steps).unwrap();
+        let analyzed = analyze(person_with_name(), premises).unwrap();
 
         assert_eq!(analyzed.premises.len(), 1);
         let name_kind = analyzed.type_of("name").expect("name has an inferred type");
@@ -315,8 +311,7 @@ mod tests {
             Some(Cardinality::One),
         );
         let premises = vec![q1.into(), q2.into()];
-        let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
-        let analyzed = analyze(person_with_name(), &plan.steps).unwrap();
+        let analyzed = analyze(person_with_name(), premises).unwrap();
 
         assert_eq!(analyzed.graph.len(), 2);
 
@@ -354,8 +349,7 @@ mod tests {
         let length = Length::apply(params).unwrap();
 
         let premises: Vec<Premise> = vec![attr.into(), Premise::from(length)];
-        let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
-        let analyzed = analyze(person_with_name(), &plan.steps).unwrap();
+        let analyzed = analyze(person_with_name(), premises).unwrap();
 
         assert_eq!(analyzed.graph.len(), 2);
 
@@ -406,8 +400,7 @@ mod tests {
             )
             .into(),
         ];
-        let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
-        let err = analyze(person_with_name(), &plan.steps).unwrap_err();
+        let err = analyze(person_with_name(), premises).unwrap_err();
         match err {
             AnalysisError::RequiredHeadFromOptional { variable } => {
                 assert_eq!(variable, "name");

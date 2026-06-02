@@ -137,7 +137,9 @@ pub trait Compile: Sized + Into<Rule> {
         // success the `AnalyzedRule` (dependency graph + inferred
         // types) is retained and stored on the compiled rule rather
         // than discarded.
-        let analysis = match analyzer::analyze(conclusion.clone(), &join.steps) {
+        let planned_premises: Vec<Premise> =
+            join.steps.iter().map(|step| step.as_premise()).collect();
+        let analysis = match analyzer::analyze(conclusion.clone(), planned_premises) {
             Ok(analysis) => analysis,
             Err(err) => {
                 let in_progress = Self::from_parts(conclusion, join, None);

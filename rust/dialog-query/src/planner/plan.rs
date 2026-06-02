@@ -536,10 +536,7 @@ mod tests {
                 )
                 .into(),
             ];
-            let plan = Planner::from(premises)
-                .plan(&crate::Environment::new())
-                .unwrap();
-            TypeEnv::infer(&plan.steps).unwrap()
+            TypeEnv::infer(&premises).unwrap()
         };
 
         // Build a negated attribute query that uses `?name` with

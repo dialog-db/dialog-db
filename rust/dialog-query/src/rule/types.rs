@@ -24,7 +24,6 @@
 //! bindings rather than introducing them.
 
 use crate::Premise;
-use crate::planner::Plan;
 use crate::schema::Requirement;
 use crate::type_system::Primitive;
 use crate::type_system::Type as Kind;
@@ -72,16 +71,16 @@ impl TypeEnv {
     /// slots (e.g. `?x` is `String` in one premise and `Entity` in
     /// another). The variable name is returned with the error so
     /// the caller can surface a useful diagnostic.
-    pub fn infer(steps: &[Plan]) -> Result<Self, InferenceError> {
+    pub fn infer(premises: &[Premise]) -> Result<Self, InferenceError> {
         let mut ctx = Context::new();
-        for step in steps {
+        for premise in premises {
             // Negation premises don't contribute — they filter on
             // bindings rather than introducing them.
-            let Premise::Assert(_) = step.as_premise() else {
+            let Premise::Assert(_) = premise else {
                 continue;
             };
-            let schema = step.schema();
-            let params = step.parameters();
+            let schema = premise.schema();
+            let params = premise.parameters();
 
             for (slot_name, field) in schema.iter() {
                 let Some(param) = params.get(slot_name) else {
@@ -169,8 +168,7 @@ mod tests {
             )
             .into(),
         ];
-        let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
-        let env = TypeEnv::infer(&plan.steps).unwrap();
+        let env = TypeEnv::infer(&premises).unwrap();
         let name_kind = env.get("name").expect("name inferred");
         assert_eq!(name_kind.as_value_type(), Some(ValueType::String));
     }
@@ -190,8 +188,7 @@ mod tests {
             )
             .into(),
         ];
-        let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
-        let env = TypeEnv::infer(&plan.steps).unwrap();
+        let env = TypeEnv::infer(&premises).unwrap();
         let name_kind = env.get("name").expect("name inferred");
         assert!(
             name_kind.is_optional(),
@@ -224,8 +221,7 @@ mod tests {
             )
             .into(),
         ];
-        let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
-        let env = TypeEnv::infer(&plan.steps).unwrap();
+        let env = TypeEnv::infer(&premises).unwrap();
         let name_kind = env.get("name").expect("name inferred");
         assert!(
             !name_kind.is_optional(),
@@ -269,8 +265,7 @@ mod tests {
             )
             .into(),
         ];
-        let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
-        let env = TypeEnv::infer(&plan.steps).unwrap();
+        let env = TypeEnv::infer(&premises).unwrap();
         let name_kind = env.get("name").expect("name inferred");
         assert!(
             !name_kind.is_optional(),
@@ -312,8 +307,7 @@ mod tests {
             positive.into(),
             Premise::Unless(Negation(Proposition::Attribute(Box::new(neg_query)))),
         ];
-        let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
-        let env = TypeEnv::infer(&plan.steps).unwrap();
+        let env = TypeEnv::infer(&premises).unwrap();
         let name_kind = env.get("name").expect("name inferred");
         assert!(
             name_kind.is_optional(),
