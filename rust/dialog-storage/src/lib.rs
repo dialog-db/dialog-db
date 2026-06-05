@@ -45,8 +45,6 @@ mod error;
 pub use error::*;
 
 mod storage;
-#[cfg(feature = "s3")]
-pub use storage::s3;
 pub use storage::*;
 
 mod hash;

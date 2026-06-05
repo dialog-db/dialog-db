@@ -464,7 +464,6 @@ mod tests {
         assert_eq!(value, "test");
     }
 
-    // --- Tests with actual native provider ---
     // These tests are native-only because TcpServer can't run in wasm.
     // They're also skipped in web integration mode (web-integration-tests feature) since
     // there's no wasm inner test to spawn.

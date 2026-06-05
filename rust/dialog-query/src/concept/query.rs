@@ -12,9 +12,14 @@ use crate::concept::descriptor::ConceptDescriptor;
 use crate::planner::Disjunction;
 use crate::schema::CONCEPT_OVERHEAD;
 use crate::selection::Selection;
+use crate::source::SelectRules;
 use crate::{
-    Cardinality, Environment, EvaluationError, Match, Parameters, Schema, Source, Term, try_stream,
+    Cardinality, Environment, EvaluationError, Match, Parameters, Schema, Term, try_stream,
 };
+use dialog_artifacts::Select;
+use dialog_capability::Provider;
+use dialog_common::ConditionalSync;
+use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 
 /// Extract a Match with parameter names from a Match with user variable names
@@ -70,12 +75,17 @@ fn merge_parameters(
 
 /// Represents an application of a concept with specific term bindings.
 /// This is used when querying for entities that match a concept pattern.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Serializes as the formal notation:
+/// `{ "assert": <ConceptDescriptor>, "where": <Parameters> }`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConceptQuery {
-    /// The term bindings for this concept application.
-    pub terms: Parameters,
     /// The concept predicate being applied.
+    #[serde(rename = "assert")]
     pub predicate: ConceptDescriptor,
+    /// The term bindings for this concept application.
+    #[serde(rename = "where")]
+    pub terms: Parameters,
 }
 
 impl ConceptQuery {
@@ -221,9 +231,15 @@ impl ConceptQuery {
     /// key insight from magic set optimization applied locally: the adornment
     /// is computed at the point of use from what's actually bound, rather
     /// than carried globally through every evaluation step.
-    pub fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
+    pub fn evaluate<'a, Env, M: Selection + 'a>(
+        self,
+        selection: M,
+        env: &'a Env,
+    ) -> impl Selection + 'a
+    where
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    {
         let app = self;
-        let source = source.clone();
 
         try_stream! {
             let mut plan = None;
@@ -235,7 +251,7 @@ impl ConceptQuery {
                 // plan. All matches in the selection share the same binding pattern
                 // (same variables bound), only the values differ.
                 if plan.is_none() {
-                    let rules = source.acquire(&app.predicate)?;
+                    let rules = Provider::<SelectRules>::execute(env, app.predicate.clone()).await?;
                     plan = Some(rules.plan(&app.terms, &input));
                 }
                 let plan = plan.as_ref().unwrap();
@@ -248,7 +264,7 @@ impl ConceptQuery {
 
                 // Merge results back, mapping parameter names → user variable names
                 // All factors are copied with their original provenance
-                for await result in Disjunction::clone(plan).evaluate(seed, &source) {
+                for await result in Disjunction::clone(plan).evaluate(seed, env) {
                     let result_match = result?;
                     let merged = merge_parameters(&input, &result_match, &app.terms)
                         .map_err(|e| EvaluationError::Store(e.to_string()))?;
@@ -272,14 +288,21 @@ impl Display for ConceptQuery {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
     use super::*;
     use crate::attribute::query::AttributeQuery;
     use crate::concept::descriptor::ConceptDescriptor;
     use crate::the;
+    use crate::types::Any;
+    use std::collections::BTreeSet;
 
+    use crate::session::RuleRegistry;
+    use crate::source::test::TestEnv;
     use crate::{
         AttributeDescriptor, Cardinality, DeductiveRule, Negation, Parameters, Premise,
-        Proposition, Session, Term, Type, Value,
+        Proposition, Term, Type, Value,
     };
 
     // Note: Async tests are commented out due to Rust recursion limit issues in test compilation
@@ -288,29 +311,31 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_executes_concept_query() -> anyhow::Result<()> {
-        use dialog_artifacts::{Artifacts, Entity};
-        use dialog_storage::MemoryStorageBackend;
+        use dialog_artifacts::Entity;
+        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
 
-        // Create a store and session
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
-        let mut session = Session::open(store);
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        {
-            let mut tx = session.edit();
-            tx.assert(
+        branch
+            .transaction()
+            .assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
             .assert(the!("person/age").of(alice.clone()).is(25u32))
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
-            .assert(the!("person/age").of(bob.clone()).is(30u32));
-            session.commit(tx).await?;
-        }
+            .assert(the!("person/age").of(bob.clone()).is(30u32))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         // Create a person concept
         let concept = ConceptDescriptor::from(vec![
@@ -346,7 +371,7 @@ mod tests {
 
         // Execute the query
         let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            application.evaluate(Match::new().seed(), &session),
+            application.evaluate(Match::new().seed(), &source),
         )
         .await?;
 
@@ -384,26 +409,28 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_executes_query_with_bound_entity() -> anyhow::Result<()> {
-        use dialog_artifacts::{Artifacts, Entity};
-        use dialog_storage::MemoryStorageBackend;
+        use dialog_artifacts::Entity;
+        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
 
-        // Create a store and session
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
-        let mut session = Session::open(store);
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
 
-        {
-            let mut tx = session.edit();
-            tx.assert(
+        branch
+            .transaction()
+            .assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
-            .assert(the!("person/age").of(alice.clone()).is(25u32));
-            session.commit(tx).await?;
-        }
+            .assert(the!("person/age").of(alice.clone()).is(25u32))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         // Create a person concept
         let concept = ConceptDescriptor::from(vec![
@@ -444,7 +471,7 @@ mod tests {
 
         // Execute with bound entity via match
         application
-            .evaluate(input.seed(), &session)
+            .evaluate(input.seed(), &source)
             .try_vec()
             .await?;
 
@@ -611,7 +638,7 @@ mod tests {
         let rule = DeductiveRule::from(&predicate);
 
         let analyzer_error = AnalyzerError::UnusedParameter {
-            rule: rule.clone(),
+            rule: Box::new(rule.clone().into()),
             parameter: "test_param".to_string(),
         };
 
@@ -696,23 +723,26 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_respects_constant_entity_parameter() -> anyhow::Result<()> {
-        use dialog_artifacts::{Artifacts, Entity};
-        use dialog_storage::MemoryStorageBackend;
+        use dialog_artifacts::Entity;
+        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
 
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
-        let mut session = Session::open(store);
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        session
-            .transact(vec![
+        branch
+            .transaction()
+            .assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alice".to_string()),
-                the!("person/name").of(bob.clone()).is("Bob".to_string()),
-            ])
+            )
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .commit()
+            .perform(&operator)
             .await?;
 
         let concept = ConceptDescriptor::from(vec![(
@@ -733,12 +763,13 @@ mod tests {
         );
         terms.insert("name".to_string(), Term::var("name"));
 
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let app = ConceptQuery {
             terms,
             predicate: concept,
         };
         let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            app.evaluate(Match::new().seed(), &session),
+            app.evaluate(Match::new().seed(), &source),
         )
         .await?;
 
@@ -757,28 +788,29 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_respects_constant_attribute_parameter() -> anyhow::Result<()> {
-        use dialog_artifacts::{Artifacts, Entity};
-        use dialog_storage::MemoryStorageBackend;
+        use dialog_artifacts::Entity;
+        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
 
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
-        let mut session = Session::open(store);
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        {
-            let mut tx = session.edit();
-            tx.assert(
+        branch
+            .transaction()
+            .assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
             .assert(the!("person/age").of(alice.clone()).is(25u32))
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
-            .assert(the!("person/age").of(bob.clone()).is(30u32));
-            session.commit(tx).await?;
-        }
+            .assert(the!("person/age").of(bob.clone()).is(30u32))
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let concept = ConceptDescriptor::from(vec![
             (
@@ -807,12 +839,13 @@ mod tests {
         terms.insert("name".to_string(), Term::constant("Bob".to_string()));
         terms.insert("age".to_string(), Term::var("age"));
 
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let app = ConceptQuery {
             terms,
             predicate: concept,
         };
         let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            app.evaluate(Match::new().seed(), &session),
+            app.evaluate(Match::new().seed(), &source),
         )
         .await?;
 
@@ -831,28 +864,29 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_respects_multiple_constant_parameters() -> anyhow::Result<()> {
-        use dialog_artifacts::{Artifacts, Entity};
-        use dialog_storage::MemoryStorageBackend;
+        use dialog_artifacts::Entity;
+        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
 
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
-        let mut session = Session::open(store);
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        {
-            let mut tx = session.edit();
-            tx.assert(
+        branch
+            .transaction()
+            .assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
             .assert(the!("person/age").of(alice.clone()).is(25u32))
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
-            .assert(the!("person/age").of(bob.clone()).is(30u32));
-            session.commit(tx).await?;
-        }
+            .assert(the!("person/age").of(bob.clone()).is(30u32))
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let concept = ConceptDescriptor::from(vec![
             (
@@ -881,12 +915,13 @@ mod tests {
         terms.insert("name".to_string(), Term::constant("Alice".to_string()));
         terms.insert("age".to_string(), Term::constant(25u32));
 
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let app = ConceptQuery {
             terms,
             predicate: concept,
         };
         let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            app.evaluate(Match::new().seed(), &session),
+            app.evaluate(Match::new().seed(), &source),
         )
         .await?;
 
@@ -901,5 +936,134 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    /// Build a representative two-attribute Person concept query with mixed
+    /// variable / constant bindings for the serde round-trip tests.
+    fn sample_concept_query() -> ConceptQuery {
+        let predicate = ConceptDescriptor::from(vec![
+            (
+                "name",
+                AttributeDescriptor::new(
+                    the!("person/name"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                ),
+            ),
+            (
+                "age",
+                AttributeDescriptor::new(
+                    the!("person/age"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::UnsignedInt),
+                ),
+            ),
+        ]);
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::<Any>::var("entity"));
+        terms.insert("name".into(), Term::Constant(Value::String("Alice".into())));
+        terms.insert("age".into(), Term::<Any>::var("age"));
+
+        ConceptQuery { predicate, terms }
+    }
+
+    #[dialog_common::test]
+    fn it_serializes_concept_query_in_formal_notation_shape() {
+        let cq = sample_concept_query();
+        let value: serde_json::Value = serde_json::to_value(&cq).expect("serialize");
+
+        let obj = value.as_object().expect("object");
+        assert_eq!(
+            obj.keys().collect::<BTreeSet<_>>(),
+            ["assert".to_string(), "where".to_string()]
+                .iter()
+                .collect::<BTreeSet<_>>(),
+            "ConceptQuery must serialize as {{assert, where}}"
+        );
+
+        assert!(
+            value["assert"].is_object(),
+            "`assert` must hold the concept descriptor"
+        );
+        assert!(
+            value["where"].is_object(),
+            "`where` must hold the parameter map"
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_round_trips_concept_query_through_json() {
+        let cq = sample_concept_query();
+
+        let json = serde_json::to_string(&cq).expect("serialize");
+        let restored: ConceptQuery = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(
+            restored.predicate.this(),
+            cq.predicate.this(),
+            "predicate content hash must survive round-trip"
+        );
+
+        let original_keys: BTreeSet<&String> = cq.terms.keys().collect();
+        let restored_keys: BTreeSet<&String> = restored.terms.keys().collect();
+        assert_eq!(
+            original_keys, restored_keys,
+            "parameter names must survive round-trip"
+        );
+
+        for (name, original_term) in cq.terms.iter() {
+            assert_eq!(
+                restored.terms.get(name),
+                Some(original_term),
+                "binding for `{name}` must survive round-trip"
+            );
+        }
+    }
+
+    #[dialog_common::test]
+    fn it_matches_proposition_concept_serialization() {
+        let cq = sample_concept_query();
+        let prop: Proposition = cq.clone().into();
+
+        let cq_json = serde_json::to_value(&cq).expect("serialize");
+        let prop_json = serde_json::to_value(&prop).expect("serialize");
+
+        assert_eq!(
+            cq_json, prop_json,
+            "ConceptQuery and Proposition::Concept must produce identical JSON"
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_validates_concept_query_deserialization() {
+        let only_assert = serde_json::json!({ "assert": { "with": {
+            "name": { "the": "person/name", "as": "Text" }
+        }}});
+        assert!(
+            serde_json::from_value::<ConceptQuery>(only_assert).is_err(),
+            "missing `where` must fail to deserialize"
+        );
+
+        let only_where = serde_json::json!({ "where": {} });
+        assert!(
+            serde_json::from_value::<ConceptQuery>(only_where).is_err(),
+            "missing `assert` must fail to deserialize"
+        );
+
+        // Unknown fields are ignored, consistent with other formal-notation
+        // types in this crate. This keeps wire-format readers tolerant of
+        // forward-compatible additions.
+        let extra_field = serde_json::json!({
+            "assert": { "with": { "name": { "the": "person/name", "as": "Text" } } },
+            "where": {},
+            "stranger": true,
+        });
+        assert!(
+            serde_json::from_value::<ConceptQuery>(extra_field).is_ok(),
+            "unknown fields must be ignored on deserialize"
+        );
     }
 }

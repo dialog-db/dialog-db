@@ -68,8 +68,10 @@
 //! // Formula::write() for FullNameFormula (writes output cells to bindings)
 //! ```
 
+use convert_case::{Case, Casing};
 use proc_macro::TokenStream;
 use quote::quote;
+use syn::ext::IdentExt;
 use syn::{Data, DeriveInput, Fields, parse_macro_input};
 
 use super::helpers::{extract_doc_comments, parse_output_attribute, type_to_value_data_type};
@@ -149,11 +151,18 @@ pub fn derive(input: TokenStream) -> TokenStream {
         struct_name.span(),
     );
 
-    // Generate Input struct fields (only non-output fields)
+    // Generate Input struct fields (only non-output fields). Forward the
+    // user's field doc when present; otherwise synthesize a fallback so
+    // downstream crates with `#![deny(missing_docs)]` still compile.
     let input_struct_fields: Vec<_> = input_fields
         .iter()
         .map(|(name, ty, doc)| {
-            let doc_lit = syn::LitStr::new(doc, proc_macro2::Span::call_site());
+            let doc_text = if doc.is_empty() {
+                format!("The `{name}` input to [`{struct_name}`].")
+            } else {
+                doc.clone()
+            };
+            let doc_lit = syn::LitStr::new(&doc_text, proc_macro2::Span::call_site());
             quote! {
                 #[doc = #doc_lit]
                 pub #name: #ty
@@ -165,7 +174,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let query_struct_fields: Vec<_> = all_fields
         .iter()
         .map(|(name, ty, doc, _is_output, _cost)| {
-            let doc_lit = syn::LitStr::new(doc, proc_macro2::Span::call_site());
+            let doc_text = if doc.is_empty() {
+                format!("Term matching the `{name}` field of [`{struct_name}`].")
+            } else {
+                doc.clone()
+            };
+            let doc_lit = syn::LitStr::new(&doc_text, proc_macro2::Span::call_site());
             quote! {
                 #[doc = #doc_lit]
                 pub #name: dialog_query::Term<#ty>
@@ -201,12 +215,17 @@ pub fn derive(input: TokenStream) -> TokenStream {
         })
         .collect();
 
+    // The Rust field name is normalized for the parameter surface:
+    // `unraw()` drops any `r#` raw-identifier prefix, then
+    // `to_case(Case::Kebab)` matches the formal-notation convention
+    // used by attribute names elsewhere.
+
     // Generate field names for Input TryFrom
     let input_field_names: Vec<_> = input_fields.iter().map(|(name, _, _)| name).collect();
     let input_field_name_lits: Vec<_> = input_fields
         .iter()
         .map(|(name, _, _)| {
-            let name_str = name.to_string();
+            let name_str = name.unraw().to_string().to_case(Case::Kebab);
             syn::LitStr::new(&name_str, proc_macro2::Span::call_site())
         })
         .collect();
@@ -216,7 +235,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let all_field_name_lits: Vec<_> = all_fields
         .iter()
         .map(|(name, _, _, _, _)| {
-            let name_str = name.to_string();
+            let name_str = name.unraw().to_string().to_case(Case::Kebab);
             syn::LitStr::new(&name_str, proc_macro2::Span::call_site())
         })
         .collect();
@@ -245,11 +264,25 @@ pub fn derive(input: TokenStream) -> TokenStream {
         })
         .collect();
 
+    let input_struct_doc = syn::LitStr::new(
+        &format!(
+            "Input structure for the [`{struct_name}`] formula. Holds only the required (non-output) fields that must be provided to compute the formula.",
+        ),
+        proc_macro2::Span::call_site(),
+    );
+    let query_struct_doc = syn::LitStr::new(
+        &format!(
+            "Query pattern for the [`{struct_name}`] formula. Holds every field (input and output) as a [`dialog_query::Term`] for pattern matching.",
+        ),
+        proc_macro2::Span::call_site(),
+    );
+
     let expanded = quote! {
             /// Input structure for #struct_name formula
             ///
             /// Contains only the required (non-output) fields that must be provided
             /// to compute the formula.
+            #[doc = #input_struct_doc]
             #[derive(Debug, Clone)]
             pub struct #input_name {
                 #(#input_struct_fields),*
@@ -258,6 +291,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             /// Query pattern for #struct_name formula.
             ///
             /// Contains all fields (both input and output) as Term<T> for pattern matching.
+            #[doc = #query_struct_doc]
             #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
             pub struct #query_name {
                 #(#query_struct_fields),*
@@ -276,11 +310,16 @@ pub fn derive(input: TokenStream) -> TokenStream {
     {
                 type Conclusion = #struct_name;
 
-                fn evaluate<S: dialog_query::Source, M: dialog_query::Selection>(
+                fn evaluate<'__a, __Env, __M: dialog_query::Selection + '__a>(
                     self,
-                    selection: M,
-                    _source: &S,
-                ) -> impl dialog_query::Selection {
+                    selection: __M,
+                    _env: &'__a __Env,
+                ) -> impl dialog_query::Selection + '__a
+                where
+                    __Env: dialog_query::Provider<dialog_query::Select<'__a>>
+                        + dialog_query::Provider<dialog_query::source::SelectRules>
+                        + dialog_query::ConditionalSync,
+                {
                     let formula: dialog_query::FormulaQuery = self.into();
                     formula.evaluate(selection)
                 }

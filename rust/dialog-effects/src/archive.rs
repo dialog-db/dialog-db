@@ -15,9 +15,11 @@
 use std::error::Error;
 
 pub use dialog_capability::{
-    Attenuation, Capability, DialogCapabilityPerformError, Effect, Policy, Subject,
+    Attenuate, Attenuation, Capability, DialogCapabilityAuthorizationError,
+    DialogCapabilityPerformError, Effect, Policy, StorageError, Subject, access::AuthorizeError,
 };
 pub use dialog_common::Blake3Hash;
+use dialog_common::Checksum;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -56,7 +58,7 @@ impl Policy for Catalog {
 /// Get operation - retrieves content by digest.
 ///
 /// Requires `Capability<Catalog>` access level.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
 pub struct Get {
     /// The blake3 digest of the content to retrieve.
     #[serde(with = "dialog_common::as_bytes")]
@@ -77,34 +79,17 @@ impl Effect for Get {
     type Output = Result<Option<Vec<u8>>, ArchiveError>;
 }
 
-/// Extension trait for `Capability<Get>` to access its fields.
-pub trait GetCapability {
-    /// Get the catalog name from the capability chain.
-    fn catalog(&self) -> &str;
-    /// Get the digest from the capability chain.
-    fn digest(&self) -> &Blake3Hash;
-}
-
-impl GetCapability for Capability<Get> {
-    fn catalog(&self) -> &str {
-        &Catalog::of(self).catalog
-    }
-
-    fn digest(&self) -> &Blake3Hash {
-        &Get::of(self).digest
-    }
-}
-
 /// Put operation - stores content by digest.
 ///
 /// Requires `Capability<Catalog>` access level.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
 pub struct Put {
     /// The blake3 digest of the content (must match hash of content).
     #[serde(with = "dialog_common::as_bytes")]
     pub digest: Blake3Hash,
     /// The content to store.
     #[serde(with = "serde_bytes")]
+    #[attenuate(into = Checksum, with = Checksum::sha256, rename = checksum)]
     pub content: Vec<u8>,
 }
 
@@ -123,29 +108,7 @@ impl Effect for Put {
     type Output = Result<(), ArchiveError>;
 }
 
-/// Extension trait for `Capability<Put>` to access its fields.
-pub trait PutCapability {
-    /// Get the catalog name from the capability chain.
-    fn catalog(&self) -> &str;
-    /// Get the digest from the capability chain.
-    fn digest(&self) -> &Blake3Hash;
-    /// Get the content from the capability chain.
-    fn content(&self) -> &[u8];
-}
-
-impl PutCapability for Capability<Put> {
-    fn catalog(&self) -> &str {
-        &Catalog::of(self).catalog
-    }
-
-    fn digest(&self) -> &Blake3Hash {
-        &Put::of(self).digest
-    }
-
-    fn content(&self) -> &[u8] {
-        &Put::of(self).content
-    }
-}
+pub mod prelude;
 
 /// Errors that can occur during archive operations.
 #[derive(Debug, Error)]
@@ -176,8 +139,20 @@ pub enum ArchiveError {
     Io(String),
 }
 
-impl From<dialog_capability::DialogCapabilityAuthorizationError> for ArchiveError {
-    fn from(value: dialog_capability::DialogCapabilityAuthorizationError) -> Self {
+impl From<StorageError> for ArchiveError {
+    fn from(e: StorageError) -> Self {
+        Self::Storage(e.to_string())
+    }
+}
+
+impl From<DialogCapabilityAuthorizationError> for ArchiveError {
+    fn from(value: DialogCapabilityAuthorizationError) -> Self {
+        ArchiveError::AuthorizationError(value.to_string())
+    }
+}
+
+impl From<AuthorizeError> for ArchiveError {
+    fn from(value: AuthorizeError) -> Self {
         ArchiveError::AuthorizationError(value.to_string())
     }
 }
@@ -237,59 +212,5 @@ mod tests {
             .invoke(Put::new([0u8; 32], Vec::new()));
 
         assert_eq!(claim.ability(), "/archive/put");
-    }
-
-    #[cfg(feature = "ucan")]
-    mod parameters_tests {
-        use super::*;
-        use dialog_capability::ucan::parameters;
-        use ipld_core::ipld::Ipld;
-
-        #[test]
-        fn it_collects_archive_parameters() {
-            let cap = Subject::from(did!("key:zSpace")).attenuate(Archive);
-            let params = parameters(&cap);
-
-            // Archive is a unit struct, should produce empty map
-            assert!(params.is_empty());
-        }
-
-        #[test]
-        fn it_collects_catalog_parameters() {
-            let cap = Subject::from(did!("key:zSpace"))
-                .attenuate(Archive)
-                .attenuate(Catalog::new("blobs"));
-            let params = parameters(&cap);
-
-            assert_eq!(params.get("catalog"), Some(&Ipld::String("blobs".into())));
-        }
-
-        #[test]
-        fn it_collects_get_parameters() {
-            let digest = Blake3Hash::from([1u8; 32]);
-            let cap = Subject::from(did!("key:zSpace"))
-                .attenuate(Archive)
-                .attenuate(Catalog::new("index"))
-                .invoke(Get::new(digest));
-            let params = parameters(&cap);
-
-            assert_eq!(params.get("catalog"), Some(&Ipld::String("index".into())));
-            assert_eq!(params.get("digest"), Some(&Ipld::Bytes([1u8; 32].to_vec())));
-        }
-
-        #[test]
-        fn it_collects_put_parameters() {
-            let digest = Blake3Hash::from([2u8; 32]);
-            let content = b"hello world".to_vec();
-            let cap = Subject::from(did!("key:zSpace"))
-                .attenuate(Archive)
-                .attenuate(Catalog::new("data"))
-                .invoke(Put::new(digest, content.clone()));
-            let params = parameters(&cap);
-
-            assert_eq!(params.get("catalog"), Some(&Ipld::String("data".into())));
-            assert_eq!(params.get("digest"), Some(&Ipld::Bytes([2u8; 32].to_vec())));
-            assert_eq!(params.get("content"), Some(&Ipld::Bytes(content)));
-        }
     }
 }

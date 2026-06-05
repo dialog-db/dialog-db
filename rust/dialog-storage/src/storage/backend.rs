@@ -14,12 +14,6 @@ mod indexeddb;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub use indexeddb::*;
 
-/// S3/R2-compatible storage backend.
-#[cfg(feature = "s3")]
-pub mod s3;
-#[cfg(feature = "s3")]
-pub use s3::{Bucket, S3, S3StorageError};
-
 #[cfg(not(target_arch = "wasm32"))]
 mod fs;
 #[cfg(not(target_arch = "wasm32"))]

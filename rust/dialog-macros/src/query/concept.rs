@@ -71,8 +71,10 @@
 //! // PersonQuery → Parameters, Premise, Proposition, ConceptQuery
 //! ```
 
+use convert_case::{Case, Casing};
 use proc_macro::TokenStream;
 use quote::quote;
+use syn::ext::IdentExt;
 use syn::{Data, DeriveInput, Fields, parse_macro_input};
 
 use super::helpers::extract_doc_comments;
@@ -141,10 +143,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
     for field in fields {
         let field_name = field.ident.as_ref().unwrap();
-        let field_name_str = field_name.to_string();
+        // The Rust field name is normalized for the descriptor / query
+        // surface: `unraw()` drops any `r#` raw-identifier prefix, then
+        // `to_case(Case::Kebab)` matches the formal-notation convention
+        // used by attribute names elsewhere.
+        let raw_field_name = field_name.unraw().to_string();
+        let field_name_str = raw_field_name.to_case(Case::Kebab);
 
         // Skip the 'this' field - it's handled specially
-        if field_name_str == "this" {
+        if raw_field_name == "this" {
             continue;
         }
 
@@ -156,9 +163,20 @@ pub fn derive(input: TokenStream) -> TokenStream {
         field_types.push(field_type);
         field_name_lits.push(field_name_lit.clone());
 
-        // Extract doc comment from the field (for Query struct docs)
-        let doc_comment = extract_doc_comments(&field.attrs);
-        let doc_comment_lit = syn::LitStr::new(&doc_comment, proc_macro2::Span::call_site());
+        // Forward the user's field doc when present, otherwise synthesize a
+        // fallback so `#![deny(missing_docs)]` in consumer crates is happy.
+        let user_doc = extract_doc_comments(&field.attrs);
+        let query_field_doc = if user_doc.is_empty() {
+            format!("Term matching the `{field_name_str}` field of [`{struct_name}`].",)
+        } else {
+            user_doc
+        };
+        let query_field_doc_lit =
+            syn::LitStr::new(&query_field_doc, proc_macro2::Span::call_site());
+        let terms_method_doc =
+            format!("Variable term for the `{field_name_str}` field of [`{struct_name}`].",);
+        let terms_method_doc_lit =
+            syn::LitStr::new(&terms_method_doc, proc_macro2::Span::call_site());
 
         // Extract the inner type from Attribute - the field type implements Attribute
         // and we need <FieldType as Attribute>::Type for the Term wrapper
@@ -166,11 +184,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         // Generate Query field (Term<InnerType>) where InnerType is the Attribute's Type
         query_fields.push(quote! {
-            #[doc = #doc_comment_lit]
+            #[doc = #query_field_doc_lit]
             pub #field_name: dialog_query::Term<#inner_type>
         });
 
         terms_methods.push(quote! {
+            #[doc = #terms_method_doc_lit]
             pub fn #field_name() -> dialog_query::Term<#inner_type> {
                 dialog_query::Term::<#inner_type>::var(#field_name_lit)
             }
@@ -212,6 +231,32 @@ pub fn derive(input: TokenStream) -> TokenStream {
         struct_name.span(),
     );
 
+    // Synthesized docs for generated types so consumer crates can enable
+    // `#![deny(missing_docs)]` without the lint firing on code they did
+    // not author. We only document items we fabricate; the user's own
+    // struct is left untouched so rustc can still warn if they forgot
+    // docs on their own concept.
+    let query_struct_doc = syn::LitStr::new(
+        &format!(
+            "Query pattern for [`{struct_name}`]. Each field is a [`dialog_query::Term`] used to match or bind that field when running the concept query.",
+        ),
+        proc_macro2::Span::call_site(),
+    );
+    let terms_struct_doc = syn::LitStr::new(
+        &format!(
+            "Typed variable-term accessors for [`{struct_name}`]. Each associated function returns a named `Term` variable for the corresponding concept field.",
+        ),
+        proc_macro2::Span::call_site(),
+    );
+    let terms_this_doc = syn::LitStr::new(
+        &format!("Variable term for the `this` field of [`{struct_name}`]."),
+        proc_macro2::Span::call_site(),
+    );
+    let query_this_field_doc = syn::LitStr::new(
+        &format!("Term matching the `this` entity of [`{struct_name}`]."),
+        proc_macro2::Span::call_site(),
+    );
+
     let expanded = quote! {
         // Compile-time validation that all fields (except 'this') implement Attribute + Descriptor
         const _: () = {
@@ -221,9 +266,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         };
 
+        #[doc = #query_struct_doc]
         #[derive(Debug, Clone, PartialEq)]
         pub struct #query_name {
-            /// The entity being matched
+            #[doc = #query_this_field_doc]
             pub this: dialog_query::Term<dialog_query::Entity>,
             #(#query_fields),*
         }
@@ -237,9 +283,11 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         }
 
+        #[doc = #terms_struct_doc]
         #[derive(Debug, Clone, PartialEq)]
         pub struct #terms_name {}
         impl #terms_name {
+            #[doc = #terms_this_doc]
             pub fn this() -> dialog_query::Term<dialog_query::Entity> {
                 dialog_query::Term::<dialog_query::Entity>::var("this")
             }
@@ -250,13 +298,18 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl dialog_query::Application for #query_name {
             type Conclusion = #struct_name;
 
-            fn evaluate<S: dialog_query::Source, M: dialog_query::Selection>(
+            fn evaluate<'__a, __Env, __M: dialog_query::Selection + '__a>(
                 self,
-                selection: M,
-                source: &S,
-            ) -> impl dialog_query::Selection {
+                selection: __M,
+                env: &'__a __Env,
+            ) -> impl dialog_query::Selection + '__a
+            where
+                __Env: dialog_query::Provider<dialog_query::Select<'__a>>
+                    + dialog_query::Provider<dialog_query::source::SelectRules>
+                    + dialog_query::ConditionalSync,
+            {
                 let application: dialog_query::ConceptQuery = self.into();
-                application.evaluate(selection, source)
+                application.evaluate(selection, env)
             }
 
             fn realize(&self, source: dialog_query::Match) -> std::result::Result<Self::Conclusion, dialog_query::EvaluationError> {
@@ -269,12 +322,17 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         // Add inherent perform method so users don't need to import Application trait
         impl #query_name {
-            /// Execute this query against the given source
-            pub fn perform<S: dialog_query::Source>(
+            /// Execute this query against the given environment
+            pub fn perform<'__a, __Env>(
                 self,
-                source: &S,
-            ) -> impl dialog_query::Output<#struct_name> {
-                dialog_query::Application::perform(self, source)
+                env: &'__a __Env,
+            ) -> impl dialog_query::Output<#struct_name> + '__a
+            where
+                __Env: dialog_query::Provider<dialog_query::Select<'__a>>
+                    + dialog_query::Provider<dialog_query::source::SelectRules>
+                    + dialog_query::ConditionalSync,
+            {
+                dialog_query::Application::perform(self, env)
             }
         }
 
@@ -291,7 +349,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         }
 
-        // Implement From<StructName> for ConceptDescriptor
+        // Implement From<StructName> for ConceptDescriptor.
+        // The struct's doc comment carries through as the
+        // descriptor's `description` so a `concept:` query
+        // surfaces it (the field list alone leaves it `None`).
         impl From<#struct_name> for dialog_query::ConceptDescriptor {
             fn from(_: #struct_name) -> Self {
                 dialog_query::ConceptDescriptor::from(vec![
@@ -299,6 +360,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                         (#field_name_lits, <#field_types as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().clone())
                     ),*
                 ])
+                .with_description(#concept_description_lit)
             }
         }
 
@@ -310,6 +372,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                         (#field_name_lits, <#field_types as dialog_query::Descriptor<dialog_query::AttributeDescriptor>>::descriptor().clone())
                     ),*
                 ])
+                .with_description(#concept_description_lit)
             }
         }
 
@@ -394,15 +457,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         // Implement Statement trait
         impl dialog_query::Statement for #struct_name {
-            fn assert(self, transaction: &mut dialog_query::Transaction) {
+            fn assert(self, update: &mut impl dialog_query::Update) {
                 #(
-                    dialog_query::Statement::assert(#instance_expressions, transaction);
+                    dialog_query::Statement::assert(#instance_expressions, update);
                 )*
             }
 
-            fn retract(self, transaction: &mut dialog_query::Transaction) {
+            fn retract(self, update: &mut impl dialog_query::Update) {
                 #(
-                    dialog_query::Statement::retract(#instance_expressions, transaction);
+                    dialog_query::Statement::retract(#instance_expressions, update);
                 )*
             }
         }
@@ -412,7 +475,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             type Output = dialog_query::Retraction<Self>;
 
             fn not(self) -> Self::Output {
-                dialog_query::Statement::revert(self)
+                dialog_query::StatementExt::revert(self)
             }
         }
 

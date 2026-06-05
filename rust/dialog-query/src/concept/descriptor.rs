@@ -9,15 +9,20 @@ use crate::attribute::{AttributeDescriptor, Attribution};
 use crate::concept::query::ConceptQuery;
 use crate::concept::{Concept, Conclusion};
 use crate::error::TypeError;
-use crate::query::{Application, Source};
+use crate::query::Application;
 use crate::selection::{Match, Selection};
+use crate::source::SelectRules;
 use crate::statement::Retraction;
 use crate::term::Term;
 use crate::types::Scalar;
 use crate::{
     Cardinality, Entity, EvaluationError, Field, Parameters, Proposition, Requirement, Schema,
-    Statement, Transaction, Type, Value,
+    Statement, Type, Value,
 };
+use dialog_artifacts::Select;
+use dialog_artifacts::Update;
+use dialog_capability::Provider;
+use dialog_common::ConditionalSync;
 
 use base58::ToBase58;
 use serde::{Deserialize, Serialize};
@@ -34,8 +39,13 @@ use std::ops::Not;
 ///
 /// Serializes to the formal notation:
 /// ```json
-/// { "description": "...", "with": { "fieldName": { "the": "domain/name", ... } } }
+/// { "description": "...", "with": { "field-name": { "the": "domain/name", ... } } }
 /// ```
+///
+/// Field-name keys follow the kebab-case convention used elsewhere in the
+/// formal notation; Rust field names are normalized on derive (e.g. a
+/// `display_name`, `displayName`, or `DisplayName` field all serialize as
+/// `"display-name"`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConceptDescriptor {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -61,6 +71,23 @@ impl ConceptDescriptor {
     /// Returns the description of this concept, if any.
     pub fn description(&self) -> Option<&str> {
         self.description.as_deref()
+    }
+
+    /// Returns this descriptor with `description` set.
+    ///
+    /// The `From<[..]>` / `From<Vec<..>>` constructors only carry
+    /// the attribute map and leave `description` as `None`; this
+    /// is the builder-style way to attach one. An empty string is
+    /// treated as absent (`description` stays `None`) so a concept
+    /// with no doc comment doesn't serialize a blank field.
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        let description = description.into();
+        self.description = if description.is_empty() {
+            None
+        } else {
+            Some(description)
+        };
+        self
     }
 
     /// Returns a reference to the named attributes.
@@ -296,14 +323,14 @@ impl ConceptStatement {
 }
 
 impl Statement for ConceptStatement {
-    fn assert(self, transaction: &mut Transaction) {
+    fn assert(self, update: &mut impl Update) {
         for attribution in self.with {
-            transaction.associate(attribution.the.into(), self.this.clone(), attribution.is);
+            update.associate(attribution.the, self.this.clone(), attribution.is);
         }
     }
-    fn retract(self, transaction: &mut Transaction) {
+    fn retract(self, update: &mut impl Update) {
         for attribution in self.with {
-            transaction.dissociate(attribution.the.into(), self.this.clone(), attribution.is);
+            update.dissociate(attribution.the, self.this.clone(), attribution.is);
         }
     }
 }
@@ -312,7 +339,7 @@ impl Not for ConceptStatement {
     type Output = Retraction<Self>;
 
     fn not(self) -> Self::Output {
-        self.revert()
+        Retraction(self)
     }
 }
 
@@ -432,8 +459,11 @@ impl From<ConceptQuery> for ConceptDescriptor {
 impl Application for ConceptQuery {
     type Conclusion = ConceptConclusion;
 
-    fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
-        ConceptQuery::evaluate(self, selection, source)
+    fn evaluate<'a, Env, M: Selection + 'a>(self, selection: M, env: &'a Env) -> impl Selection + 'a
+    where
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    {
+        ConceptQuery::evaluate(self, selection, env)
     }
 
     fn realize(&self, source: Match) -> Result<Self::Conclusion, EvaluationError> {
@@ -1214,6 +1244,118 @@ mod tests {
     }
 
     #[dialog_common::test]
+    fn it_strips_raw_identifier_prefix_from_concept_field_names() {
+        use crate as dialog_query;
+        use crate::{Attribute, Concept, Entity};
+
+        #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        #[domain("dialog.test")]
+        pub struct TypeAttr(pub String);
+
+        #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        pub struct Sample {
+            pub this: Entity,
+            /// `type` is a Rust keyword so the field has to be written
+            /// `r#type` — but the descriptor's `with` map key must be
+            /// the cooked name `"type"`, not `"r#type"`.
+            pub r#type: TypeAttr,
+        }
+
+        let descriptor: ConceptDescriptor =
+            <Sample as crate::Predicate>::Application::default().into();
+
+        // Round-trip the descriptor through JSON and assert the field
+        // key in the `with` map is `type`, not `r#type`.
+        let json = serde_json::to_value(&descriptor).expect("serialize");
+        let with = json["with"].as_object().expect("with map");
+
+        assert!(
+            with.contains_key("type"),
+            "descriptor should expose `type`, got keys: {:?}",
+            with.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !with.contains_key("r#type"),
+            "descriptor should NOT expose raw-ident `r#type`",
+        );
+
+        let round_tripped: ConceptDescriptor = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(
+            round_tripped.this(),
+            descriptor.this(),
+            "JSON round-trip must preserve the concept's content hash"
+        );
+    }
+
+    #[dialog_common::test]
+    #[allow(nonstandard_style)]
+    fn it_kebab_cases_concept_field_names() {
+        use crate as dialog_query;
+        use crate::{Attribute, Concept, Entity};
+
+        // The descriptor's `with` map keys follow the formal-notation
+        // convention: lower-case kebab. snake_case, camelCase, and
+        // PascalCase field names all collapse to kebab-case. A field
+        // already in single-word lower form is unchanged.
+
+        #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        #[domain("dialog.test")]
+        pub struct A(pub String);
+
+        #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        #[domain("dialog.test")]
+        pub struct B(pub String);
+
+        #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        #[domain("dialog.test")]
+        pub struct C(pub String);
+
+        #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        #[domain("dialog.test")]
+        pub struct D(pub String);
+
+        #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        pub struct Sample {
+            pub this: Entity,
+            /// snake_case → kebab
+            pub display_name: A,
+            /// camelCase → kebab
+            pub firstName: B,
+            /// PascalCase → kebab
+            pub LastName: C,
+            /// already lowercase single-word → unchanged
+            pub email: D,
+        }
+
+        let descriptor: ConceptDescriptor =
+            <Sample as crate::Predicate>::Application::default().into();
+
+        let json = serde_json::to_value(&descriptor).expect("serialize");
+        let with = json["with"].as_object().expect("with map");
+        let keys: Vec<&String> = with.keys().collect();
+
+        for expected in ["display-name", "first-name", "last-name", "email"] {
+            assert!(
+                with.contains_key(expected),
+                "descriptor should expose `{expected}`, got keys: {keys:?}",
+            );
+        }
+        for unexpected in ["display_name", "firstName", "LastName"] {
+            assert!(
+                !with.contains_key(unexpected),
+                "descriptor should NOT expose raw `{unexpected}`",
+            );
+        }
+
+        let round_tripped: ConceptDescriptor = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(
+            round_tripped.this(),
+            descriptor.this(),
+            "JSON round-trip must preserve the concept's content hash"
+        );
+    }
+
+    #[dialog_common::test]
     fn it_deserializes_empty_maybe_as_none() {
         let json = r#"{
             "with": {
@@ -1226,5 +1368,99 @@ mod tests {
             serde_json::from_str(json).expect("Should accept empty 'maybe'");
 
         assert_eq!(concept.maybe, None, "Empty 'maybe' should become None");
+    }
+
+    #[dialog_common::test]
+    fn it_carries_the_concept_doc_comment_into_the_descriptor() {
+        use crate::{Attribute, Concept, Entity};
+
+        // The `#[derive(Concept)]` macro captures the struct doc
+        // comment for the `Concept::description` trait method. The
+        // `From`-built descriptor must carry the same text: a
+        // `concept:` query reads the descriptor, so without this
+        // the description never reaches a consumer.
+
+        #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        #[domain("dialog.test")]
+        pub struct Title(pub String);
+
+        /// A cooking recipe.
+        #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        pub struct Recipe {
+            pub this: Entity,
+            /// The recipe's title.
+            pub title: Title,
+        }
+
+        let descriptor: ConceptDescriptor =
+            <Recipe as crate::Predicate>::Application::default().into();
+
+        assert_eq!(
+            descriptor.description(),
+            Some("A cooking recipe."),
+            "the descriptor must carry the struct doc comment",
+        );
+        // The trait method and the descriptor are two paths off
+        // the same doc comment; they must agree.
+        assert_eq!(descriptor.description(), Some(Recipe::description()));
+
+        // The description has to survive the JSON round-trip a
+        // `concept:` query serializes the descriptor through.
+        let json = serde_json::to_value(&descriptor).expect("serialize");
+        assert_eq!(json["description"], serde_json::json!("A cooking recipe."));
+        let round_tripped: ConceptDescriptor = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(round_tripped.description(), descriptor.description());
+    }
+
+    #[dialog_common::test]
+    fn it_leaves_description_none_for_an_undocumented_concept() {
+        use crate::{Attribute, Concept, Entity};
+
+        // A struct with no doc comment yields an empty
+        // description; `with_description` treats that as absent so
+        // no blank `description` field is serialized.
+
+        #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        #[domain("dialog.test")]
+        pub struct Title(pub String);
+
+        #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        pub struct Recipe {
+            pub this: Entity,
+            /// The recipe's title.
+            pub title: Title,
+        }
+
+        let descriptor: ConceptDescriptor =
+            <Recipe as crate::Predicate>::Application::default().into();
+
+        assert_eq!(descriptor.description(), None);
+        let json = serde_json::to_value(&descriptor).expect("serialize");
+        assert!(
+            json.get("description").is_none(),
+            "an empty description must not serialize a blank field",
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_sets_the_description_via_with_description() {
+        let descriptor = ConceptDescriptor::from([(
+            "name",
+            AttributeDescriptor::new(
+                the!("user/name"),
+                "User's name",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )]);
+
+        // `From<[..]>` leaves `description` as `None`.
+        assert_eq!(descriptor.description(), None);
+
+        let described = descriptor.clone().with_description("A user account.");
+        assert_eq!(described.description(), Some("A user account."));
+
+        // An empty string is treated as absent.
+        assert_eq!(described.with_description("").description(), None);
     }
 }

@@ -5,12 +5,14 @@ use std::{
     sync::{Arc, mpsc::Sender},
 };
 
-use dialog_artifacts::{Datum, DialogArtifactsError, Index, Key};
+use dialog_artifacts::{CborEncoder, Datum, DialogArtifactsError, Index, Key, Storage};
 use dialog_storage::{Blake3Hash, MemoryStorageBackend};
 use futures_util::{Stream, TryStreamExt};
 use tokio::sync::Mutex;
 
 use super::store::WorkerMessage;
+
+type DiagnoseStorage = Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>;
 
 /// Internal state for the artifacts cursor.
 ///
@@ -33,7 +35,9 @@ pub struct ArtifactsCursor {
     /// Shared state for tracking cursor position
     state: Arc<Mutex<ArtifactsCursorState>>,
     /// The prolly tree index containing the facts
-    tree: Index<Key, Datum, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
+    tree: Index<Key, Datum>,
+    /// The storage backend for tree operations
+    storage: DiagnoseStorage,
     /// Channel sender for worker messages
     tx: Sender<WorkerMessage>,
 }
@@ -44,14 +48,17 @@ impl ArtifactsCursor {
     /// # Arguments
     ///
     /// * `tree` - The prolly tree index containing facts data
+    /// * `storage` - The storage backend for tree operations
     /// * `tx` - Channel sender for worker messages
     pub fn new(
-        tree: Index<Key, Datum, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
+        tree: Index<Key, Datum>,
+        storage: DiagnoseStorage,
         tx: Sender<WorkerMessage>,
     ) -> Self {
         Self {
             state: Default::default(),
             tree,
+            storage,
             tx,
         }
     }
@@ -69,6 +76,7 @@ impl ArtifactsCursor {
         let tx = self.tx.clone();
         let state = self.state.clone();
         let tree = self.tree.clone();
+        let storage = self.storage.clone();
 
         tokio::spawn(async move {
             let mut state = state.lock().await;
@@ -82,23 +90,21 @@ impl ArtifactsCursor {
             }
 
             let mut stream: Pin<Box<dyn Stream<Item = _> + Send>> = match state.last_key.clone() {
-                Some(key) => Box::pin(tree.stream_range(key..)),
-                None => Box::pin(tree.stream()),
+                Some(key) => Box::pin(tree.stream_range(key.., &storage)),
+                None => Box::pin(tree.stream(&storage)),
             };
 
-            loop {
-                let Some(element) = stream.try_next().await? else {
-                    break;
-                };
-
+            while let Some(element) = stream.try_next().await? {
                 state.last_key = Some(element.key);
 
-                match tx.send(WorkerMessage::Fact {
-                    index: state.next_index,
-                    data: element.value,
-                }) {
-                    Ok(_) => (),
-                    Err(_) => break,
+                if tx
+                    .send(WorkerMessage::Fact {
+                        index: state.next_index,
+                        data: element.value,
+                    })
+                    .is_err()
+                {
+                    break;
                 }
 
                 state.next_index += 1;

@@ -1,7 +1,6 @@
 use std::fmt;
 
 use crate::attribute::query::AttributeQuery;
-use crate::concept::descriptor::ConceptDescriptor;
 pub use crate::concept::query::ConceptQuery;
 use crate::constraint::Constraint;
 pub use crate::error::AnalyzerError;
@@ -10,11 +9,14 @@ pub use crate::formula::query::FormulaQuery;
 pub use crate::premise::{Negation, Premise};
 use crate::query::Application;
 use crate::selection::Selection;
-pub use crate::{Environment, Parameters, Schema, Source};
+use crate::source::SelectRules;
+pub use crate::{Environment, Parameters, Schema};
+use dialog_artifacts::Select;
+use dialog_capability::Provider;
+use dialog_common::ConditionalSync;
 use futures_util::future::Either;
 use serde::de;
 use serde::ser;
-use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use std::fmt::Display;
 
@@ -56,13 +58,20 @@ impl Proposition {
     }
 
     /// Evaluate this application against the given context, producing a selection stream
-    pub fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
+    pub fn evaluate<'a, Env, M: Selection + 'a>(
+        self,
+        selection: M,
+        env: &'a Env,
+    ) -> impl Selection + 'a
+    where
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    {
         match self {
             Proposition::Attribute(query) => Either::Left(Either::Left(Either::Left(
-                Application::evaluate(*query, selection, source),
+                Application::evaluate(*query, selection, env),
             ))),
             Proposition::Concept(application) => Either::Left(Either::Left(Either::Right(
-                application.evaluate(selection, source),
+                application.evaluate(selection, env),
             ))),
             Proposition::Formula(application) => {
                 Either::Left(Either::Right(application.evaluate(selection)))
@@ -129,12 +138,7 @@ impl From<Constraint> for Proposition {
 impl Serialize for Proposition {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
-            Proposition::Concept(cq) => {
-                let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("assert", &cq.predicate)?;
-                map.serialize_entry("where", &cq.terms)?;
-                map.end()
-            }
+            Proposition::Concept(cq) => cq.serialize(serializer),
             Proposition::Formula(fq) => fq.serialize(serializer),
             Proposition::Constraint(c) => c.serialize(serializer),
             Proposition::Attribute(_) => Err(ser::Error::custom(
@@ -154,15 +158,10 @@ impl<'de> Deserialize<'de> for Proposition {
             .ok_or_else(|| de::Error::missing_field("assert"))?;
 
         match assert_val {
-            // Object → concept descriptor
+            // Object → concept query
             serde_json::Value::Object(_) => {
-                let predicate: ConceptDescriptor =
-                    serde_json::from_value(assert_val.clone()).map_err(de::Error::custom)?;
-                let terms: Parameters = raw
-                    .get("where")
-                    .ok_or_else(|| de::Error::missing_field("where"))
-                    .and_then(|v| serde_json::from_value(v.clone()).map_err(de::Error::custom))?;
-                Ok(Proposition::Concept(ConceptQuery { predicate, terms }))
+                let cq: ConceptQuery = serde_json::from_value(raw).map_err(de::Error::custom)?;
+                Ok(Proposition::Concept(cq))
             }
             // String "==" → Constraint
             serde_json::Value::String(name) if name == "==" => {

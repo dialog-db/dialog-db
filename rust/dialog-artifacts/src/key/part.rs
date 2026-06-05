@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::fmt::{Display, Formatter, Result as FmtResult};
 
 use crate::{
     ATTRIBUTE_LENGTH, Attribute, DialogArtifactsError, ENTITY_LENGTH, Entity, MAXIMUM_ATTRIBUTE,
@@ -83,7 +83,7 @@ impl<'a> TryFrom<AttributeKeyPart<'a>> for Attribute {
 }
 
 impl Display for AttributeKeyPart<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         let parsed = String::from_utf8_lossy(self.0.as_ref())
             .split('\u{0000}')
             .take(1)

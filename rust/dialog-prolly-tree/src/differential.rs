@@ -22,17 +22,17 @@
 //!
 //! ```text
 //! // Compute changes from tree_a to tree_b
-//! let changes = tree_a.differentiate(&tree_b);
+//! let changes = tree_a.differentiate(&tree_b, &storage, &storage);
 //!
 //! // Apply changes to another tree
-//! tree_c.integrate(changes).await?;
+//! tree_c.integrate(changes, &mut storage).await?;
 //! ```
 //!
 //! For sync/replication scenarios where you need to push novel nodes to a remote:
 //!
 //! ```text
 //! // Find nodes that local has but remote doesn't
-//! let diff = TreeDifference::compute(&remote_tree, &local_tree).await?;
+//! let diff = TreeDifference::compute(&remote_tree, &local_tree, storage, storage).await?;
 //! let novel = diff.novel_nodes();
 //! // Push each novel node to remote storage
 //! ```
@@ -511,11 +511,10 @@ where
 /// ```no_run
 /// # use dialog_prolly_tree::{TreeDifference, Tree, GeometricDistribution};
 /// # use dialog_storage::{Blake3Hash, CborEncoder, MemoryStorageBackend, Storage};
-/// # type TestTree = Tree<GeometricDistribution, Vec<u8>, Vec<u8>, Blake3Hash,
-/// #     Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>>;
-/// # async fn example(source: &TestTree, target: &TestTree) -> Result<(), Box<dyn std::error::Error>> {
+/// # type TestTree = Tree<GeometricDistribution, Vec<u8>, Vec<u8>, Blake3Hash>;
+/// # async fn example(source: &TestTree, target: &TestTree, storage: &Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>) -> Result<(), Box<dyn std::error::Error>> {
 /// // Compute the difference (includes expansion)
-/// let delta = TreeDifference::compute(&source, &target).await?;
+/// let delta = TreeDifference::compute(&source, &target, storage, storage).await?;
 ///
 /// // Option 1: Get entry-level changes (for replication/sync)
 /// let changes = delta.changes();
@@ -589,21 +588,22 @@ where
     /// ```no_run
     /// # use dialog_prolly_tree::{TreeDifference, Tree, GeometricDistribution};
     /// # use dialog_storage::{Blake3Hash, CborEncoder, MemoryStorageBackend, Storage};
-    /// # type TestTree = Tree<GeometricDistribution, Vec<u8>, Vec<u8>, Blake3Hash,
-    /// #     Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>>;
-    /// # async fn example(remote_tree: &TestTree, local_tree: &TestTree) -> Result<(), Box<dyn std::error::Error>> {
-    /// let diff = TreeDifference::compute(&remote_tree, &local_tree).await?;
+    /// # type TestTree = Tree<GeometricDistribution, Vec<u8>, Vec<u8>, Blake3Hash>;
+    /// # async fn example(remote_tree: &TestTree, local_tree: &TestTree, storage: &Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>) -> Result<(), Box<dyn std::error::Error>> {
+    /// let diff = TreeDifference::compute(&remote_tree, &local_tree, storage, storage).await?;
     /// // changes() produces transforms remote → local
     /// // novel_nodes() yields nodes local has that remote doesn't
     /// # Ok(())
     /// # }
     /// ```
     pub async fn compute<Distribution: crate::Distribution<Key, Hash>>(
-        source: &'a Tree<Distribution, Key, Value, Hash, Storage>,
-        target: &'a Tree<Distribution, Key, Value, Hash, Storage>,
+        source: &'a Tree<Distribution, Key, Value, Hash>,
+        target: &'a Tree<Distribution, Key, Value, Hash>,
+        source_storage: &'a Storage,
+        target_storage: &'a Storage,
     ) -> Result<Self, DialogProllyTreeError> {
         let mut source = SparseTree {
-            storage: source.storage(),
+            storage: source_storage,
             nodes: source
                 .root()
                 .map(|root| vec![SparseTreeNode::Node(root.clone())])
@@ -611,7 +611,7 @@ where
             expanded: vec![],
         };
         let mut target = SparseTree {
-            storage: target.storage(),
+            storage: target_storage,
             nodes: target
                 .root()
                 .map(|root| vec![SparseTreeNode::Node(root.clone())])
@@ -734,10 +734,9 @@ where
     /// # use dialog_prolly_tree::{TreeDifference, Tree, GeometricDistribution, Change};
     /// # use dialog_storage::{Blake3Hash, CborEncoder, MemoryStorageBackend, Storage};
     /// # use futures_util::{pin_mut, StreamExt};
-    /// # type TestTree = Tree<GeometricDistribution, Vec<u8>, Vec<u8>, Blake3Hash,
-    /// #     Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>>;
-    /// # async fn example(old_tree: &TestTree, new_tree: &TestTree) -> Result<(), Box<dyn std::error::Error>> {
-    /// let diff = TreeDifference::compute(&old_tree, &new_tree).await?;
+    /// # type TestTree = Tree<GeometricDistribution, Vec<u8>, Vec<u8>, Blake3Hash>;
+    /// # async fn example(old_tree: &TestTree, new_tree: &TestTree, storage: &Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>) -> Result<(), Box<dyn std::error::Error>> {
+    /// let diff = TreeDifference::compute(&old_tree, &new_tree, storage, storage).await?;
     /// let changes = diff.changes();
     /// pin_mut!(changes);
     /// while let Some(change) = changes.next().await {
@@ -830,10 +829,9 @@ where
     /// # use dialog_prolly_tree::{TreeDifference, Tree, GeometricDistribution};
     /// # use dialog_storage::{Blake3Hash, CborEncoder, MemoryStorageBackend, Storage};
     /// # use futures_util::{pin_mut, StreamExt};
-    /// # type TestTree = Tree<GeometricDistribution, Vec<u8>, Vec<u8>, Blake3Hash,
-    /// #     Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>>;
-    /// # async fn example(remote_tree: &TestTree, local_tree: &TestTree) -> Result<(), Box<dyn std::error::Error>> {
-    /// let diff = TreeDifference::compute(&remote_tree, &local_tree).await?;
+    /// # type TestTree = Tree<GeometricDistribution, Vec<u8>, Vec<u8>, Blake3Hash>;
+    /// # async fn example(remote_tree: &TestTree, local_tree: &TestTree, storage: &Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>) -> Result<(), Box<dyn std::error::Error>> {
+    /// let diff = TreeDifference::compute(&remote_tree, &local_tree, storage, storage).await?;
     /// let nodes = diff.novel_nodes();
     /// pin_mut!(nodes);
     /// while let Some(node) = nodes.next().await {
@@ -874,13 +872,7 @@ mod tests {
     };
     use futures_util::{StreamExt, TryStreamExt, pin_mut, stream::iter};
 
-    type TestTree = Tree<
-        GeometricDistribution,
-        Vec<u8>,
-        Vec<u8>,
-        Blake3Hash,
-        Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
-    >;
+    type TestTree = Tree<GeometricDistribution, Vec<u8>, Vec<u8>, Blake3Hash>;
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_service_worker);
@@ -888,21 +880,19 @@ mod tests {
     #[dialog_common::test]
     async fn test_differentiate_identical_trees() {
         let backend = MemoryStorageBackend::default();
-        let mut tree1 = TestTree::new(Storage {
+        let mut storage = Storage {
             encoder: CborEncoder,
             backend: backend.clone(),
-        });
-        let mut tree2 = TestTree::new(Storage {
-            encoder: CborEncoder,
-            backend: backend.clone(),
-        });
+        };
+        let mut tree1 = TestTree::new();
+        let mut tree2 = TestTree::new();
 
-        tree1.set(vec![1], vec![10]).await.unwrap();
-        tree1.set(vec![2], vec![20]).await.unwrap();
-        tree2.set(vec![1], vec![10]).await.unwrap();
-        tree2.set(vec![2], vec![20]).await.unwrap();
+        tree1.set(vec![1], vec![10], &mut storage).await.unwrap();
+        tree1.set(vec![2], vec![20], &mut storage).await.unwrap();
+        tree2.set(vec![1], vec![10], &mut storage).await.unwrap();
+        tree2.set(vec![2], vec![20], &mut storage).await.unwrap();
 
-        let changes = tree2.differentiate(&tree1);
+        let changes = tree2.differentiate(&tree1, &storage, &storage);
         pin_mut!(changes);
         let mut count = 0;
         while changes.next().await.is_some() {
@@ -915,20 +905,18 @@ mod tests {
     #[dialog_common::test]
     async fn test_differentiate_added_entry() {
         let backend = MemoryStorageBackend::default();
-        let mut tree1 = TestTree::new(Storage {
+        let mut storage = Storage {
             encoder: CborEncoder,
             backend: backend.clone(),
-        });
-        let mut tree2 = TestTree::new(Storage {
-            encoder: CborEncoder,
-            backend: backend.clone(),
-        });
+        };
+        let mut tree1 = TestTree::new();
+        let mut tree2 = TestTree::new();
 
-        tree1.set(vec![1], vec![10]).await.unwrap();
-        tree1.set(vec![2], vec![20]).await.unwrap();
-        tree2.set(vec![1], vec![10]).await.unwrap();
+        tree1.set(vec![1], vec![10], &mut storage).await.unwrap();
+        tree1.set(vec![2], vec![20], &mut storage).await.unwrap();
+        tree2.set(vec![1], vec![10], &mut storage).await.unwrap();
 
-        let changes = tree2.differentiate(&tree1);
+        let changes = tree2.differentiate(&tree1, &storage, &storage);
         pin_mut!(changes);
         let mut adds = Vec::new();
         let mut removes = Vec::new();
@@ -949,20 +937,18 @@ mod tests {
     #[dialog_common::test]
     async fn test_differentiate_removed_entry() {
         let backend = MemoryStorageBackend::default();
-        let mut tree1 = TestTree::new(Storage {
+        let mut storage = Storage {
             encoder: CborEncoder,
             backend: backend.clone(),
-        });
-        let mut tree2 = TestTree::new(Storage {
-            encoder: CborEncoder,
-            backend: backend.clone(),
-        });
+        };
+        let mut tree1 = TestTree::new();
+        let mut tree2 = TestTree::new();
 
-        tree1.set(vec![1], vec![10]).await.unwrap();
-        tree2.set(vec![1], vec![10]).await.unwrap();
-        tree2.set(vec![2], vec![20]).await.unwrap();
+        tree1.set(vec![1], vec![10], &mut storage).await.unwrap();
+        tree2.set(vec![1], vec![10], &mut storage).await.unwrap();
+        tree2.set(vec![2], vec![20], &mut storage).await.unwrap();
 
-        let changes = tree2.differentiate(&tree1);
+        let changes = tree2.differentiate(&tree1, &storage, &storage);
         pin_mut!(changes);
         let mut adds = Vec::new();
         let mut removes = Vec::new();
@@ -983,21 +969,19 @@ mod tests {
     #[dialog_common::test]
     async fn test_differentiate_modified_entry() {
         let backend = MemoryStorageBackend::default();
-        let mut tree1 = TestTree::new(Storage {
+        let mut storage = Storage {
             encoder: CborEncoder,
             backend: backend.clone(),
-        });
-        let mut tree2 = TestTree::new(Storage {
-            encoder: CborEncoder,
-            backend: backend.clone(),
-        });
+        };
+        let mut tree1 = TestTree::new();
+        let mut tree2 = TestTree::new();
 
-        tree1.set(vec![1], vec![10]).await.unwrap();
-        tree1.set(vec![2], vec![30]).await.unwrap();
-        tree2.set(vec![1], vec![10]).await.unwrap();
-        tree2.set(vec![2], vec![20]).await.unwrap();
+        tree1.set(vec![1], vec![10], &mut storage).await.unwrap();
+        tree1.set(vec![2], vec![30], &mut storage).await.unwrap();
+        tree2.set(vec![1], vec![10], &mut storage).await.unwrap();
+        tree2.set(vec![2], vec![20], &mut storage).await.unwrap();
 
-        let changes = tree2.differentiate(&tree1);
+        let changes = tree2.differentiate(&tree1, &storage, &storage);
         pin_mut!(changes);
         let mut adds = Vec::new();
         let mut removes = Vec::new();
@@ -1020,19 +1004,17 @@ mod tests {
     #[dialog_common::test]
     async fn test_differentiate_empty_to_populated() {
         let backend = MemoryStorageBackend::default();
-        let mut tree1 = TestTree::new(Storage {
+        let mut storage = Storage {
             encoder: CborEncoder,
             backend: backend.clone(),
-        });
-        let tree2 = TestTree::new(Storage {
-            encoder: CborEncoder,
-            backend: backend.clone(),
-        });
+        };
+        let mut tree1 = TestTree::new();
+        let tree2 = TestTree::new();
 
-        tree1.set(vec![1], vec![10]).await.unwrap();
-        tree1.set(vec![2], vec![20]).await.unwrap();
+        tree1.set(vec![1], vec![10], &mut storage).await.unwrap();
+        tree1.set(vec![2], vec![20], &mut storage).await.unwrap();
 
-        let changes = tree2.differentiate(&tree1);
+        let changes = tree2.differentiate(&tree1, &storage, &storage);
         pin_mut!(changes);
         let mut adds = Vec::new();
 
@@ -1049,19 +1031,17 @@ mod tests {
     #[dialog_common::test]
     async fn test_differentiate_populated_to_empty() {
         let backend = MemoryStorageBackend::default();
-        let tree1 = TestTree::new(Storage {
+        let mut storage = Storage {
             encoder: CborEncoder,
             backend: backend.clone(),
-        });
-        let mut tree2 = TestTree::new(Storage {
-            encoder: CborEncoder,
-            backend: backend.clone(),
-        });
+        };
+        let tree1 = TestTree::new();
+        let mut tree2 = TestTree::new();
 
-        tree2.set(vec![1], vec![10]).await.unwrap();
-        tree2.set(vec![2], vec![20]).await.unwrap();
+        tree2.set(vec![1], vec![10], &mut storage).await.unwrap();
+        tree2.set(vec![2], vec![20], &mut storage).await.unwrap();
 
-        let changes = tree2.differentiate(&tree1);
+        let changes = tree2.differentiate(&tree1, &storage, &storage);
         pin_mut!(changes);
         let mut removes = Vec::new();
 
@@ -1078,25 +1058,23 @@ mod tests {
     #[dialog_common::test]
     async fn test_differentiate_large_tree() {
         let backend = MemoryStorageBackend::default();
-        let mut tree1 = TestTree::new(Storage {
+        let mut storage = Storage {
             encoder: CborEncoder,
             backend: backend.clone(),
-        });
-        let mut tree2 = TestTree::new(Storage {
-            encoder: CborEncoder,
-            backend: backend.clone(),
-        });
+        };
+        let mut tree1 = TestTree::new();
+        let mut tree2 = TestTree::new();
 
         // Create a larger tree to test branch handling
         for i in 0..100u8 {
-            tree1.set(vec![i], vec![i * 2]).await.unwrap();
+            tree1.set(vec![i], vec![i * 2], &mut storage).await.unwrap();
             if i != 50 {
                 // Skip one entry in tree2
-                tree2.set(vec![i], vec![i * 2]).await.unwrap();
+                tree2.set(vec![i], vec![i * 2], &mut storage).await.unwrap();
             }
         }
 
-        let changes = tree2.differentiate(&tree1);
+        let changes = tree2.differentiate(&tree1, &storage, &storage);
         pin_mut!(changes);
         let mut adds = Vec::new();
         let mut removes = Vec::new();
@@ -1116,35 +1094,37 @@ mod tests {
     #[dialog_common::test]
     async fn test_integrate_add_new_entry() {
         let backend = MemoryStorageBackend::default();
-        let mut tree = TestTree::new(Storage {
+        let mut storage = Storage {
             encoder: CborEncoder,
             backend: backend.clone(),
-        });
+        };
+        let mut tree = TestTree::new();
 
-        tree.set(vec![1], vec![10]).await.unwrap();
+        tree.set(vec![1], vec![10], &mut storage).await.unwrap();
 
         let changes = vec![Change::Add(Entry {
             key: vec![2],
             value: vec![20],
         })];
 
-        tree.integrate(iter(changes.into_iter().map(Ok)))
+        tree.integrate(iter(changes.into_iter().map(Ok)), &mut storage)
             .await
             .unwrap();
 
-        assert_eq!(tree.get(&vec![1]).await.unwrap(), Some(vec![10]));
-        assert_eq!(tree.get(&vec![2]).await.unwrap(), Some(vec![20]));
+        assert_eq!(tree.get(&vec![1], &storage).await.unwrap(), Some(vec![10]));
+        assert_eq!(tree.get(&vec![2], &storage).await.unwrap(), Some(vec![20]));
     }
 
     #[dialog_common::test]
     async fn test_integrate_add_idempotent() {
         let backend = MemoryStorageBackend::default();
-        let mut tree = TestTree::new(Storage {
+        let mut storage = Storage {
             encoder: CborEncoder,
             backend: backend.clone(),
-        });
+        };
+        let mut tree = TestTree::new();
 
-        tree.set(vec![1], vec![10]).await.unwrap();
+        tree.set(vec![1], vec![10], &mut storage).await.unwrap();
 
         // Add same entry - should be no-op
         let changes = vec![Change::Add(Entry {
@@ -1152,23 +1132,24 @@ mod tests {
             value: vec![10],
         })];
 
-        tree.integrate(iter(changes.into_iter().map(Ok)))
+        tree.integrate(iter(changes.into_iter().map(Ok)), &mut storage)
             .await
             .unwrap();
 
-        assert_eq!(tree.get(&vec![1]).await.unwrap(), Some(vec![10]));
+        assert_eq!(tree.get(&vec![1], &storage).await.unwrap(), Some(vec![10]));
     }
 
     #[dialog_common::test]
     async fn test_integrate_add_conflict_resolution() {
         let backend = MemoryStorageBackend::default();
-        let mut tree = TestTree::new(Storage {
+        let mut storage = Storage {
             encoder: CborEncoder,
             backend: backend.clone(),
-        });
+        };
+        let mut tree = TestTree::new();
 
         // Set initial value
-        tree.set(vec![1], vec![10]).await.unwrap();
+        tree.set(vec![1], vec![10], &mut storage).await.unwrap();
 
         // Try to add different value - conflict resolution by hash comparison
         let new_value = vec![20];
@@ -1179,56 +1160,60 @@ mod tests {
             value: new_value.clone(),
         })];
 
-        tree.integrate(iter(changes.into_iter().map(Ok)))
+        tree.integrate(iter(changes.into_iter().map(Ok)), &mut storage)
             .await
             .unwrap();
 
         // Check which value won based on hash comparison
         use dialog_storage::Encoder;
-        let storage = tree.storage();
         let (existing_hash, _) = storage.encode(&existing_value).await.unwrap();
         let (new_hash, _) = storage.encode(&new_value).await.unwrap();
 
         if new_hash.as_ref() > existing_hash.as_ref() {
-            assert_eq!(tree.get(&vec![1]).await.unwrap(), Some(new_value));
+            assert_eq!(tree.get(&vec![1], &storage).await.unwrap(), Some(new_value));
         } else {
-            assert_eq!(tree.get(&vec![1]).await.unwrap(), Some(existing_value));
+            assert_eq!(
+                tree.get(&vec![1], &storage).await.unwrap(),
+                Some(existing_value)
+            );
         }
     }
 
     #[dialog_common::test]
     async fn test_integrate_remove_existing() {
         let backend = MemoryStorageBackend::default();
-        let mut tree = TestTree::new(Storage {
+        let mut storage = Storage {
             encoder: CborEncoder,
             backend: backend.clone(),
-        });
+        };
+        let mut tree = TestTree::new();
 
-        tree.set(vec![1], vec![10]).await.unwrap();
-        tree.set(vec![2], vec![20]).await.unwrap();
+        tree.set(vec![1], vec![10], &mut storage).await.unwrap();
+        tree.set(vec![2], vec![20], &mut storage).await.unwrap();
 
         let changes = vec![Change::Remove(Entry {
             key: vec![1],
             value: vec![10],
         })];
 
-        tree.integrate(iter(changes.into_iter().map(Ok)))
+        tree.integrate(iter(changes.into_iter().map(Ok)), &mut storage)
             .await
             .unwrap();
 
-        assert_eq!(tree.get(&vec![1]).await.unwrap(), None);
-        assert_eq!(tree.get(&vec![2]).await.unwrap(), Some(vec![20]));
+        assert_eq!(tree.get(&vec![1], &storage).await.unwrap(), None);
+        assert_eq!(tree.get(&vec![2], &storage).await.unwrap(), Some(vec![20]));
     }
 
     #[dialog_common::test]
     async fn test_integrate_remove_nonexistent() {
         let backend = MemoryStorageBackend::default();
-        let mut tree = TestTree::new(Storage {
+        let mut storage = Storage {
             encoder: CborEncoder,
             backend: backend.clone(),
-        });
+        };
+        let mut tree = TestTree::new();
 
-        tree.set(vec![1], vec![10]).await.unwrap();
+        tree.set(vec![1], vec![10], &mut storage).await.unwrap();
 
         // Remove non-existent entry - should be no-op
         let changes = vec![Change::Remove(Entry {
@@ -1236,23 +1221,24 @@ mod tests {
             value: vec![20],
         })];
 
-        tree.integrate(iter(changes.into_iter().map(Ok)))
+        tree.integrate(iter(changes.into_iter().map(Ok)), &mut storage)
             .await
             .unwrap();
 
-        assert_eq!(tree.get(&vec![1]).await.unwrap(), Some(vec![10]));
-        assert_eq!(tree.get(&vec![2]).await.unwrap(), None);
+        assert_eq!(tree.get(&vec![1], &storage).await.unwrap(), Some(vec![10]));
+        assert_eq!(tree.get(&vec![2], &storage).await.unwrap(), None);
     }
 
     #[dialog_common::test]
     async fn test_integrate_remove_wrong_value() {
         let backend = MemoryStorageBackend::default();
-        let mut tree = TestTree::new(Storage {
+        let mut storage = Storage {
             encoder: CborEncoder,
             backend: backend.clone(),
-        });
+        };
+        let mut tree = TestTree::new();
 
-        tree.set(vec![1], vec![10]).await.unwrap();
+        tree.set(vec![1], vec![10], &mut storage).await.unwrap();
 
         // Try to remove with wrong value - should be no-op (concurrent update)
         let changes = vec![Change::Remove(Entry {
@@ -1260,61 +1246,69 @@ mod tests {
             value: vec![20], // Wrong value
         })];
 
-        tree.integrate(iter(changes.into_iter().map(Ok)))
+        tree.integrate(iter(changes.into_iter().map(Ok)), &mut storage)
             .await
             .unwrap();
 
         // Entry should still exist with original value
-        assert_eq!(tree.get(&vec![1]).await.unwrap(), Some(vec![10]));
+        assert_eq!(tree.get(&vec![1], &storage).await.unwrap(), Some(vec![10]));
     }
 
     #[dialog_common::test]
     async fn test_integrate_concurrent_updates() {
         let backend = MemoryStorageBackend::default();
+        let mut storage = Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        };
 
         // Initial state - both replicas start with same value
-        let mut tree_a = TestTree::new(Storage {
-            encoder: CborEncoder,
-            backend: backend.clone(),
-        });
-        let mut tree_b = TestTree::new(Storage {
-            encoder: CborEncoder,
-            backend: backend.clone(),
-        });
+        let mut tree_a = TestTree::new();
+        let mut tree_b = TestTree::new();
 
-        tree_a.set(vec![1], vec![10]).await.unwrap();
-        tree_b.set(vec![1], vec![10]).await.unwrap();
+        tree_a.set(vec![1], vec![10], &mut storage).await.unwrap();
+        tree_b.set(vec![1], vec![10], &mut storage).await.unwrap();
 
         // Replica A updates to value_a
-        tree_a.set(vec![1], vec![20]).await.unwrap();
+        tree_a.set(vec![1], vec![20], &mut storage).await.unwrap();
 
         // Replica B updates to value_b
-        tree_b.set(vec![1], vec![30]).await.unwrap();
+        tree_b.set(vec![1], vec![30], &mut storage).await.unwrap();
 
         // Both replicas exchange their changes
-        let empty_tree = TestTree::new(Storage {
-            encoder: CborEncoder,
-            backend: backend.clone(),
-        });
+        let empty_tree = TestTree::new();
 
         let host_a = tree_a.clone();
-        let changes_a = empty_tree.differentiate(&host_a);
+        let changes_a: Vec<_> = empty_tree
+            .differentiate(&host_a, &storage, &storage)
+            .try_collect()
+            .await
+            .unwrap();
         let host_b = tree_b.clone();
-        let changes_b = empty_tree.differentiate(&host_b);
+        let changes_b: Vec<_> = empty_tree
+            .differentiate(&host_b, &storage, &storage)
+            .try_collect()
+            .await
+            .unwrap();
 
         // Integrate changes
-        tree_a.integrate(changes_b).await.unwrap();
-        tree_b.integrate(changes_a).await.unwrap();
+        tree_a
+            .integrate(iter(changes_b.into_iter().map(Ok)), &mut storage)
+            .await
+            .unwrap();
+        tree_b
+            .integrate(iter(changes_a.into_iter().map(Ok)), &mut storage)
+            .await
+            .unwrap();
 
         // Both should converge to the same value (deterministic by hash)
-        let final_a = tree_a.get(&vec![1]).await.unwrap();
-        let final_b = tree_b.get(&vec![1]).await.unwrap();
+        let final_a = tree_a.get(&vec![1], &storage).await.unwrap();
+        let final_b = tree_b.get(&vec![1], &storage).await.unwrap();
 
         assert_eq!(final_a, final_b, "Trees should converge to same value");
 
         // Verify the winner is determined by hash
         use dialog_storage::Encoder;
-        let storage = tree_a.storage();
         let (hash_20, _) = storage.encode(&vec![20]).await.unwrap();
         let (hash_30, _) = storage.encode(&vec![30]).await.unwrap();
 
@@ -1329,25 +1323,23 @@ mod tests {
     #[dialog_common::test]
     async fn test_roundtrip_empty_to_populated() {
         let backend = MemoryStorageBackend::default();
-        let mut target = TestTree::new(Storage {
+        let mut storage = Storage {
             encoder: CborEncoder,
             backend: backend.clone(),
-        });
-        let mut start = TestTree::new(Storage {
-            encoder: CborEncoder,
-            backend: backend.clone(),
-        });
+        };
+        let mut target = TestTree::new();
+        let mut start = TestTree::new();
 
         // Target has entries, start is empty
-        target.set(vec![1], vec![10]).await.unwrap();
-        target.set(vec![2], vec![20]).await.unwrap();
-        target.set(vec![3], vec![30]).await.unwrap();
+        target.set(vec![1], vec![10], &mut storage).await.unwrap();
+        target.set(vec![2], vec![20], &mut storage).await.unwrap();
+        target.set(vec![3], vec![30], &mut storage).await.unwrap();
 
         // Compute diff and integrate
         // Need to collect changes to avoid borrow checker issues
         // (diff holds immutable ref to start, but integrate needs mutable ref)
         let changes = {
-            let diff = start.differentiate(&target);
+            let diff = start.differentiate(&target, &storage, &storage);
             pin_mut!(diff);
             let mut changes = Vec::new();
             while let Some(result) = diff.next().await {
@@ -1356,38 +1348,36 @@ mod tests {
             changes
         };
         start
-            .integrate(iter(changes.into_iter().map(Ok)))
+            .integrate(iter(changes.into_iter().map(Ok)), &mut storage)
             .await
             .unwrap();
 
         // Verify start now matches target
-        assert_eq!(start.get(&vec![1]).await.unwrap(), Some(vec![10]));
-        assert_eq!(start.get(&vec![2]).await.unwrap(), Some(vec![20]));
-        assert_eq!(start.get(&vec![3]).await.unwrap(), Some(vec![30]));
+        assert_eq!(start.get(&vec![1], &storage).await.unwrap(), Some(vec![10]));
+        assert_eq!(start.get(&vec![2], &storage).await.unwrap(), Some(vec![20]));
+        assert_eq!(start.get(&vec![3], &storage).await.unwrap(), Some(vec![30]));
     }
 
     #[dialog_common::test]
     async fn test_roundtrip_populated_to_empty() {
         let backend = MemoryStorageBackend::default();
-        let target = TestTree::new(Storage {
+        let mut storage = Storage {
             encoder: CborEncoder,
             backend: backend.clone(),
-        });
-        let mut start = TestTree::new(Storage {
-            encoder: CborEncoder,
-            backend: backend.clone(),
-        });
+        };
+        let target = TestTree::new();
+        let mut start = TestTree::new();
 
         // Start has entries, target is empty
-        start.set(vec![1], vec![10]).await.unwrap();
-        start.set(vec![2], vec![20]).await.unwrap();
-        start.set(vec![3], vec![30]).await.unwrap();
+        start.set(vec![1], vec![10], &mut storage).await.unwrap();
+        start.set(vec![2], vec![20], &mut storage).await.unwrap();
+        start.set(vec![3], vec![30], &mut storage).await.unwrap();
 
         // Compute diff and integrate
         // Need to collect changes to avoid borrow checker issues
         // (diff holds immutable ref to start, but integrate needs mutable ref)
         let changes = {
-            let diff = start.differentiate(&target);
+            let diff = start.differentiate(&target, &storage, &storage);
             pin_mut!(diff);
             let mut changes = Vec::new();
             while let Some(result) = diff.next().await {
@@ -1396,44 +1386,42 @@ mod tests {
             changes
         };
         start
-            .integrate(iter(changes.into_iter().map(Ok)))
+            .integrate(iter(changes.into_iter().map(Ok)), &mut storage)
             .await
             .unwrap();
 
         // Verify start is now empty
-        assert_eq!(start.get(&vec![1]).await.unwrap(), None);
-        assert_eq!(start.get(&vec![2]).await.unwrap(), None);
-        assert_eq!(start.get(&vec![3]).await.unwrap(), None);
+        assert_eq!(start.get(&vec![1], &storage).await.unwrap(), None);
+        assert_eq!(start.get(&vec![2], &storage).await.unwrap(), None);
+        assert_eq!(start.get(&vec![3], &storage).await.unwrap(), None);
     }
 
     #[dialog_common::test]
     async fn test_roundtrip_mixed_changes() {
         let backend = MemoryStorageBackend::default();
-        let mut target = TestTree::new(Storage {
+        let mut storage = Storage {
             encoder: CborEncoder,
             backend: backend.clone(),
-        });
-        let mut start = TestTree::new(Storage {
-            encoder: CborEncoder,
-            backend: backend.clone(),
-        });
+        };
+        let mut target = TestTree::new();
+        let mut start = TestTree::new();
 
         // Start state: keys 1, 2, 3
-        start.set(vec![1], vec![10]).await.unwrap();
-        start.set(vec![2], vec![20]).await.unwrap();
-        start.set(vec![3], vec![30]).await.unwrap();
+        start.set(vec![1], vec![10], &mut storage).await.unwrap();
+        start.set(vec![2], vec![20], &mut storage).await.unwrap();
+        start.set(vec![3], vec![30], &mut storage).await.unwrap();
 
         // Target state: keys 2 (modified), 3, 4
-        target.set(vec![2], vec![22]).await.unwrap(); // Modified
-        target.set(vec![3], vec![30]).await.unwrap(); // Same
-        target.set(vec![4], vec![40]).await.unwrap(); // Added
+        target.set(vec![2], vec![22], &mut storage).await.unwrap(); // Modified
+        target.set(vec![3], vec![30], &mut storage).await.unwrap(); // Same
+        target.set(vec![4], vec![40], &mut storage).await.unwrap(); // Added
         // Key 1 removed
 
         // Compute diff and integrate
         // Need to collect changes to avoid borrow checker issues
         // (diff holds immutable ref to start, but integrate needs mutable ref)
         let changes = {
-            let diff = start.differentiate(&target);
+            let diff = start.differentiate(&target, &storage, &storage);
             pin_mut!(diff);
             let mut changes = Vec::new();
             while let Some(result) = diff.next().await {
@@ -1442,40 +1430,38 @@ mod tests {
             changes
         };
         start
-            .integrate(iter(changes.into_iter().map(Ok)))
+            .integrate(iter(changes.into_iter().map(Ok)), &mut storage)
             .await
             .unwrap();
 
         // Verify start now matches target
-        assert_eq!(start.get(&vec![1]).await.unwrap(), None);
-        assert_eq!(start.get(&vec![2]).await.unwrap(), Some(vec![22]));
-        assert_eq!(start.get(&vec![3]).await.unwrap(), Some(vec![30]));
-        assert_eq!(start.get(&vec![4]).await.unwrap(), Some(vec![40]));
+        assert_eq!(start.get(&vec![1], &storage).await.unwrap(), None);
+        assert_eq!(start.get(&vec![2], &storage).await.unwrap(), Some(vec![22]));
+        assert_eq!(start.get(&vec![3], &storage).await.unwrap(), Some(vec![30]));
+        assert_eq!(start.get(&vec![4], &storage).await.unwrap(), Some(vec![40]));
     }
 
     #[dialog_common::test]
     async fn test_roundtrip_large_tree() {
         let backend = MemoryStorageBackend::default();
-        let mut target = TestTree::new(Storage {
+        let mut storage = Storage {
             encoder: CborEncoder,
             backend: backend.clone(),
-        });
-        let mut start = TestTree::new(Storage {
-            encoder: CborEncoder,
-            backend: backend.clone(),
-        });
+        };
+        let mut target = TestTree::new();
+        let mut start = TestTree::new();
 
         // Create large trees with many entries
         for i in 0u16..100 {
             start
-                .set(vec![i as u8], vec![(i * 10) as u8])
+                .set(vec![i as u8], vec![(i * 10) as u8], &mut storage)
                 .await
                 .unwrap();
         }
 
         for i in 50u16..150 {
             target
-                .set(vec![i as u8], vec![(i * 20) as u8])
+                .set(vec![i as u8], vec![(i * 20) as u8], &mut storage)
                 .await
                 .unwrap();
         }
@@ -1484,7 +1470,7 @@ mod tests {
         // Need to collect changes to avoid borrow checker issues
         // (diff holds immutable ref to start, but integrate needs mutable ref)
         let changes = {
-            let diff = start.differentiate(&target);
+            let diff = start.differentiate(&target, &storage, &storage);
             pin_mut!(diff);
             let mut changes = Vec::new();
             while let Some(result) = diff.next().await {
@@ -1493,17 +1479,17 @@ mod tests {
             changes
         };
         start
-            .integrate(iter(changes.into_iter().map(Ok)))
+            .integrate(iter(changes.into_iter().map(Ok)), &mut storage)
             .await
             .unwrap();
 
         // Verify start now matches target
         for i in 0u16..50 {
-            assert_eq!(start.get(&vec![i as u8]).await.unwrap(), None);
+            assert_eq!(start.get(&vec![i as u8], &storage).await.unwrap(), None);
         }
         for i in 50u16..150 {
             assert_eq!(
-                start.get(&vec![i as u8]).await.unwrap(),
+                start.get(&vec![i as u8], &storage).await.unwrap(),
                 Some(vec![(i * 20) as u8])
             );
         }
@@ -1514,16 +1500,14 @@ mod tests {
     #[dialog_common::test]
     async fn test_differentiate_both_empty() {
         let backend = MemoryStorageBackend::default();
-        let tree1 = TestTree::new(Storage {
+        let storage = Storage {
             encoder: CborEncoder,
             backend: backend.clone(),
-        });
-        let tree2 = TestTree::new(Storage {
-            encoder: CborEncoder,
-            backend: backend.clone(),
-        });
+        };
+        let tree1 = TestTree::new();
+        let tree2 = TestTree::new();
 
-        let changes = tree2.differentiate(&tree1);
+        let changes = tree2.differentiate(&tree1, &storage, &storage);
         pin_mut!(changes);
         let mut count = 0;
         while changes.next().await.is_some() {
@@ -1536,19 +1520,17 @@ mod tests {
     #[dialog_common::test]
     async fn test_differentiate_single_entry_trees() {
         let backend = MemoryStorageBackend::default();
-        let mut tree1 = TestTree::new(Storage {
+        let mut storage = Storage {
             encoder: CborEncoder,
             backend: backend.clone(),
-        });
-        let mut tree2 = TestTree::new(Storage {
-            encoder: CborEncoder,
-            backend: backend.clone(),
-        });
+        };
+        let mut tree1 = TestTree::new();
+        let mut tree2 = TestTree::new();
 
-        tree1.set(vec![1], vec![10]).await.unwrap();
-        tree2.set(vec![1], vec![20]).await.unwrap();
+        tree1.set(vec![1], vec![10], &mut storage).await.unwrap();
+        tree2.set(vec![1], vec![20], &mut storage).await.unwrap();
 
-        let changes = tree2.differentiate(&tree1);
+        let changes = tree2.differentiate(&tree1, &storage, &storage);
         pin_mut!(changes);
         let mut adds = Vec::new();
         let mut removes = Vec::new();
@@ -1570,25 +1552,23 @@ mod tests {
     #[dialog_common::test]
     async fn test_differentiate_disjoint_trees() {
         let backend = MemoryStorageBackend::default();
-        let mut tree1 = TestTree::new(Storage {
+        let mut storage = Storage {
             encoder: CborEncoder,
             backend: backend.clone(),
-        });
-        let mut tree2 = TestTree::new(Storage {
-            encoder: CborEncoder,
-            backend: backend.clone(),
-        });
+        };
+        let mut tree1 = TestTree::new();
+        let mut tree2 = TestTree::new();
 
         // Completely disjoint key sets
-        tree1.set(vec![1], vec![10]).await.unwrap();
-        tree1.set(vec![3], vec![30]).await.unwrap();
-        tree1.set(vec![5], vec![50]).await.unwrap();
+        tree1.set(vec![1], vec![10], &mut storage).await.unwrap();
+        tree1.set(vec![3], vec![30], &mut storage).await.unwrap();
+        tree1.set(vec![5], vec![50], &mut storage).await.unwrap();
 
-        tree2.set(vec![2], vec![20]).await.unwrap();
-        tree2.set(vec![4], vec![40]).await.unwrap();
-        tree2.set(vec![6], vec![60]).await.unwrap();
+        tree2.set(vec![2], vec![20], &mut storage).await.unwrap();
+        tree2.set(vec![4], vec![40], &mut storage).await.unwrap();
+        tree2.set(vec![6], vec![60], &mut storage).await.unwrap();
 
-        let changes = tree2.differentiate(&tree1);
+        let changes = tree2.differentiate(&tree1, &storage, &storage);
         pin_mut!(changes);
         let mut adds = Vec::new();
         let mut removes = Vec::new();
@@ -1608,26 +1588,24 @@ mod tests {
     #[dialog_common::test]
     async fn test_differentiate_subset_superset() {
         let backend = MemoryStorageBackend::default();
-        let mut superset = TestTree::new(Storage {
+        let mut storage = Storage {
             encoder: CborEncoder,
             backend: backend.clone(),
-        });
-        let mut subset = TestTree::new(Storage {
-            encoder: CborEncoder,
-            backend: backend.clone(),
-        });
+        };
+        let mut superset = TestTree::new();
+        let mut subset = TestTree::new();
 
         // Subset: keys 2, 3
-        subset.set(vec![2], vec![20]).await.unwrap();
-        subset.set(vec![3], vec![30]).await.unwrap();
+        subset.set(vec![2], vec![20], &mut storage).await.unwrap();
+        subset.set(vec![3], vec![30], &mut storage).await.unwrap();
 
         // Superset: keys 1, 2, 3, 4
-        superset.set(vec![1], vec![10]).await.unwrap();
-        superset.set(vec![2], vec![20]).await.unwrap();
-        superset.set(vec![3], vec![30]).await.unwrap();
-        superset.set(vec![4], vec![40]).await.unwrap();
+        superset.set(vec![1], vec![10], &mut storage).await.unwrap();
+        superset.set(vec![2], vec![20], &mut storage).await.unwrap();
+        superset.set(vec![3], vec![30], &mut storage).await.unwrap();
+        superset.set(vec![4], vec![40], &mut storage).await.unwrap();
 
-        let changes = subset.differentiate(&superset);
+        let changes = subset.differentiate(&superset, &storage, &storage);
         pin_mut!(changes);
         let mut adds = Vec::new();
         let mut removes = Vec::new();
@@ -1647,22 +1625,20 @@ mod tests {
     #[dialog_common::test]
     async fn test_differentiate_all_modified() {
         let backend = MemoryStorageBackend::default();
-        let mut tree1 = TestTree::new(Storage {
+        let mut storage = Storage {
             encoder: CborEncoder,
             backend: backend.clone(),
-        });
-        let mut tree2 = TestTree::new(Storage {
-            encoder: CborEncoder,
-            backend: backend.clone(),
-        });
+        };
+        let mut tree1 = TestTree::new();
+        let mut tree2 = TestTree::new();
 
         // Same keys, all different values (except i=0 where both are [0])
         for i in 0u8..10 {
-            tree1.set(vec![i], vec![i * 2]).await.unwrap();
-            tree2.set(vec![i], vec![i]).await.unwrap();
+            tree1.set(vec![i], vec![i * 2], &mut storage).await.unwrap();
+            tree2.set(vec![i], vec![i], &mut storage).await.unwrap();
         }
 
-        let changes = tree2.differentiate(&tree1);
+        let changes = tree2.differentiate(&tree1, &storage, &storage);
         pin_mut!(changes);
         let mut count = 0;
 
@@ -1678,31 +1654,32 @@ mod tests {
     #[dialog_common::test]
     async fn test_roundtrip_preserves_hash() {
         let backend = MemoryStorageBackend::default();
-        let mut target = TestTree::new(Storage {
+        let mut storage = Storage {
             encoder: CborEncoder,
             backend: backend.clone(),
-        });
-        let mut start = TestTree::new(Storage {
-            encoder: CborEncoder,
-            backend: backend.clone(),
-        });
+        };
+        let mut target = TestTree::new();
+        let mut start = TestTree::new();
 
         // Set up target state
         for i in 0..20 {
-            target.set(vec![i], vec![i * 3]).await.unwrap();
+            target
+                .set(vec![i], vec![i * 3], &mut storage)
+                .await
+                .unwrap();
         }
         let target_hash = *target.hash().unwrap();
 
         // Set up different start state
         for i in 10..30 {
-            start.set(vec![i], vec![i * 5]).await.unwrap();
+            start.set(vec![i], vec![i * 5], &mut storage).await.unwrap();
         }
 
         // Compute diff and integrate
         // Need to collect changes to avoid borrow checker issues
         // (diff holds immutable ref to start, but integrate needs mutable ref)
         let changes = {
-            let diff = start.differentiate(&target);
+            let diff = start.differentiate(&target, &storage, &storage);
             pin_mut!(diff);
             let mut changes = Vec::new();
             while let Some(result) = diff.next().await {
@@ -1711,7 +1688,7 @@ mod tests {
             changes
         };
         start
-            .integrate(iter(changes.into_iter().map(Ok)))
+            .integrate(iter(changes.into_iter().map(Ok)), &mut storage)
             .await
             .unwrap();
 
@@ -1758,7 +1735,7 @@ mod tests {
 
         // Run differentiate (journal is automatically enabled after build)
         let host_b = spec_b.tree().clone();
-        let diff = host_b.differentiate(spec_a.tree());
+        let diff = host_b.differentiate(spec_a.tree(), spec_b.storage(), spec_a.storage());
         // consume so we actually perform reads
         let _: Vec<_> = diff.collect().await;
 
@@ -1796,7 +1773,7 @@ mod tests {
         .unwrap();
 
         let host_b = spec_b.tree().clone();
-        let diff = host_b.differentiate(spec_a.tree());
+        let diff = host_b.differentiate(spec_a.tree(), spec_b.storage(), spec_a.storage());
         let _: Vec<_> = diff.collect().await;
 
         spec_a.assert();
@@ -1841,7 +1818,7 @@ mod tests {
         .unwrap();
 
         let host_a = spec_a.tree().clone();
-        let diff = host_a.differentiate(spec_b.tree());
+        let diff = host_a.differentiate(spec_b.tree(), spec_a.storage(), spec_b.storage());
         let _: Vec<_> = diff.collect().await;
 
         spec_a.assert();
@@ -1887,7 +1864,7 @@ mod tests {
         .unwrap();
 
         let host_b = spec_b.tree().clone();
-        let diff = host_b.differentiate(spec_a.tree());
+        let diff = host_b.differentiate(spec_a.tree(), spec_b.storage(), spec_a.storage());
         let _: Vec<_> = diff.collect().await;
 
         spec_a.assert();
@@ -1931,7 +1908,7 @@ mod tests {
         .unwrap();
 
         let host_a = spec_a.tree().clone();
-        let diff = host_a.differentiate(spec_b.tree());
+        let diff = host_a.differentiate(spec_b.tree(), spec_a.storage(), spec_b.storage());
         let _: Vec<_> = diff.collect().await;
 
         spec_a.assert();
@@ -1977,7 +1954,7 @@ mod tests {
         // Differentiate B -> A (taller tree to shallow tree)
         // Still need to read all branches to discover remove changes
         let host_a = spec_a.tree().clone();
-        let diff = host_a.differentiate(spec_b.tree());
+        let diff = host_a.differentiate(spec_b.tree(), spec_a.storage(), spec_b.storage());
         let _: Vec<_> = diff.collect().await;
 
         spec_b.assert();
@@ -2019,9 +1996,14 @@ mod tests {
         .await
         .unwrap();
 
-        let diff = TreeDifference::compute(source.tree(), target.tree())
-            .await
-            .unwrap();
+        let diff = TreeDifference::compute(
+            source.tree(),
+            target.tree(),
+            source.storage(),
+            target.storage(),
+        )
+        .await
+        .unwrap();
         let novel_hashes = diff.novel_nodes().into_hash_set().await;
 
         // Verify that all target nodes were loaded (since source is empty)
@@ -2030,7 +2012,7 @@ mod tests {
         // All target nodes should be novel - traverse target tree to get all hashes
         let target_hashes = target
             .tree()
-            .traverse(TraversalOrder::default())
+            .traverse(TraversalOrder::default(), target.storage())
             .into_hash_set()
             .await;
         assert_eq!(
@@ -2066,9 +2048,14 @@ mod tests {
         // Empty target tree
         let target = tree_spec![].build(storage_target).await.unwrap();
 
-        let diff = TreeDifference::compute(source.tree(), target.tree())
-            .await
-            .unwrap();
+        let diff = TreeDifference::compute(
+            source.tree(),
+            target.tree(),
+            source.storage(),
+            target.storage(),
+        )
+        .await
+        .unwrap();
         let novel_hashes = diff.novel_nodes().into_hash_set().await;
 
         // Verify that no source nodes were loaded (since target is empty)
@@ -2097,9 +2084,14 @@ mod tests {
         let source = tree_spec![].build(storage_source).await.unwrap();
         let target = tree_spec![].build(storage_target).await.unwrap();
 
-        let diff = TreeDifference::compute(source.tree(), target.tree())
-            .await
-            .unwrap();
+        let diff = TreeDifference::compute(
+            source.tree(),
+            target.tree(),
+            source.storage(),
+            target.storage(),
+        )
+        .await
+        .unwrap();
         let novel_hashes = diff.novel_nodes().into_hash_set().await;
 
         assert!(
@@ -2143,9 +2135,14 @@ mod tests {
         .await
         .unwrap();
 
-        let diff = TreeDifference::compute(source.tree(), target.tree())
-            .await
-            .unwrap();
+        let diff = TreeDifference::compute(
+            source.tree(),
+            target.tree(),
+            source.storage(),
+            target.storage(),
+        )
+        .await
+        .unwrap();
         let novel_hashes = diff.novel_nodes().into_hash_set().await;
 
         // Verify no child nodes were loaded (identical trees detected at root)
@@ -2191,9 +2188,14 @@ mod tests {
         .await
         .unwrap();
 
-        let diff = TreeDifference::compute(source.tree(), target.tree())
-            .await
-            .unwrap();
+        let diff = TreeDifference::compute(
+            source.tree(),
+            target.tree(),
+            source.storage(),
+            target.storage(),
+        )
+        .await
+        .unwrap();
         let novel_hashes = diff.novel_nodes().into_hash_set().await;
 
         // Verify read patterns:
@@ -2205,12 +2207,12 @@ mod tests {
         // Novel nodes should be: target nodes - nodes shared with source
         let target_hashes = target
             .tree()
-            .traverse(TraversalOrder::default())
+            .traverse(TraversalOrder::default(), target.storage())
             .into_hash_set()
             .await;
         let source_hashes = source
             .tree()
-            .traverse(TraversalOrder::default())
+            .traverse(TraversalOrder::default(), source.storage())
             .into_hash_set()
             .await;
         let expected_novel: std::collections::HashSet<_> =
@@ -2257,9 +2259,14 @@ mod tests {
         .await
         .unwrap();
 
-        let diff = TreeDifference::compute(source.tree(), target.tree())
-            .await
-            .unwrap();
+        let diff = TreeDifference::compute(
+            source.tree(),
+            target.tree(),
+            source.storage(),
+            target.storage(),
+        )
+        .await
+        .unwrap();
         let novel_hashes = diff.novel_nodes().into_hash_set().await;
 
         // Verify read patterns - shared segment 'a' should NOT be loaded
@@ -2269,12 +2276,12 @@ mod tests {
         // Novel = target - shared
         let target_hashes = target
             .tree()
-            .traverse(TraversalOrder::default())
+            .traverse(TraversalOrder::default(), target.storage())
             .into_hash_set()
             .await;
         let source_hashes = source
             .tree()
-            .traverse(TraversalOrder::default())
+            .traverse(TraversalOrder::default(), source.storage())
             .into_hash_set()
             .await;
         let expected_novel: std::collections::HashSet<_> =
@@ -2326,20 +2333,25 @@ mod tests {
         // Because they share the same backend, identical content = identical hash
         let target = tree_spec![[(..a)]].build(storage_target).await.unwrap();
 
-        let diff = TreeDifference::compute(source.tree(), target.tree())
-            .await
-            .unwrap();
+        let diff = TreeDifference::compute(
+            source.tree(),
+            target.tree(),
+            source.storage(),
+            target.storage(),
+        )
+        .await
+        .unwrap();
         let novel_hashes = diff.novel_nodes().into_hash_set().await;
 
         // Target's 'a' segment should match source's 'a' segment (same hash)
         let target_hashes = target
             .tree()
-            .traverse(TraversalOrder::default())
+            .traverse(TraversalOrder::default(), target.storage())
             .into_hash_set()
             .await;
         let source_hashes = source
             .tree()
-            .traverse(TraversalOrder::default())
+            .traverse(TraversalOrder::default(), source.storage())
             .into_hash_set()
             .await;
         let expected_novel: std::collections::HashSet<_> =
@@ -2384,9 +2396,14 @@ mod tests {
         .await
         .unwrap();
 
-        let diff = TreeDifference::compute(source.tree(), target.tree())
-            .await
-            .unwrap();
+        let diff = TreeDifference::compute(
+            source.tree(),
+            target.tree(),
+            source.storage(),
+            target.storage(),
+        )
+        .await
+        .unwrap();
         let novel_hashes = diff.novel_nodes().into_hash_set().await;
 
         // Verify read patterns:
@@ -2398,7 +2415,7 @@ mod tests {
         // All target nodes should be novel (no overlap)
         let target_hashes = target
             .tree()
-            .traverse(TraversalOrder::default())
+            .traverse(TraversalOrder::default(), target.storage())
             .into_hash_set()
             .await;
         assert_eq!(
@@ -2441,9 +2458,14 @@ mod tests {
         .await
         .unwrap();
 
-        let diff = TreeDifference::compute(source.tree(), target.tree())
-            .await
-            .unwrap();
+        let diff = TreeDifference::compute(
+            source.tree(),
+            target.tree(),
+            source.storage(),
+            target.storage(),
+        )
+        .await
+        .unwrap();
 
         // Collect twice - as Vec (preserves duplicates) and HashSet (deduplicates)
         let all_nodes: Vec<_> = diff.novel_nodes().try_collect().await?;
@@ -2478,15 +2500,20 @@ mod tests {
         // Target: single segment 'b' (contains keys 'a', 'b' - different content)
         let target = tree_spec![[..b]].build(storage_target).await.unwrap();
 
-        let diff = TreeDifference::compute(source.tree(), target.tree())
-            .await
-            .unwrap();
+        let diff = TreeDifference::compute(
+            source.tree(),
+            target.tree(),
+            source.storage(),
+            target.storage(),
+        )
+        .await
+        .unwrap();
         let novel_hashes = diff.novel_nodes().into_hash_set().await;
 
         // All target nodes should be novel (no overlap)
         let target_hashes = target
             .tree()
-            .traverse(TraversalOrder::default())
+            .traverse(TraversalOrder::default(), target.storage())
             .into_hash_set()
             .await;
 
@@ -2536,9 +2563,14 @@ mod tests {
         .await
         .unwrap();
 
-        let diff = TreeDifference::compute(source.tree(), target.tree())
-            .await
-            .unwrap();
+        let diff = TreeDifference::compute(
+            source.tree(),
+            target.tree(),
+            source.storage(),
+            target.storage(),
+        )
+        .await
+        .unwrap();
         let novel_hashes = diff.novel_nodes().into_hash_set().await;
 
         // Verify left subtree was pruned (not loaded)
@@ -2548,12 +2580,12 @@ mod tests {
         // Novel nodes should be target - source (right subtree differs)
         let target_hashes = target
             .tree()
-            .traverse(TraversalOrder::default())
+            .traverse(TraversalOrder::default(), target.storage())
             .into_hash_set()
             .await;
         let source_hashes = source
             .tree()
-            .traverse(TraversalOrder::default())
+            .traverse(TraversalOrder::default(), source.storage())
             .into_hash_set()
             .await;
         let expected_novel: std::collections::HashSet<_> =

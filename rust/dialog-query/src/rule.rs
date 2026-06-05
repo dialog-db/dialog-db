@@ -1,12 +1,31 @@
-//! Rule-based deduction system
+//! Rule-based deduction and induction system.
 //!
-//! This module implements the core rule system for dialog-query, allowing
-//! declarative specification of derived facts through logical rules.
+//! Two rule kinds share the same analysis pipeline and differ only at
+//! evaluation time:
 //!
-//! The design follows the patterns described in notes/rules.md.
+//! - [`DeductiveRule`] derives new facts on demand when its body is
+//!   queried. Standard Datalog semantics.
+//! - [`InductiveRule`] (a.k.a. *effect*) asserts its head facts when
+//!   its body matches during commit-time evaluation. Fires the
+//!   reactor's fixpoint loop; trigger facts on `effect:system` are
+//!   ephemeral.
+//!
+//! The [`Rule`] enum carries either variant and is what compile-time
+//! analysis errors (in [`TypeError`](crate::TypeError) and
+//! [`AnalyzerError`](crate::AnalyzerError)) reference, so error
+//! reporting is uniform across both kinds.
+
+use crate::concept::descriptor::ConceptDescriptor;
+use crate::error::TypeError;
+use crate::planner::{Conjunction, Planner};
+use crate::premise::Premise;
+use crate::{Environment, Type};
+use std::fmt::{Display, Formatter, Result as FmtResult};
 
 /// Deductive rule definitions for deriving new facts.
 pub mod deductive;
+/// Inductive rule definitions (a.k.a. effects).
+pub mod inductive;
 /// Premises collection type.
 pub mod premises;
 /// When trait and tuple implementations.
@@ -14,8 +33,114 @@ pub mod when;
 
 pub use deductive::DeductiveRule;
 pub use deductive::descriptor::DeductiveRuleDescriptor;
+pub use inductive::InductiveRule;
+pub use inductive::descriptor::InductiveRuleDescriptor;
 pub use premises::*;
 pub use when::*;
+
+/// A compiled rule — either deductive or inductive.
+///
+/// Both variants share the same head ([`ConceptDescriptor`]) and
+/// body ([`Conjunction`]); they differ in what the evaluator does
+/// with a matching body. Errors raised during compile-time analysis
+/// reference the in-progress rule via this enum so the same error
+/// type works for both kinds.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Rule {
+    /// A deductive rule — yields tuples on query.
+    Deductive(DeductiveRule),
+    /// An inductive rule — asserts head facts on commit.
+    Inductive(InductiveRule),
+}
+
+impl Rule {
+    /// The conclusion (head) of this rule.
+    pub fn conclusion(&self) -> &ConceptDescriptor {
+        match self {
+            Rule::Deductive(r) => r.conclusion(),
+            Rule::Inductive(r) => r.conclusion(),
+        }
+    }
+}
+
+impl Display for Rule {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Rule::Deductive(r) => Display::fmt(r, f),
+            Rule::Inductive(r) => Display::fmt(r, f),
+        }
+    }
+}
+
+impl From<DeductiveRule> for Rule {
+    fn from(r: DeductiveRule) -> Self {
+        Rule::Deductive(r)
+    }
+}
+
+impl From<InductiveRule> for Rule {
+    fn from(r: InductiveRule) -> Self {
+        Rule::Inductive(r)
+    }
+}
+
+/// Common construction surface for both rule kinds.
+///
+/// Implementors are constructible from a head + planned body via
+/// [`from_parts`](Compile::from_parts), and convertible into a
+/// [`Rule`] so analysis errors can refer to the in-progress rule
+/// uniformly. The default [`compile`](Compile::compile) runs the
+/// shared analysis pipeline (planner + unbound-variable check).
+pub trait Compile: Sized + Into<Rule> {
+    /// Build the rule from its compiled parts. Called by
+    /// [`compile`](Self::compile) once analysis passes.
+    fn from_parts(conclusion: ConceptDescriptor, join: Conjunction) -> Self;
+
+    /// Plan the premises and verify every head variable is bound.
+    /// Default impl is identical for deductive and inductive
+    /// rules; the only difference between the kinds lives at
+    /// evaluation time, not compile time.
+    fn compile(conclusion: ConceptDescriptor, premises: Vec<Premise>) -> Result<Self, TypeError> {
+        // Plan the order of premises in a scope where none of the
+        // rule parameters are bound to find the optimal execution
+        // order, or to discover unsatisfiable premises (e.g. a
+        // formula whose required cell is never derived by another
+        // premise).
+        let join = Planner::from(premises).plan(&Environment::new())?;
+
+        // Verify that every conclusion parameter is derived by one
+        // of the premises; otherwise the rule could never fully
+        // bind its output. Build `Self` only when needed for the
+        // error path so the happy path doesn't allocate twice.
+        let unbound = conclusion
+            .operands()
+            .find(|name| !join.binds.contains(name))
+            .map(String::from);
+        if let Some(variable) = unbound {
+            let in_progress = Self::from_parts(conclusion, join);
+            return Err(TypeError::UnboundVariable {
+                rule: Box::new(in_progress.into()),
+                variable,
+            });
+        }
+
+        Ok(Self::from_parts(conclusion, join))
+    }
+}
+
+/// Helper for the [`Display`] impls on [`DeductiveRule`] and
+/// [`InductiveRule`] — both render their schema the same way.
+pub(crate) fn fmt_rule_schema(conclusion: &ConceptDescriptor, f: &mut Formatter<'_>) -> FmtResult {
+    write!(f, "{} {{", conclusion.this())?;
+    write!(f, "this: {},", Type::Entity)?;
+    for (name, attribute) in conclusion.with().iter() {
+        match attribute.content_type() {
+            Some(ty) => write!(f, "{}: {},", name, ty)?,
+            None => write!(f, "{}: Any,", name)?,
+        }
+    }
+    write!(f, "}}")
+}
 
 /// Macro for creating When collections with clean array-like syntax
 ///
@@ -57,22 +182,24 @@ mod tests {
     use std::vec::IntoIter;
 
     use super::*;
-    use crate::artifact::{Artifacts, Entity, Type};
+    use crate::artifact::{Entity, Type};
     use crate::attribute::{AttributeDescriptor, Cardinality};
     use crate::concept::descriptor::ConceptDescriptor;
     use crate::concept::query::ConceptQuery;
     use crate::concept::{Concept, Conclusion};
     use crate::predicate::Predicate;
     use crate::premise::Premise;
-    use crate::query::{Application, Source};
+    use crate::query::Application;
     use crate::selection::Match;
     use crate::selection::Selection;
+    use crate::source::SelectRules;
     use crate::statement::Statement;
     use crate::term::Term;
     use crate::the;
-    use crate::{
-        AttributeStatement, EvaluationError, Parameters, Proposition, Query, Session, Transaction,
-    };
+    use crate::{AttributeStatement, EvaluationError, Parameters, Proposition, Query};
+    use dialog_artifacts::Select;
+    use dialog_capability::Provider;
+    use dialog_common::ConditionalSync;
 
     // Manual implementation of Person struct with Concept and Rule traits
     // This serves as a template for what the derive macro should generate
@@ -182,26 +309,26 @@ mod tests {
     }
 
     impl Statement for Person {
-        fn assert(self, transaction: &mut Transaction) {
+        fn assert(self, update: &mut impl dialog_artifacts::Update) {
             the!("person/name")
                 .of(self.this.clone())
                 .is(self.name.clone())
-                .assert(transaction);
+                .assert(update);
             the!("person/age")
                 .of(self.this.clone())
                 .is(self.age)
-                .assert(transaction);
+                .assert(update);
         }
 
-        fn retract(self, transaction: &mut Transaction) {
+        fn retract(self, update: &mut impl dialog_artifacts::Update) {
             the!("person/name")
                 .of(self.this.clone())
                 .is(self.name.clone())
-                .retract(transaction);
+                .retract(update);
             the!("person/age")
                 .of(self.this.clone())
                 .is(self.age)
-                .retract(transaction);
+                .retract(update);
         }
     }
 
@@ -238,9 +365,16 @@ mod tests {
     impl Application for PersonQuery {
         type Conclusion = Person;
 
-        fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
+        fn evaluate<'a, Env, M: Selection + 'a>(
+            self,
+            selection: M,
+            env: &'a Env,
+        ) -> impl Selection + 'a
+        where
+            Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+        {
             let application: ConceptQuery = self.into();
-            application.evaluate(selection, source)
+            application.evaluate(selection, env)
         }
 
         fn realize(&self, source: Match) -> Result<Self::Conclusion, EvaluationError> {
@@ -282,8 +416,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_installs_rule() {
-        use dialog_storage::MemoryStorageBackend;
-
         // Define a rule function using the clean API
         fn person_rule(person: Query<Person>) -> impl When {
             (Query::<Person> {
@@ -293,12 +425,19 @@ mod tests {
             },)
         }
 
-        // Create a session
-        let storage = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage).await.unwrap();
-
-        let result = Session::open(artifacts).install(person_rule);
-        assert!(result.is_ok(), "install should work");
+        // Verify rule installs into registry
+        use crate::ConceptDescriptor;
+        use crate::rule::deductive::DeductiveRule;
+        use crate::session::RuleRegistry;
+        let mut rules = RuleRegistry::new();
+        let person_query = Query::<Person>::default();
+        let concept: ConceptDescriptor = person_query.into();
+        let premises = person_rule(Query::<Person>::default())
+            .into_premises()
+            .into_vec();
+        let rule = DeductiveRule::new(concept, premises).unwrap();
+        let result = rules.register(rule);
+        assert!(result.is_ok(), "register should work");
     }
 
     mod macro_person {

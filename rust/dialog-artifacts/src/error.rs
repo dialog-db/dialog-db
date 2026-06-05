@@ -1,3 +1,5 @@
+use dialog_effects::archive::ArchiveError;
+use dialog_effects::memory::MemoryError;
 use dialog_prolly_tree::DialogProllyTreeError;
 use dialog_storage::DialogStorageError;
 use thiserror::Error;
@@ -63,6 +65,18 @@ pub enum DialogArtifactsError {
 impl From<DialogStorageError> for DialogArtifactsError {
     fn from(value: DialogStorageError) -> Self {
         DialogArtifactsError::Storage(format!("{value}"))
+    }
+}
+
+impl From<ArchiveError> for DialogArtifactsError {
+    fn from(e: ArchiveError) -> Self {
+        Self::Storage(e.to_string())
+    }
+}
+
+impl From<MemoryError> for DialogArtifactsError {
+    fn from(e: MemoryError) -> Self {
+        Self::Storage(e.to_string())
     }
 }
 

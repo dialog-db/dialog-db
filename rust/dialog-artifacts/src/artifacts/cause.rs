@@ -4,7 +4,7 @@
 //! between artifacts, enabling proper versioning and update semantics in the
 //! triple store.
 
-use std::fmt::Display;
+use std::fmt::{Display, Formatter, Result as FmtResult};
 
 use base58::ToBase58;
 use serde::{Deserialize, Serialize};
@@ -39,7 +39,7 @@ impl From<&Artifact> for Cause {
 }
 
 impl Display for Cause {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "{}", self.0.to_base58())
     }
 }

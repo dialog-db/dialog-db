@@ -1,9 +1,12 @@
+use crate::access::AuthorizeError;
 use crate::subject::Did;
-use std::error::Error;
-use std::fmt::{Debug, Display, Formatter};
+use std::error::Error as StdError;
+use std::fmt::{self, Debug, Display, Formatter};
+use std::io;
+use thiserror::Error;
 
 /// Error that can occur during signing operations.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Error)]
 pub enum SignError {
     /// The signing key is not available or cannot be used.
     #[error("Signing key unavailable: {0}")]
@@ -15,7 +18,7 @@ pub enum SignError {
 }
 
 /// Errors that can occur during authorization.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Error)]
 pub enum DialogCapabilityAuthorizationError {
     /// Subject does not match the issuer's DID for self-authorization.
     #[error("Not authorized: subject '{subject}' does not match issuer '{issuer}'")]
@@ -56,16 +59,36 @@ pub enum DialogCapabilityAuthorizationError {
     Serialization(String),
 }
 
+/// Errors from capability-routed storage operations.
+#[derive(Debug, Error)]
+pub enum StorageError {
+    /// Storage backend error.
+    #[error("Storage error: {0}")]
+    Storage(String),
+
+    /// IO error.
+    #[error("IO error: {0}")]
+    Io(#[from] io::Error),
+}
+
+/// Error during fork execution.
+#[derive(Debug, Error)]
+pub enum ForkError {
+    /// Authorization was denied.
+    #[error(transparent)]
+    Authorization(#[from] AuthorizeError),
+}
+
 /// Error type for capability execution failures.
-pub enum DialogCapabilityPerformError<E: Error> {
+pub enum DialogCapabilityPerformError<E: StdError> {
     /// Error during effect execution.
     Execution(E),
     /// Error during authorization verification.
     Authorization(DialogCapabilityAuthorizationError),
 }
 
-impl<E: Error> Debug for DialogCapabilityPerformError<E> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+impl<E: StdError> Debug for DialogCapabilityPerformError<E> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Execution(e) => f.debug_tuple("Execution").field(e).finish(),
             Self::Authorization(e) => f.debug_tuple("Authorization").field(e).finish(),
@@ -73,8 +96,8 @@ impl<E: Error> Debug for DialogCapabilityPerformError<E> {
     }
 }
 
-impl<E: Error> Display for DialogCapabilityPerformError<E> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+impl<E: StdError> Display for DialogCapabilityPerformError<E> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Execution(e) => write!(f, "Execution error: {e}"),
             Self::Authorization(e) => write!(f, "Authorization error: {e}"),
@@ -82,8 +105,8 @@ impl<E: Error> Display for DialogCapabilityPerformError<E> {
     }
 }
 
-impl<E: Error + 'static> Error for DialogCapabilityPerformError<E> {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
+impl<E: StdError + 'static> StdError for DialogCapabilityPerformError<E> {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
             Self::Execution(e) => Some(e),
             Self::Authorization(e) => Some(e),

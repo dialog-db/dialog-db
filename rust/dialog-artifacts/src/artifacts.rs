@@ -13,8 +13,14 @@ pub use instruction::*;
 pub mod selector;
 pub use selector::ArtifactSelector;
 
+mod query;
+pub use query::{ArtifactStream, Select};
+
 mod store;
 pub use store::*;
+
+mod update;
+pub use update::{Change, ChangeStream, Changes, SortKey, Statement, Update, sort_key};
 
 mod attribute;
 pub use attribute::*;
@@ -42,8 +48,8 @@ pub use dialog_storage::{
     Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder, HashType,
     MemoryStorageBackend, Storage, StorageBackend,
 };
-use futures_util::{Stream, StreamExt};
-use std::{ops::Range, sync::Arc};
+use futures_util::Stream;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[cfg(feature = "csv")]
@@ -52,16 +58,17 @@ use futures_util::TryStreamExt;
 #[cfg(feature = "csv")]
 use async_stream::stream;
 
+#[cfg(feature = "csv")]
+use tokio::io::{AsyncRead, AsyncWrite};
+
+use crate::tree::ArtifactTreeExt;
 use crate::{
-    AttributeKey, DialogArtifactsError, EntityKey, FromKey, HASH_SIZE, Key, KeyView,
-    KeyViewConstruct, KeyViewMut, State, ValueKey, artifacts::selector::Constrained,
-    make_reference,
+    DialogArtifactsError, HASH_SIZE, Key, State, artifacts::selector::Constrained, make_reference,
 };
 
 /// An alias type that describes the [`Tree`]-based prolly tree that is
 /// used for each index in [`Artifacts`]
-pub type Index<Key, Value, Backend> =
-    Tree<GeometricDistribution, Key, State<Value>, Blake3Hash, Storage<CborEncoder, Backend>>;
+pub type Index<Key, Value> = Tree<GeometricDistribution, Key, State<Value>, Blake3Hash>;
 
 /// [`Artifacts`] is an implementor of [`ArtifactStore`] and [`ArtifactStoreMut`].
 /// Internally, [`Artifacts`] maintains indexes built from [`Tree`]s (that is,
@@ -84,7 +91,7 @@ where
 {
     identifier: String,
     storage: Storage<CborEncoder, Backend>,
-    index: Arc<RwLock<Index<Key, Datum, Backend>>>,
+    index: Arc<RwLock<Index<Key, Datum>>>,
 }
 
 impl<Backend> Artifacts<Backend>
@@ -95,8 +102,14 @@ where
 {
     #[cfg(feature = "debug")]
     /// Get a reference-counted pointer to the internal entity index of the [`Artifacts`]
-    pub fn index(&self) -> Arc<RwLock<Index<Key, Datum, Backend>>> {
+    pub fn index(&self) -> Arc<RwLock<Index<Key, Datum>>> {
         self.index.clone()
+    }
+
+    #[cfg(feature = "debug")]
+    /// Get a clone of the storage used by this [`Artifacts`]
+    pub fn storage(&self) -> Storage<CborEncoder, Backend> {
+        self.storage.clone()
     }
 
     /// The name used to uniquely identify the data of this [`Artifacts`]
@@ -137,9 +150,9 @@ where
             };
 
             if let Some(revision) = revision {
-                Tree::from_hash(revision.index(), storage.clone()).await?
+                Tree::from_hash(revision.index(), &storage).await?
             } else {
-                Tree::new(storage.clone())
+                Tree::new()
             }
         };
 
@@ -170,7 +183,7 @@ where
     // on pattern matching.
     pub async fn export<Write>(&self, write: &mut Write) -> Result<(), DialogArtifactsError>
     where
-        Write: tokio::io::AsyncWrite + Unpin,
+        Write: AsyncWrite + Unpin,
     {
         use crate::{EntityKey, KeyViewConstruct};
 
@@ -179,7 +192,7 @@ where
         let index = self.index.read().await;
         let range = <EntityKey<Key> as KeyViewConstruct>::min().0
             ..<EntityKey<Key> as KeyViewConstruct>::max().0;
-        let entity_stream = index.stream_range(range);
+        let entity_stream = index.stream_range(range, &self.storage);
 
         tokio::pin!(entity_stream);
 
@@ -203,7 +216,7 @@ where
     /// [`Artifacts::export`]
     pub async fn import<Read>(&mut self, read: &mut Read) -> Result<(), DialogArtifactsError>
     where
-        Read: tokio::io::AsyncRead + Unpin + Send,
+        Read: AsyncRead + Unpin + Send,
     {
         let instructions = stream! {
             let mut reader = csv_async::AsyncReaderBuilder::new()
@@ -312,7 +325,7 @@ where
 
         // Finally update the index
         let mut index = self.index.write().await;
-        index.set_hash(index_version).await?;
+        index.set_hash(index_version, &self.storage).await?;
 
         Ok(())
     }
@@ -332,65 +345,18 @@ where
     ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static + ConditionalSend
     {
         let index = self.index.clone();
+        let storage = self.storage.clone();
 
         try_stream! {
-            // We clone to "pin" the indexes at a version for the lifetime of the stream
-            let index = index.read().await.clone();
-
-            if selector.entity().is_some() {
-                let start = <EntityKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
-                let end = <EntityKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
-
-                let stream = index.stream_range(Range { start, end });
-
-                tokio::pin!(stream);
-
-                for await item in stream {
-                    let entry = item?;
-
-                    if entry.matches_selector(&selector)
-                        && let Entry { value: State::Added(datum), .. } = entry
-                    {
-                        yield Artifact::try_from(datum)?;
-                    }
-                }
-            } else if selector.value().is_some() {
-                let start = <ValueKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
-                let end = <ValueKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
-
-                let stream = index.stream_range(Range { start, end });
-
-                tokio::pin!(stream);
-
-                for await item in stream {
-                    let entry = item?;
-
-                    if entry.matches_selector(&selector)
-                        && let Entry { value: State::Added(datum), .. } = entry
-                    {
-                        yield Artifact::try_from(datum)?;
-                    }
-                }
-            } else if selector.attribute().is_some() {
-                let start = <AttributeKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
-                let end = <AttributeKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
-
-                let stream = index.stream_range(Range { start, end });
-
-                tokio::pin!(stream);
-
-                for await item in stream {
-                    let entry = item?;
-
-                    if entry.matches_selector(&selector)
-                        && let Entry { value: State::Added(datum), .. } = entry
-                    {
-                        yield Artifact::try_from(datum)?;
-                    }
-                }
-            } else {
-                unreachable!("ArtifactSelector will always have at least one field specified")
-            };
+            // Clone the tree under the read lock to "pin" it at a
+            // version for the stream's lifetime, then hand off to the
+            // shared `ArtifactTreeExt::scan` for EAV/AEV/VAE dispatch.
+            let tree = index.read().await.clone();
+            let scanned = tree.scan(storage, selector);
+            tokio::pin!(scanned);
+            for await artifact in scanned {
+                yield artifact?;
+            }
         }
     }
 }
@@ -415,84 +381,13 @@ where
         let transaction_result = async {
             let mut index = self.index.write().await;
 
-            tokio::pin!(instructions);
-
-            while let Some(instruction) = instructions.next().await {
-                match instruction {
-                    Instruction::Assert(artifact) => {
-                        let entity_key = EntityKey::from(&artifact);
-                        let value_key = ValueKey::from_key(&entity_key);
-                        let attribute_key = AttributeKey::from_key(&entity_key);
-
-                        let datum = Datum::from(artifact);
-
-                        if let Some(cause) = &datum.cause {
-                            let ancestor_key = {
-                                let search_start = <EntityKey<Key> as KeyViewConstruct>::min()
-                                    .set_entity(entity_key.entity())
-                                    .set_attribute(entity_key.attribute())
-                                    .into_key();
-                                let search_end = <EntityKey<Key> as KeyViewConstruct>::max()
-                                    .set_entity(entity_key.entity())
-                                    .set_attribute(entity_key.attribute())
-                                    .into_key();
-
-                                let search_stream = index.stream_range(search_start..search_end);
-
-                                let mut ancestor_key = None;
-
-                                tokio::pin!(search_stream);
-
-                                while let Some(candidate) = search_stream.try_next().await? {
-                                    if let State::Added(current_element) = candidate.value {
-                                        let current_artifact = Artifact::try_from(current_element)?;
-                                        let current_artifact_reference =
-                                            Cause::from(&current_artifact);
-
-                                        if cause == &current_artifact_reference {
-                                            ancestor_key = Some(candidate.key);
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                ancestor_key
-                            };
-
-                            if let Some(key) = ancestor_key {
-                                // Prune the old entry from the indexes
-                                let entity_key = EntityKey(key);
-                                let value_key = ValueKey::from_key(&entity_key);
-                                let attribute_key = AttributeKey::from_key(&entity_key);
-
-                                // TODO: Make it concurrent / parallel
-                                index.delete(&entity_key.into_key()).await?;
-                                index.delete(&value_key.into_key()).await?;
-                                index.delete(&attribute_key.into_key()).await?;
-                            }
-                        }
-
-                        // TODO: Make it concurrent / parallel
-                        index
-                            .set(entity_key.into_key(), State::Added(datum.clone()))
-                            .await?;
-                        index
-                            .set(attribute_key.into_key(), State::Added(datum.clone()))
-                            .await?;
-                        index.set(value_key.into_key(), State::Added(datum)).await?;
-                    }
-                    Instruction::Retract(fact) => {
-                        let entity_key = EntityKey::from(&fact);
-                        let value_key = ValueKey::from_key(&entity_key);
-                        let attribute_key = AttributeKey::from_key(&entity_key);
-
-                        // TODO: Make it concurrent / parallel
-                        index.set(entity_key.into_key(), State::Removed).await?;
-                        index.set(attribute_key.into_key(), State::Removed).await?;
-                        index.set(value_key.into_key(), State::Removed).await?;
-                    }
-                }
-            }
+            // The per-instruction EAV/AEV/VAE key writes (and
+            // cardinality-one supersession) are the shared
+            // `ArtifactTreeExt::apply`. `commit` adds only the
+            // surrounding transaction bookkeeping — base-revision
+            // capture, revision persistence, pointer advance, and the
+            // rollback below.
+            index.apply(&mut self.storage, instructions).await?;
 
             let next_revision = index.hash().map(Revision::new);
 
@@ -528,6 +423,7 @@ where
 #[cfg(test)]
 mod tests {
     use std::{collections::BTreeSet, str::FromStr, sync::Arc};
+    use tokio::io::{BufReader, BufWriter};
 
     use anyhow::Result;
     use dialog_storage::{
@@ -536,10 +432,10 @@ mod tests {
     use futures_util::{StreamExt, TryStreamExt};
     use tokio::sync::Mutex;
 
+    use crate::helpers::generate_data;
     use crate::{
         Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMutExt, Artifacts, Attribute,
-        DialogArtifactsError, Entity, Instruction, NULL_REVISION_HASH, Value, generate_data,
-        make_reference,
+        DialogArtifactsError, Entity, Instruction, NULL_REVISION_HASH, Value, make_reference,
     };
 
     #[cfg(target_arch = "wasm32")]
@@ -639,7 +535,7 @@ mod tests {
                 .collect::<Vec<Artifact>>()
                 .await;
 
-            let mut csv = tokio::io::BufWriter::new(Vec::<u8>::new());
+            let mut csv = BufWriter::new(Vec::<u8>::new());
             artifacts.export(&mut csv).await?;
             (csv.into_inner(), ids, artifacts.revision().await)
         };
@@ -648,9 +544,7 @@ mod tests {
 
         let mut artifacts = Artifacts::anonymous(MemoryStorageBackend::default()).await?;
 
-        artifacts
-            .import(&mut tokio::io::BufReader::new(csv.as_ref()))
-            .await?;
+        artifacts.import(&mut BufReader::new(csv.as_ref())).await?;
 
         let actual_ids = artifacts
             .select(ArtifactSelector::new().the(Attribute::from_str("item/id")?))
@@ -968,20 +862,24 @@ mod tests {
         let attribute = Attribute::from_str("test/attribute")?;
         let entity = Entity::new()?;
         let artifact = Artifact {
-            the: attribute,
+            the: attribute.clone(),
             of: entity.clone(),
             is: Value::Boolean(false),
             cause: None,
         };
 
-        artifacts
-            .commit([Instruction::Assert(artifact.clone())])
-            .await?;
+        artifacts.commit([Instruction::Assert(artifact)]).await?;
 
-        let updated_artifact = artifact.update(Value::Boolean(true));
+        // Replace supersedes priors at (entity, attribute) regardless of value.
+        let updated_artifact = Artifact {
+            the: attribute,
+            of: entity.clone(),
+            is: Value::Boolean(true),
+            cause: None,
+        };
 
         artifacts
-            .commit([Instruction::Assert(updated_artifact.clone())])
+            .commit([Instruction::Replace(updated_artifact.clone())])
             .await?;
 
         let results = artifacts

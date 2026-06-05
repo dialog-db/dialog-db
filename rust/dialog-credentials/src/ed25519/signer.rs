@@ -132,10 +132,10 @@ impl Principal for Ed25519Signer {
     }
 }
 
-// Authority impl — combines Principal + Signer into a single trait
-use dialog_capability::Authority;
+// Issuer impl — combines Principal + Signer into a single trait
+use dialog_capability::Issuer;
 
-impl Authority for Ed25519Signer {
+impl Issuer for Ed25519Signer {
     type Signature = Ed25519Signature;
 }
 
