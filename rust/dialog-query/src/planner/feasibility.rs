@@ -1,7 +1,18 @@
-use super::Infeasible;
 use crate::schema::Requirement;
 use crate::{Environment, Parameters, Premise, Schema};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
+
+/// Why a premise cannot run yet under the current bindings — the
+/// `Err` case of the SIPS binding function [`feasible`]. Names which
+/// variables the premise is still waiting on, so the planner (and
+/// later demand reification) knows what would unblock it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Infeasible {
+    /// All of these still-unbound variables must be bound before the
+    /// premise can run. A choice group already satisfied (by a
+    /// constant or a bound variable) contributes nothing here.
+    NeedsAll(BTreeSet<String>),
+}
 
 /// Categorize a premise's parameters against a set of already-bound
 /// variables: which it will bind, and which it still requires.
@@ -91,11 +102,11 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    use super::super::Planner;
     use super::*;
-    use crate::Infeasible;
     use crate::artifact::Entity;
-    use crate::attribute::Cardinality;
     use crate::attribute::query::AttributeQuery;
+    use crate::attribute::{Cardinality, The};
     use crate::formula::Formula;
     use crate::formula::string::Length;
     use crate::proposition::Proposition;
@@ -103,6 +114,7 @@ mod tests {
     use crate::the;
     use crate::types::Any;
     use crate::{Parameters, Term};
+    use std::collections::BTreeSet;
 
     fn attribute(value: Term<Any>, cardinality: Cardinality) -> Premise {
         Premise::Assert(Proposition::Attribute(Box::new(AttributeQuery::new(
@@ -221,5 +233,37 @@ mod tests {
             "a no-IO formula is cheaper than an index scan"
         );
         assert!(scan.estimate(&Environment::new()).unwrap() >= INDEX_SCAN_COST);
+    }
+
+    /// `feasible` is consistent with the planner's own output: for
+    /// each planned step, asking feasibility with the variables bound
+    /// when that step runs (`step.env()`) is `Ok` and reports exactly
+    /// the step's `binds()`. Pins the SIPS binding function to the
+    /// plan the planner emits.
+    #[dialog_common::test]
+    fn feasible_matches_planned_binds() {
+        let premises = vec![
+            attribute_for(the!("person/name"), "name"),
+            attribute_for(the!("person/age"), "age"),
+        ];
+        let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
+
+        for step in &plan.steps {
+            let binds =
+                feasible(&step.as_premise(), step.env()).expect("planned step is feasible at env");
+            let got: BTreeSet<String> = binds.iter().map(String::from).collect();
+            let expected: BTreeSet<String> = step.binds().iter().map(String::from).collect();
+            assert_eq!(got, expected, "feasible binds match the planner's binds");
+        }
+    }
+
+    fn attribute_for(the: The, value: &str) -> Premise {
+        Premise::Assert(Proposition::Attribute(Box::new(AttributeQuery::new(
+            Term::from(the),
+            Term::<Entity>::var("this"),
+            Term::var(value),
+            Term::var("cause"),
+            Some(Cardinality::One),
+        ))))
     }
 }

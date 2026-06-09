@@ -5,6 +5,7 @@ mod plan;
 
 pub use conjunction::*;
 pub use disjunction::*;
+pub use feasibility::Infeasible;
 pub(crate) use feasibility::categorize;
 pub use plan::*;
 

@@ -48,13 +48,17 @@ pub struct PremiseVars {
     pub needs: BTreeSet<String>,
 }
 
-/// Per-premise variable usage plus precomputed dependency edges.
+/// The dependency structure of a rule body: the SIPS partial order
+/// `≺` from the magic-sets literature (Alviano Def. 3.1.3).
 ///
-/// `requires[i]` is the set of premise indices that must execute
-/// before premise `i` because they bind a variable in `needs[i]`.
-/// The graph respects the user's original premise order: a premise
-/// that binds a variable can satisfy any later premise's need for
-/// it, regardless of cost. Reordering happens during planning, not
+/// Half of a SIPS is the binding function (which variables each
+/// premise binds — `feasibility::categorize`); this is the other half,
+/// the order/dependency relation. `requires[i]` is the set of premise
+/// indices that must execute before premise `i` because they bind a
+/// variable in `needs[i]`. Given a binding, the edges name which
+/// premises it affects/unblocks — the dependency index the
+/// demand-driven incremental work consumes. It is cost-free and
+/// order-agnostic: cost-driven reordering happens during planning, not
 /// here.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DependencyGraph {
