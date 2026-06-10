@@ -13,6 +13,7 @@ use crate::error::TypeError;
 use crate::rule::types::TypeEnv;
 use crate::{Environment, Premise};
 use core::mem;
+use std::sync::Arc;
 
 /// Greedily orders a rule's premises into an execution plan.
 ///
@@ -26,9 +27,23 @@ use core::mem;
 pub struct Planner {
     /// Premises waiting to be ordered.
     premises: Vec<Premise>,
+    /// Rule-level inferred types, when the caller already ran
+    /// analysis. `None` means the planner infers them itself.
+    types: Option<Arc<TypeEnv>>,
 }
 
 impl Planner {
+    /// Build a planner from premises whose rule-level types were
+    /// already inferred by analysis. Inference is rule-scoped and
+    /// scope-independent, so the analyzed env is reused across every
+    /// `plan` call (and every adornment) instead of being recomputed
+    /// per call.
+    pub fn with_types(premises: Vec<Premise>, types: Arc<TypeEnv>) -> Self {
+        Planner {
+            premises,
+            types: Some(types),
+        }
+    }
     /// Produce an ordered execution plan ([`Conjunction`]) for the given scope.
     ///
     /// Repeatedly selects the cheapest feasible premise until all
@@ -100,11 +115,18 @@ impl Planner {
         })
     }
 
-    /// Narrow the planner's premises to their rule-level inferred kinds.
+    /// Narrow the planner's premises to their rule-level inferred
+    /// kinds, using the analysis-provided env when available and
+    /// inferring one otherwise.
     fn narrow(&mut self) -> Result<(), TypeError> {
-        let types = TypeEnv::infer(&self.premises).map_err(|err| TypeError::TypeInference {
-            reason: err.to_string(),
-        })?;
+        let types = match self.types.take() {
+            Some(types) => types,
+            None => Arc::new(TypeEnv::infer(&self.premises).map_err(|err| {
+                TypeError::TypeInference {
+                    reason: err.to_string(),
+                }
+            })?),
+        };
         self.premises = self
             .premises
             .drain(..)
@@ -134,7 +156,10 @@ impl Planner {
 
 impl From<Vec<Premise>> for Planner {
     fn from(premises: Vec<Premise>) -> Self {
-        Planner { premises }
+        Planner {
+            premises,
+            types: None,
+        }
     }
 }
 

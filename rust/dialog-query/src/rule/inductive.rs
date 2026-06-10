@@ -75,8 +75,9 @@ impl InductiveRule {
 
     /// Plan this rule's premises against a scope, producing a concrete
     /// execution plan ([`Conjunction`]) ordered for the given bindings.
+    /// Reuses the analysis-inferred types; planning never re-infers.
     pub fn plan(&self, scope: &Environment) -> Conjunction {
-        Planner::from(self.analysis.premises.clone())
+        Planner::with_types(self.analysis.premises.clone(), self.analysis.types.clone())
             .plan(scope)
             .expect("an analyzed rule is plannable by construction")
     }

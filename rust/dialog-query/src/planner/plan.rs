@@ -10,7 +10,7 @@ use crate::rule::types::TypeEnv;
 use crate::selection::Selection;
 use crate::source::SelectRules;
 use crate::try_stream;
-use crate::{Environment, Parameters, Premise, Schema};
+use crate::{Environment, Parameters, Premise, Schema, Term};
 use core::pin::Pin;
 use dialog_artifacts::Select;
 use dialog_capability::Provider;
@@ -271,6 +271,30 @@ fn apply_types_to_proposition(proposition: Proposition, types: &TypeEnv) -> Prop
                 _ => Proposition::Maybe(Box::new(maybe)),
             }
         }
+        Proposition::Concept(query) => {
+            // Project the rule-level kinds onto the concept's
+            // parameter terms. This records what the surrounding
+            // rule proved about each variable at the boundary — the
+            // projection consumed by diagnostics today and by
+            // checked execution later. (Row-level enforcement at the
+            // boundary is the consuming premise's job: a narrowed
+            // variable arriving Absent is filtered by whichever
+            // scalar slot demanded it.)
+            let mut terms = Parameters::new();
+            for (param, term) in query.terms.iter() {
+                let projected = match term.name().and_then(|name| types.get(name)) {
+                    Some(kind) => {
+                        Term::typed_var(term.name().unwrap_or_default().to_string(), kind.clone())
+                    }
+                    None => term.clone(),
+                };
+                terms.insert(param.clone(), projected);
+            }
+            Proposition::Concept(ConceptQuery {
+                terms,
+                predicate: query.predicate,
+            })
+        }
         other => other,
     }
 }
@@ -411,6 +435,47 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `apply_types` projects the rule-level kinds onto a concept
+    /// premise's parameter terms, recording at the boundary what the
+    /// surrounding rule proved about each variable.
+    #[dialog_common::test]
+    fn it_projects_narrowing_onto_concept_parameters() {
+        use crate::artifact::Type as ValueType;
+        use crate::{AttributeDescriptor, ConceptDescriptor, ConceptQuery, Parameters};
+
+        let env = {
+            let premises = vec![name_scan("name")];
+            TypeEnv::infer(&premises).unwrap()
+        };
+
+        let concept = ConceptDescriptor::try_from(vec![(
+            "name",
+            AttributeDescriptor::new(the!("person/name"), "", Cardinality::One, None),
+        )])
+        .unwrap();
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::var("person"));
+        terms.insert("name".to_string(), Term::var("name"));
+        let premise = Premise::Assert(Proposition::Concept(ConceptQuery {
+            terms,
+            predicate: concept,
+        }));
+
+        let projected = apply_types(premise, &env);
+        let Premise::Assert(Proposition::Concept(query)) = projected else {
+            panic!("expected concept premise");
+        };
+        assert_eq!(
+            query
+                .terms
+                .get("name")
+                .and_then(|term| term.kind())
+                .and_then(|kind| kind.as_value_type()),
+            Some(ValueType::String),
+            "the rule-level kind is stamped onto the boundary term"
+        );
     }
 
     /// Polarity discipline: `apply_types` leaves negated premises

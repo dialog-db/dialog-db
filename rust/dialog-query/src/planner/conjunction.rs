@@ -258,14 +258,10 @@ mod tests {
 
     /// A concept's optional field crossing into a premise that
     /// demands a present value *filters* the rows where it is
-    /// Absent — it must not abort the stream.
-    ///
-    /// The concept boundary now declares the widening (the TypeEnv
-    /// is truthful), but the narrowing the formula induces is not
-    /// yet *projected into* the concept premise, so its internal
-    /// rule still emits the Absent row and the formula aborts the
-    /// stream. Fixed by single-pass inference with full projection.
-    #[ignore = "dialog-db-47: narrowing is not yet projected into concept parameters; Absent reaching the formula aborts the stream"]
+    /// Absent — it must not abort the stream. The concept boundary
+    /// delivers Bob's `Absent`, and the formula (a scalar context)
+    /// excludes his row, the same filter-by-default semantics that
+    /// the within-rule narrowing produces.
     #[dialog_common::test]
     async fn it_filters_concept_rows_with_absent_field_from_required_formula() -> anyhow::Result<()>
     {

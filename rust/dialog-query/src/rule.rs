@@ -164,7 +164,8 @@ pub trait Compile: Sized + Into<Rule> {
         // Verify the rule is plannable: ordering at an empty scope
         // surfaces unsatisfiable premises (e.g. a formula whose
         // required input is never bound) as a planning error.
-        let join = Planner::from(analysis.premises.clone()).plan(&Environment::new())?;
+        let join = Planner::with_types(analysis.premises.clone(), analysis.types.clone())
+            .plan(&Environment::new())?;
 
         // Verify that every conclusion parameter is derived by one
         // of the premises; otherwise the rule could never fully
