@@ -11,6 +11,7 @@ use crate::DeductiveRule;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::parameters::Parameters;
 use crate::planner::Disjunction;
+use crate::premise::Polarity;
 use crate::selection::Match;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
