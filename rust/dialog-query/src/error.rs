@@ -101,6 +101,20 @@ pub enum TypeError {
         reason: String,
     },
 
+    /// A set-widening (`maybe`) premise appears under `unless`. A
+    /// left-join always yields a row for a bound entity (Present or
+    /// the Absent fallback), so negating it filters every row and
+    /// the rule is vacuously false. Negate the scalar lookup ("the
+    /// entity has no such fact") or the concept instead.
+    #[error(
+        "Rule {rule} negates an optional (maybe) premise, which is always false. \
+         Negate the scalar attribute lookup or the concept instead."
+    )]
+    NegatedOptional {
+        /// The offending rule.
+        rule: Box<Rule>,
+    },
+
     /// Type inference over a rule's premises produced a
     /// contradiction (a variable appears in slots with conflicting
     /// kinds). The planner cannot proceed because the rule has no

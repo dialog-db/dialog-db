@@ -134,6 +134,22 @@ impl AttributeQueryAll {
         Ok(())
     }
 
+    /// True when the row pins one of this scan's named parameters to
+    /// [`Binding::Absent`](crate::Binding::Absent). A scalar lookup
+    /// demands present values in every slot, so such a row can match
+    /// nothing: a positive premise filters it, and a negated premise
+    /// passes it (the inner query has no rows). By the time a row
+    /// reaches the associative layer, an Absent binding means "known
+    /// to have no value" — produced upstream by a
+    /// [`MaybeQuery`](crate::maybe::MaybeQuery) left-join.
+    pub(crate) fn absent_blocked(&self, base: &Match) -> bool {
+        let absent = |term: &Term<Any>| matches!(base.lookup(term), Ok(crate::Binding::Absent));
+        absent(&Term::<Any>::from(&self.the))
+            || absent(&Term::<Any>::from(&self.of))
+            || absent(&self.is)
+            || absent(&Term::<Any>::from(&self.cause))
+    }
+
     /// Resolves variables from the given match. `Absent` bindings
     /// leave the term unchanged (same as unbound) — only Present
     /// bindings substitute.
@@ -243,6 +259,13 @@ impl AttributeQueryAll {
         try_stream! {
             for await candidate in selection {
                 let base = candidate?;
+
+                // An Absent-bound parameter matches nothing at the
+                // scalar layer: filter the row without scanning.
+                if selector.absent_blocked(&base) {
+                    continue;
+                }
+
                 let selection = selector.resolve(&base);
 
                 let stream = Provider::<Select<'_>>::execute(env, (&selection).try_into()?).await?;

@@ -424,6 +424,50 @@ mod tests {
         Ok(())
     }
 
+    /// Positive-polarity counterpart of Absent-matches-nothing: a
+    /// scalar scan whose value variable arrives bound `Absent` (from
+    /// an upstream left-join) filters the row instead of scanning
+    /// unconstrained or aborting the stream.
+    #[dialog_common::test]
+    async fn it_filters_scalar_scan_over_absent_binding() -> anyhow::Result<()> {
+        use crate::query::Application;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let club = Entity::new()?;
+        branch
+            .transaction()
+            .assert(the!("club/banned").of(club.clone()).is("Ali".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let scan = DynamicAttributeQuery::new(
+            Term::from(the!("club/banned")),
+            Term::blank(),
+            Term::<String>::var("nickname").into(),
+            Term::blank(),
+            Some(Cardinality::One),
+        );
+
+        let mut row = Match::new();
+        row.bind(&Term::var("person"), Value::Entity(alice))?;
+        row.bind_absent(&Term::var("nickname"))?;
+
+        let results: Vec<Match> =
+            Selection::try_vec(Application::evaluate(scan, row.seed(), &source)).await?;
+        assert_eq!(
+            results.len(),
+            0,
+            "an Absent binding matches nothing in a scalar slot"
+        );
+        Ok(())
+    }
+
     /// An unbound entity is a planner-contract violation surfaced as
     /// an error, never a phantom row.
     #[dialog_common::test]

@@ -180,13 +180,8 @@ mod tests {
     /// An `Absent` binding flowing into a negated premise matches
     /// nothing: the negation's inner query is filtered for that row
     /// (a scalar slot demands a present value), so the row *passes*
-    /// the negation.
-    ///
-    /// Today `resolve` treats Absent like unbound, so the inner scan
-    /// runs unconstrained, finds some fact, and filters the row —
-    /// an entity with *no* nickname is treated as if it had every
-    /// banned one.
-    #[ignore = "dialog-db-46: Absent resolves as unbound inside negation, filtering rows it must pass"]
+    /// the negation. An entity with no nickname is not treated as if
+    /// it had every banned one.
     #[dialog_common::test]
     async fn it_negates_absent_as_matching_nothing() -> anyhow::Result<()> {
         let (operator, profile) = test_operator_with_profile().await;

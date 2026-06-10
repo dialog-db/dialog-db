@@ -154,6 +154,9 @@ pub trait Compile: Sized + Into<Rule> {
                             reason,
                         }
                     }
+                    analyzer::AnalysisError::NegatedOptional => TypeError::NegatedOptional {
+                        rule: Box::new(rule.into()),
+                    },
                 });
             }
         };

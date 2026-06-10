@@ -1,5 +1,6 @@
 use super::all::AttributeQueryAll;
 use crate::Claim;
+use crate::Value;
 use crate::artifact::{ArtifactSelector, ArtifactsAttribute, Constrained};
 use crate::attribute::The;
 use crate::environment::Environment;
@@ -53,10 +54,14 @@ where
     Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
 {
     try_stream! {
-        let relation = selector.attribute();
-        let attribute = ArtifactsAttribute::try_from(candidate.lookup(&Term::from(&relation))?.content()?)?;
-        let entity = Entity::try_from(candidate.lookup(&Term::from(selector.of()))?.content()?)?;
-        let value = candidate.lookup(selector.is())?.content()?;
+        // The candidate fact is cited on the row by `merge`; read it
+        // from the claim rather than from the row's terms — a blank
+        // term (e.g. an unconstrained entity) never stores a binding,
+        // so term lookups cannot recover the fact.
+        let claim = candidate.prove(selector.source())?;
+        let attribute = ArtifactsAttribute::try_from(Value::from(claim.the().clone()))?;
+        let entity = claim.of().clone();
+        let value = claim.is().clone();
         let cause_term = selector.cause();
         let cause = if cause_term.is_blank() {
             None
@@ -193,6 +198,12 @@ impl AttributeQueryOnly {
         try_stream! {
             for await each in selection {
                 let base = each?;
+
+                // An Absent-bound parameter matches nothing at the
+                // scalar layer: filter the row without scanning.
+                if selector.absent_blocked(&base) {
+                    continue;
+                }
 
                 // Resolve variables from the incoming match so that bindings
                 // from earlier premises are visible to the strategy decision.

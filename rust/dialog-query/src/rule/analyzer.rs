@@ -23,6 +23,7 @@
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::constraint::Constraint;
 use crate::planner::categorize;
+use crate::premise::Negation;
 use crate::proposition::Proposition;
 use crate::rule::types::TypeEnv;
 use crate::type_system::Type as Kind;
@@ -153,6 +154,12 @@ pub enum AnalysisError {
         /// Human-readable reason from the unifier.
         reason: String,
     },
+    /// A set-widening (`maybe`) premise appears under `unless`. A
+    /// left-join always yields a row for a bound entity (Present or
+    /// Absent), so negating it filters every row — the rule would
+    /// be vacuously false.
+    #[error("negation over an optional (maybe) premise is always false")]
+    NegatedOptional,
 }
 
 /// A rule that has passed analysis. Carries the conclusion, the
@@ -248,6 +255,16 @@ pub fn analyze(
             return Err(AnalysisError::CoalesceTypeMismatch {
                 reason: err.to_string(),
             });
+        }
+    }
+
+    // A left-join under `unless` is rejected: it always yields a row
+    // for a bound entity (Present or the Absent fallback), so the
+    // negation filters everything. Negate the scalar lookup ("the
+    // entity has no such fact") or the concept instead.
+    for premise in &premises {
+        if let Premise::Unless(Negation(Proposition::Maybe(_))) = premise {
+            return Err(AnalysisError::NegatedOptional);
         }
     }
 
@@ -424,5 +441,38 @@ mod tests {
             }
             other => panic!("expected RequiredHeadFromOptional, got {other:?}"),
         }
+    }
+
+    /// A left-join under `unless` is rejected at analysis: it always
+    /// yields a row for a bound entity (Present or the Absent
+    /// fallback), so negating it would filter every row.
+    #[dialog_common::test]
+    fn it_rejects_negated_maybe() {
+        use crate::premise::Negation;
+
+        let name_scan = AttributeQuery::new(
+            Term::from(the!("person/name")),
+            Term::<Entity>::var("this"),
+            Term::<String>::var("name").into(),
+            Term::var("cause"),
+            Some(Cardinality::One),
+        );
+        let maybe = MaybeQuery::new(
+            Term::from(the!("person/nickname")),
+            Term::<Entity>::var("this"),
+            Term::<String>::var("nickname").into(),
+            Term::blank(),
+            Some(Cardinality::One),
+        );
+        let premises = vec![
+            name_scan.into(),
+            Premise::Unless(Negation(Proposition::Maybe(Box::new(maybe)))),
+        ];
+
+        let err = analyze(person_with_name(), premises).unwrap_err();
+        assert!(
+            matches!(err, AnalysisError::NegatedOptional),
+            "negating a maybe premise is vacuously false, got {err:?}"
+        );
     }
 }

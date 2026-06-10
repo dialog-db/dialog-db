@@ -212,23 +212,29 @@ where
 
             tokio::pin!(output);
 
-            if let Ok(Some(_)) = output.try_next().await {
-                continue;
+            match output.try_next().await {
+                // The inner query matched: the negation filters the row.
+                Ok(Some(_)) => continue,
+                // No match: the row passes.
+                Ok(None) => yield base,
+                // An inner failure is not absence — propagate instead
+                // of silently passing the row.
+                Err(error) => Err(error)?,
             }
-
-            yield base;
         }
     }
 }
 
 /// Rewrite a premise to reflect rule-level inferred types.
 ///
-/// Currently only [`AttributeQuery::is`] is rewritten — that's the
-/// slot whose `is_optional()` answer drives the planner-visible
-/// behavior difference (Absent-fallback emission). Negated
-/// attribute queries are walked too, so a negation over an
-/// optional attribute picks up the same narrowing as its positive
-/// counterpart.
+/// Positive premises only — polarity discipline. The inferred env
+/// is an occurrence-typing fact about rows that survive the
+/// positive premises ("?x is Present in every surviving row"), so
+/// it narrows positive premises: an attribute scan's `is` kind is
+/// stamped, and a [`MaybeQuery`] whose value variable was narrowed
+/// to non-optional is demoted to its wrapped scalar scan. A negated
+/// premise asks a hypothetical question about rows that do *not*
+/// survive it; it is typed in its own context and left untouched.
 ///
 /// Called once when a [`Plan`] is built. The user-supplied premise
 /// stays untouched; the plan stores the rewritten working copy.
@@ -240,9 +246,7 @@ pub(crate) fn apply_types(premise: Premise, types: &TypeEnv) -> Premise {
         Premise::Assert(proposition) => {
             Premise::Assert(apply_types_to_proposition(proposition, types))
         }
-        Premise::Unless(Negation(proposition)) => {
-            Premise::Unless(Negation(apply_types_to_proposition(proposition, types)))
-        }
+        unless @ Premise::Unless(_) => unless,
     }
 }
 
@@ -409,12 +413,12 @@ mod tests {
         }
     }
 
-    /// `apply_types` reaches into negated propositions too. A
-    /// negated attribute query over an untyped variable picks up
-    /// the kind a positive premise inferred for it.
+    /// Polarity discipline: `apply_types` leaves negated premises
+    /// untouched. The inferred env describes rows that survive the
+    /// positive premises; a negated subquery asks a hypothetical
+    /// question and is typed in its own context.
     #[dialog_common::test]
-    fn it_narrows_negated_attribute_via_rule_inference() {
-        use crate::artifact::Type as ValueType;
+    fn it_leaves_negated_premises_untyped() {
         use crate::negation::Negation;
 
         let env = {
@@ -426,7 +430,7 @@ mod tests {
         };
 
         // The negated attribute query uses `?name` untyped; the
-        // rewrite stamps the inferred kind onto it.
+        // rewrite must not stamp the positive env onto it.
         let neg = AttributeQuery::new(
             Term::from(the!("person/nickname")),
             Term::<Entity>::var("this"),
@@ -436,15 +440,10 @@ mod tests {
         );
         let original = Premise::Unless(Negation(Proposition::Attribute(Box::new(neg))));
 
-        let narrowed = apply_types(original, &env);
-        if let Premise::Unless(Negation(Proposition::Attribute(boxed))) = narrowed {
-            assert_eq!(
-                boxed.is().kind().and_then(|k| k.as_value_type()),
-                Some(ValueType::String),
-                "narrowed `is` should carry the inferred String kind"
-            );
-        } else {
-            panic!("expected negated attribute proposition");
-        }
+        let rewritten = apply_types(original.clone(), &env);
+        assert_eq!(
+            rewritten, original,
+            "negated premises are typed in their own context"
+        );
     }
 }
