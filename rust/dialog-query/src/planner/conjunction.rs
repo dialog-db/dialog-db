@@ -90,14 +90,10 @@ mod tests {
     use dialog_repository::helpers::{test_operator_with_profile, test_repo};
     use futures_util::TryStreamExt;
 
-    /// Coalesce must take the *source* when the scan finds a value
-    /// and the fallback only when it does not.
-    ///
-    /// Today the greedy planner schedules the coalesce before the
-    /// nickname scan (its constant fallback satisfies its choice
-    /// group at cost 1), so `?display` binds to the fallback for
-    /// every row — even entities whose nickname is Present.
-    #[ignore = "dialog-db-45: coalesce plans before the scan binding its source; fallback shadows Present values"]
+    /// Coalesce must take the *source* when the lookup finds a value
+    /// and the fallback only when it does not. The coalesce's source
+    /// slot is a hard requirement, so the planner orders it after
+    /// the left-join that binds `?nickname`.
     #[dialog_common::test]
     async fn it_takes_present_source_over_coalesce_fallback() -> anyhow::Result<()> {
         let (operator, profile) = test_operator_with_profile().await;

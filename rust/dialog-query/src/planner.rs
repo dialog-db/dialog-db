@@ -718,20 +718,15 @@ mod plan_ordering {
     }
 
     /// A coalesce constraint (set-widening unwrap) lowers to a
-    /// `Plan::Constraint` step. At empty scope the conjunction is
-    /// rejected: the `Maybe` left-join requires its entity
-    /// externally bound (set-widening needs a known entity — "absent
-    /// for whom?"), and no other premise binds `?person`.
+    /// `Plan::Constraint` step and orders *after* the premise that
+    /// resolves its source: the coalesce's `source` slot is a hard
+    /// requirement, so the constant fallback can never make it
+    /// feasible early — the fallback must not fire for rows whose
+    /// source is Present.
     ///
-    /// With `?person` bound the conjunction plans, and the pinned
-    /// order is still `[constraint, maybe]`: the coalesce's constant
-    /// fallback satisfies its choice group, so it is feasible before
-    /// its source is bound and, being cheap (cost 1), the greedy
-    /// planner schedules it first — which makes the fallback fire for
-    /// every row even when a nickname exists. That ordering is the
-    /// open bug tracked as dialog-db-45: coalesce must order after
-    /// the premise that binds its source. Flip this pin to
-    /// `["maybe", "constraint"]` when that lands.
+    /// At empty scope the conjunction is rejected: the coalesce
+    /// waits on `?nickname`, the left-join that would bind it waits
+    /// on `?person`, and nothing binds `?person`.
     #[dialog_common::test]
     fn it_plans_coalesce_constraint() {
         use crate::maybe::MaybeQuery;
@@ -750,26 +745,27 @@ mod plan_ordering {
 
         let premises = vec![coalesce, nickname_maybe.into()];
 
-        // Empty scope: the left-join requires `?person` bound, and
-        // nothing else can bind it — the conjunction is unplannable.
+        // Empty scope: nothing can run — the coalesce needs its
+        // source, the left-join needs its entity.
         match Planner::from(premises.clone()).plan(&Environment::new()) {
             Err(TypeError::RequiredBindings { required }) => {
                 assert!(
-                    required.contains("person"),
-                    "the rejection names the entity the left-join requires"
+                    !required.is_empty(),
+                    "the rejection names the missing bindings"
                 );
             }
             other => panic!("expected RequiredBindings, got {other:?}"),
         }
 
-        // Bound scope: plans, coalesce-first (see doc comment).
+        // Bound scope: the left-join binds the source, then the
+        // coalesce runs.
         let mut scope = Environment::new();
         scope.add("person");
         let plan = Planner::from(premises.clone()).plan(&scope).unwrap();
         assert_eq!(
             kinds(&plan),
-            vec!["constraint", "maybe"],
-            "an optional-source coalesce is feasible immediately and, being cheap, runs first (bug: dialog-db-45)"
+            vec!["maybe", "constraint"],
+            "coalesce orders after the premise binding its source"
         );
 
         // Deterministic across replans.
