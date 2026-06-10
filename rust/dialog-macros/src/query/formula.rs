@@ -80,6 +80,25 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
     let struct_name = &input.ident;
+    let generics = &input.generics;
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    // Type-parameter idents: a field whose type is exactly one of
+    // these is a *scheme* field — its cell carries the parameter's
+    // SchemeBound and a scheme label, and cells sharing a parameter
+    // share one type variable at inference time.
+    let scheme_params: Vec<syn::Ident> = generics.type_params().map(|p| p.ident.clone()).collect();
+    let scheme_param_of = |ty: &syn::Type| -> Option<syn::Ident> {
+        if let syn::Type::Path(tp) = ty
+            && tp.qself.is_none()
+            && tp.path.segments.len() == 1
+        {
+            let ident = &tp.path.segments[0].ident;
+            if tp.path.segments[0].arguments.is_none() && scheme_params.contains(ident) {
+                return Some(ident.clone());
+            }
+        }
+        None
+    };
 
     // Extract fields from the struct
     let fields = match &input.data {
@@ -195,13 +214,32 @@ pub fn derive(input: TokenStream) -> TokenStream {
             let name_str = name.to_string();
             let name_lit = syn::LitStr::new(&name_str, proc_macro2::Span::call_site());
             let doc_lit = syn::LitStr::new(doc, proc_macro2::Span::call_site());
-            let data_type = type_to_value_data_type(ty);
+
+            // A scheme field's cell carries the bound of its type
+            // parameter and the parameter name as the scheme label;
+            // a concrete field's cell carries its singleton kind.
+            let (data_type, scheme) = match scheme_param_of(ty) {
+                Some(param) => {
+                    let label =
+                        syn::LitStr::new(&param.to_string(), proc_macro2::Span::call_site());
+                    (
+                        quote! {
+                            Some(dialog_query::type_system::Type::primitive_set(
+                                <#param as dialog_query::SchemeBound>::BOUND,
+                            ))
+                        },
+                        Some(quote! { .scheme(#label) }),
+                    )
+                }
+                None => (type_to_value_data_type(ty), None),
+            };
 
             if *is_output {
                 quote! {
                     builder
                         .cell(#name_lit, #data_type)
                         .the(#doc_lit)
+                        #scheme
                         .output(#cost);
                 }
             } else {
@@ -209,6 +247,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     builder
                         .cell(#name_lit, #data_type)
                         .the(#doc_lit)
+                        #scheme
                         .required();
                 }
             }
@@ -277,6 +316,18 @@ pub fn derive(input: TokenStream) -> TokenStream {
         proc_macro2::Span::call_site(),
     );
 
+    // Impls that convert through `FormulaQuery` only exist for the
+    // instantiation(s) registered in `define_formulas!` (the
+    // canonical dynamic instantiation for generic formulas), so they
+    // are bounded on that conversion existing.
+    let mut fq_where: syn::WhereClause = generics
+        .where_clause
+        .clone()
+        .unwrap_or_else(|| syn::parse_quote!(where));
+    fq_where.predicates.push(syn::parse_quote!(
+        dialog_query::FormulaQuery: ::std::convert::From<#query_name #ty_generics>
+    ));
+
     let expanded = quote! {
             /// Input structure for #struct_name formula
             ///
@@ -284,7 +335,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             /// to compute the formula.
             #[doc = #input_struct_doc]
             #[derive(Debug, Clone)]
-            pub struct #input_name {
+            pub struct #input_name #generics #where_clause {
                 #(#input_struct_fields),*
             }
 
@@ -293,22 +344,22 @@ pub fn derive(input: TokenStream) -> TokenStream {
             /// Contains all fields (both input and output) as Term<T> for pattern matching.
             #[doc = #query_struct_doc]
             #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-            pub struct #query_name {
+            pub struct #query_name #generics #where_clause {
                 #(#query_struct_fields),*
             }
 
             /// Static storage for formula cells
             static #cells_name: ::std::sync::OnceLock<dialog_query::Cells> = ::std::sync::OnceLock::new();
 
-            impl dialog_query::Predicate for #struct_name {
-                type Conclusion = #struct_name;
-                type Application = #query_name;
+            impl #impl_generics dialog_query::Predicate for #struct_name #ty_generics #fq_where {
+                type Conclusion = #struct_name #ty_generics;
+                type Application = #query_name #ty_generics;
                 type Descriptor = dialog_query::Entity;
             }
 
-            impl dialog_query::Application for #query_name
+            impl #impl_generics dialog_query::Application for #query_name #ty_generics #fq_where
     {
-                type Conclusion = #struct_name;
+                type Conclusion = #struct_name #ty_generics;
 
                 fn evaluate<'__a, __Env, __M: dialog_query::Selection + '__a>(
                     self,
@@ -331,31 +382,31 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 }
             }
 
-            impl ::std::convert::From<#query_name> for dialog_query::Parameters {
-                fn from(terms: #query_name) -> Self {
+            impl #impl_generics ::std::convert::From<#query_name #ty_generics> for dialog_query::Parameters #where_clause {
+                fn from(terms: #query_name #ty_generics) -> Self {
                     let mut parameters = Self::new();
                     #(parameters.insert(#all_field_name_lits.into(), dialog_query::Term::<dialog_query::types::Any>::from(terms.#all_field_names));)*
                     parameters
                 }
             }
 
-            impl From<#query_name> for dialog_query::Premise
+            impl #impl_generics From<#query_name #ty_generics> for dialog_query::Premise #fq_where
     {
-                fn from(source: #query_name) -> Self {
+                fn from(source: #query_name #ty_generics) -> Self {
                     let formula: dialog_query::FormulaQuery = source.into();
                     dialog_query::Premise::Assert(dialog_query::Proposition::from(formula))
                 }
             }
 
-            impl From<#query_name> for dialog_query::Proposition
+            impl #impl_generics From<#query_name #ty_generics> for dialog_query::Proposition #fq_where
     {
-                fn from(source: #query_name) -> Self {
+                fn from(source: #query_name #ty_generics) -> Self {
                     let formula: dialog_query::FormulaQuery = source.into();
                     dialog_query::Proposition::from(formula)
                 }
             }
 
-            impl ::std::ops::Not for #query_name
+            impl #impl_generics ::std::ops::Not for #query_name #ty_generics #fq_where
     {
                 type Output = dialog_query::Premise;
 
@@ -365,7 +416,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 }
             }
 
-            impl ::std::convert::TryFrom<&mut dialog_query::Bindings> for #input_name {
+            impl #impl_generics ::std::convert::TryFrom<&mut dialog_query::Bindings> for #input_name #ty_generics #where_clause {
                 type Error = dialog_query::EvaluationError;
 
                 fn try_from(bindings: &mut dialog_query::Bindings) -> ::std::result::Result<Self, Self::Error> {
@@ -375,8 +426,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 }
             }
 
-            impl dialog_query::Formula for #struct_name {
-                type Input = #input_name;
+            impl #impl_generics dialog_query::Formula for #struct_name #ty_generics #fq_where {
+                type Input = #input_name #ty_generics;
 
                 fn cells() -> &'static dialog_query::Cells {
                     #cells_name.get_or_init(|| {
@@ -390,8 +441,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     #total_cost
                 }
 
-                fn apply(terms: dialog_query::Parameters) -> ::std::result::Result<#query_name, dialog_query::error::TypeError> {
-                    let cells = <#struct_name as dialog_query::Formula>::cells();
+                fn apply(terms: dialog_query::Parameters) -> ::std::result::Result<#query_name #ty_generics, dialog_query::error::TypeError> {
+                    let cells = <#struct_name #ty_generics as dialog_query::Formula>::cells();
                     let conformed = cells.conform(terms)?;
                     ::std::result::Result::Ok(#query_name {
                         #(#all_field_names: conformed
