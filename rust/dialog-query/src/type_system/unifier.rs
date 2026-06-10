@@ -176,20 +176,30 @@ impl Context {
     }
 
     /// Robinson unification with constraint propagation. Updates
-    /// `self` in-place. Returns `Err` on constraint conflict.
+    /// `self` in-place and returns the *unified type* — the
+    /// principal meet of the two sides — so the result of every
+    /// unification flows to the caller instead of being discarded:
+    ///
+    /// - variable / variable: the canonical variable of the merged
+    ///   chain (its constraint is the met constraint);
+    /// - variable / static: the narrowed static the variable now
+    ///   resolves to;
+    /// - static / static: the meet of the two statics.
+    ///
+    /// Returns `Err` on constraint conflict (an empty meet).
     ///
     /// Static types intersect via [`StaticType::intersect`], which
     /// narrows both primitive and composite parts (products by
     /// shared field-name set, variants by label). Variables carry
     /// a [`Primitive`] constraint that's intersected with the
     /// primitive part of any concrete type they're unified with.
-    pub fn unify(&mut self, a: &Type, b: &Type) -> Result<(), UnifyError> {
+    pub fn unify(&mut self, a: &Type, b: &Type) -> Result<Type, UnifyError> {
         match (a, b) {
             (Type::Variable(x), Type::Variable(y)) => {
                 let x = self.root(*x);
                 let y = self.root(*y);
                 if x == y {
-                    return Ok(());
+                    return Ok(Type::Variable(x));
                 }
                 // If either side has already been resolved to a
                 // static, unify that resolved static against the
@@ -214,7 +224,7 @@ impl Context {
                 self.constraints.insert(x, merged);
                 self.constraints.insert(y, merged);
                 self.substitution.insert(y, Type::Variable(x));
-                Ok(())
+                Ok(Type::Variable(x))
             }
             (Type::Variable(x), Type::Static(s)) | (Type::Static(s), Type::Variable(x)) => {
                 let x = self.root(*x);
@@ -246,12 +256,12 @@ impl Context {
                     Some(c) if !c.is_empty() => StaticType::composite(merged, c.clone()),
                     _ => StaticType::from(merged),
                 };
-                self.substitution.insert(x, Type::Static(resolved));
-                Ok(())
+                self.substitution.insert(x, Type::Static(resolved.clone()));
+                Ok(Type::Static(resolved))
             }
             (Type::Static(a), Type::Static(b)) => {
                 a.intersect(b)
-                    .map(|_| ())
+                    .map(Type::Static)
                     .ok_or_else(|| UnifyError::ConstraintConflict {
                         left: a.primitive_part(),
                         right: b.primitive_part(),
@@ -282,6 +292,68 @@ mod tests {
         let mut ctx = Context::new();
         let a = ctx.fresh(Primitive::NUMERIC);
         assert_eq!(ctx.constraint(a), Primitive::NUMERIC);
+    }
+
+    /// Static-static unification returns the meet, not merely a
+    /// compatibility verdict: the result of every unification flows
+    /// to the caller. Foundation for scheme instantiation.
+    #[dialog_common::test]
+    fn unify_static_static_returns_the_meet() {
+        let mut ctx = Context::new();
+        let unified = ctx
+            .unify(
+                &Type::primitive_set(Primitive::NUMERIC),
+                &Type::primitive_set(Primitive::COMPARABLE),
+            )
+            .unwrap();
+        match unified {
+            Type::Static(s) => assert_eq!(
+                s.primitive_part(),
+                Primitive::NUMERIC.intersect(Primitive::COMPARABLE).unwrap(),
+                "the meet of the two statics is returned"
+            ),
+            other => panic!("expected static, got {other:?}"),
+        }
+    }
+
+    /// Variable-static unification returns the narrowed static the
+    /// variable now resolves to.
+    #[dialog_common::test]
+    fn unify_var_static_returns_the_narrowed_static() {
+        let mut ctx = Context::new();
+        let v = ctx.fresh(Primitive::NUMERIC);
+        let unified = ctx
+            .unify(
+                &Type::Variable(v),
+                &Type::primitive_set(Primitive::COMPARABLE),
+            )
+            .unwrap();
+        match unified {
+            Type::Static(s) => assert_eq!(
+                s.primitive_part(),
+                Primitive::NUMERIC.intersect(Primitive::COMPARABLE).unwrap(),
+                "the variable's constraint participates in the returned meet"
+            ),
+            other => panic!("expected static, got {other:?}"),
+        }
+    }
+
+    /// Variable-variable unification returns the canonical variable
+    /// of the merged chain.
+    #[dialog_common::test]
+    fn unify_var_var_returns_the_canonical_variable() {
+        let mut ctx = Context::new();
+        let a = ctx.fresh(Primitive::NUMERIC);
+        let b = ctx.fresh(Primitive::COMPARABLE);
+        let unified = ctx.unify(&Type::Variable(a), &Type::Variable(b)).unwrap();
+        match unified {
+            Type::Variable(root) => assert_eq!(
+                ctx.constraint(root),
+                Primitive::NUMERIC.intersect(Primitive::COMPARABLE).unwrap(),
+                "the canonical variable carries the met constraint"
+            ),
+            other => panic!("expected variable, got {other:?}"),
+        }
     }
 
     #[dialog_common::test]
