@@ -114,14 +114,31 @@ impl FormulaQuery {
         self.resolve(&mut bindings)
     }
 
-    /// Expand this formula with the given match, swallowing conflicts
+    /// Expand this formula with the given match, swallowing the
+    /// row-local non-matches:
+    ///
+    /// - a `Conflict` (an output slot is already bound to a different
+    ///   value) filters the row — the formula's result disagrees with
+    ///   what the row already holds;
+    /// - an `Absent` input filters the row — a formula input is a
+    ///   scalar slot, and a row claiming "known to have no value"
+    ///   matches nothing through it. This is how the
+    ///   filter-by-default semantics of optional values holds across
+    ///   a concept boundary: the boundary delivers `Absent`, and the
+    ///   premise demanding a present value excludes the row instead
+    ///   of aborting the stream.
+    ///
+    /// Anything else (an unbound required input, a type mismatch) is
+    /// a genuine evaluation failure and propagates.
     pub fn expand(&self, matched: Match) -> Result<Vec<Match>, EvaluationError> {
         let formula = Arc::new(self.clone());
         let parameters = self.parameters();
         let mut bindings = Bindings::new(formula, matched, parameters);
         match self.resolve(&mut bindings) {
             Ok(output) => Ok(output),
-            Err(EvaluationError::Conflict { .. }) => Ok(vec![]),
+            Err(EvaluationError::Conflict { .. }) | Err(EvaluationError::Absent { .. }) => {
+                Ok(vec![])
+            }
             Err(e) => Err(e),
         }
     }

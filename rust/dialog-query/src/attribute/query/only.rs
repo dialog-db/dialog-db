@@ -1,8 +1,8 @@
 use super::all::AttributeQueryAll;
 use crate::Claim;
+use crate::Value;
 use crate::artifact::{ArtifactSelector, ArtifactsAttribute, Constrained};
 use crate::attribute::The;
-use crate::attribute::query::Resolution;
 use crate::environment::Environment;
 use crate::query::Application;
 use crate::query::Output;
@@ -54,10 +54,14 @@ where
     Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
 {
     try_stream! {
-        let relation = selector.attribute();
-        let attribute = ArtifactsAttribute::try_from(candidate.lookup(&Term::from(&relation))?.content()?)?;
-        let entity = Entity::try_from(candidate.lookup(&Term::from(selector.of()))?.content()?)?;
-        let value = candidate.lookup(selector.is())?.content()?;
+        // The candidate fact is cited on the row by `merge`; read it
+        // from the claim rather than from the row's terms — a blank
+        // term (e.g. an unconstrained entity) never stores a binding,
+        // so term lookups cannot recover the fact.
+        let claim = candidate.prove(selector.source())?;
+        let attribute = ArtifactsAttribute::try_from(Value::from(claim.the().clone()))?;
+        let entity = claim.of().clone();
+        let value = claim.is().clone();
         let cause_term = selector.cause();
         let cause = if cause_term.is_blank() {
             None
@@ -100,21 +104,12 @@ pub struct AttributeQueryOnly {
 }
 
 impl AttributeQueryOnly {
-    /// Create a new winner-selecting attribute query. The
-    /// resolution (Required vs Optional) is derived from the
-    /// typed `is` term: if its kind admits the `Nothing` atom the
-    /// query is treated as optional and yields an `Absent`
-    /// fallback row on miss.
+    /// Create a new winner-selecting attribute query. Scalar like
+    /// every associative-layer lookup: zero rows on miss.
     pub fn new(the: Term<The>, of: Term<Entity>, is: Term<Any>, cause: Term<Cause>) -> Self {
         Self {
             query: AttributeQueryAll::new(the, of, is, cause),
         }
-    }
-
-    /// Returns the resolution policy of this query (delegates to
-    /// the wrapped `AttributeQueryAll`).
-    pub fn resolution(&self) -> Resolution {
-        self.query.resolution()
     }
 
     /// Get the 'the' (attribute) term.
@@ -204,6 +199,12 @@ impl AttributeQueryOnly {
             for await each in selection {
                 let base = each?;
 
+                // An Absent-bound parameter matches nothing at the
+                // scalar layer: filter the row without scanning.
+                if selector.absent_blocked(&base) {
+                    continue;
+                }
+
                 // Resolve variables from the incoming match so that bindings
                 // from earlier premises are visible to the strategy decision.
                 let resolved = selector.resolve(&base);
@@ -212,15 +213,6 @@ impl AttributeQueryOnly {
                 let attribute_known = resolved.the().is_constant();
                 let value_known = resolved.is().is_constant();
 
-                let mut produced = false;
-                // Tracks whether the lookup observed *any* fact for
-                // this (attribute, entity). Distinguishes genuine
-                // absence (no fact → Absent fallback is correct) from
-                // a value mismatch (a fact exists but the winner fails
-                // the resolved value constraint → not absence, so no
-                // fallback). Only meaningful on the sliding-window
-                // (entity-known) path.
-                let mut saw_fact = false;
                 if entity_known || (attribute_known && !value_known) {
                     // Sliding window path.
                     let value_constraint = resolved.is().as_constant().cloned();
@@ -237,17 +229,17 @@ impl AttributeQueryOnly {
                     let stream = Provider::<Select<'_>>::execute(env, (&scan).try_into()?).await?;
                     for await artifact in stream {
                         let artifact = artifact?;
-                        saw_fact = true;
 
                         candidate = Some(match candidate.take() {
                             Some(current) if current.the == artifact.the && current.of == artifact.of => {
                                 choose(current, artifact)
                             }
                             Some(winner) => {
-                                if value_constraint.is_none() || value_constraint.as_ref() == Some(&winner.is) {
+                                if (value_constraint.is_none() || value_constraint.as_ref() == Some(&winner.is))
+                                    && selector.admits(&winner.is)
+                                {
                                     let mut extension = base.clone();
                                     selector.merge(&mut extension, &winner)?;
-                                    produced = true;
                                     yield extension;
                                 }
                                 artifact
@@ -259,10 +251,10 @@ impl AttributeQueryOnly {
                     // Yield the final group's winner.
                     if let Some(winner) = candidate.take()
                         && (value_constraint.is_none() || value_constraint.as_ref() == Some(&winner.is))
+                        && selector.admits(&winner.is)
                     {
                         let mut extension = base.clone();
                         selector.merge(&mut extension, &winner)?;
-                        produced = true;
                         yield extension;
                     }
                 } else {
@@ -272,34 +264,9 @@ impl AttributeQueryOnly {
                         let candidate = candidate?;
                         let verified = Box::pin(challenge(env, selector.clone(), candidate));
                         for await v in verified {
-                            produced = true;
                             yield v?;
                         }
                     }
-                }
-
-                // Optional fallback: yield one Absent row only when
-                // the attribute is genuinely *absent* for a known
-                // entity — never when a fact exists but was filtered.
-                //
-                // Three guards, all required:
-                //   - `!produced`: no Present row already covered this
-                //     input.
-                //   - `selector.is().is_optional()`: the slot is
-                //     set-widened, so absence is a legal value.
-                //   - `entity_known && !saw_fact`: the entity is
-                //     determined and the lookup found no fact for it.
-                //     Without this, a value mismatch (`saw_fact` true)
-                //     would wrongly report the attribute as missing,
-                //     and an unbound entity (challenge / value-only
-                //     path) would manufacture a phantom Absent row for
-                //     no concrete entity.
-                if !produced && selector.is().is_optional() && entity_known && !saw_fact {
-                    let mut fallback = base;
-                    fallback.bind_absent(selector.is())?;
-                    let cause_term: Term<Any> = Term::<Any>::from(selector.cause());
-                    fallback.bind_absent(&cause_term)?;
-                    yield fallback;
                 }
             }
         }

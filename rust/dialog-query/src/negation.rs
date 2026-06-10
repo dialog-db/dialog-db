@@ -1,13 +1,7 @@
 use std::fmt::{self, Display};
 
 use super::proposition::Proposition;
-use crate::selection::Selection;
-use crate::source::SelectRules;
-use crate::{Environment, Parameters, Requirement, Schema, try_stream};
-use dialog_artifacts::Select;
-use dialog_capability::Provider;
-use dialog_common::ConditionalSync;
-pub use futures_util::{TryStreamExt, stream};
+use crate::{Environment, Parameters, Requirement, Schema};
 use serde::{Deserialize, Serialize};
 
 /// Cost overhead added for negation operations (checking non-existence)
@@ -72,32 +66,6 @@ impl Negation {
 
         schema
     }
-
-    /// Evaluate this negation, yielding matches that do NOT match the inner application
-    pub fn evaluate<'a, Env, M: Selection + 'a>(
-        self,
-        selection: M,
-        env: &'a Env,
-    ) -> impl Selection + 'a
-    where
-        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
-    {
-        let application = self.0;
-        try_stream! {
-            for await candidate in selection {
-                let base = candidate?;
-                let output = application.clone().evaluate(base.clone().seed(), env);
-
-                tokio::pin!(output);
-
-                if let Ok(Some(_)) = output.try_next().await {
-                    continue;
-                }
-
-                yield base;
-            }
-        }
-    }
 }
 
 impl Display for Negation {
@@ -113,13 +81,28 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use crate::error::EvaluationError;
+    use crate::planner::{Conjunction, Planner};
     use crate::selection::Match;
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
     use crate::types::Any;
-    use crate::{Term, Value};
+    use crate::{Environment, Premise, Term, Value};
     use dialog_repository::helpers::{test_operator_with_profile, test_repo};
     use futures_util::TryStreamExt;
+
+    /// Lower a single negated premise to its compiled `Plan` and
+    /// evaluate it. Negation requires its variables bound, so the
+    /// planning scope declares them; the filter behavior under test
+    /// lives on `Plan::Negate`.
+    fn plan_negation(premise: Premise, vars: &[&str]) -> Conjunction {
+        let mut scope = Environment::new();
+        for var in vars {
+            scope.add(*var);
+        }
+        Planner::from(vec![premise])
+            .plan(&scope)
+            .expect("negation over bound vars should plan")
+    }
 
     #[dialog_common::test]
     async fn it_passes_match_when_negated_equality_not_satisfied() -> Result<(), EvaluationError> {
@@ -131,16 +114,13 @@ mod tests {
         // a=1, b=2 → equality finds no match → negation keeps the match
         let a = Term::<String>::var("a");
         let b = Term::<String>::var("b");
-        let premise = !a.clone().is(b.clone());
+        let plan = plan_negation(!a.clone().is(b.clone()), &["a", "b"]);
 
         let mut input = Match::new();
-        input.bind(&Term::<Any>::from(&a), Value::from(1))?;
-        input.bind(&Term::<Any>::from(&b), Value::from(2))?;
+        input.bind(&Term::<Any>::from(&a), Value::from("1".to_string()))?;
+        input.bind(&Term::<Any>::from(&b), Value::from("2".to_string()))?;
 
-        let results: Vec<Match> = premise
-            .evaluate(input.seed(), &source)
-            .try_collect()
-            .await?;
+        let results: Vec<Match> = plan.evaluate(input.seed(), &source).try_collect().await?;
 
         assert_eq!(
             results.len(),
@@ -160,16 +140,13 @@ mod tests {
 
         let a = Term::<String>::var("a");
         let b = Term::<String>::var("b");
-        let premise = !a.clone().is(b.clone());
+        let plan = plan_negation(!a.clone().is(b.clone()), &["a", "b"]);
 
         let mut input = Match::new();
-        input.bind(&Term::<Any>::from(&a), Value::from(1))?;
-        input.bind(&Term::<Any>::from(&b), Value::from(1))?;
+        input.bind(&Term::<Any>::from(&a), Value::from("1".to_string()))?;
+        input.bind(&Term::<Any>::from(&b), Value::from("1".to_string()))?;
 
-        let results: Vec<Match> = premise
-            .evaluate(input.seed(), &source)
-            .try_collect()
-            .await?;
+        let results: Vec<Match> = plan.evaluate(input.seed(), &source).try_collect().await?;
 
         assert_eq!(
             results.len(),

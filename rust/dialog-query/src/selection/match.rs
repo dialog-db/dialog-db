@@ -15,24 +15,42 @@ use super::Selection;
 ///
 /// Distinguishes [`Binding::Present`] (the variable resolved to a
 /// concrete [`Value`]) from [`Binding::Absent`] (an optional
-/// resolution premise looked up the entity's attribute and found
-/// no fact). `Absent` is structurally distinct from "no binding at
-/// all" — variables that no premise has touched aren't in the
-/// bindings map and produce
-/// [`EvaluationError::UnboundVariable`] from
+/// lookup examined the entity's attribute and found no fact).
+/// `Absent` is structurally distinct from "no binding at all" —
+/// variables that no premise has touched aren't in the bindings map
+/// and produce [`EvaluationError::UnboundVariable`] from
 /// [`Match::lookup`]; variables that have been touched by an
-/// optional resolver are *always* in the map, with either a
-/// `Present` or an `Absent` entry.
+/// optional lookup are *always* in the map, with either a `Present`
+/// or an `Absent` entry.
 ///
 /// This three-state distinction (unbound / Present / Absent) is
 /// what makes set-widening optionality work without persisting any
 /// `None` value at the storage layer. See `notes/optional-fields.md`
 /// for the design rationale.
+///
+/// # Why a dedicated type rather than `Option<Value>`
+///
+/// `Option` already has a job in this API: `Option<T>` on a concept
+/// field declares *type-level* optionality ("this field may be
+/// absent", the `Nothing` atom in the field's kind). `Binding::Absent`
+/// is the *value-level* outcome ("this field is absent, for this
+/// entity") — the value inhabiting that `Nothing`. If bindings were
+/// `Option<Value>` too, every use of `Option` would need contextual
+/// qualification to say which of the two it means; the separate type
+/// keeps the declaration and the outcome from blurring.
+///
+/// `Binding` is also a propagator cell, not a plain container:
+/// [`Match::bind`] merges (equal `Present` values are idempotent,
+/// `Present` vs `Absent` is a conflict, and
+/// [`Match::bind_absent`] over `Present` errors). Absence is a
+/// *claim* about the store, and the merge rules are what hold that
+/// claim consistent across premises — a contract `Option` does not
+/// carry.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Binding {
     /// The variable resolved to a concrete value.
     Present(Value),
-    /// An optional resolver looked up the variable's attribute for
+    /// An optional lookup examined the variable's attribute for
     /// this entity and found no fact. Distinct from "not yet
     /// bound."
     Absent,
@@ -86,7 +104,7 @@ impl Binding {
 /// A `Match` accumulates variable bindings as premises are
 /// evaluated in sequence. Each binding maps a variable name to a
 /// [`Binding`], which is either `Present(value)` (the variable
-/// resolved to a concrete value) or `Absent` (an optional resolver
+/// resolved to a concrete value) or `Absent` (an optional lookup
 /// found no fact for the entity).
 ///
 /// Matches flow through the evaluation pipeline as a stream
@@ -166,6 +184,25 @@ impl Match {
             Term::Variable {
                 name: Some(name), ..
             } => {
+                // Contract check: a typed variable only accepts values
+                // inhabiting its kind. Scans filter mismatched facts
+                // before reaching here, so a failure at this point is
+                // a contract violation (e.g. an untyped construction
+                // path feeding a value the rule's types exclude), not
+                // a data-dependent non-match.
+                if let Some(kind) = term.kind()
+                    && !kind.admits(&value)
+                {
+                    return Err(EvaluationError::Assignment {
+                        reason: format!(
+                            "Can not set {:?} to {:?} because the value's type {:?} is outside the variable's kind {:?}.",
+                            name,
+                            value,
+                            value.data_type(),
+                            kind
+                        ),
+                    });
+                }
                 if let Some(existing) = self.bindings.get(name) {
                     match existing {
                         Binding::Present(existing_value) => {
@@ -289,6 +326,23 @@ impl Match {
 mod tests {
     use super::*;
     use crate::artifact::Value;
+
+    /// A typed variable only accepts values inhabiting its kind —
+    /// the contract check behind every merge and propagation.
+    #[dialog_common::test]
+    fn bind_rejects_value_outside_the_terms_kind() {
+        let mut row = Match::new();
+        let typed: Term<Any> = Term::<String>::var("name").into();
+
+        let err = row.bind(&typed, Value::UnsignedInt(7));
+        assert!(
+            matches!(err, Err(EvaluationError::Assignment { .. })),
+            "a u32 value cannot inhabit a String-typed variable, got {err:?}"
+        );
+
+        row.bind(&typed, Value::String("Alice".into()))
+            .expect("a String value inhabits the kind");
+    }
 
     #[dialog_common::test]
     fn binding_content_returns_value_for_present() {

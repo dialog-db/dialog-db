@@ -17,7 +17,7 @@
 
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::TypeError;
-use crate::planner::{Conjunction, Planner};
+use crate::planner::Planner;
 use crate::premise::Premise;
 use crate::{Environment, Type};
 use std::fmt::{Display, Formatter, Result as FmtResult};
@@ -98,14 +98,30 @@ impl From<InductiveRule> for Rule {
 /// uniformly. The default [`compile`](Compile::compile) runs the
 /// shared analysis pipeline (planner + unbound-variable check).
 pub trait Compile: Sized + Into<Rule> {
-    /// Build the rule from its compiled parts. Called by
-    /// [`compile`](Self::compile) once analysis passes.
-    fn from_parts(conclusion: ConceptDescriptor, join: Conjunction) -> Self;
+    /// Build the rule from its analysis. Called by
+    /// [`analyze`](Self::analyze) once analysis passes — the
+    /// [`AnalyzedRule`] holds the narrowed premises, dependency graph
+    /// (SIPS), and inferred types.
+    fn from_analysis(analysis: AnalyzedRule) -> Self;
 
-    /// Plan the premises, run rule-level type analysis, and verify
-    /// every head variable is bound. Default impl is identical for
-    /// deductive and inductive rules; the only difference between
-    /// the kinds lives at evaluation time, not compile time.
+    /// Build a partial rule for display only, used to embed an
+    /// in-progress rule in a [`TypeError`] on a compile-error path.
+    /// Carries just the conclusion (which is all [`Display`] reads);
+    /// the body is irrelevant because such a rule is never planned or
+    /// evaluated.
+    fn in_progress(conclusion: ConceptDescriptor, premises: Vec<Premise>) -> Self;
+
+    /// Analyze a rule's conclusion and premises into a verified,
+    /// plannable rule. Default impl is identical for deductive and
+    /// inductive rules; the only difference between the kinds lives at
+    /// evaluation time, not compile time.
+    ///
+    /// Runs type inference + narrowing, the required-head and Coalesce
+    /// contract checks, and the dependency-graph build (all in
+    /// [`analyzer::analyze`]), then verifies the rule is *plannable*
+    /// (orders at an empty scope without unsatisfiable premises) and
+    /// that every conclusion variable is bound by the body. A returned
+    /// rule is therefore plannable by construction.
     fn compile(conclusion: ConceptDescriptor, premises: Vec<Premise>) -> Result<Self, TypeError> {
         // A concept with no required (`with`) attributes is
         // unconstructable (see `ConceptDescriptor`'s `TryFrom` /
@@ -113,55 +129,60 @@ pub trait Compile: Sized + Into<Rule> {
         // assertion), so `conclusion` is guaranteed non-degenerate
         // here — no explicit emptiness check is needed.
 
-        // Plan the order of premises in a scope where none of the
-        // rule parameters are bound to find the optimal execution
-        // order, or to discover unsatisfiable premises (e.g. a
-        // formula whose required cell is never derived by another
-        // premise).
-        let join = Planner::from(premises).plan(&Environment::new())?;
+        // Analyze first: inference + narrowing + required-head /
+        // Coalesce checks + dependency graph, all from the premises,
+        // before any execution order is chosen. The original premises
+        // are kept for the error-path display rule.
+        let display_premises = premises.clone();
+        let analysis = match analyzer::analyze(conclusion.clone(), premises) {
+            Ok(analysis) => analysis,
+            Err(err) => {
+                let rule = Self::in_progress(conclusion, display_premises);
+                return Err(match err {
+                    analyzer::AnalysisError::Inference { reason } => {
+                        TypeError::TypeInference { reason }
+                    }
+                    analyzer::AnalysisError::RequiredHeadFromOptional { variable } => {
+                        TypeError::RequiredHeadFromOptional {
+                            rule: Box::new(rule.into()),
+                            variable,
+                        }
+                    }
+                    analyzer::AnalysisError::CoalesceTypeMismatch { reason } => {
+                        TypeError::CoalesceTypeMismatch {
+                            rule: Box::new(rule.into()),
+                            reason,
+                        }
+                    }
+                    analyzer::AnalysisError::NegatedOptional => TypeError::NegatedOptional {
+                        rule: Box::new(rule.into()),
+                    },
+                });
+            }
+        };
 
-        // Run rule-level type analysis: inference + required-head
-        // check + Coalesce contract validation. Failures wrap into
-        // the corresponding `TypeError::*` variants so the user
-        // sees the in-progress rule embedded in the error.
-        if let Err(err) = analyzer::analyze(conclusion.clone(), &join.steps) {
-            let in_progress = Self::from_parts(conclusion, join);
-            return Err(match err {
-                analyzer::AnalysisError::Inference { reason } => {
-                    TypeError::TypeInference { reason }
-                }
-                analyzer::AnalysisError::RequiredHeadFromOptional { variable } => {
-                    TypeError::RequiredHeadFromOptional {
-                        rule: Box::new(in_progress.into()),
-                        variable,
-                    }
-                }
-                analyzer::AnalysisError::CoalesceTypeMismatch { reason } => {
-                    TypeError::CoalesceTypeMismatch {
-                        rule: Box::new(in_progress.into()),
-                        reason,
-                    }
-                }
-            });
-        }
+        // Verify the rule is plannable: ordering at an empty scope
+        // surfaces unsatisfiable premises (e.g. a formula whose
+        // required input is never bound) as a planning error.
+        let join = Planner::with_types(analysis.premises.clone(), analysis.types.clone())
+            .plan(&Environment::new())?;
 
         // Verify that every conclusion parameter is derived by one
         // of the premises; otherwise the rule could never fully
-        // bind its output. Build `Self` only when needed for the
-        // error path so the happy path doesn't allocate twice.
+        // bind its output.
         let unbound = conclusion
             .operands()
             .find(|name| !join.binds.contains(name))
             .map(String::from);
         if let Some(variable) = unbound {
-            let in_progress = Self::from_parts(conclusion, join);
+            let rule = Self::in_progress(conclusion, analysis.premises);
             return Err(TypeError::UnboundVariable {
-                rule: Box::new(in_progress.into()),
+                rule: Box::new(rule.into()),
                 variable,
             });
         }
 
-        Ok(Self::from_parts(conclusion, join))
+        Ok(Self::from_analysis(analysis))
     }
 }
 

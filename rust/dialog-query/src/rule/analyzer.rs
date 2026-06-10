@@ -20,16 +20,16 @@
 //! scopes (the use case is concept-rule replanning when caller
 //! bindings change).
 
-use crate::Premise;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::constraint::Constraint;
-use crate::planner::Plan;
+use crate::planner::categorize;
+use crate::premise::Negation;
 use crate::proposition::Proposition;
 use crate::rule::types::TypeEnv;
-use crate::schema::Requirement;
 use crate::type_system::Type as Kind;
 use crate::type_system::unifier::Context;
-use std::collections::{BTreeSet, HashSet};
+use crate::{Environment, Premise};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// Variable-usage information for a single premise.
@@ -49,13 +49,17 @@ pub struct PremiseVars {
     pub needs: BTreeSet<String>,
 }
 
-/// Per-premise variable usage plus precomputed dependency edges.
+/// The dependency structure of a rule body: the SIPS partial order
+/// `≺` from the magic-sets literature (Alviano Def. 3.1.3).
 ///
-/// `requires[i]` is the set of premise indices that must execute
-/// before premise `i` because they bind a variable in `needs[i]`.
-/// The graph respects the user's original premise order: a premise
-/// that binds a variable can satisfy any later premise's need for
-/// it, regardless of cost. Reordering happens during planning, not
+/// Half of a SIPS is the binding function (which variables each
+/// premise binds — `feasibility::categorize`); this is the other half,
+/// the order/dependency relation. `requires[i]` is the set of premise
+/// indices that must execute before premise `i` because they bind a
+/// variable in `needs[i]`. Given a binding, the edges name which
+/// premises it affects/unblocks — the dependency index the
+/// demand-driven incremental work consumes. It is cost-free and
+/// order-agnostic: cost-driven reordering happens during planning, not
 /// here.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DependencyGraph {
@@ -77,65 +81,34 @@ impl DependencyGraph {
         self.usage.len()
     }
 
-    /// Compute the dependency graph for a sequence of planned steps.
-    /// Walks each step's schema once: a non-blank named parameter
-    /// goes into `binds` if the schema field is `Optional` or part
-    /// of a satisfied choice group, otherwise into `needs`. Choice
-    /// groups satisfied by a constant or already-bound parameter
-    /// don't contribute to `needs`.
-    pub fn from_steps(steps: &[Plan]) -> Self {
-        let mut usage = Vec::with_capacity(steps.len());
-
-        for step in steps {
-            let is_negation = matches!(step.premise, Premise::Unless(_));
-            let schema = step.premise.schema();
-            let params = step.premise.parameters();
-
-            // Identify choice groups satisfied by a constant in
-            // this step's parameters.
-            let mut satisfied_groups = HashSet::new();
-            for (slot_name, field) in schema.iter() {
-                if let Some(param) = params.get(slot_name)
-                    && let Requirement::Required(Some(group)) = &field.requirement
-                    && param.is_constant()
-                {
-                    satisfied_groups.insert(*group);
+    /// Compute the dependency graph for a rule's premises.
+    ///
+    /// The graph is order-independent — each premise's binds/needs come
+    /// from its own schema, and the `requires` edges from matching one
+    /// premise's needs to another's binds — so it is computed from the
+    /// premises directly, before any execution order is chosen. The
+    /// per-premise categorization reuses the planner's single
+    /// definition of feasibility ([`categorize`]) at empty scope: a
+    /// choice group is satisfied only by a constant member here, since
+    /// nothing is bound yet.
+    pub fn from_premises(premises: &[Premise]) -> Self {
+        let empty = Environment::new();
+        let usage: Vec<PremiseVars> = premises
+            .iter()
+            .map(|premise| {
+                let is_negation = matches!(premise, Premise::Unless(_));
+                let (binds, requires) = categorize(
+                    &premise.schema(),
+                    &premise.parameters(),
+                    is_negation,
+                    &empty,
+                );
+                PremiseVars {
+                    binds: binds.iter().map(String::from).collect(),
+                    needs: requires.iter().map(String::from).collect(),
                 }
-            }
-
-            let mut vars = PremiseVars::default();
-            for (slot_name, field) in schema.iter() {
-                let Some(param) = params.get(slot_name) else {
-                    continue;
-                };
-                if param.is_constant() || param.is_blank() {
-                    continue;
-                }
-                let Some(name) = param.name() else {
-                    continue;
-                };
-                match &field.requirement {
-                    Requirement::Required(None) => {
-                        vars.needs.insert(name.to_string());
-                    }
-                    Requirement::Required(Some(group)) => {
-                        if satisfied_groups.contains(group) {
-                            if !is_negation {
-                                vars.binds.insert(name.to_string());
-                            }
-                        } else {
-                            vars.needs.insert(name.to_string());
-                        }
-                    }
-                    Requirement::Optional => {
-                        if !is_negation {
-                            vars.binds.insert(name.to_string());
-                        }
-                    }
-                }
-            }
-            usage.push(vars);
-        }
+            })
+            .collect();
 
         // For each premise i, find every other premise j (j != i)
         // that binds something i needs.
@@ -181,11 +154,18 @@ pub enum AnalysisError {
         /// Human-readable reason from the unifier.
         reason: String,
     },
+    /// A set-widening (`maybe`) premise appears under `unless`. A
+    /// left-join always yields a row for a bound entity (Present or
+    /// Absent), so negating it filters every row — the rule would
+    /// be vacuously false.
+    #[error("negation over an optional (maybe) premise is always false")]
+    NegatedOptional,
 }
 
 /// A rule that has passed analysis. Carries the conclusion, the
-/// original premises in their planned order, the rule-wide
-/// inferred type environment, and a per-premise dependency graph.
+/// premises (in their original authored order — analysis never
+/// reorders), the rule-wide inferred type environment, and a
+/// per-premise dependency graph.
 ///
 /// This is the artifact of analysis. The planner reads it (or its
 /// pieces) to build per-step plans; future iterations of the
@@ -195,8 +175,8 @@ pub enum AnalysisError {
 pub struct AnalyzedRule {
     /// The rule's conclusion.
     pub conclusion: ConceptDescriptor,
-    /// The premises in their planned order. Analysis preserves
-    /// the planner's ordering; it doesn't re-order on its own.
+    /// The premises in their original authored order; planning
+    /// orders a working copy per scope.
     pub premises: Vec<Premise>,
     /// The rule-wide inferred type environment. Shared via
     /// [`Arc`] across consumers.
@@ -207,6 +187,19 @@ pub struct AnalyzedRule {
 }
 
 impl AnalyzedRule {
+    /// Build a partial, *unanalyzed* rule for display only — used to
+    /// embed an in-progress rule in a compile error. Carries the
+    /// conclusion and premises but an empty type env and graph; such a
+    /// rule is never planned or evaluated.
+    pub fn in_progress(conclusion: ConceptDescriptor, premises: Vec<Premise>) -> Self {
+        AnalyzedRule {
+            conclusion,
+            premises,
+            types: Arc::new(TypeEnv::new()),
+            graph: DependencyGraph::default(),
+        }
+    }
+
     /// Iterate over the analyzed premises.
     pub fn premises(&self) -> impl Iterator<Item = &Premise> {
         self.premises.iter()
@@ -232,10 +225,10 @@ impl AnalyzedRule {
 /// variants with the planned rule embedded for display.
 pub fn analyze(
     conclusion: ConceptDescriptor,
-    steps: &[Plan],
+    premises: Vec<Premise>,
 ) -> Result<AnalyzedRule, AnalysisError> {
     let types = Arc::new(
-        TypeEnv::infer(steps).map_err(|err| AnalysisError::Inference {
+        TypeEnv::infer(&premises).map_err(|err| AnalysisError::Inference {
             reason: err.to_string(),
         })?,
     );
@@ -253,9 +246,8 @@ pub fn analyze(
     // Each Coalesce constraint validates against a fresh unifier
     // context. Catches wire-format and raw-builder mismatches
     // where the typed builder isn't the construction path.
-    for step in steps {
-        let Premise::Assert(Proposition::Constraint(Constraint::Coalesce(coalesce))) =
-            &step.premise
+    for premise in &premises {
+        let Premise::Assert(Proposition::Constraint(Constraint::Coalesce(coalesce))) = premise
         else {
             continue;
         };
@@ -267,8 +259,17 @@ pub fn analyze(
         }
     }
 
-    let premises = steps.iter().map(|step| step.premise.clone()).collect();
-    let graph = DependencyGraph::from_steps(steps);
+    // A left-join under `unless` is rejected: it always yields a row
+    // for a bound entity (Present or the Absent fallback), so the
+    // negation filters everything. Negate the scalar lookup ("the
+    // entity has no such fact") or the concept instead.
+    for premise in &premises {
+        if let Premise::Unless(Negation(Proposition::OptionalAttribute(_))) = premise {
+            return Err(AnalysisError::NegatedOptional);
+        }
+    }
+
+    let graph = DependencyGraph::from_premises(&premises);
     Ok(AnalyzedRule {
         conclusion,
         premises,
@@ -286,10 +287,10 @@ mod tests {
     use crate::artifact::{Entity, Type as ValueType};
     use crate::attribute::AttributeDescriptor;
     use crate::attribute::query::AttributeQuery;
-    use crate::planner::Planner;
+    use crate::optional::OptionalAttributeQuery;
     use crate::the;
     use crate::types::Any;
-    use crate::{Cardinality, Environment, Term};
+    use crate::{Cardinality, Term};
 
     fn person_with_name() -> ConceptDescriptor {
         ConceptDescriptor::try_from(vec![(
@@ -318,8 +319,7 @@ mod tests {
             )
             .into(),
         ];
-        let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
-        let analyzed = analyze(person_with_name(), &plan.steps).unwrap();
+        let analyzed = analyze(person_with_name(), premises).unwrap();
 
         assert_eq!(analyzed.premises.len(), 1);
         let name_kind = analyzed.type_of("name").expect("name has an inferred type");
@@ -347,8 +347,7 @@ mod tests {
             Some(Cardinality::One),
         );
         let premises = vec![q1.into(), q2.into()];
-        let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
-        let analyzed = analyze(person_with_name(), &plan.steps).unwrap();
+        let analyzed = analyze(person_with_name(), premises).unwrap();
 
         assert_eq!(analyzed.graph.len(), 2);
 
@@ -386,8 +385,7 @@ mod tests {
         let length = Length::apply(params).unwrap();
 
         let premises: Vec<Premise> = vec![attr.into(), Premise::from(length)];
-        let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
-        let analyzed = analyze(person_with_name(), &plan.steps).unwrap();
+        let analyzed = analyze(person_with_name(), premises).unwrap();
 
         assert_eq!(analyzed.graph.len(), 2);
 
@@ -427,24 +425,55 @@ mod tests {
     /// admits `Nothing` — the rule could yield Absent in the head.
     #[dialog_common::test]
     fn it_rejects_required_head_bound_only_by_optional_premises() {
-        let optional_name: Term<Any> = Term::<Option<String>>::var("name").into();
         let premises = vec![
-            AttributeQuery::new(
+            OptionalAttributeQuery::new(
                 Term::from(the!("person/name")),
                 Term::<Entity>::var("this"),
-                optional_name,
-                Term::var("cause"),
+                Term::<String>::var("name").into(),
+                Term::blank(),
                 Some(Cardinality::One),
             )
             .into(),
         ];
-        let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
-        let err = analyze(person_with_name(), &plan.steps).unwrap_err();
+        let err = analyze(person_with_name(), premises).unwrap_err();
         match err {
             AnalysisError::RequiredHeadFromOptional { variable } => {
                 assert_eq!(variable, "name");
             }
             other => panic!("expected RequiredHeadFromOptional, got {other:?}"),
         }
+    }
+
+    /// A left-join under `unless` is rejected at analysis: it always
+    /// yields a row for a bound entity (Present or the Absent
+    /// fallback), so negating it would filter every row.
+    #[dialog_common::test]
+    fn it_rejects_negated_optional() {
+        use crate::premise::Negation;
+
+        let name_scan = AttributeQuery::new(
+            Term::from(the!("person/name")),
+            Term::<Entity>::var("this"),
+            Term::<String>::var("name").into(),
+            Term::var("cause"),
+            Some(Cardinality::One),
+        );
+        let maybe = OptionalAttributeQuery::new(
+            Term::from(the!("person/nickname")),
+            Term::<Entity>::var("this"),
+            Term::<String>::var("nickname").into(),
+            Term::blank(),
+            Some(Cardinality::One),
+        );
+        let premises = vec![
+            name_scan.into(),
+            Premise::Unless(Negation(Proposition::OptionalAttribute(Box::new(maybe)))),
+        ];
+
+        let err = analyze(person_with_name(), premises).unwrap_err();
+        assert!(
+            matches!(err, AnalysisError::NegatedOptional),
+            "negating a maybe premise is vacuously false, got {err:?}"
+        );
     }
 }

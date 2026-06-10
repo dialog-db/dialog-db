@@ -11,13 +11,7 @@ use crate::environment::Environment;
 pub use crate::error::{AnalyzerError, QueryResult};
 use crate::formula::query::FormulaQuery;
 use crate::proposition::Proposition;
-use crate::selection::{Match, Selection};
-use crate::source::SelectRules;
 use crate::{Parameters, Schema};
-use dialog_artifacts::Select;
-use dialog_capability::Provider;
-use dialog_common::ConditionalSync;
-use futures_util::future::Either;
 use std::fmt::{self, Display};
 use std::ops;
 
@@ -66,29 +60,6 @@ impl Premise {
             Premise::Assert(application) => application.schema(),
             Premise::Unless(negation) => negation.schema(),
         }
-    }
-
-    /// Evaluate this premise with the given selection and environment
-    pub fn evaluate<'a, Env, M: Selection + 'a>(
-        self,
-        selection: M,
-        env: &'a Env,
-    ) -> impl Selection + 'a
-    where
-        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
-    {
-        match self {
-            Premise::Assert(application) => Either::Left(application.evaluate(selection, env)),
-            Premise::Unless(negation) => Either::Right(negation.evaluate(selection, env)),
-        }
-    }
-
-    /// Execute this premise against the given environment
-    pub fn perform<'a, Env>(self, env: &'a Env) -> impl Selection + 'a
-    where
-        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
-    {
-        self.evaluate(Match::new().seed(), env)
     }
 }
 

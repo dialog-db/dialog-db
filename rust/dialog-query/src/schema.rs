@@ -49,6 +49,11 @@ impl Schema {
         self.fields.get(name)
     }
 
+    /// Returns a mutable reference to the field with the given name, if present.
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut Field> {
+        self.fields.get_mut(name)
+    }
+
     /// Returns an iterator over all `(name, field)` pairs.
     pub fn iter(&self) -> impl Iterator<Item = (&String, &Field)> {
         self.fields.iter()

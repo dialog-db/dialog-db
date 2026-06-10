@@ -11,21 +11,18 @@
 //! planner consumes the env to rewrite each premise's variable
 //! terms so they carry the inferred kinds at evaluation time.
 //!
-//! Untyped slots (those with no static `content_type`) still
-//! contribute to inference via their requirement shape:
-//!
-//! - `Required` slots contribute `Primitive::ALL` — "any present
-//!   value." This excludes `Nothing` from the variable's type.
-//! - `Optional` slots contribute `Primitive::ANY` — "any present or
-//!   absent value." This lets `Nothing` survive unification when
-//!   every slot the variable visits is optional.
+//! Untyped slots (those with no static `content_type`) contribute
+//! `Primitive::ALL` — "any present value" — regardless of their
+//! requirement: a slot's `Requirement` speaks of *derivability*
+//! (does the premise produce or demand the binding), never of
+//! absence. Set-widening (admitting `Nothing`) is declared
+//! exclusively through content types — a `OptionalAttributeQuery`'s value slot
+//! or a concept's optional field.
 //!
 //! Negation premises do not contribute. They filter on existing
 //! bindings rather than introducing them.
 
 use crate::Premise;
-use crate::planner::Plan;
-use crate::schema::Requirement;
 use crate::type_system::Primitive;
 use crate::type_system::Type as Kind;
 use crate::type_system::unifier::{Context, Type as Inferred, lift};
@@ -72,16 +69,16 @@ impl TypeEnv {
     /// slots (e.g. `?x` is `String` in one premise and `Entity` in
     /// another). The variable name is returned with the error so
     /// the caller can surface a useful diagnostic.
-    pub fn infer(steps: &[Plan]) -> Result<Self, InferenceError> {
+    pub fn infer(premises: &[Premise]) -> Result<Self, InferenceError> {
         let mut ctx = Context::new();
-        for step in steps {
+        for premise in premises {
             // Negation premises don't contribute — they filter on
             // bindings rather than introducing them.
-            let Premise::Assert(_) = &step.premise else {
+            let Premise::Assert(_) = premise else {
                 continue;
             };
-            let schema = step.premise.schema();
-            let params = step.premise.parameters();
+            let schema = premise.schema();
+            let params = premise.parameters();
 
             for (slot_name, field) in schema.iter() {
                 let Some(param) = params.get(slot_name) else {
@@ -90,12 +87,17 @@ impl TypeEnv {
                 let Some(var_name) = param.name() else {
                     continue;
                 };
+                // An untyped slot constrains the variable to "any
+                // present value" regardless of its requirement.
+                // `Requirement::Optional` means *derivable* (the
+                // premise produces the binding rather than demanding
+                // it) — derivability is not absence. Set-widening
+                // (admitting `Nothing`) is declared exclusively
+                // through content types: a `OptionalAttributeQuery`'s value slot
+                // or a concept's optional field.
                 let slot_kind: Kind = match field.content_type() {
                     Some(t) => t.clone(),
-                    None => match field.requirement {
-                        Requirement::Required(_) => Kind::primitive_set(Primitive::ALL),
-                        Requirement::Optional => Kind::primitive_set(Primitive::ANY),
-                    },
+                    None => Kind::primitive_set(Primitive::ALL),
                 };
                 let var = ctx.var_for_name(var_name);
                 if let Err(reason) = ctx.unify(&lift(&slot_kind), &Inferred::Variable(var)) {
@@ -150,10 +152,26 @@ mod tests {
 
     use super::*;
     use crate::artifact::{Entity, Type as ValueType};
+    use crate::attribute::The;
     use crate::attribute::query::AttributeQuery;
+    use crate::optional::OptionalAttributeQuery;
     use crate::planner::Planner;
     use crate::types::Any;
     use crate::{Cardinality, Environment, Term, the};
+
+    /// Helper: an optional (set-widening) binding for `?name` — a
+    /// `OptionalAttributeQuery` left-join whose schema admits `Nothing` for the
+    /// value slot.
+    fn optional_name_premise(the: Term<The>) -> Premise {
+        OptionalAttributeQuery::new(
+            the,
+            Term::<Entity>::var("this"),
+            Term::<String>::var("name").into(),
+            Term::blank(),
+            Some(Cardinality::One),
+        )
+        .into()
+    }
 
     /// A typed slot kind flows into the variable's inferred type.
     #[dialog_common::test]
@@ -169,8 +187,7 @@ mod tests {
             )
             .into(),
         ];
-        let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
-        let env = TypeEnv::infer(&plan.steps).unwrap();
+        let env = TypeEnv::infer(&premises).unwrap();
         let name_kind = env.get("name").expect("name inferred");
         assert_eq!(name_kind.as_value_type(), Some(ValueType::String));
     }
@@ -179,23 +196,93 @@ mod tests {
     /// bit in its inferred type.
     #[dialog_common::test]
     fn it_preserves_nothing_when_only_optional_bindings_exist() {
-        let optional_name: Term<Any> = Term::<Option<String>>::var("name").into();
-        let premises = vec![
-            AttributeQuery::new(
-                Term::from(the!("person/name")),
-                Term::<Entity>::var("this"),
-                optional_name,
-                Term::var("cause"),
-                Some(Cardinality::One),
-            )
-            .into(),
-        ];
-        let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
-        let env = TypeEnv::infer(&plan.steps).unwrap();
+        let premises = vec![optional_name_premise(Term::from(the!("person/name")))];
+        let env = TypeEnv::infer(&premises).unwrap();
         let name_kind = env.get("name").expect("name inferred");
         assert!(
             name_kind.is_optional(),
             "single optional binding leaves Nothing in the inferred type"
+        );
+    }
+
+    /// Derivability is not absence: a variable bound only by an
+    /// *untyped derivable* slot (a concept field with no declared
+    /// type) infers "any present value" — no `Nothing` bit. Only
+    /// set-widened content types introduce absence.
+    #[dialog_common::test]
+    fn it_does_not_widen_untyped_derivable_slots() {
+        use crate::{AttributeDescriptor, ConceptDescriptor, ConceptQuery, Parameters};
+
+        let concept = ConceptDescriptor::try_from(vec![(
+            "tag",
+            AttributeDescriptor::new(the!("misc/tag"), "", Cardinality::One, None),
+        )])
+        .unwrap();
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::var("entity"));
+        terms.insert("tag".to_string(), Term::var("tag"));
+        let premises = vec![Premise::Assert(crate::Proposition::Concept(ConceptQuery {
+            terms,
+            predicate: concept,
+        }))];
+
+        let env = TypeEnv::infer(&premises).unwrap();
+        let tag_kind = env.get("tag").expect("tag inferred");
+        assert!(
+            !tag_kind.is_optional(),
+            "an untyped derivable slot must not admit Nothing"
+        );
+    }
+
+    /// The concept boundary declares set-widening: a variable bound
+    /// by a concept's *optional* field admits `Nothing` in the
+    /// consuming rule's TypeEnv, while a required sibling stays
+    /// present-only.
+    #[dialog_common::test]
+    fn it_widens_variables_bound_by_concept_optional_fields() {
+        use crate::{
+            AttributeDescriptor, ConceptDescriptor, ConceptFieldDescriptor, ConceptQuery,
+            Parameters,
+        };
+
+        let concept = ConceptDescriptor::try_from(vec![
+            (
+                "title".to_string(),
+                ConceptFieldDescriptor::required(AttributeDescriptor::new(
+                    the!("person/title"),
+                    "",
+                    Cardinality::One,
+                    Some(ValueType::String),
+                )),
+            ),
+            (
+                "nickname".to_string(),
+                ConceptFieldDescriptor::optional(AttributeDescriptor::new(
+                    the!("person/nickname"),
+                    "",
+                    Cardinality::One,
+                    Some(ValueType::String),
+                )),
+            ),
+        ])
+        .unwrap();
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::var("entity"));
+        terms.insert("title".to_string(), Term::var("title"));
+        terms.insert("nickname".to_string(), Term::var("nick"));
+        let premises = vec![Premise::Assert(crate::Proposition::Concept(ConceptQuery {
+            terms,
+            predicate: concept,
+        }))];
+
+        let env = TypeEnv::infer(&premises).unwrap();
+        assert!(
+            env.get("nick").expect("nick inferred").is_optional(),
+            "the optional field widens the consuming variable"
+        );
+        assert!(
+            !env.get("title").expect("title inferred").is_optional(),
+            "the required field stays present-only"
         );
     }
 
@@ -204,17 +291,9 @@ mod tests {
     /// wins.
     #[dialog_common::test]
     fn it_strips_nothing_when_a_required_binding_also_exists() {
-        let optional_name: Term<Any> = Term::<Option<String>>::var("name").into();
         let typed_name: Term<Any> = Term::<String>::var("name").into();
         let premises = vec![
-            AttributeQuery::new(
-                Term::from(the!("person/nickname")),
-                Term::<Entity>::var("this"),
-                optional_name,
-                Term::var("cause1"),
-                Some(Cardinality::One),
-            )
-            .into(),
+            optional_name_premise(Term::from(the!("person/nickname"))),
             AttributeQuery::new(
                 Term::from(the!("person/name")),
                 Term::<Entity>::var("this"),
@@ -224,8 +303,7 @@ mod tests {
             )
             .into(),
         ];
-        let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
-        let env = TypeEnv::infer(&plan.steps).unwrap();
+        let env = TypeEnv::infer(&premises).unwrap();
         let name_kind = env.get("name").expect("name inferred");
         assert!(
             !name_kind.is_optional(),
@@ -269,8 +347,7 @@ mod tests {
             )
             .into(),
         ];
-        let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
-        let env = TypeEnv::infer(&plan.steps).unwrap();
+        let env = TypeEnv::infer(&premises).unwrap();
         let name_kind = env.get("name").expect("name inferred");
         assert!(
             !name_kind.is_optional(),
@@ -287,19 +364,11 @@ mod tests {
     fn it_ignores_negation_contributions_during_inference() {
         use crate::Proposition;
         use crate::negation::Negation;
-        // Positive premise binds ?name optionally (Option<String>).
-        let optional_name: Term<Any> = Term::<Option<String>>::var("name").into();
-        let positive = AttributeQuery::new(
-            Term::from(the!("person/name")),
-            Term::<Entity>::var("this"),
-            optional_name,
-            Term::var("cause"),
-            Some(Cardinality::One),
-        );
+        // Positive premise binds ?name optionally (a Maybe left-join).
         // Negation references ?name as Term<String> (non-optional).
-        // If this contributed to inference, ?name's inferred kind
-        // would be narrowed to String (no Nothing). But it doesn't,
-        // so ?name stays Optional<String>.
+        // If the negation contributed to inference, ?name's inferred
+        // kind would be narrowed to String (no Nothing). But it
+        // doesn't, so ?name stays set-widened.
         let strict_name: Term<Any> = Term::<String>::var("name").into();
         let neg_query = AttributeQuery::new(
             Term::from(the!("person/nickname")),
@@ -309,11 +378,10 @@ mod tests {
             Some(Cardinality::One),
         );
         let premises = vec![
-            positive.into(),
+            optional_name_premise(Term::from(the!("person/name"))),
             Premise::Unless(Negation(Proposition::Attribute(Box::new(neg_query)))),
         ];
-        let plan = Planner::from(premises).plan(&Environment::new()).unwrap();
-        let env = TypeEnv::infer(&plan.steps).unwrap();
+        let env = TypeEnv::infer(&premises).unwrap();
         let name_kind = env.get("name").expect("name inferred");
         assert!(
             name_kind.is_optional(),

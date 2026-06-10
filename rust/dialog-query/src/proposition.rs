@@ -6,15 +6,9 @@ use crate::constraint::Constraint;
 pub use crate::error::AnalyzerError;
 pub use crate::error::QueryResult;
 pub use crate::formula::query::FormulaQuery;
+use crate::optional::OptionalAttributeQuery;
 pub use crate::premise::{Negation, Premise};
-use crate::query::Application;
-use crate::selection::Selection;
-use crate::source::SelectRules;
 pub use crate::{Environment, Parameters, Schema};
-use dialog_artifacts::Select;
-use dialog_capability::Provider;
-use dialog_common::ConditionalSync;
-use futures_util::future::Either;
 use serde::de;
 use serde::ser;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -40,6 +34,10 @@ pub enum Proposition {
     /// Attribute query — cardinality-aware EAV lookup.
     /// Boxed to reduce enum size.
     Attribute(Box<AttributeQuery>),
+    /// Left-join over a scalar attribute lookup — the semantic-layer
+    /// realization of an optional (`maybe`) concept field. Boxed to
+    /// reduce enum size.
+    OptionalAttribute(Box<OptionalAttributeQuery>),
     /// Constraint between variables (equality, comparison, etc.)
     Constraint(Constraint),
 }
@@ -51,32 +49,10 @@ impl Proposition {
     pub fn estimate(&self, env: &Environment) -> Option<usize> {
         match self {
             Proposition::Attribute(query) => query.estimate(env),
+            Proposition::OptionalAttribute(query) => query.estimate(env),
             Proposition::Concept(application) => application.estimate(env),
             Proposition::Formula(application) => application.estimate(env),
             Proposition::Constraint(constraint) => constraint.estimate(env),
-        }
-    }
-
-    /// Evaluate this application against the given context, producing a selection stream
-    pub fn evaluate<'a, Env, M: Selection + 'a>(
-        self,
-        selection: M,
-        env: &'a Env,
-    ) -> impl Selection + 'a
-    where
-        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
-    {
-        match self {
-            Proposition::Attribute(query) => Either::Left(Either::Left(Either::Left(
-                Application::evaluate(*query, selection, env),
-            ))),
-            Proposition::Concept(application) => Either::Left(Either::Left(Either::Right(
-                application.evaluate(selection, env),
-            ))),
-            Proposition::Formula(application) => {
-                Either::Left(Either::Right(application.evaluate(selection)))
-            }
-            Proposition::Constraint(constraint) => Either::Right(constraint.evaluate(selection)),
         }
     }
 
@@ -84,6 +60,7 @@ impl Proposition {
     pub fn parameters(&self) -> Parameters {
         match self {
             Proposition::Attribute(query) => query.parameters(),
+            Proposition::OptionalAttribute(query) => query.parameters(),
             Proposition::Concept(application) => application.parameters(),
             Proposition::Formula(application) => application.parameters(),
             Proposition::Constraint(constraint) => constraint.parameters(),
@@ -94,6 +71,7 @@ impl Proposition {
     pub fn schema(&self) -> Schema {
         match self {
             Proposition::Attribute(query) => query.schema(),
+            Proposition::OptionalAttribute(query) => query.schema(),
             Proposition::Concept(application) => application.schema(),
             Proposition::Formula(application) => application.schema(),
             Proposition::Constraint(constraint) => constraint.schema(),
@@ -122,6 +100,7 @@ impl Display for Proposition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Proposition::Attribute(query) => Display::fmt(query, f),
+            Proposition::OptionalAttribute(query) => Display::fmt(query, f),
             Proposition::Concept(application) => Display::fmt(application, f),
             Proposition::Formula(application) => Display::fmt(application, f),
             Proposition::Constraint(constraint) => Display::fmt(constraint, f),
@@ -143,6 +122,9 @@ impl Serialize for Proposition {
             Proposition::Constraint(c) => c.serialize(serializer),
             Proposition::Attribute(_) => Err(ser::Error::custom(
                 "Attribute propositions cannot be serialized in formal notation",
+            )),
+            Proposition::OptionalAttribute(_) => Err(ser::Error::custom(
+                "Optional attribute propositions cannot be serialized in formal notation",
             )),
         }
     }

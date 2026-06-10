@@ -435,8 +435,8 @@ mod tests {
     /// optional slot bound to `Binding::Absent`. Entities that
     /// have the fact get `Binding::Present(value)` for the slot.
     /// This is the v2 set-widening behavior at the concept
-    /// projection layer, driven by `Resolution::Optional` on the
-    /// emitted `AttributeQuery`.
+    /// projection layer, realized by the `OptionalAttributeQuery` left-join the
+    /// concept lowering emits for `maybe` fields.
     #[dialog_common::test]
     async fn it_executes_concept_with_optional_field() -> anyhow::Result<()> {
         use crate::Binding;
@@ -545,6 +545,123 @@ mod tests {
             found_bob_without_nickname,
             "Bob should have nickname Absent"
         );
+
+        Ok(())
+    }
+
+    /// Regression (PR #348): a `this`-unbound concept query whose
+    /// alphabetically-first field is *optional* must still set-widen
+    /// it, not drop entities that lack the optional fact. `bio`
+    /// (optional) sorts before `name` (required); Alice has only
+    /// `name`, Bob has both. Both must be returned (Alice's `bio`
+    /// Absent, Bob's Present).
+    ///
+    /// Fixed by making an optional attribute *require* its entity
+    /// (`of`) bound rather than letting the choice group bind it: an
+    /// unbound-entity optional scan suppresses its `Absent` fallback,
+    /// so it must never lead an unbound scan. Feasibility now forces a
+    /// required premise (`name`) to bind `this` first; the optional
+    /// `bio` then runs with `this` known and set-widens correctly.
+    #[dialog_common::test]
+    async fn it_set_widens_optional_field_sorted_before_required() -> anyhow::Result<()> {
+        use crate::Binding;
+        use dialog_artifacts::Entity;
+        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        // Alice has only name; Bob has both name and bio.
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .assert(the!("person/bio").of(bob.clone()).is("Hi".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        // `bio` (optional) sorts before `name` (required).
+        let concept = ConceptDescriptor::try_from(vec![
+            (
+                "bio".to_string(),
+                ConceptFieldDescriptor::optional(AttributeDescriptor::new(
+                    the!("person/bio"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
+            ),
+            (
+                "name".to_string(),
+                ConceptFieldDescriptor::required(AttributeDescriptor::new(
+                    the!("person/name"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
+            ),
+        ])
+        .unwrap();
+
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::var("person"));
+        terms.insert("name".to_string(), Term::var("name"));
+        terms.insert("bio".to_string(), Term::var("bio"));
+
+        let application = ConceptQuery {
+            terms,
+            predicate: concept,
+        };
+
+        let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
+            application.evaluate(Match::new().seed(), &source),
+        )
+        .await?;
+
+        assert_eq!(
+            selection.len(),
+            2,
+            "Should find 2 people (both Alice and Bob), even though the \
+             optional `bio` field sorts before the required `name`"
+        );
+
+        let name_param = Term::var("name");
+        let bio_param = Term::var("bio");
+
+        let mut found_alice_without_bio = false;
+        let mut found_bob_with_bio = false;
+        for match_result in selection.iter() {
+            let name = match_result.lookup(&name_param)?.content()?;
+            let bio = match_result.lookup(&bio_param)?;
+            match (&name, bio) {
+                (Value::String(n), Binding::Absent) if n == "Alice" => {
+                    found_alice_without_bio = true;
+                }
+                (Value::String(n), Binding::Present(Value::String(b)))
+                    if n == "Bob" && b == "Hi" =>
+                {
+                    found_bob_with_bio = true;
+                }
+                _ => panic!(
+                    "unexpected (name, bio): ({:?}, {:?})",
+                    name,
+                    match_result.lookup(&bio_param)
+                ),
+            }
+        }
+        assert!(found_alice_without_bio, "Alice should have bio Absent");
+        assert!(found_bob_with_bio, "Bob should have bio Present");
 
         Ok(())
     }

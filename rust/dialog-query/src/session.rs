@@ -26,9 +26,28 @@ mod tests {
     use crate::concept::descriptor::ConceptDescriptor;
     use crate::concept::query::ConceptRules;
     use crate::error::EvaluationError;
+    use crate::planner::{Conjunction, Planner};
+    use crate::proposition::Proposition;
     use crate::rule::deductive::DeductiveRule;
-    use crate::{AttributeDescriptor, Cardinality, Concept, Parameters, Query, Term, Type};
+    use crate::{
+        AttributeDescriptor, Cardinality, Concept, Environment, Parameters, Premise, Query, Term,
+        Type,
+    };
     use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+
+    /// Lower a single proposition to its compiled `Plan` for the
+    /// given binding scope. Tests that exercise a concept/attribute
+    /// proposition in isolation run it through the planner so they
+    /// evaluate via the same operator IR as production.
+    fn plan_proposition(proposition: Proposition, scope_vars: &[&str]) -> Conjunction {
+        let mut scope = Environment::new();
+        for var in scope_vars {
+            scope.add(*var);
+        }
+        Planner::from(vec![Premise::Assert(proposition)])
+            .plan(&scope)
+            .expect("proposition should plan")
+    }
 
     #[dialog_common::test]
     async fn it_queries_asserted_facts() -> anyhow::Result<()> {
@@ -90,10 +109,10 @@ mod tests {
         params.insert("age".into(), Term::var("age"));
 
         // Use new query API directly on application
-        let application = person.apply(params)?;
+        let plan = plan_proposition(person.apply(params)?, &[]);
 
         let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            application.evaluate(Match::new().seed(), &session),
+            plan.evaluate(Match::new().seed(), &session),
         )
         .await?;
         assert_eq!(selection.len(), 2); // Should find just Alice and Bob
@@ -216,10 +235,10 @@ mod tests {
         params.insert("age".into(), Term::var("age"));
 
         // Let's test with empty parameters first to see the exact error
-        let application = person.apply(params)?;
+        let plan = plan_proposition(person.apply(params)?, &[]);
 
         let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            application.evaluate(Match::new().seed(), &session),
+            plan.evaluate(Match::new().seed(), &session),
         )
         .await?;
         assert_eq!(selection.len(), 2); // Should find just Alice and Bob
@@ -1216,19 +1235,18 @@ mod tests {
         params.insert("name".into(), Term::var("name"));
         params.insert("age".into(), Term::var("age"));
 
-        let application = person.apply(params)?;
+        let plan = plan_proposition(person.apply(params)?, &[]);
 
         // First query -- plan is computed and cached
         let results1: Vec<_> = futures_util::TryStreamExt::try_collect(
-            application.clone().evaluate(Match::new().seed(), &session),
+            plan.clone().evaluate(Match::new().seed(), &session),
         )
         .await?;
 
         // Second query -- plan is reused from cache
-        let results2: Vec<_> = futures_util::TryStreamExt::try_collect(
-            application.evaluate(Match::new().seed(), &session),
-        )
-        .await?;
+        let results2: Vec<_> =
+            futures_util::TryStreamExt::try_collect(plan.evaluate(Match::new().seed(), &session))
+                .await?;
 
         assert_eq!(results1.len(), 2, "First query should find 2 people");
         assert_eq!(results2.len(), 2, "Cached query should find 2 people");
@@ -1289,15 +1307,12 @@ mod tests {
         params.insert("name".into(), Term::var("name"));
         params.insert("age".into(), Term::var("age"));
 
-        let application = person.apply(params)?;
+        let plan = plan_proposition(person.apply(params)?, &["this"]);
 
         let mut candidate = Match::new();
         candidate.bind(&entity_param, Value::from(alice.clone()))?;
 
-        let results = application
-            .evaluate(candidate.seed(), &session)
-            .try_vec()
-            .await?;
+        let results = plan.evaluate(candidate.seed(), &session).try_vec().await?;
 
         assert_eq!(results.len(), 1, "Should find exactly one person (Alice)");
         assert_eq!(

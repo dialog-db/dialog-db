@@ -2,7 +2,6 @@ use crate::Cardinality;
 use crate::Claim;
 use crate::artifact::{ArtifactSelector, ArtifactsAttribute, Constrained};
 use crate::attribute::The;
-use crate::attribute::query::Resolution;
 use crate::environment::Environment;
 use crate::query::Application;
 use crate::query::Output;
@@ -41,29 +40,26 @@ pub struct AttributeQueryAll {
 }
 
 impl AttributeQueryAll {
-    /// Create a new attribute query. The resolution policy is
-    /// derived from `is`'s kind: a set-widened (`Nothing`-bit-set)
-    /// kind yields [`Resolution::Optional`] — one Absent fallback
-    /// row on miss; otherwise [`Resolution::Required`] — zero rows
-    /// on miss.
+    /// Create a new attribute query.
+    ///
+    /// The associative layer is scalar: a fact either exists or the
+    /// row is filtered. Set-widening (`Absent` on miss) is a
+    /// semantic-layer construct realized by
+    /// [`OptionalAttributeQuery`](crate::optional::OptionalAttributeQuery), so a `Nothing` bit
+    /// on the `is` term's kind is meaningless here and is stripped.
     pub fn new(the: Term<The>, of: Term<Entity>, is: Term<Any>, cause: Term<Cause>) -> Self {
+        let is = match (is.name(), is.kind()) {
+            (Some(name), Some(kind)) if kind.is_optional() => {
+                Term::<Any>::typed_var(name.to_string(), kind.without_nothing())
+            }
+            _ => is,
+        };
         Self {
             the,
             of,
             is,
             cause,
             source: Term::<Record>::unique(),
-        }
-    }
-
-    /// Resolution policy derived from `is`'s kind. A set-widened
-    /// `is` (admits `Nothing`) is [`Resolution::Optional`];
-    /// otherwise [`Resolution::Required`].
-    pub fn resolution(&self) -> Resolution {
-        if self.is.is_optional() {
-            Resolution::Optional
-        } else {
-            Resolution::Required
         }
     }
 
@@ -138,6 +134,35 @@ impl AttributeQueryAll {
         Ok(())
     }
 
+    /// True when the row pins one of this scan's named parameters to
+    /// [`Binding::Absent`](crate::Binding::Absent). A scalar lookup
+    /// demands present values in every slot, so such a row can match
+    /// nothing: a positive premise filters it, and a negated premise
+    /// passes it (the inner query has no rows). By the time a row
+    /// reaches the associative layer, an Absent binding means "known
+    /// to have no value" — produced upstream by a
+    /// [`OptionalAttributeQuery`](crate::optional::OptionalAttributeQuery) left-join.
+    pub(crate) fn absent_blocked(&self, base: &Match) -> bool {
+        let absent = |term: &Term<Any>| matches!(base.lookup(term), Ok(crate::Binding::Absent));
+        absent(&Term::<Any>::from(&self.the))
+            || absent(&Term::<Any>::from(&self.of))
+            || absent(&self.is)
+            || absent(&Term::<Any>::from(&self.cause))
+    }
+
+    /// True when a fact's value inhabits the `is` term's kind. A
+    /// typed value slot is a constraint: attribute values are
+    /// dynamically typed in the store (one attribute may hold values
+    /// of several types across facts), so a fact whose value falls
+    /// outside the term's kind is a non-match to be filtered, never
+    /// an error.
+    pub(crate) fn admits(&self, value: &Value) -> bool {
+        match self.is.kind() {
+            Some(kind) => kind.admits(value),
+            None => true,
+        }
+    }
+
     /// Resolves variables from the given match. `Absent` bindings
     /// leave the term unchanged (same as unbound) — only Present
     /// bindings substitute.
@@ -184,9 +209,8 @@ impl AttributeQueryAll {
             },
         );
 
-        // The `is` term's kind already encodes optionality via the
-        // `Nothing` atom. `None` means "no static info" — the
-        // unifier resolves at rule-compile time.
+        // `None` means "no static info" — the unifier resolves at
+        // rule-compile time.
         schema.insert(
             "is".to_string(),
             Field {
@@ -197,19 +221,11 @@ impl AttributeQueryAll {
             },
         );
 
-        // The `cause` slot is bound by the merge step on every
-        // Present row; when the query is optional the fallback
-        // row binds it to `Absent`, so the slot is set-widened.
-        let cause_content = if self.is.is_optional() {
-            Kind::primitive(Type::Bytes).optional()
-        } else {
-            Kind::primitive(Type::Bytes)
-        };
         schema.insert(
             "cause".to_string(),
             Field {
                 description: "Causal stamp of the relation".to_string(),
-                content_type: Some(cause_content),
+                content_type: Some(Kind::primitive(Type::Bytes)),
                 requirement: requirement.required(),
                 cardinality: Cardinality::One,
             },
@@ -240,15 +256,10 @@ impl AttributeQueryAll {
 
     /// Evaluate yielding all matching artifacts.
     ///
-    /// With [`Resolution::Required`] (the default), zero rows are
-    /// yielded for an input when no fact matches the lookup —
-    /// standard EAV semantics.
-    ///
-    /// With [`Resolution::Optional`], if no fact matches for an
-    /// input row, a single fallback row is yielded with the `is`
-    /// slot (and the `cause` slot, if a named variable) bound to
-    /// [`Binding::Absent`](crate::Binding::Absent). This is the
-    /// row-layer signal for "we looked, no fact found."
+    /// Standard EAV semantics: zero rows are yielded for an input
+    /// when no fact matches the lookup — the premise filters the
+    /// row. Set-widening (`Absent` on miss) lives at the semantic
+    /// layer in [`OptionalAttributeQuery`](crate::optional::OptionalAttributeQuery).
     pub fn evaluate<'a, Env, M: Selection + 'a>(
         self,
         env: &'a Env,
@@ -261,49 +272,26 @@ impl AttributeQueryAll {
         try_stream! {
             for await candidate in selection {
                 let base = candidate?;
+
+                // An Absent-bound parameter matches nothing at the
+                // scalar layer: filter the row without scanning.
+                if selector.absent_blocked(&base) {
+                    continue;
+                }
+
                 let selection = selector.resolve(&base);
 
-                // The entity must be determined for the Absent
-                // fallback to mean anything: "this entity has no such
-                // fact." An unbound entity would manufacture a phantom
-                // Absent row not tied to any concrete entity.
-                let entity_known = selection.of().is_constant();
-
-                let mut produced = false;
                 let stream = Provider::<Select<'_>>::execute(env, (&selection).try_into()?).await?;
                 for await artifact in stream {
                     let artifact = artifact?;
+                    // A typed `is` slot filters facts whose value
+                    // falls outside the kind.
+                    if !selector.admits(&artifact.is) {
+                        continue;
+                    }
                     let mut extension = base.clone();
                     selector.merge(&mut extension, &artifact)?;
-                    produced = true;
                     yield extension;
-                }
-
-                // Optional fallback: yield one Absent row only when
-                // the attribute is genuinely absent for a known
-                // entity. Guards:
-                //   - `!produced`: no fact row covered this input.
-                //   - `selector.is.is_optional()`: the slot admits
-                //     absence.
-                //   - `entity_known`: absence is about a concrete
-                //     entity, not an unbound scan.
-                //   - `!base.is_present(&selector.is)`: the value
-                //     wasn't already pinned to a Present binding. When
-                //     it was, an empty scan is a value *mismatch*
-                //     (the value-keyed scan found nothing equal to the
-                //     pinned value), not absence — and binding that
-                //     Present variable to Absent would error and abort
-                //     the stream.
-                if !produced
-                    && selector.is.is_optional()
-                    && entity_known
-                    && !base.is_present(&selector.is)
-                {
-                    let mut fallback = base;
-                    fallback.bind_absent(&selector.is)?;
-                    let cause_term: Term<Any> = Term::<Any>::from(&selector.cause);
-                    fallback.bind_absent(&cause_term)?;
-                    yield fallback;
                 }
             }
         }

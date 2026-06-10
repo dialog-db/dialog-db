@@ -12,12 +12,16 @@
 //! `source` term is looked up against the input row's bindings;
 //! if [`Binding::Present`](crate::Binding::Present) the value
 //! flows into `is`; if [`Binding::Absent`](crate::Binding::Absent)
-//! (or if `source` is unbound) the fallback value flows into `is`
-//! instead. `fallback` may itself be a term — variable or
-//! constant — and is resolved in the same row.
+//! the fallback value flows into `is` instead. An *unbound* source
+//! is a planner-contract violation and errors: the constraint's
+//! schema hard-requires `source`, so it is always scheduled after
+//! the premise that resolves it. `fallback` may itself be a term —
+//! variable or constant — and is resolved in the same row.
 
 use std::fmt;
 use std::fmt::Display;
+
+use crate::EvaluationError;
 
 use crate::type_system::unifier::{Context, Type as UnifierType, UnifyError, lift};
 use crate::types::Any;
@@ -51,8 +55,10 @@ const COALESCE_COST: usize = 1;
 /// At runtime, evaluation is `.map`-style — one row in, one row
 /// out:
 /// - If `source` looks up to `Present(v)`: bind `is` to `v`.
-/// - If `source` looks up to `Absent` or is unbound: bind `is` to
-///   `fallback`'s resolved value.
+/// - If `source` looks up to `Absent`: bind `is` to `fallback`'s
+///   resolved value.
+/// - If `source` is unbound: error — a planner-contract violation,
+///   the constraint orders after the premise resolving its source.
 /// - If `fallback` itself is an unbound variable, the row is
 ///   filtered out (we can't bind without a concrete value).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -60,7 +66,7 @@ pub struct Coalesce {
     /// The optional input term — typically a variable bound by an
     /// upstream optional attribute query.
     pub source: Term<Any>,
-    /// The default value used when `source` is `Absent` or unbound.
+    /// The default value used when `source` is `Absent`.
     pub fallback: Term<Any>,
     /// The output term that receives either `source`'s value or
     /// `fallback`'s value.
@@ -131,12 +137,18 @@ impl Coalesce {
         Ok(())
     }
 
-    /// Schema describing the three slots. All three are required;
-    /// `source` is set-widened (Optional), `fallback` and `is`
-    /// share the unwrapped shape.
+    /// Schema describing the three slots.
+    ///
+    /// `source` and `fallback` are *hard* requirements (no choice
+    /// group): coalesce consumes them, so the planner must order it
+    /// after whichever premises resolve them. In particular the
+    /// constant fallback must never make the source slot
+    /// satisfiable — that would schedule the coalesce before its
+    /// source is bound, and the fallback would fire for every row
+    /// even when the source is Present. `is` is the output the
+    /// constraint derives.
     pub fn schema(&self) -> Schema {
         let mut schema = Schema::new();
-        let requirement = Requirement::new_group();
         schema.insert(
             "source".into(),
             Field {
@@ -144,16 +156,16 @@ impl Coalesce {
                     "Optional input term — value flows to `is` when Present, else `fallback` does."
                         .into(),
                 content_type: self.source.kind(),
-                requirement: requirement.required(),
+                requirement: Requirement::required(),
                 cardinality: Cardinality::One,
             },
         );
         schema.insert(
             "fallback".into(),
             Field {
-                description: "Default value used when `source` is `Absent` or unbound.".into(),
+                description: "Default value used when `source` is `Absent`.".into(),
                 content_type: self.fallback.kind(),
-                requirement: requirement.required(),
+                requirement: Requirement::required(),
                 cardinality: Cardinality::One,
             },
         );
@@ -162,7 +174,7 @@ impl Coalesce {
             Field {
                 description: "Output term — receives `source`'s value or `fallback`'s.".into(),
                 content_type: self.is.kind(),
-                requirement: requirement.required(),
+                requirement: Requirement::Optional,
                 cardinality: Cardinality::One,
             },
         );
@@ -198,17 +210,29 @@ impl Coalesce {
                 // Resolve the source binding: Present, Absent, or unbound.
                 let source_binding = base.lookup(&source);
 
+                // An unbound source is a planner-contract violation:
+                // the schema hard-requires `source`, so the planner
+                // only schedules this constraint once some premise
+                // has resolved it (bound Present, or a left-join's
+                // Absent). Silently taking the fallback here would
+                // shadow Present values whenever ordering broke.
+                if source_binding.is_err() {
+                    Err(EvaluationError::UnboundVariable {
+                        variable_name: source.name().unwrap_or("source").to_string(),
+                    })?;
+                }
+
                 // Resolve the fallback value: must be concrete to bind output.
                 let fallback_value = base.lookup(&fallback);
 
                 // The value coalesce would bind into `is`: `source`
                 // when Present, else `fallback` if it resolves to a
                 // concrete value. `None` means there is nothing to
-                // produce (Absent/unbound source and Absent/unbound
-                // fallback) — the row is filtered.
+                // produce (Absent source and Absent/unbound fallback)
+                // — the row is filtered.
                 let chosen = match source_binding {
                     Ok(Binding::Present(value)) => Some(value),
-                    Ok(Binding::Absent) | Err(_) => match fallback_value {
+                    _ => match fallback_value {
                         Ok(Binding::Present(value)) => Some(value),
                         _ => None,
                     },
@@ -310,10 +334,14 @@ mod tests {
         Ok(())
     }
 
-    /// Source unbound (no binding at all) is also handled like Absent —
-    /// output takes from fallback.
+    /// An unbound source is a planner-contract violation: the
+    /// constraint orders after the premise that resolves its source
+    /// (bound Present, or a left-join's Absent), so an unbound
+    /// source surfaces as an error instead of silently taking the
+    /// fallback — which would shadow Present values whenever
+    /// ordering broke.
     #[dialog_common::test]
-    async fn it_binds_output_from_fallback_when_source_unbound() -> Result<(), EvaluationError> {
+    async fn it_errors_when_source_unbound() -> Result<(), EvaluationError> {
         let coalesce = Coalesce::new(
             Term::var("source"),
             Term::Constant(Value::from("default".to_string())),
@@ -322,13 +350,9 @@ mod tests {
 
         let candidate = Match::new();
 
-        let results: Vec<Match> = coalesce.evaluate(candidate.seed()).try_collect().await?;
-
-        assert_eq!(results.len(), 1);
-        assert_eq!(
-            results[0].lookup(&Term::var("out"))?.content()?,
-            Value::from("default".to_string())
-        );
+        let results: Result<Vec<Match>, _> =
+            coalesce.evaluate(candidate.seed()).try_collect().await;
+        assert!(results.is_err(), "unbound source must error");
         Ok(())
     }
 
