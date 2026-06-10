@@ -49,8 +49,10 @@ struct Person {
 }
 ```
 
-queries as a *left join*: every entity matching the required fields
-produces a row, and the optional slot reports what the lookup found.
+queries as an *optional lookup* (in SQL terms, a left join; this
+guide says "optional lookup" from here on): every entity matching the
+required fields produces a row, and the optional slot reports what
+the lookup found.
 
 ```text
 ?person   ?name     ?nickname
@@ -72,12 +74,12 @@ A variable in a row is in one of three states:
 
 The difference between unbound and `Absent` carries real information.
 `Absent` is a positive claim about the store ("this entity has no
-such fact"), produced by exactly one construct: the left join behind
-an optional concept field (`MaybeQuery` internally). Nothing else in
-the engine manufactures `Absent`, and nothing ever stores it.
+such fact"), produced by exactly one construct: the optional lookup
+behind an optional concept field (`MaybeQuery` internally). Nothing
+else in the engine manufactures `Absent`, and nothing ever stores it.
 
-This is why the left join *requires the entity to be bound* before it
-runs. "Absent" answers the question "absent for whom?", which is
+This is why the optional lookup *requires the entity to be bound*
+before it runs. "Absent" answers the question "absent for whom?", which is
 meaningless without a concrete entity. The planner enforces this
 structurally: an optional field's lookup can never lead an unbound
 scan; some required premise must bind the entity first.
@@ -105,8 +107,8 @@ falling out of the rules above:
    optional field vacuously. An all-optional concept would be the
    concept of "anything at all", and a query for it would enumerate
    the universe.
-2. **Nothing would bind the entity.** Every optional field's left
-   join requires `this` already bound, and in an all-optional concept
+2. **Nothing would bind the entity.** Every optional field's lookup
+   requires `this` already bound, and in an all-optional concept
    there is no required field to bind it. The body would be
    unplannable by its own rules.
 
@@ -115,8 +117,8 @@ concept a meaning (they constrain which entities match), and they are
 what binds `this` so the optional fields have a concrete entity to
 report absence about.
 
-The left join itself has four behaviors, all consequences of reading
-`Absent` as a claim:
+The optional lookup itself has four behaviors, all consequences of
+reading `Absent` as a claim:
 
 | input row state for `?nickname` | facts for the entity | output |
 |---------------------------------|----------------------|--------|
@@ -150,9 +152,9 @@ requires a number *is* the evidence of presence, the same way a
 future `?x.text()` type predicate would narrow `?x` to strings.
 
 The planner exploits the narrowing: when inference proves a sibling
-premise guarantees the value is present, the left join can never take
-its `Absent` branch, so it is *demoted* to a plain scalar scan. Same
-semantics, less work.
+premise guarantees the value is present, the optional lookup can
+never take its `Absent` branch, so it is *demoted* to a plain scalar
+scan. Same semantics, less work.
 
 If filtering is not what you want, say so explicitly with a default:
 
@@ -207,7 +209,7 @@ The fix is to discharge the optionality explicitly before the head:
 ```rust
 // OK
 // when Person { nickname: ?nick }
-//      ?nick.unwrap_or("friend") = ?text
+//      ?text.is(?nick.unwrap_or("friend"))
 ```
 
 The same contract holds across concept boundaries: an outer rule that
@@ -218,11 +220,7 @@ the slot can deliver `Absent`.
 ## Negation and absence
 
 `unless` filters a row when its inner query has at least one match.
-Two rules govern how it interacts with optionality.
-
-**`Absent` matches nothing.** A scalar slot demands a present value,
-so a row that arrives with `?nickname = Absent` cannot match any fact
-through it. Concretely, with one more fact in the store:
+With one more fact in the store:
 
 ```text
 the           of     is
@@ -241,25 +239,22 @@ and the rule body:
 | alice | `"Ali"`     | finds `club/banned _ "Ali"`  | filtered (banned) |
 | bob   | `Absent`    | matches nothing              | passes |
 
-Bob has no nickname, so he cannot have a banned one. If `Absent` were
-instead treated like *unbound* inside the negation, the inner scan
-would run unconstrained, find the `"Ali"` fact (anyone's banned
-nickname), and filter Bob too, treating a person with no nickname as
-if they had every banned nickname in the store. The claim "Bob has no
-nickname" would silently turn into the question "does any banned
-nickname exist?".
-
-The same rule applies in positive position for symmetry: a scalar
-premise receiving an `Absent` binding filters the row (instead of
-scanning unconstrained or crashing), which is exactly the
+Alice's nickname is banned, so she is filtered. Bob passes because an
+`Absent` binding matches nothing: `club/banned` is a scalar fact
+lookup, its value slot demands a present value, and Bob's row carries
+the claim that there is no value. A person with no nickname cannot
+have a banned one. (The same holds in positive position: a scalar
+premise receiving an `Absent` binding filters the row, the
 filter-by-default semantics from the previous section arriving by
-another road.
+another road.)
 
-**You cannot negate a left join.** A left join always yields a row
-for a bound entity (`Present` or the `Absent` fallback), so negating
-it would filter every row; the rule would be vacuously false. The
-analyzer rejects it at compile time (`NegatedOptional`). What you
-almost certainly meant is one of:
+### You cannot negate an optional field
+
+An optional field's lookup always yields a row once its entity is
+bound: `Present` when the fact exists, `Absent` when it does not.
+Negating something that always matches filters every row, making the
+rule vacuously false, so the analyzer rejects it at compile time
+(`NegatedOptional`). What you almost certainly meant is one of:
 
 ```rust
 // "the entity has no nickname fact": negate the scalar lookup
@@ -269,14 +264,25 @@ almost certainly meant is one of:
 // unless Person { this: ?person, .. }
 ```
 
-**Narrowing does not cross into negation.** The types inference
-derives describe rows that *survive* the positive premises ("in every
-surviving row, `?x` is present"). A negated subquery asks a
-hypothetical question about rows that must *not* match, so it is
-typed in its own context and never receives the positive premises'
-narrowing. This polarity discipline is what keeps "the formula
-narrows `?age`" from silently changing what an unrelated `unless`
-means.
+### Negation does not narrow types
+
+The banned-nicknames rule also shows why a negated premise must stay
+out of the rule's type narrowing. The inner `club/banned` lookup
+demands a present `?nickname`. If that demand counted as evidence
+about the rule's rows (the way a formula's demand does), inference
+would conclude that every row has a present nickname, the optional
+lookup would tighten into a required one, and Bob would be dropped
+before the negation ever ran. The rule says "unless the nickname is
+banned", not "must have a nickname, and it must not be banned"; if
+you want the second meaning, write it explicitly with a required
+field.
+
+So narrowing is computed from positive premises only: what a negated
+subquery demands says nothing about the rows that survive it. The
+finer points, including the reverse direction (whether positive
+narrowing should flow *into* a negated subquery), are design-note
+territory rather than user-facing behavior: see
+`notes/polarity-and-negation.md`.
 
 ## Why it is layered this way
 
@@ -284,22 +290,22 @@ Keeping the associative layer scalar and pushing all optionality into
 one semantic-layer construct is not just tidiness. It buys three
 things:
 
-1. **One place to be correct.** The left join's contract (entity
-   bound, mismatch is not absence, claims are checked) lives in one
-   operator instead of being distributed across runtime guards inside
-   every scan, where plan reordering used to break it.
+1. **One place to be correct.** The optional lookup's contract
+   (entity bound, mismatch is not absence, claims are checked) lives
+   in one operator instead of being distributed across runtime guards
+   inside every scan, where plan reordering could break it.
 2. **Types that tell the truth.** Set-widening appears in exactly the
-   schemas that can deliver `Absent` (the left join, a concept's
-   optional fields), so the inference's verdict about a variable is
-   also a fact about runtime. Derivability ("this premise produces
-   the binding") and absence ("the value may not exist") are kept
-   apart; only the latter is ever expressed in types.
+   schemas that can deliver `Absent` (the optional lookup, a
+   concept's optional fields), so the inference's verdict about a
+   variable is also a fact about runtime. Derivability ("this premise
+   produces the binding") and absence ("the value may not exist") are
+   kept apart; only the latter is ever expressed in types.
 3. **A future hook.** "We looked at range R for entity E and found
    nothing" is precisely the event an incremental subscription must
    record so a later fact in R can flip `Absent` to `Present`. With
-   the left join as a single operator, the future demand-tracking
-   work attaches to one node instead of reverse-engineering scattered
-   guards.
+   the optional lookup compiled as a single operator, the future
+   demand-tracking work attaches to one node instead of
+   reverse-engineering scattered guards.
 
 The deeper principle, which also governs negation and the planned
 replication work: **absence is a claim about a completely examined
