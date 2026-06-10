@@ -242,6 +242,38 @@ mod tests {
     }
 
     #[dialog_common::test]
+    async fn create_with_credential_names_from_did() {
+        let (operator, profile) = test_operator_with_profile().await;
+
+        // Generate the keypair first, derive the space name from the
+        // last 8 chars of its did:key, then create with that same signer.
+        let signer = Ed25519Signer::generate().await.unwrap();
+        let did = signer.did().to_string();
+        let name = did[did.len() - 8..].to_string();
+
+        let created = profile
+            .repository(name.clone())
+            .create()
+            .with_credential(signer)
+            .perform(&operator)
+            .await
+            .unwrap();
+
+        // The repository's DID is the supplied credential's DID, and the
+        // name is its last 8 chars.
+        assert_eq!(created.did().to_string(), did);
+        assert!(did.ends_with(&name));
+
+        let loaded = profile
+            .repository(name)
+            .load()
+            .perform(&operator)
+            .await
+            .unwrap();
+        assert_eq!(created.did(), loaded.did());
+    }
+
+    #[dialog_common::test]
     async fn it_opens_branch_via_repository() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
