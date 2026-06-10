@@ -556,16 +556,12 @@ mod tests {
     /// `name`, Bob has both. Both must be returned (Alice's `bio`
     /// Absent, Bob's Present).
     ///
-    /// Currently FAILS (`#[ignore]`d so it documents the bug without
-    /// breaking CI). Root cause: an optional attribute is marked
-    /// feasible as a lead scan even with `this` unbound (its constant
-    /// `the` satisfies the choice group, so feasibility says it binds
-    /// `this`), but an optional lead with unbound entity cannot emit
-    /// its `Absent` fallback — so it drops entities lacking the fact.
-    /// Fix: an optional attribute must *require* its entity (`of`)
-    /// bound rather than bind it, so feasibility leads an unbound scan
-    /// with a required field. Remove the `#[ignore]` once fixed.
-    #[ignore = "PR #348: optional field sorted first drops rows; fix in feasibility (optional requires entity)"]
+    /// Fixed by making an optional attribute *require* its entity
+    /// (`of`) bound rather than letting the choice group bind it: an
+    /// unbound-entity optional scan suppresses its `Absent` fallback,
+    /// so it must never lead an unbound scan. Feasibility now forces a
+    /// required premise (`name`) to bind `this` first; the optional
+    /// `bio` then runs with `this` known and set-widens correctly.
     #[dialog_common::test]
     async fn it_set_widens_optional_field_sorted_before_required() -> anyhow::Result<()> {
         use crate::Binding;

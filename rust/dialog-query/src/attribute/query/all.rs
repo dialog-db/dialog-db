@@ -174,12 +174,26 @@ impl AttributeQueryAll {
             },
         );
 
+        // For an optional (set-widening) query the entity must be
+        // *externally* bound, not satisfiable by the choice group:
+        // the `Absent` fallback is only meaningful for a known entity
+        // ("this entity has no such fact"). An unbound-entity optional
+        // scan suppresses its fallback and silently drops entities
+        // lacking the fact, so it must never lead an unbound scan —
+        // feasibility marks `of` required, forcing a required premise
+        // to bind the entity first. For a required query `of` joins
+        // the choice group as before (a constant `the` can lead).
+        let of_requirement = if self.is.is_optional() {
+            Requirement::required()
+        } else {
+            requirement.required()
+        };
         schema.insert(
             "of".to_string(),
             Field {
                 description: "Entity of the relation".to_string(),
                 content_type: Some(Kind::primitive(Type::Entity)),
-                requirement: requirement.required(),
+                requirement: of_requirement,
                 cardinality: Cardinality::One,
             },
         );

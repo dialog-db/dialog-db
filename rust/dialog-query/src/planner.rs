@@ -717,13 +717,20 @@ mod plan_ordering {
     }
 
     /// A coalesce constraint (set-widening unwrap) lowers to a
-    /// `Plan::Constraint` step and plans alongside a scan. Because the
-    /// coalesce `source` is *optional* (set-widened), the constraint
-    /// does not require `nickname` bound to run — it can fall back —
-    /// so it is viable at empty scope and, being cheap (cost 1), the
-    /// greedy planner schedules it first. This pins the actual
-    /// behavior: an optional source makes coalesce orderable before
-    /// the scan that would bind it.
+    /// `Plan::Constraint` step. At empty scope the conjunction is
+    /// rejected: the optional nickname scan requires its entity
+    /// externally bound (set-widening needs a known entity — "absent
+    /// for whom?"), and no other premise binds `?person`.
+    ///
+    /// With `?person` bound the conjunction plans, and the pinned
+    /// order is still `[constraint, scan]`: the coalesce's constant
+    /// fallback satisfies its choice group, so it is feasible before
+    /// its source is bound and, being cheap (cost 1), the greedy
+    /// planner schedules it first — which makes the fallback fire for
+    /// every row even when a nickname exists. That ordering is the
+    /// open bug tracked as dialog-db-45: coalesce must order after
+    /// the premise that binds its source. Flip this pin to
+    /// `["scan", "constraint"]` when that lands.
     #[dialog_common::test]
     fn it_plans_coalesce_constraint() {
         let nickname: Term<Option<String>> = Term::var("nickname");
@@ -743,25 +750,31 @@ mod plan_ordering {
             coalesce,
             Premise::Assert(Proposition::Attribute(Box::new(nickname_scan))),
         ];
-        let plan = Planner::from(premises.clone())
-            .plan(&Environment::new())
-            .unwrap();
 
-        let order = kinds(&plan);
-        assert_eq!(order.len(), 2);
-        assert!(
-            order.contains(&"constraint"),
-            "coalesce lowers to Constraint"
-        );
-        assert!(order.contains(&"scan"));
+        // Empty scope: the optional scan requires `?person` bound, and
+        // nothing else can bind it — the conjunction is unplannable.
+        match Planner::from(premises.clone()).plan(&Environment::new()) {
+            Err(TypeError::RequiredBindings { required }) => {
+                assert!(
+                    required.contains("person"),
+                    "the rejection names the entity the optional scan requires"
+                );
+            }
+            other => panic!("expected RequiredBindings, got {other:?}"),
+        }
+
+        // Bound scope: plans, coalesce-first (see doc comment).
+        let mut scope = Environment::new();
+        scope.add("person");
+        let plan = Planner::from(premises.clone()).plan(&scope).unwrap();
         assert_eq!(
-            order,
+            kinds(&plan),
             vec!["constraint", "scan"],
-            "an optional-source coalesce is viable immediately and, being cheap, runs first"
+            "an optional-source coalesce is feasible immediately and, being cheap, runs first (bug: dialog-db-45)"
         );
 
         // Deterministic across replans.
-        let replanned = Planner::from(premises).plan(&Environment::new()).unwrap();
+        let replanned = Planner::from(premises).plan(&scope).unwrap();
         assert_eq!(kinds(&plan), kinds(&replanned));
     }
 }

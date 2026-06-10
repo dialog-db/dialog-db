@@ -261,6 +261,7 @@ mod tests {
 
     use super::*;
     use crate::artifact::Entity;
+    use crate::error::TypeError;
     use crate::planner::Planner;
     use crate::the;
     use crate::types::Any;
@@ -373,12 +374,22 @@ mod tests {
         );
     }
 
-    /// A standalone query (single optional premise, nothing
-    /// constraining it further) keeps its `is` term's optional
-    /// kind through planning. The rewrite doesn't strip
-    /// optionality when inference didn't strip it either.
+    /// A standalone optional premise cannot be planned at empty
+    /// scope: set-widening needs a known entity ("absent for
+    /// whom?"), so feasibility requires `?this` externally bound and
+    /// the planner rejects the conjunction naming it.
+    ///
+    /// Once the entity is bound the premise plans, and the rewrite
+    /// keeps its `is` optional — narrowing doesn't strip optionality
+    /// when inference didn't strip it either.
+    ///
+    /// Interim contract for the scalar-associative-layer restructure
+    /// (dialog-db-42/43, notes/scalar-associative-layer.md): the
+    /// associative layer will stop accepting optional `is` terms
+    /// altogether, turning this planning rejection into a
+    /// construction error.
     #[dialog_common::test]
-    fn it_preserves_local_optionality_when_no_other_premise_narrows() {
+    fn it_requires_entity_for_standalone_optional_scan() {
         let optional_name: Term<Any> = Term::<Option<String>>::var("name").into();
         let premises = vec![
             AttributeQuery::new(
@@ -390,10 +401,20 @@ mod tests {
             )
             .into(),
         ];
-        let plan = Planner::from(premises)
-            .plan(&crate::Environment::new())
-            .unwrap();
 
+        match Planner::from(premises.clone()).plan(&crate::Environment::new()) {
+            Err(TypeError::RequiredBindings { required }) => {
+                assert!(
+                    required.contains("this"),
+                    "the rejection names the entity the optional scan requires"
+                );
+            }
+            other => panic!("expected RequiredBindings, got {other:?}"),
+        }
+
+        let mut scope = crate::Environment::new();
+        scope.add("this");
+        let plan = Planner::from(premises).plan(&scope).unwrap();
         if let Premise::Assert(Proposition::Attribute(boxed)) = plan.steps[0].as_premise() {
             assert!(
                 boxed.is().is_optional(),
