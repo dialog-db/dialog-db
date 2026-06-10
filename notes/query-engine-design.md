@@ -2,7 +2,7 @@
 
 > Overview of dialog-db's query engine: how a rule is analyzed, planned, and evaluated, the type
 > hierarchy that carries the guarantees, and the academic work it is based on. Companion to the
-> sequencing record ([`implementation-plan.md`](./implementation-plan.md)), the planner design
+> sequencing record ([`operator-ir.md`](./operator-ir.md)), the planner design
 > ([`planning-adornment-and-cost.md`](./planning-adornment-and-cost.md)), and the forward-looking
 > [`incremental-subscriptions.md`](./incremental-subscriptions.md). User-facing optionality semantics
 > are documented in [`rust/dialog-query/guide.md`](../rust/dialog-query/guide.md).

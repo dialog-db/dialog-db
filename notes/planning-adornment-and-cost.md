@@ -12,7 +12,7 @@
 > entity, rather than a kind-driven scan mode (see `notes/scalar-associative-layer.md`). Still open:
 > the richer `Infeasible` vocabulary (`NeedsAnyOf`/`NeedsKOf`), the serializable per-premise
 > `Feasibility` descriptor, propagator decomposition of multidirectional formulas, and the cost
-> redesign — see the as-built deltas in [`implementation-plan.md`](./implementation-plan.md).
+> redesign — see the as-built deltas in [`operator-ir.md`](./operator-ir.md).
 
 ## Where this fits
 
