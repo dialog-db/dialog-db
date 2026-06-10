@@ -11,6 +11,7 @@ pub use crate::proposition::Proposition;
 pub use crate::rule::Rule;
 pub use crate::rule::deductive::DeductiveRule;
 use crate::term::Term;
+use crate::type_system::Type as Kind;
 use crate::types::Any;
 pub use thiserror::Error;
 
@@ -25,6 +26,17 @@ pub enum TypeError {
         binding: String,
         /// Expected type.
         expected: Type,
+        /// Actual term provided.
+        actual: Box<Term<Any>>,
+    },
+
+    /// A binding's term cannot inhabit the slot's kind (lattice type).
+    #[error("Expected binding \"{binding}\" whose kind meets {expected}, instead got {actual}")]
+    KindMismatch {
+        /// Name of the binding.
+        binding: String,
+        /// The slot's kind.
+        expected: Kind,
         /// Actual term provided.
         actual: Box<Term<Any>>,
     },
@@ -270,6 +282,14 @@ pub enum FieldTypeError {
         /// Actual term provided.
         actual: Box<Term<Any>>,
     },
+    /// The term cannot inhabit the slot's kind (lattice type).
+    #[error("Expected a term whose kind meets {expected}, instead got {actual}")]
+    KindMismatch {
+        /// The slot's kind.
+        expected: Kind,
+        /// Actual term provided.
+        actual: Box<Term<Any>>,
+    },
     /// A required term is missing.
     #[error("Required term is missing")]
     OmittedRequirement,
@@ -283,6 +303,11 @@ impl FieldTypeError {
     pub fn at(self, binding: String) -> TypeError {
         match self {
             FieldTypeError::TypeMismatch { expected, actual } => TypeError::TypeMismatch {
+                binding,
+                expected,
+                actual,
+            },
+            FieldTypeError::KindMismatch { expected, actual } => TypeError::KindMismatch {
                 binding,
                 expected,
                 actual,
