@@ -393,3 +393,38 @@ The questions the doc closed during implementation:
 3. **Error messages.** Settled: `InferenceError::Conflict`
    includes the offending variable name; the `Compile::compile`
    layer wraps it as `TypeError::TypeInference { reason }`.
+
+## Addendum: the structural turn (M1, feat/operator-ir)
+
+The flat shipped design described above was reworked once more; the
+contract is now structural rather than kind-driven. The deltas:
+
+- **Optionality left the associative layer.** `Resolution` and the
+  `is`-term-driven Absent fallback are gone; a raw attribute lookup is
+  scalar (zero rows on miss), and `AttributeQueryAll::new` strips a
+  `Nothing`-bearing kind. Set-widening is realized by the `MaybeQuery`
+  left-join at the semantic layer (see
+  `notes/scalar-associative-layer.md`).
+- **One encoding.** The `Requirement::Optional -> Primitive::ANY`
+  inference rule is deleted: a slot's `Requirement` speaks only of
+  derivability, and absence is declared exclusively through content
+  types (`MaybeQuery` schema, concept optional fields). The concept
+  boundary schema now widens optional fields, so a consuming rule's
+  TypeEnv is truthful.
+- **Filter semantics, everywhere.** A scalar context (scan slot,
+  formula input, equality against a non-widened term) matches nothing
+  against an `Absent` binding: the row is filtered, in positive and
+  negative polarity alike. `Coalesce` is the explicit opt-in for a
+  default, and it now orders strictly after the premise resolving its
+  source.
+- **Polarity discipline.** Negated premises neither contribute to
+  inference nor receive the positive narrowing
+  (`notes/polarity-and-negation.md`); `unless` over a `maybe` premise
+  is rejected at analysis (`NegatedOptional`).
+- **Checked, not advisory.** Inference runs once per rule (analysis;
+  `Planner::with_types`), typed scans filter values outside the
+  term's kind (`Type::admits`), and `Match::bind` validates kinds as
+  a contract check. `RequiredHeadFromOptional` also fires across
+  concept boundaries now that the boundary declares its widening.
+
+User-facing semantics: `rust/dialog-query/guide.md`.

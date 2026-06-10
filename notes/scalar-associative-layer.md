@@ -94,3 +94,37 @@ removes.
   purely a concept-projection (semantic) construct with no presence in attribute terms at all?
 - Cardinality-many optional fields (a `maybe`+`many` field) — how the left-join interacts with multiple
   rows.
+
+## Decisions (as built)
+
+The restructure landed on `feat/operator-ir`; every open question above
+is settled:
+
+- **Option 1 taken.** The left-join is a first-class construct:
+  `MaybeQuery` (premise level: `Proposition::Maybe`, plan level:
+  `Plan::Maybe`) wraps a *scalar* `DynamicAttributeQuery`. Its schema
+  hard-requires the entity slot and set-widens the `is`/`cause`
+  content types, so feasibility and inference need no special cases.
+  Concept lowering emits a plain scan per required field and a
+  `MaybeQuery` per optional field.
+- **The `of`-required symptom patch was reverted** once the schema
+  contract moved into `MaybeQuery`; attribute schemas are uniform
+  again.
+- **Term-level `Option` fate.** The `Nothing` bit lives in the type
+  system and in the schemas that can deliver `Absent` (`MaybeQuery`,
+  a concept's optional fields). Attribute terms never carry it:
+  `AttributeQueryAll::new` strips a `Nothing`-bearing kind at
+  construction. `Term<Option<T>>` remains the *declaration* surface
+  (concept fields, coalesce sources).
+- **Narrowing demotes.** When rule inference proves a sibling premise
+  guarantees presence, `apply_types` demotes the `Maybe` to its inner
+  scalar scan (`MaybeQuery::into_query`), preserving the
+  fallback-suppression optimization the old `is`-term narrowing
+  provided.
+- **Cardinality::Many** rides the inner dispatch: every fact extends
+  the row; a miss still yields exactly one `Absent` row (set-widening
+  is per entity, not per fact).
+- The remaining row-multiplicity guards (`saw_fact`, `entity_known`)
+  were deleted with `Resolution`; their semantics live in
+  `MaybeQuery::evaluate`'s four-case contract. User-facing semantics
+  are documented in `rust/dialog-query/guide.md`.

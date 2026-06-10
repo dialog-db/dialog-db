@@ -160,3 +160,31 @@ sets / pull) rather than DBSP's world-driven push, because dialog-db holds parti
 - Budiu et al., *DBSP: Automatic Incremental View Maintenance for Rich Query Languages* (VLDB 2023) +
   the DBSP spec — the incremental algebra (forward direction).
 - Gupta, Mumick, Subrahmanian 1993 (DRed); Tekle & Liu (FBF) — incremental maintenance with retraction.
+
+## Addendum: optionality and checked types (M1, feat/operator-ir)
+
+Updates to the engine since the body of this note was written:
+
+- The `Plan` IR gained a variant: `Maybe(Header, Box<MaybeQuery>)`,
+  the left-join realizing optional concept fields. Scans are scalar;
+  the left-join owns set-widening, hard-requires its entity in its
+  schema (feasibility needs no special case), and demotes to its
+  inner scan when rule inference proves the value present.
+- Inference is single-pass: `analyze` computes the `TypeEnv` once and
+  `Planner::with_types` consumes it for every `plan(scope)` call and
+  adornment; only the raw `Planner::from` path infers for itself.
+  `apply_types` is positive-polarity-only and projects kinds onto
+  attribute `is` terms, `Maybe` demotion, and concept parameter
+  terms.
+- Types are enforced: typed scan slots filter facts whose value falls
+  outside the kind (`Type::admits`), `Match::bind` validates kinds as
+  a contract check, and `Equality` propagates `Absent` only into
+  terms that explicitly admit `Nothing`.
+- Negation: `Absent` matches nothing in any scalar slot (both
+  polarities); `negate` propagates inner errors instead of swallowing
+  them; the cardinality-one `challenge` path reads the candidate fact
+  from the claim cited on the row (blank terms store no bindings).
+- The "feasibility (gate) vs cost (rank)" split now carries the
+  optionality contracts: `MaybeQuery` and `Coalesce` declare hard
+  requirements in their schemas, so ordering correctness is
+  structural rather than a cost accident.

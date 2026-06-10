@@ -424,6 +424,54 @@ mod tests {
         Ok(())
     }
 
+    /// A `Cardinality::Many` left-join: every fact extends the row
+    /// (one output row per fact), and a miss still yields exactly
+    /// one `Absent` row — set-widening is about the *entity*, not
+    /// the fact count.
+    #[dialog_common::test]
+    async fn it_left_joins_cardinality_many_fields() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+        branch
+            .transaction()
+            .assert(the!("person/alias").of(alice.clone()).is("Ali".to_string()))
+            .assert(
+                the!("person/alias")
+                    .of(alice.clone())
+                    .is("Allie".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let aliases = MaybeQuery::new(
+            Term::from(the!("person/alias")),
+            Term::<Entity>::var("person"),
+            Term::<String>::var("alias").into(),
+            Term::blank(),
+            Some(Cardinality::Many),
+        );
+
+        let mut alice_row = Match::new();
+        alice_row.bind(&Term::var("person"), Value::Entity(alice))?;
+        let results: Vec<Match> =
+            Selection::try_vec(aliases.clone().evaluate(&source, alice_row.seed())).await?;
+        assert_eq!(results.len(), 2, "every alias extends the row");
+
+        let mut bob_row = Match::new();
+        bob_row.bind(&Term::var("person"), Value::Entity(bob))?;
+        let results: Vec<Match> =
+            Selection::try_vec(aliases.evaluate(&source, bob_row.seed())).await?;
+        assert_eq!(results.len(), 1, "a miss yields exactly one fallback row");
+        assert_eq!(results[0].lookup(&Term::var("alias"))?, Binding::Absent);
+        Ok(())
+    }
+
     /// Positive-polarity counterpart of Absent-matches-nothing: a
     /// scalar scan whose value variable arrives bound `Absent` (from
     /// an upstream left-join) filters the row instead of scanning
