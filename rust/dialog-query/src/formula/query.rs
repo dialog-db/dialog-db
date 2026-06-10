@@ -8,7 +8,7 @@ use crate::formula::logic::{And, Not, Or};
 use crate::formula::math::{Difference, Modulo, Product, Quotient, Sum};
 use crate::formula::string::{Concatenate, Length, Like, Lowercase, Uppercase};
 use crate::selection::{Match, Selection};
-use crate::{Environment, Formula, Parameters, Query, Schema, try_stream};
+use crate::{Environment, Formula, Parameters, Schema, try_stream};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::sync::Arc;
@@ -16,14 +16,21 @@ use std::sync::Arc;
 /// Cost per parameter for formula evaluation
 pub const PARAM_COST: usize = 10;
 
-/// Defines the [`FormulaQuery`] enum from a list of `"formal/name" => Variant(Type)` entries.
+/// Defines the [`FormulaQuery`] enum from a list of
+/// `"formal/name" => Variant(FormulaType, QueryType)` entries.
 ///
 /// Generates:
 /// - The enum with `#[serde(tag = "assert", content = "where")]` and per-variant renames
 /// - Per-variant dispatch: `name()`, `cells()`, `resolve()`, `cost()`, `parameters()`
-/// - `From<Query<T>> for FormulaQuery` for each variant
+/// - `From<QueryType> for FormulaQuery` for each variant
+///
+/// The variant payload names the query struct *directly* rather than
+/// through the `Query<T>` projection: the projection requires
+/// `Predicate`, which (for generic formulas) is conditional on the
+/// very `From` impls this macro generates — naming the struct breaks
+/// that cycle.
 macro_rules! define_formulas {
-    ( $( $name:literal => $variant:ident($ty:ty) ),* $(,)? ) => {
+    ( $( $name:literal => $variant:ident($ty:ty, $q:ty) ),* $(,)? ) => {
         /// A formula premise bound to specific term arguments.
         ///
         /// Each variant wraps the typed `Query<T>` struct (e.g. `SumQuery`) generated
@@ -34,7 +41,7 @@ macro_rules! define_formulas {
             $(
                 #[doc = concat!("Formula `", $name, "`")]
                 #[serde(rename = $name)]
-                $variant(Query<$ty>),
+                $variant($q),
             )*
         }
 
@@ -45,7 +52,7 @@ macro_rules! define_formulas {
             }
 
             /// Returns the static cell definitions for this formula.
-            fn cells(&self) -> &'static Cells {
+            pub(crate) fn cells(&self) -> &'static Cells {
                 match self { $( Self::$variant(_) => <$ty>::cells(), )* }
             }
 
@@ -66,33 +73,33 @@ macro_rules! define_formulas {
         }
 
         $(
-            impl From<Query<$ty>> for FormulaQuery {
-                fn from(q: Query<$ty>) -> Self { Self::$variant(q) }
+            impl From<$q> for FormulaQuery {
+                fn from(q: $q) -> Self { Self::$variant(q) }
             }
         )*
     };
 }
 
 define_formulas! {
-    "math/sum"                => Sum(Sum),
-    "math/difference"         => Difference(Difference),
-    "math/product"            => Product(Product),
-    "math/quotient"           => Quotient(Quotient),
-    "math/modulo"             => Modulo(Modulo),
-    "text/concatenate"        => Concatenate(Concatenate),
-    "text/length"             => Length(Length),
-    "text/upper-case"         => Uppercase(Uppercase),
-    "text/lower-case"         => Lowercase(Lowercase),
-    "text/like"               => Like(Like),
+    "math/sum"                => Sum(Sum, super::math::SumQuery),
+    "math/difference"         => Difference(Difference, super::math::DifferenceQuery),
+    "math/product"            => Product(Product, super::math::ProductQuery),
+    "math/quotient"           => Quotient(Quotient, super::math::QuotientQuery),
+    "math/modulo"             => Modulo(Modulo, super::math::ModuloQuery),
+    "text/concatenate"        => Concatenate(Concatenate, super::string::ConcatenateQuery),
+    "text/length"             => Length(Length, super::string::LengthQuery),
+    "text/upper-case"         => Uppercase(Uppercase, super::string::UppercaseQuery),
+    "text/lower-case"         => Lowercase(Lowercase, super::string::LowercaseQuery),
+    "text/like"               => Like(Like, super::string::LikeQuery),
 
-    "boolean/and"             => And(And),
-    "boolean/or"              => Or(Or),
-    "boolean/not"             => Not(Not),
+    "boolean/and"             => And(And, super::logic::AndQuery),
+    "boolean/or"              => Or(Or, super::logic::OrQuery),
+    "boolean/not"             => Not(Not, super::logic::NotQuery),
 
-    "text/from"               => ToString(conversions::ToString),
-    "unsigned-integer/parse"  => ParseUnsignedInteger(ParseUnsignedInteger),
-    "signed-integer/parse"    => ParseSignedInteger(ParseSignedInteger),
-    "float/parse"             => ParseFloat(ParseFloat),
+    "text/from"               => ToString(conversions::ToString, conversions::ToStringQuery),
+    "unsigned-integer/parse"  => ParseUnsignedInteger(ParseUnsignedInteger, conversions::ParseUnsignedIntegerQuery),
+    "signed-integer/parse"    => ParseSignedInteger(ParseSignedInteger, conversions::ParseSignedIntegerQuery),
+    "float/parse"             => ParseFloat(ParseFloat, conversions::ParseFloatQuery),
 }
 
 impl FormulaQuery {
@@ -171,6 +178,7 @@ impl Display for FormulaQuery {
 mod tests {
     use super::*;
     use crate::Proposition;
+    use crate::Query;
     use crate::constraint::Constraint;
     use crate::constraint::coalesce::Coalesce;
     use crate::constraint::equality::Equality;

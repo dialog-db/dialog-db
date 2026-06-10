@@ -23,7 +23,7 @@
 
 use crate::artifact::{ArtifactTypeError, Type as ValueType, Value};
 use crate::type_system::{Primitive, Type as Kind};
-use crate::types::{TypeDescriptor, Typed};
+use crate::types::{Scalar, TypeDescriptor, Typed};
 use std::fmt::{self, Display};
 
 /// The lattice bound a scheme variable ranges over.
@@ -49,16 +49,10 @@ pub trait SchemeBound {
 /// is infinity, not `None`).
 pub trait Number:
     SchemeBound
-    + Sized
-    + Clone
-    + fmt::Debug
+    + Scalar
     + PartialEq
     + TryFrom<Value, Error = ArtifactTypeError>
-    + Into<Value>
-    + Typed
-    + dialog_common::ConditionalSend
     + dialog_common::ConditionalSync
-    + 'static
 {
     /// Addition; `None` on overflow or mixed types.
     fn add(self, other: Self) -> Option<Self>;
@@ -135,7 +129,8 @@ impl Number for f64 {
 /// no-promotion semantics: a row pairing an unsigned integer with a
 /// float in one scheme variable is a non-match. The engine registers
 /// generic formulas at their `Numeric` instantiation.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
 pub enum Numeric {
     /// An unsigned 128-bit integer (the width [`Value`] stores).
     UnsignedInt(u128),
@@ -216,6 +211,8 @@ impl TypeDescriptor for NumericDescriptor {
 impl Typed for Numeric {
     type Descriptor = NumericDescriptor;
 }
+
+impl Scalar for Numeric {}
 
 impl SchemeBound for Numeric {
     const BOUND: Primitive = Primitive::NUMERIC;

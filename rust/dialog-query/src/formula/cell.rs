@@ -33,6 +33,12 @@ pub struct Cell {
     content_type: Option<Kind>,
     /// Requirement for this cell
     requirement: Requirement,
+    /// Scheme label: cells sharing a label share one type variable,
+    /// instantiated fresh per use of the formula. `None` for
+    /// concrete (non-generic) cells. The label is the formula's
+    /// type-parameter name (e.g. `"N"`).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    scheme: Option<String>,
 }
 
 impl Cell {
@@ -43,6 +49,7 @@ impl Cell {
             description: String::new(),
             content_type,
             requirement: Requirement::Optional,
+            scheme: None,
         }
     }
 
@@ -56,6 +63,19 @@ impl Cell {
     pub fn the(&mut self, description: &'static str) -> &mut Self {
         self.description = description.to_string();
         self
+    }
+
+    /// Labels this cell as a scheme slot: cells of one formula
+    /// sharing a label share one bounded type variable. The cell's
+    /// `content_type` carries the bound.
+    pub fn scheme(&mut self, label: &'static str) -> &mut Self {
+        self.scheme = Some(label.to_string());
+        self
+    }
+
+    /// Returns the scheme label of this cell, if it is a scheme slot.
+    pub fn scheme_label(&self) -> Option<&str> {
+        self.scheme.as_deref()
     }
 
     /// Marks this cell as required, returning `self` for chaining.

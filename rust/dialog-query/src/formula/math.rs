@@ -1,126 +1,148 @@
-use crate::{Formula, formula::Input};
+use crate::Formula;
+use crate::formula::number::{Number, Numeric};
 
-/// Sum formula that adds two numbers
+/// Sum formula: `is = of + with`, generic over the numeric types.
+///
+/// The type parameter is the formula's *scheme variable*: all three
+/// cells share it, so inference links their types (a `u64` input
+/// narrows the output to `u64`) and a row whose values cannot share
+/// one type is a non-match. The engine evaluates the canonical
+/// [`Numeric`] instantiation; arithmetic that produces no value of
+/// the shared type (mixed variants, overflow) yields no rows. See
+/// `notes/formula-schemes.md`.
 #[derive(Debug, Clone, Formula)]
-pub struct Sum {
+pub struct Sum<N: Number = Numeric> {
     /// First operand
-    pub of: u32,
+    pub of: N,
     /// Second operand
-    pub with: u32,
+    pub with: N,
     /// Computed sum
     #[output(cost = 5)]
-    pub is: u32,
+    pub is: N,
 }
 
-impl Sum {
-    /// Compute the sum of `of` and `with`
-    pub fn compute(input: Input<Self>) -> Vec<Self> {
-        vec![Sum {
-            of: input.of,
-            with: input.with,
-            is: input.of + input.with,
-        }]
-    }
-}
-
-/// Difference formula that subtracts two numbers
-#[derive(Debug, Clone, Formula)]
-pub struct Difference {
-    /// Number to subtract from
-    pub of: u32,
-    /// Number to subtract
-    pub subtract: u32,
-    /// Difference
-    #[output(cost = 2)]
-    pub is: u32,
-}
-
-impl Difference {
-    /// Compute the difference of `of` minus `subtract`
-    pub fn compute(input: Input<Self>) -> Vec<Self> {
-        vec![Difference {
-            of: input.of,
-            subtract: input.subtract,
-            is: input.of.saturating_sub(input.subtract),
-        }]
-    }
-}
-
-/// Product formula that multiplies two numbers
-#[derive(Debug, Clone, Formula)]
-pub struct Product {
-    /// Number to multiply
-    pub of: u32,
-    /// Times to multiply
-    pub times: u32,
-    /// Result of multiplication
-    #[output(cost = 5)]
-    pub is: u32,
-}
-
-impl Product {
-    /// Compute the product of `of` times `times`
-    pub fn compute(input: Input<Self>) -> Vec<Self> {
-        vec![Product {
-            of: input.of,
-            times: input.times,
-            is: input.of * input.times,
-        }]
-    }
-}
-
-/// Quotient formula that divides two numbers
-#[derive(Debug, Clone, Formula)]
-pub struct Quotient {
-    /// Number to divide
-    pub of: u32,
-    /// Number to divide by
-    pub by: u32,
-    /// Result of division
-    #[output(cost = 5)]
-    pub is: u32,
-}
-
-impl Quotient {
-    /// Compute the quotient of `of` divided by `by`, returning empty on division by zero
-    pub fn compute(input: Input<Self>) -> Vec<Self> {
-        if input.by == 0 {
-            // Return empty Vec for division by zero - this will be filtered out
-            vec![]
-        } else {
-            vec![Quotient {
+impl<N: Number> Sum<N> {
+    /// Compute the sum of `of` and `with`. No rows when the
+    /// operation has no value of the shared type.
+    pub fn compute(input: SumInput<N>) -> Vec<Self> {
+        match input.of.clone().add(input.with.clone()) {
+            Some(is) => vec![Sum {
                 of: input.of,
-                by: input.by,
-                is: input.of / input.by,
-            }]
+                with: input.with,
+                is,
+            }],
+            None => vec![],
         }
     }
 }
 
-/// Modulo formula that computes remainder of division
+/// Difference formula: `is = of - subtract`, generic over the
+/// numeric types (see [`Sum`] for the scheme semantics).
 #[derive(Debug, Clone, Formula)]
-pub struct Modulo {
-    /// Number to compute modulo of
-    pub of: u32,
-    /// Number to compute modulo by
-    pub by: u32,
-    /// Result of modulo operation
-    #[output(cost = 10)]
-    pub is: u32,
+pub struct Difference<N: Number = Numeric> {
+    /// Number to subtract from
+    pub of: N,
+    /// Number to subtract
+    pub subtract: N,
+    /// Difference
+    #[output(cost = 2)]
+    pub is: N,
 }
 
-impl Modulo {
-    /// Compute `of` modulo `by`, returning empty on modulo by zero
-    pub fn compute(input: Input<Self>) -> Vec<Self> {
-        if input.by == 0 {
-            // Return empty Vec for modulo by zero
-            vec![]
-        } else {
-            vec![Modulo {
+impl<N: Number> Difference<N> {
+    /// Compute `of - subtract`. No rows when the operation has no
+    /// value of the shared type (including unsigned underflow).
+    pub fn compute(input: DifferenceInput<N>) -> Vec<Self> {
+        match input.of.clone().subtract(input.subtract.clone()) {
+            Some(is) => vec![Difference {
+                of: input.of,
+                subtract: input.subtract,
+                is,
+            }],
+            None => vec![],
+        }
+    }
+}
+
+/// Product formula: `is = of * times`, generic over the numeric
+/// types (see [`Sum`] for the scheme semantics).
+#[derive(Debug, Clone, Formula)]
+pub struct Product<N: Number = Numeric> {
+    /// Number to multiply
+    pub of: N,
+    /// Times to multiply
+    pub times: N,
+    /// Result of multiplication
+    #[output(cost = 5)]
+    pub is: N,
+}
+
+impl<N: Number> Product<N> {
+    /// Compute `of * times`. No rows when the operation has no value
+    /// of the shared type.
+    pub fn compute(input: ProductInput<N>) -> Vec<Self> {
+        match input.of.clone().multiply(input.times.clone()) {
+            Some(is) => vec![Product {
+                of: input.of,
+                times: input.times,
+                is,
+            }],
+            None => vec![],
+        }
+    }
+}
+
+/// Quotient formula: `is = of / by`, generic over the numeric types
+/// (see [`Sum`] for the scheme semantics).
+#[derive(Debug, Clone, Formula)]
+pub struct Quotient<N: Number = Numeric> {
+    /// Number to divide
+    pub of: N,
+    /// Number to divide by
+    pub by: N,
+    /// Result of division
+    #[output(cost = 5)]
+    pub is: N,
+}
+
+impl<N: Number> Quotient<N> {
+    /// Compute `of / by`. No rows on integer division by zero
+    /// (floats follow IEEE-754 and stay total).
+    pub fn compute(input: QuotientInput<N>) -> Vec<Self> {
+        match input.of.clone().divide(input.by.clone()) {
+            Some(is) => vec![Quotient {
                 of: input.of,
                 by: input.by,
-                is: input.of % input.by,
-            }]
+                is,
+            }],
+            None => vec![],
+        }
+    }
+}
+
+/// Modulo formula: `is = of % by`, generic over the numeric types
+/// (see [`Sum`] for the scheme semantics).
+#[derive(Debug, Clone, Formula)]
+pub struct Modulo<N: Number = Numeric> {
+    /// Number to compute modulo of
+    pub of: N,
+    /// Number to compute modulo by
+    pub by: N,
+    /// Result of modulo operation
+    #[output(cost = 10)]
+    pub is: N,
+}
+
+impl<N: Number> Modulo<N> {
+    /// Compute `of % by`. No rows on an integer zero divisor.
+    pub fn compute(input: ModuloInput<N>) -> Vec<Self> {
+        match input.of.clone().remainder(input.by.clone()) {
+            Some(is) => vec![Modulo {
+                of: input.of,
+                by: input.by,
+                is,
+            }],
+            None => vec![],
         }
     }
 }
@@ -325,8 +347,10 @@ mod tests {
         Ok(())
     }
 
+    /// Unsigned underflow has no value of the shared type: the row
+    /// is a non-match, never a saturated (fabricated) zero.
     #[dialog_common::test]
-    fn it_handles_difference_underflow() -> anyhow::Result<()> {
+    fn it_filters_difference_underflow() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x"));
         terms.insert("subtract".to_string(), Term::var("y"));
@@ -339,19 +363,9 @@ mod tests {
         let app: FormulaQuery = Difference::apply(terms)?.into();
         let results = app
             .compute(input)
-            .expect("Difference underflow should be handled");
+            .expect("underflow is a non-match, not an error");
 
-        assert_eq!(results.len(), 1);
-        let result = &results[0];
-        // Should saturate at 0
-        assert_eq!(
-            result
-                .lookup(&Term::var("result"))
-                .ok()
-                .and_then(|b| b.content().ok())
-                .and_then(|v| u32::try_from(v).ok()),
-            Some(0)
-        );
+        assert_eq!(results.len(), 0, "no value of the type is the result");
         Ok(())
     }
 
@@ -576,9 +590,9 @@ mod tests {
 
         // Now test realize: should reconstruct the Sum proof struct
         let proof = query_copy.realize(matches[0].clone())?;
-        assert_eq!(proof.of, 5);
-        assert_eq!(proof.with, 3);
-        assert_eq!(proof.is, 8);
+        assert_eq!(proof.of, Numeric::UnsignedInt(5));
+        assert_eq!(proof.with, Numeric::UnsignedInt(3));
+        assert_eq!(proof.is, Numeric::UnsignedInt(8));
 
         Ok(())
     }
@@ -587,8 +601,8 @@ mod tests {
     async fn it_performs_formula_with_constant_inputs() -> anyhow::Result<()> {
         // Input fields are constants, output field is a variable
         let query = Query::<Sum> {
-            of: Term::from(5u32),
-            with: Term::from(3u32),
+            of: Term::Constant(Value::from(5u32)),
+            with: Term::Constant(Value::from(3u32)),
             is: Term::var("result"),
         };
 
@@ -605,9 +619,9 @@ mod tests {
 
         assert_eq!(selection.len(), 1);
         let proof = query_copy.realize(selection[0].clone())?;
-        assert_eq!(proof.of, 5);
-        assert_eq!(proof.with, 3);
-        assert_eq!(proof.is, 8);
+        assert_eq!(proof.of, Numeric::UnsignedInt(5));
+        assert_eq!(proof.with, Numeric::UnsignedInt(3));
+        assert_eq!(proof.is, Numeric::UnsignedInt(8));
 
         Ok(())
     }
@@ -618,7 +632,7 @@ mod tests {
         let query = Query::<Sum> {
             of: Term::var("x"),
             with: Term::var("y"),
-            is: Term::from(8u32),
+            is: Term::Constant(Value::from(8u32)),
         };
 
         let (operator, profile) = test_operator_with_profile().await;
@@ -636,9 +650,9 @@ mod tests {
         // Should succeed: the formula computes 8, and the constant 8 is consistent
         assert_eq!(matches.len(), 1);
         let proof = query_copy.realize(matches[0].clone())?;
-        assert_eq!(proof.of, 5);
-        assert_eq!(proof.with, 3);
-        assert_eq!(proof.is, 8);
+        assert_eq!(proof.of, Numeric::UnsignedInt(5));
+        assert_eq!(proof.with, Numeric::UnsignedInt(3));
+        assert_eq!(proof.is, Numeric::UnsignedInt(8));
 
         Ok(())
     }
@@ -649,7 +663,7 @@ mod tests {
         let query = Query::<Sum> {
             of: Term::var("x"),
             with: Term::var("y"),
-            is: Term::from(99u32),
+            is: Term::Constant(Value::from(99u32)),
         };
 
         let (operator, profile) = test_operator_with_profile().await;
@@ -678,7 +692,7 @@ mod tests {
     async fn it_performs_formula_with_mixed_terms() -> anyhow::Result<()> {
         // Mix: one input is constant, one is variable, output is variable
         let query = Query::<Sum> {
-            of: Term::from(10u32),
+            of: Term::Constant(Value::from(10u32)),
             with: Term::var("y"),
             is: Term::var("result"),
         };
@@ -696,9 +710,9 @@ mod tests {
 
         assert_eq!(selection.len(), 1);
         let proof = query_copy.realize(selection[0].clone())?;
-        assert_eq!(proof.of, 10);
-        assert_eq!(proof.with, 7);
-        assert_eq!(proof.is, 17);
+        assert_eq!(proof.of, Numeric::UnsignedInt(10));
+        assert_eq!(proof.with, Numeric::UnsignedInt(7));
+        assert_eq!(proof.is, Numeric::UnsignedInt(17));
 
         Ok(())
     }
@@ -725,9 +739,9 @@ mod tests {
 
         assert_eq!(matches.len(), 1);
         let proof = query_copy.realize(matches[0].clone())?;
-        assert_eq!(proof.of, 4);
-        assert_eq!(proof.with, 4);
-        assert_eq!(proof.is, 8);
+        assert_eq!(proof.of, Numeric::UnsignedInt(4));
+        assert_eq!(proof.with, Numeric::UnsignedInt(4));
+        assert_eq!(proof.is, Numeric::UnsignedInt(8));
 
         Ok(())
     }
