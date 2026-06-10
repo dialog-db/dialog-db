@@ -3,8 +3,9 @@ use std::fmt::{self, Display};
 
 use crate::error::{FieldTypeError, TypeError};
 use crate::term::Term;
+use crate::type_system::Type as Kind;
 use crate::types::Any;
-use crate::{Parameters, Requirement, Schema, Type};
+use crate::{Parameters, Requirement, Schema};
 use serde::{Deserialize, Serialize};
 
 /// A single named parameter slot in a formula's schema.
@@ -25,16 +26,18 @@ pub struct Cell {
     name: String,
     /// Description of this cell
     description: String,
-    /// Data type of this cell
+    /// Kind (lattice type) of this cell. A concrete formula cell
+    /// carries a singleton; a scheme-bounded cell carries the set
+    /// the scheme variable ranges over (e.g. NUMERIC).
     #[serde(rename = "type")]
-    content_type: Option<Type>,
+    content_type: Option<Kind>,
     /// Requirement for this cell
     requirement: Requirement,
 }
 
 impl Cell {
     /// Creates a new optional cell with the given name and optional content type.
-    pub fn new(name: &'static str, content_type: Option<Type>) -> Self {
+    pub fn new(name: &'static str, content_type: Option<Kind>) -> Self {
         Cell {
             name: name.to_string(),
             description: String::new(),
@@ -44,7 +47,7 @@ impl Cell {
     }
 
     /// Sets the content type for this cell, returning `self` for chaining.
-    pub fn typed(&mut self, content_type: Type) -> &mut Self {
+    pub fn typed(&mut self, content_type: Kind) -> &mut Self {
         self.content_type = Some(content_type);
         self
     }
@@ -83,7 +86,7 @@ impl Cell {
     }
 
     /// Returns the content type of this cell, if specified.
-    pub fn content_type(&self) -> &Option<Type> {
+    pub fn content_type(&self) -> &Option<Kind> {
         &self.content_type
     }
 
@@ -92,23 +95,19 @@ impl Cell {
         &self.requirement
     }
 
-    /// Type checks that the provided parameter matches this cell's content type.
+    /// Type checks that the provided parameter is compatible with
+    /// this cell's kind: the meet of the two must be inhabited. A
+    /// kindless cell accepts anything; a kindless term is accepted
+    /// by any cell (inference resolves it at rule-compile time).
     pub fn check(&self, param: &Term<Any>) -> Result<(), FieldTypeError> {
-        // First we type check the input to ensure it matches cell's content type
-        match (self.content_type(), param.content_type()) {
-            // if expected is any (has no type) it checks
-            (None, _) => Ok(()),
-            // if cell is of some type and we're given term of unknown
-            // type that's also fine.
-            (_, None) => Ok(()),
-            // if expected isn't any (has no type) it must be equal
-            // to actual or it's a type mismatch.
-            (Some(expected), actual) => {
-                if Some(*expected) == actual {
+        match (self.content_type(), param.kind()) {
+            (None, _) | (_, None) => Ok(()),
+            (Some(expected), Some(actual)) => {
+                if expected.intersect(&actual).is_some() {
                     Ok(())
                 } else {
-                    Err(FieldTypeError::TypeMismatch {
-                        expected: *expected,
+                    Err(FieldTypeError::KindMismatch {
+                        expected: expected.clone(),
                         actual: Box::new(param.clone()),
                     })
                 }
@@ -145,7 +144,7 @@ impl Display for Cell {
             "?"
         };
 
-        if let Some(content_type) = self.content_type {
+        if let Some(content_type) = &self.content_type {
             write!(f, "{}{}: {}", prefix, self.name, content_type)
         } else {
             write!(f, "{}{}: Value", prefix, self.name)
@@ -160,7 +159,7 @@ pub struct CellsBuilder {
 
 impl CellsBuilder {
     /// Adds a new cell with the given name and optional type, returning it for further configuration.
-    pub fn cell(&mut self, name: &'static str, content_type: Option<Type>) -> &mut Cell {
+    pub fn cell(&mut self, name: &'static str, content_type: Option<Kind>) -> &mut Cell {
         let cell = Cell::new(name, content_type);
         self.cells.insert(name.to_string(), cell);
         self.cells.get_mut(name).unwrap()
@@ -248,7 +247,6 @@ impl<T: Iterator<Item = Cell>> From<T> for Cells {
 
 impl From<&Cells> for Schema {
     fn from(cells: &Cells) -> Self {
-        use crate::type_system;
         use crate::{Cardinality, Field};
         let mut schema = Schema::new();
         for (name, cell) in cells.iter() {
@@ -256,7 +254,7 @@ impl From<&Cells> for Schema {
                 name.into(),
                 Field {
                     description: cell.description.clone(),
-                    content_type: cell.content_type.map(type_system::Type::primitive),
+                    content_type: cell.content_type.clone(),
                     requirement: cell.requirement.clone(),
                     cardinality: Cardinality::One,
                 },
@@ -275,12 +273,12 @@ mod tests {
     fn it_evaluates_cells() -> anyhow::Result<()> {
         let cells = Cells::define(|builder| {
             builder
-                .cell("name", Some(Type::String))
+                .cell("name", Some(Kind::primitive(Type::String)))
                 .the("name field")
                 .required();
 
             builder
-                .cell("age", Some(Type::UnsignedInt))
+                .cell("age", Some(Kind::primitive(Type::UnsignedInt)))
                 .the("age field")
                 .output(15);
         });
@@ -289,7 +287,7 @@ mod tests {
         assert_eq!(cells.get("name").unwrap().name(), "name");
         assert_eq!(
             *cells.get("name").unwrap().content_type(),
-            Some(Type::String)
+            Some(Kind::primitive(Type::String))
         );
         assert_eq!(cells.get("name").unwrap().description(), "name field");
         assert_eq!(
@@ -300,7 +298,7 @@ mod tests {
         assert_eq!(cells.get("age").unwrap().name(), "age");
         assert_eq!(
             *cells.get("age").unwrap().content_type(),
-            Some(Type::UnsignedInt)
+            Some(Kind::primitive(Type::UnsignedInt))
         );
         assert_eq!(cells.get("age").unwrap().description(), "age field");
         assert_eq!(
@@ -319,7 +317,9 @@ mod tests {
     fn schema_from_cells_lifts_content_types() {
         use crate::Schema;
         let cells = Cells::define(|builder| {
-            builder.cell("name", Some(Type::String)).required();
+            builder
+                .cell("name", Some(Kind::primitive(Type::String)))
+                .required();
             builder.cell("untyped", None).required();
         });
         let schema = Schema::from(&cells);
