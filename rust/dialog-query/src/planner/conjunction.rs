@@ -54,3 +54,388 @@ impl Conjunction {
         )
     }
 }
+
+/// End-to-end regression tests for the optionality bug family: each
+/// test asserts the *agreed* observable semantics of set-widening
+/// through a planned conjunction. Tests that pin a known-broken
+/// behavior are `#[ignore]`d with the Beads issue that fixes them;
+/// remove the attribute when the fix lands.
+///
+/// The agreed semantics (see notes/optional-fields.md and
+/// notes/scalar-associative-layer.md): body premises are *filters* —
+/// a slot that demands a present value excludes rows where the
+/// variable is Absent (occurrence-typing narrowing); `Coalesce` is
+/// the explicit opt-in for treating a missing value as a default;
+/// absence is only ever read relative to a known entity.
+#[cfg(test)]
+mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use crate::attribute::query::AttributeQuery;
+    use crate::formula::math::Sum;
+    use crate::formula::string::Uppercase;
+    use crate::planner::Planner;
+    use crate::selection::Match;
+    use crate::session::RuleRegistry;
+    use crate::source::test::TestEnv;
+    use crate::the;
+    use crate::types::Any;
+    use crate::{
+        AttributeDescriptor, Cardinality, ConceptDescriptor, ConceptFieldDescriptor, ConceptQuery,
+        Environment, Formula, Negation, Parameters, Premise, Proposition, Term, Type, Value,
+    };
+    use dialog_artifacts::Entity;
+    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use futures_util::TryStreamExt;
+
+    /// Coalesce must take the *source* when the scan finds a value
+    /// and the fallback only when it does not.
+    ///
+    /// Today the greedy planner schedules the coalesce before the
+    /// nickname scan (its constant fallback satisfies its choice
+    /// group at cost 1), so `?display` binds to the fallback for
+    /// every row — even entities whose nickname is Present.
+    #[ignore = "dialog-db-45: coalesce plans before the scan binding its source; fallback shadows Present values"]
+    #[dialog_common::test]
+    async fn it_takes_present_source_over_coalesce_fallback() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(
+                the!("person/nickname")
+                    .of(alice.clone())
+                    .is("Ali".to_string()),
+            )
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let name_scan = AttributeQuery::new(
+            Term::from(the!("person/name")),
+            Term::<Entity>::var("person"),
+            Term::<String>::var("name").into(),
+            Term::var("c1"),
+            Some(Cardinality::One),
+        );
+        let nickname_scan = AttributeQuery::new(
+            Term::from(the!("person/nickname")),
+            Term::<Entity>::var("person"),
+            Term::<Option<String>>::var("nickname").into(),
+            Term::var("c2"),
+            Some(Cardinality::One),
+        );
+        let coalesce = Term::<Option<String>>::var("nickname")
+            .unwrap_or("Anon".to_string())
+            .is(Term::<String>::var("display"));
+
+        let plan = Planner::from(vec![
+            Premise::Assert(Proposition::Attribute(Box::new(name_scan))),
+            Premise::Assert(Proposition::Attribute(Box::new(nickname_scan))),
+            coalesce,
+        ])
+        .plan(&Environment::new())?;
+        let results: Vec<Match> = plan
+            .evaluate(Match::new().seed(), &source)
+            .try_collect()
+            .await?;
+
+        assert_eq!(results.len(), 2, "both people produce a row");
+        let mut found_alice = false;
+        let mut found_bob = false;
+        for row in &results {
+            let name = row.lookup(&Term::var("name"))?.content()?;
+            let display = row.lookup(&Term::var("display"))?.content()?;
+            match (&name, &display) {
+                (Value::String(n), Value::String(d)) if n == "Alice" => {
+                    assert!(
+                        d == "Ali",
+                        "Present nickname must win over the fallback, got {d:?}"
+                    );
+                    found_alice = true;
+                }
+                (Value::String(n), Value::String(d)) if n == "Bob" => {
+                    assert!(
+                        d == "Anon",
+                        "missing nickname takes the fallback, got {d:?}"
+                    );
+                    found_bob = true;
+                }
+                other => panic!("unexpected (name, display): {other:?}"),
+            }
+        }
+        assert!(found_alice && found_bob);
+        Ok(())
+    }
+
+    /// An `Absent` binding flowing into a negated premise matches
+    /// nothing: the negation's inner query is filtered for that row
+    /// (a scalar slot demands a present value), so the row *passes*
+    /// the negation.
+    ///
+    /// Today `resolve` treats Absent like unbound, so the inner scan
+    /// runs unconstrained, finds some fact, and filters the row —
+    /// an entity with *no* nickname is treated as if it had every
+    /// banned one.
+    #[ignore = "dialog-db-46: Absent resolves as unbound inside negation, filtering rows it must pass"]
+    #[dialog_common::test]
+    async fn it_negates_absent_as_matching_nothing() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+        let club = Entity::new()?;
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(
+                the!("person/nickname")
+                    .of(alice.clone())
+                    .is("Ali".to_string()),
+            )
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .assert(the!("club/banned").of(club.clone()).is("Ali".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let name_scan = AttributeQuery::new(
+            Term::from(the!("person/name")),
+            Term::<Entity>::var("person"),
+            Term::<String>::var("name").into(),
+            Term::var("c1"),
+            Some(Cardinality::One),
+        );
+        let nickname_scan = AttributeQuery::new(
+            Term::from(the!("person/nickname")),
+            Term::<Entity>::var("person"),
+            Term::<Option<String>>::var("nickname").into(),
+            Term::var("c2"),
+            Some(Cardinality::One),
+        );
+        let banned_scan = AttributeQuery::new(
+            Term::from(the!("club/banned")),
+            Term::blank(),
+            Term::<String>::var("nickname").into(),
+            Term::blank(),
+            Some(Cardinality::One),
+        );
+
+        let plan = Planner::from(vec![
+            Premise::Assert(Proposition::Attribute(Box::new(name_scan))),
+            Premise::Assert(Proposition::Attribute(Box::new(nickname_scan))),
+            Premise::Unless(Negation::not(Proposition::Attribute(Box::new(banned_scan)))),
+        ])
+        .plan(&Environment::new())?;
+        let results: Vec<Match> = plan
+            .evaluate(Match::new().seed(), &source)
+            .try_collect()
+            .await?;
+
+        assert_eq!(
+            results.len(),
+            1,
+            "Alice (banned nickname) is filtered; Bob (no nickname) passes"
+        );
+        let name = results[0].lookup(&Term::var("name"))?.content()?;
+        assert!(
+            matches!(&name, Value::String(n) if n == "Bob"),
+            "the surviving row is Bob, got {name:?}"
+        );
+        Ok(())
+    }
+
+    /// A concept's optional field crossing into a premise that
+    /// demands a present value *filters* the rows where it is
+    /// Absent — it must not abort the stream.
+    ///
+    /// Today the concept boundary drops set-widening from its schema
+    /// (the TypeEnv claims `String` while runtime delivers Absent),
+    /// so the Absent binding reaches the formula and the whole
+    /// stream errors instead of excluding the row.
+    #[ignore = "dialog-db-44: concept schema omits set-widening; Absent reaching the formula aborts the stream"]
+    #[dialog_common::test]
+    async fn it_filters_concept_rows_with_absent_field_from_required_formula() -> anyhow::Result<()>
+    {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(
+                the!("person/nickname")
+                    .of(alice.clone())
+                    .is("Ali".to_string()),
+            )
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let concept = ConceptDescriptor::try_from(vec![
+            (
+                "name".to_string(),
+                ConceptFieldDescriptor::required(AttributeDescriptor::new(
+                    the!("person/name"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
+            ),
+            (
+                "nickname".to_string(),
+                ConceptFieldDescriptor::optional(AttributeDescriptor::new(
+                    the!("person/nickname"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
+            ),
+        ])?;
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::var("person"));
+        terms.insert("name".to_string(), Term::var("name"));
+        terms.insert("nickname".to_string(), Term::var("nickname"));
+        let concept_premise = Premise::Assert(Proposition::Concept(ConceptQuery {
+            terms,
+            predicate: concept,
+        }));
+
+        let mut formula_terms = Parameters::new();
+        formula_terms.insert("of".to_string(), Term::var("nickname"));
+        formula_terms.insert("is".to_string(), Term::var("upper"));
+        let uppercase = Premise::Assert(Proposition::Formula(
+            Uppercase::apply(formula_terms)?.into(),
+        ));
+
+        let plan = Planner::from(vec![concept_premise, uppercase]).plan(&Environment::new())?;
+        let results: Vec<Match> = plan
+            .evaluate(Match::new().seed(), &source)
+            .try_collect()
+            .await?;
+
+        assert_eq!(
+            results.len(),
+            1,
+            "Bob (Absent nickname) is filtered by the formula's required input; the stream must not error"
+        );
+        let name = results[0].lookup(&Term::var("name"))?.content()?;
+        let upper = results[0].lookup(&Term::var("upper"))?.content()?;
+        assert!(
+            matches!(&name, Value::String(n) if n == "Alice"),
+            "the surviving row is Alice, got {name:?}"
+        );
+        assert!(
+            matches!(&upper, Value::String(u) if u == "ALI"),
+            "the formula computed over the Present value, got {upper:?}"
+        );
+        Ok(())
+    }
+
+    /// Characterization of the agreed filter semantics, passing
+    /// today: a formula slot demanding a present value narrows a
+    /// set-widened attribute variable rule-wide (occurrence typing),
+    /// so entities lacking the optional fact are excluded — no
+    /// Absent fallback row is emitted and no Absent reaches the
+    /// formula. `Coalesce` remains the explicit opt-in for a
+    /// default instead of exclusion.
+    #[dialog_common::test]
+    async fn it_narrows_optional_formula_input_to_a_filter() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(the!("person/age").of(alice.clone()).is(25u32))
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let name_scan = AttributeQuery::new(
+            Term::from(the!("person/name")),
+            Term::<Entity>::var("person"),
+            Term::<String>::var("name").into(),
+            Term::var("c1"),
+            Some(Cardinality::One),
+        );
+        let age_scan = AttributeQuery::new(
+            Term::from(the!("person/age")),
+            Term::<Entity>::var("person"),
+            Term::<Option<u32>>::var("age").into(),
+            Term::var("c2"),
+            Some(Cardinality::One),
+        );
+        let mut sum_terms = Parameters::new();
+        sum_terms.insert("of".to_string(), Term::var("age"));
+        sum_terms.insert("with".to_string(), Term::<Any>::constant(1u32));
+        sum_terms.insert("is".to_string(), Term::var("total"));
+        let sum = Premise::Assert(Proposition::Formula(Sum::apply(sum_terms)?.into()));
+
+        let plan = Planner::from(vec![
+            Premise::Assert(Proposition::Attribute(Box::new(name_scan))),
+            Premise::Assert(Proposition::Attribute(Box::new(age_scan))),
+            sum,
+        ])
+        .plan(&Environment::new())?;
+        let results: Vec<Match> = plan
+            .evaluate(Match::new().seed(), &source)
+            .try_collect()
+            .await?;
+
+        assert_eq!(
+            results.len(),
+            1,
+            "Bob lacks the optional age the formula requires; only Alice survives"
+        );
+        let name = results[0].lookup(&Term::var("name"))?.content()?;
+        let total = results[0].lookup(&Term::var("total"))?.content()?;
+        assert!(
+            matches!(&name, Value::String(n) if n == "Alice"),
+            "the surviving row is Alice, got {name:?}"
+        );
+        assert_eq!(
+            u32::try_from(total.clone()).ok(),
+            Some(26),
+            "the formula computed over the Present value"
+        );
+        Ok(())
+    }
+}
