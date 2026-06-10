@@ -80,11 +80,40 @@ This is why the left join *requires the entity to be bound* before it
 runs. "Absent" answers the question "absent for whom?", which is
 meaningless without a concrete entity. The planner enforces this
 structurally: an optional field's lookup can never lead an unbound
-scan; some required premise must bind the entity first. (Historically
-this was the #348 bug: when an optional field happened to sort first,
-it led the scan, its fallback was suppressed, and entities lacking
-the optional fact were silently dropped. The entity-bound requirement
-makes that ordering impossible rather than merely unlikely.)
+scan; some required premise must bind the entity first.
+
+If the planner did not enforce this, an optional field's lookup could
+end up leading the scan whenever it happened to sort first among the
+concept's fields. With no concrete entity there is nothing sound to
+report `Absent` *about*, so the fallback would have to be suppressed,
+and the lookup would silently degrade to an inner join: every entity
+lacking the optional fact would vanish from the result, based on
+nothing more than the alphabetical position of a field name. A
+correctness property must not depend on what you happened to name
+your fields.
+
+### Why a concept must have at least one required attribute
+
+A concept whose fields are *all* optional is rejected at compile time
+(`#[derive(Concept)]` fails to build it, and the dynamic constructors
+return `TypeError::EmptyConcept`). Two independent reasons, both
+falling out of the rules above:
+
+1. **It would match everything.** Each optional field widens rather
+   than constrains: any entity either has the fact (`Present`) or
+   does not (`Absent`), so every entity in the store satisfies every
+   optional field vacuously. An all-optional concept would be the
+   concept of "anything at all", and a query for it would enumerate
+   the universe.
+2. **Nothing would bind the entity.** Every optional field's left
+   join requires `this` already bound, and in an all-optional concept
+   there is no required field to bind it. The body would be
+   unplannable by its own rules.
+
+The required fields therefore do double duty: they are what gives the
+concept a meaning (they constrain which entities match), and they are
+what binds `this` so the optional fields have a concrete entity to
+report absence about.
 
 The left join itself has four behaviors, all consequences of reading
 `Absent` as a claim:
@@ -149,14 +178,16 @@ opt-in for defaults.
 
 ### Coalesce is ordered after its source
 
-A subtlety worth knowing because it was once a bug: the coalesce's
-`source` slot is a *hard dependency*. The planner schedules the
-constraint only after the premise that resolves `?nickname` (to
-`Present` or to `Absent`) has run. Were it scheduled earlier (it is
-very cheap, so a greedy planner would love to), an unbound source
-would look just like an absent one and `"Anon"` would shadow Alice's
-real nickname. For the same reason, an unbound source at evaluation
-time is an error, never a silent fallback.
+The coalesce's `source` slot is a *hard dependency*: the planner
+schedules the constraint only after the premise that resolves
+`?nickname` (to `Present` or to `Absent`) has run. This matters
+because the constraint is very cheap, so a greedy planner would
+otherwise love to schedule it first, and if it ran before the lookup,
+an unbound source would be indistinguishable from an absent one:
+`"Anon"` would shadow Alice's real nickname on every row. For the
+same reason, an unbound source at evaluation time is an error, never
+a silent fallback; silently substituting the default is precisely the
+failure mode the ordering rule exists to prevent.
 
 ## Producing values: heads are contracts
 
@@ -210,11 +241,13 @@ and the rule body:
 | alice | `"Ali"`     | finds `club/banned _ "Ali"`  | filtered (banned) |
 | bob   | `Absent`    | matches nothing              | passes |
 
-Bob has no nickname, so he cannot have a banned one. Before this rule
-existed, `Absent` resolved like *unbound* inside the negation: the
-inner scan ran unconstrained, found the `"Ali"` fact, and filtered
-Bob, treating a person with no nickname as if they had every banned
-one.
+Bob has no nickname, so he cannot have a banned one. If `Absent` were
+instead treated like *unbound* inside the negation, the inner scan
+would run unconstrained, find the `"Ali"` fact (anyone's banned
+nickname), and filter Bob too, treating a person with no nickname as
+if they had every banned nickname in the store. The claim "Bob has no
+nickname" would silently turn into the question "does any banned
+nickname exist?".
 
 The same rule applies in positive position for symmetry: a scalar
 premise receiving an `Absent` binding filters the row (instead of
