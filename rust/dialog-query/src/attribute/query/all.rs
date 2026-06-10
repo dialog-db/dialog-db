@@ -2,7 +2,6 @@ use crate::Cardinality;
 use crate::Claim;
 use crate::artifact::{ArtifactSelector, ArtifactsAttribute, Constrained};
 use crate::attribute::The;
-use crate::attribute::query::Resolution;
 use crate::environment::Environment;
 use crate::query::Application;
 use crate::query::Output;
@@ -41,29 +40,26 @@ pub struct AttributeQueryAll {
 }
 
 impl AttributeQueryAll {
-    /// Create a new attribute query. The resolution policy is
-    /// derived from `is`'s kind: a set-widened (`Nothing`-bit-set)
-    /// kind yields [`Resolution::Optional`] — one Absent fallback
-    /// row on miss; otherwise [`Resolution::Required`] — zero rows
-    /// on miss.
+    /// Create a new attribute query.
+    ///
+    /// The associative layer is scalar: a fact either exists or the
+    /// row is filtered. Set-widening (`Absent` on miss) is a
+    /// semantic-layer construct realized by
+    /// [`MaybeQuery`](crate::maybe::MaybeQuery), so a `Nothing` bit
+    /// on the `is` term's kind is meaningless here and is stripped.
     pub fn new(the: Term<The>, of: Term<Entity>, is: Term<Any>, cause: Term<Cause>) -> Self {
+        let is = match (is.name(), is.kind()) {
+            (Some(name), Some(kind)) if kind.is_optional() => {
+                Term::<Any>::typed_var(name.to_string(), kind.without_nothing())
+            }
+            _ => is,
+        };
         Self {
             the,
             of,
             is,
             cause,
             source: Term::<Record>::unique(),
-        }
-    }
-
-    /// Resolution policy derived from `is`'s kind. A set-widened
-    /// `is` (admits `Nothing`) is [`Resolution::Optional`];
-    /// otherwise [`Resolution::Required`].
-    pub fn resolution(&self) -> Resolution {
-        if self.is.is_optional() {
-            Resolution::Optional
-        } else {
-            Resolution::Required
         }
     }
 
@@ -174,33 +170,18 @@ impl AttributeQueryAll {
             },
         );
 
-        // For an optional (set-widening) query the entity must be
-        // *externally* bound, not satisfiable by the choice group:
-        // the `Absent` fallback is only meaningful for a known entity
-        // ("this entity has no such fact"). An unbound-entity optional
-        // scan suppresses its fallback and silently drops entities
-        // lacking the fact, so it must never lead an unbound scan —
-        // feasibility marks `of` required, forcing a required premise
-        // to bind the entity first. For a required query `of` joins
-        // the choice group as before (a constant `the` can lead).
-        let of_requirement = if self.is.is_optional() {
-            Requirement::required()
-        } else {
-            requirement.required()
-        };
         schema.insert(
             "of".to_string(),
             Field {
                 description: "Entity of the relation".to_string(),
                 content_type: Some(Kind::primitive(Type::Entity)),
-                requirement: of_requirement,
+                requirement: requirement.required(),
                 cardinality: Cardinality::One,
             },
         );
 
-        // The `is` term's kind already encodes optionality via the
-        // `Nothing` atom. `None` means "no static info" — the
-        // unifier resolves at rule-compile time.
+        // `None` means "no static info" — the unifier resolves at
+        // rule-compile time.
         schema.insert(
             "is".to_string(),
             Field {
@@ -211,19 +192,11 @@ impl AttributeQueryAll {
             },
         );
 
-        // The `cause` slot is bound by the merge step on every
-        // Present row; when the query is optional the fallback
-        // row binds it to `Absent`, so the slot is set-widened.
-        let cause_content = if self.is.is_optional() {
-            Kind::primitive(Type::Bytes).optional()
-        } else {
-            Kind::primitive(Type::Bytes)
-        };
         schema.insert(
             "cause".to_string(),
             Field {
                 description: "Causal stamp of the relation".to_string(),
-                content_type: Some(cause_content),
+                content_type: Some(Kind::primitive(Type::Bytes)),
                 requirement: requirement.required(),
                 cardinality: Cardinality::One,
             },
@@ -254,15 +227,10 @@ impl AttributeQueryAll {
 
     /// Evaluate yielding all matching artifacts.
     ///
-    /// With [`Resolution::Required`] (the default), zero rows are
-    /// yielded for an input when no fact matches the lookup —
-    /// standard EAV semantics.
-    ///
-    /// With [`Resolution::Optional`], if no fact matches for an
-    /// input row, a single fallback row is yielded with the `is`
-    /// slot (and the `cause` slot, if a named variable) bound to
-    /// [`Binding::Absent`](crate::Binding::Absent). This is the
-    /// row-layer signal for "we looked, no fact found."
+    /// Standard EAV semantics: zero rows are yielded for an input
+    /// when no fact matches the lookup — the premise filters the
+    /// row. Set-widening (`Absent` on miss) lives at the semantic
+    /// layer in [`MaybeQuery`](crate::maybe::MaybeQuery).
     pub fn evaluate<'a, Env, M: Selection + 'a>(
         self,
         env: &'a Env,
@@ -277,47 +245,12 @@ impl AttributeQueryAll {
                 let base = candidate?;
                 let selection = selector.resolve(&base);
 
-                // The entity must be determined for the Absent
-                // fallback to mean anything: "this entity has no such
-                // fact." An unbound entity would manufacture a phantom
-                // Absent row not tied to any concrete entity.
-                let entity_known = selection.of().is_constant();
-
-                let mut produced = false;
                 let stream = Provider::<Select<'_>>::execute(env, (&selection).try_into()?).await?;
                 for await artifact in stream {
                     let artifact = artifact?;
                     let mut extension = base.clone();
                     selector.merge(&mut extension, &artifact)?;
-                    produced = true;
                     yield extension;
-                }
-
-                // Optional fallback: yield one Absent row only when
-                // the attribute is genuinely absent for a known
-                // entity. Guards:
-                //   - `!produced`: no fact row covered this input.
-                //   - `selector.is.is_optional()`: the slot admits
-                //     absence.
-                //   - `entity_known`: absence is about a concrete
-                //     entity, not an unbound scan.
-                //   - `!base.is_present(&selector.is)`: the value
-                //     wasn't already pinned to a Present binding. When
-                //     it was, an empty scan is a value *mismatch*
-                //     (the value-keyed scan found nothing equal to the
-                //     pinned value), not absence — and binding that
-                //     Present variable to Absent would error and abort
-                //     the stream.
-                if !produced
-                    && selector.is.is_optional()
-                    && entity_known
-                    && !base.is_present(&selector.is)
-                {
-                    let mut fallback = base;
-                    fallback.bind_absent(&selector.is)?;
-                    let cause_term: Term<Any> = Term::<Any>::from(&selector.cause);
-                    fallback.bind_absent(&cause_term)?;
-                    yield fallback;
                 }
             }
         }

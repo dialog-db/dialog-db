@@ -149,10 +149,26 @@ mod tests {
 
     use super::*;
     use crate::artifact::{Entity, Type as ValueType};
+    use crate::attribute::The;
     use crate::attribute::query::AttributeQuery;
+    use crate::maybe::MaybeQuery;
     use crate::planner::Planner;
     use crate::types::Any;
     use crate::{Cardinality, Environment, Term, the};
+
+    /// Helper: an optional (set-widening) binding for `?name` — a
+    /// `MaybeQuery` left-join whose schema admits `Nothing` for the
+    /// value slot.
+    fn maybe_name(the: Term<The>) -> Premise {
+        MaybeQuery::new(
+            the,
+            Term::<Entity>::var("this"),
+            Term::<String>::var("name").into(),
+            Term::blank(),
+            Some(Cardinality::One),
+        )
+        .into()
+    }
 
     /// A typed slot kind flows into the variable's inferred type.
     #[dialog_common::test]
@@ -177,17 +193,7 @@ mod tests {
     /// bit in its inferred type.
     #[dialog_common::test]
     fn it_preserves_nothing_when_only_optional_bindings_exist() {
-        let optional_name: Term<Any> = Term::<Option<String>>::var("name").into();
-        let premises = vec![
-            AttributeQuery::new(
-                Term::from(the!("person/name")),
-                Term::<Entity>::var("this"),
-                optional_name,
-                Term::var("cause"),
-                Some(Cardinality::One),
-            )
-            .into(),
-        ];
+        let premises = vec![maybe_name(Term::from(the!("person/name")))];
         let env = TypeEnv::infer(&premises).unwrap();
         let name_kind = env.get("name").expect("name inferred");
         assert!(
@@ -201,17 +207,9 @@ mod tests {
     /// wins.
     #[dialog_common::test]
     fn it_strips_nothing_when_a_required_binding_also_exists() {
-        let optional_name: Term<Any> = Term::<Option<String>>::var("name").into();
         let typed_name: Term<Any> = Term::<String>::var("name").into();
         let premises = vec![
-            AttributeQuery::new(
-                Term::from(the!("person/nickname")),
-                Term::<Entity>::var("this"),
-                optional_name,
-                Term::var("cause1"),
-                Some(Cardinality::One),
-            )
-            .into(),
+            maybe_name(Term::from(the!("person/nickname"))),
             AttributeQuery::new(
                 Term::from(the!("person/name")),
                 Term::<Entity>::var("this"),
@@ -282,19 +280,11 @@ mod tests {
     fn it_ignores_negation_contributions_during_inference() {
         use crate::Proposition;
         use crate::negation::Negation;
-        // Positive premise binds ?name optionally (Option<String>).
-        let optional_name: Term<Any> = Term::<Option<String>>::var("name").into();
-        let positive = AttributeQuery::new(
-            Term::from(the!("person/name")),
-            Term::<Entity>::var("this"),
-            optional_name,
-            Term::var("cause"),
-            Some(Cardinality::One),
-        );
+        // Positive premise binds ?name optionally (a Maybe left-join).
         // Negation references ?name as Term<String> (non-optional).
-        // If this contributed to inference, ?name's inferred kind
-        // would be narrowed to String (no Nothing). But it doesn't,
-        // so ?name stays Optional<String>.
+        // If the negation contributed to inference, ?name's inferred
+        // kind would be narrowed to String (no Nothing). But it
+        // doesn't, so ?name stays set-widened.
         let strict_name: Term<Any> = Term::<String>::var("name").into();
         let neg_query = AttributeQuery::new(
             Term::from(the!("person/nickname")),
@@ -304,7 +294,7 @@ mod tests {
             Some(Cardinality::One),
         );
         let premises = vec![
-            positive.into(),
+            maybe_name(Term::from(the!("person/name"))),
             Premise::Unless(Negation(Proposition::Attribute(Box::new(neg_query)))),
         ];
         let env = TypeEnv::infer(&premises).unwrap();

@@ -75,6 +75,7 @@ mod tests {
     use crate::attribute::query::AttributeQuery;
     use crate::formula::math::Sum;
     use crate::formula::string::Uppercase;
+    use crate::maybe::MaybeQuery;
     use crate::planner::Planner;
     use crate::selection::Match;
     use crate::session::RuleRegistry;
@@ -130,11 +131,11 @@ mod tests {
             Term::var("c1"),
             Some(Cardinality::One),
         );
-        let nickname_scan = AttributeQuery::new(
+        let nickname_maybe = MaybeQuery::new(
             Term::from(the!("person/nickname")),
             Term::<Entity>::var("person"),
-            Term::<Option<String>>::var("nickname").into(),
-            Term::var("c2"),
+            Term::<String>::var("nickname").into(),
+            Term::blank(),
             Some(Cardinality::One),
         );
         let coalesce = Term::<Option<String>>::var("nickname")
@@ -143,7 +144,7 @@ mod tests {
 
         let plan = Planner::from(vec![
             Premise::Assert(Proposition::Attribute(Box::new(name_scan))),
-            Premise::Assert(Proposition::Attribute(Box::new(nickname_scan))),
+            nickname_maybe.into(),
             coalesce,
         ])
         .plan(&Environment::new())?;
@@ -225,11 +226,11 @@ mod tests {
             Term::var("c1"),
             Some(Cardinality::One),
         );
-        let nickname_scan = AttributeQuery::new(
+        let nickname_maybe = MaybeQuery::new(
             Term::from(the!("person/nickname")),
             Term::<Entity>::var("person"),
-            Term::<Option<String>>::var("nickname").into(),
-            Term::var("c2"),
+            Term::<String>::var("nickname").into(),
+            Term::blank(),
             Some(Cardinality::One),
         );
         let banned_scan = AttributeQuery::new(
@@ -242,7 +243,7 @@ mod tests {
 
         let plan = Planner::from(vec![
             Premise::Assert(Proposition::Attribute(Box::new(name_scan))),
-            Premise::Assert(Proposition::Attribute(Box::new(nickname_scan))),
+            nickname_maybe.into(),
             Premise::Unless(Negation::not(Proposition::Attribute(Box::new(banned_scan)))),
         ])
         .plan(&Environment::new())?;
@@ -396,11 +397,11 @@ mod tests {
             Term::var("c1"),
             Some(Cardinality::One),
         );
-        let age_scan = AttributeQuery::new(
+        let age_maybe = MaybeQuery::new(
             Term::from(the!("person/age")),
             Term::<Entity>::var("person"),
-            Term::<Option<u32>>::var("age").into(),
-            Term::var("c2"),
+            Term::<u32>::var("age").into(),
+            Term::blank(),
             Some(Cardinality::One),
         );
         let mut sum_terms = Parameters::new();
@@ -411,7 +412,7 @@ mod tests {
 
         let plan = Planner::from(vec![
             Premise::Assert(Proposition::Attribute(Box::new(name_scan))),
-            Premise::Assert(Proposition::Attribute(Box::new(age_scan))),
+            age_maybe.into(),
             sum,
         ])
         .plan(&Environment::new())?;

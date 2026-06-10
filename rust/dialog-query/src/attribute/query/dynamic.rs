@@ -2,7 +2,6 @@ use crate::Cardinality;
 use crate::Claim;
 use crate::artifact::{ArtifactSelector, ArtifactsAttribute, Constrained};
 use crate::attribute::The;
-use crate::attribute::query::Resolution;
 use crate::environment::Environment;
 use crate::negation::Negation;
 use crate::proposition::Proposition;
@@ -46,10 +45,9 @@ impl DynamicAttributeQuery {
     /// `None` or `Some(Cardinality::Many)` → `All` variant.
     /// `Some(Cardinality::One)` → `Only` variant.
     ///
-    /// Resolution (Required vs Optional) is derived from the
-    /// typed `is` term: if its kind admits the `Nothing` atom the
-    /// query is treated as optional and yields an `Absent`
-    /// fallback row on miss.
+    /// Scalar semantics in both variants: zero rows on miss.
+    /// Set-widening (`Absent` on miss) is a semantic-layer construct
+    /// realized by [`MaybeQuery`](crate::maybe::MaybeQuery).
     pub fn new(
         the: Term<The>,
         of: Term<Entity>,
@@ -62,14 +60,6 @@ impl DynamicAttributeQuery {
                 DynamicAttributeQuery::Only(AttributeQueryOnly::new(the, of, is, cause))
             }
             _ => DynamicAttributeQuery::All(AttributeQueryAll::new(the, of, is, cause)),
-        }
-    }
-
-    /// Returns the resolution policy of this query.
-    pub fn resolution(&self) -> Resolution {
-        match self {
-            DynamicAttributeQuery::All(q) => q.resolution(),
-            DynamicAttributeQuery::Only(q) => q.resolution(),
         }
     }
 
@@ -916,39 +906,12 @@ mod tests {
         Ok(())
     }
 
-    /// `DynamicAttributeQuery::new` defaults to
-    /// `Resolution::Required` — the existing semantics.
+    /// The associative layer is scalar: a set-widened (`Nothing`-
+    /// bearing) `is` kind is stripped at construction, in both
+    /// cardinality variants. Set-widening belongs to
+    /// [`MaybeQuery`](crate::maybe::MaybeQuery).
     #[dialog_common::test]
-    fn new_defaults_to_required_resolution() {
-        let q = DynamicAttributeQuery::new(
-            Term::var("the"),
-            Term::var("of"),
-            Term::var("is"),
-            Term::var("cause"),
-            None,
-        );
-        assert_eq!(q.resolution(), Resolution::Required);
-    }
-
-    /// When the `is` term carries an optional kind the derived
-    /// resolution is `Optional`.
-    #[dialog_common::test]
-    fn it_derives_optional_resolution_from_is_term_kind() {
-        let q = DynamicAttributeQuery::new(
-            Term::var("the"),
-            Term::var("of"),
-            optional_is("is"),
-            Term::var("cause"),
-            None,
-        );
-        assert_eq!(q.resolution(), Resolution::Optional);
-    }
-
-    /// Resolution is derived from the `is` term's kind and shows
-    /// up identically across both `All` (Many cardinality) and
-    /// `Only` (One cardinality) variants.
-    #[dialog_common::test]
-    fn it_propagates_resolution_through_cardinality_variants() {
+    fn it_normalizes_optional_is_kind_at_construction() {
         let many = DynamicAttributeQuery::new(
             Term::var("the"),
             Term::var("of"),
@@ -963,58 +926,17 @@ mod tests {
             Term::var("cause"),
             Some(Cardinality::One),
         );
-        assert_eq!(many.resolution(), Resolution::Optional);
-        assert_eq!(one.resolution(), Resolution::Optional);
+        assert!(!many.is().is_optional(), "Many variant strips Nothing");
+        assert!(!one.is().is_optional(), "One variant strips Nothing");
         assert!(matches!(many, DynamicAttributeQuery::All(_)));
         assert!(matches!(one, DynamicAttributeQuery::Only(_)));
     }
 
-    /// Required-resolution schema declares the `is` slot as a
-    /// concrete type or unknown — the slot demands a Present
-    /// value (no `Nothing` bit).
+    /// The schema's `is` slot never carries the `Nothing` bit,
+    /// even when constructed from a `Term<Option<U>>` — the inner
+    /// value type is preserved, the widening is dropped.
     #[dialog_common::test]
-    fn it_emits_definite_schema_for_required_resolution() {
-        let q = DynamicAttributeQuery::new(
-            Term::var("the"),
-            Term::var("of"),
-            Term::var("is"),
-            Term::var("cause"),
-            None,
-        );
-        let schema = q.schema();
-        let is = schema.get("is").expect("is field present");
-        // Untyped `is` slot reports `None` (unknown) — not
-        // Optional in the sense of set-widening.
-        assert!(
-            is.content_type().is_none() || !is.content_type().unwrap().is_optional(),
-            "Required resolution must not produce Optional schema"
-        );
-    }
-
-    /// When the `is` term's kind is optional, the schema's `is`
-    /// slot is optional too and may bind to Absent.
-    #[dialog_common::test]
-    fn it_emits_optional_schema_when_is_term_is_optional() {
-        let q = DynamicAttributeQuery::new(
-            Term::var("the"),
-            Term::var("of"),
-            optional_is("is"),
-            Term::var("cause"),
-            None,
-        );
-        let schema = q.schema();
-        let is = schema.get("is").expect("is field present");
-        let content = is.content_type().expect("content_type present");
-        assert!(
-            content.is_optional(),
-            "Optional `is` term must produce Optional schema"
-        );
-    }
-
-    /// When the `is` term is a typed `Term<Option<U>>`, the schema's
-    /// `is` slot admits both `U` and `Nothing`.
-    #[dialog_common::test]
-    fn it_preserves_inner_type_when_is_term_is_optional() {
+    fn it_emits_scalar_schema_even_for_optional_input_term() {
         use crate::artifact::Type as ValueType;
         let typed_is: Term<Any> = Term::<Option<String>>::var("name").into();
         let q = DynamicAttributeQuery::new(
@@ -1027,111 +949,68 @@ mod tests {
         let schema = q.schema();
         let is = schema.get("is").expect("is field present");
         let content = is.content_type().expect("content_type present");
-        assert!(content.is_optional());
+        assert!(!content.is_optional(), "the associative layer is scalar");
         assert!(
             content.primitive_part().contains(ValueType::String),
-            "Optional wrap preserves the inner primitive type"
+            "normalization preserves the inner primitive type"
+        );
+
+        let untyped = DynamicAttributeQuery::new(
+            Term::var("the"),
+            Term::var("of"),
+            Term::var("is"),
+            Term::var("cause"),
+            None,
+        );
+        let schema = untyped.schema();
+        let is = schema.get("is").expect("is field present");
+        assert!(
+            is.content_type().is_none(),
+            "untyped is slot reports unknown, not widened"
         );
     }
 
-    /// Required-resolution evaluation yields zero rows when the
-    /// underlying fact is missing — standard EAV.
+    /// Evaluation yields zero rows when the underlying fact is
+    /// missing — standard EAV — regardless of the input term's
+    /// kind. The Absent fallback lives in `MaybeQuery`, not here.
     #[dialog_common::test]
-    async fn it_yields_zero_rows_on_miss_when_required() -> anyhow::Result<()> {
+    async fn it_yields_zero_rows_on_miss() -> anyhow::Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         // Don't assert any facts — the lookup misses.
         let alice = Entity::new()?;
-        let q = DynamicAttributeQuery::new(
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let scalar = DynamicAttributeQuery::new(
             Term::Constant(crate::Value::from(the!("person/name").clone())),
-            Term::Constant(crate::Value::Entity(alice)),
+            Term::Constant(crate::Value::Entity(alice.clone())),
             Term::var("is"),
             Term::blank(),
             Some(Cardinality::One),
         );
-
-        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results =
-            Selection::try_vec(Application::evaluate(q, Match::new().seed(), &source)).await?;
-        assert_eq!(
-            results.len(),
-            0,
-            "Required resolution must yield no rows on miss"
-        );
-        Ok(())
-    }
+            Selection::try_vec(Application::evaluate(scalar, Match::new().seed(), &source)).await?;
+        assert_eq!(results.len(), 0, "scalar lookup yields no rows on miss");
 
-    /// Optional-resolution evaluation yields one row with `is`
-    /// bound to `Absent` when the underlying fact is missing.
-    #[dialog_common::test]
-    async fn it_yields_absent_fallback_on_miss_when_optional() -> anyhow::Result<()> {
-        use crate::Binding;
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
-        let branch = repo.branch("main").open().perform(&operator).await?;
-
-        let alice = Entity::new()?;
-        let q = DynamicAttributeQuery::new(
+        let widened_term = DynamicAttributeQuery::new(
             Term::Constant(crate::Value::from(the!("person/nickname").clone())),
             Term::Constant(crate::Value::Entity(alice)),
             optional_is("nickname"),
             Term::blank(),
             Some(Cardinality::One),
         );
-
-        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
-        let results =
-            Selection::try_vec(Application::evaluate(q, Match::new().seed(), &source)).await?;
+        let results = Selection::try_vec(Application::evaluate(
+            widened_term,
+            Match::new().seed(),
+            &source,
+        ))
+        .await?;
         assert_eq!(
             results.len(),
-            1,
-            "Optional resolution must yield one fallback row on miss"
-        );
-        assert_eq!(
-            results[0].lookup(&Term::var("nickname"))?,
-            Binding::Absent,
-            "fallback row must bind `is` to Absent"
-        );
-        Ok(())
-    }
-
-    /// Optional-resolution evaluation yields the matched row(s)
-    /// when the underlying fact exists — set-widening doesn't
-    /// shadow Present results.
-    #[dialog_common::test]
-    async fn it_yields_present_row_when_optional_fact_exists() -> anyhow::Result<()> {
-        use crate::Binding;
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
-        let branch = repo.branch("main").open().perform(&operator).await?;
-
-        let alice = Entity::new()?;
-        let name_attr = the!("person/name");
-        branch
-            .transaction()
-            .assert(name_attr.clone().of(alice.clone()).is("Alice".to_string()))
-            .commit()
-            .perform(&operator)
-            .await?;
-
-        let q = DynamicAttributeQuery::new(
-            Term::Constant(crate::Value::from(name_attr)),
-            Term::Constant(crate::Value::Entity(alice)),
-            optional_is("name"),
-            Term::blank(),
-            Some(Cardinality::One),
-        );
-
-        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
-        let results =
-            Selection::try_vec(Application::evaluate(q, Match::new().seed(), &source)).await?;
-        assert_eq!(results.len(), 1);
-        assert_eq!(
-            results[0].lookup(&Term::var("name"))?,
-            Binding::Present(crate::Value::String("Alice".into())),
-            "Optional with a Present fact yields Present, not Absent"
+            0,
+            "an optional-kinded input term is normalized: still no fallback row"
         );
         Ok(())
     }

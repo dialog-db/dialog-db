@@ -289,151 +289,76 @@ mod tests {
     use super::*;
     use crate::artifact::Entity;
     use crate::error::TypeError;
+    use crate::maybe::MaybeQuery;
     use crate::planner::Planner;
     use crate::the;
-    use crate::types::Any;
     use crate::{Cardinality, Term};
 
-    /// A rule where one premise binds `?name` optionally (so its
-    /// local `is` term carries `String | Nothing`) and another
-    /// binds it required (kind `String`). Rule-level inference
-    /// narrows `?name` to `String`, and the planner stamps the
-    /// narrowed term into each plan step's premise so the
-    /// evaluator's `is.is_optional()` check returns `false`.
+    fn maybe_nickname(var: &str) -> Premise {
+        MaybeQuery::new(
+            Term::from(the!("person/nickname")),
+            Term::<Entity>::var("this"),
+            Term::<String>::var(var).into(),
+            Term::blank(),
+            Some(Cardinality::One),
+        )
+        .into()
+    }
+
+    fn name_scan(var: &str) -> Premise {
+        AttributeQuery::new(
+            Term::from(the!("person/name")),
+            Term::<Entity>::var("this"),
+            Term::<String>::var(var).into(),
+            Term::var("cause2"),
+            Some(Cardinality::One),
+        )
+        .into()
+    }
+
+    /// A rule where a `Maybe` left-join binds `?name` (set-widened:
+    /// `String | Nothing` in its schema) and a sibling scan binds it
+    /// required (kind `String`). Rule-level inference narrows
+    /// `?name` to `String`, and the planner demotes the `Maybe` to
+    /// its wrapped scalar scan — the fallback can never fire, so the
+    /// plan contains no `Maybe` step at all.
     #[dialog_common::test]
-    fn it_narrows_optional_is_term_via_rule_inference() {
-        let optional_name: Term<Any> = Term::<Option<String>>::var("name").into();
-        let typed_name: Term<Any> = Term::<String>::var("name").into();
-        let premises = vec![
-            AttributeQuery::new(
-                Term::from(the!("person/nickname")),
-                Term::<Entity>::var("this"),
-                optional_name,
-                Term::var("cause1"),
-                Some(Cardinality::One),
-            )
-            .into(),
-            AttributeQuery::new(
-                Term::from(the!("person/name")),
-                Term::<Entity>::var("this"),
-                typed_name,
-                Term::var("cause2"),
-                Some(Cardinality::One),
-            )
-            .into(),
-        ];
+    fn it_demotes_maybe_to_scan_via_rule_inference() {
+        let premises = vec![maybe_nickname("name"), name_scan("name")];
         let plan = Planner::from(premises)
             .plan(&crate::Environment::new())
             .unwrap();
 
-        // Every plan step's stored premise has the narrowed `is` —
-        // the rewrite happens at plan time. The first premise's
-        // user-supplied `is` was `Option<String>`; after planning
-        // it should be `String` only.
+        assert_eq!(plan.steps.len(), 2);
         for step in plan.steps {
-            if let Premise::Assert(Proposition::Attribute(boxed)) = step.as_premise() {
-                assert!(
-                    !boxed.is().is_optional(),
-                    "rule-level narrowing should leave `is` non-optional"
-                );
+            match step.as_premise() {
+                Premise::Assert(Proposition::Attribute(boxed)) => {
+                    assert!(
+                        !boxed.is().is_optional(),
+                        "demoted scan carries the narrowed scalar kind"
+                    );
+                }
+                other => panic!("expected only scalar scans after demotion, got {other}"),
             }
         }
     }
 
-    /// End-to-end: with rule-level narrowing applied, an optional
-    /// attribute query whose `?nick` is narrowed to non-optional by
-    /// a sibling premise no longer emits Absent-fallback rows.
-    ///
-    /// The test asserts a stronger fact than "rows are filtered":
-    /// it walks the plan's stored premises and verifies the
-    /// optional attribute's `is` term has been rewritten to a
-    /// non-optional kind. Without that rewrite, the attribute's
-    /// `evaluate` would emit one Absent fallback row per entity
-    /// without a nickname.
-    #[dialog_common::test]
-    fn it_suppresses_absent_fallback_under_rule_inference() {
-        let optional_nick: Term<Any> = Term::<Option<String>>::var("nick").into();
-        let typed_nick: Term<Any> = Term::<String>::var("nick").into();
-        let nickname_query = AttributeQuery::new(
-            Term::from(the!("person/nickname")),
-            Term::<Entity>::var("this"),
-            optional_nick,
-            Term::var("cause1"),
-            Some(Cardinality::One),
-        );
-        let name_query = AttributeQuery::new(
-            Term::from(the!("person/name")),
-            Term::<Entity>::var("this"),
-            typed_nick,
-            Term::var("cause2"),
-            Some(Cardinality::One),
-        );
-
-        // Before planning, the nickname query's `is` is optional.
-        assert!(
-            nickname_query.is().is_optional(),
-            "the local optional kind is preserved on the user's query"
-        );
-
-        let plan = Planner::from(vec![nickname_query.into(), name_query.into()])
-            .plan(&crate::Environment::new())
-            .unwrap();
-
-        // After planning, every attribute step that references
-        // `?nick` should have an `is` term whose kind is no
-        // longer optional — the narrowing was applied at plan
-        // time, not deferred to evaluation.
-        let mut narrowed_count = 0;
-        for step in &plan.steps {
-            if let Premise::Assert(Proposition::Attribute(boxed)) = step.as_premise()
-                && boxed.is().name() == Some("nick")
-            {
-                assert!(
-                    !boxed.is().is_optional(),
-                    "rule-level narrowing should have stripped Nothing from ?nick"
-                );
-                narrowed_count += 1;
-            }
-        }
-        assert_eq!(
-            narrowed_count, 2,
-            "both attribute steps reference ?nick and should both be checked"
-        );
-    }
-
-    /// A standalone optional premise cannot be planned at empty
+    /// A standalone `Maybe` premise cannot be planned at empty
     /// scope: set-widening needs a known entity ("absent for
-    /// whom?"), so feasibility requires `?this` externally bound and
-    /// the planner rejects the conjunction naming it.
-    ///
-    /// Once the entity is bound the premise plans, and the rewrite
-    /// keeps its `is` optional — narrowing doesn't strip optionality
-    /// when inference didn't strip it either.
-    ///
-    /// Interim contract for the scalar-associative-layer restructure
-    /// (dialog-db-42/43, notes/scalar-associative-layer.md): the
-    /// associative layer will stop accepting optional `is` terms
-    /// altogether, turning this planning rejection into a
-    /// construction error.
+    /// whom?"), so its schema hard-requires `?this` and the planner
+    /// rejects the conjunction naming it. Once the entity is bound
+    /// the premise plans, and stays a `Maybe` step — nothing
+    /// narrowed it, so the left-join (and its Absent fallback) is
+    /// preserved.
     #[dialog_common::test]
-    fn it_requires_entity_for_standalone_optional_scan() {
-        let optional_name: Term<Any> = Term::<Option<String>>::var("name").into();
-        let premises = vec![
-            AttributeQuery::new(
-                Term::from(the!("person/name")),
-                Term::<Entity>::var("this"),
-                optional_name,
-                Term::var("cause"),
-                Some(Cardinality::One),
-            )
-            .into(),
-        ];
+    fn it_requires_entity_for_standalone_maybe() {
+        let premises = vec![maybe_nickname("name")];
 
         match Planner::from(premises.clone()).plan(&crate::Environment::new()) {
             Err(TypeError::RequiredBindings { required }) => {
                 assert!(
                     required.contains("this"),
-                    "the rejection names the entity the optional scan requires"
+                    "the rejection names the entity the left-join requires"
                 );
             }
             other => panic!("expected RequiredBindings, got {other:?}"),
@@ -442,51 +367,36 @@ mod tests {
         let mut scope = crate::Environment::new();
         scope.add("this");
         let plan = Planner::from(premises).plan(&scope).unwrap();
-        if let Premise::Assert(Proposition::Attribute(boxed)) = plan.steps[0].as_premise() {
-            assert!(
-                boxed.is().is_optional(),
-                "single optional premise should keep its optional `is`"
-            );
-        }
+        assert!(
+            matches!(plan.steps[0], Plan::Maybe(..)),
+            "an un-narrowed optional premise stays a Maybe step"
+        );
     }
 
     /// Replanning a `Conjunction` preserves the rule-level
-    /// narrowing. The fresh inference pass over already-narrowed
-    /// premises is idempotent and yields the same non-optional
-    /// `is` kinds.
+    /// narrowing: the demotion of a `Maybe` whose variable a
+    /// sibling requires is idempotent across replans at different
+    /// scopes.
     #[dialog_common::test]
     fn it_preserves_narrowing_across_replans() {
-        let optional_name: Term<Any> = Term::<Option<String>>::var("nick").into();
-        let typed_name: Term<Any> = Term::<String>::var("nick").into();
-        let premises = vec![
-            AttributeQuery::new(
-                Term::from(the!("person/nickname")),
-                Term::<Entity>::var("this"),
-                optional_name,
-                Term::var("cause1"),
-                Some(Cardinality::One),
-            )
-            .into(),
-            AttributeQuery::new(
-                Term::from(the!("person/name")),
-                Term::<Entity>::var("this"),
-                typed_name,
-                Term::var("cause2"),
-                Some(Cardinality::One),
-            )
-            .into(),
-        ];
-        Planner::from(premises.clone())
+        let premises = vec![maybe_nickname("nick"), name_scan("nick")];
+        let plan = Planner::from(premises.clone())
             .plan(&crate::Environment::new())
             .unwrap();
+        assert!(
+            !plan.steps.iter().any(|s| matches!(s, Plan::Maybe(..))),
+            "demotion applies at empty scope"
+        );
 
         // Replan against a new scope where `this` is bound — plan the
         // same premises fresh, the production replan path.
         let mut scope = crate::Environment::new();
         scope.add("this");
         let replanned = Planner::from(premises).plan(&scope).unwrap();
-
-        // The replanned steps still have the narrowed `is`.
+        assert!(
+            !replanned.steps.iter().any(|s| matches!(s, Plan::Maybe(..))),
+            "demotion must survive replanning"
+        );
         for step in &replanned.steps {
             if let Premise::Assert(Proposition::Attribute(boxed)) = step.as_premise()
                 && boxed.is().name() == Some("nick")
@@ -500,39 +410,27 @@ mod tests {
     }
 
     /// `apply_types` reaches into negated propositions too. A
-    /// negated attribute query that references an inferred
-    /// variable should see its `is` rewritten to match the env.
+    /// negated attribute query over an untyped variable picks up
+    /// the kind a positive premise inferred for it.
     #[dialog_common::test]
     fn it_narrows_negated_attribute_via_rule_inference() {
         use crate::artifact::Type as ValueType;
         use crate::negation::Negation;
-        use crate::type_system::Type as Kind;
 
         let env = {
             // Build an env via the public path: a one-premise rule
             // with a typed Term<String>. The single binding
             // dictates the inferred kind.
-            let typed_name: Term<Any> = Term::<String>::var("name").into();
-            let premises = vec![
-                AttributeQuery::new(
-                    Term::from(the!("person/name")),
-                    Term::<Entity>::var("this"),
-                    typed_name,
-                    Term::var("cause"),
-                    Some(Cardinality::One),
-                )
-                .into(),
-            ];
+            let premises = vec![name_scan("name")];
             TypeEnv::infer(&premises).unwrap()
         };
 
-        // Build a negated attribute query that uses `?name` with
-        // the still-optional local term kind.
-        let optional_name: Term<Any> = Term::<Option<String>>::var("name").into();
+        // The negated attribute query uses `?name` untyped; the
+        // rewrite stamps the inferred kind onto it.
         let neg = AttributeQuery::new(
             Term::from(the!("person/nickname")),
             Term::<Entity>::var("this"),
-            optional_name,
+            Term::var("name"),
             Term::var("cause"),
             Some(Cardinality::One),
         );
@@ -540,16 +438,11 @@ mod tests {
 
         let narrowed = apply_types(original, &env);
         if let Premise::Unless(Negation(Proposition::Attribute(boxed))) = narrowed {
-            assert!(
-                !boxed.is().is_optional(),
-                "rule-level narrowing should reach into negated attributes"
-            );
             assert_eq!(
                 boxed.is().kind().and_then(|k| k.as_value_type()),
                 Some(ValueType::String),
                 "narrowed `is` should carry the inferred String kind"
             );
-            let _ = Kind::primitive(ValueType::String);
         } else {
             panic!("expected negated attribute proposition");
         }

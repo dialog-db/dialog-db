@@ -183,20 +183,24 @@ mod tests {
     use super::*;
     use crate::artifact::{Cause, Entity, Type};
     use crate::attribute::AttributeDescriptor;
+    use crate::attribute::The;
     use crate::attribute::query::AttributeQuery;
     use crate::the;
-    use crate::type_system::Primitive;
     use crate::types::Any;
 
-    /// Helper: produce an optional `Term<Any>` — this is how an
-    /// AttributeQuery is told to run with optional resolution, since
-    /// resolution is derived from `is.is_optional()`.
-    fn optional_term(name: &str, inner: Option<Type>) -> Term<Any> {
-        let kind = match inner {
-            Some(ty) => Kind::primitive(ty).optional(),
-            None => Kind::primitive_set(Primitive::ALL).optional(),
-        };
-        Term::<Any>::typed_var(name, kind)
+    /// Helper: an optional (set-widening) premise over the given
+    /// attribute. Optionality is structural — a `MaybeQuery`
+    /// left-join wrapping a scalar lookup — so this is how a test
+    /// makes a variable's inferred kind admit `Nothing`.
+    fn maybe_premise(the: Term<The>, is: Term<Any>, cause: Term<Cause>) -> Premise {
+        MaybeQuery::new(
+            the,
+            Term::<Entity>::var("this"),
+            is,
+            cause,
+            Some(Cardinality::One),
+        )
+        .into()
     }
 
     #[dialog_common::test]
@@ -598,14 +602,12 @@ mod tests {
         );
     }
 
-    /// Concept projection emits one premise per `with` attribute,
-    /// each with `Resolution::Required` (the default). A concept
-    /// with no `maybe` attributes produces only required
-    /// premises.
+    /// Concept projection emits one scalar scan per `with`
+    /// attribute. A concept with no `maybe` attributes produces no
+    /// `Maybe` left-joins.
     #[dialog_common::test]
     fn from_concept_with_only_required_emits_required_premises() {
         use crate::Premise;
-        use crate::attribute::query::Resolution;
         use crate::proposition::Proposition;
 
         let concept = ConceptDescriptor::try_from(vec![(
@@ -621,18 +623,17 @@ mod tests {
 
         let rule = DeductiveRule::from(&concept);
 
-        let mut required = 0;
-        let mut optional = 0;
+        let mut scans = 0;
+        let mut maybes = 0;
         for premise in rule.analysis().premises.iter() {
-            if let Premise::Assert(Proposition::Attribute(query)) = premise {
-                match query.resolution() {
-                    Resolution::Required => required += 1,
-                    Resolution::Optional => optional += 1,
-                }
+            match premise {
+                Premise::Assert(Proposition::Attribute(_)) => scans += 1,
+                Premise::Assert(Proposition::Maybe(_)) => maybes += 1,
+                _ => {}
             }
         }
-        assert_eq!(required, 1, "expected one required premise");
-        assert_eq!(optional, 0, "expected no optional premises");
+        assert_eq!(scans, 1, "expected one scalar scan");
+        assert_eq!(maybes, 0, "expected no Maybe left-joins");
     }
 
     /// Concept projection emits a scalar scan per required attribute
@@ -783,19 +784,13 @@ mod tests {
             ),
         )])
         .unwrap();
-        let this = Term::<Entity>::var("this");
-        // Bind ?name with an optional `is` term — the meet for ?name
+        // Bind ?name only through a left-join — the meet for ?name
         // includes Nothing.
-        let premises = vec![
-            AttributeQuery::new(
-                Term::from(the!("user/name")),
-                this,
-                optional_term("name", None),
-                Term::var("cause"),
-                Some(Cardinality::One),
-            )
-            .into(),
-        ];
+        let premises = vec![maybe_premise(
+            Term::from(the!("user/name")),
+            Term::var("name"),
+            Term::var("cause"),
+        )];
         let result = DeductiveRule::new(conclusion, premises);
         match result {
             Err(TypeError::RequiredHeadFromOptional { variable, .. }) => {
@@ -822,23 +817,15 @@ mod tests {
         )])
         .unwrap();
         let this = Term::<Entity>::var("this");
-        // The `is` slot must carry a typed kind so the meet has
-        // information to combine. An untyped `Term::var` produces
-        // `None` content_type, which contributes nothing to the
-        // meet — the optional side then wins.
         let typed_name: Term<Any> = Term::<String>::var("name").into();
-        let optional_name: Term<Any> = Term::<Option<String>>::var("name").into();
 
         let premises = vec![
-            // Optional `is` term: contributes a slot type with Nothing.
-            AttributeQuery::new(
+            // Left-join: contributes a slot type with Nothing.
+            maybe_premise(
                 Term::from(the!("user/name")),
-                this.clone(),
-                optional_name,
+                Term::<String>::var("name").into(),
                 Term::var("cause1"),
-                Some(Cardinality::One),
-            )
-            .into(),
+            ),
             // Required `is` term: contributes a slot type without Nothing.
             AttributeQuery::new(
                 Term::from(the!("user/canonical-name")),
@@ -876,18 +863,14 @@ mod tests {
         )])
         .unwrap();
         let this = Term::<Entity>::var("this");
-        let optional_name = optional_term("name", Some(Type::String));
 
         let premises = vec![
-            // Optional `is` (typed): contributes `{String, Nothing}`.
-            AttributeQuery::new(
+            // Left-join (typed): contributes `{String, Nothing}`.
+            maybe_premise(
                 Term::from(the!("user/name")),
-                this.clone(),
-                optional_name,
+                Term::<String>::var("name").into(),
                 Term::var("cause1"),
-                Some(Cardinality::One),
-            )
-            .into(),
+            ),
             // Required with *untyped* `is` (Term::var without a
             // kind). Contributes "any present value" to the meet
             // via the None-content_type branch.
@@ -908,11 +891,10 @@ mod tests {
         );
     }
 
-    /// The `cause` slot of an Optional attribute query is set-
-    /// widened in the schema (since the fallback row binds it to
-    /// `Absent`). A rule where a required-head variable shares
-    /// its name with such a cause is therefore rejected by the
-    /// meet algebra.
+    /// The `cause` slot of a `Maybe` left-join is set-widened in
+    /// the schema (since the fallback row binds it to `Absent`). A
+    /// rule where a required-head variable shares its name with
+    /// such a cause is therefore rejected by the meet algebra.
     #[dialog_common::test]
     fn it_rejects_required_head_from_optional_cause() {
         // Conclusion has a required `mark` field expecting a
@@ -922,21 +904,15 @@ mod tests {
             AttributeDescriptor::new(the!("person/mark"), "", Cardinality::One, Some(Type::Bytes)),
         )])
         .unwrap();
-        let this = Term::<Entity>::var("this");
-        // The optional attribute's cause slot shares the name
-        // `?mark` with the conclusion's required head — the
-        // meet's cause contribution carries Nothing, so the
-        // required head sees Optional.
-        let premises = vec![
-            AttributeQuery::new(
-                Term::from(the!("user/name")),
-                this,
-                optional_term("name", None),
-                Term::<Cause>::var("mark"),
-                Some(Cardinality::One),
-            )
-            .into(),
-        ];
+        // The left-join's cause slot shares the name `?mark` with
+        // the conclusion's required head — the meet's cause
+        // contribution carries Nothing, so the required head sees
+        // Optional.
+        let premises = vec![maybe_premise(
+            Term::from(the!("user/name")),
+            Term::var("name"),
+            Term::<Cause>::var("mark"),
+        )];
         let result = DeductiveRule::new(conclusion, premises);
         match result {
             Err(TypeError::RequiredHeadFromOptional { variable, .. }) => {

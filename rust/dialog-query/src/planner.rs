@@ -719,46 +719,44 @@ mod plan_ordering {
 
     /// A coalesce constraint (set-widening unwrap) lowers to a
     /// `Plan::Constraint` step. At empty scope the conjunction is
-    /// rejected: the optional nickname scan requires its entity
+    /// rejected: the `Maybe` left-join requires its entity
     /// externally bound (set-widening needs a known entity — "absent
     /// for whom?"), and no other premise binds `?person`.
     ///
     /// With `?person` bound the conjunction plans, and the pinned
-    /// order is still `[constraint, scan]`: the coalesce's constant
+    /// order is still `[constraint, maybe]`: the coalesce's constant
     /// fallback satisfies its choice group, so it is feasible before
     /// its source is bound and, being cheap (cost 1), the greedy
     /// planner schedules it first — which makes the fallback fire for
     /// every row even when a nickname exists. That ordering is the
     /// open bug tracked as dialog-db-45: coalesce must order after
     /// the premise that binds its source. Flip this pin to
-    /// `["scan", "constraint"]` when that lands.
+    /// `["maybe", "constraint"]` when that lands.
     #[dialog_common::test]
     fn it_plans_coalesce_constraint() {
+        use crate::maybe::MaybeQuery;
+
         let nickname: Term<Option<String>> = Term::var("nickname");
         let display: Term<String> = Term::var("display");
         let coalesce = nickname.unwrap_or("Anon".to_string()).is(display);
 
-        let nickname_scan = AttributeQuery::new(
+        let nickname_maybe = MaybeQuery::new(
             Term::from(the!("person/nickname")),
             Term::<Entity>::var("person"),
-            // optional source term so the scan yields Absent on miss
-            Term::<Option<String>>::var("nickname").into(),
-            Term::var("cause"),
+            Term::<String>::var("nickname").into(),
+            Term::blank(),
             Some(Cardinality::One),
         );
 
-        let premises = vec![
-            coalesce,
-            Premise::Assert(Proposition::Attribute(Box::new(nickname_scan))),
-        ];
+        let premises = vec![coalesce, nickname_maybe.into()];
 
-        // Empty scope: the optional scan requires `?person` bound, and
+        // Empty scope: the left-join requires `?person` bound, and
         // nothing else can bind it — the conjunction is unplannable.
         match Planner::from(premises.clone()).plan(&Environment::new()) {
             Err(TypeError::RequiredBindings { required }) => {
                 assert!(
                     required.contains("person"),
-                    "the rejection names the entity the optional scan requires"
+                    "the rejection names the entity the left-join requires"
                 );
             }
             other => panic!("expected RequiredBindings, got {other:?}"),
@@ -770,7 +768,7 @@ mod plan_ordering {
         let plan = Planner::from(premises.clone()).plan(&scope).unwrap();
         assert_eq!(
             kinds(&plan),
-            vec!["constraint", "scan"],
+            vec!["constraint", "maybe"],
             "an optional-source coalesce is feasible immediately and, being cheap, runs first (bug: dialog-db-45)"
         );
 

@@ -269,6 +269,7 @@ mod tests {
     use crate::artifact::{Entity, Type as ValueType};
     use crate::attribute::AttributeDescriptor;
     use crate::attribute::query::AttributeQuery;
+    use crate::maybe::MaybeQuery;
     use crate::the;
     use crate::types::Any;
     use crate::{Cardinality, Term};
@@ -406,13 +407,12 @@ mod tests {
     /// admits `Nothing` — the rule could yield Absent in the head.
     #[dialog_common::test]
     fn it_rejects_required_head_bound_only_by_optional_premises() {
-        let optional_name: Term<Any> = Term::<Option<String>>::var("name").into();
         let premises = vec![
-            AttributeQuery::new(
+            MaybeQuery::new(
                 Term::from(the!("person/name")),
                 Term::<Entity>::var("this"),
-                optional_name,
-                Term::var("cause"),
+                Term::<String>::var("name").into(),
+                Term::blank(),
                 Some(Cardinality::One),
             )
             .into(),
