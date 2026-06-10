@@ -2,7 +2,7 @@
 
 Datalog-inspired query engine for Dialog. Operates over the associative model's claim store, providing typed pattern matching, deductive rules, and built-in formulas.
 
-For a worked explanation of optional fields, `Absent`, negation, and the rationale behind the scalar/semantic layering, see [guide.md](./guide.md).
+For a worked explanation of optional fields, `Absent`, negation, and the rationale behind the scalar/semantic layering, see [guide.md](../../notes/guide.md).
 
 ## Information Model
 

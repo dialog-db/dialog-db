@@ -427,4 +427,4 @@ contract is now structural rather than kind-driven. The deltas:
   a contract check. `RequiredHeadFromOptional` also fires across
   concept boundaries now that the boundary declares its widening.
 
-User-facing semantics: `rust/dialog-query/guide.md`.
+User-facing semantics: `notes/guide.md`.
