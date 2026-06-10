@@ -269,11 +269,12 @@ mod tests {
     /// demands a present value *filters* the rows where it is
     /// Absent — it must not abort the stream.
     ///
-    /// Today the concept boundary drops set-widening from its schema
-    /// (the TypeEnv claims `String` while runtime delivers Absent),
-    /// so the Absent binding reaches the formula and the whole
-    /// stream errors instead of excluding the row.
-    #[ignore = "dialog-db-44: concept schema omits set-widening; Absent reaching the formula aborts the stream"]
+    /// The concept boundary now declares the widening (the TypeEnv
+    /// is truthful), but the narrowing the formula induces is not
+    /// yet *projected into* the concept premise, so its internal
+    /// rule still emits the Absent row and the formula aborts the
+    /// stream. Fixed by single-pass inference with full projection.
+    #[ignore = "dialog-db-47: narrowing is not yet projected into concept parameters; Absent reaching the formula aborts the stream"]
     #[dialog_common::test]
     async fn it_filters_concept_rows_with_absent_field_from_required_formula() -> anyhow::Result<()>
     {

@@ -922,6 +922,68 @@ mod tests {
         }
     }
 
+    /// The widening crosses the concept boundary: a required head
+    /// bound only through an inner concept's *optional* field is
+    /// rejected, because the concept's schema declares that the
+    /// slot can deliver `Absent`.
+    #[dialog_common::test]
+    fn it_rejects_required_head_from_concept_optional_field() {
+        use crate::concept::query::ConceptQuery;
+        use crate::{ConceptFieldDescriptor, Proposition};
+
+        let conclusion = ConceptDescriptor::try_from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                the!("person/name"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )])
+        .unwrap();
+
+        let inner = ConceptDescriptor::try_from(vec![
+            (
+                "title".to_string(),
+                ConceptFieldDescriptor::required(AttributeDescriptor::new(
+                    the!("person/title"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
+            ),
+            (
+                "nickname".to_string(),
+                ConceptFieldDescriptor::optional(AttributeDescriptor::new(
+                    the!("person/nickname"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
+            ),
+        ])
+        .unwrap();
+
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::var("this"));
+        terms.insert("title".to_string(), Term::var("title"));
+        // The outer head's required `name` is fed by the inner
+        // concept's optional `nickname` — the meet admits Nothing.
+        terms.insert("nickname".to_string(), Term::var("name"));
+        let premises = vec![Premise::Assert(Proposition::Concept(ConceptQuery {
+            terms,
+            predicate: inner,
+        }))];
+
+        let result = DeductiveRule::new(conclusion, premises);
+        match result {
+            Err(TypeError::RequiredHeadFromOptional { variable, .. }) => {
+                assert_eq!(variable, "name");
+            }
+            other => panic!("expected RequiredHeadFromOptional, got {other:?}"),
+        }
+    }
+
     /// A rule containing a malformed Coalesce (non-Optional source)
     /// is rejected at compile time. This is the regression test for
     /// validate-not-called: previously `Coalesce::validate` existed

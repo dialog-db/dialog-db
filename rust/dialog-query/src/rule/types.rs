@@ -11,20 +11,18 @@
 //! planner consumes the env to rewrite each premise's variable
 //! terms so they carry the inferred kinds at evaluation time.
 //!
-//! Untyped slots (those with no static `content_type`) still
-//! contribute to inference via their requirement shape:
-//!
-//! - `Required` slots contribute `Primitive::ALL` — "any present
-//!   value." This excludes `Nothing` from the variable's type.
-//! - `Optional` slots contribute `Primitive::ANY` — "any present or
-//!   absent value." This lets `Nothing` survive unification when
-//!   every slot the variable visits is optional.
+//! Untyped slots (those with no static `content_type`) contribute
+//! `Primitive::ALL` — "any present value" — regardless of their
+//! requirement: a slot's `Requirement` speaks of *derivability*
+//! (does the premise produce or demand the binding), never of
+//! absence. Set-widening (admitting `Nothing`) is declared
+//! exclusively through content types — a `MaybeQuery`'s value slot
+//! or a concept's optional field.
 //!
 //! Negation premises do not contribute. They filter on existing
 //! bindings rather than introducing them.
 
 use crate::Premise;
-use crate::schema::Requirement;
 use crate::type_system::Primitive;
 use crate::type_system::Type as Kind;
 use crate::type_system::unifier::{Context, Type as Inferred, lift};
@@ -89,12 +87,17 @@ impl TypeEnv {
                 let Some(var_name) = param.name() else {
                     continue;
                 };
+                // An untyped slot constrains the variable to "any
+                // present value" regardless of its requirement.
+                // `Requirement::Optional` means *derivable* (the
+                // premise produces the binding rather than demanding
+                // it) — derivability is not absence. Set-widening
+                // (admitting `Nothing`) is declared exclusively
+                // through content types: a `MaybeQuery`'s value slot
+                // or a concept's optional field.
                 let slot_kind: Kind = match field.content_type() {
                     Some(t) => t.clone(),
-                    None => match field.requirement {
-                        Requirement::Required(_) => Kind::primitive_set(Primitive::ALL),
-                        Requirement::Optional => Kind::primitive_set(Primitive::ANY),
-                    },
+                    None => Kind::primitive_set(Primitive::ALL),
                 };
                 let var = ctx.var_for_name(var_name);
                 if let Err(reason) = ctx.unify(&lift(&slot_kind), &Inferred::Variable(var)) {
@@ -199,6 +202,87 @@ mod tests {
         assert!(
             name_kind.is_optional(),
             "single optional binding leaves Nothing in the inferred type"
+        );
+    }
+
+    /// Derivability is not absence: a variable bound only by an
+    /// *untyped derivable* slot (a concept field with no declared
+    /// type) infers "any present value" — no `Nothing` bit. Only
+    /// set-widened content types introduce absence.
+    #[dialog_common::test]
+    fn it_does_not_widen_untyped_derivable_slots() {
+        use crate::{AttributeDescriptor, ConceptDescriptor, ConceptQuery, Parameters};
+
+        let concept = ConceptDescriptor::try_from(vec![(
+            "tag",
+            AttributeDescriptor::new(the!("misc/tag"), "", Cardinality::One, None),
+        )])
+        .unwrap();
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::var("entity"));
+        terms.insert("tag".to_string(), Term::var("tag"));
+        let premises = vec![Premise::Assert(crate::Proposition::Concept(ConceptQuery {
+            terms,
+            predicate: concept,
+        }))];
+
+        let env = TypeEnv::infer(&premises).unwrap();
+        let tag_kind = env.get("tag").expect("tag inferred");
+        assert!(
+            !tag_kind.is_optional(),
+            "an untyped derivable slot must not admit Nothing"
+        );
+    }
+
+    /// The concept boundary declares set-widening: a variable bound
+    /// by a concept's *optional* field admits `Nothing` in the
+    /// consuming rule's TypeEnv, while a required sibling stays
+    /// present-only.
+    #[dialog_common::test]
+    fn it_widens_variables_bound_by_concept_optional_fields() {
+        use crate::{
+            AttributeDescriptor, ConceptDescriptor, ConceptFieldDescriptor, ConceptQuery,
+            Parameters,
+        };
+
+        let concept = ConceptDescriptor::try_from(vec![
+            (
+                "title".to_string(),
+                ConceptFieldDescriptor::required(AttributeDescriptor::new(
+                    the!("person/title"),
+                    "",
+                    Cardinality::One,
+                    Some(ValueType::String),
+                )),
+            ),
+            (
+                "nickname".to_string(),
+                ConceptFieldDescriptor::optional(AttributeDescriptor::new(
+                    the!("person/nickname"),
+                    "",
+                    Cardinality::One,
+                    Some(ValueType::String),
+                )),
+            ),
+        ])
+        .unwrap();
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::var("entity"));
+        terms.insert("title".to_string(), Term::var("title"));
+        terms.insert("nickname".to_string(), Term::var("nick"));
+        let premises = vec![Premise::Assert(crate::Proposition::Concept(ConceptQuery {
+            terms,
+            predicate: concept,
+        }))];
+
+        let env = TypeEnv::infer(&premises).unwrap();
+        assert!(
+            env.get("nick").expect("nick inferred").is_optional(),
+            "the optional field widens the consuming variable"
+        );
+        assert!(
+            !env.get("title").expect("title inferred").is_optional(),
+            "the required field stays present-only"
         );
     }
 

@@ -310,21 +310,31 @@ impl TryFrom<Vec<(String, ConceptFieldDescriptor)>> for ConceptDescriptor {
 
 impl From<&ConceptDescriptor> for Schema {
     fn from(predicate: &ConceptDescriptor) -> Self {
-        use crate::type_system::Type as Kind;
+        use crate::type_system::{Primitive, Type as Kind};
         let mut schema = Schema::new();
         for (name, field) in predicate.with().iter() {
+            // A `maybe` field is set-widened: the concept yields the
+            // slot bound to `Absent` when the entity lacks the fact,
+            // so the slot's content type must admit `Nothing` — the
+            // consuming rule's TypeEnv has to know an Absent binding
+            // can arrive through this boundary. An untyped optional
+            // field widens the full value set.
+            let content_type = match (field.content_type(), field.is_optional()) {
+                (Some(ty), false) => Some(Kind::primitive(ty)),
+                (Some(ty), true) => Some(Kind::primitive(ty).optional()),
+                (None, true) => Some(Kind::primitive_set(Primitive::ALL).optional()),
+                (None, false) => None,
+            };
             schema.insert(
                 name.into(),
                 Field {
                     description: field.description().into(),
-                    content_type: field.content_type().map(Kind::primitive),
+                    content_type,
                     // Every concept slot is `Optional` at the schema
                     // layer: a `concept:` query *produces* its fields
                     // rather than requiring the caller to supply them.
-                    // This is orthogonal to a field's `is_optional()`
-                    // (set-widened / Absent-on-miss) concept-membership
-                    // flag, which is carried into the rule body via the
-                    // `is` term's kind, not the schema requirement.
+                    // Derivability is orthogonal to set-widening,
+                    // which lives in the content type above.
                     requirement: Requirement::Optional,
                     cardinality: field.cardinality(),
                 },
@@ -1642,6 +1652,68 @@ mod tests {
         let schema = Schema::from(&descriptor);
         let tag = schema.get("tag").expect("tag field present");
         assert!(tag.content_type().is_none());
+    }
+
+    /// An optional (`maybe`) field's schema slot is set-widened: the
+    /// concept yields `Absent` for it when the entity lacks the
+    /// fact, so a consuming rule's TypeEnv must see `Nothing` in
+    /// the slot's content type. Required siblings stay scalar.
+    #[dialog_common::test]
+    fn schema_from_concept_widens_optional_fields() {
+        let descriptor = ConceptDescriptor::try_from(vec![
+            (
+                "name".to_string(),
+                ConceptFieldDescriptor::required(AttributeDescriptor::new(
+                    the!("person/name"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
+            ),
+            (
+                "nickname".to_string(),
+                ConceptFieldDescriptor::optional(AttributeDescriptor::new(
+                    the!("person/nickname"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
+            ),
+            (
+                "tag".to_string(),
+                ConceptFieldDescriptor::optional(AttributeDescriptor::new(
+                    the!("misc/tag"),
+                    "",
+                    Cardinality::One,
+                    None,
+                )),
+            ),
+        ])
+        .unwrap();
+        let schema = Schema::from(&descriptor);
+
+        let name = schema.get("name").expect("name field present");
+        assert!(
+            !name.content_type().expect("name kind").is_optional(),
+            "required field stays scalar"
+        );
+
+        let nickname = schema.get("nickname").expect("nickname field present");
+        let nickname_kind = nickname.content_type().expect("nickname kind");
+        assert!(
+            nickname_kind.is_optional(),
+            "optional field is set-widened at the boundary"
+        );
+        assert!(
+            nickname_kind.primitive_part().contains(Type::String),
+            "widening preserves the declared value type"
+        );
+
+        let tag = schema.get("tag").expect("tag field present");
+        assert!(
+            tag.content_type().expect("tag kind").is_optional(),
+            "an untyped optional field widens the full value set"
+        );
     }
 
     /// The synthesized `this` field always declares
