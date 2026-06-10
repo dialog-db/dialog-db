@@ -5,13 +5,13 @@ use crate::artifact::Entity;
 use crate::attribute::query::AttributeQuery;
 pub use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::TypeError;
+use crate::maybe::MaybeQuery;
 use crate::negation::Negation;
 pub use crate::planner::Plan;
 pub use crate::planner::{Conjunction, Planner};
 pub use crate::premise::Premise;
 use crate::rule::analyzer::AnalyzedRule;
 use crate::rule::{Compile, fmt_rule_schema};
-use crate::type_system::Primitive;
 use crate::type_system::Type as Kind;
 use crate::types::Any;
 pub use crate::{Attribute, Cardinality, Parameters, Proposition, Requirement, Value};
@@ -139,22 +139,29 @@ impl From<&ConceptDescriptor> for DeductiveRule {
         let this = Term::<Entity>::var("this");
 
         for (name, field) in concept.with().iter() {
-            // Required field: standard EAV semantics — a missing fact
-            // filters the row out. Optional field: the `is` term is
-            // typed set-widened, so `AttributeQuery` runs with
-            // `Resolution::Optional` and a missing fact yields a
-            // fallback row with the slot bound to `Binding::Absent`.
-            let value = if field.is_optional() {
-                let kind = match field.content_type() {
-                    Some(ty) => Kind::primitive(ty).optional(),
-                    None => Kind::primitive_set(Primitive::ALL).optional(),
-                };
-                Term::<Any>::typed_var(name, kind)
-            } else {
-                Term::var(name)
+            // The value term stays scalar in both cases — the
+            // associative layer never carries optionality. A
+            // required field lowers to a plain scan (a missing fact
+            // filters the row out); an optional field lowers to a
+            // `MaybeQuery` left-join, which set-widens at the
+            // projection: `this` is bound by the required fields, so
+            // a miss yields one row with the slot bound to
+            // `Binding::Absent`.
+            let value = match field.content_type() {
+                Some(ty) => Term::<Any>::typed_var(name, Kind::primitive(ty)),
+                None => Term::var(name),
             };
 
-            premises.push(
+            let premise: Premise = if field.is_optional() {
+                MaybeQuery::new(
+                    Term::Constant(Value::from(field.the().clone())),
+                    this.clone(),
+                    value,
+                    Term::blank(),
+                    Some(field.cardinality()),
+                )
+                .into()
+            } else {
                 AttributeQuery::new(
                     Term::Constant(Value::from(field.the().clone())),
                     this.clone(),
@@ -162,8 +169,9 @@ impl From<&ConceptDescriptor> for DeductiveRule {
                     Term::blank(),
                     Some(field.cardinality()),
                 )
-                .into(),
-            );
+                .into()
+            };
+            premises.push(premise);
         }
 
         DeductiveRule::new(concept.clone(), premises).expect("Concept should compile")
@@ -177,6 +185,7 @@ mod tests {
     use crate::attribute::AttributeDescriptor;
     use crate::attribute::query::AttributeQuery;
     use crate::the;
+    use crate::type_system::Primitive;
     use crate::types::Any;
 
     /// Helper: produce an optional `Term<Any>` — this is how an
@@ -626,13 +635,14 @@ mod tests {
         assert_eq!(optional, 0, "expected no optional premises");
     }
 
-    /// Concept projection emits one premise per required attribute
-    /// (Required) and one per optional attribute (Optional).
+    /// Concept projection emits a scalar scan per required attribute
+    /// and a `Maybe` left-join per optional attribute. The left-join
+    /// wraps a *scalar* lookup — optionality is structural, not a
+    /// property of the value term's kind.
     #[dialog_common::test]
-    fn from_concept_with_optional_field_emits_optional_resolver() {
+    fn from_concept_with_optional_field_emits_maybe_left_join() {
         use crate::ConceptFieldDescriptor;
         use crate::Premise;
-        use crate::attribute::query::Resolution;
         use crate::proposition::Proposition;
 
         let concept = ConceptDescriptor::try_from(vec![
@@ -659,18 +669,23 @@ mod tests {
 
         let rule = DeductiveRule::from(&concept);
 
-        let mut required = 0;
-        let mut optional = 0;
+        let mut scans = 0;
+        let mut maybes = 0;
         for premise in rule.analysis().premises.iter() {
-            if let Premise::Assert(Proposition::Attribute(query)) = premise {
-                match query.resolution() {
-                    Resolution::Required => required += 1,
-                    Resolution::Optional => optional += 1,
+            match premise {
+                Premise::Assert(Proposition::Attribute(_)) => scans += 1,
+                Premise::Assert(Proposition::Maybe(query)) => {
+                    assert!(
+                        !query.is().is_optional(),
+                        "the wrapped lookup's value term stays scalar"
+                    );
+                    maybes += 1;
                 }
+                _ => {}
             }
         }
-        assert_eq!(required, 1, "expected one required premise (name)");
-        assert_eq!(optional, 1, "expected one optional premise (nickname)");
+        assert_eq!(scans, 1, "expected one scalar scan (name)");
+        assert_eq!(maybes, 1, "expected one Maybe left-join (nickname)");
     }
 
     /// The degenerate "rule body binds only optionals" shape, at the

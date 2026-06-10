@@ -2,6 +2,7 @@ use crate::attribute::query::{AttributeQuery, DynamicAttributeQuery};
 use crate::concept::query::ConceptQuery;
 use crate::constraint::Constraint;
 use crate::formula::query::FormulaQuery;
+use crate::maybe::MaybeQuery;
 use crate::negation::Negation;
 use crate::proposition::Proposition;
 use crate::query::Application;
@@ -53,6 +54,11 @@ pub enum Plan {
     /// cardinality-aware winner selection folded into the wrapped
     /// query.
     Scan(Header, Box<DynamicAttributeQuery>),
+    /// Left-join over a scalar attribute lookup: per input row (entity
+    /// bound by construction), Present facts extend the row and a miss
+    /// yields one row with the value slot bound Absent. The
+    /// semantic-layer realization of an optional concept field.
+    Maybe(Header, Box<MaybeQuery>),
     /// Pure computation that derives bindings without touching the
     /// fact store.
     Formula(Header, FormulaQuery),
@@ -73,6 +79,7 @@ impl Plan {
     pub fn header(&self) -> &Header {
         match self {
             Plan::Scan(header, _) => header,
+            Plan::Maybe(header, _) => header,
             Plan::Formula(header, _) => header,
             Plan::Constraint(header, _) => header,
             Plan::Concept(header, _) => header,
@@ -90,6 +97,7 @@ impl Plan {
     pub fn as_premise(&self) -> Premise {
         match self {
             Plan::Scan(_, query) => Premise::Assert(Proposition::Attribute(query.clone())),
+            Plan::Maybe(_, query) => Premise::Assert(Proposition::Maybe(query.clone())),
             Plan::Concept(_, query) => Premise::Assert(Proposition::Concept(query.clone())),
             Plan::Formula(_, query) => Premise::Assert(Proposition::Formula(query.clone())),
             Plan::Constraint(_, constraint) => {
@@ -147,6 +155,7 @@ impl Plan {
     fn lower_proposition(proposition: Proposition, header: Header) -> Self {
         match proposition {
             Proposition::Attribute(query) => Plan::Scan(header, query),
+            Proposition::Maybe(query) => Plan::Maybe(header, query),
             Proposition::Concept(query) => Plan::Concept(header, query),
             Proposition::Formula(query) => Plan::Formula(header, query),
             Proposition::Constraint(constraint) => Plan::Constraint(header, constraint),
@@ -163,9 +172,12 @@ impl Plan {
         Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
     {
         match self {
-            Plan::Scan(_, query) => Either::Left(Either::Left(Either::Left(
+            Plan::Scan(_, query) => Either::Left(Either::Left(Either::Left(Either::Left(
                 Application::evaluate(*query, selection, env),
-            ))),
+            )))),
+            Plan::Maybe(_, query) => Either::Left(Either::Left(Either::Left(Either::Right(
+                Application::evaluate(*query, selection, env),
+            )))),
             Plan::Concept(_, query) => {
                 Either::Left(Either::Left(Either::Right(query.evaluate(selection, env))))
             }
@@ -239,6 +251,21 @@ fn apply_types_to_proposition(proposition: Proposition, types: &TypeEnv) -> Prop
         Proposition::Attribute(boxed) => {
             let query = *boxed;
             Proposition::Attribute(Box::new(narrow_attribute(query, types)))
+        }
+        Proposition::Maybe(boxed) => {
+            // When rule inference narrowed the value variable to a
+            // non-optional kind (a sibling premise guarantees it is
+            // Present), the left-join's fallback can never fire:
+            // demote to the wrapped scalar scan so evaluation skips
+            // the per-row miss handling entirely.
+            let maybe = *boxed;
+            match maybe.is().name().and_then(|name| types.get(name)) {
+                Some(kind) if !kind.is_optional() => {
+                    let kind = kind.clone();
+                    Proposition::Attribute(Box::new(maybe.into_query().with_type(kind)))
+                }
+                _ => Proposition::Maybe(Box::new(maybe)),
+            }
         }
         other => other,
     }

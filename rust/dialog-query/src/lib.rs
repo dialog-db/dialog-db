@@ -40,6 +40,8 @@ pub mod environment;
 pub mod error;
 /// Built-in formulas for data transformations and computations.
 pub mod formula;
+/// Left-join projection realizing optional (`maybe`) concept fields.
+pub mod maybe;
 /// Negation support for excluding matching results.
 pub mod negation;
 /// Named parameter bindings for rule and formula applications.
@@ -88,6 +90,7 @@ pub use descriptor::Descriptor;
 pub use environment::*;
 pub use error::*;
 pub use formula::*;
+pub use maybe::MaybeQuery;
 pub use negation::*;
 pub use parameters::*;
 pub use planner::*;

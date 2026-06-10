@@ -511,6 +511,7 @@ mod plan_ordering {
             .iter()
             .map(|step| match step {
                 Plan::Scan(..) => "scan",
+                Plan::Maybe(..) => "maybe",
                 Plan::Formula(..) => "formula",
                 Plan::Constraint(..) => "constraint",
                 Plan::Concept(..) => "concept",
