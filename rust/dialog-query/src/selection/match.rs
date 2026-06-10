@@ -104,7 +104,7 @@ impl Binding {
 /// A `Match` accumulates variable bindings as premises are
 /// evaluated in sequence. Each binding maps a variable name to a
 /// [`Binding`], which is either `Present(value)` (the variable
-/// resolved to a concrete value) or `Absent` (an optional resolver
+/// resolved to a concrete value) or `Absent` (an optional lookup
 /// found no fact for the entity).
 ///
 /// Matches flow through the evaluation pipeline as a stream

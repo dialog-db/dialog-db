@@ -1,9 +1,14 @@
-# Implementation plan: operator IR, SIPS-owned-by-analysis, propagator feasibility
+# Implementation record: operator IR, SIPS-owned-by-analysis, sound optionals
 
-> Sequencing note. Turns the design in [`planning-adornment-and-cost.md`](./planning-adornment-and-cost.md)
-> and [`incremental-subscriptions.md`](./incremental-subscriptions.md) into an ordered series of small,
-> independently-reviewable, always-green PRs. Each step compiles, passes `nix … test:native:debug`, and
-> is shippable on its own; later steps depend only on earlier ones.
+> Sequencing record for the `feat/operator-ir` chapter. Turns the design in
+> [`planning-adornment-and-cost.md`](./planning-adornment-and-cost.md) and
+> [`incremental-subscriptions.md`](./incremental-subscriptions.md) into an ordered series of small,
+> always-green steps. **Status: the chapter is complete** — steps 1, 2, 4, 5a, 5b, the
+> analyze-then-plan inversion, and the sound-optionals milestone (scalar associative layer,
+> `MaybeQuery`, one optionality encoding, checked types) all landed; 5c, 6, and 7 remain open and are
+> tracked on the roadmap. Current-truth engine documentation lives in
+> [`query-engine-design.md`](./query-engine-design.md); the as-built deltas from this plan are recorded
+> at the end of this note.
 
 ## Guiding constraints
 
@@ -203,3 +208,62 @@ demand function (which vars a premise needs/binds), the graph is the SIPS to dem
 - No demand reification / incremental subscriptions here — that is the *next* project, unblocked by
   this one. This plan ends at "the planner is a SIPS-driven, feasibility/cost-separated, propagator-
   decomposed engine over a compiled IR."
+
+## The analyze-then-plan inversion (folded chapter)
+
+Mid-chapter, the constructor flow was inverted from plan-then-analyze to analyze-then-plan, giving the
+rule hierarchy its guarantees:
+
+```
+DeductiveRuleDescriptor --analyze--> DeductiveRule --plan(scope)--> Conjunction --evaluate--> results
+   (data)                            (verified, plannable)          (scope-specific plan)
+```
+
+- Analysis is the constructor: type inference, the invariant checks (required-head, Coalesce,
+  negated-optional), and the `DependencyGraph` all run from the premises, before any execution order is
+  chosen. A constructed `DeductiveRule` is plannable by construction.
+- The rule holds the *analysis* and produces a `Conjunction` per scope; no pre-baked plan is stored,
+  and replanning never reconstructs premises from a stored plan. `Candidate` and the
+  premise-reconstruction replan path were removed.
+- `DependencyGraph::from_steps(&[Plan])` became `from_premises(&[Premise])`.
+
+### The graph as a dependency index (not the ordering driver)
+
+Clarification (user): the dependency graph's role is to encode *dependencies* so that, given an `env`,
+we can identify which premises are *affected* by a binding — which become newly feasible, and which
+premise depends on which. The `requires[i]` edges (premise `j` binds a variable premise `i` needs) are
+exactly this: when a variable enters scope, the edges name the premises it unblocks, without rescanning
+everything.
+
+This separates two consumers:
+
+- **Ordering** needs per-*scope* feasibility (`feasibility::categorize`) because choice groups shift
+  with the bound set; the static graph alone can't drive the greedy cost ordering.
+- **Demand / incremental re-planning** needs the static dependency structure: "binding X affects
+  premises {…}" — the affected-premises lookup the `requires` edges provide.
+
+So the graph is retained as the **dependency index** the incremental-subscriptions / demand work
+consumes, while feasibility drives ordering. A greedy planner can also *use* the edges to re-check only
+the premises affected by the round's newly-bound variables — an optimization the edges enable.
+
+## As-built deltas from this plan
+
+- **Narrowing stayed at plan time, but consumes the analysis.** The folded chapter proposed storing
+  *already-narrowed* premises on the rule. As built, the rule stores premises in authored form and
+  `Planner::with_types` projects the analysis-inferred `TypeEnv` onto a working copy per `plan(scope)`
+  call: inference runs exactly once, and the serialized descriptor round-trips unchanged (narrowed
+  terms never leak into the wire form).
+- **`AnalyzedRule` was composed, not dissolved.** `DeductiveRule { analysis: AnalyzedRule }` rather
+  than flattened fields; the functional intent (rule holds analysis, plans per scope) is met.
+- **`adorn` became `feasibility::feasible`/`categorize`.** The per-step method was dropped with
+  `Candidate`; one shared SIPS binding function remains.
+- **The sound-optionals milestone rode this chapter.** Optionality left the associative layer
+  (`Resolution` and the is-term-driven fallback deleted); `MaybeQuery` (premise/plan construct) owns
+  set-widening with the entity-bound contract in its schema; `Coalesce` declares its source as a hard
+  requirement; `Absent` matches nothing in scalar slots in both polarities; kinds are enforced at
+  scans, binds, and equality. See `notes/scalar-associative-layer.md`,
+  `notes/polarity-and-negation.md`, and `rust/dialog-query/guide.md`.
+- **Still open from this plan:** step 5c (richer `Infeasible` vocabulary + serializable per-premise
+  `Feasibility` descriptor), step 6 (propagator decomposition of multidirectional formulas), step 7
+  (cost as class + selectivity). These fold into the roadmap's type-checker milestone (formula
+  generics / refinement predicates) and the eventual cost chapter.

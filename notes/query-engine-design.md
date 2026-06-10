@@ -2,9 +2,10 @@
 
 > Overview of dialog-db's query engine: how a rule is analyzed, planned, and evaluated, the type
 > hierarchy that carries the guarantees, and the academic work it is based on. Companion to the
-> sequencing notes ([`analyze-then-plan.md`](./analyze-then-plan.md),
-> [`planning-adornment-and-cost.md`](./planning-adornment-and-cost.md)) and the forward-looking
-> [`incremental-subscriptions.md`](./incremental-subscriptions.md).
+> sequencing record ([`implementation-plan.md`](./implementation-plan.md)), the planner design
+> ([`planning-adornment-and-cost.md`](./planning-adornment-and-cost.md)), and the forward-looking
+> [`incremental-subscriptions.md`](./incremental-subscriptions.md). User-facing optionality semantics
+> are documented in [`rust/dialog-query/guide.md`](../rust/dialog-query/guide.md).
 
 ## The pipeline
 
@@ -21,8 +22,8 @@ DeductiveRuleDescriptor  ──analyze──▶  DeductiveRule  ──plan(scope
   propositions. Just data.
 - **`DeductiveRule`** — the *analyzed* rule. Analysis verifies every invariant (type inference,
   required-head-not-optional, Coalesce contracts, conclusion grounding) and proves the body is
-  *plannable*. It holds the analysis: the narrowed premises, the inferred types, and the dependency
-  graph (the SIPS — see below). Because analysis ran, a `DeductiveRule` is **plannable by
+  *plannable*. It holds the analysis: the premises (authored order), the inferred types, and the
+  dependency graph (the SIPS — see below). Because analysis ran, a `DeductiveRule` is **plannable by
   construction**.
 - **`Conjunction`** — the concrete execution plan for a *specific* scope, produced on demand by
   `DeductiveRule::plan(scope)`. The plan is what evaluates (`Conjunction::evaluate`). The rule analyzes
@@ -50,9 +51,11 @@ approved.
 ## Analysis vs. planning (cost-free vs. cost-driven)
 
 - **Analysis is cost-free.** It builds the feasibility structure (the binding function + the dependency
-  graph) from the premises alone, narrows them to their inferred types once, and proves a valid total
-  order exists from the empty scope (satisfiability). It never consults sizes or costs. Its output is
-  the *space* of valid orderings.
+  graph) from the premises alone, infers the rule-wide types once, and proves a valid total order
+  exists from the empty scope (satisfiability). It never consults sizes or costs. Its output is the
+  *space* of valid orderings. Planning consumes the analyzed types (`Planner::with_types`) and projects
+  them onto a working copy of the premises per `plan(scope)` call — the stored premises stay in their
+  authored, un-narrowed form so the rule's serialized descriptor round-trips unchanged.
 - **Planning selects by cost.** `plan(scope)` greedily picks, at each step, the cheapest *feasible*
   premise under the variables bound so far; its binds extend the bound set for the next step. The plan
   it emits is one chosen ordering. Cost lives only here, per scope.
@@ -65,11 +68,18 @@ analysis).
 ## The operator IR
 
 The planned `Conjunction` is a sequence of compiled `Plan` operators, not the syntactic AST. `Plan` is
-an enum — `Scan` (attribute lookup), `Formula`, `Constraint`, `Concept`, `Negate` — each carrying the
-lowered query plus a small `Header` (cost / binds / env). `evaluate` dispatches on the variant; the AST
-is reconstructable from the payload (`Plan::as_premise`) for analysis but is not stored separately. This
-keeps execution off the AST and gives later work (incremental maintenance) a concrete structure to
+an enum — `Scan` (scalar attribute lookup), `Maybe` (the optional lookup: a left-join over a scalar
+lookup, realizing `maybe` concept fields), `Formula`, `Constraint`, `Concept`, `Negate` — each carrying
+the lowered query plus a small `Header` (cost / binds / env). `evaluate` dispatches on the variant; the
+AST is reconstructable from the payload (`Plan::as_premise`) for analysis but is not stored separately.
+This keeps execution off the AST and gives later work (incremental maintenance) a concrete structure to
 attach to.
+
+`Maybe` is also where the optionality contracts live structurally: its schema hard-requires the entity
+slot ("absent for whom?") and set-widens its value/cause content types, so feasibility and inference
+need no special cases; type narrowing demotes it to a plain `Scan` when a sibling premise proves the
+value present. `Coalesce` declares its source as a hard requirement for the same reason — ordering
+correctness is schema-borne, never a cost accident.
 
 ## What the papers contribute
 
@@ -107,8 +117,8 @@ Two facts the papers settle, both adopted here:
 dialog-db's premises are *richer* than Datalog atoms: formulas and constraints have genuine input
 *requirements* (a formula can't run until its input is bound), so feasibility is not merely an
 adornment pattern but a real "can it run yet" predicate. This is why `f` carries a `NeedsAll` error
-naming the still-required variables, and why an optional attribute must *require* its entity bound
-rather than binding it.
+naming the still-required variables, and why the optional lookup (`MaybeQuery`) hard-requires its
+entity bound rather than binding it.
 
 ### Negation as demand — Tekle & Liu, *Extended Magic for Negation* (arXiv:1909.08246)
 
@@ -142,7 +152,9 @@ sets / pull) rather than DBSP's world-driven push, because dialog-db holds parti
 - `rust/dialog-query/src/planner.rs` — the greedy SIPS-selection planner.
 - `rust/dialog-query/src/planner/feasibility.rs` — `feasible` / `categorize` (the binding function `f`)
   and `Infeasible`.
-- `rust/dialog-query/src/planner/plan.rs` — the `Plan` operator IR and `Conjunction` evaluation.
+- `rust/dialog-query/src/planner/plan.rs` — the `Plan` operator IR, type projection (`apply_types`),
+  and `Conjunction` evaluation.
+- `rust/dialog-query/src/maybe.rs` — `MaybeQuery`, the optional lookup (left-join) operator.
 - `rust/dialog-query/src/schema.rs` — `Requirement` / `Group` (feasibility input) and the cost
   constants (`Cardinality::estimate`, the SIPS-selection cost model).
 
@@ -161,30 +173,12 @@ sets / pull) rather than DBSP's world-driven push, because dialog-db holds parti
   the DBSP spec — the incremental algebra (forward direction).
 - Gupta, Mumick, Subrahmanian 1993 (DRed); Tekle & Liu (FBF) — incremental maintenance with retraction.
 
-## Addendum: optionality and checked types (M1, feat/operator-ir)
+## Types are checked, not advisory
 
-Updates to the engine since the body of this note was written:
-
-- The `Plan` IR gained a variant: `Maybe(Header, Box<MaybeQuery>)`,
-  the left-join realizing optional concept fields. Scans are scalar;
-  the left-join owns set-widening, hard-requires its entity in its
-  schema (feasibility needs no special case), and demotes to its
-  inner scan when rule inference proves the value present.
-- Inference is single-pass: `analyze` computes the `TypeEnv` once and
-  `Planner::with_types` consumes it for every `plan(scope)` call and
-  adornment; only the raw `Planner::from` path infers for itself.
-  `apply_types` is positive-polarity-only and projects kinds onto
-  attribute `is` terms, `Maybe` demotion, and concept parameter
-  terms.
-- Types are enforced: typed scan slots filter facts whose value falls
-  outside the kind (`Type::admits`), `Match::bind` validates kinds as
-  a contract check, and `Equality` propagates `Absent` only into
-  terms that explicitly admit `Nothing`.
-- Negation: `Absent` matches nothing in any scalar slot (both
-  polarities); `negate` propagates inner errors instead of swallowing
-  them; the cardinality-one `challenge` path reads the candidate fact
-  from the claim cited on the row (blank terms store no bindings).
-- The "feasibility (gate) vs cost (rank)" split now carries the
-  optionality contracts: `MaybeQuery` and `Coalesce` declare hard
-  requirements in their schemas, so ordering correctness is
-  structural rather than a cost accident.
+Rule-level inference (one pass, at analysis) is enforced at evaluation: typed scan slots filter facts
+whose value falls outside the term's kind (`Type::admits`), `Match::bind` validates kinds as a
+last-resort contract check, and `Equality` propagates `Absent` only into terms that explicitly admit
+`Nothing`. An `Absent` binding matches nothing in any scalar slot, in both polarities — under negation
+this makes "has no nickname" pass "unless the nickname is banned" instead of matching every banned
+value. Narrowing is positive-polarity-only; negated subqueries are typed in their own context (see
+[`polarity-and-negation.md`](./polarity-and-negation.md)).

@@ -163,8 +163,9 @@ pub enum AnalysisError {
 }
 
 /// A rule that has passed analysis. Carries the conclusion, the
-/// original premises in their planned order, the rule-wide
-/// inferred type environment, and a per-premise dependency graph.
+/// premises (in their original authored order — analysis never
+/// reorders), the rule-wide inferred type environment, and a
+/// per-premise dependency graph.
 ///
 /// This is the artifact of analysis. The planner reads it (or its
 /// pieces) to build per-step plans; future iterations of the
@@ -174,8 +175,8 @@ pub enum AnalysisError {
 pub struct AnalyzedRule {
     /// The rule's conclusion.
     pub conclusion: ConceptDescriptor,
-    /// The premises in their planned order. Analysis preserves
-    /// the planner's ordering; it doesn't re-order on its own.
+    /// The premises in their original authored order; planning
+    /// orders a working copy per scope.
     pub premises: Vec<Premise>,
     /// The rule-wide inferred type environment. Shared via
     /// [`Arc`] across consumers.

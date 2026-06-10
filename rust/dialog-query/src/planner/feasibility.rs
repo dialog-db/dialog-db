@@ -17,9 +17,9 @@ pub enum Infeasible {
 /// Categorize a premise's parameters against a set of already-bound
 /// variables: which it will bind, and which it still requires.
 ///
-/// This is the single definition of feasibility, shared by the planner
-/// (via [`feasible`]) and the per-step SIPS function
-/// ([`Plan::adorn`](super::Plan::adorn)). For each non-constant,
+/// This is the single definition of feasibility — the SIPS binding
+/// function — shared by the planner (via [`feasible`]) and the rule
+/// analyzer's dependency graph. For each non-constant,
 /// non-blank, not-yet-bound slot: a `Required(None)` slot is required;
 /// a `Required(Some(group))` slot is bound if its choice group is
 /// satisfied (by a constant or an already-bound member) and required
@@ -82,8 +82,7 @@ pub(crate) fn categorize(
 /// `Ok(binds)` — the variables the premise will bind — when every
 /// prerequisite is satisfied, or `Err(Infeasible)` naming the
 /// variables it still requires. This is the premise-level entry the
-/// planner orders by; [`Plan::adorn`](super::Plan::adorn) is the same
-/// computation over a lowered step.
+/// planner orders by.
 pub(crate) fn feasible(premise: &Premise, bound: &Environment) -> Result<Environment, Infeasible> {
     let is_negation = matches!(premise, Premise::Unless(_));
     let (binds, requires) =

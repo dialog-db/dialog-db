@@ -183,7 +183,7 @@ where
 // emits zero records when the value is `None` (absence is never
 // persisted).
 //
-// Resolution at the call site is purely type-system driven —
+// Optionality at the call site is purely type-system driven —
 // `<Option<N> as ConceptField>` resolves to *this* impl by virtue
 // of the structural `Option<N>` shape. Aliased imports
 // (`use core::option::Option as Maybe`, etc.) resolve identically

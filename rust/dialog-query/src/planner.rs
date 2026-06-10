@@ -20,9 +20,8 @@ use std::sync::Arc;
 /// Holds the rule's premises and, on [`plan`](Planner::plan), narrows
 /// them to their inferred kinds and repeatedly selects the cheapest
 /// premise that is *feasible* under the variables bound so far — its
-/// feasibility ([`adorn`](Plan::adorn) / [`feasibility::categorize`])
-/// reports the variables it binds, which extend the bound set for the
-/// next round. Cost comes from each premise's `estimate` at the current
+/// feasibility (`feasibility::categorize`) reports the variables it
+/// binds, which extend the bound set for the next round. Cost comes from each premise's `estimate` at the current
 /// scope. The result is an ordered [`Conjunction`].
 pub struct Planner {
     /// Premises waiting to be ordered.

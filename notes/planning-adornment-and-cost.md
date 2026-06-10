@@ -5,6 +5,14 @@
 > adornment function) from **cost** (ranking among feasible orders), make both declarable so a rule
 > loaded from a peer carries its binding requirements as data, and fix the cases the current per-slot
 > `Requirement` schema cannot express.
+>
+> **Status.** The feasibility/cost split landed (`feasibility::feasible`/`categorize`, one shared SIPS
+> binding function; `Infeasible::NeedsAll`); the `Absent`-as-lattice-point analysis below was realized
+> *structurally* — the optional lookup is the `MaybeQuery` left-join whose schema hard-requires the
+> entity, rather than a kind-driven scan mode (see `notes/scalar-associative-layer.md`). Still open:
+> the richer `Infeasible` vocabulary (`NeedsAnyOf`/`NeedsKOf`), the serializable per-premise
+> `Feasibility` descriptor, propagator decomposition of multidirectional formulas, and the cost
+> redesign — see the as-built deltas in [`implementation-plan.md`](./implementation-plan.md).
 
 ## Where this fits
 
