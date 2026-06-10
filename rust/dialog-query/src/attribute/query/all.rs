@@ -45,7 +45,7 @@ impl AttributeQueryAll {
     /// The associative layer is scalar: a fact either exists or the
     /// row is filtered. Set-widening (`Absent` on miss) is a
     /// semantic-layer construct realized by
-    /// [`MaybeQuery`](crate::maybe::MaybeQuery), so a `Nothing` bit
+    /// [`OptionalAttributeQuery`](crate::optional::OptionalAttributeQuery), so a `Nothing` bit
     /// on the `is` term's kind is meaningless here and is stripped.
     pub fn new(the: Term<The>, of: Term<Entity>, is: Term<Any>, cause: Term<Cause>) -> Self {
         let is = match (is.name(), is.kind()) {
@@ -141,7 +141,7 @@ impl AttributeQueryAll {
     /// passes it (the inner query has no rows). By the time a row
     /// reaches the associative layer, an Absent binding means "known
     /// to have no value" — produced upstream by a
-    /// [`MaybeQuery`](crate::maybe::MaybeQuery) left-join.
+    /// [`OptionalAttributeQuery`](crate::optional::OptionalAttributeQuery) left-join.
     pub(crate) fn absent_blocked(&self, base: &Match) -> bool {
         let absent = |term: &Term<Any>| matches!(base.lookup(term), Ok(crate::Binding::Absent));
         absent(&Term::<Any>::from(&self.the))
@@ -259,7 +259,7 @@ impl AttributeQueryAll {
     /// Standard EAV semantics: zero rows are yielded for an input
     /// when no fact matches the lookup — the premise filters the
     /// row. Set-widening (`Absent` on miss) lives at the semantic
-    /// layer in [`MaybeQuery`](crate::maybe::MaybeQuery).
+    /// layer in [`OptionalAttributeQuery`](crate::optional::OptionalAttributeQuery).
     pub fn evaluate<'a, Env, M: Selection + 'a>(
         self,
         env: &'a Env,

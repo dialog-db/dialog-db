@@ -6,7 +6,7 @@ use crate::constraint::Constraint;
 pub use crate::error::AnalyzerError;
 pub use crate::error::QueryResult;
 pub use crate::formula::query::FormulaQuery;
-use crate::maybe::MaybeQuery;
+use crate::optional::OptionalAttributeQuery;
 pub use crate::premise::{Negation, Premise};
 pub use crate::{Environment, Parameters, Schema};
 use serde::de;
@@ -37,7 +37,7 @@ pub enum Proposition {
     /// Left-join over a scalar attribute lookup — the semantic-layer
     /// realization of an optional (`maybe`) concept field. Boxed to
     /// reduce enum size.
-    Maybe(Box<MaybeQuery>),
+    OptionalAttribute(Box<OptionalAttributeQuery>),
     /// Constraint between variables (equality, comparison, etc.)
     Constraint(Constraint),
 }
@@ -49,7 +49,7 @@ impl Proposition {
     pub fn estimate(&self, env: &Environment) -> Option<usize> {
         match self {
             Proposition::Attribute(query) => query.estimate(env),
-            Proposition::Maybe(query) => query.estimate(env),
+            Proposition::OptionalAttribute(query) => query.estimate(env),
             Proposition::Concept(application) => application.estimate(env),
             Proposition::Formula(application) => application.estimate(env),
             Proposition::Constraint(constraint) => constraint.estimate(env),
@@ -60,7 +60,7 @@ impl Proposition {
     pub fn parameters(&self) -> Parameters {
         match self {
             Proposition::Attribute(query) => query.parameters(),
-            Proposition::Maybe(query) => query.parameters(),
+            Proposition::OptionalAttribute(query) => query.parameters(),
             Proposition::Concept(application) => application.parameters(),
             Proposition::Formula(application) => application.parameters(),
             Proposition::Constraint(constraint) => constraint.parameters(),
@@ -71,7 +71,7 @@ impl Proposition {
     pub fn schema(&self) -> Schema {
         match self {
             Proposition::Attribute(query) => query.schema(),
-            Proposition::Maybe(query) => query.schema(),
+            Proposition::OptionalAttribute(query) => query.schema(),
             Proposition::Concept(application) => application.schema(),
             Proposition::Formula(application) => application.schema(),
             Proposition::Constraint(constraint) => constraint.schema(),
@@ -100,7 +100,7 @@ impl Display for Proposition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Proposition::Attribute(query) => Display::fmt(query, f),
-            Proposition::Maybe(query) => Display::fmt(query, f),
+            Proposition::OptionalAttribute(query) => Display::fmt(query, f),
             Proposition::Concept(application) => Display::fmt(application, f),
             Proposition::Formula(application) => Display::fmt(application, f),
             Proposition::Constraint(constraint) => Display::fmt(constraint, f),
@@ -123,8 +123,8 @@ impl Serialize for Proposition {
             Proposition::Attribute(_) => Err(ser::Error::custom(
                 "Attribute propositions cannot be serialized in formal notation",
             )),
-            Proposition::Maybe(_) => Err(ser::Error::custom(
-                "Maybe propositions cannot be serialized in formal notation",
+            Proposition::OptionalAttribute(_) => Err(ser::Error::custom(
+                "Optional attribute propositions cannot be serialized in formal notation",
             )),
         }
     }

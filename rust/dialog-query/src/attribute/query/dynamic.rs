@@ -47,7 +47,7 @@ impl DynamicAttributeQuery {
     ///
     /// Scalar semantics in both variants: zero rows on miss.
     /// Set-widening (`Absent` on miss) is a semantic-layer construct
-    /// realized by [`MaybeQuery`](crate::maybe::MaybeQuery).
+    /// realized by [`OptionalAttributeQuery`](crate::optional::OptionalAttributeQuery).
     pub fn new(
         the: Term<The>,
         of: Term<Entity>,
@@ -909,7 +909,7 @@ mod tests {
     /// The associative layer is scalar: a set-widened (`Nothing`-
     /// bearing) `is` kind is stripped at construction, in both
     /// cardinality variants. Set-widening belongs to
-    /// [`MaybeQuery`](crate::maybe::MaybeQuery).
+    /// [`OptionalAttributeQuery`](crate::optional::OptionalAttributeQuery).
     #[dialog_common::test]
     fn it_normalizes_optional_is_kind_at_construction() {
         let many = DynamicAttributeQuery::new(
@@ -1017,7 +1017,7 @@ mod tests {
 
     /// Evaluation yields zero rows when the underlying fact is
     /// missing — standard EAV — regardless of the input term's
-    /// kind. The Absent fallback lives in `MaybeQuery`, not here.
+    /// kind. The Absent fallback lives in `OptionalAttributeQuery`, not here.
     #[dialog_common::test]
     async fn it_yields_zero_rows_on_miss() -> anyhow::Result<()> {
         let (operator, profile) = test_operator_with_profile().await;

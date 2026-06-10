@@ -435,7 +435,7 @@ mod tests {
     /// optional slot bound to `Binding::Absent`. Entities that
     /// have the fact get `Binding::Present(value)` for the slot.
     /// This is the v2 set-widening behavior at the concept
-    /// projection layer, realized by the `MaybeQuery` left-join the
+    /// projection layer, realized by the `OptionalAttributeQuery` left-join the
     /// concept lowering emits for `maybe` fields.
     #[dialog_common::test]
     async fn it_executes_concept_with_optional_field() -> anyhow::Result<()> {

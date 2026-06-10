@@ -80,7 +80,7 @@ rule proved at the boundary. Projection is positive-polarity only.
 
 ### Structural optionality
 
-Set-widening lives in exactly one construct, the `MaybeQuery` left-join, whose schema hard-requires
+Set-widening lives in exactly one construct, the `OptionalAttributeQuery` left-join, whose schema hard-requires
 its entity slot and declares the widened content types. The associative layer below it is scalar.
 Every ordering-sensitive correctness condition is schema-borne (the entity requirement, Coalesce's
 hard-required source), so the planner cannot produce an order that changes meaning.
@@ -121,7 +121,7 @@ a type system that cannot constrain the plan cannot guarantee its own semantics.
 (2) compose optional fields from a scalar scan plus `Coalesce` — rejected because the fallback still
 needs left-join row semantics underneath (emit nothing vs. emit Absent), so the operator is needed
 anyway and the composition adds nothing.
-Chosen: a first-class `MaybeQuery` premise/plan construct wrapping a *scalar* lookup, with the
+Chosen: a first-class `OptionalAttributeQuery` premise/plan construct wrapping a *scalar* lookup, with the
 contracts in its schema. A standalone optional lookup with an unbound entity is thereby
 *inexpressible* rather than mis-planned ("absent for whom?").
 

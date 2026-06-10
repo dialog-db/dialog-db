@@ -8,7 +8,7 @@
 >
 > **Status.** The feasibility/cost split landed (`feasibility::feasible`/`categorize`, one shared SIPS
 > binding function; `Infeasible::NeedsAll`); the `Absent`-as-lattice-point analysis below was realized
-> *structurally* — the optional lookup is the `MaybeQuery` left-join whose schema hard-requires the
+> *structurally* — the optional lookup is the `OptionalAttributeQuery` left-join whose schema hard-requires the
 > entity, rather than a kind-driven scan mode (see `notes/scalar-associative-layer.md`). Still open:
 > the richer `Infeasible` vocabulary (`NeedsAnyOf`/`NeedsKOf`), the serializable per-premise
 > `Feasibility` descriptor, propagator decomposition of multidirectional formulas, and the cost

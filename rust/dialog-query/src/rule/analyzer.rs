@@ -264,7 +264,7 @@ pub fn analyze(
     // negation filters everything. Negate the scalar lookup ("the
     // entity has no such fact") or the concept instead.
     for premise in &premises {
-        if let Premise::Unless(Negation(Proposition::Maybe(_))) = premise {
+        if let Premise::Unless(Negation(Proposition::OptionalAttribute(_))) = premise {
             return Err(AnalysisError::NegatedOptional);
         }
     }
@@ -287,7 +287,7 @@ mod tests {
     use crate::artifact::{Entity, Type as ValueType};
     use crate::attribute::AttributeDescriptor;
     use crate::attribute::query::AttributeQuery;
-    use crate::maybe::MaybeQuery;
+    use crate::optional::OptionalAttributeQuery;
     use crate::the;
     use crate::types::Any;
     use crate::{Cardinality, Term};
@@ -426,7 +426,7 @@ mod tests {
     #[dialog_common::test]
     fn it_rejects_required_head_bound_only_by_optional_premises() {
         let premises = vec![
-            MaybeQuery::new(
+            OptionalAttributeQuery::new(
                 Term::from(the!("person/name")),
                 Term::<Entity>::var("this"),
                 Term::<String>::var("name").into(),
@@ -448,7 +448,7 @@ mod tests {
     /// yields a row for a bound entity (Present or the Absent
     /// fallback), so negating it would filter every row.
     #[dialog_common::test]
-    fn it_rejects_negated_maybe() {
+    fn it_rejects_negated_optional() {
         use crate::premise::Negation;
 
         let name_scan = AttributeQuery::new(
@@ -458,7 +458,7 @@ mod tests {
             Term::var("cause"),
             Some(Cardinality::One),
         );
-        let maybe = MaybeQuery::new(
+        let maybe = OptionalAttributeQuery::new(
             Term::from(the!("person/nickname")),
             Term::<Entity>::var("this"),
             Term::<String>::var("nickname").into(),
@@ -467,7 +467,7 @@ mod tests {
         );
         let premises = vec![
             name_scan.into(),
-            Premise::Unless(Negation(Proposition::Maybe(Box::new(maybe)))),
+            Premise::Unless(Negation(Proposition::OptionalAttribute(Box::new(maybe)))),
         ];
 
         let err = analyze(person_with_name(), premises).unwrap_err();

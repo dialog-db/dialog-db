@@ -16,7 +16,7 @@
 //! requirement: a slot's `Requirement` speaks of *derivability*
 //! (does the premise produce or demand the binding), never of
 //! absence. Set-widening (admitting `Nothing`) is declared
-//! exclusively through content types — a `MaybeQuery`'s value slot
+//! exclusively through content types — a `OptionalAttributeQuery`'s value slot
 //! or a concept's optional field.
 //!
 //! Negation premises do not contribute. They filter on existing
@@ -93,7 +93,7 @@ impl TypeEnv {
                 // premise produces the binding rather than demanding
                 // it) — derivability is not absence. Set-widening
                 // (admitting `Nothing`) is declared exclusively
-                // through content types: a `MaybeQuery`'s value slot
+                // through content types: a `OptionalAttributeQuery`'s value slot
                 // or a concept's optional field.
                 let slot_kind: Kind = match field.content_type() {
                     Some(t) => t.clone(),
@@ -154,16 +154,16 @@ mod tests {
     use crate::artifact::{Entity, Type as ValueType};
     use crate::attribute::The;
     use crate::attribute::query::AttributeQuery;
-    use crate::maybe::MaybeQuery;
+    use crate::optional::OptionalAttributeQuery;
     use crate::planner::Planner;
     use crate::types::Any;
     use crate::{Cardinality, Environment, Term, the};
 
     /// Helper: an optional (set-widening) binding for `?name` — a
-    /// `MaybeQuery` left-join whose schema admits `Nothing` for the
+    /// `OptionalAttributeQuery` left-join whose schema admits `Nothing` for the
     /// value slot.
-    fn maybe_name(the: Term<The>) -> Premise {
-        MaybeQuery::new(
+    fn optional_name_premise(the: Term<The>) -> Premise {
+        OptionalAttributeQuery::new(
             the,
             Term::<Entity>::var("this"),
             Term::<String>::var("name").into(),
@@ -196,7 +196,7 @@ mod tests {
     /// bit in its inferred type.
     #[dialog_common::test]
     fn it_preserves_nothing_when_only_optional_bindings_exist() {
-        let premises = vec![maybe_name(Term::from(the!("person/name")))];
+        let premises = vec![optional_name_premise(Term::from(the!("person/name")))];
         let env = TypeEnv::infer(&premises).unwrap();
         let name_kind = env.get("name").expect("name inferred");
         assert!(
@@ -293,7 +293,7 @@ mod tests {
     fn it_strips_nothing_when_a_required_binding_also_exists() {
         let typed_name: Term<Any> = Term::<String>::var("name").into();
         let premises = vec![
-            maybe_name(Term::from(the!("person/nickname"))),
+            optional_name_premise(Term::from(the!("person/nickname"))),
             AttributeQuery::new(
                 Term::from(the!("person/name")),
                 Term::<Entity>::var("this"),
@@ -378,7 +378,7 @@ mod tests {
             Some(Cardinality::One),
         );
         let premises = vec![
-            maybe_name(Term::from(the!("person/name"))),
+            optional_name_premise(Term::from(the!("person/name"))),
             Premise::Unless(Negation(Proposition::Attribute(Box::new(neg_query)))),
         ];
         let env = TypeEnv::infer(&premises).unwrap();

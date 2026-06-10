@@ -75,7 +75,7 @@ A variable in a row is in one of three states:
 The difference between unbound and `Absent` carries real information.
 `Absent` is a positive claim about the store ("this entity has no
 such fact"), produced by exactly one construct: the optional lookup
-behind an optional concept field (`MaybeQuery` internally). Nothing
+behind an optional concept field (`OptionalAttributeQuery` internally). Nothing
 else in the engine manufactures `Absent`, and nothing ever stores it.
 
 This is why the optional lookup *requires the entity to be bound*

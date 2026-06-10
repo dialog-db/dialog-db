@@ -402,13 +402,13 @@ contract is now structural rather than kind-driven. The deltas:
 - **Optionality left the associative layer.** `Resolution` and the
   `is`-term-driven Absent fallback are gone; a raw attribute lookup is
   scalar (zero rows on miss), and `AttributeQueryAll::new` strips a
-  `Nothing`-bearing kind. Set-widening is realized by the `MaybeQuery`
+  `Nothing`-bearing kind. Set-widening is realized by the `OptionalAttributeQuery`
   left-join at the semantic layer (see
   `notes/scalar-associative-layer.md`).
 - **One encoding.** The `Requirement::Optional -> Primitive::ANY`
   inference rule is deleted: a slot's `Requirement` speaks only of
   derivability, and absence is declared exclusively through content
-  types (`MaybeQuery` schema, concept optional fields). The concept
+  types (`OptionalAttributeQuery` schema, concept optional fields). The concept
   boundary schema now widens optional fields, so a consuming rule's
   TypeEnv is truthful.
 - **Filter semantics, everywhere.** A scalar context (scan slot,

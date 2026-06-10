@@ -535,7 +535,7 @@ mod plan_ordering {
             .iter()
             .map(|step| match step {
                 Plan::Scan(..) => "scan",
-                Plan::Maybe(..) => "maybe",
+                Plan::OptionalScan(..) => "optional",
                 Plan::Formula(..) => "formula",
                 Plan::Constraint(..) => "constraint",
                 Plan::Concept(..) => "concept",
@@ -753,13 +753,13 @@ mod plan_ordering {
     /// on `?person`, and nothing binds `?person`.
     #[dialog_common::test]
     fn it_plans_coalesce_constraint() {
-        use crate::maybe::MaybeQuery;
+        use crate::optional::OptionalAttributeQuery;
 
         let nickname: Term<Option<String>> = Term::var("nickname");
         let display: Term<String> = Term::var("display");
         let coalesce = nickname.unwrap_or("Anon".to_string()).is(display);
 
-        let nickname_maybe = MaybeQuery::new(
+        let optional_nickname = OptionalAttributeQuery::new(
             Term::from(the!("person/nickname")),
             Term::<Entity>::var("person"),
             Term::<String>::var("nickname").into(),
@@ -767,7 +767,7 @@ mod plan_ordering {
             Some(Cardinality::One),
         );
 
-        let premises = vec![coalesce, nickname_maybe.into()];
+        let premises = vec![coalesce, optional_nickname.into()];
 
         // Empty scope: nothing can run — the coalesce needs its
         // source, the left-join needs its entity.
@@ -788,7 +788,7 @@ mod plan_ordering {
         let plan = Planner::from(premises.clone()).plan(&scope).unwrap();
         assert_eq!(
             kinds(&plan),
-            vec!["maybe", "constraint"],
+            vec!["optional", "constraint"],
             "coalesce orders after the premise binding its source"
         );
 

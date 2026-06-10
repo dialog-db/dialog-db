@@ -5,8 +5,8 @@ use crate::artifact::Entity;
 use crate::attribute::query::AttributeQuery;
 pub use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::TypeError;
-use crate::maybe::MaybeQuery;
 use crate::negation::Negation;
+use crate::optional::OptionalAttributeQuery;
 pub use crate::planner::Plan;
 pub use crate::planner::{Conjunction, Planner};
 pub use crate::premise::Premise;
@@ -144,7 +144,7 @@ impl From<&ConceptDescriptor> for DeductiveRule {
             // associative layer never carries optionality. A
             // required field lowers to a plain scan (a missing fact
             // filters the row out); an optional field lowers to a
-            // `MaybeQuery` left-join, which set-widens at the
+            // `OptionalAttributeQuery` left-join, which set-widens at the
             // projection: `this` is bound by the required fields, so
             // a miss yields one row with the slot bound to
             // `Binding::Absent`.
@@ -154,7 +154,7 @@ impl From<&ConceptDescriptor> for DeductiveRule {
             };
 
             let premise: Premise = if field.is_optional() {
-                MaybeQuery::new(
+                OptionalAttributeQuery::new(
                     Term::Constant(Value::from(field.the().clone())),
                     this.clone(),
                     value,
@@ -190,11 +190,11 @@ mod tests {
     use crate::types::Any;
 
     /// Helper: an optional (set-widening) premise over the given
-    /// attribute. Optionality is structural — a `MaybeQuery`
+    /// attribute. Optionality is structural — a `OptionalAttributeQuery`
     /// left-join wrapping a scalar lookup — so this is how a test
     /// makes a variable's inferred kind admit `Nothing`.
-    fn maybe_premise(the: Term<The>, is: Term<Any>, cause: Term<Cause>) -> Premise {
-        MaybeQuery::new(
+    fn optional_premise(the: Term<The>, is: Term<Any>, cause: Term<Cause>) -> Premise {
+        OptionalAttributeQuery::new(
             the,
             Term::<Entity>::var("this"),
             is,
@@ -629,7 +629,7 @@ mod tests {
         for premise in rule.analysis().premises.iter() {
             match premise {
                 Premise::Assert(Proposition::Attribute(_)) => scans += 1,
-                Premise::Assert(Proposition::Maybe(_)) => maybes += 1,
+                Premise::Assert(Proposition::OptionalAttribute(_)) => maybes += 1,
                 _ => {}
             }
         }
@@ -676,7 +676,7 @@ mod tests {
         for premise in rule.analysis().premises.iter() {
             match premise {
                 Premise::Assert(Proposition::Attribute(_)) => scans += 1,
-                Premise::Assert(Proposition::Maybe(query)) => {
+                Premise::Assert(Proposition::OptionalAttribute(query)) => {
                     assert!(
                         !query.is().is_optional(),
                         "the wrapped lookup's value term stays scalar"
@@ -787,7 +787,7 @@ mod tests {
         .unwrap();
         // Bind ?name only through a left-join — the meet for ?name
         // includes Nothing.
-        let premises = vec![maybe_premise(
+        let premises = vec![optional_premise(
             Term::from(the!("user/name")),
             Term::var("name"),
             Term::var("cause"),
@@ -822,7 +822,7 @@ mod tests {
 
         let premises = vec![
             // Left-join: contributes a slot type with Nothing.
-            maybe_premise(
+            optional_premise(
                 Term::from(the!("user/name")),
                 Term::<String>::var("name").into(),
                 Term::var("cause1"),
@@ -867,7 +867,7 @@ mod tests {
 
         let premises = vec![
             // Left-join (typed): contributes `{String, Nothing}`.
-            maybe_premise(
+            optional_premise(
                 Term::from(the!("user/name")),
                 Term::<String>::var("name").into(),
                 Term::var("cause1"),
@@ -909,7 +909,7 @@ mod tests {
         // the conclusion's required head — the meet's cause
         // contribution carries Nothing, so the required head sees
         // Optional.
-        let premises = vec![maybe_premise(
+        let premises = vec![optional_premise(
             Term::from(the!("user/name")),
             Term::var("name"),
             Term::<Cause>::var("mark"),

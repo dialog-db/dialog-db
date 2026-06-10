@@ -75,7 +75,7 @@ mod tests {
     use crate::attribute::query::AttributeQuery;
     use crate::formula::math::Sum;
     use crate::formula::string::Uppercase;
-    use crate::maybe::MaybeQuery;
+    use crate::optional::OptionalAttributeQuery;
     use crate::planner::Planner;
     use crate::selection::Match;
     use crate::session::RuleRegistry;
@@ -127,7 +127,7 @@ mod tests {
             Term::var("c1"),
             Some(Cardinality::One),
         );
-        let nickname_maybe = MaybeQuery::new(
+        let optional_nickname = OptionalAttributeQuery::new(
             Term::from(the!("person/nickname")),
             Term::<Entity>::var("person"),
             Term::<String>::var("nickname").into(),
@@ -140,7 +140,7 @@ mod tests {
 
         let plan = Planner::from(vec![
             Premise::Assert(Proposition::Attribute(Box::new(name_scan))),
-            nickname_maybe.into(),
+            optional_nickname.into(),
             coalesce,
         ])
         .plan(&Environment::new())?;
@@ -217,7 +217,7 @@ mod tests {
             Term::var("c1"),
             Some(Cardinality::One),
         );
-        let nickname_maybe = MaybeQuery::new(
+        let optional_nickname = OptionalAttributeQuery::new(
             Term::from(the!("person/nickname")),
             Term::<Entity>::var("person"),
             Term::<String>::var("nickname").into(),
@@ -234,7 +234,7 @@ mod tests {
 
         let plan = Planner::from(vec![
             Premise::Assert(Proposition::Attribute(Box::new(name_scan))),
-            nickname_maybe.into(),
+            optional_nickname.into(),
             Premise::Unless(Negation::not(Proposition::Attribute(Box::new(banned_scan)))),
         ])
         .plan(&Environment::new())?;
@@ -385,7 +385,7 @@ mod tests {
             Term::var("c1"),
             Some(Cardinality::One),
         );
-        let age_maybe = MaybeQuery::new(
+        let optional_age = OptionalAttributeQuery::new(
             Term::from(the!("person/age")),
             Term::<Entity>::var("person"),
             Term::<u32>::var("age").into(),
@@ -400,7 +400,7 @@ mod tests {
 
         let plan = Planner::from(vec![
             Premise::Assert(Proposition::Attribute(Box::new(name_scan))),
-            age_maybe.into(),
+            optional_age.into(),
             sum,
         ])
         .plan(&Environment::new())?;

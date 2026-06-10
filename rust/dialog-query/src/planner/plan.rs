@@ -2,8 +2,8 @@ use crate::attribute::query::{AttributeQuery, DynamicAttributeQuery};
 use crate::concept::query::ConceptQuery;
 use crate::constraint::Constraint;
 use crate::formula::query::FormulaQuery;
-use crate::maybe::MaybeQuery;
 use crate::negation::Negation;
+use crate::optional::OptionalAttributeQuery;
 use crate::proposition::Proposition;
 use crate::query::Application;
 use crate::rule::types::TypeEnv;
@@ -58,7 +58,7 @@ pub enum Plan {
     /// bound by construction), Present facts extend the row and a miss
     /// yields one row with the value slot bound Absent. The
     /// semantic-layer realization of an optional concept field.
-    Maybe(Header, Box<MaybeQuery>),
+    OptionalScan(Header, Box<OptionalAttributeQuery>),
     /// Pure computation that derives bindings without touching the
     /// fact store.
     Formula(Header, FormulaQuery),
@@ -79,7 +79,7 @@ impl Plan {
     pub fn header(&self) -> &Header {
         match self {
             Plan::Scan(header, _) => header,
-            Plan::Maybe(header, _) => header,
+            Plan::OptionalScan(header, _) => header,
             Plan::Formula(header, _) => header,
             Plan::Constraint(header, _) => header,
             Plan::Concept(header, _) => header,
@@ -97,7 +97,9 @@ impl Plan {
     pub fn as_premise(&self) -> Premise {
         match self {
             Plan::Scan(_, query) => Premise::Assert(Proposition::Attribute(query.clone())),
-            Plan::Maybe(_, query) => Premise::Assert(Proposition::Maybe(query.clone())),
+            Plan::OptionalScan(_, query) => {
+                Premise::Assert(Proposition::OptionalAttribute(query.clone()))
+            }
             Plan::Concept(_, query) => Premise::Assert(Proposition::Concept(query.clone())),
             Plan::Formula(_, query) => Premise::Assert(Proposition::Formula(query.clone())),
             Plan::Constraint(_, constraint) => {
@@ -155,7 +157,7 @@ impl Plan {
     fn lower_proposition(proposition: Proposition, header: Header) -> Self {
         match proposition {
             Proposition::Attribute(query) => Plan::Scan(header, query),
-            Proposition::Maybe(query) => Plan::Maybe(header, query),
+            Proposition::OptionalAttribute(query) => Plan::OptionalScan(header, query),
             Proposition::Concept(query) => Plan::Concept(header, query),
             Proposition::Formula(query) => Plan::Formula(header, query),
             Proposition::Constraint(constraint) => Plan::Constraint(header, constraint),
@@ -175,9 +177,9 @@ impl Plan {
             Plan::Scan(_, query) => Either::Left(Either::Left(Either::Left(Either::Left(
                 Application::evaluate(*query, selection, env),
             )))),
-            Plan::Maybe(_, query) => Either::Left(Either::Left(Either::Left(Either::Right(
-                Application::evaluate(*query, selection, env),
-            )))),
+            Plan::OptionalScan(_, query) => Either::Left(Either::Left(Either::Left(
+                Either::Right(Application::evaluate(*query, selection, env)),
+            ))),
             Plan::Concept(_, query) => {
                 Either::Left(Either::Left(Either::Right(query.evaluate(selection, env))))
             }
@@ -231,7 +233,7 @@ where
 /// is an occurrence-typing fact about rows that survive the
 /// positive premises ("?x is Present in every surviving row"), so
 /// it narrows positive premises: an attribute scan's `is` kind is
-/// stamped, and a [`MaybeQuery`] whose value variable was narrowed
+/// stamped, and a [`OptionalAttributeQuery`] whose value variable was narrowed
 /// to non-optional is demoted to its wrapped scalar scan. A negated
 /// premise asks a hypothetical question about rows that do *not*
 /// survive it; it is typed in its own context and left untouched.
@@ -256,7 +258,7 @@ fn apply_types_to_proposition(proposition: Proposition, types: &TypeEnv) -> Prop
             let query = *boxed;
             Proposition::Attribute(Box::new(narrow_attribute(query, types)))
         }
-        Proposition::Maybe(boxed) => {
+        Proposition::OptionalAttribute(boxed) => {
             // When rule inference narrowed the value variable to a
             // non-optional kind (a sibling premise guarantees it is
             // Present), the left-join's fallback can never fire:
@@ -268,7 +270,7 @@ fn apply_types_to_proposition(proposition: Proposition, types: &TypeEnv) -> Prop
                     let kind = kind.clone();
                     Proposition::Attribute(Box::new(maybe.into_query().with_type(kind)))
                 }
-                _ => Proposition::Maybe(Box::new(maybe)),
+                _ => Proposition::OptionalAttribute(Box::new(maybe)),
             }
         }
         Proposition::Concept(query) => {
@@ -317,13 +319,13 @@ mod tests {
     use super::*;
     use crate::artifact::Entity;
     use crate::error::TypeError;
-    use crate::maybe::MaybeQuery;
+    use crate::optional::OptionalAttributeQuery;
     use crate::planner::Planner;
     use crate::the;
     use crate::{Cardinality, Term};
 
-    fn maybe_nickname(var: &str) -> Premise {
-        MaybeQuery::new(
+    fn optional_nickname_premise(var: &str) -> Premise {
+        OptionalAttributeQuery::new(
             Term::from(the!("person/nickname")),
             Term::<Entity>::var("this"),
             Term::<String>::var(var).into(),
@@ -344,15 +346,15 @@ mod tests {
         .into()
     }
 
-    /// A rule where a `Maybe` left-join binds `?name` (set-widened:
+    /// A rule where an optional lookup binds `?name` (set-widened:
     /// `String | Nothing` in its schema) and a sibling scan binds it
     /// required (kind `String`). Rule-level inference narrows
-    /// `?name` to `String`, and the planner demotes the `Maybe` to
+    /// `?name` to `String`, and the planner demotes the optional lookup to
     /// its wrapped scalar scan — the fallback can never fire, so the
-    /// plan contains no `Maybe` step at all.
+    /// plan contains no `OptionalScan` step at all.
     #[dialog_common::test]
-    fn it_demotes_maybe_to_scan_via_rule_inference() {
-        let premises = vec![maybe_nickname("name"), name_scan("name")];
+    fn it_demotes_optional_to_scan_via_rule_inference() {
+        let premises = vec![optional_nickname_premise("name"), name_scan("name")];
         let plan = Planner::from(premises)
             .plan(&crate::Environment::new())
             .unwrap();
@@ -379,8 +381,8 @@ mod tests {
     /// narrowed it, so the left-join (and its Absent fallback) is
     /// preserved.
     #[dialog_common::test]
-    fn it_requires_entity_for_standalone_maybe() {
-        let premises = vec![maybe_nickname("name")];
+    fn it_requires_entity_for_standalone_optional() {
+        let premises = vec![optional_nickname_premise("name")];
 
         match Planner::from(premises.clone()).plan(&crate::Environment::new()) {
             Err(TypeError::RequiredBindings { required }) => {
@@ -396,7 +398,7 @@ mod tests {
         scope.add("this");
         let plan = Planner::from(premises).plan(&scope).unwrap();
         assert!(
-            matches!(plan.steps[0], Plan::Maybe(..)),
+            matches!(plan.steps[0], Plan::OptionalScan(..)),
             "an un-narrowed optional premise stays a Maybe step"
         );
     }
@@ -407,12 +409,15 @@ mod tests {
     /// scopes.
     #[dialog_common::test]
     fn it_preserves_narrowing_across_replans() {
-        let premises = vec![maybe_nickname("nick"), name_scan("nick")];
+        let premises = vec![optional_nickname_premise("nick"), name_scan("nick")];
         let plan = Planner::from(premises.clone())
             .plan(&crate::Environment::new())
             .unwrap();
         assert!(
-            !plan.steps.iter().any(|s| matches!(s, Plan::Maybe(..))),
+            !plan
+                .steps
+                .iter()
+                .any(|s| matches!(s, Plan::OptionalScan(..))),
             "demotion applies at empty scope"
         );
 
@@ -422,7 +427,10 @@ mod tests {
         scope.add("this");
         let replanned = Planner::from(premises).plan(&scope).unwrap();
         assert!(
-            !replanned.steps.iter().any(|s| matches!(s, Plan::Maybe(..))),
+            !replanned
+                .steps
+                .iter()
+                .any(|s| matches!(s, Plan::OptionalScan(..))),
             "demotion must survive replanning"
         );
         for step in &replanned.steps {

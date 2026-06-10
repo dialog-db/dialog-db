@@ -37,7 +37,7 @@ use std::fmt::{Formatter, Result as FmtResult};
 ///
 /// The associative layer stays scalar: the wrapped query's `is` term
 /// carries a plain value kind, and the widening (`T ∪ Nothing`) is
-/// declared here, in [`MaybeQuery::schema`]. The schema also marks
+/// declared here, in [`OptionalAttributeQuery::schema`]. The schema also marks
 /// the entity slot hard-required — "absent" is only meaningful for a
 /// known entity ("absent for *whom*?"), so the planner must bind the
 /// entity through some other premise before scheduling this step.
@@ -45,12 +45,12 @@ use std::fmt::{Formatter, Result as FmtResult};
 /// an optional lookup leading an unbound scan silently dropped
 /// entities (#348).
 #[derive(Debug, Clone, PartialEq)]
-pub struct MaybeQuery {
+pub struct OptionalAttributeQuery {
     /// The scalar attribute lookup to left-join against.
     query: DynamicAttributeQuery,
 }
 
-impl MaybeQuery {
+impl OptionalAttributeQuery {
     /// Create a left-join over the given attribute lookup terms. The
     /// `is` term is scalar; set-widening is declared by this wrapper,
     /// not by the term's kind.
@@ -72,7 +72,7 @@ impl MaybeQuery {
     }
 
     /// Unwrap into the scalar lookup, dropping the left-join. The
-    /// planner uses this to demote a `Maybe` whose value variable was
+    /// planner uses this to demote an optional lookup whose value variable was
     /// narrowed to non-optional by rule inference: when a sibling
     /// premise guarantees the value is Present, the fallback can
     /// never fire and the premise is an ordinary scan.
@@ -211,7 +211,7 @@ impl MaybeQuery {
     }
 }
 
-impl Application for MaybeQuery {
+impl Application for OptionalAttributeQuery {
     type Conclusion = Claim;
 
     fn evaluate<'a, Env, M: Selection + 'a>(self, selection: M, env: &'a Env) -> impl Selection + 'a
@@ -226,21 +226,21 @@ impl Application for MaybeQuery {
     }
 }
 
-impl Display for MaybeQuery {
+impl Display for OptionalAttributeQuery {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "maybe {}", self.query)
     }
 }
 
-impl From<MaybeQuery> for Proposition {
-    fn from(query: MaybeQuery) -> Self {
-        Proposition::Maybe(Box::new(query))
+impl From<OptionalAttributeQuery> for Proposition {
+    fn from(query: OptionalAttributeQuery) -> Self {
+        Proposition::OptionalAttribute(Box::new(query))
     }
 }
 
-impl From<MaybeQuery> for Premise {
-    fn from(query: MaybeQuery) -> Self {
-        Premise::Assert(Proposition::Maybe(Box::new(query)))
+impl From<OptionalAttributeQuery> for Premise {
+    fn from(query: OptionalAttributeQuery) -> Self {
+        Premise::Assert(Proposition::OptionalAttribute(Box::new(query)))
     }
 }
 
@@ -256,8 +256,8 @@ mod tests {
     use crate::{Type, Value};
     use dialog_repository::helpers::{test_operator_with_profile, test_repo};
 
-    fn nickname_maybe() -> MaybeQuery {
-        MaybeQuery::new(
+    fn optional_nickname() -> OptionalAttributeQuery {
+        OptionalAttributeQuery::new(
             Term::from(the!("person/nickname")),
             Term::<Entity>::var("person"),
             Term::<String>::var("nickname").into(),
@@ -271,7 +271,7 @@ mod tests {
     /// lookup stays scalar.
     #[dialog_common::test]
     fn it_widens_schema_but_keeps_inner_scalar() {
-        let maybe = nickname_maybe();
+        let maybe = optional_nickname();
 
         let schema = maybe.schema();
         let of = schema.get("of").expect("of field");
@@ -321,7 +321,7 @@ mod tests {
         input.bind(&Term::var("person"), Value::Entity(alice))?;
 
         let results: Vec<Match> =
-            Selection::try_vec(nickname_maybe().evaluate(&source, input.seed())).await?;
+            Selection::try_vec(optional_nickname().evaluate(&source, input.seed())).await?;
         assert_eq!(results.len(), 1);
         assert_eq!(
             results[0].lookup(&Term::var("nickname"))?,
@@ -343,7 +343,7 @@ mod tests {
         input.bind(&Term::var("person"), Value::Entity(bob))?;
 
         let results: Vec<Match> =
-            Selection::try_vec(nickname_maybe().evaluate(&source, input.seed())).await?;
+            Selection::try_vec(optional_nickname().evaluate(&source, input.seed())).await?;
         assert_eq!(results.len(), 1, "set-widening yields one fallback row");
         assert_eq!(results[0].lookup(&Term::var("nickname"))?, Binding::Absent);
         Ok(())
@@ -375,7 +375,7 @@ mod tests {
         input.bind(&Term::var("nickname"), Value::String("Al".into()))?;
 
         let results: Vec<Match> =
-            Selection::try_vec(nickname_maybe().evaluate(&source, input.seed())).await?;
+            Selection::try_vec(optional_nickname().evaluate(&source, input.seed())).await?;
         assert_eq!(
             results.len(),
             0,
@@ -410,7 +410,7 @@ mod tests {
         claims_absent_alice.bind(&Term::var("person"), Value::Entity(alice))?;
         claims_absent_alice.bind_absent(&Term::var("nickname"))?;
         let results: Vec<Match> =
-            Selection::try_vec(nickname_maybe().evaluate(&source, claims_absent_alice.seed()))
+            Selection::try_vec(optional_nickname().evaluate(&source, claims_absent_alice.seed()))
                 .await?;
         assert_eq!(results.len(), 0, "a fact contradicts the claimed absence");
 
@@ -418,7 +418,7 @@ mod tests {
         claims_absent_bob.bind(&Term::var("person"), Value::Entity(bob))?;
         claims_absent_bob.bind_absent(&Term::var("nickname"))?;
         let results: Vec<Match> =
-            Selection::try_vec(nickname_maybe().evaluate(&source, claims_absent_bob.seed()))
+            Selection::try_vec(optional_nickname().evaluate(&source, claims_absent_bob.seed()))
                 .await?;
         assert_eq!(results.len(), 1, "no fact confirms the claimed absence");
         Ok(())
@@ -449,7 +449,7 @@ mod tests {
             .await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
-        let aliases = MaybeQuery::new(
+        let aliases = OptionalAttributeQuery::new(
             Term::from(the!("person/alias")),
             Term::<Entity>::var("person"),
             Term::<String>::var("alias").into(),
@@ -526,7 +526,7 @@ mod tests {
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let results =
-            Selection::try_vec(nickname_maybe().evaluate(&source, Match::new().seed())).await;
+            Selection::try_vec(optional_nickname().evaluate(&source, Match::new().seed())).await;
         assert!(results.is_err(), "unbound entity must error");
         Ok(())
     }

@@ -117,7 +117,7 @@ Two facts the papers settle, both adopted here:
 dialog-db's premises are *richer* than Datalog atoms: formulas and constraints have genuine input
 *requirements* (a formula can't run until its input is bound), so feasibility is not merely an
 adornment pattern but a real "can it run yet" predicate. This is why `f` carries a `NeedsAll` error
-naming the still-required variables, and why the optional lookup (`MaybeQuery`) hard-requires its
+naming the still-required variables, and why the optional lookup (`OptionalAttributeQuery`) hard-requires its
 entity bound rather than binding it.
 
 ### Negation as demand — Tekle & Liu, *Extended Magic for Negation* (arXiv:1909.08246)
@@ -154,7 +154,7 @@ sets / pull) rather than DBSP's world-driven push, because dialog-db holds parti
   and `Infeasible`.
 - `rust/dialog-query/src/planner/plan.rs` — the `Plan` operator IR, type projection (`apply_types`),
   and `Conjunction` evaluation.
-- `rust/dialog-query/src/maybe.rs` — `MaybeQuery`, the optional lookup (left-join) operator.
+- `rust/dialog-query/src/optional.rs` — `OptionalAttributeQuery`, the optional lookup (left-join) operator.
 - `rust/dialog-query/src/schema.rs` — `Requirement` / `Group` (feasibility input) and the cost
   constants (`Cardinality::estimate`, the SIPS-selection cost model).
 
