@@ -184,6 +184,25 @@ impl Match {
             Term::Variable {
                 name: Some(name), ..
             } => {
+                // Contract check: a typed variable only accepts values
+                // inhabiting its kind. Scans filter mismatched facts
+                // before reaching here, so a failure at this point is
+                // a contract violation (e.g. an untyped construction
+                // path feeding a value the rule's types exclude), not
+                // a data-dependent non-match.
+                if let Some(kind) = term.kind()
+                    && !kind.admits(&value)
+                {
+                    return Err(EvaluationError::Assignment {
+                        reason: format!(
+                            "Can not set {:?} to {:?} because the value's type {:?} is outside the variable's kind {:?}.",
+                            name,
+                            value,
+                            value.data_type(),
+                            kind
+                        ),
+                    });
+                }
                 if let Some(existing) = self.bindings.get(name) {
                     match existing {
                         Binding::Present(existing_value) => {
@@ -307,6 +326,23 @@ impl Match {
 mod tests {
     use super::*;
     use crate::artifact::Value;
+
+    /// A typed variable only accepts values inhabiting its kind —
+    /// the contract check behind every merge and propagation.
+    #[dialog_common::test]
+    fn bind_rejects_value_outside_the_terms_kind() {
+        let mut row = Match::new();
+        let typed: Term<Any> = Term::<String>::var("name").into();
+
+        let err = row.bind(&typed, Value::UnsignedInt(7));
+        assert!(
+            matches!(err, Err(EvaluationError::Assignment { .. })),
+            "a u32 value cannot inhabit a String-typed variable, got {err:?}"
+        );
+
+        row.bind(&typed, Value::String("Alice".into()))
+            .expect("a String value inhabits the kind");
+    }
 
     #[dialog_common::test]
     fn binding_content_returns_value_for_present() {

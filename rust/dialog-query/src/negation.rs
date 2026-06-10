@@ -117,8 +117,8 @@ mod tests {
         let plan = plan_negation(!a.clone().is(b.clone()), &["a", "b"]);
 
         let mut input = Match::new();
-        input.bind(&Term::<Any>::from(&a), Value::from(1))?;
-        input.bind(&Term::<Any>::from(&b), Value::from(2))?;
+        input.bind(&Term::<Any>::from(&a), Value::from("1".to_string()))?;
+        input.bind(&Term::<Any>::from(&b), Value::from("2".to_string()))?;
 
         let results: Vec<Match> = plan.evaluate(input.seed(), &source).try_collect().await?;
 
@@ -143,8 +143,8 @@ mod tests {
         let plan = plan_negation(!a.clone().is(b.clone()), &["a", "b"]);
 
         let mut input = Match::new();
-        input.bind(&Term::<Any>::from(&a), Value::from(1))?;
-        input.bind(&Term::<Any>::from(&b), Value::from(1))?;
+        input.bind(&Term::<Any>::from(&a), Value::from("1".to_string()))?;
+        input.bind(&Term::<Any>::from(&b), Value::from("1".to_string()))?;
 
         let results: Vec<Match> = plan.evaluate(input.seed(), &source).try_collect().await?;
 

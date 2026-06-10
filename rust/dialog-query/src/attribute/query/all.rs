@@ -150,6 +150,19 @@ impl AttributeQueryAll {
             || absent(&Term::<Any>::from(&self.cause))
     }
 
+    /// True when a fact's value inhabits the `is` term's kind. A
+    /// typed value slot is a constraint: attribute values are
+    /// dynamically typed in the store (one attribute may hold values
+    /// of several types across facts), so a fact whose value falls
+    /// outside the term's kind is a non-match to be filtered, never
+    /// an error.
+    pub(crate) fn admits(&self, value: &Value) -> bool {
+        match self.is.kind() {
+            Some(kind) => kind.admits(value),
+            None => true,
+        }
+    }
+
     /// Resolves variables from the given match. `Absent` bindings
     /// leave the term unchanged (same as unbound) — only Present
     /// bindings substitute.
@@ -271,6 +284,11 @@ impl AttributeQueryAll {
                 let stream = Provider::<Select<'_>>::execute(env, (&selection).try_into()?).await?;
                 for await artifact in stream {
                     let artifact = artifact?;
+                    // A typed `is` slot filters facts whose value
+                    // falls outside the kind.
+                    if !selector.admits(&artifact.is) {
+                        continue;
+                    }
                     let mut extension = base.clone();
                     selector.merge(&mut extension, &artifact)?;
                     yield extension;

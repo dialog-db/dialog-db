@@ -26,6 +26,7 @@
 pub mod unifier;
 
 use crate::artifact::Type as ValueType;
+use crate::artifact::Value;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -305,6 +306,14 @@ impl Type {
             Type::Primitive(p) => Type::Primitive(p.union(Primitive::NOTHING)),
             Type::Composite(p, c) => Type::Composite(p.union(Primitive::NOTHING), c),
         }
+    }
+
+    /// True when the given runtime value inhabits this type: the
+    /// value's data type is a member of the primitive part.
+    /// Composite refinements are not yet checked — no composite
+    /// values flow through evaluation today.
+    pub fn admits(&self, value: &Value) -> bool {
+        self.primitive_part().contains(value.data_type())
     }
 
     /// The inverse of [`optional`]: strip the `Nothing` atom if

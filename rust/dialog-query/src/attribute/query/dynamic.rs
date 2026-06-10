@@ -970,6 +970,51 @@ mod tests {
         );
     }
 
+    /// A typed `is` slot is a constraint: attribute values are
+    /// dynamically typed in the store, and facts whose value falls
+    /// outside the term's kind are filtered, not errors.
+    #[dialog_common::test]
+    async fn it_filters_values_outside_the_terms_kind() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // One attribute, two facts of different value types.
+        let alice = Entity::new()?;
+        branch
+            .transaction()
+            .assert(the!("misc/tag").of(alice.clone()).is("blue".to_string()))
+            .assert(the!("misc/tag").of(alice.clone()).is(7u32))
+            .commit()
+            .perform(&operator)
+            .await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let typed = DynamicAttributeQuery::new(
+            Term::from(the!("misc/tag")),
+            Term::Constant(crate::Value::Entity(alice.clone())),
+            Term::<String>::var("tag").into(),
+            Term::blank(),
+            Some(Cardinality::Many),
+        );
+        let results =
+            Selection::try_vec(Application::evaluate(typed, Match::new().seed(), &source)).await?;
+        assert_eq!(results.len(), 1, "only the String fact inhabits the kind");
+
+        let untyped = DynamicAttributeQuery::new(
+            Term::from(the!("misc/tag")),
+            Term::Constant(crate::Value::Entity(alice)),
+            Term::var("tag"),
+            Term::blank(),
+            Some(Cardinality::Many),
+        );
+        let results =
+            Selection::try_vec(Application::evaluate(untyped, Match::new().seed(), &source))
+                .await?;
+        assert_eq!(results.len(), 2, "an untyped slot admits every value");
+        Ok(())
+    }
+
     /// Evaluation yields zero rows when the underlying fact is
     /// missing — standard EAV — regardless of the input term's
     /// kind. The Absent fallback lives in `MaybeQuery`, not here.

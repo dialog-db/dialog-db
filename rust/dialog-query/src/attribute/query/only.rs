@@ -235,7 +235,9 @@ impl AttributeQueryOnly {
                                 choose(current, artifact)
                             }
                             Some(winner) => {
-                                if value_constraint.is_none() || value_constraint.as_ref() == Some(&winner.is) {
+                                if (value_constraint.is_none() || value_constraint.as_ref() == Some(&winner.is))
+                                    && selector.admits(&winner.is)
+                                {
                                     let mut extension = base.clone();
                                     selector.merge(&mut extension, &winner)?;
                                     yield extension;
@@ -249,6 +251,7 @@ impl AttributeQueryOnly {
                     // Yield the final group's winner.
                     if let Some(winner) = candidate.take()
                         && (value_constraint.is_none() || value_constraint.as_ref() == Some(&winner.is))
+                        && selector.admits(&winner.is)
                     {
                         let mut extension = base.clone();
                         selector.merge(&mut extension, &winner)?;

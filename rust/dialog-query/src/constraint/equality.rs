@@ -142,18 +142,20 @@ impl Equality {
                         yield extension;
                     }
                     // One side Absent, other unbound: propagate Absent
-                    // iff the unbound term's kind admits Nothing.
-                    // Otherwise the row violates the unbound term's
-                    // type contract — filter.
+                    // iff the unbound term's kind explicitly admits
+                    // Nothing. Types are checked, not assumed:
+                    // carrying a claimed absence into a term requires
+                    // the term to have opted into absence, so an
+                    // untyped term filters.
                     (Ok(Binding::Absent), Err(_)) => {
-                        if is.is_optional() || is.kind().is_none() {
+                        if is.is_optional() {
                             let mut extension = base.clone();
                             extension.bind_absent(&is)?;
                             yield extension;
                         }
                     }
                     (Err(_), Ok(Binding::Absent)) => {
-                        if this.is_optional() || this.kind().is_none() {
+                        if this.is_optional() {
                             let mut extension = base.clone();
                             extension.bind_absent(&this)?;
                             yield extension;
@@ -346,6 +348,26 @@ mod tests {
             results.len(),
             0,
             "Absent cannot bind a non-optional term — filter"
+        );
+        Ok(())
+    }
+
+    /// An *untyped* term does not accept a propagated Absent either:
+    /// carrying a claimed absence into a term requires the term to
+    /// have explicitly opted into absence (an `Option`-typed kind).
+    #[dialog_common::test]
+    async fn it_filters_absent_into_untyped_term() -> Result<(), EvaluationError> {
+        let constraint = Equality::new(Term::var("x"), Term::var("y"));
+
+        let mut candidate = Match::new();
+        candidate.bind_absent(&Term::<Any>::var("x"))?;
+
+        let results: Vec<Match> = constraint.evaluate(candidate.seed()).try_collect().await?;
+
+        assert_eq!(
+            results.len(),
+            0,
+            "an untyped term has not opted into absence — filter"
         );
         Ok(())
     }
