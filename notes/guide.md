@@ -363,9 +363,14 @@ trade "row excluded" for "row matched with a quietly wrong value").
 Conversions are explicit formulas, parallel to `Coalesce` being the
 explicit form of defaulting. And because exclusion is silent by
 design — the excluded fact may be someone else's perfectly valid
-data — the inference must be *inspectable*: the planned diagnostics
-surface reports what each variable narrowed to and which premise
-narrowed it.
+data — the inference is *inspectable*: `TypeEnv::explain()` renders
+each variable's final kind and the premise-by-premise narrowing
+steps that produced it (`TypeEnv::narrowings()` is the structured
+form), and `TypeEnv::dead_optionality()` reports any field declared
+optional that the rule's other premises require present — sound (the
+optional lookup is demoted to a plain scan) but almost certainly not
+what the author meant, since no result can ever carry that field as
+`Absent`.
 
 ## Why it is layered this way
 
