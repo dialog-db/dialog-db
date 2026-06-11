@@ -473,6 +473,51 @@ mod tests {
         Ok(())
     }
 
+    /// A type predicate filters heterogeneous data and narrows the
+    /// feeding scan: `?tag.number()` keeps the numeric facts and the
+    /// narrowing stamps the scan so non-numeric facts never reach
+    /// the predicate.
+    #[dialog_common::test]
+    async fn it_filters_rows_through_type_predicates() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        branch
+            .transaction()
+            .assert(the!("misc/tag").of(alice.clone()).is("blue".to_string()))
+            .assert(the!("misc/tag").of(alice.clone()).is(7u32))
+            .commit()
+            .perform(&operator)
+            .await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let scan = AttributeQuery::new(
+            Term::from(the!("misc/tag")),
+            Term::<Entity>::var("this"),
+            Term::var("tag"),
+            Term::var("c1"),
+            Some(Cardinality::Many),
+        );
+        let plan = Planner::from(vec![
+            Premise::Assert(Proposition::Attribute(Box::new(scan))),
+            Term::<Any>::var("tag").number(),
+        ])
+        .plan(&Environment::new())?;
+        let results: Vec<Match> = plan
+            .evaluate(Match::new().seed(), &source)
+            .try_collect()
+            .await?;
+
+        assert_eq!(results.len(), 1, "only the numeric fact survives");
+        assert_eq!(
+            results[0].lookup(&Term::var("tag"))?.content()?,
+            Value::UnsignedInt(7)
+        );
+        Ok(())
+    }
+
     /// Characterization of the agreed filter semantics, passing
     /// today: a formula slot demanding a present value narrows a
     /// set-widened attribute variable rule-wide (occurrence typing),

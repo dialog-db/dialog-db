@@ -269,6 +269,39 @@ mod tests {
         .into()
     }
 
+    /// A type predicate narrows its subject rule-wide: occurrence
+    /// typing as a premise.
+    #[dialog_common::test]
+    fn it_narrows_variables_via_type_predicates() -> anyhow::Result<()> {
+        let scan = AttributeQuery::new(
+            Term::from(the!("misc/tag")),
+            Term::<Entity>::var("this"),
+            Term::var("tag"),
+            Term::var("cause"),
+            Some(Cardinality::One),
+        );
+        let premises = vec![scan.into(), Term::<Any>::var("tag").number()];
+
+        let env = TypeEnv::infer(&premises)?;
+        let kind = env.get("tag").expect("inferred");
+        assert_eq!(
+            kind.primitive_part(),
+            Primitive::NUMERIC,
+            "the predicate narrowed the scan variable"
+        );
+        Ok(())
+    }
+
+    /// Conflicting type predicates are a compile-time error.
+    #[dialog_common::test]
+    fn it_rejects_conflicting_type_predicates() {
+        let premises = vec![Term::<Any>::var("x").text(), Term::<Any>::var("x").number()];
+        assert!(
+            TypeEnv::infer(&premises).is_err(),
+            "text and number have an empty meet"
+        );
+    }
+
     /// A formula scheme links its cells: one bounded type variable
     /// per label, shared by every cell carrying it, instantiated
     /// fresh for this use of the formula.

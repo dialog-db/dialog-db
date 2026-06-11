@@ -6,11 +6,13 @@
 
 pub mod coalesce;
 pub mod equality;
+pub mod type_of;
 
 use std::fmt;
 
 pub use coalesce::Coalesce;
 pub use equality::Equality;
+pub use type_of::TypeOf;
 
 use crate::selection::Selection;
 use crate::{Environment, Parameters, Schema};
@@ -32,6 +34,10 @@ pub enum Constraint {
     /// else from `fallback`. Set-widening unwrap.
     #[serde(rename = "coalesce")]
     Coalesce(Coalesce),
+    /// Type predicate — the subject's value inhabits a kind
+    /// (`?x.text()`, `?x.number()`). Occurrence typing as a premise.
+    #[serde(rename = "type")]
+    TypeOf(TypeOf),
 }
 
 impl Constraint {
@@ -40,6 +46,7 @@ impl Constraint {
         match self {
             Constraint::Equality(c) => c.schema(),
             Constraint::Coalesce(c) => c.schema(),
+            Constraint::TypeOf(c) => c.schema(),
         }
     }
 
@@ -48,6 +55,7 @@ impl Constraint {
         match self {
             Constraint::Equality(c) => c.estimate(env),
             Constraint::Coalesce(c) => c.estimate(env),
+            Constraint::TypeOf(c) => c.estimate(env),
         }
     }
 
@@ -56,14 +64,16 @@ impl Constraint {
         match self {
             Constraint::Equality(c) => c.parameters(),
             Constraint::Coalesce(c) => c.parameters(),
+            Constraint::TypeOf(c) => c.parameters(),
         }
     }
 
     /// Evaluates the constraint against the current selection of matches.
     pub fn evaluate<M: Selection>(self, selection: M) -> impl Selection {
         match self {
-            Constraint::Equality(c) => Either::Left(c.evaluate(selection)),
-            Constraint::Coalesce(c) => Either::Right(c.evaluate(selection)),
+            Constraint::Equality(c) => Either::Left(Either::Left(c.evaluate(selection))),
+            Constraint::Coalesce(c) => Either::Left(Either::Right(c.evaluate(selection))),
+            Constraint::TypeOf(c) => Either::Right(c.evaluate(selection)),
         }
     }
 }
@@ -73,6 +83,7 @@ impl Display for Constraint {
         match self {
             Constraint::Equality(c) => Display::fmt(c, f),
             Constraint::Coalesce(c) => Display::fmt(c, f),
+            Constraint::TypeOf(c) => Display::fmt(c, f),
         }
     }
 }
