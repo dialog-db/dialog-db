@@ -148,8 +148,11 @@ This is ordinary relational semantics. A premise is a predicate on
 the row set, and a predicate that demands presence filters rows
 lacking it, exactly the way the scalar nickname lookup filtered Bob.
 Think of it as occurrence typing: using `?age` in a context that
-requires a number *is* the evidence of presence, the same way a
-future `?x.text()` type predicate would narrow `?x` to strings.
+requires a number *is* the evidence of presence, the same way the
+`?x.text()` type predicate narrows `?x` to strings, or
+`?x.starts_with("did:")` narrows it to the textual kinds a literal
+prefix could begin, or `?x.less_than(?y)` narrows both sides to
+numbers.
 
 The planner exploits the narrowing: when inference proves a sibling
 premise guarantees the value is present, the optional lookup can
