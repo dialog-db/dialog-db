@@ -1828,4 +1828,153 @@ mod tests {
 
         Ok(())
     }
+
+    /// Builds a tree by inserting the given u32 keys (little-endian encoded)
+    /// in order and flushing the result to storage.
+    async fn build_and_flush_u32(
+        keys: &[u32],
+        storage: &mut ContentAddressedStorage<
+            MemoryStorageBackend<dialog_common::Blake3Hash, Vec<u8>>,
+        >,
+    ) -> Result<Tree<[u8; 4], Vec<u8>>> {
+        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        for &k in keys {
+            tree = tree
+                .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), storage)
+                .await?;
+        }
+        for (hash, buffer) in tree.flush() {
+            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        }
+        Ok(tree)
+    }
+
+    /// Deleting a boundary whose removal collapses the root must produce the
+    /// same tree as building the remaining keys from scratch.
+    ///
+    /// In this dataset the tree has exactly two segments under the root and
+    /// 69161 is the boundary of the first one. Deleting it makes the right
+    /// segment adopt the orphans, the root's two children fuse into one, and
+    /// the early-return in `let_right_neighbor_adopt_orphans` then returns
+    /// the fused node at the wrong level (here: a bare segment as the tree
+    /// root, where a canonical tree always has an index root).
+    #[dialog_common::test]
+    async fn it_produces_canonical_tree_when_boundary_delete_collapses_the_root() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let keys: Vec<u32> = vec![69161, 101527, 102790, 164389, 171478, 193283];
+
+        let mut tree = build_and_flush_u32(&keys, &mut storage).await?;
+        let mut after = tree.delete(&69161u32.to_le_bytes(), &storage).await?;
+        for (hash, buffer) in after.flush() {
+            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        }
+
+        let remaining: Vec<u32> = keys.iter().copied().filter(|&k| k != 69161).collect();
+        let scratch = build_and_flush_u32(&remaining, &mut storage).await?;
+
+        assert_eq!(
+            after.root(),
+            scratch.root(),
+            "boundary delete that collapses the root should be canonical"
+        );
+        Ok(())
+    }
+
+    /// Deleting the sole entry of a segment must leave every other entry
+    /// readable and produce the canonical tree.
+    ///
+    /// In this dataset 198936 is a boundary that forms a single-entry
+    /// segment in a tree of height two, so deleting it sends a multi-layer
+    /// search path through `TreeShaper::remove_from_path`. That path
+    /// processes the layers in root-to-leaf order while `merge_with_path`
+    /// consumes them leaf-to-root, so the rebuilt subtrees come out in the
+    /// wrong key order: keys 10554, 83265 and 167706 land to the right of
+    /// larger keys and become unreachable through search.
+    #[dialog_common::test]
+    async fn it_keeps_entries_readable_after_a_delete_empties_a_segment() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let keys: Vec<u32> = vec![
+            10554, 28619, 40390, 43764, 45237, 48124, 64082, 66285, 67399, 67838, 81131, 83265,
+            92896, 94186, 98645, 103270, 110189, 114100, 123267, 127869, 135162, 136309, 147808,
+            153518, 154310, 156529, 161523, 167706, 172145, 172489, 176828, 187970, 189253, 198936,
+        ];
+
+        let mut tree = build_and_flush_u32(&keys, &mut storage).await?;
+        let mut after = tree.delete(&198936u32.to_le_bytes(), &storage).await?;
+        for (hash, buffer) in after.flush() {
+            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        }
+
+        let mut unreadable = vec![];
+        for &k in keys.iter().filter(|&&k| k != 198936) {
+            if after.get(&k.to_le_bytes(), &storage).await?.is_none() {
+                unreadable.push(k);
+            }
+        }
+        assert!(
+            unreadable.is_empty(),
+            "live keys unreadable after emptying a segment: {unreadable:?}"
+        );
+
+        let remaining: Vec<u32> = keys.iter().copied().filter(|&k| k != 198936).collect();
+        let scratch = build_and_flush_u32(&remaining, &mut storage).await?;
+        assert_eq!(
+            after.root(),
+            scratch.root(),
+            "emptying a segment should produce the canonical tree"
+        );
+        Ok(())
+    }
+
+    /// A range with an unbounded start bound must stream every entry below
+    /// the end bound. `TreeWalker::stream` currently returns immediately on
+    /// `Bound::Unbounded` and yields nothing.
+    #[dialog_common::test]
+    async fn it_streams_ranges_with_unbounded_start() -> Result<()> {
+        use futures_util::StreamExt;
+
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let tree = build_and_flush_u32(&(0..10).collect::<Vec<_>>(), &mut storage).await?;
+
+        let stream = tree.stream_range(..5u32.to_le_bytes(), &storage);
+        futures_util::pin_mut!(stream);
+        let mut count = 0;
+        while let Some(entry) = stream.next().await {
+            entry?;
+            count += 1;
+        }
+        assert_eq!(count, 5, "..end range should yield entries below end");
+        Ok(())
+    }
+
+    /// Streaming the whole tree must include an entry whose key is the
+    /// maximum key. `Tree::stream` currently delegates to
+    /// `stream_range(Key::min()..Key::max())`, and the exclusive end bound
+    /// drops the maximum key.
+    #[dialog_common::test]
+    async fn it_streams_the_maximum_key() -> Result<()> {
+        use futures_util::StreamExt;
+
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        for i in 0..5u32 {
+            tree = tree
+                .insert(i.to_le_bytes(), vec![i as u8], &storage)
+                .await?;
+        }
+        tree = tree.insert([0xFF; 4], vec![0xFF], &storage).await?;
+        for (hash, buffer) in tree.flush() {
+            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        }
+
+        let stream = tree.stream(&storage);
+        futures_util::pin_mut!(stream);
+        let mut count = 0;
+        while let Some(entry) = stream.next().await {
+            entry?;
+            count += 1;
+        }
+        assert_eq!(count, 6, "stream should include the maximum key");
+        Ok(())
+    }
 }
