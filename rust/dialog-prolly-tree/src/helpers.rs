@@ -57,7 +57,7 @@ use dialog_storage::{ContentAddressedStorage, HashType};
 use futures_core::Stream;
 use futures_util::StreamExt;
 
-use crate::{DialogProllyTreeError, Distribution, KeyType, Node, Tree, ValueType};
+use crate::{DialogProllyTreeError, Distribution, KeyType, Node, Rank, Tree, ValueType};
 
 /// Traversal order for tree iteration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -246,13 +246,13 @@ impl<Hash> Distribution<Vec<u8>, Hash> for DistributionSimulator
 where
     Hash: HashType,
 {
-    const BRANCH_FACTOR: u32 = 4;
+    const BRANCH_FACTOR: u64 = 4;
 
-    fn rank(key: &Vec<u8>) -> u32 {
+    fn rank(key: &Vec<u8>) -> Rank {
         // Keys are encoded as [key_bytes, 0x00, rank_byte]
         // Just read the last byte as the rank
         if key.len() >= 2 && key[key.len() - 2] == 0x00 {
-            key[key.len() - 1] as u32
+            Rank::from(key[key.len() - 1])
         } else {
             1 // Default rank for keys without encoding
         }
