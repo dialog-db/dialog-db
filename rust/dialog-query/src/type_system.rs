@@ -29,6 +29,7 @@ use crate::artifact::Type as ValueType;
 use crate::artifact::Value;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::{Display, Formatter, Result as FmtResult};
 
 /// A bitfield over [`ValueType`] variants plus a `Nothing` bit —
 /// the set of admissible primitive shapes.
@@ -47,6 +48,47 @@ pub struct Primitive {
     /// One bit per [`ValueType`] variant (positions 0-8), plus a
     /// `Nothing` bit at position 9.
     bits: u16,
+}
+
+impl Display for Primitive {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        if *self == Self::EMPTY {
+            return write!(f, "Never");
+        }
+        if self.without_nothing() == Self::ALL {
+            write!(f, "Value")?;
+        } else {
+            const ATOMS: [ValueType; 9] = [
+                ValueType::String,
+                ValueType::Boolean,
+                ValueType::UnsignedInt,
+                ValueType::SignedInt,
+                ValueType::Float,
+                ValueType::Bytes,
+                ValueType::Entity,
+                ValueType::Symbol,
+                ValueType::Record,
+            ];
+            let mut first = true;
+            for atom in ATOMS {
+                if self.contains(atom) {
+                    if !first {
+                        write!(f, "|")?;
+                    }
+                    write!(f, "{atom}")?;
+                    first = false;
+                }
+            }
+            if first {
+                // Only the Nothing bit is set.
+                return write!(f, "Nothing");
+            }
+        }
+        if self.contains_nothing() {
+            write!(f, "|Nothing")?;
+        }
+        Ok(())
+    }
 }
 
 /// Bit position for the synthetic `Nothing` atom.
@@ -84,6 +126,16 @@ impl Primitive {
     /// String-like primitives: `String`, `Symbol`.
     pub const STRING_LIKE: Self = Self {
         bits: Self::bit_for(ValueType::String) | Self::bit_for(ValueType::Symbol),
+    };
+
+    /// Textual primitives: the types whose values have a lexical
+    /// form a prefix predicate can range over — strings, symbols
+    /// (attribute names), and entities (URIs). The bound for
+    /// `starts-with`-style predicates: one predicate over TEXTUAL
+    /// instead of per-type variants, with each member's lexical
+    /// grammar deciding whether a given prefix can match it at all.
+    pub const TEXTUAL: Self = Self {
+        bits: Self::STRING_LIKE.bits | Self::bit_for(ValueType::Entity),
     };
 
     /// Comparable primitives: numeric, string-like, entity, bytes.
@@ -235,6 +287,15 @@ impl From<ValueType> for Type {
 /// Composites live in a [`BTreeSet`] rather than a [`HashSet`].
 /// Two reasons:
 ///
+impl Display for Type {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Type::Primitive(p) => write!(f, "{p}"),
+            Type::Composite(p, c) => write!(f, "{p}+{} composite", c.len()),
+        }
+    }
+}
+
 /// 1. `Type` derives [`Hash`]. `BTreeSet` iterates in a stable
 ///    `Ord`-based order, so the derived hash is canonical:
 ///    `Type::Composite(p, {a, b})` and `Type::Composite(p, {b, a})`

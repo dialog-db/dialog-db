@@ -284,6 +284,86 @@ narrowing should flow *into* a negated subquery), are design-note
 territory rather than user-facing behavior: see
 `notes/polarity-and-negation.md`.
 
+## Where errors surface
+
+The engine has exactly two error surfaces, and only one of them is
+reachable from a rule that compiled.
+
+**Compile time** (rule construction, whether authored locally or
+hydrated from the wire) rejects every misalignment between *known*
+types: a variable demanded as `String` by one slot and as a number by
+another (an empty meet), a required head fed by an optional source, a
+negated optional lookup, a malformed `Coalesce`, a literal that
+cannot inhabit a formula's cell. If the knowledge exists to catch a
+mistake, it is caught here.
+
+**Evaluation time has no type errors — only membership.** A row
+either inhabits the types a premise demands or it is a non-match: a
+`String` fact under a numeric slot is filtered the same way a wrong
+*value* under a pinned constant is, an `Absent` in a scalar slot is
+filtered, and a row whose values cannot share a formula's type
+variable is filtered. Nothing throws and nothing is coerced. The few
+runtime errors that remain in the engine are *contract* violations
+(an optional lookup scheduled with an unbound entity, a bind outside
+a variable's kind): they indicate an engine or construction-path bug,
+are unreachable from any rule that compiled, and exist as defense in
+depth.
+
+For comparison, the three corners of this design space: PostgreSQL
+*errors* at runtime (a bad cast kills the query); SQLite *coerces*
+(`'abc' + 1 = 1`, no error, occasionally nonsense — its `STRICT`
+tables exist because of how that felt in practice); dialog *filters*.
+Filtering keeps SQLite's ergonomic guarantee — a query never dies
+mid-stream on data — without ever fabricating a value.
+
+## Inference in an open world
+
+No annotation is ever required. Inference reconstructs everything
+reconstructable — slot kinds, concept schemas, formula schemes — and
+an untyped wire concept compiles fine; its fields are simply wide.
+The guarantee a compiled rule carries:
+
+> A rule that compiles never produces a runtime type error, and every
+> row it yields inhabits its inferred types.
+
+This is the closed-world (Elm-style) soundness property restated for
+an open world. The data layer is schema-on-query: an attribute may
+hold values of several types across facts, and wire concepts need not
+declare field types, so no amount of inference can make unknown data
+known at compile time. Where inference can only establish a *bound*
+(say NUMERIC, or "any present value"), the bound's runtime meaning is
+the filter semantics above: types narrow on use, and rows outside the
+narrowed type are non-matches. One worked example, with `person/age`
+undeclared on the wire:
+
+```rust
+// person/age(?p, ?age)
+// math/sum { of: ?age, with: 1, is: ?next }
+```
+
+Analysis puts `?age` and `?next` in one type variable bounded NUMERIC
+(the formula's scheme) and stamps that bound onto the age scan. Then,
+per row: an entity with `age = 30` (unsigned) instantiates the
+variable to unsigned, the literal `1` follows losslessly, and
+`?next = 31`; an entity with `age = 2.5` instantiates to float and
+yields `3.5`; an entity whose `age` fact is the *string* `"old"` is
+filtered at the scan by the stamped bound, before the formula ever
+runs. And if some other premise in the same rule demanded `?age` as a
+`String`, the rule would not compile: there the types were known, and
+they misalign.
+
+Two consequences worth naming. There is no implicit numeric
+promotion: a row mixing unsigned and float inputs in one scheme
+variable is a non-match, not a lossy widening (dialog's value lattice
+has no arbitrary-precision type to promote into, so promotion would
+trade "row excluded" for "row matched with a quietly wrong value").
+Conversions are explicit formulas, parallel to `Coalesce` being the
+explicit form of defaulting. And because exclusion is silent by
+design — the excluded fact may be someone else's perfectly valid
+data — the inference must be *inspectable*: the planned diagnostics
+surface reports what each variable narrowed to and which premise
+narrowed it.
+
 ## Why it is layered this way
 
 Keeping the associative layer scalar and pushing all optionality into
@@ -314,6 +394,6 @@ entity (a finite, checkable range), only consumes it through explicit
 operators (`Coalesce`), and treats it as matching nothing everywhere
 else.
 
-For the design history see `notes/scalar-associative-layer.md`,
-`notes/optional-fields.md`, and `notes/query-engine-design.md` at the
-repository root.
+For the design history see [`scalar-associative-layer.md`](./scalar-associative-layer.md),
+[`optional-fields.md`](./optional-fields.md), and
+[`query-engine-design.md`](./query-engine-design.md).

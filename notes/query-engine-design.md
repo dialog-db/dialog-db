@@ -5,7 +5,7 @@
 > sequencing record ([`operator-ir.md`](./operator-ir.md)), the planner design
 > ([`planning-adornment-and-cost.md`](./planning-adornment-and-cost.md)), and the forward-looking
 > [`incremental-subscriptions.md`](./incremental-subscriptions.md). User-facing optionality semantics
-> are documented in [`rust/dialog-query/guide.md`](../rust/dialog-query/guide.md).
+> are documented in [`guide.md`](./guide.md).
 
 ## The pipeline
 

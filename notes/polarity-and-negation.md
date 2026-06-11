@@ -3,7 +3,7 @@
 > Design note. Records the polarity discipline adopted for rule-level
 > type narrowing, the reasoning behind each direction, and the part
 > that remains an open judgment call. User-facing behavior is
-> summarized in `rust/dialog-query/guide.md`; this note is the
+> summarized in `notes/guide.md`; this note is the
 > rationale and the uncertainty.
 
 Rule-level inference computes, per variable, the meet of the kinds of

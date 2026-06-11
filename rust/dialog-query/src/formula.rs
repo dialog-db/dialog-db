@@ -9,14 +9,18 @@
 pub mod bindings;
 /// Formula cell types for parameter slot definitions.
 pub mod cell;
+
 /// Input type alias for formula input cells.
 pub mod input;
+/// Numeric scheme machinery: `Number`, `Numeric`, `SchemeBound`.
+pub mod number;
 /// Formula query for computed values.
 pub mod query;
 
 pub use bindings::*;
 pub use cell::*;
 pub use input::*;
+pub use number::*;
 pub use query::*;
 
 /// Type conversion formulas (to_string, parse_number)
