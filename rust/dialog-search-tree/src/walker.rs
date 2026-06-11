@@ -241,7 +241,7 @@ where
 /// the searched key — a necessary condition for boundary-delete overflow. If
 /// the search path contains any layer with a right sibling, we follow the
 /// leftmost descent from the first such sibling down to the next leaf. This
-/// lets [`TreeShaper::delete`] absorb orphan entries into that leaf in one
+/// lets [`TreeShaper::delete`] fold orphan entries into that leaf in one
 /// pass when the deleted entry turns out to be the segment boundary.
 ///
 /// Returns `None` when either the key is not the leaf's last entry or the leaf
