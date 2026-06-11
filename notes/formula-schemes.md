@@ -117,3 +117,28 @@ Compile time: empty meets (known types misaligned), literal outside a cell's bou
 no type errors — rows that cannot instantiate the scheme are non-matches, and inference must be
 inspectable (the planned diagnostics surface reports what narrowed each variable and what was
 filtered where).
+
+## Addendum: the TEXTUAL scheme (prefix predicates)
+
+User direction after the numeric scheme landed: `starts-with` and its
+relatives are **one predicate over a TEXTUAL bound**
+(`String | Symbol | Entity`, now `Primitive::TEXTUAL`) rather than
+per-type variants. Three properties fall out:
+
+- **The prefix literal refines the scheme.** Each textual type has a
+  lexical grammar (entity URIs, `domain/name` symbols), so a literal
+  prefix that cannot begin a value of some member type drops that
+  member from the subject's inferred kind — a space excludes
+  entities and symbols, narrowing the subject to `String`. If every
+  member drops, the predicate is statically never-matching: a
+  *logical no-match* (the premise filters everything), surfaced as a
+  vacuous-premise diagnostic rather than an error.
+- **Filter semantics per row**: instantiate to the value's type,
+  compare the lexical prefix; non-textual values are non-matches via
+  the bound, like every other scheme mismatch.
+- **Pushdown-ready**: the refined kind plus the prefix is exactly
+  the per-stratum index range bound the scan pushdown consumes.
+
+Numeric range predicates (`<`, `<=`, `>`, `>=`) ride the NUMERIC
+scheme identically; their refinement payload is an interval instead
+of a prefix.

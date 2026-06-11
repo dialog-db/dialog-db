@@ -125,6 +125,16 @@ impl Primitive {
         bits: Self::bit_for(ValueType::String) | Self::bit_for(ValueType::Symbol),
     };
 
+    /// Textual primitives: the types whose values have a lexical
+    /// form a prefix predicate can range over — strings, symbols
+    /// (attribute names), and entities (URIs). The bound for
+    /// `starts-with`-style predicates: one predicate over TEXTUAL
+    /// instead of per-type variants, with each member's lexical
+    /// grammar deciding whether a given prefix can match it at all.
+    pub const TEXTUAL: Self = Self {
+        bits: Self::STRING_LIKE.bits | Self::bit_for(ValueType::Entity),
+    };
+
     /// Comparable primitives: numeric, string-like, entity, bytes.
     pub const COMPARABLE: Self = Self {
         bits: Self::NUMERIC.bits
