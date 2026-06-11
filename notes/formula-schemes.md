@@ -129,16 +129,37 @@ per-type variants. Three properties fall out:
   lexical grammar (entity URIs, `domain/name` symbols), so a literal
   prefix that cannot begin a value of some member type drops that
   member from the subject's inferred kind — a space excludes
-  entities and symbols, narrowing the subject to `String`. If every
-  member drops, the predicate is statically never-matching: a
-  *logical no-match* (the premise filters everything), surfaced as a
-  vacuous-premise diagnostic rather than an error.
+  entities, a prefix longer than any symbol excludes symbols. As
+  built (`constraint/starts_with.rs`), the refinement is
+  conservative: only *certainly impossible* members drop. A symbol's
+  validator enforces just a 64-byte cap (its charset is unenforced
+  upstream), so only length excludes `Symbol`; an entity's
+  serialized URL always begins `scheme:` and never contains raw
+  whitespace or control characters, so those exclude `Entity`; and
+  `String` admits any prefix, so the contributed set is never
+  empty — the all-members-drop case cannot arise from the prefix
+  alone. Statically-known no-matches surface instead as an empty
+  *meet* when the refined set collides with a subject already
+  narrowed elsewhere (`?x.entity()` plus a prefix with a space),
+  which is the ordinary known-types-misalign compile error.
 - **Filter semantics per row**: instantiate to the value's type,
   compare the lexical prefix; non-textual values are non-matches via
   the bound, like every other scheme mismatch.
 - **Pushdown-ready**: the refined kind plus the prefix is exactly
   the per-stratum index range bound the scan pushdown consumes.
 
-Numeric range predicates (`<`, `<=`, `>`, `>=`) ride the NUMERIC
-scheme identically; their refinement payload is an interval instead
-of a prefix.
+Numeric range predicates (`<`, `<=`, `>`, `>=`) follow the same
+shape with an interval-flavored payload instead of a prefix. As
+built (`constraint/compare.rs`): both sides are bounded NUMERIC at
+inference and a row orders only within one numeric type — mixed
+data is a non-match, exactly the formula arithmetic semantics — with
+the polymorphic-literal release valve: a *constant* side adapts
+losslessly to the data's type per row (`1` orders against floats as
+`1.0`; `1.5` against integer data is a non-match), data never
+adapts. One deliberate gap from the formula schemes: a comparison's
+sides are bounded but not *linked* to one shared instantiation
+(constraints go through the generic schema walk, which has no
+scheme labels), so `?a < ?b` does not statically force `?a` and
+`?b` to one numeric type. Soundness lives in evaluation; the
+planned per-atom interval refinements are the place linking (and
+range pushdown) becomes worth carrying through the lattice.
