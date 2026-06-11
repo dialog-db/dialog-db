@@ -302,8 +302,8 @@ mod tests {
         let mut ctx = Context::new();
         let unified = ctx
             .unify(
-                &Type::primitive_set(Primitive::NUMERIC),
-                &Type::primitive_set(Primitive::COMPARABLE),
+                &Type::Static(StaticType::from(Primitive::NUMERIC)),
+                &Type::Static(StaticType::from(Primitive::COMPARABLE)),
             )
             .unwrap();
         match unified {
@@ -325,7 +325,7 @@ mod tests {
         let unified = ctx
             .unify(
                 &Type::Variable(v),
-                &Type::primitive_set(Primitive::COMPARABLE),
+                &Type::Static(StaticType::from(Primitive::COMPARABLE)),
             )
             .unwrap();
         match unified {

@@ -52,7 +52,7 @@ impl Display for Primitive {
         if *self == Self::EMPTY {
             return write!(f, "Never");
         }
-        if self.without_nothing() == Self::ALL {
+        if self.required() == Self::ALL {
             write!(f, "Value")?;
         } else {
             const ATOMS: [ValueType; 9] = [

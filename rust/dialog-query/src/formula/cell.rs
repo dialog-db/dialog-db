@@ -286,18 +286,18 @@ impl From<&Cells> for Schema {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Requirement, Type};
+    use crate::Type;
 
     #[dialog_common::test]
     fn it_evaluates_cells() -> anyhow::Result<()> {
         let cells = Cells::define(|builder| {
             builder
-                .cell("name", Some(Kind::primitive(Type::String)))
+                .cell("name", Some(Kind::from(Type::String)))
                 .the("name field")
                 .required();
 
             builder
-                .cell("age", Some(Kind::primitive(Type::UnsignedInt)))
+                .cell("age", Some(Kind::from(Type::UnsignedInt)))
                 .the("age field")
                 .output(15);
         });
@@ -306,7 +306,7 @@ mod tests {
         assert_eq!(cells.get("name").unwrap().name(), "name");
         assert_eq!(
             *cells.get("name").unwrap().content_type(),
-            Some(Kind::primitive(Type::String))
+            Some(Kind::from(Type::String))
         );
         assert_eq!(cells.get("name").unwrap().description(), "name field");
         assert_eq!(
@@ -317,7 +317,7 @@ mod tests {
         assert_eq!(cells.get("age").unwrap().name(), "age");
         assert_eq!(
             *cells.get("age").unwrap().content_type(),
-            Some(Kind::primitive(Type::UnsignedInt))
+            Some(Kind::from(Type::UnsignedInt))
         );
         assert_eq!(cells.get("age").unwrap().description(), "age field");
         assert_eq!(
@@ -336,7 +336,7 @@ mod tests {
     fn schema_from_cells_lifts_content_types() {
         let cells = Cells::define(|builder| {
             builder
-                .cell("name", Some(Kind::primitive(Type::String)))
+                .cell("name", Some(Kind::from(Type::String)))
                 .required();
             builder.cell("untyped", None).required();
         });

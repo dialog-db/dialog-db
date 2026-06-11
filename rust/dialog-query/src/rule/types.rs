@@ -22,8 +22,12 @@
 //! Negation premises do not contribute. They filter on existing
 //! bindings rather than introducing them.
 
+use crate::FormulaQuery;
 use crate::Premise;
+use crate::Proposition;
+use crate::Term;
 use crate::error::InferenceError;
+use crate::formula::number::Numeric;
 use crate::type_system::Primitive;
 use crate::type_system::Type as Kind;
 use crate::type_system::unifier::{Context, Type as Inferred, lift};
@@ -72,7 +76,7 @@ impl TypeEnv {
             // scheme) is expressed against the formula's cells
             // directly, so formulas take this arm instead of the
             // generic schema walk below.
-            if let crate::Proposition::Formula(formula) = proposition {
+            if let Proposition::Formula(formula) = proposition {
                 Self::infer_formula(&mut ctx, formula)?;
                 continue;
             }
@@ -133,11 +137,7 @@ impl TypeEnv {
     /// too — a literal narrows the scheme it instantiates, and a
     /// literal outside a concrete cell's bound is a compile-time
     /// conflict.
-    fn infer_formula(
-        ctx: &mut Context,
-        formula: &crate::FormulaQuery,
-    ) -> Result<(), InferenceError> {
-        use crate::type_system::unifier::Type as Inferred;
+    fn infer_formula(ctx: &mut Context, formula: &FormulaQuery) -> Result<(), InferenceError> {
         let params = formula.parameters();
         let mut schemes: HashMap<String, Inferred> = HashMap::new();
 
@@ -160,18 +160,37 @@ impl TypeEnv {
                     .clone(),
                 None => match cell.content_type() {
                     Some(kind) => lift(kind),
-                    None => lift(&Kind::primitive_set(Primitive::ALL)),
+                    None => lift(&Kind::from(Primitive::ALL)),
                 },
             };
 
             let argument = match param.name() {
                 Some(var_name) => Inferred::Variable(ctx.var_for_name(var_name)),
-                None => match param.kind() {
-                    // A constant: its kind narrows the slot (and the
-                    // scheme, when the slot is a scheme cell).
-                    Some(kind) => lift(&kind),
-                    // A blank contributes nothing.
-                    None => continue,
+                None => match (param, cell.scheme_label()) {
+                    // A numeric constant in a *scheme* slot is a
+                    // polymorphic literal: it contributes the set of
+                    // types it instantiates to losslessly, so `1`
+                    // does not pin the scheme while `1.5` pins it to
+                    // Float. (At evaluation the literal adapts to the
+                    // row's instantiation; data never does.)
+                    (Term::Constant(value), Some(_)) => {
+                        match Numeric::try_from(value.clone()) {
+                            Ok(literal) => Inferred::Static(Kind::from(literal.admissible())),
+                            // Not numeric: its singleton kind applies
+                            // (and conflicts with a numeric bound).
+                            Err(_) => match param.kind() {
+                                Some(kind) => lift(&kind),
+                                None => continue,
+                            },
+                        }
+                    }
+                    // A constant in a concrete slot: its kind narrows
+                    // the slot.
+                    _ => match param.kind() {
+                        Some(kind) => lift(&kind),
+                        // A blank contributes nothing.
+                        None => continue,
+                    },
                 },
             };
 
@@ -216,13 +235,15 @@ mod tests {
     use crate::attribute::The;
     use crate::attribute::query::AttributeQuery;
     use crate::error::TypeError;
+    use crate::formula::Formula;
+    use crate::formula::math::Sum;
     use crate::negation::Negation;
     use crate::optional::OptionalAttributeQuery;
     use crate::planner::Planner;
     use crate::types::Any;
     use crate::{
         AttributeDescriptor, Cardinality, ConceptDescriptor, ConceptFieldDescriptor, ConceptQuery,
-        Environment, Parameters, Proposition, Term, the,
+        Environment, Parameters, Proposition, Term, Value, the,
     };
 
     /// Helper: an optional (set-widening) binding for `?name`, a
@@ -244,11 +265,7 @@ mod tests {
     /// fresh for this use of the formula.
     #[dialog_common::test]
     fn it_instantiates_formula_schemes() -> anyhow::Result<()> {
-        use crate::Proposition;
-        use crate::formula::Formula;
-        use crate::formula::math::Sum;
-
-        let mut terms = crate::Parameters::new();
+        let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("a"));
         terms.insert("with".to_string(), Term::var("b"));
         terms.insert("is".to_string(), Term::var("c"));
@@ -268,16 +285,39 @@ mod tests {
         Ok(())
     }
 
+    /// An *integer* literal is polymorphic: it fits every numeric
+    /// type losslessly, so it does not pin the scheme — the linked
+    /// variables stay bounded NUMERIC and the row's data decides.
+    #[dialog_common::test]
+    fn it_keeps_schemes_open_for_integer_literals() -> anyhow::Result<()> {
+        let mut terms = Parameters::new();
+        terms.insert("of".to_string(), Term::var("a"));
+        terms.insert(
+            "with".to_string(),
+            Term::<Any>::Constant(Value::UnsignedInt(1)),
+        );
+        terms.insert("is".to_string(), Term::var("c"));
+        let premises = vec![Premise::Assert(Proposition::Formula(
+            Sum::apply(terms)?.into(),
+        ))];
+
+        let env = TypeEnv::infer(&premises)?;
+        for var in ["a", "c"] {
+            let kind = env.get(var).expect("inferred");
+            assert_eq!(
+                kind.primitive_part(),
+                Primitive::NUMERIC,
+                "the integer literal must not pin {var}"
+            );
+        }
+        Ok(())
+    }
+
     /// A constant argument narrows the scheme it instantiates: a
     /// float literal makes every linked cell Float.
     #[dialog_common::test]
     fn it_narrows_schemes_by_constant_arguments() -> anyhow::Result<()> {
-        use crate::Proposition;
-        use crate::Value;
-        use crate::formula::Formula;
-        use crate::formula::math::Sum;
-
-        let mut terms = crate::Parameters::new();
+        let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("a"));
         terms.insert("with".to_string(), Term::<Any>::Constant(Value::Float(1.5)));
         terms.insert("is".to_string(), Term::var("c"));
