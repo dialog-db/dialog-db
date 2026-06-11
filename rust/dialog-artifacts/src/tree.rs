@@ -33,7 +33,8 @@ use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::{Stream, StreamExt};
 
 use crate::{
-    Artifact, ArtifactSelector, AttributeKey, Datum, DialogArtifactsError, EntityKey, FromKey,
+    ATTRIBUTE_LENGTH, Artifact, ArtifactSelector, AttributeKey, AttributeKeyPart, Datum,
+    DialogArtifactsError, ENTITY_LENGTH, ENTITY_RAW_HEAD, EntityKey, EntityKeyPart, FromKey,
     Instruction, Key, KeyBytes, KeyView, KeyViewConstruct, KeyViewMut, MatchCandidate, State,
     ValueKey, selector::Constrained,
 };
@@ -71,6 +72,53 @@ where
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
         self.0.get(key.as_bytes()).await
     }
+}
+
+/// A fixed-width key segment bounding a string prefix: the prefix's
+/// raw bytes (capped at `head` — the order-preserving span of the
+/// segment) followed by `fill`. With `fill = 0x00` this is the
+/// smallest segment any matching value can have, with `fill = 0xFF`
+/// the largest, so the pair brackets the prefix's key range.
+fn prefix_segment<const N: usize>(prefix: &str, head: usize, fill: u8) -> [u8; N] {
+    let mut segment = [fill; N];
+    let raw = prefix.as_bytes();
+    let take = raw.len().min(head).min(N);
+    segment[..take].copy_from_slice(&raw[..take]);
+    segment
+}
+
+/// Tighten a scan's `(start, end)` key pair with the selector's
+/// prefix bounds. A prefix on a field that also has an exact
+/// constraint is skipped — the exact value is already in the keys
+/// and is strictly tighter. Applying a prefix to a non-leading key
+/// dimension is sound (the range stays a superset of the matches;
+/// [`MatchCandidate::matches_selector`] filters the rest) and
+/// tightens the range whenever every more-significant dimension is
+/// exact.
+fn apply_prefix_bounds<K: KeyViewMut>(
+    start: K,
+    end: K,
+    selector: &ArtifactSelector<Constrained>,
+) -> (K, K) {
+    let mut start = start;
+    let mut end = end;
+    if selector.attribute().is_none()
+        && let Some(prefix) = selector.attribute_prefix()
+    {
+        let lo = prefix_segment::<ATTRIBUTE_LENGTH>(prefix, ATTRIBUTE_LENGTH, u8::MIN);
+        let hi = prefix_segment::<ATTRIBUTE_LENGTH>(prefix, ATTRIBUTE_LENGTH, u8::MAX);
+        start = start.set_attribute(AttributeKeyPart(&lo));
+        end = end.set_attribute(AttributeKeyPart(&hi));
+    }
+    if selector.entity().is_none()
+        && let Some(prefix) = selector.entity_prefix()
+    {
+        let lo = prefix_segment::<ENTITY_LENGTH>(prefix, ENTITY_RAW_HEAD, u8::MIN);
+        let hi = prefix_segment::<ENTITY_LENGTH>(prefix, ENTITY_RAW_HEAD, u8::MAX);
+        start = start.set_entity(EntityKeyPart(&lo));
+        end = end.set_entity(EntityKeyPart(&hi));
+    }
+    (start, end)
 }
 
 /// Shared mutation + scan operations on an [`ArtifactTree`].
@@ -289,42 +337,42 @@ impl ArtifactTreeExt for ArtifactTree {
         let tree = self;
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
         try_stream! {
-            // Inclusive ranges: when every key component is constrained by
-            // the selector, the lower and upper bounds are the same exact
-            // key and the scan must still select it.
-            let range = if selector.entity().is_some() {
-                KeyBytes::from(
-                    <EntityKey<Key> as KeyViewConstruct>::min()
-                        .apply_selector(&selector)
-                        .into_key(),
-                )
-                    ..=KeyBytes::from(
-                        <EntityKey<Key> as KeyViewConstruct>::max()
-                            .apply_selector(&selector)
-                            .into_key(),
-                    )
+            // Index choice: exact fields take priority (entity /
+            // value / attribute, as before); prefix bounds pick the
+            // index whose leading dimension they constrain when no
+            // exact field does. Every branch additionally tightens
+            // its key range with whatever prefix bounds the selector
+            // carries (sound on any dimension, tight on leading ones)
+            // via `apply_prefix_bounds`, and `matches_selector`
+            // re-checks per entry. The lower/upper bounds collapse to
+            // the same exact key when every component is constrained,
+            // and the inclusive range still selects it.
+            let range = if selector.entity().is_some()
+                || (selector.entity_prefix().is_some()
+                    && selector.value().is_none()
+                    && selector.attribute().is_none()
+                    && selector.attribute_prefix().is_none())
+            {
+                let (start, end) = apply_prefix_bounds(
+                    <EntityKey<Key> as KeyViewConstruct>::min().apply_selector(&selector),
+                    <EntityKey<Key> as KeyViewConstruct>::max().apply_selector(&selector),
+                    &selector,
+                );
+                KeyBytes::from(start.into_key())..=KeyBytes::from(end.into_key())
             } else if selector.value().is_some() {
-                KeyBytes::from(
-                    <ValueKey<Key> as KeyViewConstruct>::min()
-                        .apply_selector(&selector)
-                        .into_key(),
-                )
-                    ..=KeyBytes::from(
-                        <ValueKey<Key> as KeyViewConstruct>::max()
-                            .apply_selector(&selector)
-                            .into_key(),
-                    )
-            } else if selector.attribute().is_some() {
-                KeyBytes::from(
-                    <AttributeKey<Key> as KeyViewConstruct>::min()
-                        .apply_selector(&selector)
-                        .into_key(),
-                )
-                    ..=KeyBytes::from(
-                        <AttributeKey<Key> as KeyViewConstruct>::max()
-                            .apply_selector(&selector)
-                            .into_key(),
-                    )
+                let (start, end) = apply_prefix_bounds(
+                    <ValueKey<Key> as KeyViewConstruct>::min().apply_selector(&selector),
+                    <ValueKey<Key> as KeyViewConstruct>::max().apply_selector(&selector),
+                    &selector,
+                );
+                KeyBytes::from(start.into_key())..=KeyBytes::from(end.into_key())
+            } else if selector.attribute().is_some() || selector.attribute_prefix().is_some() {
+                let (start, end) = apply_prefix_bounds(
+                    <AttributeKey<Key> as KeyViewConstruct>::min().apply_selector(&selector),
+                    <AttributeKey<Key> as KeyViewConstruct>::max().apply_selector(&selector),
+                    &selector,
+                );
+                KeyBytes::from(start.into_key())..=KeyBytes::from(end.into_key())
             } else {
                 // `Constrained` guarantees at least one field is set.
                 unreachable!("ArtifactSelector will always have at least one field specified")

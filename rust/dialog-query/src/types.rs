@@ -114,12 +114,52 @@ define_descriptor!(
     Bytes, Type::Bytes
 );
 
-define_descriptor!(
+/// Descriptors whose terms can carry a *narrowed* kind at plan
+/// time — a refinement the rule proved about the variable (an
+/// entity URI prefix, an attribute-name prefix) that the scan
+/// boundary turns into index-range bounds. The stored kind is
+/// `None` whenever it adds nothing over the static type, so terms
+/// without narrowing compare, hash, and round-trip exactly like
+/// the unit descriptors they replace.
+macro_rules! define_refinable_descriptor {
+    (
+        $(#[$meta:meta])*
+        $name:ident, $variant:expr
+    ) => {
+        $(#[$meta])*
+        #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+        pub struct $name(Option<type_system::Type>);
+
+        impl TypeDescriptor for $name {
+            const TYPE: Option<Type> = Some($variant);
+
+            fn kind(&self) -> Option<type_system::Type> {
+                self.0
+                    .clone()
+                    .or_else(|| Self::TYPE.map(Kind::from))
+            }
+
+            fn from_kind(kind: Option<type_system::Type>) -> Self {
+                // Normalize: a kind that says no more than the
+                // static type is not stored, so unnarrowed terms
+                // stay equal to their pre-roundtrip selves.
+                let stored = kind.filter(|k| Some(k) != Self::TYPE.map(Kind::from).as_ref());
+                $name(stored)
+            }
+        }
+
+        impl Typed for $name {
+            type Descriptor = Self;
+        }
+    };
+}
+
+define_refinable_descriptor!(
     /// Descriptor for entity references.
     EntityType, Type::Entity
 );
 
-define_descriptor!(
+define_refinable_descriptor!(
     /// Descriptor for attribute symbols.
     Symbol, Type::Symbol
 );
@@ -368,8 +408,11 @@ mod tests {
         assert_eq!(to_singleton(SignedInteger.kind()), Some(Type::SignedInt));
         assert_eq!(to_singleton(Float.kind()), Some(Type::Float));
         assert_eq!(to_singleton(Bytes.kind()), Some(Type::Bytes));
-        assert_eq!(to_singleton(EntityType.kind()), Some(Type::Entity));
-        assert_eq!(to_singleton(Symbol.kind()), Some(Type::Symbol));
+        assert_eq!(
+            to_singleton(EntityType::default().kind()),
+            Some(Type::Entity)
+        );
+        assert_eq!(to_singleton(Symbol::default().kind()), Some(Type::Symbol));
         assert_eq!(to_singleton(Record.kind()), Some(Type::Record));
     }
 

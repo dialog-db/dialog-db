@@ -135,6 +135,13 @@ impl AttributeQueryOnly {
         }
     }
 
+    /// See [`AttributeQueryAll::with_subject_kinds`].
+    pub(crate) fn with_subject_kinds(self, the: Option<Kind>, of: Option<Kind>) -> Self {
+        Self {
+            query: self.query.with_subject_kinds(the, of),
+        }
+    }
+
     /// Get the 'cause' term.
     pub fn cause(&self) -> &Term<Cause> {
         self.query.cause()

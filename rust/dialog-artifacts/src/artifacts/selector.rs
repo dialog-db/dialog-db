@@ -47,6 +47,18 @@ where
     value: Option<Value>,
 
     value_reference: Option<Blake3Hash>,
+
+    /// Prefix bound on the entity URI: selected [`Artifact`]s'
+    /// entities must have URIs beginning with this string. The
+    /// entity key stores the first 32 URI bytes raw (the rest is
+    /// hashed), so scans range over the raw head and re-check
+    /// longer prefixes against the stored datum.
+    entity_prefix: Option<String>,
+    /// Prefix bound on the attribute name: selected [`Artifact`]s'
+    /// attributes must have names beginning with this string. The
+    /// attribute key stores the full (64-byte-capped) name raw, so
+    /// this bound is an exact key range.
+    attribute_prefix: Option<String>,
     state_type: PhantomData<State>,
 }
 
@@ -66,6 +78,8 @@ impl ArtifactSelector<Unconstrained> {
             attribute: None,
             value: None,
             value_reference: None,
+            entity_prefix: None,
+            attribute_prefix: None,
             state_type: PhantomData,
         }
     }
@@ -95,6 +109,16 @@ where
         self.value_reference.as_ref()
     }
 
+    /// The prefix bound on entity URIs, if any
+    pub fn entity_prefix(&self) -> Option<&str> {
+        self.entity_prefix.as_deref()
+    }
+
+    /// The prefix bound on attribute names, if any
+    pub fn attribute_prefix(&self) -> Option<&str> {
+        self.attribute_prefix.as_deref()
+    }
+
     /// Set the [`Attribute`] field (the predicate) of the [`ArtifactSelector`]
     pub fn the(self, attribute: Attribute) -> ArtifactSelector<Constrained> {
         ArtifactSelector::<Constrained> {
@@ -102,6 +126,8 @@ where
             entity: self.entity,
             value_reference: self.value_reference,
             value: self.value,
+            entity_prefix: self.entity_prefix,
+            attribute_prefix: self.attribute_prefix,
             state_type: PhantomData,
         }
     }
@@ -113,6 +139,8 @@ where
             entity: Some(entity),
             value_reference: self.value_reference,
             value: self.value,
+            entity_prefix: self.entity_prefix,
+            attribute_prefix: self.attribute_prefix,
             state_type: PhantomData,
         }
     }
@@ -124,6 +152,40 @@ where
             entity: self.entity,
             value_reference: Some(value.to_reference()),
             value: Some(value),
+            entity_prefix: self.entity_prefix,
+            attribute_prefix: self.attribute_prefix,
+            state_type: PhantomData,
+        }
+    }
+
+    /// Constrain selected [`Artifact`]s to attributes whose name begins
+    /// with `prefix`. A prefix is a constraint, so the resulting
+    /// selector is [`Constrained`]; an exact attribute set via
+    /// [`ArtifactSelector::the`] takes precedence during scans.
+    pub fn the_starting_with(self, prefix: impl Into<String>) -> ArtifactSelector<Constrained> {
+        ArtifactSelector::<Constrained> {
+            attribute: self.attribute,
+            entity: self.entity,
+            value_reference: self.value_reference,
+            value: self.value,
+            entity_prefix: self.entity_prefix,
+            attribute_prefix: Some(prefix.into()),
+            state_type: PhantomData,
+        }
+    }
+
+    /// Constrain selected [`Artifact`]s to entities whose URI begins
+    /// with `prefix`. A prefix is a constraint, so the resulting
+    /// selector is [`Constrained`]; an exact entity set via
+    /// [`ArtifactSelector::of`] takes precedence during scans.
+    pub fn of_starting_with(self, prefix: impl Into<String>) -> ArtifactSelector<Constrained> {
+        ArtifactSelector::<Constrained> {
+            attribute: self.attribute,
+            entity: self.entity,
+            value_reference: self.value_reference,
+            value: self.value,
+            entity_prefix: Some(prefix.into()),
+            attribute_prefix: self.attribute_prefix,
             state_type: PhantomData,
         }
     }

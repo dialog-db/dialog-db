@@ -146,6 +146,21 @@ impl<T: Typed> Term<T> {
         Self::default()
     }
 
+    /// Return a copy of this term carrying `kind` in its
+    /// descriptor — the planner's stamp of what rule-level
+    /// inference proved about the variable. Descriptors that
+    /// cannot store a kind keep their static one; constants are
+    /// returned unchanged.
+    pub fn with_kind(self, kind: type_system::Type) -> Self {
+        match self {
+            Term::Variable { name, .. } => Term::Variable {
+                name,
+                descriptor: <T as Typed>::Descriptor::from_kind(Some(kind)),
+            },
+            constant => constant,
+        }
+    }
+
     /// Create a uniquely-named variable.
     ///
     /// Like a named variable, it participates in bindings, but the name is
