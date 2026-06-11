@@ -28,7 +28,21 @@ use crate::{
 /// A collection of nodes with their ranks.
 type RankedNodes<Key, Value> = NonEmpty<(Node<Key, Value>, Rank)>;
 
+/// The rank threshold for grouping entries into leaf segments (level 0 of
+/// the tree). Every key has a rank of at least 1; an entry whose key's rank
+/// exceeds this threshold ends the segment it belongs to (it is a segment
+/// *boundary*).
 const BOTTOM_RANK: Rank = 1;
+
+/// The rank threshold for grouping leaf segments (level 0) into the first
+/// level of index nodes (level 1).
+///
+/// Each level of the tree uses a threshold one higher than the level below
+/// it: level `L` is built by grouping level `L - 1` nodes, ending a group
+/// whenever a node's rank exceeds `BOTTOM_RANK + L`. Walks that rebuild the
+/// tree from the leaves up start at this threshold and increment it once per
+/// level (see `TreeShaper::merge_with_path`).
+const FIRST_INDEX_RANK: Rank = BOTTOM_RANK + 1;
 
 /// The stateful side-effects of tree mutations are compartmentalized
 /// to a MutationContext. Key ranking is intermediated by the MutationContext
@@ -223,11 +237,11 @@ where
     ///
     /// 3. **Boundary-delete overflow**: The deleted entry was the segment's
     ///    last entry (its boundary), the segment still has orphan entries, and
-    ///    a right-adjacent segment exists. The orphans are merged with the
-    ///    right-adjacent segment's entries; the combined list is redistributed
-    ///    and the two affected subtrees are stitched back together at their
-    ///    lowest common ancestor. Requires the `right_neighbor` prefetch on
-    ///    the search result.
+    ///    a right-adjacent segment exists. The right-adjacent segment adopts
+    ///    the orphans: the combined entries are redistributed and the two
+    ///    affected subtrees are stitched back together at their lowest common
+    ///    ancestor. Requires the `right_neighbor` prefetch on the search
+    ///    result. See `Self::let_right_neighbor_adopt_orphans`.
     ///
     /// 4. **Ordinary shrink**: The segment still has entries after removal and
     ///    there is no overflow. The remaining entries are redistributed using
@@ -264,7 +278,7 @@ where
             && let Some(right_neighbor) = search_result.right_neighbor
         {
             let main_leaf_hash = search_result.leaf.hash().clone();
-            return self.absorb_orphans_into_right_neighbor(
+            return self.let_right_neighbor_adopt_orphans(
                 segment.entries,
                 main_leaf_hash,
                 search_result.path,
@@ -272,33 +286,76 @@ where
             );
         }
 
+        // The adoption path above did not apply, which leaves three cases:
+        // a non-boundary delete (the segment's boundary still stands, so the
+        // remaining entries redistribute in place), a boundary delete with no
+        // right-adjacent segment (the segment was the rightmost in the tree,
+        // so there is no neighbor to adopt the remaining entries and they
+        // redistribute in place), or a delete that emptied the segment
+        // entirely (the segment itself must be removed from its parent).
         match NonEmpty::from_vec(segment.entries) {
             Some(entries) => self.distribute(entries, Some(search_result)),
             None => self.remove_from_path(search_result.path),
         }
     }
 
-    /// Resolves a boundary-delete overflow using the prefetched right-adjacent
-    /// segment.
+    /// Resolves a boundary-delete overflow by letting the prefetched
+    /// right-adjacent segment adopt the orphaned entries.
     ///
     /// See case (3) in [`Self::delete`] for the high-level contract.
     ///
-    /// Key invariant: when a rank-R entry is deleted, it was simultaneously a
-    /// boundary at levels 0..R-2, and each of those boundaries dissolves. At
-    /// every level below the LCA, the main subtree's rebuild and the
-    /// right-adjacent subtree's rebuild therefore fuse into a *single* index
-    /// rather than remaining as siblings. The tree above the LCA is unaffected
-    /// and handed off to the standard merge routine.
+    /// Throughout this method "LCA" stands for *lowest common ancestor*: the
+    /// deepest node on the search path that is an ancestor of both the
+    /// modified leaf and its right-adjacent leaf. It is the node where the
+    /// two descents fork into different children; below it they run through
+    /// disjoint subtrees.
     ///
-    /// By construction of the search (main descent follows the boundary
-    /// rightward at every level; the right-adjacent descent takes leftmost
-    /// children) we can rely on:
+    /// Consider deleting `x`, a rank-3 key. Because every index inherits its
+    /// upper bound from its last child, `x` is simultaneously the boundary of
+    /// its segment *and* the upper bound of every index on the main descent
+    /// below the LCA (`D` here). The right-adjacent leaf `[y]` is reached by
+    /// descending leftmost from the LCA's next child (`E`):
+    ///
+    /// ```text
+    ///                     ( LCA )
+    ///                    /   |   \
+    ///                  D     E     F        index nodes
+    ///                /  \    |  \
+    ///           [u v] [w x] [y] [z ...]     leaf segments
+    ///                    ^   ^
+    ///                    |   right-adjacent leaf
+    ///                    main descent target: x is deleted, w is orphaned
+    /// ```
+    ///
+    /// Deleting `x` dissolves that boundary at every one of those levels at
+    /// once. A from-scratch build of the remaining keys would place the
+    /// orphan `w` at the start of the *next* segment, and would never split
+    /// `D` from `E` because no boundary separates their keys anymore. The
+    /// rebuilt region must therefore fuse pairwise, level by level, into a
+    /// single node at each level below the LCA:
+    ///
+    /// ```text
+    ///                     ( LCA' )
+    ///                     /     \
+    ///                   DE       F
+    ///                 /  |  \
+    ///            [u v] [w y] [z ...]
+    /// ```
+    ///
+    /// By construction of the two descents (the main descent follows the
+    /// boundary rightward at every level, so the boundary's host is always
+    /// the last child; the right-adjacent descent takes leftmost children)
+    /// we can rely on:
     /// - `main_layer.right_siblings == None` for every layer below the LCA, and
     /// - `right_layer.left_siblings == None` for every layer below the LCA.
     ///
-    /// The fold at each level is therefore just
+    /// The fold that produces each fused node (`[w y]`, then `DE`) is
+    /// therefore just
     /// `[main_layer.left_siblings | unified | right_layer.right_siblings]`.
-    fn absorb_orphans_into_right_neighbor(
+    ///
+    /// The tree above the LCA is unaffected and handed off to the standard
+    /// merge routine.
+    fn let_right_neighbor_adopt_orphans(
         self,
         orphans: Vec<Entry<Key, Value>>,
         main_leaf_hash: Blake3Hash,
@@ -340,12 +397,15 @@ where
         let above_lca = above_and_lca;
 
         // Fuse the two subtrees level-by-level below the LCA. At every such
-        // level the boundary that separated them has dissolved, so their
-        // children flatten into one unified index.
+        // level the boundary that separated them has dissolved, so the
+        // children of the main-descent node and of the right-descent node
+        // flatten into one unified index node (`D` and `E` becoming `DE` in
+        // the diagram above).
         //
-        // Nodes live at level 0 after the entry merge; building a level-1
-        // parent uses minimum_rank 2 (level L uses minimum_rank L + 1).
-        let mut level_minimum_rank: Rank = 2;
+        // The unified nodes start out as leaf segments (level 0), so the
+        // first fused parent is built with the level-1 threshold; each
+        // further level up increments the threshold by one.
+        let mut level_minimum_rank: Rank = FIRST_INDEX_RANK;
         for (main_layer, right_layer) in main_below
             .into_iter()
             .rev()
@@ -468,8 +528,8 @@ where
         };
 
         // Nodes start at level 0 (segments); the first level-up collect uses
-        // minimum_rank 2 (the level-1 threshold).
-        Self::merge_with_path(nodes, search_path, context, 2)
+        // the level-1 threshold.
+        Self::merge_with_path(nodes, search_path, context, FIRST_INDEX_RANK)
     }
 
     /// Merges a collection of nodes with a search path, rebuilding from leaves
@@ -488,8 +548,9 @@ where
     /// when the same boundary key appears more than once.
     ///
     /// `initial_level_minimum_rank` is the rank threshold to apply at the first
-    /// level of the walk. Callers that start from raw leaf segments pass `2`;
-    /// the overflow path passes a higher value when it picks up mid-walk.
+    /// level of the walk. Callers that start from raw leaf segments pass
+    /// [`FIRST_INDEX_RANK`]; the overflow path passes a higher value when it
+    /// picks up mid-walk.
     ///
     /// This is the shared path-reconstruction logic used by both insert (after
     /// distributing entries) and delete (after modifying a segment).
@@ -640,7 +701,7 @@ where
 
         // Merge up the remaining path. `merge_with_path` pops from the back,
         // so hand it back a `Vec` of the still-pending ancestors.
-        Self::merge_with_path(nodes, path.into(), context, 2)
+        Self::merge_with_path(nodes, path.into(), context, FIRST_INDEX_RANK)
     }
 
     /// Collects a sequence of ranked children into nodes based on a minimum
