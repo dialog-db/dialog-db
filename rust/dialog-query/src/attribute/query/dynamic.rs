@@ -96,6 +96,19 @@ impl DynamicAttributeQuery {
         }
     }
 
+    /// Return a copy with the `the`/`of` variable terms carrying
+    /// the given kinds. See [`AttributeQueryAll::with_subject_kinds`].
+    pub(crate) fn with_subject_kinds(self, the: Option<Kind>, of: Option<Kind>) -> Self {
+        match self {
+            DynamicAttributeQuery::All(q) => {
+                DynamicAttributeQuery::All(q.with_subject_kinds(the, of))
+            }
+            DynamicAttributeQuery::Only(q) => {
+                DynamicAttributeQuery::Only(q.with_subject_kinds(the, of))
+            }
+        }
+    }
+
     /// Get the 'cause' term.
     pub fn cause(&self) -> &Term<Cause> {
         match self {

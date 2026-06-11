@@ -32,6 +32,7 @@ use crate::error::EvaluationError;
 use crate::selection::Selection;
 use crate::type_system::Primitive;
 use crate::type_system::Type as Kind;
+use crate::type_system::lexical_form;
 use crate::types::Any;
 use crate::{Binding, Cardinality, Environment, Field, Parameters, Requirement, Schema, Term};
 use crate::{Constraint, Negation, Premise, Proposition, try_stream};
@@ -106,16 +107,6 @@ fn could_begin_entity(prefix: &str) -> bool {
     }
 }
 
-/// The lexical form of a value, if its kind has one.
-fn lexical_form(value: &Value) -> Option<String> {
-    match value {
-        Value::String(content) => Some(content.clone()),
-        Value::Symbol(symbol) => Some(String::from(symbol)),
-        Value::Entity(entity) => Some(entity.as_str().to_string()),
-        _ => None,
-    }
-}
-
 impl StartsWith {
     /// Create a prefix predicate over the given subject and prefix.
     pub fn new(of: Term<Any>, prefix: Term<String>) -> Self {
@@ -124,21 +115,29 @@ impl StartsWith {
 
     /// Schema: both slots are *hard* requirements (the predicate
     /// consumes bound values; the planner orders it after the
-    /// premises binding them). The subject's content type is the
-    /// admissible TEXTUAL member set — the lexical-grammar
-    /// refinement a constant prefix performs — and the prefix's is
-    /// `String`.
+    /// premises binding them). The subject's content type carries
+    /// both halves of what a constant prefix proves: the admissible
+    /// TEXTUAL member set (the lexical-grammar refinement) and the
+    /// prefix itself as a [`Refinement`](crate::type_system::Refinement)
+    /// — which is how the prefix travels through inference to the
+    /// scan-range pushdown. The prefix slot is a `String`.
     pub fn schema(&self) -> Schema {
-        let members = match self.prefix.as_constant() {
-            Some(Value::String(prefix)) => admissible_members(prefix),
-            _ => Primitive::TEXTUAL,
+        let content = match self.prefix.as_constant() {
+            Some(Value::String(prefix)) => {
+                let members = Kind::primitive_set(admissible_members(prefix));
+                members
+                    .clone()
+                    .with_prefix(prefix.clone())
+                    .unwrap_or(members)
+            }
+            _ => Kind::primitive_set(Primitive::TEXTUAL),
         };
         let mut schema = Schema::new();
         schema.insert(
             "of".to_string(),
             Field {
                 description: "Term whose value's lexical form is compared".to_string(),
-                content_type: Some(Kind::primitive_set(members)),
+                content_type: Some(content),
                 requirement: Requirement::required(),
                 cardinality: Cardinality::One,
             },
@@ -416,7 +415,9 @@ mod tests {
     }
 
     /// Inference consumes the refinement: a constant prefix narrows
-    /// the subject's kind rule-wide.
+    /// the subject's kind rule-wide — both the member set and the
+    /// prefix itself, which the scan boundary turns into range
+    /// bounds.
     #[dialog_common::test]
     fn it_narrows_subjects_via_prefix_refinement() -> anyhow::Result<()> {
         let premises = vec![Term::<Any>::var("x").starts_with("has space")];
@@ -426,6 +427,11 @@ mod tests {
             kind.primitive_part(),
             Primitive::singleton(ValueType::String).union(Primitive::singleton(ValueType::Symbol)),
             "a prefix with a space excludes entities"
+        );
+        assert_eq!(
+            kind.refinement().expect("the prefix travels").prefix,
+            "has space",
+            "the inferred kind carries the prefix refinement"
         );
         Ok(())
     }
