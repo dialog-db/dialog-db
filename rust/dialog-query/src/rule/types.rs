@@ -26,7 +26,7 @@ use crate::Premise;
 use crate::formula::number::Numeric;
 use crate::type_system::Primitive;
 use crate::type_system::Type as Kind;
-use crate::type_system::unifier::{Context, Type as Inferred, lift};
+use crate::type_system::unifier::{Context, Type as Inferred, VarId, lift};
 use std::collections::HashMap;
 
 /// Errors raised by [`TypeEnv::infer`].
@@ -43,6 +43,40 @@ pub enum InferenceError {
     },
 }
 
+/// One narrowing step recorded during inference: `premise`
+/// constrained `variable` to `to` (from `from`, or from nothing on
+/// the variable's first contribution). The provenance behind
+/// [`TypeEnv::explain`] — *which premise proved what* — and the
+/// evidence the dead-optionality lint reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Narrowing {
+    /// The variable whose kind changed.
+    pub variable: String,
+    /// Display form of the premise that narrowed it.
+    pub premise: String,
+    /// The kind before this premise; `None` on first contribution.
+    pub from: Option<Kind>,
+    /// The kind after this premise.
+    pub to: Kind,
+}
+
+/// A dead-optionality finding: a premise declared the variable
+/// optional (its slot admits `Nothing`), but the rule's other
+/// premises require it present, so no result can ever carry it as
+/// `Absent` — the declared optionality is unreachable. Not an
+/// error (the rule is sound; the optional lookup is demoted to a
+/// scalar scan), but almost certainly not what the author meant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeadOptionality {
+    /// The variable declared optional.
+    pub variable: String,
+    /// Display form of the premise that declared the optionality.
+    pub declared_in: String,
+    /// Display form of the premise that pinned the variable
+    /// present, when one narrowing step is identifiable.
+    pub required_by: Option<String>,
+}
+
 /// Inferred types for every named variable referenced by a rule's
 /// positive premises.
 ///
@@ -51,9 +85,17 @@ pub enum InferenceError {
 /// carry rule-level kinds at evaluation time. Also carried on
 /// [`AnalyzedRule`](super::AnalyzedRule) (wrapped in an `Arc`) for
 /// later phases that want type-by-variable lookups.
+///
+/// Alongside the final kinds, inference records its *provenance*:
+/// every step where a premise changed a variable's kind
+/// ([`Self::narrowings`]) and every declared optionality no result
+/// can exercise ([`Self::dead_optionality`]). [`Self::explain`]
+/// renders both as a human-readable account.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TypeEnv {
     by_name: HashMap<String, Kind>,
+    narrowings: Vec<Narrowing>,
+    dead_optionality: Vec<DeadOptionality>,
 }
 
 impl TypeEnv {
@@ -72,6 +114,15 @@ impl TypeEnv {
     /// the caller can surface a useful diagnostic.
     pub fn infer(premises: &[Premise]) -> Result<Self, InferenceError> {
         let mut ctx = Context::new();
+        let mut narrowings: Vec<Narrowing> = Vec::new();
+        // Running per-variable kinds, diffed after each premise to
+        // attribute narrowing steps to the premise that caused them.
+        let mut current: HashMap<String, Kind> = HashMap::new();
+        // The first premise to declare each variable optional (a
+        // slot whose content type admits `Nothing`) — the lint's
+        // evidence of *declared* optionality.
+        let mut widened: Vec<(String, String)> = Vec::new();
+
         for premise in premises {
             // Negation premises don't contribute — they filter on
             // bindings rather than introducing them.
@@ -88,6 +139,7 @@ impl TypeEnv {
             // generic schema walk below.
             if let crate::Proposition::Formula(formula) = proposition {
                 Self::infer_formula(&mut ctx, formula)?;
+                Self::record_narrowings(&ctx, premise, &mut current, &mut narrowings);
                 continue;
             }
 
@@ -113,6 +165,9 @@ impl TypeEnv {
                     Some(t) => t.clone(),
                     None => Kind::primitive_set(Primitive::ALL),
                 };
+                if slot_kind.is_optional() && !widened.iter().any(|(name, _)| name == var_name) {
+                    widened.push((var_name.to_string(), premise.to_string()));
+                }
                 let var = ctx.var_for_name(var_name);
                 if let Err(reason) = ctx.unify(&lift(&slot_kind), &Inferred::Variable(var)) {
                     return Err(InferenceError::Conflict {
@@ -121,21 +176,80 @@ impl TypeEnv {
                     });
                 }
             }
+
+            Self::record_narrowings(&ctx, premise, &mut current, &mut narrowings);
         }
 
         let mut by_name = HashMap::new();
         for (name, var_id) in ctx.named_vars() {
-            if let Inferred::Static(kind) = ctx.apply(&Inferred::Variable(*var_id)) {
-                by_name.insert(name.clone(), kind);
-            } else {
-                // Variable never resolved to a static type — record
-                // its constraint as a primitive set. This is the
-                // "no slot ever gave us a concrete shape" case; the
-                // rule compiler treats it as fully unconstrained.
-                by_name.insert(name.clone(), Kind::primitive_set(ctx.constraint(*var_id)));
-            }
+            by_name.insert(name.clone(), Self::resolve(&ctx, *var_id));
         }
-        Ok(Self { by_name })
+
+        // Dead optionality: declared optional, inferred required.
+        // The premise to blame is the first one whose contribution
+        // left the variable without the `Nothing` atom.
+        let mut dead_optionality = Vec::new();
+        for (variable, declared_in) in widened {
+            let Some(kind) = by_name.get(&variable) else {
+                continue;
+            };
+            if kind.is_optional() {
+                continue;
+            }
+            let required_by = narrowings
+                .iter()
+                .find(|step| step.variable == variable && !step.to.is_optional())
+                .map(|step| step.premise.clone());
+            dead_optionality.push(DeadOptionality {
+                variable,
+                declared_in,
+                required_by,
+            });
+        }
+
+        Ok(Self {
+            by_name,
+            narrowings,
+            dead_optionality,
+        })
+    }
+
+    /// Resolve a unifier variable to its current best kind: the
+    /// static it resolved to, or its primitive constraint when no
+    /// slot ever gave it a concrete shape.
+    fn resolve(ctx: &Context, var: VarId) -> Kind {
+        match ctx.apply(&Inferred::Variable(var)) {
+            Inferred::Static(kind) => kind,
+            _ => Kind::primitive_set(ctx.constraint(var)),
+        }
+    }
+
+    /// Diff every named variable's kind against the running
+    /// snapshot and attribute each change to `premise`. Names are
+    /// visited in sorted order so the recorded steps are
+    /// deterministic.
+    fn record_narrowings(
+        ctx: &Context,
+        premise: &Premise,
+        current: &mut HashMap<String, Kind>,
+        narrowings: &mut Vec<Narrowing>,
+    ) {
+        let mut names: Vec<(&String, &VarId)> = ctx.named_vars().collect();
+        names.sort_by_key(|(name, _)| name.as_str());
+        for (name, var_id) in names {
+            let kind = Self::resolve(ctx, *var_id);
+            let previous = current.get(name);
+            if previous == Some(&kind) {
+                continue;
+            }
+            narrowings.push(Narrowing {
+                variable: name.clone(),
+                premise: premise.to_string(),
+                from: previous.cloned(),
+                to: kind.clone(),
+            });
+            current.insert(name.clone(), kind);
+        }
     }
 
     /// Contribute one formula premise to the unification context.
@@ -225,6 +339,65 @@ impl TypeEnv {
         self.by_name.get(name)
     }
 
+    /// The narrowing steps recorded during inference, in premise
+    /// order: which premise constrained which variable, from what
+    /// to what.
+    pub fn narrowings(&self) -> &[Narrowing] {
+        &self.narrowings
+    }
+
+    /// Declared optionality no result can exercise: variables some
+    /// premise set-widened with `Nothing` that the rule's other
+    /// premises require present. Sound, but worth surfacing — the
+    /// author wrote an optional that always filters.
+    pub fn dead_optionality(&self) -> &[DeadOptionality] {
+        &self.dead_optionality
+    }
+
+    /// Render a human-readable account of the inference: every
+    /// variable's final kind, the premises that narrowed it there,
+    /// and any dead-optionality findings.
+    ///
+    /// ```text
+    /// ?age: UnsignedInt
+    ///   introduced as UnsignedInt|Nothing by person { age?: ?age }
+    ///   narrowed to UnsignedInt by 5 = sum(?age, 1)
+    /// warning: ?age is declared optional by person { age?: ?age }
+    ///   but required by 5 = sum(?age, 1); rows lacking it are
+    ///   excluded, no result carries it as Absent
+    /// ```
+    pub fn explain(&self) -> String {
+        let mut lines = Vec::new();
+        let mut names: Vec<&String> = self.by_name.keys().collect();
+        names.sort();
+        for name in names {
+            lines.push(format!("?{name}: {}", self.by_name[name]));
+            for step in self.narrowings.iter().filter(|step| &step.variable == name) {
+                match &step.from {
+                    None => lines.push(format!("  introduced as {} by {}", step.to, step.premise)),
+                    Some(from) => lines.push(format!(
+                        "  narrowed from {} to {} by {}",
+                        from, step.to, step.premise
+                    )),
+                }
+            }
+        }
+        for finding in &self.dead_optionality {
+            let mut line = format!(
+                "warning: ?{} is declared optional by {} but can never be Absent",
+                finding.variable, finding.declared_in
+            );
+            if let Some(required_by) = &finding.required_by {
+                line.push_str(&format!(
+                    " (required by {}; rows lacking it are excluded)",
+                    required_by
+                ));
+            }
+            lines.push(line);
+        }
+        lines.join("\n")
+    }
+
     /// Iterate over `(name, inferred kind)` pairs.
     pub fn iter(&self) -> impl Iterator<Item = (&String, &Kind)> {
         self.by_name.iter()
@@ -254,6 +427,7 @@ mod tests {
     use crate::planner::Planner;
     use crate::types::Any;
     use crate::{Cardinality, Environment, Term, the};
+    use std::slice;
 
     /// Helper: an optional (set-widening) binding for `?name` — a
     /// `OptionalAttributeQuery` left-join whose schema admits `Nothing` for the
@@ -267,6 +441,90 @@ mod tests {
             Some(Cardinality::One),
         )
         .into()
+    }
+
+    /// Inference records its provenance: each premise's
+    /// contribution to a variable's kind becomes a narrowing step
+    /// naming the premise.
+    #[dialog_common::test]
+    fn it_records_narrowing_provenance() -> anyhow::Result<()> {
+        let scan = AttributeQuery::new(
+            Term::from(the!("misc/tag")),
+            Term::<Entity>::var("this"),
+            Term::var("tag"),
+            Term::var("cause"),
+            Some(Cardinality::One),
+        );
+        let predicate = Term::<Any>::var("tag").number();
+        let premises = vec![scan.into(), predicate.clone()];
+
+        let env = TypeEnv::infer(&premises)?;
+        let steps: Vec<&Narrowing> = env
+            .narrowings()
+            .iter()
+            .filter(|step| step.variable == "tag")
+            .collect();
+        assert_eq!(
+            steps.len(),
+            2,
+            "introduced by the scan, narrowed by the predicate"
+        );
+        assert_eq!(steps[0].from, None, "first contribution has no prior kind");
+        assert_eq!(
+            steps[1].to.primitive_part(),
+            Primitive::NUMERIC,
+            "the predicate's step records the narrowed kind"
+        );
+        assert_eq!(
+            steps[1].premise,
+            predicate.to_string(),
+            "the step names the premise that narrowed"
+        );
+        assert!(
+            env.explain().contains("?tag:"),
+            "explain renders the variable's account"
+        );
+        Ok(())
+    }
+
+    /// A declared optionality the rule's other premises make
+    /// unreachable is reported: the variable can never be Absent in
+    /// any result.
+    #[dialog_common::test]
+    fn it_lints_dead_optionality() -> anyhow::Result<()> {
+        let optional = optional_name_premise(Term::from(the!("person/nickname")));
+        let scan: Premise = AttributeQuery::new(
+            Term::from(the!("person/name")),
+            Term::<Entity>::var("this"),
+            Term::<String>::var("name").into(),
+            Term::var("cause"),
+            Some(Cardinality::One),
+        )
+        .into();
+
+        // Alone, the optionality is live: no lint.
+        let env = TypeEnv::infer(slice::from_ref(&optional))?;
+        assert!(
+            env.dead_optionality().is_empty(),
+            "an optional nothing requires is live"
+        );
+
+        // A sibling scan requires ?name present: the optionality is
+        // dead and the lint names both premises.
+        let env = TypeEnv::infer(&[optional.clone(), scan.clone()])?;
+        let findings = env.dead_optionality();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].variable, "name");
+        assert_eq!(findings[0].declared_in, optional.to_string());
+        assert_eq!(
+            findings[0].required_by.as_deref(),
+            Some(scan.to_string().as_str())
+        );
+        assert!(
+            env.explain().contains("warning:"),
+            "explain surfaces the finding"
+        );
+        Ok(())
     }
 
     /// A type predicate narrows its subject rule-wide: occurrence

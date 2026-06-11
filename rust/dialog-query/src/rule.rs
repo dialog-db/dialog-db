@@ -41,7 +41,7 @@ pub use deductive::descriptor::DeductiveRuleDescriptor;
 pub use inductive::InductiveRule;
 pub use inductive::descriptor::InductiveRuleDescriptor;
 pub use premises::*;
-pub use types::TypeEnv;
+pub use types::{DeadOptionality, Narrowing, TypeEnv};
 pub use when::*;
 
 /// A compiled rule — either deductive or inductive.
