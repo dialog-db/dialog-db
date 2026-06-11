@@ -731,7 +731,7 @@ where
     where
         NodeBody<Key, Value>: TryFrom<Vec<Child>, Error = DialogSearchTreeError>,
     {
-        let mut output: Vec<(Node<Key, Value>, u32)> = vec![];
+        let mut output: Vec<(Node<Key, Value>, Rank)> = vec![];
         let mut pending = vec![];
 
         for (child, rank) in children {
