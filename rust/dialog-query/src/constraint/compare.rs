@@ -91,7 +91,7 @@ macro_rules! define_comparison {
                     "of".to_string(),
                     Field {
                         description: "Left side of the comparison".to_string(),
-                        content_type: Some(Kind::primitive_set(Primitive::NUMERIC)),
+                        content_type: Some(Kind::from(Primitive::NUMERIC)),
                         requirement: Requirement::required(),
                         cardinality: Cardinality::One,
                     },
@@ -100,7 +100,7 @@ macro_rules! define_comparison {
                     "with".to_string(),
                     Field {
                         description: "Right side of the comparison".to_string(),
-                        content_type: Some(Kind::primitive_set(Primitive::NUMERIC)),
+                        content_type: Some(Kind::from(Primitive::NUMERIC)),
                         requirement: Requirement::required(),
                         cardinality: Cardinality::One,
                     },

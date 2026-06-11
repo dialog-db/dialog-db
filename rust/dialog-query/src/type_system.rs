@@ -294,6 +294,7 @@ impl Display for Type {
         match self {
             Type::Primitive(p) => write!(f, "{p}"),
             Type::Composite(p, c) => write!(f, "{p}+{} composite", c.len()),
+            Type::Refined(p, r) => write!(f, "{p}[starts-with {:?}]", r.prefix),
         }
     }
 }
@@ -329,6 +330,82 @@ pub enum Type {
     /// giving a pure composite type. Invariant: the composite set is
     /// never empty (an empty one collapses to `Primitive`).
     Composite(Primitive, BTreeSet<Composite>),
+    /// Primitive set narrowed by a [`Refinement`] on the *values*
+    /// of the member types — not just which types are admitted, but
+    /// which of their inhabitants. Produced by refinement
+    /// predicates (`starts-with`); consumed by scan-range pushdown
+    /// and, like every kind, by [`Type::admits`] at the data
+    /// boundary. Admits no composite shapes (refinements constrain
+    /// lexical forms, which composites do not have).
+    Refined(Primitive, Refinement),
+}
+
+/// A value-level constraint layered onto a primitive membership
+/// set. The meet of two refinements is their conjunction (both
+/// constraints), the join their weakest common implication — see
+/// [`Refinement::meet`] and [`Refinement::join`].
+///
+/// Today one refinement exists: a lexical prefix over the TEXTUAL
+/// kinds. Numeric intervals and Entity concept-membership (M3)
+/// extend this struct rather than adding lattice variants.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Refinement {
+    /// Lexical prefix every admitted value must begin with.
+    /// Invariant: non-empty (an empty prefix is no refinement; the
+    /// constructors collapse it).
+    pub prefix: String,
+}
+
+impl Refinement {
+    /// Meet: the conjunction of both constraints. Two prefixes are
+    /// jointly satisfiable iff one extends the other, and the meet
+    /// is the longer; disjoint prefixes admit nothing.
+    fn meet(&self, other: &Refinement) -> Option<Refinement> {
+        if self.prefix.starts_with(&other.prefix) {
+            Some(self.clone())
+        } else if other.prefix.starts_with(&self.prefix) {
+            Some(other.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Join: the weakest constraint both sides imply — the longest
+    /// common prefix. `None` when nothing is common (the join
+    /// carries no refinement).
+    fn join(&self, other: &Refinement) -> Option<Refinement> {
+        let common: String = self
+            .prefix
+            .chars()
+            .zip(other.prefix.chars())
+            .take_while(|(a, b)| a == b)
+            .map(|(a, _)| a)
+            .collect();
+        if common.is_empty() {
+            None
+        } else {
+            Some(Refinement { prefix: common })
+        }
+    }
+
+    /// True when the value's lexical form satisfies the refinement.
+    /// Values without a lexical form satisfy no prefix.
+    pub fn admits(&self, value: &Value) -> bool {
+        lexical_form(value).is_some_and(|form| form.starts_with(&self.prefix))
+    }
+}
+
+/// The lexical form of a value, if its kind has one: the string
+/// content, the symbol's `namespace/predicate` name, or the
+/// entity's URI. This is the form prefix refinements and the
+/// `starts-with` predicate compare against.
+pub fn lexical_form(value: &Value) -> Option<String> {
+    match value {
+        Value::String(content) => Some(content.clone()),
+        Value::Symbol(symbol) => Some(String::from(symbol)),
+        Value::Entity(entity) => Some(entity.as_str().to_string()),
+        _ => None,
+    }
 }
 
 /// A composite (structured) value shape. Ordered by derived
@@ -361,15 +438,23 @@ impl Type {
         match self {
             Type::Primitive(p) => Type::Primitive(p.union(Primitive::NOTHING)),
             Type::Composite(p, c) => Type::Composite(p.union(Primitive::NOTHING), c),
+            Type::Refined(p, r) => Type::Refined(p.union(Primitive::NOTHING), r),
         }
     }
 
     /// True when the given runtime value inhabits this type: the
-    /// value's data type is a member of the primitive part.
+    /// value's data type is a member of the primitive part, and the
+    /// refinement (if any) admits the value itself.
     /// Composite refinements are not yet checked; no composite
     /// values flow through evaluation today.
     pub fn admits(&self, value: &Value) -> bool {
-        self.primitive_part().contains(value.data_type())
+        if !self.primitive_part().contains(value.data_type()) {
+            return false;
+        }
+        match self {
+            Type::Refined(_, r) => r.admits(value),
+            _ => true,
+        }
     }
 
     /// The inverse of [`optional`]: strip the `Nothing` atom if
@@ -379,6 +464,54 @@ impl Type {
         match self {
             Type::Primitive(p) => Type::Primitive(p.required()),
             Type::Composite(p, c) => Type::Composite(p.required(), c),
+            Type::Refined(p, r) => Type::Refined(p.required(), r),
+        }
+    }
+
+    /// Refine this type with a lexical prefix constraint.
+    ///
+    /// The membership is narrowed to the TEXTUAL kinds (the kinds
+    /// with a lexical form; the `Nothing` bit, if present, rides
+    /// along untouched — refinements constrain present values).
+    /// Returns `None` when no member could carry a lexical form —
+    /// an empty meet. An empty prefix is no constraint and returns
+    /// the type unchanged; an existing prefix refinement is met
+    /// against the new one.
+    pub fn with_prefix(self, prefix: impl Into<String>) -> Option<Type> {
+        let prefix = prefix.into();
+        if prefix.is_empty() {
+            return Some(self);
+        }
+        let membership = self
+            .primitive_part()
+            .intersect(Primitive::TEXTUAL.union(Primitive::NOTHING))?;
+        if membership.required().is_empty() {
+            return None;
+        }
+        let refinement = match &self {
+            Type::Refined(_, existing) => existing.meet(&Refinement { prefix })?,
+            _ => Refinement { prefix },
+        };
+        Some(Type::Refined(membership, refinement))
+    }
+
+    /// The refinement layered onto this type, if any.
+    pub fn refinement(&self) -> Option<&Refinement> {
+        match self {
+            Type::Refined(_, r) => Some(r),
+            _ => None,
+        }
+    }
+
+    /// Rebuild this type around a replacement primitive part,
+    /// preserving its composite or refinement structure. The
+    /// unifier uses this so a resolution that narrows membership
+    /// does not silently shed the rest of the type.
+    pub(crate) fn with_primitive_part(&self, p: Primitive) -> Type {
+        match self {
+            Type::Primitive(_) => Type::Primitive(p),
+            Type::Composite(_, c) => Type::composite(p, c.clone()),
+            Type::Refined(_, r) => Type::Refined(p, r.clone()),
         }
     }
 
@@ -428,6 +561,24 @@ impl Type {
             bits: p_self.bits & p_other.bits,
         };
 
+        // Refinements are constraints: the meet carries the
+        // conjunction. Two refined sides must have jointly
+        // satisfiable refinements; a refined side admits no
+        // composite shapes, so any composite part on the other
+        // side is dropped.
+        let refinement = match (self.refinement(), other.refinement()) {
+            (Some(a), Some(b)) => Some(a.meet(b)?),
+            (Some(r), None) | (None, Some(r)) => Some(r.clone()),
+            (None, None) => None,
+        };
+        if let Some(refinement) = refinement {
+            return if p.is_empty() {
+                None
+            } else {
+                Some(Type::Refined(p, refinement))
+            };
+        }
+
         let composite_intersection: BTreeSet<Composite> =
             match (self.composite_part(), other.composite_part()) {
                 (Some(a), Some(b)) => intersect_composite_sets(a, b),
@@ -442,8 +593,21 @@ impl Type {
     }
 
     /// Set union over both primitive and composite parts.
+    ///
+    /// Refinements weaken at a join: two refined sides keep their
+    /// weakest common implication (the longest common prefix), a
+    /// refined side joined with an unrefined one sheds the
+    /// refinement entirely — the union must admit everything either
+    /// side admits.
     pub fn union(&self, other: &Type) -> Type {
         let p = self.primitive_part().union(other.primitive_part());
+
+        if let (Some(a), Some(b)) = (self.refinement(), other.refinement())
+            && let Some(joined) = a.join(b)
+        {
+            return Type::Refined(p, joined);
+        }
+
         let mut composites: BTreeSet<Composite> = BTreeSet::new();
         if let Some(s) = self.composite_part() {
             composites.extend(s.iter().cloned());
@@ -467,6 +631,19 @@ impl Type {
         if !self.primitive_part().includes(other.primitive_part()) {
             return false;
         }
+        // A refined type admits fewer values than its membership: it
+        // includes `other` only if `other` is at least as
+        // constrained (other's prefix extends ours). An unrefined
+        // type over-approximates any refinement of its membership.
+        match (self.refinement(), other.refinement()) {
+            (Some(a), Some(b)) => {
+                if !b.prefix.starts_with(&a.prefix) {
+                    return false;
+                }
+            }
+            (Some(_), None) => return false,
+            (None, _) => {}
+        }
         match (self.composite_part(), other.composite_part()) {
             (_, None) => true,
             (None, Some(b)) => b.is_empty(),
@@ -486,6 +663,7 @@ impl Type {
         match self {
             Type::Primitive(p) => *p,
             Type::Composite(p, _) => *p,
+            Type::Refined(p, _) => *p,
         }
     }
 
@@ -495,15 +673,19 @@ impl Type {
         match self {
             Type::Primitive(_) => None,
             Type::Composite(_, c) => Some(c),
+            Type::Refined(_, _) => None,
         }
     }
 
     /// Legacy storage-codec view: if this type reduces to exactly
     /// one [`ValueType`] (no `Nothing`, no composites), return it.
+    /// A refinement does not change the storage type, so a refined
+    /// singleton still reports its member.
     pub fn as_value_type(&self) -> Option<ValueType> {
         match self {
             Type::Primitive(p) => p.as_singleton(),
             Type::Composite(_, _) => None,
+            Type::Refined(p, _) => p.as_singleton(),
         }
     }
 }
@@ -985,6 +1167,118 @@ mod tests {
             hash_of(&b),
             "product hash is field-insertion-order independent"
         );
+    }
+
+    /// `with_prefix` narrows membership to the TEXTUAL kinds and
+    /// attaches the refinement; non-textual membership is an empty
+    /// meet.
+    #[dialog_common::test]
+    fn with_prefix_narrows_to_textual() {
+        let refined = Type::from(Primitive::ALL)
+            .with_prefix("did:")
+            .expect("textual members remain");
+        assert_eq!(refined.primitive_part(), Primitive::TEXTUAL);
+        assert_eq!(refined.refinement().expect("refined").prefix, "did:");
+
+        assert!(
+            Type::from(Primitive::NUMERIC).with_prefix("did:").is_none(),
+            "no numeric value has a lexical form"
+        );
+        assert_eq!(
+            Type::from(ValueType::String).with_prefix(""),
+            Some(Type::from(ValueType::String)),
+            "an empty prefix is no refinement"
+        );
+    }
+
+    /// The meet of two refined types takes the stronger prefix;
+    /// disjoint prefixes are an empty meet.
+    #[dialog_common::test]
+    fn refined_intersect_takes_the_stronger_prefix() {
+        let did = Type::from(ValueType::Entity).with_prefix("did:").unwrap();
+        let did_key = Type::from(ValueType::Entity)
+            .with_prefix("did:key:")
+            .unwrap();
+        let met = did.intersect(&did_key).expect("compatible prefixes");
+        assert_eq!(met.refinement().unwrap().prefix, "did:key:");
+
+        let http = Type::from(ValueType::Entity).with_prefix("http:").unwrap();
+        assert!(
+            did.intersect(&http).is_none(),
+            "no value starts with both prefixes"
+        );
+
+        let unrefined = Type::from(Primitive::TEXTUAL);
+        let met = did.intersect(&unrefined).expect("memberships overlap");
+        assert_eq!(
+            met.refinement().unwrap().prefix,
+            "did:",
+            "the refinement survives a meet with an unrefined side"
+        );
+        assert_eq!(met.primitive_part().as_singleton(), Some(ValueType::Entity));
+    }
+
+    /// The join weakens: common prefix when there is one, no
+    /// refinement otherwise (including against an unrefined side).
+    #[dialog_common::test]
+    fn refined_union_weakens() {
+        let a = Type::from(ValueType::String)
+            .with_prefix("user/admin")
+            .unwrap();
+        let b = Type::from(ValueType::String)
+            .with_prefix("user/guest")
+            .unwrap();
+        let joined = a.union(&b);
+        assert_eq!(joined.refinement().unwrap().prefix, "user/");
+
+        let unrefined = Type::from(ValueType::String);
+        assert_eq!(
+            a.union(&unrefined),
+            Type::from(ValueType::String),
+            "a join with an unrefined side sheds the refinement"
+        );
+
+        let disjoint = Type::from(ValueType::String).with_prefix("group/").unwrap();
+        assert!(
+            a.union(&disjoint).refinement().is_none(),
+            "no common prefix, no refinement"
+        );
+    }
+
+    /// Inclusion: the more-refined side is the subtype.
+    #[dialog_common::test]
+    fn refined_includes_is_constraint_ordered() {
+        let did = Type::from(ValueType::Entity).with_prefix("did:").unwrap();
+        let did_key = Type::from(ValueType::Entity)
+            .with_prefix("did:key:")
+            .unwrap();
+        let unrefined = Type::from(ValueType::Entity);
+
+        assert!(did.includes(&did_key), "longer prefix is more constrained");
+        assert!(!did_key.includes(&did));
+        assert!(unrefined.includes(&did), "unrefined over-approximates");
+        assert!(!did.includes(&unrefined));
+    }
+
+    /// `admits` enforces the refinement against the value's lexical
+    /// form — membership alone is not enough.
+    #[dialog_common::test]
+    fn refined_admits_checks_lexical_form() {
+        let refined = Type::from(Primitive::TEXTUAL).with_prefix("user/").unwrap();
+        assert!(refined.admits(&Value::String("user/name".into())));
+        assert!(!refined.admits(&Value::String("group/name".into())));
+        assert!(!refined.admits(&Value::UnsignedInt(7)));
+    }
+
+    /// Refined types survive serde.
+    #[dialog_common::test]
+    fn refined_serde_round_trip() {
+        let t = Type::from(ValueType::Entity)
+            .with_prefix("did:key:")
+            .unwrap();
+        let j = serde_json::to_string(&t).unwrap();
+        let back: Type = serde_json::from_str(&j).unwrap();
+        assert_eq!(t, back);
     }
 
     /// Combining two products via union also produces identical

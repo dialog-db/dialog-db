@@ -252,10 +252,10 @@ impl Context {
                     .intersect(p)
                     .ok_or(UnifyError::ConstraintConflict { left: cx, right: p })?;
                 self.constraints.insert(x, merged);
-                let resolved = match narrowed_static.composite_part() {
-                    Some(c) if !c.is_empty() => StaticType::composite(merged, c.clone()),
-                    _ => StaticType::from(merged),
-                };
+                // Rebuild around the merged membership without
+                // shedding the static's composite or refinement
+                // structure.
+                let resolved = narrowed_static.with_primitive_part(merged);
                 self.substitution.insert(x, Type::Static(resolved.clone()));
                 Ok(Type::Static(resolved))
             }
@@ -457,5 +457,31 @@ mod tests {
         let mut ctx = Context::new();
         let result = ctx.unify(&p(ValueType::String), &Type::optional(ValueType::Entity));
         assert!(matches!(result, Err(UnifyError::ConstraintConflict { .. })));
+    }
+
+    /// A variable resolved against a refined static keeps the
+    /// refinement: resolution narrows membership without shedding
+    /// the rest of the type's structure.
+    #[dialog_common::test]
+    fn unify_variable_with_refined_static_keeps_the_refinement() {
+        let mut ctx = Context::new();
+        let v = ctx.fresh(Primitive::ANY);
+        let refined = StaticType::from(Primitive::TEXTUAL)
+            .with_prefix("did:")
+            .expect("textual members");
+        ctx.unify(&Type::Variable(v), &Type::Static(refined))
+            .unwrap();
+        // A later premise narrows membership further; the prefix
+        // must survive that narrowing too.
+        ctx.unify(&Type::Variable(v), &Type::primitive(ValueType::Entity))
+            .unwrap();
+        let resolved = ctx.resolve(&Type::Variable(v));
+        match resolved {
+            Type::Static(s) => {
+                assert_eq!(s.primitive_part().as_singleton(), Some(ValueType::Entity));
+                assert_eq!(s.refinement().expect("refinement preserved").prefix, "did:");
+            }
+            other => panic!("expected static, got {other:?}"),
+        }
     }
 }

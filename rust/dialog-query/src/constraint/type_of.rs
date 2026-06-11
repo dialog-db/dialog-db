@@ -135,39 +135,39 @@ impl Term<Any> {
 
     /// `?x` is a string.
     pub fn text(self) -> Premise {
-        self.typed_as(Kind::primitive(ValueType::String))
+        self.typed_as(Kind::from(ValueType::String))
     }
 
     /// `?x` is textual: a string, a symbol, or an entity — the kinds
     /// a lexical prefix can range over.
     pub fn textual(self) -> Premise {
-        self.typed_as(Kind::primitive_set(Primitive::TEXTUAL))
+        self.typed_as(Kind::from(Primitive::TEXTUAL))
     }
 
     /// `?x` is numeric: an unsigned integer, a signed integer, or a
     /// float.
     pub fn number(self) -> Premise {
-        self.typed_as(Kind::primitive_set(Primitive::NUMERIC))
+        self.typed_as(Kind::from(Primitive::NUMERIC))
     }
 
     /// `?x` is an entity.
     pub fn entity(self) -> Premise {
-        self.typed_as(Kind::primitive(ValueType::Entity))
+        self.typed_as(Kind::from(ValueType::Entity))
     }
 
     /// `?x` is a symbol (an attribute name).
     pub fn symbol(self) -> Premise {
-        self.typed_as(Kind::primitive(ValueType::Symbol))
+        self.typed_as(Kind::from(ValueType::Symbol))
     }
 
     /// `?x` is a boolean.
     pub fn boolean(self) -> Premise {
-        self.typed_as(Kind::primitive(ValueType::Boolean))
+        self.typed_as(Kind::from(ValueType::Boolean))
     }
 
     /// `?x` is bytes.
     pub fn bytes(self) -> Premise {
-        self.typed_as(Kind::primitive(ValueType::Bytes))
+        self.typed_as(Kind::from(ValueType::Bytes))
     }
 }
 
@@ -200,7 +200,7 @@ mod tests {
     /// Present values filter by kind membership.
     #[dialog_common::test]
     async fn it_filters_by_kind() -> Result<(), EvaluationError> {
-        let predicate = TypeOf::new(Term::var("x"), Kind::primitive(ValueType::String));
+        let predicate = TypeOf::new(Term::var("x"), Kind::from(ValueType::String));
 
         let mut row = Match::new();
         row.bind(&Term::var("x"), Value::String("hi".into()))?;
@@ -217,7 +217,7 @@ mod tests {
     /// An Absent binding matches nothing in a scalar kind.
     #[dialog_common::test]
     async fn it_filters_absent_for_scalar_kinds() -> Result<(), EvaluationError> {
-        let predicate = TypeOf::new(Term::var("x"), Kind::primitive(ValueType::String));
+        let predicate = TypeOf::new(Term::var("x"), Kind::from(ValueType::String));
         let mut row = Match::new();
         row.bind_absent(&Term::var("x"))?;
         let results: Vec<Match> = predicate.evaluate(row.seed()).try_collect().await?;
@@ -228,7 +228,7 @@ mod tests {
     /// An unbound subject is a planner-contract violation.
     #[dialog_common::test]
     async fn it_errors_on_unbound_subject() {
-        let predicate = TypeOf::new(Term::var("x"), Kind::primitive(ValueType::String));
+        let predicate = TypeOf::new(Term::var("x"), Kind::from(ValueType::String));
         let results: Result<Vec<Match>, _> =
             predicate.evaluate(Match::new().seed()).try_collect().await;
         assert!(results.is_err(), "unbound subject must error");
