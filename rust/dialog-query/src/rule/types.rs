@@ -23,6 +23,7 @@
 //! bindings rather than introducing them.
 
 use crate::Premise;
+use crate::formula::number::Numeric;
 use crate::type_system::Primitive;
 use crate::type_system::Type as Kind;
 use crate::type_system::unifier::{Context, Type as Inferred, lift};
@@ -179,12 +180,33 @@ impl TypeEnv {
 
             let argument = match param.name() {
                 Some(var_name) => Inferred::Variable(ctx.var_for_name(var_name)),
-                None => match param.kind() {
-                    // A constant: its kind narrows the slot (and the
-                    // scheme, when the slot is a scheme cell).
-                    Some(kind) => lift(&kind),
-                    // A blank contributes nothing.
-                    None => continue,
+                None => match (param, cell.scheme_label()) {
+                    // A numeric constant in a *scheme* slot is a
+                    // polymorphic literal: it contributes the set of
+                    // types it instantiates to losslessly, so `1`
+                    // does not pin the scheme while `1.5` pins it to
+                    // Float. (At evaluation the literal adapts to the
+                    // row's instantiation; data never does.)
+                    (crate::Term::Constant(value), Some(_)) => {
+                        match Numeric::try_from(value.clone()) {
+                            Ok(literal) => {
+                                Inferred::Static(Kind::primitive_set(literal.admissible()))
+                            }
+                            // Not numeric: its singleton kind applies
+                            // (and conflicts with a numeric bound).
+                            Err(_) => match param.kind() {
+                                Some(kind) => lift(&kind),
+                                None => continue,
+                            },
+                        }
+                    }
+                    // A constant in a concrete slot: its kind narrows
+                    // the slot.
+                    _ => match param.kind() {
+                        Some(kind) => lift(&kind),
+                        // A blank contributes nothing.
+                        None => continue,
+                    },
                 },
             };
 
@@ -271,6 +293,39 @@ mod tests {
                 kind.primitive_part(),
                 Primitive::NUMERIC,
                 "{var} is bounded by the scheme"
+            );
+        }
+        Ok(())
+    }
+
+    /// An *integer* literal is polymorphic: it fits every numeric
+    /// type losslessly, so it does not pin the scheme — the linked
+    /// variables stay bounded NUMERIC and the row's data decides.
+    #[dialog_common::test]
+    fn it_keeps_schemes_open_for_integer_literals() -> anyhow::Result<()> {
+        use crate::Proposition;
+        use crate::Value;
+        use crate::formula::Formula;
+        use crate::formula::math::Sum;
+
+        let mut terms = crate::Parameters::new();
+        terms.insert("of".to_string(), Term::var("a"));
+        terms.insert(
+            "with".to_string(),
+            Term::<Any>::Constant(Value::UnsignedInt(1)),
+        );
+        terms.insert("is".to_string(), Term::var("c"));
+        let premises = vec![Premise::Assert(Proposition::Formula(
+            Sum::apply(terms)?.into(),
+        ))];
+
+        let env = TypeEnv::infer(&premises)?;
+        for var in ["a", "c"] {
+            let kind = env.get(var).expect("inferred");
+            assert_eq!(
+                kind.primitive_part(),
+                Primitive::NUMERIC,
+                "the integer literal must not pin {var}"
             );
         }
         Ok(())

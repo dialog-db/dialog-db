@@ -1,5 +1,6 @@
 use std::fmt;
 
+use crate::artifact::Type as ValueType;
 use crate::error::EvaluationError;
 use crate::formula::bindings::Bindings;
 use crate::formula::cell::Cells;
@@ -8,7 +9,9 @@ use crate::formula::logic::{And, Not, Or};
 use crate::formula::math::{Difference, Modulo, Product, Quotient, Sum};
 use crate::formula::string::{Concatenate, Length, Like, Lowercase, Uppercase};
 use crate::selection::{Match, Selection};
-use crate::{Environment, Formula, Parameters, Schema, try_stream};
+use crate::term::Term;
+use crate::types::Any;
+use crate::{Environment, Formula, Parameters, Schema, Value, try_stream};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::sync::Arc;
@@ -113,10 +116,76 @@ impl FormulaQuery {
         Some(self.cost())
     }
 
+    /// Adapt polymorphic literals to the row's scheme instantiation.
+    ///
+    /// For each scheme group, the row's *variable* members determine
+    /// the instantiation (the data's type); *constant* numeric
+    /// members — literals — are then converted into it losslessly.
+    /// `None` means some literal has no lossless form in the row's
+    /// type: the row is a non-match. Data values are never touched —
+    /// only literals adapt, which is the strict-data /
+    /// polymorphic-literal split (see notes/formula-schemes.md).
+    fn adapt_literals(&self, row: &Match) -> Option<Parameters> {
+        use crate::formula::number::Numeric;
+        use std::collections::HashMap;
+
+        let mut parameters = self.parameters();
+        let mut instantiation: HashMap<&str, ValueType> = HashMap::new();
+
+        // First pass: the row's instantiation per scheme group, from
+        // variable members bound to numeric values.
+        for (slot, cell) in self.cells().iter() {
+            let Some(label) = cell.scheme_label() else {
+                continue;
+            };
+            let Some(term) = parameters.get(slot) else {
+                continue;
+            };
+            if term.name().is_some()
+                && let Ok(crate::Binding::Present(value)) = row.lookup(term)
+                && Numeric::try_from(value.clone()).is_ok()
+            {
+                instantiation.entry(label).or_insert(value.data_type());
+            }
+        }
+
+        if instantiation.is_empty() {
+            return Some(parameters);
+        }
+
+        // Second pass: adapt constant members into their group's
+        // instantiation.
+        let mut adapted: Vec<(String, Term<Any>)> = Vec::new();
+        for (slot, cell) in self.cells().iter() {
+            let Some(label) = cell.scheme_label() else {
+                continue;
+            };
+            let Some(target) = instantiation.get(label) else {
+                continue;
+            };
+            let Some(Term::Constant(value)) = parameters.get(slot) else {
+                continue;
+            };
+            let Ok(literal) = Numeric::try_from(value.clone()) else {
+                continue;
+            };
+            let instantiated = literal.instantiate(*target)?;
+            adapted.push((slot.to_string(), Term::Constant(Value::from(instantiated))));
+        }
+        for (slot, term) in adapted {
+            parameters.insert(slot, term);
+        }
+        Some(parameters)
+    }
+
     /// Computes matches using this formula
     pub fn compute(&self, input: Match) -> Result<Vec<Match>, EvaluationError> {
         let formula = Arc::new(self.clone());
-        let parameters = self.parameters();
+        let Some(parameters) = self.adapt_literals(&input) else {
+            // A literal has no lossless form in the row's type: the
+            // row is a non-match.
+            return Ok(vec![]);
+        };
         let mut bindings = Bindings::new(formula, input, parameters);
         self.resolve(&mut bindings)
     }
@@ -139,13 +208,19 @@ impl FormulaQuery {
     /// a genuine evaluation failure and propagates.
     pub fn expand(&self, matched: Match) -> Result<Vec<Match>, EvaluationError> {
         let formula = Arc::new(self.clone());
-        let parameters = self.parameters();
+        let Some(parameters) = self.adapt_literals(&matched) else {
+            // A literal has no lossless form in the row's type: the
+            // row is a non-match.
+            return Ok(vec![]);
+        };
         let mut bindings = Bindings::new(formula, matched, parameters);
         match self.resolve(&mut bindings) {
             Ok(output) => Ok(output),
-            Err(EvaluationError::Conflict { .. }) | Err(EvaluationError::Absent { .. }) => {
-                Ok(vec![])
-            }
+            Err(EvaluationError::Conflict { .. })
+            | Err(EvaluationError::Absent { .. })
+            // A row value outside an input's type is a row-local
+            // non-match (a scalar slot filters), same as at a scan.
+            | Err(EvaluationError::TypeMismatch { .. }) => Ok(vec![]),
             Err(e) => Err(e),
         }
     }
