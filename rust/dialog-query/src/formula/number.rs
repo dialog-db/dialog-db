@@ -159,6 +159,58 @@ impl Numeric {
     }
 }
 
+impl Numeric {
+    /// Convert into the given numeric type *losslessly*: `None` when
+    /// the value is not exactly representable there. The literal
+    /// adaptation primitive: a polymorphic literal instantiates to a
+    /// row's type through this, so a literal never changes value and
+    /// data is never coerced.
+    ///
+    /// Float literals stay float (the author wrote float syntax);
+    /// integer literals adapt wherever they fit exactly, including
+    /// to float below 2^53.
+    pub fn instantiate(self, target: ValueType) -> Option<Numeric> {
+        match (self, target) {
+            (n @ Numeric::UnsignedInt(_), ValueType::UnsignedInt) => Some(n),
+            (n @ Numeric::SignedInt(_), ValueType::SignedInt) => Some(n),
+            (n @ Numeric::Float(_), ValueType::Float) => Some(n),
+            (Numeric::UnsignedInt(v), ValueType::SignedInt) => {
+                i128::try_from(v).ok().map(Numeric::SignedInt)
+            }
+            (Numeric::SignedInt(v), ValueType::UnsignedInt) => {
+                u128::try_from(v).ok().map(Numeric::UnsignedInt)
+            }
+            (Numeric::UnsignedInt(v), ValueType::Float) => {
+                let f = v as f64;
+                (f.is_finite() && f as u128 == v && f >= 0.0).then_some(Numeric::Float(f))
+            }
+            (Numeric::SignedInt(v), ValueType::Float) => {
+                let f = v as f64;
+                (f.is_finite() && f as i128 == v).then_some(Numeric::Float(f))
+            }
+            _ => None,
+        }
+    }
+
+    /// The set of numeric types this value can instantiate to
+    /// losslessly — the kind a polymorphic literal contributes to
+    /// inference (so `1` does not pin a scheme, while `1.5` pins it
+    /// to Float).
+    pub fn admissible(&self) -> Primitive {
+        let mut set = Primitive::EMPTY;
+        for target in [
+            ValueType::UnsignedInt,
+            ValueType::SignedInt,
+            ValueType::Float,
+        ] {
+            if self.instantiate(target).is_some() {
+                set = set.union(Primitive::singleton(target));
+            }
+        }
+        set
+    }
+}
+
 impl TryFrom<Value> for Numeric {
     type Error = ArtifactTypeError;
 
@@ -204,7 +256,7 @@ impl TypeDescriptor for NumericDescriptor {
     const TYPE: Option<ValueType> = None;
 
     fn kind(&self) -> Option<Kind> {
-        Some(Kind::primitive_set(Primitive::NUMERIC))
+        Some(Kind::from(Primitive::NUMERIC))
     }
 }
 
@@ -291,6 +343,51 @@ mod tests {
     fn it_reports_the_numeric_kind() {
         let kind = NumericDescriptor.kind().expect("kind");
         assert_eq!(kind.primitive_part(), Primitive::NUMERIC);
+    }
+
+    /// Lossless instantiation: integer literals adapt wherever they
+    /// fit exactly; floats stay float; nothing ever changes value.
+    #[dialog_common::test]
+    fn it_instantiates_losslessly() {
+        let one = Numeric::UnsignedInt(1);
+        assert_eq!(
+            one.instantiate(ValueType::SignedInt),
+            Some(Numeric::SignedInt(1))
+        );
+        assert_eq!(one.instantiate(ValueType::Float), Some(Numeric::Float(1.0)));
+
+        // Above 2^53 a float is no longer exact.
+        let big = Numeric::UnsignedInt((1u128 << 53) + 1);
+        assert_eq!(big.instantiate(ValueType::Float), None);
+        assert!(big.instantiate(ValueType::SignedInt).is_some());
+
+        // Negatives have no unsigned form.
+        let neg = Numeric::SignedInt(-1);
+        assert_eq!(neg.instantiate(ValueType::UnsignedInt), None);
+        assert_eq!(
+            neg.instantiate(ValueType::Float),
+            Some(Numeric::Float(-1.0))
+        );
+
+        // Float literals stay float.
+        let frac = Numeric::Float(1.5);
+        assert_eq!(frac.instantiate(ValueType::UnsignedInt), None);
+        assert_eq!(frac.instantiate(ValueType::SignedInt), None);
+    }
+
+    /// The admissible set is what a polymorphic literal contributes
+    /// to inference.
+    #[dialog_common::test]
+    fn it_reports_admissible_sets() {
+        assert_eq!(Numeric::UnsignedInt(1).admissible(), Primitive::NUMERIC);
+        assert_eq!(
+            Numeric::Float(1.5).admissible(),
+            Primitive::singleton(ValueType::Float)
+        );
+        let neg = Numeric::SignedInt(-1).admissible();
+        assert!(!neg.contains(ValueType::UnsignedInt));
+        assert!(neg.contains(ValueType::SignedInt));
+        assert!(neg.contains(ValueType::Float));
     }
 
     /// Round trip through Value preserves the variant.

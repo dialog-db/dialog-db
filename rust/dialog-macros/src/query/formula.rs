@@ -224,7 +224,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                         syn::LitStr::new(&param.to_string(), proc_macro2::Span::call_site());
                     (
                         quote! {
-                            Some(dialog_query::type_system::Type::primitive_set(
+                            Some(dialog_query::type_system::Type::from(
                                 <#param as dialog_query::SchemeBound>::BOUND,
                             ))
                         },
