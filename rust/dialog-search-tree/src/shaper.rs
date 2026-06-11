@@ -280,7 +280,7 @@ where
         mut search_path: Vec<TreeLayer<Key, Value>>,
         mut delta: Delta<Blake3Hash, Buffer>,
     ) -> Result<(Blake3Hash, Delta<Blake3Hash, Buffer>), DialogSearchTreeError> {
-        const MINIMUM_RANK: u32 = 2;
+        const MINIMUM_RANK: Rank = 2;
         let mut minimum_rank = MINIMUM_RANK;
 
         loop {
@@ -456,7 +456,7 @@ where
     where
         NodeBody<Key, Value>: TryFrom<Vec<Child>, Error = DialogSearchTreeError>,
     {
-        let mut output: Vec<(Node<Key, Value>, u32)> = vec![];
+        let mut output: Vec<(Node<Key, Value>, Rank)> = vec![];
         let mut pending = vec![];
 
         for (child, rank) in children {

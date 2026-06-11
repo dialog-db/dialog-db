@@ -548,7 +548,7 @@ where
         Adopter: crate::Adopter<Key, Value, Hash>,
         Storage: ContentAddressedStorage<Hash = Hash>,
     {
-        let mut output: Vec<(Node<Key, Value, Hash>, u32)> = vec![];
+        let mut output: Vec<(Node<Key, Value, Hash>, Rank)> = vec![];
         let mut pending = vec![];
         for (node, rank) in nodes {
             pending.push(node);
@@ -629,7 +629,7 @@ where
 
     async fn rejoin<Distribution, Storage>(
         &self,
-        mut nodes: NonEmpty<(Node<Key, Value, Hash>, u32)>,
+        mut nodes: NonEmpty<(Node<Key, Value, Hash>, Rank)>,
         mut branch_stack: BranchStack<Key, Hash>,
         storage: &mut Storage,
     ) -> Result<Self, DialogProllyTreeError>
