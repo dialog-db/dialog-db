@@ -192,14 +192,11 @@ impl Match {
                 if let Some(kind) = term.kind()
                     && !kind.admits(&value)
                 {
-                    return Err(EvaluationError::Assignment {
-                        reason: format!(
-                            "Can not set {:?} to {:?} because the value's type {:?} is outside the variable's kind {:?}.",
-                            name,
-                            value,
-                            value.data_type(),
-                            kind
-                        ),
+                    return Err(EvaluationError::KindMismatch {
+                        variable: name.clone(),
+                        kind: kind.to_string(),
+                        value: format!("{value:?}"),
+                        value_type: format!("{:?}", value.data_type()),
                     });
                 }
                 if let Some(existing) = self.bindings.get(name) {
@@ -335,7 +332,7 @@ mod tests {
 
         let err = row.bind(&typed, Value::UnsignedInt(7));
         assert!(
-            matches!(err, Err(EvaluationError::Assignment { .. })),
+            matches!(err, Err(EvaluationError::KindMismatch { .. })),
             "a u32 value cannot inhabit a String-typed variable, got {err:?}"
         );
 
