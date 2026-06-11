@@ -74,9 +74,22 @@ impl TypeEnv {
         for premise in premises {
             // Negation premises don't contribute — they filter on
             // bindings rather than introducing them.
-            let Premise::Assert(_) = premise else {
+            let Premise::Assert(proposition) = premise else {
                 continue;
             };
+
+            // Formula premises may declare *schemes*: cells sharing a
+            // label share one bounded type variable, instantiated
+            // fresh per use of the formula. That linkage (and the
+            // contribution of constant arguments, which narrow the
+            // scheme) is expressed against the formula's cells
+            // directly, so formulas take this arm instead of the
+            // generic schema walk below.
+            if let crate::Proposition::Formula(formula) = proposition {
+                Self::infer_formula(&mut ctx, formula)?;
+                continue;
+            }
+
             let schema = premise.schema();
             let params = premise.parameters();
 
@@ -122,6 +135,67 @@ impl TypeEnv {
             }
         }
         Ok(Self { by_name })
+    }
+
+    /// Contribute one formula premise to the unification context.
+    ///
+    /// Scheme-labeled cells sharing a label share one fresh type
+    /// variable bounded by the cell's kind (the per-use
+    /// instantiation of the formula's scheme); concrete cells
+    /// contribute their kinds as before. Constant arguments unify
+    /// too — a literal narrows the scheme it instantiates, and a
+    /// literal outside a concrete cell's bound is a compile-time
+    /// conflict.
+    fn infer_formula(
+        ctx: &mut Context,
+        formula: &crate::FormulaQuery,
+    ) -> Result<(), InferenceError> {
+        use crate::type_system::unifier::Type as Inferred;
+        let params = formula.parameters();
+        let mut schemes: HashMap<String, Inferred> = HashMap::new();
+
+        for (slot_name, cell) in formula.cells().iter() {
+            let Some(param) = params.get(slot_name) else {
+                continue;
+            };
+
+            let slot_ty = match cell.scheme_label() {
+                Some(label) => schemes
+                    .entry(label.to_string())
+                    .or_insert_with(|| {
+                        let bound = cell
+                            .content_type()
+                            .as_ref()
+                            .map(|kind| kind.primitive_part())
+                            .unwrap_or(Primitive::ALL);
+                        Inferred::Variable(ctx.fresh(bound))
+                    })
+                    .clone(),
+                None => match cell.content_type() {
+                    Some(kind) => lift(kind),
+                    None => lift(&Kind::primitive_set(Primitive::ALL)),
+                },
+            };
+
+            let argument = match param.name() {
+                Some(var_name) => Inferred::Variable(ctx.var_for_name(var_name)),
+                None => match param.kind() {
+                    // A constant: its kind narrows the slot (and the
+                    // scheme, when the slot is a scheme cell).
+                    Some(kind) => lift(&kind),
+                    // A blank contributes nothing.
+                    None => continue,
+                },
+            };
+
+            if let Err(reason) = ctx.unify(&slot_ty, &argument) {
+                return Err(InferenceError::Conflict {
+                    variable: param.name().unwrap_or(slot_name).to_string(),
+                    reason: reason.to_string(),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Look up the inferred type for a variable by name.
@@ -171,6 +245,64 @@ mod tests {
             Some(Cardinality::One),
         )
         .into()
+    }
+
+    /// A formula scheme links its cells: one bounded type variable
+    /// per label, shared by every cell carrying it, instantiated
+    /// fresh for this use of the formula.
+    #[dialog_common::test]
+    fn it_instantiates_formula_schemes() -> anyhow::Result<()> {
+        use crate::Proposition;
+        use crate::formula::Formula;
+        use crate::formula::math::Sum;
+
+        let mut terms = crate::Parameters::new();
+        terms.insert("of".to_string(), Term::var("a"));
+        terms.insert("with".to_string(), Term::var("b"));
+        terms.insert("is".to_string(), Term::var("c"));
+        let premises = vec![Premise::Assert(Proposition::Formula(
+            Sum::apply(terms)?.into(),
+        ))];
+
+        let env = TypeEnv::infer(&premises)?;
+        for var in ["a", "b", "c"] {
+            let kind = env.get(var).expect("inferred");
+            assert_eq!(
+                kind.primitive_part(),
+                Primitive::NUMERIC,
+                "{var} is bounded by the scheme"
+            );
+        }
+        Ok(())
+    }
+
+    /// A constant argument narrows the scheme it instantiates: a
+    /// float literal makes every linked cell Float.
+    #[dialog_common::test]
+    fn it_narrows_schemes_by_constant_arguments() -> anyhow::Result<()> {
+        use crate::Proposition;
+        use crate::Value;
+        use crate::formula::Formula;
+        use crate::formula::math::Sum;
+
+        let mut terms = crate::Parameters::new();
+        terms.insert("of".to_string(), Term::var("a"));
+        terms.insert("with".to_string(), Term::<Any>::Constant(Value::Float(1.5)));
+        terms.insert("is".to_string(), Term::var("c"));
+        let premises = vec![Premise::Assert(Proposition::Formula(
+            Sum::apply(terms)?.into(),
+        ))];
+
+        let env = TypeEnv::infer(&premises)?;
+        for var in ["a", "c"] {
+            let kind = env.get(var).expect("inferred");
+            assert_eq!(
+                kind.as_value_type(),
+                Some(ValueType::Float),
+                "the literal narrowed {var} through the scheme"
+            );
+        }
+        Ok(())
     }
 
     /// A typed slot kind flows into the variable's inferred type.
