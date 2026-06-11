@@ -302,6 +302,18 @@ fn apply_types_to_proposition(proposition: Proposition, types: &TypeEnv) -> Prop
 }
 
 fn narrow_attribute(query: AttributeQuery, types: &TypeEnv) -> AttributeQuery {
+    // Stamp the attribute/entity variables with their rule-level
+    // kinds. This is how a prefix refinement proved by a sibling
+    // premise reaches the scan boundary, where the selector
+    // conversion turns it into index-range bounds.
+    let kind_of = |term_name: Option<&str>| term_name.and_then(|name| types.get(name)).cloned();
+    let the_kind = kind_of(query.the().name());
+    let of_kind = kind_of(query.of().name());
+    let query = match (&the_kind, &of_kind) {
+        (None, None) => query,
+        _ => query.with_subject_kinds(the_kind, of_kind),
+    };
+
     let Some(name) = query.is().name() else {
         return query;
     };
@@ -322,6 +334,7 @@ mod tests {
     use crate::optional::OptionalAttributeQuery;
     use crate::planner::Planner;
     use crate::the;
+    use crate::types::Any;
     use crate::{Cardinality, Term};
 
     fn optional_nickname_premise(var: &str) -> Premise {
@@ -371,6 +384,37 @@ mod tests {
                 other => panic!("expected only scalar scans after demotion, got {other}"),
             }
         }
+    }
+
+    /// A prefix refinement proved by a sibling `starts-with`
+    /// premise is stamped onto the scan's entity term, where the
+    /// selector conversion turns it into an index-range bound.
+    #[dialog_common::test]
+    fn it_stamps_prefix_refinements_onto_scan_subjects() {
+        let scan: Premise = AttributeQuery::new(
+            Term::from(the!("person/name")),
+            Term::<Entity>::var("e"),
+            Term::<String>::var("name").into(),
+            Term::blank(),
+            Some(Cardinality::One),
+        )
+        .into();
+        let predicate = Term::<Any>::var("e").starts_with("did:key:");
+
+        let plan = Planner::from(vec![scan, predicate])
+            .plan(&crate::Environment::new())
+            .unwrap();
+
+        let stamped = plan.steps.iter().find_map(|step| match step.as_premise() {
+            Premise::Assert(Proposition::Attribute(boxed)) => boxed.of().kind(),
+            _ => None,
+        });
+        let kind = stamped.expect("the scan's entity term carries a kind");
+        assert_eq!(
+            kind.refinement().expect("refined").prefix,
+            "did:key:",
+            "the proved prefix reaches the scan boundary"
+        );
     }
 
     /// A standalone `Maybe` premise cannot be planned at empty

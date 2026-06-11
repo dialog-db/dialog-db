@@ -26,13 +26,61 @@ use dialog_storage::{Blake3Hash, ContentAddressedStorage, DialogStorageError};
 use futures_util::{Stream, StreamExt, TryStreamExt};
 
 use crate::{
-    Artifact, ArtifactSelector, AttributeKey, Datum, DialogArtifactsError, EntityKey, FromKey,
+    ATTRIBUTE_LENGTH, Artifact, ArtifactSelector, AttributeKey, AttributeKeyPart, Datum,
+    DialogArtifactsError, ENTITY_LENGTH, ENTITY_RAW_HEAD, EntityKey, EntityKeyPart, FromKey,
     Instruction, Key, KeyView, KeyViewConstruct, KeyViewMut, MatchCandidate, State, ValueKey,
     selector::Constrained,
 };
 
 /// The concrete prolly-tree type the artifact indexes use.
 pub type ArtifactTree = Tree<GeometricDistribution, Key, State<Datum>, Blake3Hash>;
+
+/// A fixed-width key segment bounding a string prefix: the prefix's
+/// raw bytes (capped at `head` — the order-preserving span of the
+/// segment) followed by `fill`. With `fill = 0x00` this is the
+/// smallest segment any matching value can have, with `fill = 0xFF`
+/// the largest, so the pair brackets the prefix's key range.
+fn prefix_segment<const N: usize>(prefix: &str, head: usize, fill: u8) -> [u8; N] {
+    let mut segment = [fill; N];
+    let raw = prefix.as_bytes();
+    let take = raw.len().min(head).min(N);
+    segment[..take].copy_from_slice(&raw[..take]);
+    segment
+}
+
+/// Tighten a scan's `(start, end)` key pair with the selector's
+/// prefix bounds. A prefix on a field that also has an exact
+/// constraint is skipped — the exact value is already in the keys
+/// and is strictly tighter. Applying a prefix to a non-leading key
+/// dimension is sound (the range stays a superset of the matches;
+/// [`MatchCandidate::matches_selector`] filters the rest) and
+/// tightens the range whenever every more-significant dimension is
+/// exact.
+fn apply_prefix_bounds<K: KeyViewMut>(
+    start: K,
+    end: K,
+    selector: &ArtifactSelector<Constrained>,
+) -> (K, K) {
+    let mut start = start;
+    let mut end = end;
+    if selector.attribute().is_none()
+        && let Some(prefix) = selector.attribute_prefix()
+    {
+        let lo = prefix_segment::<ATTRIBUTE_LENGTH>(prefix, ATTRIBUTE_LENGTH, u8::MIN);
+        let hi = prefix_segment::<ATTRIBUTE_LENGTH>(prefix, ATTRIBUTE_LENGTH, u8::MAX);
+        start = start.set_attribute(AttributeKeyPart(&lo));
+        end = end.set_attribute(AttributeKeyPart(&hi));
+    }
+    if selector.entity().is_none()
+        && let Some(prefix) = selector.entity_prefix()
+    {
+        let lo = prefix_segment::<ENTITY_LENGTH>(prefix, ENTITY_RAW_HEAD, u8::MIN);
+        let hi = prefix_segment::<ENTITY_LENGTH>(prefix, ENTITY_RAW_HEAD, u8::MAX);
+        start = start.set_entity(EntityKeyPart(&lo));
+        end = end.set_entity(EntityKeyPart(&hi));
+    }
+    (start, end)
+}
 
 /// Shared mutation + scan operations on an [`ArtifactTree`].
 ///
@@ -206,14 +254,25 @@ impl ArtifactTreeExt for ArtifactTree {
     {
         let tree = self;
         try_stream! {
-            if selector.entity().is_some() {
-                let start = <EntityKey<Key> as KeyViewConstruct>::min()
-                    .apply_selector(&selector)
-                    .into_key();
-                let end = <EntityKey<Key> as KeyViewConstruct>::max()
-                    .apply_selector(&selector)
-                    .into_key();
-                let stream = tree.stream_range(Range { start, end }, &store);
+            // Index choice: exact fields take priority (entity /
+            // value / attribute, as before); prefix bounds pick the
+            // index whose leading dimension they constrain when no
+            // exact field does. Every branch additionally tightens
+            // its key range with whatever prefix bounds the selector
+            // carries — sound on any dimension, tight on leading
+            // ones — and `matches_selector` re-checks per entry.
+            if selector.entity().is_some()
+                || (selector.entity_prefix().is_some()
+                    && selector.value().is_none()
+                    && selector.attribute().is_none()
+                    && selector.attribute_prefix().is_none())
+            {
+                let (start, end) = apply_prefix_bounds(
+                    <EntityKey<Key> as KeyViewConstruct>::min().apply_selector(&selector),
+                    <EntityKey<Key> as KeyViewConstruct>::max().apply_selector(&selector),
+                    &selector,
+                );
+                let stream = tree.stream_range(Range { start: start.into_key(), end: end.into_key() }, &store);
                 tokio::pin!(stream);
                 for await item in stream {
                     let entry: Entry<Key, State<Datum>> = item?;
@@ -224,13 +283,12 @@ impl ArtifactTreeExt for ArtifactTree {
                     }
                 }
             } else if selector.value().is_some() {
-                let start = <ValueKey<Key> as KeyViewConstruct>::min()
-                    .apply_selector(&selector)
-                    .into_key();
-                let end = <ValueKey<Key> as KeyViewConstruct>::max()
-                    .apply_selector(&selector)
-                    .into_key();
-                let stream = tree.stream_range(Range { start, end }, &store);
+                let (start, end) = apply_prefix_bounds(
+                    <ValueKey<Key> as KeyViewConstruct>::min().apply_selector(&selector),
+                    <ValueKey<Key> as KeyViewConstruct>::max().apply_selector(&selector),
+                    &selector,
+                );
+                let stream = tree.stream_range(Range { start: start.into_key(), end: end.into_key() }, &store);
                 tokio::pin!(stream);
                 for await item in stream {
                     let entry: Entry<Key, State<Datum>> = item?;
@@ -240,14 +298,13 @@ impl ArtifactTreeExt for ArtifactTree {
                         yield Artifact::try_from(datum)?;
                     }
                 }
-            } else if selector.attribute().is_some() {
-                let start = <AttributeKey<Key> as KeyViewConstruct>::min()
-                    .apply_selector(&selector)
-                    .into_key();
-                let end = <AttributeKey<Key> as KeyViewConstruct>::max()
-                    .apply_selector(&selector)
-                    .into_key();
-                let stream = tree.stream_range(Range { start, end }, &store);
+            } else if selector.attribute().is_some() || selector.attribute_prefix().is_some() {
+                let (start, end) = apply_prefix_bounds(
+                    <AttributeKey<Key> as KeyViewConstruct>::min().apply_selector(&selector),
+                    <AttributeKey<Key> as KeyViewConstruct>::max().apply_selector(&selector),
+                    &selector,
+                );
+                let stream = tree.stream_range(Range { start: start.into_key(), end: end.into_key() }, &store);
                 tokio::pin!(stream);
                 for await item in stream {
                     let entry: Entry<Key, State<Datum>> = item?;

@@ -42,6 +42,12 @@ use crate::{ArtifactSelector, DialogArtifactsError, ValueDataType, selector::Con
 pub(crate) const TAG_LENGTH: usize = 1;
 /// Length of the entity field in key bytes
 pub(crate) const ENTITY_LENGTH: usize = 64;
+/// Number of leading entity-URI bytes stored *raw* (and therefore
+/// order-preserving) in the entity field; the remainder of the
+/// field is a hash of the URI's tail (see [`Uri::key_bytes`](crate::Uri::key_bytes)).
+/// Prefix scans can range over at most this many bytes of the URI;
+/// longer prefixes re-check against the stored datum.
+pub(crate) const ENTITY_RAW_HEAD: usize = 32;
 /// Length of the attribute field in key bytes
 pub(crate) const ATTRIBUTE_LENGTH: usize = 64;
 /// Length of the value data type field in key bytes

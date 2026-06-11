@@ -482,6 +482,119 @@ mod tests {
         Ok(())
     }
 
+    /// An attribute-prefix selector ranges over the AEV index:
+    /// attribute names are stored raw in the key, so the range is
+    /// exact.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_selects_by_attribute_prefix() -> Result<()> {
+        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let mut facts = Artifacts::anonymous(storage_backend).await?;
+        let alice = Entity::new()?;
+
+        let data = vec![
+            Artifact {
+                the: Attribute::from_str("person/name")?,
+                of: alice.clone(),
+                is: Value::String("Alice".into()),
+                cause: None,
+            },
+            Artifact {
+                the: Attribute::from_str("person/age")?,
+                of: alice.clone(),
+                is: Value::UnsignedInt(40),
+                cause: None,
+            },
+            Artifact {
+                the: Attribute::from_str("group/name")?,
+                of: alice,
+                is: Value::String("Admins".into()),
+                cause: None,
+            },
+        ];
+        facts
+            .commit(data.into_iter().map(Instruction::Assert))
+            .await?;
+
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().the_starting_with("person/"))
+            .try_collect()
+            .await?;
+        assert_eq!(selected.len(), 2, "two person/* facts");
+        assert!(
+            selected
+                .iter()
+                .all(|fact| String::from(&fact.the).starts_with("person/")),
+            "every selected fact carries the prefix"
+        );
+        Ok(())
+    }
+
+    /// An entity-prefix selector ranges over the EAV index. The
+    /// entity key stores only the first 32 URI bytes raw, so a
+    /// prefix longer than that must be confirmed against the stored
+    /// datum — the second half of this test diverges two URIs past
+    /// byte 32 to force that path.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_selects_by_entity_prefix() -> Result<()> {
+        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let mut facts = Artifacts::anonymous(storage_backend).await?;
+
+        let name = Attribute::from_str("person/name")?;
+        let fact = |entity: Entity, value: &str| Artifact {
+            the: name.clone(),
+            of: entity,
+            is: Value::String(value.into()),
+            cause: None,
+        };
+
+        // Short prefixes (within the raw head) discriminate on key
+        // bytes alone.
+        let urn_alpha = Entity::from_str("urn:alpha:1")?;
+        let urn_beta = Entity::from_str("urn:beta:1")?;
+        // Long shared head: these two agree for well over 32 bytes
+        // and diverge only in the hashed tail of the key.
+        let shared = "urn:shared:0000000000000000000000000000:";
+        let long_a = Entity::from_str(&format!("{shared}aaaa"))?;
+        let long_b = Entity::from_str(&format!("{shared}bbbb"))?;
+
+        facts
+            .commit(
+                [
+                    fact(urn_alpha.clone(), "Alpha"),
+                    fact(urn_beta, "Beta"),
+                    fact(long_a.clone(), "LongA"),
+                    fact(long_b, "LongB"),
+                ]
+                .into_iter()
+                .map(Instruction::Assert),
+            )
+            .await?;
+
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().of_starting_with("urn:alpha:"))
+            .try_collect()
+            .await?;
+        assert_eq!(selected.len(), 1, "short prefix selects on key bytes");
+        assert_eq!(selected[0].of, urn_alpha);
+
+        let long_prefix = format!("{shared}aaaa");
+        assert!(long_prefix.len() > 32, "the prefix outruns the raw head");
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().of_starting_with(long_prefix))
+            .try_collect()
+            .await?;
+        assert_eq!(
+            selected.len(),
+            1,
+            "the datum re-check discriminates beyond the raw head"
+        );
+        assert_eq!(selected[0].of, long_a);
+
+        Ok(())
+    }
+
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_pins_a_stream_at_the_version_where_iteration_begins() -> Result<()> {
