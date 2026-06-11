@@ -24,6 +24,7 @@
 use crate::artifact::{ArtifactTypeError, Type as ValueType, Value};
 use crate::type_system::{Primitive, Type as Kind};
 use crate::types::{Scalar, TypeDescriptor, Typed};
+use std::cmp::Ordering;
 use std::fmt::{self, Display};
 
 /// The lattice bound a scheme variable ranges over.
@@ -188,6 +189,27 @@ impl Numeric {
                 let f = v as f64;
                 (f.is_finite() && f as i128 == v).then_some(Numeric::Float(f))
             }
+            _ => None,
+        }
+    }
+
+    /// The numeric [`ValueType`] of this variant.
+    pub fn value_type(&self) -> ValueType {
+        match self {
+            Numeric::UnsignedInt(_) => ValueType::UnsignedInt,
+            Numeric::SignedInt(_) => ValueType::SignedInt,
+            Numeric::Float(_) => ValueType::Float,
+        }
+    }
+
+    /// Same-variant ordering: `None` for mixed variants (the strict
+    /// no-promotion semantics, exactly like the arithmetic) and for
+    /// incomparable floats (NaN).
+    pub fn compare(self, other: Self) -> Option<Ordering> {
+        match (self, other) {
+            (Numeric::UnsignedInt(a), Numeric::UnsignedInt(b)) => Some(a.cmp(&b)),
+            (Numeric::SignedInt(a), Numeric::SignedInt(b)) => Some(a.cmp(&b)),
+            (Numeric::Float(a), Numeric::Float(b)) => a.partial_cmp(&b),
             _ => None,
         }
     }
